@@ -24,3 +24,17 @@ jobs:
           name: vrfkit-windows-x64
           path: target/release/*.exe
           if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
+      - name: build release
+        run: cargo +1.86.0 build --release --locked -p vrfkit --all-features
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrfkit-linux-x64
+          path: target/release/vrfkit
+          if-no-files-found: error
