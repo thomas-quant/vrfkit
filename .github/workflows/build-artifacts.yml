@@ -10,6 +10,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.86.0
       - uses: Swatinem/rust-cache@v2
+      - name: transform golden vectors
+        run: cargo +1.86.0 test --locked -p vrf-transform
+      - name: workspace tests
+        run: cargo +1.86.0 test --workspace --locked
       - name: build release
         run: cargo +1.86.0 build --release --locked -p vrfkit --all-features
       - name: list binaries
