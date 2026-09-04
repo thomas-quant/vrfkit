@@ -1,0 +1,22 @@
+name: build-artifacts
+on:
+  push:
+    branches: [build-artifacts]
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - uses: Swatinem/rust-cache@v2
+      - name: build release
+        run: cargo +1.86.0 build --release --locked -p vrfkit --all-features
+      - name: list binaries
+        shell: pwsh
+        run: Get-ChildItem target/release -Filter *.exe | Select-Object Name,Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrfkit-windows-x64
+          path: target/release/*.exe
+          if-no-files-found: error
