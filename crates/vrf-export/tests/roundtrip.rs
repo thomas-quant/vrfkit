@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arrow_array::cast::AsArray;
-use arrow_array::types::{Float32Type, Int32Type, Int64Type, UInt8Type, UInt32Type};
+use arrow_array::types::{Float32Type, Int8Type, Int32Type, Int64Type, UInt8Type, UInt32Type};
 use arrow_array::{Array, ArrayAccessor, ArrayRef, RecordBatch, StringArray};
 use arrow_schema::DataType;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -98,6 +98,10 @@ fn make_movement_record(i: u32) -> MovementRecord {
         timestamp: i * 3,
         movement_state: (i % 5) as u8,
         move_type: (i % 2) as u8,
+        rotation_yaw_multiplier: [2i8, 16, 18, -126][i as usize % 4],
+        has_optional_movement_value: i % 4 == 2,
+        optional_movement_raw_byte: if i % 4 == 2 { (i % 30) as u8 } else { 0 },
+        flag48: i % 7 != 0,
     }
 }
 
@@ -253,6 +257,10 @@ fn movement_keeps_column_order_narrow_types_and_exact_values() {
         timestamp: u32::MAX,
         movement_state: u8::MAX,
         move_type: 1,
+        rotation_yaw_multiplier: i8::MIN,
+        has_optional_movement_value: true,
+        optional_movement_raw_byte: u8::MAX,
+        flag48: true,
         ..make_movement_record(20)
     };
     let rows: Vec<MovementRecord> = (0..20).map(make_movement_record).chain([extreme]).collect();
@@ -280,6 +288,10 @@ fn movement_keeps_column_order_narrow_types_and_exact_values() {
             "timestamp",
             "movement_state",
             "move_type",
+            "rotation_yaw_multiplier",
+            "has_optional_movement_value",
+            "optional_movement_raw_byte",
+            "flag48",
         ]
     );
     for field in schema.fields() {
@@ -295,9 +307,17 @@ fn movement_keeps_column_order_narrow_types_and_exact_values() {
         schema.field_with_name("timestamp").unwrap().data_type(),
         &DataType::UInt32
     );
-    for name in ["movement_state", "move_type"] {
+    for name in ["movement_state", "move_type", "optional_movement_raw_byte"] {
         let field = schema.field_with_name(name).unwrap();
         assert_eq!(field.data_type(), &DataType::UInt8, "{name} was widened");
+    }
+    assert_eq!(
+        schema.field_with_name("rotation_yaw_multiplier").unwrap().data_type(),
+        &DataType::Int8
+    );
+    for name in ["has_optional_movement_value", "flag48"] {
+        let field = schema.field_with_name(name).unwrap();
+        assert_eq!(field.data_type(), &DataType::Boolean, "{name}");
     }
 
     let pos_x = col(&batch, "pos_x").as_primitive::<Float32Type>();
@@ -305,6 +325,10 @@ fn movement_keeps_column_order_narrow_types_and_exact_values() {
     let timestamp = col(&batch, "timestamp").as_primitive::<UInt32Type>();
     let movement_state = col(&batch, "movement_state").as_primitive::<UInt8Type>();
     let move_type = col(&batch, "move_type").as_primitive::<UInt8Type>();
+    let ryaw = col(&batch, "rotation_yaw_multiplier").as_primitive::<Int8Type>();
+    let has_opt = col(&batch, "has_optional_movement_value").as_boolean();
+    let opt = col(&batch, "optional_movement_raw_byte").as_primitive::<UInt8Type>();
+    let flag48 = col(&batch, "flag48").as_boolean();
     for (i, r) in rows.iter().enumerate() {
         assert_eq!(pos_x.value(i).to_bits(), r.pos_x.to_bits(), "row {i} pos_x");
         assert_eq!(vel_x.value(i).to_bits(), r.vel_x.to_bits(), "row {i} vel_x");
@@ -315,6 +339,10 @@ fn movement_keeps_column_order_narrow_types_and_exact_values() {
             "row {i} movement_state"
         );
         assert_eq!(move_type.value(i), r.move_type, "row {i} move_type");
+        assert_eq!(ryaw.value(i), r.rotation_yaw_multiplier, "row {i} rotation_yaw_multiplier");
+        assert_eq!(has_opt.value(i), r.has_optional_movement_value, "row {i} has_optional");
+        assert_eq!(opt.value(i), r.optional_movement_raw_byte, "row {i} optional byte");
+        assert_eq!(flag48.value(i), r.flag48, "row {i} flag48");
     }
 }
 

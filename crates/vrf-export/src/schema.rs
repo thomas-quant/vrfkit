@@ -52,6 +52,7 @@ macro_rules! column {
     (@type $prim:ident) => {
         <column!(@prim $prim) as arrow_array::types::ArrowPrimitiveType>::DATA_TYPE
     };
+    (@prim i8) => { arrow_array::types::Int8Type };
     (@prim u8) => { arrow_array::types::UInt8Type };
     (@prim u32) => { arrow_array::types::UInt32Type };
     (@prim u64) => { arrow_array::types::UInt64Type };
@@ -305,6 +306,15 @@ columns! {
         // One wire byte each, kept as u8 (`move_type` is effectively a bool).
         movement_state: u8,
         move_type: u8,
+        // Move-header posture, appended. `rotation_yaw_multiplier` is header
+        // bits [1..9] signed as the C# parser types it; measured meaning: 16 =
+        // walk key held, 2 = fully crouched. The optional byte is present only
+        // while crouching (it counts the crouch transition; 0 when absent);
+        // `flag48` is the bit ahead of the packed angles, meaning unknown.
+        rotation_yaw_multiplier: i8,
+        has_optional_movement_value: bool,
+        optional_movement_raw_byte: u8,
+        flag48: bool,
     }
 }
 

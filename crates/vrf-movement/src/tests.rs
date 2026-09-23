@@ -13,14 +13,31 @@ use crate::types::{MovementMove, RpcDecodeResult};
 /// One move record: movementState 3, position `(x, y, z)` as 3 x f32, and for
 /// variant 1 the velocity (4, 5, 6) at scale 10.
 fn build_move(variant1: bool, timestamp: u32, x: f32, y: f32, z: f32) -> BitWriter {
+    build_move_with(variant1, timestamp, (x, y, z), 2, None, false)
+}
+
+/// [`build_move`] with the three header values that carry posture set by the
+/// caller: the rotation-yaw-multiplier byte, the optional byte, and flag48.
+fn build_move_with(
+    variant1: bool,
+    timestamp: u32,
+    (x, y, z): (f32, f32, f32),
+    rotation_yaw_multiplier: u8,
+    optional_byte: Option<u8>,
+    flag48: bool,
+) -> BitWriter {
     let mut w = BitWriter::new();
     // Header (moveType, rotationYawMultiplier, movementState, unusedByte),
     // rotationInput, timestamp, then position info 0: 3 x f32.
-    w.bit(variant1).u8(2).u8(3).u8(0);
+    w.bit(variant1).u8(rotation_yaw_multiplier).u8(3).u8(0);
     w.u16(0x8000).u16(0x8000).u16(0x8000).int_packed(timestamp);
     w.serialized_int(0, 128).f32(x).f32(y).f32(z);
-    // hasOptionalByte, flag48, packedAngles.
-    w.bit(false).bit(false).u32(0);
+    // hasOptionalByte (+ the byte), flag48, packedAngles.
+    w.bit(optional_byte.is_some());
+    if let Some(b) = optional_byte {
+        w.u8(b);
+    }
+    w.bit(flag48).u32(0);
     if variant1 {
         // variant1Flag, then info componentBits 10 | extraInfo 1 and 40, 50, 60.
         w.bit(true).serialized_int(10 | (1 << 6), 128);
@@ -286,6 +303,33 @@ fn bits_after_the_updates_array_terminator_are_counted_unless_one_int_packed() {
         assert!(moves.is_empty(), "{name}");
         assert_eq!(result.error_count, errors, "{name}");
     }
+}
+
+#[test]
+fn keeps_the_posture_bits_of_the_header() {
+    // Walk key (16) and full crouch (2) in the multiplier byte, with bit 7 set
+    // so the signed read is exercised; a crouch-progress byte; flag48 set.
+    // Then a plain move after it: if the optional byte were not consumed the
+    // second move's marker and position would be read from the wrong bits.
+    let posture = build_move_with(true, 7, (1.0, 2.0, 3.0), 0x80 | 16 | 2, Some(14), true);
+    let plain = build_move(false, 8, 10.0, 11.0, 12.0);
+    let stream = real_stream(&[posture, plain], ENVELOPE_TRAILER_BITS);
+    let (result, moves) = decode(&build_rpc_payload(4321, &stream));
+
+    assert_eq!(result.error_count, 0);
+    assert_eq!(moves.len(), 2);
+    assert_eq!(moves[0].rotation_yaw_multiplier, (0x80u8 | 16 | 2) as i8);
+    assert_eq!(moves[0].rotation_yaw_multiplier & 16, 16);
+    assert_eq!(moves[0].optional_movement_raw_byte, Some(14));
+    assert!(moves[0].flag48);
+    assert!((moves[0].vel_x - 4.0).abs() < 0.001);
+
+    assert_eq!(moves[1].rotation_yaw_multiplier, 2);
+    assert_eq!(moves[1].optional_movement_raw_byte, None);
+    assert!(!moves[1].flag48);
+    assert_eq!(moves[1].timestamp, 8);
+    assert!((moves[1].pos_x - 10.0).abs() < 0.001);
+    assert!((moves[1].pos_z - 12.0).abs() < 0.001);
 }
 
 #[test]

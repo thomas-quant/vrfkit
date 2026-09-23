@@ -78,6 +78,19 @@ pub struct MovementRecord {
     pub movement_state: u8,
     /// 0 = variant 0, 1 = variant 1.
     pub move_type: u8,
+    /// Move-header bits [1..9], signed (`RotationYawMultiplier`, an `sbyte`, in
+    /// the C# parser). Measured meaning is posture: bit 4 (16) is set while the
+    /// walk key is held (moving 3.0-3.5 m/s) and bit 1 (2) while fully crouched.
+    pub rotation_yaw_multiplier: i8,
+    /// Whether the optional byte after the position was present: only while
+    /// crouching or crouched.
+    pub has_optional_movement_value: bool,
+    /// The optional byte, 0 when absent (the table stays dense). It counts up
+    /// the crouch transition (7, 14, 22, ...).
+    pub optional_movement_raw_byte: u8,
+    /// The bit ahead of the packed angles. Meaning unknown; clear on ~5 % of
+    /// samples.
+    pub flag48: bool,
 }
 
 /// A single actor lifecycle record ready for export. The paths are not

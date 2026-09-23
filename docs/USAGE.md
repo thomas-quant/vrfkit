@@ -416,6 +416,10 @@ look.
 | `timestamp` | u32 | Server tick |
 | `movement_state` | u8 | Posture byte |
 | `move_type` | u8 | 0=variant0 (no velocity) / 1=variant1 (velocity) |
+| `rotation_yaw_multiplier` | i8 | Move-header bits [1..9]; measured: 16 = walk key held, 2 = fully crouched |
+| `has_optional_movement_value` | bool | The optional byte was present (only while crouching) |
+| `optional_movement_raw_byte` | u8 | That byte, 0 when absent; counts the crouch transition |
+| `flag48` | bool | The bit ahead of the packed angles; meaning unknown |
 
 **Three things to note:**
 

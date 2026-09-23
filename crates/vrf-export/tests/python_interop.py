@@ -24,7 +24,9 @@ EXPECTED = {
         # Appended after vel_z, not interleaved: consumers read by position.
         ["time_ms", "packet_id", "character_net_guid", "pos_x", "pos_y", "pos_z",
          "yaw", "pitch", "vel_x", "vel_y", "vel_z",
-         "timestamp", "movement_state", "move_type"],
+         "timestamp", "movement_state", "move_type",
+         "rotation_yaw_multiplier", "has_optional_movement_value",
+         "optional_movement_raw_byte", "flag48"],
         set(),
         set(),
     ),
