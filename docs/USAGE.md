@@ -282,6 +282,10 @@ look. (This said -180..180 for a while, which no row has ever matched.)
 | `timestamp` | u32 | Server tick |
 | `movement_state` | u8 | Posture byte |
 | `move_type` | u8 | 0=variant0 (no velocity) / 1=variant1 (velocity) |
+| `rotation_yaw_multiplier` | i8 | Header bits [1..9] (upstream's name): 16 = walk key, 2 = fully crouched |
+| `has_optional_movement_value` | bool | Set only while crouching or crouched |
+| `optional_movement_raw_byte` | u8 | Crouch transition counter; 0 when the flag above is false |
+| `flag48` | bool | Bit ahead of the packed angles; meaning unknown |
 
 **Three things to note:**
 
@@ -292,8 +296,9 @@ look. (This said -180..180 for a while, which no row has ever matched.)
   1,034,035,170 exported rows in the current 527-replay corpus (builds 13.01,
   13.02 and 13.04). A future build may break that invariant, so both bytes are
   exported verbatim.
-- **Posture detail is `bCrouchHeld`, not `movement_state`.** It already ships as
-  a separate field in `fields.parquet`.
+- **Posture is `rotation_yaw_multiplier` and `has_optional_movement_value`, not
+  `movement_state`** (see `DATA.md`). `bCrouchHeld` in `fields.parquet` is the
+  crouch key.
 
 `mode_flags` is intentionally omitted -- it is assigned from the same local as
 `movement_state`, so there is no code path where the two differ, and it would
@@ -530,7 +535,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `compare_rpc_params.py` | RPC parameter comparison |
 | `compare_with_csharp.py` | Diff against the C# parser |
 | `check_effect_decoder.py` | Effect decoder (12 cases) |
-| `check_ascii.py` | Rust source ASCII sweep (119 files) |
+| `check_ascii.py` | Rust source ASCII sweep (121 files) |
 | `check_docs.py` | This document itself (below) |
 | `atomic_io.py` | Internal containment, recursive-removal and atomic-replacement helpers shared by mutating tools |
 
@@ -687,7 +692,7 @@ field meaning; the analyzer deliberately performs no type inference.
 cargo +1.86.0 test --workspace --locked                              # 594 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
-python -W error tools/check_ascii.py --check                         # 119 files
+python -W error tools/check_ascii.py --check                         # 121 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
 python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 553 passing
 python -W error tools/check_docs.py --fast

@@ -89,7 +89,7 @@ fn parse_single_move(
     // -- 25-bit header ----------------------------------------------------
     let header = reader.read_bits(25)?;
     let move_type_flag = (header & 1) != 0; // bit 0
-    let _rotation_yaw_multiplier = ((header >> 1) & 0xFF) as u8; // bits [1..9]
+    let rotation_yaw_multiplier = ((header >> 1) & 0xFF) as u8 as i8; // bits [1..9]
     let movement_state = ((header >> 9) & 0xFF) as u8; // bits [9..17]
     let _unused_byte = ((header >> 17) & 0xFF) as u8; // bits [17..25]
 
@@ -104,13 +104,15 @@ fn parse_single_move(
 
     // -- Optional byte ----------------------------------------------------
     let has_optional = reader.read_bit()?;
-    if has_optional {
-        let _optional_byte = reader.read_u8()?;
-    }
+    let optional_movement_raw_byte = if has_optional {
+        Some(reader.read_u8()?)
+    } else {
+        None
+    };
 
     // -- 33-bit flag + packed angles --------------------------------------
     let flag_and_angles = reader.read_bits(33)?;
-    let _flag48 = (flag_and_angles & 1) != 0;
+    let flag48 = (flag_and_angles & 1) != 0;
     let packed_angles = (flag_and_angles >> 1) as u32;
     let raw_pitch = (packed_angles & 0xFFFF) as u16;
     let raw_yaw = (packed_angles >> 16) as u16;
@@ -153,5 +155,8 @@ fn parse_single_move(
         movement_state,
         mode_flags: movement_state, // same field in wire format
         move_type: if move_type_flag { 1 } else { 0 },
+        rotation_yaw_multiplier,
+        optional_movement_raw_byte,
+        flag48,
     })
 }

@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Float32Array, RecordBatch, UInt8Array, UInt32Array};
+use arrow_array::{
+    ArrayRef, BooleanArray, Float32Array, Int8Array, RecordBatch, UInt8Array, UInt32Array,
+};
 use arrow_schema::Schema;
 
 use crate::error::ExportError;
@@ -17,9 +19,9 @@ use crate::writer::{Table, TableWriter};
 
 /// Default row group size for movement data.
 ///
-/// Movement rows are smaller (11 x 4 bytes + 1 x 4 + 2 x 1 = 50 bytes per row
-/// uncompressed), so we can afford a larger row group without excessive memory
-/// use. 256 Ki rows approximately 13 MB uncompressed per row group -- a good
+/// Movement rows are smaller (11 x 4 bytes + 1 x 4 + 5 x 1 + 2 bits = ~53
+/// bytes per row uncompressed), so we can afford a larger row group without
+/// excessive memory use. 256 Ki rows approximately 13 MB uncompressed per row group -- a good
 /// chunk size for ZSTD.
 pub const DEFAULT_MOVEMENT_ROW_GROUP_SIZE: usize = 262_144;
 
@@ -41,6 +43,8 @@ pub struct MovementTable;
 ///     yaw: 45.0, pitch: -10.0,
 ///     vel_x: 100.0, vel_y: 0.0, vel_z: 0.0,
 ///     timestamp: 31_337, movement_state: 2, move_type: 1,
+///     rotation_yaw_multiplier: 16, has_optional_movement_value: false,
+///     optional_movement_raw_byte: 0, flag48: true,
 /// })?;
 /// writer.finish()?;
 /// # Ok(())
@@ -94,6 +98,20 @@ impl Table for MovementTable {
         let move_type: ArrayRef = Arc::new(UInt8Array::from_iter_values(
             rows.iter().map(|r| r.move_type),
         ));
+        let rotation_yaw_multiplier: ArrayRef = Arc::new(Int8Array::from_iter_values(
+            rows.iter().map(|r| r.rotation_yaw_multiplier),
+        ));
+        let has_optional_movement_value: ArrayRef = Arc::new(BooleanArray::from(
+            rows.iter()
+                .map(|r| r.has_optional_movement_value)
+                .collect::<Vec<bool>>(),
+        ));
+        let optional_movement_raw_byte: ArrayRef = Arc::new(UInt8Array::from_iter_values(
+            rows.iter().map(|r| r.optional_movement_raw_byte),
+        ));
+        let flag48: ArrayRef = Arc::new(BooleanArray::from(
+            rows.iter().map(|r| r.flag48).collect::<Vec<bool>>(),
+        ));
 
         // Order must match movement_schema() exactly -- RecordBatch::try_new
         // only checks types, so a swap between two same-typed columns (e.g.
@@ -115,6 +133,10 @@ impl Table for MovementTable {
                 timestamp,
                 movement_state,
                 move_type,
+                rotation_yaw_multiplier,
+                has_optional_movement_value,
+                optional_movement_raw_byte,
+                flag48,
             ],
         )
         .map_err(|e| ExportError::Parquet(e.into()))

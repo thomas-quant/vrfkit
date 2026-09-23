@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use arrow_array::cast::AsArray;
 use arrow_array::types::Int32Type;
 use arrow_array::{
-    Array, ArrayAccessor, BinaryArray, Float32Array, Int32Array, Int64Array, RecordBatch,
-    StringArray, UInt8Array, UInt32Array,
+    Array, ArrayAccessor, BinaryArray, BooleanArray, Float32Array, Int8Array, Int32Array,
+    Int64Array, RecordBatch, StringArray, UInt8Array, UInt32Array,
 };
 use arrow_schema::DataType;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -134,6 +134,12 @@ fn make_movement_record(i: u32) -> MovementRecord {
         timestamp: i * 3,
         movement_state: (i % 5) as u8,
         move_type: (i % 2) as u8,
+        // Posture columns, varied the same way; the multiplier crosses into
+        // negative values so a signed round-trip is exercised.
+        rotation_yaw_multiplier: (i.wrapping_mul(37) % 256) as u8 as i8,
+        has_optional_movement_value: i % 4 == 1,
+        optional_movement_raw_byte: if i % 4 == 1 { (7 * i % 256) as u8 } else { 0 },
+        flag48: i % 3 != 0,
     }
 }
 
@@ -518,6 +524,10 @@ fn movement_f32_precision() {
                 timestamp: 0,
                 movement_state: 0,
                 move_type: 0,
+                rotation_yaw_multiplier: 0,
+                has_optional_movement_value: false,
+                optional_movement_raw_byte: 0,
+                flag48: false,
             })
             .unwrap();
         writer.finish().unwrap();
@@ -579,13 +589,33 @@ fn movement_state_columns_keep_their_narrow_types() {
         schema.field_with_name("timestamp").unwrap().data_type(),
         &DataType::UInt32
     );
-    for name in ["movement_state", "move_type"] {
+    for name in ["movement_state", "move_type", "optional_movement_raw_byte"] {
         let field = schema.field_with_name(name).unwrap();
         assert_eq!(field.data_type(), &DataType::UInt8, "{name} was widened");
     }
+    assert_eq!(
+        schema
+            .field_with_name("rotation_yaw_multiplier")
+            .unwrap()
+            .data_type(),
+        &DataType::Int8,
+        "rotation_yaw_multiplier must stay signed and narrow"
+    );
+    for name in ["has_optional_movement_value", "flag48"] {
+        let field = schema.field_with_name(name).unwrap();
+        assert_eq!(field.data_type(), &DataType::Boolean, "{name}");
+    }
     // The movement table is dense by contract; python_interop.py asserts the
     // same thing over the whole schema.
-    for name in ["timestamp", "movement_state", "move_type"] {
+    for name in [
+        "timestamp",
+        "movement_state",
+        "move_type",
+        "rotation_yaw_multiplier",
+        "has_optional_movement_value",
+        "optional_movement_raw_byte",
+        "flag48",
+    ] {
         assert!(
             !schema.field_with_name(name).unwrap().is_nullable(),
             "{name} must not be nullable"
@@ -612,6 +642,10 @@ fn movement_state_columns_keep_their_narrow_types() {
             "timestamp",
             "movement_state",
             "move_type",
+            "rotation_yaw_multiplier",
+            "has_optional_movement_value",
+            "optional_movement_raw_byte",
+            "flag48",
         ]
     );
 
@@ -680,6 +714,69 @@ fn movement_new_columns_roundtrip_values() {
         distinct_states.len() > 1,
         "movement_state did not vary across rows"
     );
+}
+
+#[test]
+fn movement_posture_columns_roundtrip_values() {
+    let path = test_dir().join("movement_posture_columns_values.parquet");
+    let expected: Vec<MovementRecord> = (0..40).map(make_movement_record).collect();
+    {
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = MovementWriter::with_row_group_size(file, 1024).unwrap();
+        for r in &expected {
+            writer.push(*r).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    let batches = read_all_batches(&path);
+    let batch = &batches[0];
+    let col = |name: &str| batch.column(batch.schema().index_of(name).unwrap()).clone();
+    let multiplier = col("rotation_yaw_multiplier");
+    let multiplier = multiplier.as_any().downcast_ref::<Int8Array>().unwrap();
+    let has_optional = col("has_optional_movement_value");
+    let has_optional = has_optional
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    let optional_byte = col("optional_movement_raw_byte");
+    let optional_byte = optional_byte.as_any().downcast_ref::<UInt8Array>().unwrap();
+    let flag48 = col("flag48");
+    let flag48 = flag48.as_any().downcast_ref::<BooleanArray>().unwrap();
+
+    for (i, r) in expected.iter().enumerate() {
+        assert_eq!(
+            multiplier.value(i),
+            r.rotation_yaw_multiplier,
+            "row {i} multiplier"
+        );
+        assert_eq!(
+            has_optional.value(i),
+            r.has_optional_movement_value,
+            "row {i} flag"
+        );
+        assert_eq!(
+            optional_byte.value(i),
+            r.optional_movement_raw_byte,
+            "row {i} byte"
+        );
+        assert_eq!(flag48.value(i), r.flag48, "row {i} flag48");
+    }
+    for a in [
+        has_optional as &dyn Array,
+        flag48,
+        multiplier,
+        optional_byte,
+    ] {
+        assert_eq!(a.null_count(), 0, "the movement table is dense");
+    }
+
+    // The helper must vary every column, including a negative multiplier, or
+    // the loop above could pass on a constant fill or an unsigned copy.
+    assert!((0..40).any(|i| multiplier.value(i) < 0));
+    assert!((0..40).any(|i| multiplier.value(i) > 0));
+    assert!((0..40).any(|i| has_optional.value(i)) && (0..40).any(|i| !has_optional.value(i)));
+    assert!((0..40).any(|i| flag48.value(i)) && (0..40).any(|i| !flag48.value(i)));
 }
 
 /// Write interop files for the Python verification step (requirement section 6).

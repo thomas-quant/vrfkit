@@ -229,6 +229,10 @@ impl ExportSink<'_> {
                 // assigns it from the same local as movement_state, so it
                 // can never hold a different value.
                 move_type: mv.move_type,
+                rotation_yaw_multiplier: mv.rotation_yaw_multiplier,
+                has_optional_movement_value: mv.optional_movement_raw_byte.is_some(),
+                optional_movement_raw_byte: mv.optional_movement_raw_byte.unwrap_or(0),
+                flag48: mv.flag48,
             });
         });
         let failed = match &result {

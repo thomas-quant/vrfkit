@@ -160,7 +160,8 @@ other five tables are byte-for-byte identical.**
 
 Two things about `movement.parquet` worth knowing up front: `timestamp` is the
 128.0 Hz server tick and **resets each round** -- use `time_ms` for a global
-timeline; and posture detail lives in `bCrouchHeld`, not in `movement_state`.
+timeline; and posture (walk, crouch) lives in `rotation_yaw_multiplier` and
+`has_optional_movement_value`, not in `movement_state`.
 
 > Column schemas, the `tools/` scripts, the full validation suite, and
 > per-crate usage live in [`docs/USAGE.md`](docs/USAGE.md).
@@ -207,8 +208,10 @@ fields requires re-exporting from the original `.vrf`.
 
 ### `movement.parquet` -- character position time series
 
-14 columns: `time_ms`, `packet_id`, `character_net_guid`, `pos_x/y/z`, `yaw`,
-`pitch`, `vel_x/y/z`, `timestamp`, `movement_state`, `move_type`.
+18 columns: `time_ms`, `packet_id`, `character_net_guid`, `pos_x/y/z`, `yaw`,
+`pitch`, `vel_x/y/z`, `timestamp`, `movement_state`, `move_type`,
+`rotation_yaw_multiplier`, `has_optional_movement_value`,
+`optional_movement_raw_byte`, `flag48`.
 
 - `timestamp` is a **128.0 Hz global server tick** and **resets at each round
   boundary.** Use it for in-round alignment; use `time_ms` for a global
@@ -217,8 +220,9 @@ fields requires re-exporting from the original `.vrf`.
   1,034,035,170 exported rows in the current 527-replay corpus (builds 13.01,
   13.02 and 13.04). A future build may break that invariant, so both bytes are
   exported verbatim.
-- **Posture detail is `bCrouchHeld`, not `movement_state`.** It already ships
-  as a separate field in `fields.parquet`.
+- **Posture is `rotation_yaw_multiplier` (16 = walk, 2 = crouched) and
+  `has_optional_movement_value` (crouching), not `movement_state`.**
+  `bCrouchHeld` in `fields.parquet` is the crouch key.
 
 ### `actors.parquet` -- actor spawn/despawn
 
@@ -298,7 +302,7 @@ it as one gives the year 3626.
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
 **594 passing**, strict workspace `clippy -D warnings` **0**, `cargo fmt` clean,
-and `check_ascii` on 119 files. The Python suite in `tools/tests` has 553 tests.
+and `check_ascii` on 121 files. The Python suite in `tools/tests` has 553 tests.
 
 Re-measure per-crate counts with `cargo test -p <crate>`. Counts are omitted
 from the table below on purpose -- they go stale, and re-measuring is one line.

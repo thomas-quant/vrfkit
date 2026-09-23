@@ -324,9 +324,13 @@ leaving. Sage's orb and Chamber's trap slow; Fade's Seize and Terra's time-slow
 grenade showed no movement-speed effect at their actor's position.
 
 **Crouch is not in `movement_state`.** That column is 0 on all
-1,034,035,170 exported movement rows in the current 527-replay corpus. Crouch
-is `bCrouchHeld` on the character actor, or a ~19 cm drop in `pos_z`, and
-crouch speed is ~190 cm/s.
+1,034,035,170 exported movement rows in the current 527-replay corpus. Posture
+is in three other bits of the same move header, exported since 2026-09-23:
+walk key held = `rotation_yaw_multiplier & 16`, fully crouched = `& 2`, crouching or
+crouched = `has_optional_movement_value` (its byte counts the crouch transition: 7, 14,
+22, ...). Measured downstream on 2.2 M samples: walking 3.0-3.5 m/s, crouched muzzle
+0.58 m vs 0.76 m standing. `bCrouchHeld` on the character actor is the crouch *key*;
+a ~19 cm drop in `pos_z` and ~190 cm/s crouch speed agree.
 
 ## Movement & position
 
@@ -336,7 +340,7 @@ crouch speed is ~190 cm/s.
 | Rotation (yaw/pitch) | movement | ✅ exact |
 | Velocity | movement vel_x/y/z | ✅ exact |
 | Time (128 Hz tick, resets per round) / global | movement `timestamp` / `time_ms` | ✅ — `timestamp` is a **tick counter**, not milliseconds |
-| Posture (crouch) | `fields.bCrouchHeld` (not movement_state) | ✅ |
+| Posture (walk, crouch) | movement `rotation_yaw_multiplier`, `has_optional_movement_value` (not movement_state); crouch key `fields.bCrouchHeld` | ✅ |
 | Trajectory | movement time series per character | ✅ |
 
 ### The tick is 128 Hz by a 3:13 pattern, not by alternating

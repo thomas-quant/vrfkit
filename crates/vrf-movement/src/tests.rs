@@ -99,11 +99,24 @@ impl BitWriter {
 
 /// Build a single move payload (variant 0 or variant 1).
 fn build_move(variant1: bool, timestamp: u32, x: f32, y: f32, z: f32) -> BitWriter {
+    build_move_with(variant1, timestamp, (x, y, z), 2, None, false)
+}
+
+/// [`build_move`] with the three header values that carry posture set by the
+/// caller: the rotation-yaw-multiplier byte, the optional byte, and flag48.
+fn build_move_with(
+    variant1: bool,
+    timestamp: u32,
+    (x, y, z): (f32, f32, f32),
+    rotation_yaw_multiplier: u8,
+    optional_byte: Option<u8>,
+    flag48: bool,
+) -> BitWriter {
     let mut w = BitWriter::new();
 
     // 25-bit header: moveType(1) + rotationYawMultiplier(8) + movementState(8) + unused(8)
     w.write_bit(variant1); // moveType
-    w.write_u8(2); // rotationYawMultiplier
+    w.write_u8(rotation_yaw_multiplier);
     w.write_u8(3); // movementState
     w.write_u8(0); // unused
 
@@ -122,11 +135,13 @@ fn build_move(variant1: bool, timestamp: u32, x: f32, y: f32, z: f32) -> BitWrit
     w.write_f32(y);
     w.write_f32(z);
 
-    // hasOptionalByte = false
-    w.write_bit(false);
+    w.write_bit(optional_byte.is_some()); // hasOptionalByte
+    if let Some(b) = optional_byte {
+        w.write_u8(b);
+    }
 
     // 33-bit flag+packedAngles: flag48(1) + packedAngles(32)
-    w.write_bit(false); // flag48
+    w.write_bit(flag48);
     w.write_u32(0); // packedAngles (pitch=0, yaw=0)
 
     if variant1 {
@@ -439,6 +454,38 @@ fn decodes_single_variant1_move_with_velocity() {
     assert!((moves[0].vel_x - 4.0).abs() < 0.001);
     assert!((moves[0].vel_y - 5.0).abs() < 0.001);
     assert!((moves[0].vel_z - 6.0).abs() < 0.001);
+}
+
+#[test]
+fn keeps_the_posture_bits_of_the_header() {
+    // Walk key (16) and full crouch (2) in the multiplier byte, with bit 7 set
+    // so the signed read is exercised; a crouch-progress byte; flag48 set.
+    // Then a plain move after it: if the optional byte were not consumed the
+    // second move's marker and position would be read from the wrong bits.
+    let posture = build_move_with(true, 7, (1.0, 2.0, 3.0), 0x80 | 16 | 2, Some(14), true);
+    let plain = build_move(false, 8, 10.0, 11.0, 12.0);
+    let stream = build_component_data_stream(&[posture, plain]);
+    let rpc = build_rpc_payload(4321, &stream);
+    let bytes = rpc.to_bytes();
+    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
+
+    let mut moves = Vec::new();
+    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
+
+    assert_eq!(result.error_count, 0);
+    assert_eq!(moves.len(), 2);
+    assert_eq!(moves[0].rotation_yaw_multiplier, (0x80u8 | 16 | 2) as i8);
+    assert_eq!(moves[0].rotation_yaw_multiplier & 16, 16);
+    assert_eq!(moves[0].optional_movement_raw_byte, Some(14));
+    assert!(moves[0].flag48);
+    assert!((moves[0].vel_x - 4.0).abs() < 0.001);
+
+    assert_eq!(moves[1].rotation_yaw_multiplier, 2);
+    assert_eq!(moves[1].optional_movement_raw_byte, None);
+    assert!(!moves[1].flag48);
+    assert_eq!(moves[1].timestamp, 8);
+    assert!((moves[1].pos_x - 10.0).abs() < 0.001);
+    assert!((moves[1].pos_z - 12.0).abs() < 0.001);
 }
 
 #[test]

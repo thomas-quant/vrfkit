@@ -30,6 +30,19 @@ pub struct MovementMove {
     pub mode_flags: u8,
     /// 0 = variant0, 1 = variant1.
     pub move_type: u8,
+    /// Move-header bits [1..9], signed as upstream's C# parser types it
+    /// (`RotationYawMultiplier`, an `sbyte`). The name is upstream's; the
+    /// measured meaning is posture: bit 4 (value 16) is set while the walk key
+    /// is held (moving speed 3.0-3.5 m/s) and bit 1 (value 2) while fully
+    /// crouched, on 2.2 M samples of the downstream `directness` corpus.
+    pub rotation_yaw_multiplier: i8,
+    /// The optional byte after the position, `None` when its presence bit is
+    /// clear. Present only while crouching or crouched, where it counts up the
+    /// crouch transition (7, 14, 22, ...) on the same corpus.
+    pub optional_movement_raw_byte: Option<u8>,
+    /// The bit ahead of the packed angles. Meaning unknown; recorded because
+    /// it varies (clear on ~5% of samples) and costs one bit.
+    pub flag48: bool,
 }
 
 /// A single character update descriptor (carries moves).

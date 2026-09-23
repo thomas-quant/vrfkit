@@ -172,6 +172,8 @@ def verify_movement():
         # Appended after vel_z, never interleaved: consumers address movement
         # columns positionally.
         "timestamp", "movement_state", "move_type",
+        "rotation_yaw_multiplier", "has_optional_movement_value",
+        "optional_movement_raw_byte", "flag48",
     ]
     actual_cols = [f.name for f in schema]
     check(

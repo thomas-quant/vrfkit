@@ -82,7 +82,7 @@ pub fn fields_schema() -> Schema {
 /// negative number here; it wraps to a value near 360.
 /// Velocity is cm/s as reported by the replication channel.
 ///
-/// The last three columns are appended rather than interleaved: existing
+/// The last seven columns are appended rather than interleaved: existing
 /// consumers address movement columns positionally, so inserting `timestamp`
 /// next to `time_ms` (where it reads more naturally) would silently repoint
 /// every downstream `column(3)`/`column(8)` at the wrong data.
@@ -118,6 +118,17 @@ pub fn movement_schema() -> Schema {
         // present). Effectively a bool, but kept as the decoder's u8 so the
         // column stays a faithful copy of the wire value.
         Field::new("move_type", DataType::UInt8, false),
+        // Appended after `move_type` for the same positional reason as the
+        // three above; names and signedness are upstream's C# JSON. Posture
+        // lives here, not in `movement_state`: value 16 in
+        // `rotation_yaw_multiplier` is the walk key, value 2 full crouch, and
+        // `has_optional_movement_value` is set only while crouching.
+        Field::new("rotation_yaw_multiplier", DataType::Int8, false),
+        Field::new("has_optional_movement_value", DataType::Boolean, false),
+        // 0 when the flag above is false: the table stays dense, so the flag,
+        // not a null, carries absence.
+        Field::new("optional_movement_raw_byte", DataType::UInt8, false),
+        Field::new("flag48", DataType::Boolean, false),
     ])
 }
 

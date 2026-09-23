@@ -114,7 +114,7 @@ pub struct FieldRecord {
 /// All fields are non-optional (the replication channel always provides the
 /// full state vector; partial updates are merged upstream before reaching us).
 ///
-/// Field order mirrors `movement_schema()` exactly, including the three
+/// Field order mirrors `movement_schema()` exactly, including the seven
 /// trailing columns that were appended rather than interleaved.
 ///
 /// `vrf_movement::MovementMove` also carries a `mode_flags` byte, which is not
@@ -141,13 +141,28 @@ pub struct MovementRecord {
     /// across 527 corpus replays (builds 13.01, 13.02 and 13.04). Exported anyway,
     /// because it is a byte the wire spends and
     /// a later build may start using it -- but do not read posture out of it.
-    /// Crouch is `bCrouchHeld` on the character actor, or the ~19 cm step in
-    /// `pos_z`.
+    /// Posture is in `rotation_yaw_multiplier` and
+    /// `has_optional_movement_value` below; `bCrouchHeld` on the character
+    /// actor is the crouch key.
     pub movement_state: u8,
     /// 0 = variant0 (velocity absent on the wire), 1 = variant1. The same
     /// 527-replay sweep observed variant1 on every exported row; retain the
     /// discriminator so a future build cannot silently change that invariant.
     pub move_type: u8,
+    /// Move-header bits [1..9] (upstream's `RotationYawMultiplier`). Carries
+    /// posture: 16 = walk key held, 2 = fully crouched. See
+    /// `vrf_movement::MovementMove::rotation_yaw_multiplier`.
+    pub rotation_yaw_multiplier: i8,
+    /// Presence bit of the optional byte after the position. Set only while
+    /// crouching or crouched.
+    pub has_optional_movement_value: bool,
+    /// That byte (the crouch transition counter: 7, 14, 22, ...), or 0 when
+    /// `has_optional_movement_value` is false. The table is dense by
+    /// contract, so absence is the flag, not a null; never read this byte
+    /// without it.
+    pub optional_movement_raw_byte: u8,
+    /// The bit ahead of the packed angles; meaning unknown.
+    pub flag48: bool,
 }
 
 /// A single actor lifecycle record ready for export.
