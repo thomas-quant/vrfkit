@@ -55,9 +55,9 @@
 //! [`TransformVersion`] is non-exhaustive, so adding a build does not change the
 //! registry's public type and external callers cannot match every future variant.
 //! Per-build gating would still remove existing, publicly named variants and is
-//! therefore not offered. The cost is small: the seven `impl`s are branch-free
+//! therefore not offered. The cost is small: the eight `impl`s are branch-free
 //! arithmetic, and the only sizeable data is the three S-box tables (used by
-//! release-13.00 and release-13.02 alone).
+//! release-13.00, release-13.02 and release-13.06 alone).
 
 #![forbid(unsafe_code)]
 
@@ -65,7 +65,7 @@ pub mod helpers;
 pub mod sbox;
 pub mod versions;
 
-use versions::{SeededTransform, V12_10, V12_11, V13_00, V13_01, V13_02, V13_04, V13_05};
+use versions::{SeededTransform, V12_10, V12_11, V13_00, V13_01, V13_02, V13_04, V13_05, V13_06};
 use vrf_bitio::{BitError, BitReader, Result as BitResult};
 
 /// Derive the transform seed for a content block.
@@ -165,6 +165,8 @@ pub enum TransformVersion {
     V1304,
     /// `++Ares-Core+release-13.05`
     V1305,
+    /// `++Ares-Core+release-13.06`
+    V1306,
 }
 
 /// Every transform this build of the crate knows about.
@@ -182,6 +184,7 @@ pub const ALL_VERSIONS: &[TransformVersion] = &[
     TransformVersion::V1302,
     TransformVersion::V1304,
     TransformVersion::V1305,
+    TransformVersion::V1306,
 ];
 
 /// A replay whose branch has no registered transform.
@@ -238,6 +241,7 @@ impl TransformVersion {
             Self::V1302 => V13_02::BRANCH,
             Self::V1304 => V13_04::BRANCH,
             Self::V1305 => V13_05::BRANCH,
+            Self::V1306 => V13_06::BRANCH,
         }
     }
 
@@ -257,6 +261,7 @@ impl TransformVersion {
             Self::V1302 => transform_in_place::<V13_02>(buf, bit_count, seed),
             Self::V1304 => transform_in_place::<V13_04>(buf, bit_count, seed),
             Self::V1305 => transform_in_place::<V13_05>(buf, bit_count, seed),
+            Self::V1306 => transform_in_place::<V13_06>(buf, bit_count, seed),
         }
     }
 
