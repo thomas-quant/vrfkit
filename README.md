@@ -19,7 +19,7 @@ by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
 **Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
-**910 passing** tests. All 24 supported builds received the same verification
+**927 passing** tests. All 24 supported builds received the same verification
 on **986 unique replays**; all **986** meet every strict criterion after fixing
 the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
@@ -379,7 +379,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**714 passing**; the full Python suite also has **910 passing** tests. The
+**714 passing**; the full Python suite also has **927 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
@@ -988,8 +988,8 @@ layered, and the layers catch different things:
 - **Bytes** (`check_export_baseline.py`, per-file row and byte counts) --
   regression in any of the 28 export counters.
 - **Decode** (`check_decode_errors_corpus.py`, scoped export corpora) -- overlay
-  type errors and struct-blob failures; the recorded 13.04 scope is all 108 files
-  with checkpoints enabled.
+  type errors, struct-blob failures and array/leaf/truncated-RPC/movement
+  failures; the recorded 13.04 scope is all 108 files with checkpoints enabled.
 - **Semantics** (`check_metrics_baseline.py`, 7 builds) -- round count,
   score, K/D/A invariants that need no baseline.
 
