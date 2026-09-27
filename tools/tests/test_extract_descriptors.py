@@ -1333,6 +1333,14 @@ internal static class AgentClassNetCacheDescriptors
         )
 
     def test_commented_raw_wrapper_does_not_reclassify_live_typed_call(self):
+        # This fixture also defined the live typed AddValue as
+        # `=> AddPropertyHandle(handle, property, ExportCategory.GameState);`.
+        # That body reaches the end of the type ladder with no type method and
+        # was dropped without a word; it is now a `<no type method>` rejection,
+        # which is right -- the splitter cannot see calls through such a
+        # wrapper, so the definition is their only trace. The case moved to
+        # test_a_typed_wrapper_definition_is_rejected, which also fails if a
+        # typed wrapper is ever misread as a raw one.
         output = self.run_generator(
             {
                 "LiveTypedDescriptor.cs": r'''
@@ -1348,11 +1356,6 @@ public sealed class LiveTypedDescriptor : ExportGroupDescriptor<LiveTypedDescrip
         AddProperty(x => x.KnownValue).UInt32();
         AddValue(7, x => x.TypedValue).UInt32();
     }
-
-    private PropertyDescriptor AddValue(
-        uint handle,
-        Expression<Func<LiveTypedDescriptor, uint>> property) =>
-        AddPropertyHandle(handle, property, ExportCategory.GameState);
 }
 '''
             }
@@ -2559,7 +2562,7 @@ public sealed class EffectManagerComponentClassNetCacheDescriptor : ClassNetCach
 
 
 class SilentDropTests(ExtractDescriptorsTests):
-    """Two ways a declared field left the table without saying so."""
+    """Ways a declared field left the table without saying so."""
 
     def test_an_unknown_primitive_type_is_rejected_not_dropped(self):
         """`.Int64()` is not in PRIMITIVE_TYPES, so the statement fell off the
@@ -2607,6 +2610,175 @@ public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
         self.assertEqual(
             self.entries(output), {("/Script/ShooterGame.Widget", "Spin")}
         )
+
+    @staticmethod
+    def widget(*statements: str) -> dict[str, str]:
+        """One descriptor on a path nothing else uses, declaring `statements`."""
+        body = "\n".join(f"        {statement}" for statement in statements)
+        return {
+            "WidgetDescriptor.cs": r'''
+public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
+{
+    public override string Path => "/Script/ShooterGame.Widget";
+    protected override void Configure()
+    {
+''' + body + r'''
+    }
+}
+''',
+        }
+
+    def test_a_declaration_with_no_type_method_is_rejected_not_dropped(self):
+        """`AddProperty(x => x.Ticks);` names no type method, so
+        `_extract_type_name` returned None and the ladder's last step recorded
+        nothing -- no entry, no rejection, no message. Only a NAMED unknown
+        method was a failure. Upstream really does write this shape, three
+        times (DECODERLESS_PROPERTIES); anywhere else it must stop the run.
+
+        The label is asserted, not just the field name: the report echoes the
+        statement, so "Ticks" would appear under any label.
+        """
+        stderr = self.run_generator_expecting_failure(
+            self.widget(
+                "AddProperty(x => x.Spin).Float();",
+                "AddProperty(x => x.Ticks);",
+            )
+        )
+        self.assertIn("  .<no type method>(): AddProperty(x => x.Ticks);", stderr)
+
+    def test_a_generic_type_method_is_rejected_by_name(self):
+        """`.Enum<EMode>()` put a `<` where `_extract_type_name` wanted a `(`,
+        so it read as no type method at all and fell off the same way. It must
+        fail, and name the method a reader has to add.
+        """
+        stderr = self.run_generator_expecting_failure(
+            self.widget(
+                "AddProperty(x => x.Spin).Float();",
+                "AddProperty(x => x.Mode).Enum<EMode>();",
+            )
+        )
+        self.assertIn(
+            "  .Enum(): AddProperty(x => x.Mode).Enum<EMode>();", stderr
+        )
+
+    def test_a_typed_wrapper_definition_is_rejected(self):
+        """A helper that returns the builder for its caller to type. Its calls
+        (`AddValue(7, x => x.Typed).UInt32();`) do not start with AddProperty,
+        so the splitter never sees them; its own body is the one statement
+        that shows declarations are routed through it, and that body names no
+        type method. Dropping it silently dropped every call with it.
+        """
+        stderr = self.run_generator_expecting_failure(
+            {
+                "WrappedDescriptor.cs": r'''
+public sealed class WrappedDescriptor : ExportGroupDescriptor<WrappedDescriptor>
+{
+    public override string Path => "/Script/ShooterGame.Wrapped";
+    protected override void Configure()
+    {
+        AddProperty(x => x.Known).UInt32();
+        AddValue(7, x => x.Typed).UInt32();
+    }
+
+    private FieldDescriptorBuilder AddValue(
+        uint handle,
+        Expression<Func<WrappedDescriptor, uint>> property) =>
+        AddPropertyHandle(handle, property, ExportCategory.GameState);
+}
+''',
+            }
+        )
+        self.assertIn(
+            "  .<no type method>(): "
+            "AddPropertyHandle(handle, property, ExportCategory.GameState);",
+            stderr,
+        )
+
+    def test_the_generic_method_the_ladder_knows_still_generates(self):
+        """The one generic type method the descriptors use keeps its own
+        branch: a `RepLayoutDynamicArray<T>()` is an opaque TArray, so Raw,
+        not a rejection now that `_extract_type_name` can see generic names.
+        """
+        output = self.run_generator(
+            self.widget(
+                "AddProperty(x => x.Spin).Float();",
+                "AddPropertyHandle(6, x => x.FloatValues)"
+                ".RepLayoutDynamicArray<EffectDataFloat>();",
+            )
+        )
+        self.assertEqual(
+            {
+                (group, field, field_type.strip())
+                for group, field, field_type in ENTRY_RE.findall(output)
+            },
+            {
+                ("/Script/ShooterGame.Widget", "Spin", "FieldType::Float"),
+                ("/Script/ShooterGame.Widget", "FloatValues", "FieldType::Raw"),
+            },
+        )
+
+    #: A real decoder-less declaration: the vendored
+    #: AresAbilitySystemComponentDescriptor.cs, trimmed to one typed sibling.
+    #: {TYPE} is what follows `x.AresAttributeSet)`.
+    DECODERLESS_SOURCE = r'''
+public sealed class AresAbilitySystemComponentDescriptor : ExportGroupDescriptor<AresAbilitySystemComponentDescriptor>
+{
+    public override string Path => "/Script/ShooterGame.AresAbilitySystemComponent";
+    public override ExportGroupKind Kind => ExportGroupKind.Component;
+    protected override void Configure()
+    {
+        AddProperty(x => x.Owner).ObjectNetGuid();
+        AddProperty(x => x.AresAttributeSet){TYPE};
+    }
+}
+'''
+
+    def test_a_listed_decoderless_declaration_contributes_nothing(self):
+        """What DECODERLESS_PROPERTIES allows: no entry -- as before -- with
+        the sibling still typed, the run succeeding, and the declaration
+        counted by name in the summary instead of vanishing.
+        """
+        result, output = self.run_generator_process(
+            {
+                "AresAbilitySystemComponentDescriptor.cs":
+                    self.DECODERLESS_SOURCE.replace("{TYPE}", ""),
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.entries(output or ""),
+            {("/Script/ShooterGame.AresAbilitySystemComponent", "Owner")},
+        )
+        self.assertIn(
+            "Declared without a type method (no entry): 1\n"
+            "  AresAbilitySystemComponentDescriptor.AresAttributeSet\n",
+            result.stdout,
+        )
+
+    def test_the_decoderless_list_is_scoped_to_its_class(self):
+        """The listed property on a class the list does not name is an
+        ordinary rejection; the exception is one declaration, not a name.
+        """
+        stderr = self.run_generator_expecting_failure(
+            self.widget("AddProperty(x => x.AresAttributeSet);")
+        )
+        self.assertIn(
+            "  .<no type method>(): AddProperty(x => x.AresAttributeSet);",
+            stderr,
+        )
+
+    def test_a_listed_property_declared_with_a_type_fails(self):
+        """Once upstream gives a listed property a type, the reason recorded
+        for it is false. The run says so rather than carry it.
+        """
+        stderr = self.run_generator_expecting_failure(
+            {
+                "AresAbilitySystemComponentDescriptor.cs":
+                    self.DECODERLESS_SOURCE.replace("{TYPE}", ".ObjectNetGuid()"),
+            }
+        )
+        self.assertIn("DECODERLESS_PROPERTIES", stderr)
+        self.assertIn("AresAbilitySystemComponentDescriptor.AresAttributeSet", stderr)
 
     #: Two descriptor classes, one Path, one field name, two types.
     CONFLICTING_CLASSES = {
