@@ -82,7 +82,10 @@ The other local ability descriptors remain registered. See
 naming `/Game/Equippables/Guns/Rifles/BattleRifle/BattleRifle.BattleRifle_C`
 `Warden` (rifle). The file declares no descriptor, so `table.rs` regenerates
 byte for byte; it feeds `tools/extract_equippables.py` only. Every other file
-here keeps the provenance above.
+here keeps the provenance above. Upstream's Raze descriptor commit `8b7afcb` is
+not vendored: the generator cannot read its descriptors, and its adopted types
+are exact group/name/checksum identities instead
+([`UPSTREAM_RAZE_WARDEN.md`](../../docs/UPSTREAM_RAZE_WARDEN.md)).
 
 ### Regeneration
 

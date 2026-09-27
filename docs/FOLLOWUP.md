@@ -167,6 +167,15 @@ preserves every other tail whole.
   damage or purchase counts.
 - Re-run the component-remap and mapping guards on each new supported build;
   the replay does not reveal Blueprint-to-native class aliases by itself.
+- Give `ReplicatedMovement` a per-class location scale. `FieldType::RepMovement`
+  (like upstream's C# decoder) divides every location by 100; measured against
+  spawn locations on 2026-09-28, projectiles and game objects replicate whole
+  centimetres, so 24 of the 25 typed groups export positions 100 times too small
+  while pawns are right ([UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md)).
+  Exact consumption cannot see this -- the scale changes no width. The fix
+  rewrites typed values on those groups and every export baseline, so it needs
+  its own before/after. Raze's satchel, Paint Shells and rocket stay raw until
+  then.
 - Find out why neither C# build (upstream `b51d674`, vendored `8824794`) emits
   any event for packet 391880 of `02d4d478`, where vrfkit decodes a
   killing-blow `MulticastNotifyDamage_Point` on the `DamageableComponent` of

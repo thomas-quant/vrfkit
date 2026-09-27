@@ -1000,7 +1000,7 @@
         "++Ares-Core+release-13.05",
         "++Ares-Core+release-13.06"
       ],
-      "evidence": "Upstream 8b7afcb (feat: add raze descriptors) declares handle 10 ReplicatedMovement ReplicatedMovement(ShortComponents) for Pawn_Clay_E_Boomba_C. audit-main raw audit of all 1,018 unique corpus exports (11.06-13.06, made with 259ed10), 2026-09-28; tools/validate_type_evidence.py consumed every observed payload exactly under this type: 2,296 rows (2,296 main, 0 checkpoint), exactly 91/94/97/100/103/106 bits; short rotation consumes every payload exactly. The first update of each of 2,296 actors lies a median 0.05 cm from its actors.parquet spawn location (100% within 1 m), so the scale-100 location is right for this class."
+      "evidence": "Upstream 8b7afcb (feat: add raze descriptors) declares handle 10 ReplicatedMovement ReplicatedMovement(ShortComponents) for Pawn_Clay_E_Boomba_C. audit-main raw audit of all 1,018 unique corpus exports (11.06-13.06, made with 259ed10), 2026-09-28; tools/validate_type_evidence.py consumed every observed payload exactly under this type: 2,296 rows (2,296 main, 0 checkpoint), exactly 91/94/97/100/103/106 bits; short rotation consumes every payload exactly, while byte rotation fails 1,110 of them. The first update of each of 2,296 actors lies a median 0.05 cm from its actors.parquet spawn location (100% within 1 m), so the scale-100 location is right for this class."
     },
     {
       "group": "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",

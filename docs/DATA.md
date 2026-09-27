@@ -219,7 +219,35 @@ with 100.
 | Persistent effect position (smoke/wall/molly/slow/trap) | `actors.parquet` class_path + spawn xyz | ✅ every spawned effect actor |
 | Persistent effect lifetime | `actors.time_ms` paired across `event` `open`/`close` (non-fuel; a `dormant` event does not end the instance); `CurrentFuelLevel`+`WallActivated` (Viper) | ✅ |
 | Smoke live position | `ReplicatedMovement` (x100) / `MulticastAddSmokeScreenPoint.Translation` | ✅ |
+| Raze ability items (owner, persistence, attachment, seed) | `Ability_Clay_{4,E,Q,X}_*`: `CreatedByCharacter`, `bInPersistentData`, `AttachComponent`, `RelativeScale3D`, `CosmeticRandomSeed` | ✅ exact group/name/checksum; `CreatedByCharacter` resolves to the `Clay_PC_C` actor on every non-null main row |
+| Raze satchel attachment | `Projectile_Clay_Q_Satchel_Arming`: `AttachComponent`, `LocationOffset`, `RotationOffset`, `RelativeScale3D` | ✅ exact identity; offsets are relative to the attach component, which resolves to world geometry or a character capsule |
+| Raze Boom Bot position | `Pawn_Clay_E_Boomba.ReplicatedMovement` (short rotation) / `bAIControlled` | ✅ location in centimetres, checked against spawn; `bAIControlled` is true on every observed row |
+| Raze satchel, Paint Shells and rocket position | `ReplicatedMovement` on those projectiles | ◐ raw on purpose; `actors.parquet` spawn xyz for placement -- see below |
 | Interaction progress (plant/defuse/orb pickup) | `UsableComponent.HighestProgress` (Float 0..1) / `bIsActive` | ✅ |
+
+### `ReplicatedMovement` location is in metres on projectiles and game objects
+
+`FieldType::RepMovement` divides every location by 100, which is right for
+pawns and wrong for projectiles and ability game objects: those classes
+replicate whole centimetres, so their exported `location` is the position in
+metres. Multiply by 100 before joining it to `movement.parquet` or
+`actors.parquet` coordinates. The smoke row above has always said so; it holds
+for every non-pawn class measured.
+
+Measured 2026-09-28 on all 1,018 unique corpus replays: each actor's first
+`ReplicatedMovement` against its `actors.parquet` spawn location. On 24 of the
+25 groups the table types, the decoded location sits a median 5,800-7,600 cm
+from spawn and times 100 lands a median 0.4-0.5 cm away, every actor within
+1 m (425,146 actors; `EquippablePickupProjectile_C` alone is 288,644). The 25th
+is `Pawn_Aggrobot_SeekerNade_C`, which matches at the decoded scale, as does
+Raze's Boom Bot. Velocity agrees with the centimetre reading: on the
+projectiles checked for it (Raze's satchel, grenade and rocket and Sova's Recon
+Bolt, two replays) the reported speed over the speed implied by consecutive
+updates has a median of 0.98 to 1.02. Rotation quantization is not the
+discriminator -- five of the 24 use short components. Raze's projectiles are left raw rather than joined to this
+error; [UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md) has the method and
+the per-group numbers, and the decoder fix is tracked in
+[FOLLOWUP.md](FOLLOWUP.md#remaining-work).
 
 ### `CastTime` is not measured from `roundStarted`
 
@@ -406,6 +434,7 @@ crouch speed is ~190 cm/s.
 | Time (128 Hz tick, resets per round) / global | movement `timestamp` / `time_ms` | ✅ — `timestamp` is a **tick counter**, not milliseconds |
 | Posture (crouch) | `fields.bCrouchHeld` (not movement_state) | ✅ |
 | Trajectory | movement time series per character | ✅ |
+| Force modules applied to a character (knockback, tag slow, death push, door push) | `ForceModuleManagerComponent:NetMulticastApplyForceModule`: `Module`, `ModuleType`, `Character`, `Source`, `Duration`, `NetTimestamp`, `RespawnNumber` (plus the earlier `HandleNumber`, `SourceLocation`) | ✅ exact identity; `Module` resolves to a `ForceModule_*` class and `Character` to a character or pawn actor on every main row |
 
 ### The tick is 128 Hz by a 3:13 pattern, not by alternating
 
@@ -548,6 +577,7 @@ guessing -- which is the only reason the failure was findable.
 |---|---|---|
 | Ping / latency (ms) | `BombPlayerState.Ping` (16-bit, ms) | ✅ typed (SerializedInt{65536}) |
 | Connection status | `ConnectionStatus` | ✅ |
+| Movement-prediction reset on possession | `ShooterCharacter:ClientResetRemoteMovementPrediction.isPossess` (every character and pawn cache) | ✅ Bool; true on every one of 291,346 observed rows |
 | Game mode (Bomb / Swiftplay) | group_path (`GROUP_ALIASES` maps Swiftplay) | ✅ parser-side |
 
 ---

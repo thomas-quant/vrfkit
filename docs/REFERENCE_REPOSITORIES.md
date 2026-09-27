@@ -6,6 +6,15 @@
 [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md)에 기록한다. 아래 내용은
 각 날짜에 확인한 upstream 변경 이력이다.
 
+## 2026-09-28 업데이트
+
+upstream `2103d92`(Warden)와 `8b7afcb`(Raze descriptor)를 검토했다.
+`2103d92`의 `ValorantEquippableResolver.cs`는 그대로 다시 벤더링했고,
+`8b7afcb`는 파일을 벤더링하지 않고 코퍼스에서 관측·검증된 정확한
+group/name/checksum 식별자로만 반영했다. 투사체 `ReplicatedMovement`의 위치
+배율 문제와 채택하지 않은 항목의 근거를 포함한 처분 기록은
+[UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md)에 있다.
+
 ## 2026-09-24 업데이트
 
 upstream `2b66c65`의 소바·페이드 정찰 descriptor와 섬광/근시의 플레이어 본체 구분
