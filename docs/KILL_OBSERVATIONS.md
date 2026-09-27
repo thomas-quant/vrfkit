@@ -9,6 +9,19 @@ checkpoint field, declaration and reference tables.
 python tools/extract_kill_observations.py --export out/nested --out out/kill-observations.json
 ```
 
+**Builds.** The extractor accepts exports from 11.06--12.09 and 13.01--13.05
+and refuses any other build before reading a row. The legacy builds were added
+on 2026-09-28, once the parser emitted KillData children on them (see the
+[legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+The committed extractor then accepted all 48 available legacy exports, three
+per build, made by parser `2e7acce` with `--checkpoints`: 7,334 main and 8,876
+checkpoint parents, 7,347 and 73,518 element updates (12 of them main partial
+updates), and 2,525 and 25,419 assisting references. No nonzero reference was
+unresolved in its own scope. Exports of the same replays by parser `259ed10`,
+which emits no KillData children there, fail with `child count before parent
+differs from raw array`. 12.10, 12.11 and 13.00 stay refused: the parser emits
+no KillData children on them, and their only fixtures contain no KillData.
+
 These records are serialized element updates. They are not a deduplicated kill ledger. A replay can repeat a payload, send more than one element in a parent array, or send a partial element containing only `bDidKillTriggerFinisher`. Missing fields therefore remain JSON `null`/absent and are never copied from another record.
 
 Each observation is identified by its source table, checkpoint identity when applicable, physical `KillData` parent-row ordinal, and array element index. It retains packet/object coordinates, a parent-raw digest, exact member raw windows, and the serialized values currently measured for victim, equippable class, weapon theme, assisting players, damage type/value/region, game time, round timestamp/number, and finisher flag.

@@ -20,6 +20,24 @@ SCHEMA_VERSION = 1
 GROUP = "/Script/ShooterGame.PlayerMatchStatsComponent"
 PARENT = ("KillData", 1493759848)
 MEASURED_BUILDS = {
+    # 11.06-12.09: every available export passed on 2026-09-28; see
+    # docs/KILL_OBSERVATIONS.md. 12.10, 12.11 and 13.00 export no KillData children.
+    "++Ares-Core+release-11.06",
+    "++Ares-Core+release-11.07",
+    "++Ares-Core+release-11.08",
+    "++Ares-Core+release-11.09",
+    "++Ares-Core+release-11.10",
+    "++Ares-Core+release-11.11",
+    "++Ares-Core+release-12.00",
+    "++Ares-Core+release-12.01",
+    "++Ares-Core+release-12.02",
+    "++Ares-Core+release-12.03",
+    "++Ares-Core+release-12.04",
+    "++Ares-Core+release-12.05",
+    "++Ares-Core+release-12.06",
+    "++Ares-Core+release-12.07",
+    "++Ares-Core+release-12.08",
+    "++Ares-Core+release-12.09",
     "++Ares-Core+release-13.01",
     "++Ares-Core+release-13.02",
     "++Ares-Core+release-13.04",

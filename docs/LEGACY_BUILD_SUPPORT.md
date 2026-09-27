@@ -125,7 +125,10 @@ reference 13.01 replay:
 - `extract_kill_observations.py`, with its build set extended in-process for
   this run only, accepted all 48 legacy exports: 7,334 main and 8,876
   checkpoint parents, 7,347 and 73,518 element updates, and 2,525 and 25,419
-  assisting references, none unresolved.
+  assisting references, none unresolved. It now admits 11.06--12.09, and the
+  committed extractor and kill ledger both complete all 48 exports; see
+  [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md) and
+  [KILL_LEDGER.md](KILL_LEDGER.md#legacy-builds-2026-09-28).
 - `validate_ability_array_evidence.py --compare-typed` matched all 22,272 path
   children on 464 parents. Its only failures are the ActiveBlinds parents that
   now stay raw.
@@ -170,9 +173,6 @@ python tools/validate_ability_array_evidence.py '<exports>/12.09/sample-1' --com
 - ActiveBlinds needs both declaration-keyed member widths for the
   11.06--12.04 swap and an explicit rule for the 9-bit hardcoded `SourceID`,
   with the matching change in `validate_ability_array_evidence.py`.
-- `extract_kill_observations.py` still accepts only 13.01--13.05 and
-  therefore refuses the legacy exports that now carry KillData children, as it
-  already refused 13.06.
 - The exact array walker skips zero-width members without a counter. Only
   the held-back `SelectedV2` layout produced them here.
 

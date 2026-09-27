@@ -9,6 +9,9 @@ between them. Use a measured 13.01, 13.02, 13.04 or 13.05 export generated with
 python tools/extract_kill_ledger.py --export out/replay --out out/kill-ledger.json
 ```
 
+Exports from 11.06--12.09 are accepted as well; their measurement is in
+[Legacy builds](#legacy-builds-2026-09-28).
+
 The document has schema version 1 and kind
 `vrfkit_character_death_ledger`. It retains the complete
 [serialized observation stream](KILL_OBSERVATIONS.md) in `source_observations`.
@@ -84,6 +87,38 @@ Missing references stay null with explicit status. Count keys include zero
 values. Input/schema/value violations return a nonzero exit; a successful
 document is written atomically. Output paths that alias input tables, the
 observation document or the implementation files are refused.
+
+## Legacy builds, 2026-09-28
+
+The ledger reads KillData through the [observation extractor](KILL_OBSERVATIONS.md),
+so it accepts the builds that extractor admits. 11.06--12.09 were added once the
+parser emitted KillData children on them (see the
+[legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+The committed command completed all 48 available exports, three per build,
+made by parser `2e7acce` with `--checkpoints`, one process at a time.
+
+| Population | Count |
+|---|---:|
+| Character-death events, with fully validated payloads | 7,381 |
+| Complete main KillData entities | 7,335 |
+| Mutually unique same-round identity joins | 7,332 |
+| Unmatched character-death events | 49 |
+| Unmatched main KillData observations | 3 |
+| Ambiguous event/main-observation joins | 0 / 0 |
+| Finisher revisions that change the previous state | 12 |
+| Finisher revisions that repeat the previous state | 0 |
+| Checkpoint snapshots matching an existing state | 73,518 |
+| Unresolved checkpoint snapshots | 0 |
+| Validated round-start events | 985 |
+
+Every killer and victim pawn resolved to a PlayerState, and no death round was
+unresolved. Matched replication lags range from 8 to 35 ms. All 49 unmatched
+death events have the same resolved PlayerState on both sides, and all three
+unmatched KillData observations retain same-round, same-victim context with a
+different killer identity. As on 13.x, these are observed attribution
+differences, not suicide or kill-credit rules. This run checks the tool's own
+invariants on these exports; it did not repeat the independent identity
+reconstruction and join comparison recorded for the 714 13.x exports below.
 
 ## Validation scope
 
