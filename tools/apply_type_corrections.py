@@ -855,6 +855,59 @@ ADDITIONS = [
     ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
      "Projectile_Guide_E_HawkFlash_C",
      "PostControlVelocity", "FieldType::VectorDouble"),
+    # HawkFlash's `ReplicatedMovement` and `Banking`. third_party/vrp has no
+    # HawkFlash class at all, so these are ADDITIONS keyed on the exact group;
+    # DATA.md's "no name rule for ReplicatedMovement" stands, and checksum
+    # 2749104612 stays dropped (this is a twentieth ByteComponents donor
+    # against six ShortComponents ones). Measured 2026-09-28 over the 1,018
+    # replays audited at 259ed10: the group occurs on 15 builds (11.06-13.06),
+    # every row in the main stream -- no class's ReplicatedMovement reaches a
+    # checkpoint table, so that side is untested by construction.
+    #
+    # `ReplicatedMovement` (handle 10 on every build): 1,033,952 rows,
+    # 71-118 bits. Rotator quantization is decided by the wire, the 13-J
+    # method: a ByteComponents read consumes all 1,033,952 exactly on every
+    # build, while ShortComponents overruns or leaves residue on 564,158
+    # (54.6%) -- and the rotation IS on the wire (pitch/yaw flags set on 99.9%
+    # of rows), so the choice is measured, not merely bounded. Values: all four
+    # flags 0 on every row; |velocity| median 1799.93 (p99 1800.56), the same
+    # magnitude as the separately typed PostControlVelocity (the direction of
+    # that different property differs); byte yaw against atan2(vy, vx) has a
+    # median error of 0.36 deg; the packed location's displacement over ~50 ms
+    # windows divided by dt matches the velocity with a median ratio 1.00. An
+    # independent reader that matched Rust on 8,249,671 already-typed Byte
+    # rows reproduced all of it.
+    #
+    # LOCATION SCALE: every row's location header says "scaled", and the reader
+    # divides by 100, so the exported location is world/100 on this class --
+    # the packed integer at each of the 8,265 actors' first update matches the
+    # actors.parquet spawn position within 0.87 cm, the /100 value is 2,919 to
+    # 15,023 units off. That is the reader-wide divergence recorded in 13-J and
+    # in the decoders-deep-1 audit (world/100 on every observed class but
+    # Pawn_Aggrobot_SeekerNade_C); it is not this entry's to fix, and nothing
+    # here pins a location value. Multiply by 100 for world coordinates, and
+    # expect roll 0.0 always -- it is never replicated, so that is the
+    # absent-flag default, not a measurement.
+    #
+    # `Banking` (checksum 677106858, handle 17 on 11.06-11.09 and 18 after --
+    # where PostControlVelocity took 17, so a handle rule would have mistyped
+    # one of them): 801,700 rows, 64 bits on every row of every build. As
+    # little-endian f64 every value is finite and within [-180, 180] (p1/p99
+    # -74.6/73.5), all with the low 29 mantissa bits zero -- an f32 widened to
+    # f64 -- and the per-actor step wraps at +-180 like an angle. Two f32
+    # halves or an Int64 read are nonsense (the low word takes 7 values;
+    # median |i64| 4.6e18). In the proposer's measurement (not re-derived by
+    # the verifier) its sign follows the turn direction computed from the
+    # velocity heading on 86% of clearly turning rows (r = 0.56).
+    # Only a double angle in degrees is claimed; 150 actors start at exactly
+    # 0.0.
+    ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
+     "Projectile_Guide_E_HawkFlash_C",
+     "ReplicatedMovement",
+     "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents }"),
+    ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
+     "Projectile_Guide_E_HawkFlash_C",
+     "Banking", "FieldType::Double"),
 ]
 EXPECTED += [(g, f, t) for g, f, t in ADDITIONS]
 

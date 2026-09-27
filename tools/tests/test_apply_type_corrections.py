@@ -190,6 +190,11 @@ class AdditionsTests(unittest.TestCase):
         strictly increasing, LastSeen < Correction on every paired row, and
         every checkpoint value equal to the preceding main-stream one).
 
+        135 -> 137 types HawkFlash's `ReplicatedMovement` (ByteComponents:
+        the only reading that consumes all 1,033,952 payloads; Short fails on
+        54.6%) and its `Banking` (64-bit doubles, -180..180, on 801,700 rows),
+        on that exact group only.
+
         63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
         for being a wrong `FString`; it is back because a decoder now exists
         and the reason given for waiting was itself wrong -- `Statistic` was
@@ -226,7 +231,7 @@ class AdditionsTests(unittest.TestCase):
         2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
         reaches a real declaration and the guessed name is gone.
         """
-        self.assertEqual(len(atc.ADDITIONS), 135, atc.ADDITIONS)
+        self.assertEqual(len(atc.ADDITIONS), 137, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
         """Same guardrail for the handle -> name additions.

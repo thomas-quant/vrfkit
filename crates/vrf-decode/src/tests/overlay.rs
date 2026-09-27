@@ -8,6 +8,7 @@ use crate::overlay::{
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
+use crate::types::RotatorQuantization;
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
 
 const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
@@ -417,6 +418,32 @@ fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
         ),
         Some(FieldType::VectorDouble)
     );
+}
+
+/// HawkFlash's `ReplicatedMovement` is read with byte rotator components and
+/// its `Banking` as a double, on that exact group only. Over the 1,018-replay
+/// audit every one of its 1,033,952 movement payloads (71-118 bits) is
+/// consumed exactly by the byte reading and 54.6% overrun or leave residue
+/// under the short one; `Banking` is 64 bits on all 801,700 rows, reading
+/// -180..180. Only the type is pinned here, deliberately not a decoded
+/// location: the reader's location scale is a separately tracked divergence
+/// (world/100 on this class), and a value pinned now would lock it in.
+#[test]
+fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
+    const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        table.lookup(HAWK, "ReplicatedMovement"),
+        Some(FieldType::RepMovement {
+            rotation: RotatorQuantization::ByteComponents
+        })
+    );
+    assert_eq!(table.lookup(HAWK, "Banking"), Some(FieldType::Double));
+    assert_eq!(lookup_checksum(677106858), Some(FieldType::Double));
+    // Still no name rule and no checksum for ReplicatedMovement as a whole:
+    // the new entry is a twentieth ByteComponents donor, and the six
+    // ShortComponents ones keep 2749104612 out of the checksum table.
+    assert_eq!(lookup_checksum(2749104612), None);
 }
 
 #[test]
@@ -1304,7 +1331,7 @@ fn an_unlearned_checksum_resolves_nothing() {
 
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 19 groups and `ShortComponents`
+/// is the one that matters -- `ByteComponents` on 20 groups and `ShortComponents`
 /// on 6, which differ in width, so guessing would desync the block rather than
 /// read a wrong value.
 ///

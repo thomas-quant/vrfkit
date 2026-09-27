@@ -219,6 +219,7 @@ with 100.
 | Persistent effect position (smoke/wall/molly/slow/trap) | `actors.parquet` class_path + spawn xyz | ✅ every spawned effect actor |
 | Persistent effect lifetime | `actors.time_ms` paired across `event` `open`/`close` (non-fuel; a `dormant` event does not end the instance); `CurrentFuelLevel`+`WallActivated` (Viper) | ✅ |
 | Smoke live position | `ReplicatedMovement` (x100) / `MulticastAddSmokeScreenPoint.Translation` | ✅ |
+| Guide (Gekko) E projectile flight | `Projectile_Guide_E_HawkFlash_C`: `ReplicatedMovement` (ByteComponents), `Banking` (Double), `PostControlVelocity` | ✅ typed, main stream only (11.06-13.06). `location` lands on **world/100** for this class, like every observed RepMovement class except `Pawn_Aggrobot_SeekerNade_C`: multiply by 100 (the packed value matches the spawn position to 0.87 cm). Velocity is in world units; roll is never replicated and reads 0. `Banking` is an angle in degrees, -180..180; what it banks is not established |
 | Interaction progress (plant/defuse/orb pickup) | `UsableComponent.HighestProgress` (Float 0..1) / `bIsActive` | ✅ |
 
 ### `CastTime` is not measured from `roundStarted`
@@ -842,7 +843,7 @@ is worth keeping.
 
 `Owner` was safe because its *encoding* is fixed, not because its name is
 standard. `ReplicatedMovement` is just as standard a name and is declared three
-different ways in the table -- `RepMovement{ByteComponents}` on 18 groups,
+different ways in the table -- `RepMovement{ByteComponents}` on 20 groups,
 `RepMovement{ShortComponents}` on 6, `Skip` on 1. Those differ in width, so a
 name rule there would not read a wrong value quietly; it would desync the block.
 `RelativeScale3D` and `CosmeticRandomSeed` split the same way, and only on

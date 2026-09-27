@@ -151,7 +151,9 @@ VECTOR_PROPERTIES = frozenset({
 # Listed by name rather than sniffed with `value.startswith("{")`: a string
 # that merely looks like JSON is not evidence that it is a movement struct.
 # ReplicatedMovement is the only field with FieldType::RepMovement in the
-# generated table (7 entries, all this name).
+# generated table (26 entries, all this name). Its `location` is the packed
+# value divided by 100, which is world/100 on every observed class except
+# Pawn_Aggrobot_SeekerNade_C -- see docs/DATA.md; the adapter passes it through.
 JSON_OBJECT_PROPERTIES = frozenset({
     "ReplicatedMovement",
 })
