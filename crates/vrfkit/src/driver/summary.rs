@@ -13,7 +13,7 @@ use vrf_decode::{OverlayErrorReport, OverlayStats};
 use vrf_net::stats::NetStats;
 
 use super::checkpoints::CheckpointStats;
-use super::totals::SinkTotals;
+use crate::sink::SinkTotals;
 
 /// Everything the run counted that is not in [`NetStats`].
 pub(super) struct RunTotals {
@@ -61,7 +61,7 @@ pub(super) struct RunTotals {
     /// Everything the per-packet sinks counted. One struct rather than a dozen
     /// loose fields, because the failure this guards against is a counter that
     /// exists on `ExportStats` and reaches no summary line. See
-    /// [`super::totals`].
+    /// [`SinkTotals`].
     pub sink: SinkTotals,
     /// [`stale_checkpoint_note`], computed by the caller against the
     /// PRE-publish destination -- the directory `OutputTransaction::publish`
@@ -105,7 +105,7 @@ pub(super) fn print(
     // redundant to drop: a mismatch against the five lines above is a real
     // desync between what vrf-net framed and what the sink actually saw, and
     // before this line existed these counters were summed on `ExportStats`
-    // and read by nothing (see `driver::totals`).
+    // and read by nothing (see `sink::totals`).
     eprintln!(
         "  Sink tally:       {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
         totals.sink.fields_emitted,

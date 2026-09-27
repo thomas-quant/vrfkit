@@ -15,12 +15,27 @@
 //! overran mid-element wrote its parent raw row, lost its flattened children,
 //! and recorded no failure anywhere.
 //!
-//! Both passes now go through [`SinkTotals::absorb`]. One function, one test,
-//! and a counter added to `ExportStats` has exactly one place to be wired in.
+//! Both passes now go through [`SinkTotals::absorb`], and so does `diag`,
+//! which used to keep a line-for-line copy of it (`DiagSinkTotals`) and a
+//! second list of the same counters. That is why this lives in `sink` and not
+//! in the `export`-gated driver: `diag` is built without the feature.
+//!
+//! `absorb` opens with a destructure of `ExportStats` that has no `..`, and it
+//! sums the overlay and array counters through `OverlayStats::merge_counts_from`
+//! and `ArrayDecodeStats::merge_from`, which are written the same way. A
+//! counter added to any of the three structs therefore does not compile until
+//! it is summed here, and binding it without summing it is an unused-variable
+//! warning. Before, a new field compiled cleanly and simply never arrived:
+//! "one place to be wired in" was a convention with nothing enforcing it.
+//!
+//! What this does NOT cover: the printers. The export summary, the manifest's
+//! `quality` block and the `diag` JSON each still name their lines by hand, so
+//! a counter can reach this struct and still be printed nowhere. The `diag`
+//! list is checked against this struct by a test in `diagnose.rs`.
 
 use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
 
-use crate::sink::ExportStats;
+use super::ExportStats;
 
 /// Everything a packet's sink counted, summed across packets.
 #[derive(Debug, Default)]
@@ -71,49 +86,64 @@ impl SinkTotals {
     ///
     /// `stats` is taken by `&mut` for the two `Option<String>` fields, which are
     /// moved out rather than cloned -- they are only ever set once per run.
-    pub(super) fn absorb(
+    pub(crate) fn absorb(
         &mut self,
         stats: &mut ExportStats,
         error_report: &mut OverlayErrorReport,
     ) {
-        self.fields_emitted += stats.fields_emitted;
-        self.rpcs_emitted += stats.rpcs_emitted;
-        self.actor_opens += stats.actor_opens;
-        self.actor_closes += stats.actor_closes;
-        self.content_blocks += stats.content_blocks;
-        self.overlay.decoded_ok += stats.overlay.decoded_ok;
-        self.overlay.decoded_err += stats.overlay.decoded_err;
-        self.overlay.raw_or_skip += stats.overlay.raw_or_skip;
-        self.overlay.not_in_table += stats.overlay.not_in_table;
-        self.overlay.no_field_name += stats.overlay.no_field_name;
-        self.overlay.handle_conflicts_refused += stats.overlay.handle_conflicts_refused;
-        self.effect_blobs_decoded += stats.effect_blobs_decoded;
-        self.struct_blobs_decoded += stats.struct_blobs_decoded;
-        self.struct_blobs_failed += stats.struct_blobs_failed;
+        // No `..`: see the module doc. A field added to `ExportStats` stops
+        // this compiling until it is bound here and summed below.
+        let ExportStats {
+            fields_emitted,
+            rpcs_emitted,
+            actor_opens,
+            actor_closes,
+            content_blocks,
+            overlay,
+            array,
+            tracked_rewards_opaque_empty_variants,
+            effect_blobs_decoded,
+            struct_blobs_decoded,
+            multi_contents_items_emitted,
+            cnc_rpcs_emitted,
+            rep_layout_cnc_tails_decoded,
+            rep_layout_cnc_tails_preserved,
+            struct_blobs_failed,
+            struct_blob_first_error,
+            movement_rpc_errors,
+            movement_first_error,
+            truncated_rpcs,
+            rpc_suffix_bits_dropped,
+            array_leaf_decode_errors,
+            targeting_world_locations_decoded,
+        } = stats;
+        self.fields_emitted += *fields_emitted;
+        self.rpcs_emitted += *rpcs_emitted;
+        self.actor_opens += *actor_opens;
+        self.actor_closes += *actor_closes;
+        self.content_blocks += *content_blocks;
+        self.overlay.merge_counts_from(overlay);
+        self.effect_blobs_decoded += *effect_blobs_decoded;
+        self.struct_blobs_decoded += *struct_blobs_decoded;
+        self.struct_blobs_failed += *struct_blobs_failed;
         if self.struct_blob_first_error.is_none() {
-            self.struct_blob_first_error = stats.struct_blob_first_error.take();
+            self.struct_blob_first_error = struct_blob_first_error.take();
         }
-        self.multi_contents_items_emitted += stats.multi_contents_items_emitted;
-        self.movement_rpc_errors += stats.movement_rpc_errors;
+        self.multi_contents_items_emitted += *multi_contents_items_emitted;
+        self.movement_rpc_errors += *movement_rpc_errors;
         if self.movement_first_error.is_none() {
-            self.movement_first_error = stats.movement_first_error.take();
+            self.movement_first_error = movement_first_error.take();
         }
-        self.array.elements_decoded += stats.array.elements_decoded;
-        self.array.fields_emitted += stats.array.fields_emitted;
-        self.array.truncations += stats.array.truncations;
-        self.array.errors += stats.array.errors;
-        self.array.unconsumed_nested_bits += stats.array.unconsumed_nested_bits;
-        self.array.implicit_terminations += stats.array.implicit_terminations;
-        self.array.unconsumed_root_bits += stats.array.unconsumed_root_bits;
-        self.tracked_rewards_opaque_empty_variants += stats.tracked_rewards_opaque_empty_variants;
-        self.array_leaf_decode_errors += stats.array_leaf_decode_errors;
-        self.targeting_world_locations_decoded += stats.targeting_world_locations_decoded;
-        self.truncated_rpcs += stats.truncated_rpcs;
-        self.rpc_suffix_bits_dropped += stats.rpc_suffix_bits_dropped;
-        self.cnc_rpcs_emitted += stats.cnc_rpcs_emitted;
-        self.rep_layout_cnc_tails_decoded += stats.rep_layout_cnc_tails_decoded;
-        self.rep_layout_cnc_tails_preserved += stats.rep_layout_cnc_tails_preserved;
-        error_report.merge_from(&stats.overlay.error_report);
+        self.array.merge_from(array);
+        self.tracked_rewards_opaque_empty_variants += *tracked_rewards_opaque_empty_variants;
+        self.array_leaf_decode_errors += *array_leaf_decode_errors;
+        self.targeting_world_locations_decoded += *targeting_world_locations_decoded;
+        self.truncated_rpcs += *truncated_rpcs;
+        self.rpc_suffix_bits_dropped += *rpc_suffix_bits_dropped;
+        self.cnc_rpcs_emitted += *cnc_rpcs_emitted;
+        self.rep_layout_cnc_tails_decoded += *rep_layout_cnc_tails_decoded;
+        self.rep_layout_cnc_tails_preserved += *rep_layout_cnc_tails_preserved;
+        error_report.merge_from(&overlay.error_report);
     }
 }
 

@@ -190,12 +190,7 @@ fn decode_verified_nested_array(
         declared_names,
         &mut stats,
     );
-    let complete = stats.truncations == 0
-        && stats.errors == 0
-        && stats.implicit_terminations == 0
-        && stats.unconsumed_nested_bits == 0
-        && stats.unconsumed_root_bits == 0;
-    if !complete {
+    if !stats.is_clean() {
         return (None, stats, 0);
     }
 
@@ -602,19 +597,6 @@ fn is_tracked_rewards_opaque_empty_variant(
     )
 }
 
-fn merge_array_stats(
-    target: &mut vrf_decode::ArrayDecodeStats,
-    source: &vrf_decode::ArrayDecodeStats,
-) {
-    target.elements_decoded += source.elements_decoded;
-    target.fields_emitted += source.fields_emitted;
-    target.truncations += source.truncations;
-    target.errors += source.errors;
-    target.unconsumed_nested_bits += source.unconsumed_nested_bits;
-    target.unconsumed_root_bits += source.unconsumed_root_bits;
-    target.implicit_terminations += source.implicit_terminations;
-}
-
 /// The struct-blob fields that have a dedicated decoder in `vrf-decode`.
 #[derive(Clone, Copy)]
 enum StructBlob {
@@ -797,13 +779,8 @@ impl ExportSink<'_> {
             )
         };
         if measured {
-            let complete = isolated.truncations == 0
-                && isolated.errors == 0
-                && isolated.implicit_terminations == 0
-                && isolated.unconsumed_nested_bits == 0
-                && isolated.unconsumed_root_bits == 0;
-            merge_array_stats(&mut self.stats.array, &isolated);
-            if !complete {
+            self.stats.array.merge_from(&isolated);
+            if !isolated.is_clean() {
                 return;
             }
             if parent_name == "ActiveBlinds"
@@ -942,7 +919,7 @@ impl ExportSink<'_> {
             })
             .collect();
         for (_, nested_stats, nested_failures) in &nested_results {
-            merge_array_stats(&mut self.stats.array, nested_stats);
+            self.stats.array.merge_from(nested_stats);
             self.stats.array_leaf_decode_errors = self
                 .stats
                 .array_leaf_decode_errors

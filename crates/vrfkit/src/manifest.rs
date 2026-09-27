@@ -25,8 +25,8 @@ use vrf_net::stats::NetStats;
 use vrf_schema::NetGuidCache;
 
 use crate::driver::checkpoints::CheckpointStats;
-use crate::driver::totals::SinkTotals;
 use crate::error::CliError;
+use crate::sink::SinkTotals;
 
 /// Every run-level value needed to judge whether the published tables are
 /// complete and how much typed decoding fell back to preserved raw data.
@@ -906,7 +906,7 @@ fn json_str(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::driver::checkpoints::CheckpointStats;
-    use crate::driver::totals::SinkTotals;
+    use crate::sink::SinkTotals;
     use vrf_decode::OverlayErrorReport;
     use vrf_net::stats::NetStats;
 

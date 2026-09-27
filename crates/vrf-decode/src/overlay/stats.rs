@@ -161,6 +161,35 @@ pub struct OverlayStats {
     pub error_report: OverlayErrorReport,
 }
 
+impl OverlayStats {
+    /// Add the six counters of `other` into `self`.
+    ///
+    /// `error_report` is deliberately not merged: callers fold it into one
+    /// report shared by every pass (see `OverlayErrorReport::merge_from`), so
+    /// a checkpoint-only failure is still in the breakdown the summary prints.
+    /// The destructure has no `..`, so a counter added to this struct does not
+    /// compile until it is summed here -- the export and `diag` totals both go
+    /// through this method, and a hand-written copy of the sum is how a new
+    /// counter used to reach one of them and not the other.
+    pub fn merge_counts_from(&mut self, other: &Self) {
+        let Self {
+            decoded_ok,
+            decoded_err,
+            raw_or_skip,
+            not_in_table,
+            no_field_name,
+            handle_conflicts_refused,
+            error_report: _,
+        } = other;
+        self.decoded_ok += decoded_ok;
+        self.decoded_err += decoded_err;
+        self.raw_or_skip += raw_or_skip;
+        self.not_in_table += not_in_table;
+        self.no_field_name += no_field_name;
+        self.handle_conflicts_refused += handle_conflicts_refused;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +293,33 @@ mod tests {
                 DecodeErrorKind::ZeroBits,
             ]
         );
+    }
+
+    fn distinct_counts(base: u64) -> OverlayStats {
+        OverlayStats {
+            decoded_ok: base + 1,
+            decoded_err: base + 2,
+            raw_or_skip: base + 3,
+            not_in_table: base + 4,
+            no_field_name: base + 5,
+            handle_conflicts_refused: base + 6,
+            error_report: tied_report(),
+        }
+    }
+
+    /// Each counter lands in its own total, and the per-field breakdown is
+    /// left alone: callers merge it into a report shared across passes.
+    #[test]
+    fn merge_counts_from_sums_every_counter_and_leaves_the_report() {
+        let mut total = OverlayStats::default();
+        total.merge_counts_from(&distinct_counts(0));
+        total.merge_counts_from(&distinct_counts(100));
+        assert_eq!(total.decoded_ok, 1 + 101);
+        assert_eq!(total.decoded_err, 2 + 102);
+        assert_eq!(total.raw_or_skip, 3 + 103);
+        assert_eq!(total.not_in_table, 4 + 104);
+        assert_eq!(total.no_field_name, 5 + 105);
+        assert_eq!(total.handle_conflicts_refused, 6 + 106);
+        assert_eq!(total.error_report.total_errors(), 0);
     }
 }

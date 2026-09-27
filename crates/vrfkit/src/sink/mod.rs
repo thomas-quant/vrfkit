@@ -16,9 +16,11 @@
 //! - [`rpc`] -- the ClassNetCache RPC parameter walker.
 //! - [`blobs`] -- the struct-blob and flattened-array decoders.
 //! - [`stream`] -- the `vrf-net` trait impls that drive all of the above.
+//! - [`totals`] -- the per-run sum of every packet sink's counters, shared by
+//!   `export` (both passes) and `diag`.
 //!
-//! This module holds what those five share: the sink, the per-packet record
-//! buffers, and the state that must outlive a packet.
+//! This module holds what the first five share: the sink, the per-packet
+//! record buffers, and the state that must outlive a packet.
 //!
 //! # What the sink costs
 //!
@@ -34,8 +36,10 @@ mod intern;
 mod paths;
 mod rpc;
 mod stream;
+mod totals;
 
 pub use failure_stats::FailureAggregate;
+pub(crate) use totals::SinkTotals;
 
 use std::sync::Arc;
 

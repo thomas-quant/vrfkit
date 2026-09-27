@@ -144,6 +144,63 @@ pub struct ArrayDecodeStats {
     pub implicit_terminations: u64,
 }
 
+impl ArrayDecodeStats {
+    /// Add every counter of `other` into `self`.
+    ///
+    /// The one place a walk's counters are folded into a running total. The
+    /// sum used to be written out field by field in four places (two sink
+    /// decoders, the export totals and the `diag` totals), and none of them
+    /// would have noticed a new field: it compiled, and the new counter read
+    /// as absent everywhere it was not wired in by hand. The destructure below
+    /// has no `..`, so a field added to this struct does not compile until it
+    /// is summed here.
+    pub fn merge_from(&mut self, other: &Self) {
+        let Self {
+            elements_decoded,
+            fields_emitted,
+            truncations,
+            errors,
+            unconsumed_nested_bits,
+            unconsumed_root_bits,
+            implicit_terminations,
+        } = other;
+        self.elements_decoded += elements_decoded;
+        self.fields_emitted += fields_emitted;
+        self.truncations += truncations;
+        self.errors += errors;
+        self.unconsumed_nested_bits += unconsumed_nested_bits;
+        self.unconsumed_root_bits += unconsumed_root_bits;
+        self.implicit_terminations += implicit_terminations;
+    }
+
+    /// Whether a walk recorded none of the five failure shapes.
+    ///
+    /// Measured routes emit typed children only from a clean walk, so this is
+    /// the acceptance test for every one of them. It was spelled out as a
+    /// five-way `== 0` conjunction at each route, and a new failure counter
+    /// added to this struct would have been left out of every copy -- typed
+    /// children would then have been emitted from a walk that had failed. The
+    /// destructure has no `..`: a new field must be classified here as work
+    /// (bound to `_`) or failure (tested) before it compiles.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        let Self {
+            elements_decoded: _,
+            fields_emitted: _,
+            truncations,
+            errors,
+            unconsumed_nested_bits,
+            unconsumed_root_bits,
+            implicit_terminations,
+        } = self;
+        *truncations == 0
+            && *errors == 0
+            && *unconsumed_nested_bits == 0
+            && *unconsumed_root_bits == 0
+            && *implicit_terminations == 0
+    }
+}
+
 /// Everything one walk carries down through the recursion.
 ///
 /// `declared` and `output`/`stats` are the same for every level; bundling them
@@ -1387,5 +1444,90 @@ mod tests {
         assert_eq!(targets.field_name(19), Some("AffectedPlayer"));
         assert_eq!(targets.field_name(20), Some("Value"));
         assert!(targets.sub_array(19).is_none(), "leaves stay leaves");
+    }
+
+    /// Every field, a distinct value, so a field summed into the wrong target
+    /// or not summed at all fails here instead of cancelling out.
+    fn distinct_stats(base: u64) -> ArrayDecodeStats {
+        ArrayDecodeStats {
+            elements_decoded: base + 1,
+            fields_emitted: base + 2,
+            truncations: base + 3,
+            errors: base + 4,
+            unconsumed_nested_bits: base + 5,
+            unconsumed_root_bits: base + 6,
+            implicit_terminations: base + 7,
+        }
+    }
+
+    /// `merge_from` is the one place a walk's isolated counters are folded into
+    /// a running total. It replaced four hand-written copies of the same seven
+    /// `+=` lines, none of which a new field would have broken.
+    #[test]
+    fn merge_from_sums_every_field_into_its_own_target() {
+        let mut total = distinct_stats(0);
+        total.merge_from(&distinct_stats(100));
+        assert_eq!(total.elements_decoded, 1 + 101);
+        assert_eq!(total.fields_emitted, 2 + 102);
+        assert_eq!(total.truncations, 3 + 103);
+        assert_eq!(total.errors, 4 + 104);
+        assert_eq!(total.unconsumed_nested_bits, 5 + 105);
+        assert_eq!(total.unconsumed_root_bits, 6 + 106);
+        assert_eq!(total.implicit_terminations, 7 + 107);
+    }
+
+    /// `is_clean` gates whether a measured route may emit typed children from
+    /// a walk. Each of the five failure counters must refuse on its own; the
+    /// two work counters must not.
+    #[test]
+    fn is_clean_refuses_each_failure_counter_alone_and_ignores_work_counters() {
+        let work_only = ArrayDecodeStats {
+            elements_decoded: 3,
+            fields_emitted: 9,
+            ..ArrayDecodeStats::default()
+        };
+        assert!(work_only.is_clean(), "work counters are not failures");
+        assert!(ArrayDecodeStats::default().is_clean());
+
+        let one_failure_each = [
+            (
+                "truncations",
+                ArrayDecodeStats {
+                    truncations: 1,
+                    ..work_only.clone()
+                },
+            ),
+            (
+                "errors",
+                ArrayDecodeStats {
+                    errors: 1,
+                    ..work_only.clone()
+                },
+            ),
+            (
+                "unconsumed_nested_bits",
+                ArrayDecodeStats {
+                    unconsumed_nested_bits: 1,
+                    ..work_only.clone()
+                },
+            ),
+            (
+                "unconsumed_root_bits",
+                ArrayDecodeStats {
+                    unconsumed_root_bits: 1,
+                    ..work_only.clone()
+                },
+            ),
+            (
+                "implicit_terminations",
+                ArrayDecodeStats {
+                    implicit_terminations: 1,
+                    ..work_only.clone()
+                },
+            ),
+        ];
+        for (name, stats) in one_failure_each {
+            assert!(!stats.is_clean(), "{name} alone must make a walk unclean");
+        }
     }
 }
