@@ -20,6 +20,11 @@
 //! - the declared bit count overruns the bunch -- likewise;
 //! - the payload decoded but its inner stream did not walk -- only that one
 //!   block's bits are lost, and the sink is told which class it was.
+//!
+//! The first two charge [`abandoned_from`] -- the failing block's first bit to
+//! the end of the bunch -- to `skipped_bits`, never what the reader happened
+//! to have left. That is the rule [`abandoned_on_error`] applies one depth
+//! down and `abandon_bunch` one depth up.
 
 use vrf_bitio::BitReader;
 use vrf_transform::TransformVersion;
@@ -67,7 +72,8 @@ pub(super) fn frame_content_blocks(
 
         let Ok(header) = content::read_content_block_header(payload, actor_net_guid, sink) else {
             let remaining = payload.bits_remaining();
-            stage.stats.skipped_bits += remaining;
+            let abandoned = abandoned_from(payload, consumed_before_header);
+            stage.stats.skipped_bits += abandoned;
             stage.stats.content_block_framing_failures += 1;
             diagnostics::header_read_error(
                 stage.stats,
@@ -77,6 +83,7 @@ pub(super) fn frame_content_blocks(
                 block_index,
                 consumed_before_header,
                 remaining,
+                abandoned,
             );
             payload.skip_remaining();
             return;
@@ -94,7 +101,8 @@ pub(super) fn frame_content_blocks(
         let consumed_before_bits_read = payload.position();
         let Ok(content_bits) = payload.read_int_packed() else {
             let remaining = payload.bits_remaining();
-            stage.stats.skipped_bits += remaining;
+            let abandoned = abandoned_from(payload, consumed_before_header);
+            stage.stats.skipped_bits += abandoned;
             stage.stats.content_block_framing_failures += 1;
             diagnostics::content_bits_read_error(
                 stage.stats,
@@ -104,6 +112,7 @@ pub(super) fn frame_content_blocks(
                 block_index,
                 consumed_before_bits_read,
                 remaining,
+                abandoned,
                 &header,
             );
             payload.skip_remaining();
@@ -112,8 +121,9 @@ pub(super) fn frame_content_blocks(
 
         if u64::from(content_bits) > payload.bits_remaining() {
             let remaining = payload.bits_remaining();
+            let abandoned = abandoned_from(payload, consumed_before_header);
             stage.stats.malformed_content_blocks += 1;
-            stage.stats.skipped_bits += remaining;
+            stage.stats.skipped_bits += abandoned;
             diagnostics::content_bits_overrun(
                 stage.stats,
                 ctx,
@@ -122,6 +132,7 @@ pub(super) fn frame_content_blocks(
                 block_index,
                 payload.position(),
                 remaining,
+                abandoned,
                 &header,
                 content_bits,
             );
@@ -224,6 +235,23 @@ fn decode_into_scratch(
 /// direction it errs in is loud.
 fn abandoned_on_error(bit_count: usize) -> u64 {
     bit_count as u64
+}
+
+/// Bits to charge to `skipped_bits` when block framing aborts the bunch: from
+/// the failing block's first bit to the end of the bunch window.
+///
+/// Not `bits_remaining()`, for the reason [`abandoned_on_error`] gives one
+/// depth down and `abandon_bunch` one depth up. The header reader consumes its
+/// flags and GUIDs before the read that fails, and `read_int_packed` consumes
+/// its bytes before discovering the value runs off the end, so a block whose
+/// header or `content_bits` expires at the window's end left
+/// `bits_remaining() == 0` and charged nothing: `content_block_framing_failures`
+/// moved with no bit tally behind it. The overrun arm has read both too, and
+/// they framed nothing. `payload` is the bunch-payload window (see
+/// `abandon_bunch`), so `len_bits()` is its end; blocks that framed before
+/// this one keep their bits out of the charge.
+fn abandoned_from(payload: &BitReader<'_>, block_start: u64) -> u64 {
+    payload.len_bits() - block_start
 }
 
 pub(super) fn decode_and_parse_rep_layout(
@@ -494,6 +522,7 @@ mod diagnostics {
         block_index: u32,
         consumed_bits: u64,
         remaining_bits: u64,
+        bits_skipped: u64,
     ) -> DiagnosticEvent {
         let h = ctx.header;
         DiagnosticEvent {
@@ -524,11 +553,12 @@ mod diagnostics {
             content_block_header: None,
             content_bits: None,
             block_index_in_bunch: block_index,
-            bits_skipped: remaining_bits,
+            bits_skipped,
         }
     }
 
     #[cfg(feature = "diagnostics")]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn header_read_error(
         stats: &mut NetStats,
         ctx: &BunchContext<'_>,
@@ -537,6 +567,7 @@ mod diagnostics {
         block_index: u32,
         consumed_bits: u64,
         remaining_bits: u64,
+        bits_skipped: u64,
     ) {
         stats.record_diagnostic(|| {
             base(
@@ -546,6 +577,7 @@ mod diagnostics {
                 block_index,
                 consumed_bits,
                 remaining_bits,
+                bits_skipped,
             )
         });
     }
@@ -560,6 +592,7 @@ mod diagnostics {
         block_index: u32,
         consumed_bits: u64,
         remaining_bits: u64,
+        bits_skipped: u64,
         header: &ContentBlockHeader,
     ) {
         stats.record_diagnostic(|| DiagnosticEvent {
@@ -572,6 +605,7 @@ mod diagnostics {
                 block_index,
                 consumed_bits,
                 remaining_bits,
+                bits_skipped,
             )
         });
     }
@@ -586,6 +620,7 @@ mod diagnostics {
         block_index: u32,
         consumed_bits: u64,
         remaining_bits: u64,
+        bits_skipped: u64,
         header: &ContentBlockHeader,
         content_bits: u32,
     ) {
@@ -603,11 +638,13 @@ mod diagnostics {
                 block_index,
                 consumed_bits,
                 remaining_bits,
+                bits_skipped,
             )
         });
     }
 
     #[cfg(not(feature = "diagnostics"))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn header_read_error(
         _stats: &mut NetStats,
         _ctx: &BunchContext<'_>,
@@ -616,6 +653,7 @@ mod diagnostics {
         _block_index: u32,
         _consumed_bits: u64,
         _remaining_bits: u64,
+        _bits_skipped: u64,
     ) {
     }
 
@@ -629,6 +667,7 @@ mod diagnostics {
         _block_index: u32,
         _consumed_bits: u64,
         _remaining_bits: u64,
+        _bits_skipped: u64,
         _header: &ContentBlockHeader,
     ) {
     }
@@ -643,6 +682,7 @@ mod diagnostics {
         _block_index: u32,
         _consumed_bits: u64,
         _remaining_bits: u64,
+        _bits_skipped: u64,
         _header: &ContentBlockHeader,
         _content_bits: u32,
     ) {

@@ -38,7 +38,7 @@ use vrf_export::{
     CheckpointNetGuidWriter, EventRecord, EventWriter, FieldRecord, FieldWriter, MovementRecord,
     MovementWriter, NetGuidRecord, NetGuidWriter,
 };
-use vrf_frame::iter_demo_frames;
+use vrf_frame::{FrameSkips, walk_demo_frames};
 use vrf_net::pipeline::ReplicationReader;
 use vrf_schema::NetGuidCache;
 
@@ -157,6 +157,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);
     let mut chunks_processed = 0u32;
     let mut frames_walked = 0u32;
+    let mut frame_skips = FrameSkips::default();
     let mut total_packets: u32 = 0;
     let mut channel_state = ChannelState::new();
 
@@ -280,56 +281,56 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         // records the first one and makes later callbacks no-ops until the
         // frame walk finishes and the error can be returned here.
         let mut packet_error = None;
-        let (_, chunk_frames) =
-            iter_demo_frames(&decompressed, ctx.flags, &mut cache, |pkt, packet_cache| {
-                if packet_error.is_some() {
-                    return;
+        let walk = walk_demo_frames(&decompressed, ctx.flags, &mut cache, |pkt, packet_cache| {
+            if packet_error.is_some() {
+                return;
+            }
+            let pkt_id = total_packets;
+            total_packets += 1;
+
+            // Scoped so the sink's borrow of `buffers` ends before they are
+            // drained. The buffers outlive the sink; that is the point.
+            {
+                let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
+                sink.enable_measured_array_routes(ctx.branch);
+                sink.time_ms = pkt.time_ms;
+                sink.packet_id = pkt_id;
+
+                repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
+
+                // The sink is dropped at the end of this scope, so a counter
+                // not read here is a counter that never existed. All of them
+                // go through one function; see `sink::totals`.
+                sink_totals.absorb(&mut sink.stats, &mut error_report);
+            }
+
+            // Hand field and movement records to their writer threads.
+            let result = (|| -> Result<(), CliError> {
+                fields.append(&mut buffers.fields)?;
+                movement_rows += buffers.movement.len() as u64;
+                movement.append(&mut buffers.movement)?;
+                // Drain actor lifecycle records to the inline writer.
+                for record in buffers.actors.drain(..) {
+                    actor_writer.push(record)?;
                 }
-                let pkt_id = total_packets;
-                total_packets += 1;
-
-                // Scoped so the sink's borrow of `buffers` ends before they are
-                // drained. The buffers outlive the sink; that is the point.
-                {
-                    let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-                    sink.enable_measured_array_routes(ctx.branch);
-                    sink.time_ms = pkt.time_ms;
-                    sink.packet_id = pkt_id;
-
-                    repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
-
-                    // The sink is dropped at the end of this scope, so a counter
-                    // not read here is a counter that never existed. All of them
-                    // go through one function; see `sink::totals`.
-                    sink_totals.absorb(&mut sink.stats, &mut error_report);
+                for mut record in buffers.partials.drain(..) {
+                    partial_rows += 1;
+                    partial_bits += record.bit_count;
+                    record.source = "main";
+                    partial_writer.push(record)?;
                 }
-
-                // Hand field and movement records to their writer threads.
-                let result = (|| -> Result<(), CliError> {
-                    fields.append(&mut buffers.fields)?;
-                    movement_rows += buffers.movement.len() as u64;
-                    movement.append(&mut buffers.movement)?;
-                    // Drain actor lifecycle records to the inline writer.
-                    for record in buffers.actors.drain(..) {
-                        actor_writer.push(record)?;
-                    }
-                    for mut record in buffers.partials.drain(..) {
-                        partial_rows += 1;
-                        partial_bits += record.bit_count;
-                        record.source = "main";
-                        partial_writer.push(record)?;
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    packet_error = Some(error);
-                }
-            })?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                packet_error = Some(error);
+            }
+        })?;
         if let Some(error) = packet_error {
             return Err(error);
         }
 
-        frames_walked += chunk_frames;
+        frames_walked += walk.frames;
+        frame_skips.absorb(walk.skipped);
         chunks_processed += 1;
 
         if chunks_processed % 100 == 0 {
@@ -426,6 +427,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
             partial_bits,
             event_trailing_bytes,
             replay_data_trailing_bytes,
+            frame_skips,
             event_layout_mismatches,
             event_first_layout_mismatch: event_first_layout_mismatch.as_deref(),
             event_payloads_decoded,
@@ -457,6 +459,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         &RunTotals {
             chunks_processed,
             frames: frames_walked,
+            frame_skips,
             total_packets,
             export_groups: cache.group_count(),
             movement_rows,

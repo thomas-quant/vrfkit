@@ -197,3 +197,15 @@ Considered on 2026-09-14 and deliberately not done, each with the reason:
   the machine-local corpus sweeps.
 - Updating the test counts in [CURRENT_STATUS.md](CURRENT_STATUS.md). They
   describe its dated 2026-09-09 validation run and say so.
+
+Considered on 2026-09-28 and deliberately not done:
+
+- Deleting the packet reader's partial tracker (`track_partial_bunch` in
+  `crates/vrf-net/src/packet.rs`). Nothing in this workspace reads what it
+  produces -- the pipeline strips its header flags, and never sums
+  `PacketReadResult::partial_error_count` -- but `RawPacketReader::read_packet`
+  and that field are published API, and an extractor built directly on the
+  reader is on record in [TRANSPORT_PRESERVATION.md](TRANSPORT_PRESERVATION.md).
+  Deleting the tracker would remove the field or leave it a permanent 0, which
+  is the counter-that-cannot-move shape this repository refuses. It stays,
+  documented as advisory, and the pipeline's strip keeps it that way.

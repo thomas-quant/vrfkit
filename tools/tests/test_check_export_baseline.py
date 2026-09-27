@@ -380,6 +380,61 @@ class MovementTailCounterTests(unittest.TestCase):
                 self.assertIsNone(guard.PATTERNS[name].search(checkpoint_only))
 
 
+class FrameSkipCounterTests(unittest.TestCase):
+    MAIN = "  Frame skips:      2 external blobs / 9 external bytes / 0 game-specific bytes\n"
+    CHECKPOINT = ("  Checkpoint frame skips: 1 external blobs / 4 external bytes"
+                  " / 5 game-specific bytes\n")
+
+    def write_manifest(self, root: Path, main: dict, checkpoint: dict | None) -> None:
+        quality = {f"frame_{key}": value for key, value in main.items()}
+        if checkpoint is not None:
+            quality["checkpoints"] = {f"checkpoint_frame_{key}": value
+                                      for key, value in checkpoint.items()}
+        (root / "manifest.json").write_text(json.dumps({"quality": quality}), encoding="utf-8")
+
+    def test_frame_skip_counts_must_match_the_manifest_in_both_passes(self):
+        main = {"external_data_blobs": 2, "external_data_bytes": 9, "game_specific_bytes": 0}
+        checkpoint = {"external_data_blobs": 1, "external_data_bytes": 4, "game_specific_bytes": 5}
+        counts = {f"frame_{key}": value for key, value in main.items()}
+        counts.update({f"cp_frame_{key}": value for key, value in checkpoint.items()})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_manifest(root, main, checkpoint)
+            self.assertEqual(guard.frame_skip_manifest_errors(root, counts, True), [])
+            for key in counts:
+                changed = dict(counts, **{key: counts[key] + 1})
+                self.assertIn(key, " ".join(guard.frame_skip_manifest_errors(root, changed, True)))
+            missing = {k: v for k, v in counts.items() if k != "frame_game_specific_bytes"}
+            self.assertIn("disagrees", " ".join(guard.frame_skip_manifest_errors(root, missing, True)))
+            for invalid in (True, -1, "0"):
+                self.write_manifest(root, dict(main, external_data_bytes=invalid), checkpoint)
+                self.assertIn("nonnegative integers",
+                              " ".join(guard.frame_skip_manifest_errors(root, counts, True)))
+            self.write_manifest(root, main, None)
+            self.assertIn("omits", " ".join(guard.frame_skip_manifest_errors(root, counts, True)))
+            self.assertEqual(guard.frame_skip_manifest_errors(root, counts, False), [])
+
+    def test_frame_skip_lines_are_read_only_by_their_own_patterns(self):
+        text = self.MAIN + self.CHECKPOINT + "  Frames:           3\n"
+        found = {key: int(guard.PATTERNS[key].search(text).group(1))
+                 for key in ("frame_external_data_blobs", "frame_external_data_bytes",
+                             "frame_game_specific_bytes")}
+        self.assertEqual(found, {"frame_external_data_blobs": 2,
+                                 "frame_external_data_bytes": 9,
+                                 "frame_game_specific_bytes": 0})
+        cp = {key: int(re.search(guard.CHECKPOINT_COUNTERS[key], text).group(1))
+              for key in ("cp_frame_external_data_blobs", "cp_frame_external_data_bytes",
+                          "cp_frame_game_specific_bytes")}
+        self.assertEqual(cp, {"cp_frame_external_data_blobs": 1,
+                              "cp_frame_external_data_bytes": 4,
+                              "cp_frame_game_specific_bytes": 5})
+        # Neither label may be read as the other, nor as the checkpoint `Frames:`.
+        self.assertIsNone(guard.PATTERNS["frame_external_data_blobs"].search(self.CHECKPOINT))
+        self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_frame_external_data_blobs"],
+                                    self.MAIN))
+        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_frames"], text).group(1), "3")
+
+
 class RequiredInputTests(unittest.TestCase):
     def test_explicit_required_mode_cannot_report_missing_replay_as_skip(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -418,6 +473,7 @@ Actor opens: 1
 Actor closes: 0
 Reward opaque: 0 empty variants
 Target locations: 0 array children
+Frame skips: 0 external blobs / 0 external bytes / 0 game-specific bytes
 """
 
     def run_fake_export(self, *, fail: bool):
@@ -451,7 +507,7 @@ Target locations: 0 array children
                 "stage.mkdir()\n"
                 "for name in ('actors', 'fields', 'movement', 'net_guids', 'events', 'partials'):\n"
                 "    pq.write_table(pa.table({'value': [1]}), stage / (name + '.parquet'))\n"
-                "(stage / 'manifest.json').write_text(json.dumps({'quality': {'sink': {'tracked_rewards_opaque_empty_variants': 0, 'targeting_world_locations_decoded': 0}}}), encoding='utf-8')\n"
+                "(stage / 'manifest.json').write_text(json.dumps({'quality': {'sink': {'tracked_rewards_opaque_empty_variants': 0, 'targeting_world_locations_decoded': 0}, 'frame_external_data_blobs': 0, 'frame_external_data_bytes': 0, 'frame_game_specific_bytes': 0}}), encoding='utf-8')\n"
                 "os.replace(out, backup)\n"
                 "os.replace(stage, out)\n"
                 "shutil.rmtree(backup)\n"

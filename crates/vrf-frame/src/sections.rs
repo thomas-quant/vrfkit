@@ -74,15 +74,23 @@ pub(crate) fn read_streaming_level_fixes(
 /// ExternalData: loop reading numBits + netGuid + skip, until numBits == 0.
 ///
 /// Source: `PlaybackPacketReader.ReadExternalData()`
-pub(crate) fn read_external_data(reader: &mut BitReader<'_>) -> Result<(), FrameError> {
+///
+/// Returns `(blobs, bytes)` skipped. The reference discards them too, and the
+/// length prefix keeps the frame aligned whatever they hold, so this count is
+/// the only thing that moves if a build starts sending external data.
+pub(crate) fn read_external_data(reader: &mut BitReader<'_>) -> Result<(u64, u64), FrameError> {
+    let mut blobs = 0u64;
+    let mut bytes = 0u64;
     loop {
         let num_bits = reader.read_int_packed()?;
         if num_bits == 0 {
-            return Ok(());
+            return Ok((blobs, bytes));
         }
         let _net_guid = reader.read_int_packed()?;
         let byte_count = u64::from(num_bits.div_ceil(8));
         reader.skip_bits(byte_count * 8)?;
+        blobs += 1;
+        bytes += byte_count;
     }
 }
 
@@ -92,16 +100,18 @@ pub(crate) fn read_external_data(reader: &mut BitReader<'_>) -> Result<(), Frame
 ///
 /// See the "Flag semantics" table in lib.rs's module doc for which flag
 /// enables this section and its measured absence in the corpus.
+///
+/// Returns the bytes skipped: 0 when the flag is off or the offset is 0.
 pub(crate) fn read_game_specific_frame_data(
     reader: &mut BitReader<'_>,
     has_game_specific: bool,
-) -> Result<(), FrameError> {
+) -> Result<u64, FrameError> {
     if !has_game_specific {
-        return Ok(());
+        return Ok(0);
     }
     let skip_offset = reader.read_u64()?;
     if skip_offset == 0 {
-        return Ok(());
+        return Ok(0);
     }
     // `skip_offset` is a raw u64 from the wire; `* 8` is plain wrapping
     // multiplication, so a large value silently wraps to a small skip and
@@ -113,7 +123,7 @@ pub(crate) fn read_game_specific_frame_data(
         ))
     })?;
     reader.skip_bits(skip_bits)?;
-    Ok(())
+    Ok(skip_offset)
 }
 
 #[cfg(test)]

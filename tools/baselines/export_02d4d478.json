@@ -40,7 +40,10 @@
     "movement_sized_section_tails": 0,
     "movement_sized_section_tail_bits": 0,
     "movement_open_section_tails": 0,
-    "movement_open_section_tail_bits": 0
+    "movement_open_section_tail_bits": 0,
+    "frame_external_data_blobs": 0,
+    "frame_external_data_bytes": 0,
+    "frame_game_specific_bytes": 0
   },
   "parquet": {
     "fields": {

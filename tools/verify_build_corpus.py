@@ -34,7 +34,8 @@ NET_ZERO = (
     "content_block_framing_failures", "malformed_content_blocks",
     "transform_failures", "field_stream_failures", "channel_reopens_while_open",
     "actor_opens_missing_spawn", "channel_state_limit_failures",
-    "partial_resource_limit_failures",
+    "partial_resource_limit_failures", "failed_reopens_while_open",
+    "bunches_on_unopened_channel", "unopened_channel_bits",
 )
 SINK_ZERO = (
     "overlay_decoded_err", "struct_blobs_failed", "movement_rpc_errors",
@@ -161,6 +162,7 @@ def check_export(text, directory):
     errors += baseline.checkpoint_manifest_errors(directory, printed)
     errors += baseline.reward_opaque_manifest_errors(directory, printed, True)
     errors += baseline.targeting_manifest_errors(directory, printed, True)
+    errors += baseline.frame_skip_manifest_errors(directory, printed, True)
     if errors:
         raise ValueError("; ".join(errors))
     return tables

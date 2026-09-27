@@ -42,7 +42,7 @@ use vrf_container::{
     parse_checkpoint_chunk, parse_preamble,
 };
 use vrf_decode::OverlayErrorReport;
-use vrf_frame::iter_demo_frames;
+use vrf_frame::{FrameSkips, walk_demo_frames};
 use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::NetStats;
 use vrf_schema::{NetGuidCache, read_checkpoint_tables};
@@ -57,6 +57,8 @@ use crate::sink::{ChannelState, ExportSink, FailureAggregate, RecordBuffers, Sin
 struct DiagCheckpointStats {
     chunks: u64,
     frames: u64,
+    /// Section bytes the snapshot frames stepped over.
+    frame_skips: FrameSkips,
     packets: u64,
     trailing_bytes: u64,
     guid_entries: u64,
@@ -108,6 +110,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut total_packets: u32 = 0;
     let mut replay_data_chunks: u64 = 0;
     let mut replay_data_frames: u64 = 0;
+    let mut replay_data_frame_skips = FrameSkips::default();
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut sink_totals = SinkTotals::default();
@@ -148,8 +151,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                     decompress_replay_data_with_trailing(payload, compressed, encrypted)?;
                 replay_data_trailing_bytes += trailing as u64;
                 replay_data_chunks += 1;
-                let (_, chunk_frames) =
-                    iter_demo_frames(&decompressed, flags, &mut cache, |pkt, packet_cache| {
+                let walk =
+                    walk_demo_frames(&decompressed, flags, &mut cache, |pkt, packet_cache| {
                         let pkt_id = total_packets;
                         total_packets += 1;
                         {
@@ -169,7 +172,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                         buffers.movement.clear();
                         buffers.actors.clear();
                     })?;
-                replay_data_frames += u64::from(chunk_frames);
+                replay_data_frames += u64::from(walk.frames);
+                replay_data_frame_skips.absorb(walk.skipped);
             }
             other => {
                 // `Unknown(u32)` and `Header` -- nothing the replication pass
@@ -210,6 +214,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(&event_chunks.to_string());
     json.push_str(", \"replay_data_trailing_bytes\": ");
     json.push_str(&replay_data_trailing_bytes.to_string());
+    push_frame_skips(&mut json, "replay_data_", &replay_data_frame_skips);
     json.push_str("},\n");
 
     json.push_str("  \"net_main\": ");
@@ -226,6 +231,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(&cp_stats.packets.to_string());
     json.push_str(", \"trailing_bytes\": ");
     json.push_str(&cp_stats.trailing_bytes.to_string());
+    push_frame_skips(&mut json, "", &cp_stats.frame_skips);
     json.push_str(", \"guid_entries\": ");
     json.push_str(&cp_stats.guid_entries.to_string());
     json.push_str(", \"group_records\": ");
@@ -398,7 +404,7 @@ fn process_checkpoint_chunk(
     // No writer here, so unlike `driver::checkpoints::process_chunk` there is
     // no error a callback cannot propagate: the closure is infallible and the
     // frame walk returns its own errors through `?`.
-    let (_, frame_count) = iter_demo_frames(frame, flags, &mut cache, |pkt, packet_cache| {
+    let walk = walk_demo_frames(frame, flags, &mut cache, |pkt, packet_cache| {
         {
             let mut sink = ExportSink::new(packet_cache, &mut channels, &mut buffers);
             sink.enable_measured_array_routes(branch);
@@ -422,7 +428,8 @@ fn process_checkpoint_chunk(
     cp.failures.absorb(&mut chunk_failures);
 
     cp.chunks += 1;
-    cp.frames += frame_count as u64;
+    cp.frames += u64::from(walk.frames);
+    cp.frame_skips.absorb(walk.skipped);
     cp.packets += packet_count;
     cp.guid_entries += u64::from(tables.guid_count);
     cp.group_records += u64::from(tables.group_count);
@@ -463,6 +470,18 @@ fn push_json_string(out: &mut String, s: &str) {
         }
     }
     out.push('"');
+}
+
+/// Append the three [`FrameSkips`] tallies as `, "<prefix>external_data_blobs": N`
+/// and so on, inside an object the caller has already opened.
+fn push_frame_skips(out: &mut String, prefix: &str, skips: &FrameSkips) {
+    for (key, value) in [
+        ("external_data_blobs", skips.external_data_blobs),
+        ("external_data_bytes", skips.external_data_bytes),
+        ("game_specific_bytes", skips.game_specific_bytes),
+    ] {
+        out.push_str(&format!(", \"{prefix}{key}\": {value}"));
+    }
 }
 
 fn push_net_stats(out: &mut String, s: &NetStats) {
@@ -552,6 +571,15 @@ fn push_net_stats(out: &mut String, s: &NetStats) {
             "actor_opens_missing_spawn",
             s.actor_opens_missing_spawn.to_string(),
         ),
+        (
+            "failed_reopens_while_open",
+            s.failed_reopens_while_open.to_string(),
+        ),
+        (
+            "bunches_on_unopened_channel",
+            s.bunches_on_unopened_channel.to_string(),
+        ),
+        ("unopened_channel_bits", s.unopened_channel_bits.to_string()),
         (
             "channel_state_limit_failures",
             s.channel_state_limit_failures.to_string(),
@@ -811,10 +839,51 @@ fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_label, push_json_string, push_sink_totals, reject_input_output_alias, write_json_file,
+        FrameSkips, build_label, push_frame_skips, push_json_string, push_net_stats,
+        push_sink_totals, reject_input_output_alias, write_json_file,
     };
     use crate::sink::SinkTotals;
     use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
+    use vrf_net::stats::NetStats;
+
+    /// The frame-skip tallies land under their prefixed keys with their own
+    /// values, zeros included, as members of an object already open.
+    #[test]
+    fn frame_skips_json_carries_every_tally_under_its_prefix() {
+        let mut skips = FrameSkips::default();
+        skips.external_data_blobs = 2;
+        skips.external_data_bytes = 9;
+        let mut json = String::from("{\"first\": 1");
+        push_frame_skips(&mut json, "replay_data_", &skips);
+        json.push('}');
+        assert_eq!(
+            json,
+            "{\"first\": 1, \"replay_data_external_data_blobs\": 2, \
+             \"replay_data_external_data_bytes\": 9, \
+             \"replay_data_game_specific_bytes\": 0}"
+        );
+    }
+
+    /// The channel-guard counters reach the diag JSON with their measured
+    /// values. Distinct values, so a key wired to the wrong field shows.
+    #[test]
+    fn net_stats_json_carries_the_channel_guard_counters() {
+        let stats = NetStats {
+            failed_reopens_while_open: 3,
+            bunches_on_unopened_channel: 5,
+            unopened_channel_bits: 7,
+            ..NetStats::default()
+        };
+        let mut json = String::new();
+        push_net_stats(&mut json, &stats);
+        for expected in [
+            "\"failed_reopens_while_open\": 3",
+            "\"bunches_on_unopened_channel\": 5",
+            "\"unopened_channel_bits\": 7",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
 
     /// The branch-to-build label the corpus aggregation joins on. A branch
     /// without the `release-` marker stays unlabelled rather than guessed.

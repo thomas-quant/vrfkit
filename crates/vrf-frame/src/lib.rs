@@ -67,6 +67,9 @@
 //!
 //! The reference replay sets only `HasStreamingFixes` (header flags `0x0002`),
 //! so its game-specific section is absent on every one of its 226,190 frames.
+//! So does every header of the 45-replay, 24-build sample measured on
+//! 2026-09-28 (docs/PERFORMANCE_NOTES.md, "Frame walking"), which also carried
+//! no ExternalData. [`FrameSkips`] is what moves if a build changes either.
 //!
 //! # Module map
 //!
@@ -130,6 +133,55 @@ pub struct DemoPacket<'a> {
     pub data: &'a [u8],
 }
 
+/// Section bytes a DemoFrame walk stepped over without decoding them.
+///
+/// ExternalData and GameSpecificFrameData are skipped -- as the reference
+/// skips them -- by lengths the wire declares, so the frame stays aligned and
+/// no read fails however much they carry. That also means nothing else moves
+/// when a build starts sending them: until these were counted, the only
+/// evidence the sections were empty was one replay's measurement. Each field
+/// is a plain total; zero is a measurement, not a default.
+///
+/// `#[non_exhaustive]` so a further tally is not a breaking change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FrameSkips {
+    /// ExternalData blobs stepped over: one per non-zero `numBits`.
+    pub external_data_blobs: u64,
+    /// Bytes those blobs occupied, `ceil(numBits / 8)` each. Their net GUIDs
+    /// are read and dropped, and are not counted here.
+    pub external_data_bytes: u64,
+    /// Bytes skipped by GameSpecificFrameData's `skipExternalOffset`, counted
+    /// only in frames whose header flag enables the section.
+    pub game_specific_bytes: u64,
+}
+
+impl FrameSkips {
+    /// Add another walk's tallies to these.
+    pub fn absorb(&mut self, other: FrameSkips) {
+        self.external_data_blobs += other.external_data_blobs;
+        self.external_data_bytes += other.external_data_bytes;
+        self.game_specific_bytes += other.game_specific_bytes;
+    }
+}
+
+/// What one [`walk_demo_frames`] call walked.
+///
+/// `#[non_exhaustive]` for the same reason as [`FrameSkips`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FrameWalk {
+    /// Packets yielded to the callback.
+    pub packets: u32,
+    /// DemoFrames walked. Not derivable from `packets` -- a frame can carry
+    /// zero, one, or many packets -- and a caller that assumes "one frame per
+    /// chunk" (as `driver::checkpoints` used to) has no way to notice that
+    /// assumption break without it.
+    pub frames: u32,
+    /// Section bytes stepped over without being decoded.
+    pub skipped: FrameSkips,
+}
+
 /// Iterate all DemoFrames in a decompressed ReplayData chunk, emitting packets.
 ///
 /// `data` is the full decompressed chunk. `flags` is `ReplayHeader.flags`.
@@ -142,23 +194,39 @@ pub struct DemoPacket<'a> {
 /// visible to the next packet before a later frame's ExportData is applied.
 /// This is allocation-free for the packet data (slices into `data`).
 ///
-/// Returns `(total packets yielded, total DemoFrames walked)`. The frame
-/// count is not derivable from the packet count -- a frame can carry zero,
-/// one, or many packets -- and a caller that assumes "one frame per chunk"
-/// (as `driver::checkpoints` used to) has no way to notice that assumption
-/// break without this.
+/// Returns `(total packets yielded, total DemoFrames walked)` -- the first two
+/// fields of [`FrameWalk`]. It is kept, with that signature, for callers of
+/// the published function; it drops [`FrameSkips`], so a caller that should
+/// see skipped section bytes uses [`walk_demo_frames`], as every caller in
+/// this workspace does.
 pub fn iter_demo_frames(
     data: &[u8],
     flags: u32,
     cache: &mut NetGuidCache,
-    mut on_packet: impl FnMut(DemoPacket<'_>, &mut NetGuidCache),
+    on_packet: impl FnMut(DemoPacket<'_>, &mut NetGuidCache),
 ) -> Result<(u32, u32), FrameError> {
+    let walk = walk_demo_frames(data, flags, cache, on_packet)?;
+    Ok((walk.packets, walk.frames))
+}
+
+/// [`iter_demo_frames`], returning everything the walk counted.
+///
+/// Same arguments, same callback contract, same errors; the result adds the
+/// [`FrameSkips`] tally of ExternalData and GameSpecificFrameData bytes the
+/// walk stepped over.
+pub fn walk_demo_frames(
+    data: &[u8],
+    flags: u32,
+    cache: &mut NetGuidCache,
+    mut on_packet: impl FnMut(DemoPacket<'_>, &mut NetGuidCache),
+) -> Result<FrameWalk, FrameError> {
     let has_streaming_fixes = (flags & FLAG_HAS_STREAMING_FIXES) != 0;
     let has_game_specific = (flags & FLAG_GAME_SPECIFIC_FRAME_DATA) != 0;
 
     let mut reader = BitReader::new(data);
     let mut packet_index: u32 = 0;
     let mut frame_count: u32 = 0;
+    let mut skipped = FrameSkips::default();
 
     while !reader.at_end() {
         frame_count += 1;
@@ -214,10 +282,13 @@ pub fn iter_demo_frames(
         read_streaming_level_fixes(&mut reader, has_streaming_fixes)?;
 
         // -- ExternalData --------------------------------------------------
-        read_external_data(&mut reader)?;
+        let (blobs, bytes) = read_external_data(&mut reader)?;
+        skipped.external_data_blobs += blobs;
+        skipped.external_data_bytes += bytes;
 
         // -- GameSpecificFrameData -----------------------------------------
-        read_game_specific_frame_data(&mut reader, has_game_specific)?;
+        skipped.game_specific_bytes +=
+            read_game_specific_frame_data(&mut reader, has_game_specific)?;
 
         // -- Packet loop ---------------------------------------------------
         loop {
@@ -268,7 +339,11 @@ pub fn iter_demo_frames(
         }
     }
 
-    Ok((packet_index, frame_count))
+    Ok(FrameWalk {
+        packets: packet_index,
+        frames: frame_count,
+        skipped,
+    })
 }
 
 #[cfg(test)]
@@ -358,6 +433,115 @@ mod tests {
         push_int_packed(&mut data, 0); // seen level before frame terminator
         data.extend_from_slice(&0i32.to_le_bytes());
         data
+    }
+
+    /// One frame with HasStreamingFixes: no exports and no streaming levels,
+    /// then the given ExternalData blobs `(numBits, netGuid, payload)`, a
+    /// GameSpecificFrameData block when `game_specific` is given (the caller
+    /// sets that flag), and one packet.
+    fn build_frame_with_sections(
+        external: &[(u32, u32, &[u8])],
+        game_specific: Option<&[u8]>,
+        packet: &[u8],
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0i32.to_le_bytes()); // currentLevelIndex
+        data.extend_from_slice(&1.0f32.to_le_bytes()); // timeSeconds
+        push_int_packed(&mut data, 0); // no layout exports
+        push_int_packed(&mut data, 0); // no export GUIDs
+        push_int_packed(&mut data, 0); // no streaming levels
+        data.extend_from_slice(&0u64.to_le_bytes()); // externalOffset
+        for &(num_bits, net_guid, payload) in external {
+            push_int_packed(&mut data, num_bits);
+            push_int_packed(&mut data, net_guid);
+            data.extend_from_slice(payload);
+        }
+        push_int_packed(&mut data, 0); // ExternalData terminator
+        if let Some(bytes) = game_specific {
+            data.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            data.extend_from_slice(bytes);
+        }
+        push_int_packed(&mut data, 0); // seenLevelIndex
+        data.extend_from_slice(&(packet.len() as i32).to_le_bytes());
+        data.extend_from_slice(packet);
+        push_int_packed(&mut data, 0); // seenLevelIndex before the terminator
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data
+    }
+
+    /// ExternalData blobs are skipped by their declared length, so the frame
+    /// stays aligned and nothing fails -- which is exactly why they must be
+    /// counted: a build that starts sending them moves no other number. Two
+    /// frames, so the tally is shown to add across frames rather than keep
+    /// the last one.
+    #[test]
+    fn external_data_blobs_are_counted_and_the_packets_still_arrive() {
+        // 12 bits -> 2 bytes, 17 bits -> 3 bytes; then 1 bit -> 1 byte.
+        let mut data = build_frame_with_sections(
+            &[(12, 6, &[0xAA, 0xBB]), (17, 9, &[1, 2, 3])],
+            None,
+            &[0xDE, 0xAD],
+        );
+        data.extend(build_frame_with_sections(&[(1, 4, &[0x01])], None, &[0xBE]));
+        let mut cache = NetGuidCache::new();
+        let mut received = Vec::new();
+
+        let walk = walk_demo_frames(&data, FLAG_HAS_STREAMING_FIXES, &mut cache, |pkt, _| {
+            received.push(pkt.data.to_vec());
+        })
+        .unwrap();
+
+        assert_eq!((walk.packets, walk.frames), (2, 2));
+        assert_eq!(
+            walk.skipped,
+            FrameSkips {
+                external_data_blobs: 3,
+                external_data_bytes: 6,
+                game_specific_bytes: 0,
+            }
+        );
+        assert_eq!(received, [vec![0xDE, 0xAD], vec![0xBE]]);
+    }
+
+    /// The GameSpecificFrameData skip is counted in bytes, and only when the
+    /// header flag enables the section.
+    #[test]
+    fn game_specific_bytes_are_counted_and_the_packet_still_arrives() {
+        let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
+        let data = build_frame_with_sections(&[], Some(&[1, 2, 3, 4, 5]), &[0x7F]);
+        let mut cache = NetGuidCache::new();
+        let mut received = Vec::new();
+
+        let walk = walk_demo_frames(&data, flags, &mut cache, |pkt, _| {
+            received.push(pkt.data.to_vec());
+        })
+        .unwrap();
+
+        assert_eq!(
+            walk.skipped,
+            FrameSkips {
+                external_data_blobs: 0,
+                external_data_bytes: 0,
+                game_specific_bytes: 5,
+            }
+        );
+        assert_eq!(received, [vec![0x7F]]);
+    }
+
+    /// Empty sections read as zero, and the published tuple function reports
+    /// the same packets and frames as the walk it wraps.
+    #[test]
+    fn a_frame_with_empty_sections_skips_nothing() {
+        let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
+        let data = build_minimal_frame(1.0, &[0x00], flags);
+
+        let walk = walk_demo_frames(&data, flags, &mut NetGuidCache::new(), |_, _| {}).unwrap();
+        assert_eq!(walk.skipped, FrameSkips::default());
+        assert_eq!(
+            iter_demo_frames(&data, flags, &mut NetGuidCache::new(), |_, _| {}).unwrap(),
+            (walk.packets, walk.frames)
+        );
+        assert_eq!((walk.packets, walk.frames), (1, 1));
     }
 
     #[test]

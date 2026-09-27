@@ -160,8 +160,28 @@ COUNTERS = {
     "movement_open_section_tail_bits": (
         r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
     ),
+    # Section bytes the DemoFrame walk stepped over. The skip is
+    # length-prefixed, so a build that starts sending ExternalData or
+    # GameSpecificFrameData moves nothing else here. Anchored: `cp_frames`
+    # below is the unanchored `Frames:\s+(\d+)`, and the two must never be
+    # able to read each other's line.
+    "frame_external_data_blobs": (
+        r"(?m)^\s*Frame skips:\s+(\d+) external blobs / \d+ external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "frame_external_data_bytes": (
+        r"(?m)^\s*Frame skips:\s+\d+ external blobs / (\d+) external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "frame_game_specific_bytes": (
+        r"(?m)^\s*Frame skips:\s+\d+ external blobs / \d+ external bytes"
+        r" / (\d+) game-specific bytes\s*$"
+    ),
 }
 PATTERNS = {k: re.compile(v) for k, v in COUNTERS.items()}
+#: The three frame-skip tallies, as the manifest names them after its
+#: `frame_` / `checkpoint_frame_` prefixes.
+FRAME_SKIP_KEYS = ("external_data_blobs", "external_data_bytes", "game_specific_bytes")
 
 # Only printed under `--checkpoints`, so they live apart from COUNTERS -- a
 # default run must not record them as None and then diff that against a
@@ -217,6 +237,18 @@ CHECKPOINT_COUNTERS = {
     ),
     "cp_movement_open_section_tail_bits": (
         r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
+    ),
+    "cp_frame_external_data_blobs": (
+        r"(?m)^\s*Checkpoint frame skips:\s+(\d+) external blobs / \d+ external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "cp_frame_external_data_bytes": (
+        r"(?m)^\s*Checkpoint frame skips:\s+\d+ external blobs / (\d+) external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "cp_frame_game_specific_bytes": (
+        r"(?m)^\s*Checkpoint frame skips:\s+\d+ external blobs / \d+ external bytes"
+        r" / (\d+) game-specific bytes\s*$"
     ),
 }
 
@@ -408,6 +440,27 @@ def targeting_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) 
             for name, value in values.items() if counters.get(name) != value]
 
 
+def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
+    """The frame-skip tallies must agree between CLI and manifest, zeros included.
+
+    Not a zero gate: skipping these sections is what the reference does, so
+    a non-zero count is data this parser leaves undecoded, not a failure. What
+    must hold is that the two outputs report the same measurement.
+    """
+    try:
+        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
+        values = {f"frame_{key}": quality[f"frame_{key}"] for key in FRAME_SKIP_KEYS}
+        if checkpoints:
+            values.update({f"cp_frame_{key}": quality["checkpoints"][f"checkpoint_frame_{key}"]
+                           for key in FRAME_SKIP_KEYS})
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [f"manifest omits frame-skip quality data: {exc}"]
+    if any(type(value) is not int or value < 0 for value in values.values()):
+        return ["frame-skip counts must be nonnegative integers"]
+    return [f"manifest {name}={value} disagrees with summary {counters.get(name)}"
+            for name, value in values.items() if counters.get(name) != value]
+
+
 def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -> dict:
     """Export one replay and collect the summary counters and Parquet shape.
 
@@ -456,7 +509,8 @@ def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -
         }
 
     manifest_errors = (reward_opaque_manifest_errors(out_dir, counters, checkpoints)
-                       + targeting_manifest_errors(out_dir, counters, checkpoints))
+                       + targeting_manifest_errors(out_dir, counters, checkpoints)
+                       + frame_skip_manifest_errors(out_dir, counters, checkpoints))
     if manifest_errors:
         raise SystemExit("; ".join(manifest_errors))
 

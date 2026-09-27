@@ -4,15 +4,18 @@
 //! pins every line its `COUNTERS` and `CHECKPOINT_COUNTERS` tables name, and
 //! cross-checks some of them against the row counts of the files they name.
 //! Not every line here is in those tables -- they are the list, not this
-//! file. `tools/check_decode_errors_corpus.py` and `tools/verify_build_corpus.py`
-//! parse this text too. Adding, removing or renaming a line breaks those
-//! harnesses; do it deliberately or not at all.
+//! file. `tools/verify_build_corpus.py` requires the same labels, and
+//! `tools/check_decode_errors_corpus.py` parses this text too. Adding,
+//! removing or renaming a line can break those harnesses; do it deliberately
+//! or not at all. A new label must not contain an existing one: some of those
+//! patterns are unanchored (`Frames:\s+(\d+)` among them).
 
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 use vrf_decode::{OverlayErrorReport, OverlayStats};
+use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 
 use super::checkpoints::CheckpointStats;
@@ -35,6 +38,13 @@ pub(super) struct RunTotals {
     /// so a second line spelled that way earlier in the output would silently
     /// feed this number to the `cp_frames` check.
     pub frames: u32,
+    /// ExternalData and GameSpecificFrameData bytes those frames stepped over.
+    ///
+    /// Printed as `Frame skips:`, which contains neither `Frames:` nor any
+    /// other label `tools/check_export_baseline.py` searches for unanchored.
+    /// The skip is length-prefixed, so a build that starts sending these
+    /// sections moves no other number here.
+    pub frame_skips: FrameSkips,
     pub total_packets: u32,
     pub export_groups: usize,
     pub movement_rows: u64,
@@ -90,6 +100,12 @@ pub(super) fn print(
     eprintln!("=== Export complete ===");
     eprintln!("  Chunks:           {}", totals.chunks_processed);
     eprintln!("  ReplayData frames: {}", totals.frames);
+    eprintln!(
+        "  Frame skips:      {} external blobs / {} external bytes / {} game-specific bytes",
+        totals.frame_skips.external_data_blobs,
+        totals.frame_skips.external_data_bytes,
+        totals.frame_skips.game_specific_bytes
+    );
     eprintln!("  Packets:          {}", totals.total_packets);
     eprintln!("  Export groups:    {}", totals.export_groups);
     eprintln!("  Content blocks:   {}", net_stats.content_blocks);
@@ -165,8 +181,9 @@ pub(super) fn print(
     // Unconditional, zeros included, for the reason spelled out on the struct
     // blob line below: a line that only appears when non-zero cannot tell
     // "nothing was lost" apart from "the code that counts stopped running".
-    // These five all read 0 on a healthy replay, which is exactly why a 0 that
-    // is present is worth more than a line that is absent.
+    // Every line down to `RepLayout exports` reads 0 on a healthy replay, which
+    // is exactly why a 0 that is present is worth more than a line that is
+    // absent.
     eprintln!(
         "  Unfinished partials: {} ({} bits)",
         net_stats.unfinished_partials, net_stats.unfinished_partial_bits
@@ -178,6 +195,18 @@ pub(super) fn print(
     eprintln!(
         "  Opens w/o spawn:  {}",
         net_stats.actor_opens_missing_spawn
+    );
+    // A failed open that took a live actor off its channel, and the bunches
+    // dropped afterwards for want of an open channel. Before these existed the
+    // drop moved nothing but `Bunches`, and the stale actor it replaced went on
+    // absorbing blocks that were not its own.
+    eprintln!(
+        "  Failed reopens:   {}",
+        net_stats.failed_reopens_while_open
+    );
+    eprintln!(
+        "  Unopened channel: {} bunches / {} bits",
+        net_stats.bunches_on_unopened_channel, net_stats.unopened_channel_bits
     );
     eprintln!(
         "  Resource limits:  {} channel / {} partial reassembly",
@@ -337,6 +366,12 @@ fn print_checkpoints(cp: &CheckpointStats) {
     eprintln!("  Exported fields:  {}", cp.exported_fields);
     eprintln!("  Frames:           {}", cp.frames);
     eprintln!("  Frame packets:    {}", cp.packets);
+    eprintln!(
+        "  Checkpoint frame skips: {} external blobs / {} external bytes / {} game-specific bytes",
+        cp.frame_skips.external_data_blobs,
+        cp.frame_skips.external_data_bytes,
+        cp.frame_skips.game_specific_bytes
+    );
     eprintln!("  Checkpoint rows:  {}", cp.field_rows);
     eprintln!("  Checkpoint actors:{} rows", cp.actor_rows_written);
     eprintln!("  Checkpoint GUID rows: {}", cp.net_guid_rows_written);
@@ -402,6 +437,14 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.net.actor_closes,
         cp.net.channel_reopens_while_open,
         cp.net.actor_opens_missing_spawn
+    );
+    // Its own line, not appended to `Checkpoint life:`, so that line's format
+    // is unchanged for anything already reading it.
+    eprintln!(
+        "  Checkpoint unopened: {} bunches / {} bits / {} failed reopens",
+        cp.net.bunches_on_unopened_channel,
+        cp.net.unopened_channel_bits,
+        cp.net.failed_reopens_while_open
     );
     eprintln!(
         "  Checkpoint limits: {} channel / {} partial reassembly",
