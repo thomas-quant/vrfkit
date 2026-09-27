@@ -3,7 +3,7 @@
 `Replay.Valorant/` holds the 163 C# descriptor files that
 `tools/extract_descriptors.py` reads to generate
 `crates/vrf-decode/src/table.rs`. They are copied verbatim from the commit
-below, with the selective update recorded below. Nothing here is compiled;
+below, with the selective updates recorded below. Nothing here is compiled;
 it is generator input. Two other tools read it
 by default: `tools/extract_equippables.py` generates `tools/equippable_table.py`
 from `Replay.Valorant/Combat/ValorantEquippableResolver.cs`, and
@@ -71,6 +71,18 @@ explicit handles. Its previous 13.01 measurement was 486 exact byte-rotation
 payloads; short rotation failed on 225 (222 EOF, three residual).
 The other local ability descriptors remain registered. See
 [`UPSTREAM_REVEALS.md`](../../docs/UPSTREAM_REVEALS.md) for replay verification.
+
+### Selective update, 2026-09-28
+
+`Combat/ValorantEquippableResolver.cs` is copied verbatim from upstream
+[`2103d924c59a629fb3eaecd4dedf283b0267a761`](https://github.com/michel-giehl/ValorantReplayParser/commit/2103d924c59a629fb3eaecd4dedf283b0267a761)
+("feat: Add warden"). The copy it replaces was byte-identical to that file at
+`2d2e05e` and at `2b66c65` (git blob `bd79109`); the new copy is blob
+`1b512e1`, byte-identical to `2103d92`'s. The only difference is one `Define`
+naming `/Game/Equippables/Guns/Rifles/BattleRifle/BattleRifle.BattleRifle_C`
+`Warden` (rifle). The file declares no descriptor, so `table.rs` regenerates
+byte for byte; it feeds `tools/extract_equippables.py` only. Every other file
+here keeps the provenance above.
 
 ### Regeneration
 
