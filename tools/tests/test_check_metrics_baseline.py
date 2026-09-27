@@ -187,7 +187,8 @@ class WiringTests(unittest.TestCase):
 
     def test_every_build_has_a_replay_path(self):
         self.assertEqual(sorted(guard.REPLAYS),
-                         ["12.10", "12.11", "13.00", "13.01", "13.02", "13.04", "13.05"])
+                         ["12.10", "12.11", "13.00", "13.01", "13.02", "13.04", "13.05",
+                          "13.06"])
 
     def test_no_build_points_at_the_directory_the_game_rotates(self):
         """Saved\\Demos is owned by VALORANT and lost four pinned replays once."""

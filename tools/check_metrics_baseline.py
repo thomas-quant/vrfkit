@@ -46,9 +46,10 @@ pinned instead.
 Cost
 ----
 
-This is the slowest check in the repo: it exports, re-nests and recomputes two
-full 50-65 MB matches. Run it after a non-trivial change, not in a fast sweep.
-Its value is the layer it exercises, not its speed.
+This is the slowest check in the repo: it exports, re-nests and recomputes five
+full 44-65 MB matches (13.01, 13.02, 13.04, 13.05, 13.06) besides three sub-MB
+public fixtures. Run it after a non-trivial change, not in a fast sweep. Its
+value is the layer it exercises, not its speed.
 
 Usage:
     python tools/check_metrics_baseline.py
@@ -97,6 +98,15 @@ COMPUTE_METRICS = Path(
 #: 13.04 and 13.05 were added 2026-09-13. Until then the two newest supported
 #: builds had no semantic guard at all; each fixture is a full ranked match that
 #: had already been through export -> bundle -> compute_metrics end to end.
+#:
+#: 13.06 was added 2026-09-28, after it had been in the same position: listed
+#: as supported, its framing pinned by build_1306.json, and absent here.
+#: The fixture was chosen by running all six preserved 13.06 replays through
+#: this pipeline: all six pass R1-R5, but abf07066 (7 rounds, 7-0) and
+#: ee4c3f26 (10 rounds, 8-2) are not full matches. 2a7d2c4c is a full match
+#: (22 rounds, 13-9, 10 players, 170 kills = 170 deaths) at 59.6 MB, inside
+#: the other full matches' size range; 57881928, a4b7406f (72.8 MB) and
+#: e02e6230 are the alternatives.
 REPLAYS = {
     "12.10": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1210"
              r"\9f8b32c5-c243-41ec-bbbb-832582edf652.12_10.vrf",
@@ -110,6 +120,8 @@ REPLAYS = {
              r"\01e0979f-660f-4121-b3ce-84911860df8e.vrf",
     "13.05": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1305"
              r"\005f5193-35ef-4ade-8539-e9e8dd0d5ed7.vrf",
+    "13.06": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1306"
+             r"\2a7d2c4c-952b-444e-9e45-c45c5ae77610.vrf",
 }
 
 

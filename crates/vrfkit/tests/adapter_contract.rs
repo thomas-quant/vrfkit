@@ -29,19 +29,18 @@
 //! the code below it changed -- a check that cannot fail. So the assignment
 //! statement is located by name and only the string literals inside that
 //! statement are compared.
+//!
+//! # Why the Event allowlists enumerate the parser's table
+//!
+//! The Rust side of each Event contract is built from
+//! `vrf_container::KNOWN_EVENT_GROUPS`, the parser's own list, not from a
+//! list kept here. This file used to carry its own seven names, so a group
+//! the parser learned passed every test while the adapter, which does not
+//! know it, published that group without its words, tag or name. Each
+//! dictionary is compared whole, so a group missing on either side fails.
 
 use std::fs;
 use std::path::PathBuf;
-
-const KNOWN_EVENT_GROUPS: [&str; 7] = [
-    "characterDeath",
-    "characterUltimateUsed",
-    "roundStarted",
-    "switchTeams",
-    "spikePlanted",
-    "spikeDefused",
-    "spikeExploded",
-];
 
 /// The adapter source, read from the workspace this test was compiled in.
 ///
@@ -157,30 +156,72 @@ fn python_string_dict(source: &str, name: &str) -> Option<Vec<(String, String)>>
     None
 }
 
-fn rust_event_word_counts() -> Vec<(String, String)> {
-    let mut rows = KNOWN_EVENT_GROUPS
-        .into_iter()
-        .map(|group| {
-            (
-                group.to_string(),
-                vrf_container::known_event_word_count(group)
-                    .expect("known group must have a word count")
-                    .to_string(),
-            )
+/// One Event allowlist as the parser sees it: every group in
+/// `vrf_container::KNOWN_EVENT_GROUPS`, through the accessor the parser
+/// itself calls, rendered as the adapter's dictionary literal spells it.
+fn rust_event_rows(render: fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let mut rows = vrf_container::KNOWN_EVENT_GROUPS
+        .iter()
+        .map(|known| {
+            let value = render(known.group).unwrap_or_else(|| {
+                panic!(
+                    "{} is in KNOWN_EVENT_GROUPS but its accessor returns None",
+                    known.group
+                )
+            });
+            (known.group.to_string(), value)
         })
         .collect::<Vec<_>>();
     rows.sort();
     rows
 }
 
+fn rust_event_word_counts() -> Vec<(String, String)> {
+    rust_event_rows(|group| vrf_container::known_event_word_count(group).map(|n| n.to_string()))
+}
+
+fn rust_event_tags() -> Vec<(String, String)> {
+    rust_event_rows(|group| vrf_container::known_event_payload_tag(group).map(|t| t.to_string()))
+}
+
+fn rust_event_names() -> Vec<(String, String)> {
+    rust_event_rows(|group| {
+        vrf_container::known_event_payload_name(group).map(|name| format!("\"{name}\""))
+    })
+}
+
+/// The whole adapter dictionary against the whole parser table. A group
+/// either side lacks, or a value that differs, is drift.
+fn assert_event_contract(source: &str, dictionary: &str, rust: &[(String, String)], drift: &str) {
+    let python = python_string_dict(source, dictionary)
+        .unwrap_or_else(|| panic!("the adapter must assign a simple {dictionary} dictionary"));
+    assert_eq!(python, rust, "{drift}");
+}
+
 fn assert_event_word_count_contract(source: &str) {
-    let python = python_string_dict(source, "_SERVER_TIMELINE_WORD_COUNTS")
-        .expect("the adapter must assign a simple Event word-count dictionary");
-    assert_eq!(
-        python,
-        rust_event_word_counts(),
-        "the adapter's Event word-count allowlist drifted"
+    assert_event_contract(
+        source,
+        "_SERVER_TIMELINE_WORD_COUNTS",
+        &rust_event_word_counts(),
+        "the adapter's Event word-count allowlist drifted",
     );
+}
+
+/// `_SERVER_TIMELINE_WORD_COUNTS` built from the parser's table, minus
+/// `skip` and plus `extra`: a dictionary that differs from the parser by
+/// exactly one group and nothing else.
+fn word_count_dictionary(skip: Option<&str>, extra: Option<(&str, usize)>) -> String {
+    let mut source = String::from("_SERVER_TIMELINE_WORD_COUNTS = {\n");
+    for known in vrf_container::KNOWN_EVENT_GROUPS {
+        if Some(known.group) != skip {
+            source.push_str(&format!("    \"{}\": {},\n", known.group, known.word_count));
+        }
+    }
+    if let Some((group, count)) = extra {
+        source.push_str(&format!("    \"{group}\": {count},\n"));
+    }
+    source.push_str("}\n");
+    source
 }
 
 #[test]
@@ -229,59 +270,62 @@ fn adapter_pins_the_event_payload_word_counts() {
 /// A source parser that quietly substitutes Rust's values would make the real
 /// contract tautological. Keep one complete but deliberately drifted Python
 /// dictionary to prove that a one-value disagreement reaches the assertion.
+/// Built from the parser's table with one value changed, so it stays
+/// complete when the table grows; a hand-written seven-group literal would
+/// then fail on the missing group and stop testing the value at all.
 #[test]
 #[should_panic(expected = "the adapter's Event word-count allowlist drifted")]
 fn event_word_count_contract_rejects_one_drifted_value() {
-    assert_event_word_count_contract(concat!(
-        "_SERVER_TIMELINE_WORD_COUNTS = {\n",
-        "    \"characterDeath\": 1,\n",
-        "    \"characterUltimateUsed\": 1,\n",
-        "    \"roundStarted\": 1,\n",
-        "    \"switchTeams\": 1,\n",
-        "    \"spikePlanted\": 0,\n",
-        "    \"spikeDefused\": 0,\n",
-        "    \"spikeExploded\": 0,\n",
-        "}\n",
-    ));
+    let complete = word_count_dictionary(None, None);
+    let drifted = complete.replacen("\"characterDeath\": 2,", "\"characterDeath\": 1,", 1);
+    assert_ne!(
+        drifted, complete,
+        "the fixture must change exactly one value"
+    );
+    assert_event_word_count_contract(&drifted);
+}
+
+/// The dictionary built from the parser's table passes, so the two tests
+/// below fail for the one group they change and not for how the dictionary
+/// is written.
+#[test]
+fn event_word_count_contract_accepts_the_parsers_own_table() {
+    assert_event_word_count_contract(&word_count_dictionary(None, None));
+}
+
+/// The direction the hand-kept list could not see: the parser knows a group
+/// the adapter does not, so the adapter would publish it without its words.
+#[test]
+#[should_panic(expected = "the adapter's Event word-count allowlist drifted")]
+fn event_word_count_contract_rejects_a_group_the_adapter_lacks() {
+    let first = vrf_container::KNOWN_EVENT_GROUPS[0].group;
+    assert_event_word_count_contract(&word_count_dictionary(Some(first), None));
+}
+
+/// The adapter assigns words to a group the parser never decodes.
+#[test]
+#[should_panic(expected = "the adapter's Event word-count allowlist drifted")]
+fn event_word_count_contract_rejects_a_group_the_parser_lacks() {
+    assert_event_word_count_contract(&word_count_dictionary(None, Some(("spikeDropped", 0))));
 }
 
 #[test]
 fn adapter_pins_the_event_payload_tags() {
-    let source = adapter_source();
-    let python = python_string_dict(&source, "_SERVER_TIMELINE_PAYLOAD_TAGS")
-        .expect("the adapter must assign a simple Event payload tag dictionary");
-    let mut rust = KNOWN_EVENT_GROUPS
-        .into_iter()
-        .map(|group| {
-            (
-                group.to_string(),
-                vrf_container::known_event_payload_tag(group)
-                    .expect("known group must have a tag")
-                    .to_string(),
-            )
-        })
-        .collect::<Vec<_>>();
-    rust.sort();
-    assert_eq!(python, rust, "the adapter's Event tag allowlist drifted");
+    assert_event_contract(
+        &adapter_source(),
+        "_SERVER_TIMELINE_PAYLOAD_TAGS",
+        &rust_event_tags(),
+        "the adapter's Event tag allowlist drifted",
+    );
 }
 
 #[test]
 fn adapter_pins_the_event_payload_names() {
-    let source = adapter_source();
-    let python = python_string_dict(&source, "_SERVER_TIMELINE_PAYLOAD_NAMES")
-        .expect("the adapter must assign a simple Event payload name dictionary");
-    let mut rust = KNOWN_EVENT_GROUPS
-        .into_iter()
-        .map(|group| {
-            let name = vrf_container::known_event_payload_name(group)
-                .expect("known group must have a payload name");
-            (group.to_string(), format!("\"{name}\""))
-        })
-        .collect::<Vec<_>>();
-    rust.sort();
-    assert_eq!(
-        python, rust,
-        "the adapter's public Event-name allowlist drifted"
+    assert_event_contract(
+        &adapter_source(),
+        "_SERVER_TIMELINE_PAYLOAD_NAMES",
+        &rust_event_names(),
+        "the adapter's public Event-name allowlist drifted",
     );
 }
 

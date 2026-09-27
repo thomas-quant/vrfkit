@@ -22,7 +22,7 @@ MAIN_COUNTERS = frozenset(COUNTERS)
 CHECKPOINT_ONLY_COUNTERS = frozenset(CHECKPOINT_COUNTERS)
 MAIN_PARQUET = tuple(PARQUET_FILES)
 CORPUS_TOTALS = ("blocks", "fields", "rpcs", "malformed", "skipped")
-BUILDS = ("12.10", "12.11", "13.00", "13.01", "13.02", "13.04", "13.05")
+BUILDS = ("12.10", "12.11", "13.00", "13.01", "13.02", "13.04", "13.05", "13.06")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 KNOWN_BASELINES = {
     "bench.json", "metrics_builds.json", "export_02d4d478.json",

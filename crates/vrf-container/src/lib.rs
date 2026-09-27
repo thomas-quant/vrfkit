@@ -101,9 +101,9 @@ pub use preamble::{Preamble, parse_preamble};
 pub use checkpoint::{CheckpointChunk, decompress_checkpoint, parse_checkpoint_chunk};
 #[cfg(feature = "event")]
 pub use event::{
-    EVENT_PAYLOAD_TIME_TOLERANCE_MS, EventChunk, EventPayload, event_payload_seconds_matches_time,
-    known_event_payload_name, known_event_payload_tag, known_event_word_count, parse_event_chunk,
-    parse_event_payload, parse_known_event_payload,
+    EVENT_PAYLOAD_TIME_TOLERANCE_MS, EventChunk, EventPayload, KNOWN_EVENT_GROUPS, KnownEventGroup,
+    event_payload_seconds_matches_time, known_event_payload_name, known_event_payload_tag,
+    known_event_word_count, parse_event_chunk, parse_event_payload, parse_known_event_payload,
 };
 
 #[cfg(test)]

@@ -700,7 +700,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `check_corpus_baseline.py` | Per-build corpus baseline |
 | `check_export_baseline.py` | Export counters + per-file rows/bytes/SHA-256 content identity |
 | `check_baseline_schemas.py` | All committed baseline schemas, measured SHA-256 hashes, and cross-file replay/counter/table identities. |
-| `check_decode_errors_corpus.py` | Overlay type errors + struct blob failures (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
+| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, and array/leaf/truncated-RPC/movement failures -- the same zero-required counters as `verify_build_corpus.py` (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
 | `corpus_scan.py` | Not a check -- the `.vrf` discovery `validate_corpus.py` and `check_decode_errors_corpus.py` share, so the two can no longer glob a directory two different ways and disagree about what "the corpus" is without saying so. Non-recursive by default; read its docstring for why. |
 | `check_component_remaps.py` | Whether each Blueprint-component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
@@ -824,18 +824,31 @@ python tools/to_valplay_bundle.py <export_dir> -o <bundle_dir>
 python "<valplay>/pipeline/metrics/compute_metrics.py" <bundle_dir> -o metrics.json
 ```
 
-**This is the pipeline bottleneck.** For a single 48 MB replay:
+**The slowest stage is valplay's `compute_metrics.py`; the slowest one
+vrfkit owns is `to_valplay_bundle.py`.** For a single 48 MB replay
+(`02d4d478`), measured 2026-09-28: `vrfkit export --out` without
+`--checkpoints` from a release build of 259ed10, `to_valplay_bundle.py` from
+the same commit on that export, then `compute_metrics.py` (valplay 0d91c9a)
+on the bundle -- three sequential runs of each, Python 3.12.10:
 
-| Stage | Time |
-|---|---|
-| `vrfkit export` | 0.85 s |
-| `to_valplay_bundle.py` | **21.7 s** |
-| `compute_metrics.py` | ~14 s |
+| Stage | Median | Range |
+|---|---|---|
+| `vrfkit export` | 1.53 s | 1.47-1.58 s |
+| `to_valplay_bundle.py` | **13.1 s** | 10.6-15.0 s |
+| `compute_metrics.py` | 20.9 s | 20.4-21.1 s |
 
-Bundle conversion is ~25x the parse (figure after the 1.9x improvement in
-section 35). If you process multiple replays, **parallelizing is the biggest
-lever** -- each replay is fully independent, and the measurements above are
-deliberately sequential for accuracy.
+The machine was shared with other work (CPU 91% busy before the runs, 71%
+after, about 30 other Python processes), so read the times as upper bounds:
+the adapter's last performance commit (670474f) recorded 4.59 s on its 13.01
+reference export. Two things held in every run regardless:
+`compute_metrics.py` took longer than the bundle conversion, and the bundle
+conversion took 7-10x as long as the parse (8.6x on the medians). The multiple
+this section quoted before dates from section 35 and predates the adapter's
+numpy column reads (bb4b0f4), vectorised movement path (cecea64), per-row
+trimming (3c67a91) and disabled cyclic collector (670474f).
+If you process multiple replays, **parallelizing is the biggest lever** --
+each replay is fully independent, and the measurements above are deliberately
+sequential for accuracy.
 
 > **The time figures fluctuate by +/-10%.** On the same machine and commit,
 > export was 0.79 s on 2026-08-04 and 0.85 s on 2026-08-05. At section 36-F the
@@ -1121,9 +1134,9 @@ has and the C# export does not, documented there.
 |---|---|---|---|
 | `validate_corpus.py` | Framing (top level of the corpus dir; `--recursive` for subdirectories) | Type errors, broken semantics | ~30 s |
 | `check_export_baseline.py` | 28 export counters + per-file rows/bytes | Other builds | 1 s |
-| `check_decode_errors_corpus.py` | Overlay type errors + struct blob failures (top level; `--recursive` for subdirectories) | Broken semantics; Checkpoint chunks, unless `--checkpoints` | ~50 s |
-| `check_decode_errors_corpus.py --checkpoints` | The same, plus every Checkpoint chunk's overlay and struct-blob decode | Broken semantics | slower: `vrfkit export` also decodes every Checkpoint chunk per replay |
-| `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A (7 builds) | Errors in the metrics pipeline itself | ~46 s |
+| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures (top level; `--recursive` for subdirectories) | Broken semantics; Checkpoint chunks, unless `--checkpoints` | ~50 s |
+| `check_decode_errors_corpus.py --checkpoints` | The same failure counters for every Checkpoint chunk too (overlay, struct blobs, array truncations/residual bits, leaf errors, truncated RPCs, movement) | Broken semantics | slower: `vrfkit export` also decodes every Checkpoint chunk per replay |
+| `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A (8 builds) | Errors in the metrics pipeline itself | ~46 s |
 | `compare_combat_report.py` | Metrics-input multiset | Framing | seconds |
 
 **The layers differ.** The first three of those four read framing counters or
