@@ -22,7 +22,7 @@ use vrf_decode::{
 use vrf_schema::{FxHashMap, NetGuidCache};
 
 use super::intern::put;
-use super::{ExportSink, FieldValues, TABLE};
+use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 
 /// Memo for [`ExportSink::find_rpc_param_group_path`].
 ///
@@ -309,7 +309,7 @@ impl ExportSink<'_> {
                     .is_some_and(|field| {
                         field.name == "WorldLocation" && field.compatible_checksum == 3965480401
                     });
-            let projectile_path_array = self.measured_array_routes
+            let projectile_path_array = self.admits(MeasuredArrayRoute::NetworkedProjectilePath)
                 && self.current_group_path.as_ref()
                     == "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache"
                 && param_group_path_ref

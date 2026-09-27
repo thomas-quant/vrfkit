@@ -15,9 +15,10 @@
 //! - [`paths`] -- content-block group-path resolution and its memo.
 //! - [`rpc`] -- the ClassNetCache RPC parameter walker.
 //! - [`blobs`] -- the struct-blob and flattened-array decoders.
+//! - [`measured_routes`] -- which structured-array routes each build admits.
 //! - [`stream`] -- the `vrf-net` trait impls that drive all of the above.
 //!
-//! This module holds what those five share: the sink, the per-packet record
+//! This module holds what those share: the sink, the per-packet record
 //! buffers, and the state that must outlive a packet.
 //!
 //! # What the sink costs
@@ -31,6 +32,7 @@
 mod blobs;
 mod failure_stats;
 mod intern;
+mod measured_routes;
 mod paths;
 mod rpc;
 mod stream;
@@ -53,6 +55,7 @@ use vrf_net::types::NetworkGuid;
 use vrf_schema::{FxHashMap, NetGuidCache};
 
 use intern::NameInterner;
+use measured_routes::{MeasuredArrayRoute, MeasuredArrayRoutes};
 use paths::{BlockPathMemo, ChannelArchetype};
 use rpc::RpcParamGroupMemo;
 
@@ -417,8 +420,9 @@ pub struct ExportSink<'a> {
     records: &'a mut RecordBuffers,
     /// Stats.
     pub stats: ExportStats,
-    /// Enables checksum routes measured on the named release families.
-    measured_array_routes: bool,
+    /// The checksum-gated structured-array routes this replay's branch admits.
+    /// See [`measured_routes`]; empty until `enable_measured_array_routes`.
+    measured_array_routes: MeasuredArrayRoutes,
     checkpoint_block_scope: Option<(CheckpointIdentity, u64, u32)>,
 
     // -- per-content-block context (set by on_content_block) ----------------
@@ -475,7 +479,7 @@ impl<'a> ExportSink<'a> {
             packet_id: 0,
             records,
             stats: ExportStats::default(),
-            measured_array_routes: false,
+            measured_array_routes: MeasuredArrayRoutes::NONE,
             checkpoint_block_scope: None,
             current_channel: 0,
             current_actor_guid: 0,
@@ -489,15 +493,15 @@ impl<'a> ExportSink<'a> {
         }
     }
 
+    /// Admit the structured-array routes measured for `branch`. The table,
+    /// and why each build admits what it does, is in [`measured_routes`].
     pub(super) fn enable_measured_array_routes(&mut self, branch: &str) {
-        self.measured_array_routes = matches!(
-            branch,
-            "++Ares-Core+release-13.01"
-                | "++Ares-Core+release-13.02"
-                | "++Ares-Core+release-13.04"
-                | "++Ares-Core+release-13.05"
-                | "++Ares-Core+release-13.06"
-        );
+        self.measured_array_routes = MeasuredArrayRoutes::for_branch(branch);
+    }
+
+    /// Whether `route` may expand its parent in this replay.
+    fn admits(&self, route: MeasuredArrayRoute) -> bool {
+        self.measured_array_routes.admits(route)
     }
 
     #[cfg(feature = "export")]
