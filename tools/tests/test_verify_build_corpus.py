@@ -30,7 +30,7 @@ def manifest():
                 overlay_no_field_name=5, struct_blobs_decoded=2,
                 rpc_suffix_bits_dropped=4, overlay_handle_conflicts_refused=1,
                 cnc_bruteforce_payloads_attempted=6, cnc_bruteforce_payloads_unwalked=0,
-                movement_sized_section_tails=1, movement_sized_section_tail_bits=40,
+                movement_sized_section_tails=0, movement_sized_section_tail_bits=0,
                 movement_open_section_tails=0, movement_open_section_tail_bits=0,
                 sink_rpcs_emitted=40, sink_actor_opens=7, sink_actor_closes=5,
                 sink_content_blocks=100)
@@ -88,10 +88,11 @@ class ManifestTests(unittest.TestCase):
                     with self.assertRaises(KeyError):
                         audit.manifest_counts(data)
 
-    def test_movement_tails_are_recorded_and_required_but_not_failures(self):
-        counts, failures = audit.manifest_counts(manifest())
-        self.assertEqual(failures, [], "a nonzero tail is a measurement, not a failure")
-        self.assertEqual(counts["main_movement_sized_section_tail_bits"], 40)
+    def test_movement_tails_are_recorded_and_required(self):
+        data = manifest()
+        data["quality"]["sink"]["movement_open_section_tail_bits"] = 40
+        counts, _ = audit.manifest_counts(data)
+        self.assertEqual(counts["main_movement_open_section_tail_bits"], 40)
         for key in ("movement_sized_section_tails", "movement_sized_section_tail_bits",
                     "movement_open_section_tails", "movement_open_section_tail_bits"):
             with self.subTest(key=key):
@@ -99,6 +100,18 @@ class ManifestTests(unittest.TestCase):
                 del data["quality"]["checkpoints"]["sink"][key]
                 with self.assertRaises(KeyError):
                     audit.manifest_counts(data)
+
+    def test_unwalked_cnc_payloads_and_movement_tails_fail_the_audit(self):
+        """Named here, not read from SINK_ZERO: the generic test above iterates
+        SINK_ZERO itself, so it cannot notice a key being dropped from it."""
+        for scope in ("main", "checkpoint"):
+            for key in ("cnc_bruteforce_payloads_unwalked", "movement_sized_section_tails",
+                        "movement_open_section_tails"):
+                with self.subTest(scope=scope, key=key):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    target["sink"][key] = 2
+                    self.assertIn(f"{scope}_{key}=2", audit.manifest_counts(data)[1])
 
     def test_sink_event_tallies_must_equal_the_framing_counts(self):
         """The export summary's `Sink tally` promised a desync check nobody ran.

@@ -41,6 +41,15 @@ SINK_ZERO = (
     "array_truncations", "array_errors", "array_unconsumed_nested_bits",
     "array_unconsumed_root_bits", "array_implicit_terminations",
     "array_leaf_decode_errors", "truncated_rpcs",
+    # The three below were zero in both passes of all 1,018 unique corpus
+    # replays (24 builds) when added on 2026-09-28. The brute force rests on
+    # one empirical constant (fc=34), so a payload it cannot walk means a
+    # build changed. A movement-section tail is a tally in the exporter, not
+    # an error (see RpcDecodeResult::sized_section_tails), but no measured
+    # build has produced one: a nonzero count is a new shape to look at, the
+    # same footing array_implicit_terminations has here.
+    "cnc_bruteforce_payloads_unwalked",
+    "movement_sized_section_tails", "movement_open_section_tails",
 )
 #: Each sink event tally the manifest publishes, and the NetStats counter it
 #: must equal. vrf-net calls the sink right beside its own increment for each
@@ -84,20 +93,12 @@ def manifest_counts(manifest):
                 keys.update(("content_blocks", "skipped_bits", "rpc_stream_failures",
                              "unresolved_rpc_payloads_preserved"))
             else:
-                # The brute-force pair is recorded and required, not yet
-                # gated on zero: `unwalked` has only been measured on a
-                # sample of builds, not on the whole corpus.
                 keys.update(("overlay_decoded_ok", "overlay_raw_or_skip",
                              "overlay_not_in_table", "overlay_no_field_name",
                              "struct_blobs_decoded", "rpc_suffix_bits_dropped",
                              "overlay_handle_conflicts_refused",
                              "cnc_bruteforce_payloads_attempted",
-                             "cnc_bruteforce_payloads_unwalked",
-                             # A measured tally, recorded per build; whether
-                             # a tail is loss is not established.
-                             "movement_sized_section_tails",
                              "movement_sized_section_tail_bits",
-                             "movement_open_section_tails",
                              "movement_open_section_tail_bits"))
             for key in sorted(keys):
                 name = f"{prefix}_{key}"
