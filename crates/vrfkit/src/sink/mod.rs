@@ -308,17 +308,44 @@ pub struct ExportStats {
     /// one trailing alignment bit the `FunctionParameters` grammar permits.
     ///
     /// The terminator used to end the walk without asking what remained. Any
-    /// parameter already emitted set `emitted_any`, which suppresses the
+    /// parameter already emitted set `emitted_any`, which suppressed the
     /// caller's whole-payload fallback row, so the tail reached no row, no
     /// [`Self::truncated_rpcs`] and not even `skipped_bits`. Every *leaf*
     /// payload in this crate is checked for full consumption
     /// (`decode_field` returns `NotFullyConsumed`); the *container's* was not,
     /// which is the same omission one level up.
     ///
-    /// Counted rather than rejected. The parameters that parsed are good, and
-    /// throwing them away to punish an unexplained tail would lose data to make
-    /// a point. Zero on every payload the project has measured; a non-zero
-    /// value means the parameter grammar no longer describes this build.
+    /// Counted rather than rejected, and not lost. The parameters that parsed
+    /// keep their rows, and a payload with a suffix also gets a whole-payload
+    /// row under the function's name (`try_parse_rpc_params`, or the caller's
+    /// raw row when no parameter parsed), so every counted bit is still in
+    /// `raw_bits`.
+    ///
+    /// It is not zero on real replays. In the 259ed10 corpus audit (1,018
+    /// unique replays, exported with `--checkpoints`) the main-pass total is
+    /// nonzero in 21 of 24 builds -- from 26,766 bits (12.07, 3 replays) to
+    /// 9,329,665 (13.05, 401 replays) -- and zero only in the three builds
+    /// with a single public fixture (12.10, 12.11, 13.00); some individual
+    /// replays read zero too. The checkpoint pass is zero in every build.
+    ///
+    /// Every counted bit had one source: the handle named
+    /// `ActiveGameplayEffects` under
+    /// `/Script/ShooterGame.AresAbilitySystemComponent_ClassNetCache`, whose
+    /// payload walks as parameters up to a zero handle and then continues.
+    /// ClassNetCache framing carries custom-delta properties as well as RPCs
+    /// (see `ActiveGameplayEffects` in docs/DATA.md), so this counts the part
+    /// of that payload the RPC parameter grammar does not describe; what those
+    /// bits encode is not established here. A suffix on any other handle would
+    /// be new, and would mean the grammar no longer describes that payload.
+    ///
+    /// Method (2026-09-28): a separate Python re-walk of the grammar --
+    /// checksum bit, IntPacked handle and length pairs to a zero handle, one
+    /// trailing bit allowed -- over every bare-named ClassNetCache row with a
+    /// payload in `fields.parquet` and `checkpoint_fields.parquet` reproduced
+    /// this counter exactly in 90 of 90 (export, stream) pairs: two exports
+    /// per build, one for each single-fixture build. In another 40 exports,
+    /// 1,416 of 32,391 such rows carried a suffix, every one of them
+    /// `ActiveGameplayEffects`, from 128 to 1,239 bits each.
     pub rpc_suffix_bits_dropped: u64,
 
     /// Flattened array leaves with a resolved type whose payload failed that
