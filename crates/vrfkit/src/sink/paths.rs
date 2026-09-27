@@ -125,8 +125,10 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     // build renames a component; nothing here can detect that on its own, and
     // `tools/check_component_remaps.py` is what watches for the symptoms.
     //
-    // Every target is a group the replay itself declares, so the handles pick up
-    // names and types the moment the leaf resolves.
+    // Every target is a group the replay itself declares wherever the leaf
+    // carries RepLayout rows (checked per replay over the corpus for the pairs
+    // added from 13.06), so the handles pick up names and types the moment the
+    // leaf resolves.
     (
         "ZoomStateMachine",
         "/Script/ShooterGame.EquippableStateMachineComponent",

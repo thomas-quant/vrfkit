@@ -45,16 +45,17 @@ The four ClassNetCache pairs (the C# reference's effect components) keep the
 ratio. Their verdict compares bare RepLayout rows with the RepLayout group,
 which is not what those pairs remap, so it is a coarse signal and no more.
 
-What the ratio verdicts DO NOT cover
-------------------------------------
+What the verdicts DO NOT cover
+-----------------------------
 
 A game build renaming a component. This tool's failure text used to claim that
 as the likely cause of a `broken` verdict, and a rename cannot produce one: the
-replay stops declaring the old leaf altogether, so `bare_rows` is 0, the ratio
-is 0, and the pair reads `ok` for as long as any sibling keeps the native group
-busy -- nine leaves map to `EquippableStateMachineComponent` -- or `absent`
-when none does. `broken` means something else: the rows are still arriving
-under the leaf and are not reaching the native group.
+replay stops declaring the old leaf altogether, so `bare_rows` is 0 -- which
+passes the strict rule and the ratio alike -- and the pair reads `ok` for as
+long as anything else keeps the target group busy (26 leaves map to
+`EquippableStateMachineComponent`), or `absent` when nothing does. `broken`
+means something else: the rows are still arriving under the leaf and are not
+reaching the target group.
 
 The renamed component does not leave the export, though. It arrives bare under
 its NEW name, which no pair claims. `unmapped_bare_groups` lists exactly those,

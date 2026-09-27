@@ -59,11 +59,13 @@ class VerdictTests(unittest.TestCase):
     def test_a_dead_leaf_sharing_a_live_target_is_caught(self):
         """The case that a target-only check misses.
 
-        Nine leaves map to `EquippableStateMachineComponent`. If one is renamed
-        by a build the other eight keep the target busy, so "does the target
-        have rows" says everything is fine while that component's blocks are all
-        bare again. Measured by simulating the rename: the leaf goes to 15.58%
-        of the target's rows, against 0.12% when it is healthy.
+        Many leaves map to `EquippableStateMachineComponent` (nine when this
+        was written, 26 now). If one stops resolving, the others keep the target
+        busy, so "does the target have rows" says everything is fine while that
+        component's blocks are all bare again. Measured by simulating the
+        rename: the leaf goes to 15.58% of the target's rows, against 0.12% when
+        it is healthy -- which the ratio catches; see `StrictRepLayoutTests`
+        for the smaller shares it did not.
         """
         v = guard.verdicts(PAIRS, {
             "/Script/ShooterGame.EquippableStateMachineComponent": 52059,
@@ -150,9 +152,9 @@ class RenameSignalTests(unittest.TestCase):
     The FAILED text told the reader "the likely cause is a game build renaming
     the component". A rename cannot produce that verdict. When a build renames
     `ZoomStateMachine` to something else the replay stops declaring the old
-    leaf at all, so `bare_rows` is 0, `share` is 0, and the pair reads `ok`
-    whenever any of the eight siblings keeps the native group busy -- or
-    `absent` when it does not. Never `broken`.
+    leaf at all, so `bare_rows` is 0 -- under the strict rule and the ratio
+    alike -- and the pair reads `ok` whenever another leaf keeps the target
+    group busy, or `absent` when none does. Never `broken`.
 
     The renamed component does not vanish from the export, though. It arrives
     as a bare group under its NEW name, which no pair in the table claims. That
