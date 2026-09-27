@@ -189,7 +189,7 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 |
+| `fields.parquet` | 1,296,660 | 16,460,477 |
 | `movement.parquet` | 1,844,147 | 31,886,449 |
 | `actors.parquet` | 3,827 | 87,281 |
 | `net_guids.parquet` | 16,167 | 153,606 |
@@ -749,13 +749,13 @@ committed export baseline `tools/baselines/export_02d4d478.json` after the
 partial-header and shot-array corrections:
 
 ```
-Decoded OK:   796,920      Decode errors:      0
-Raw/Skip:      26,507      Not in table: 163,534
-No field name:  2,034      Typed:          80.6%
+Decoded OK:   800,129      Decode errors:      0
+Raw/Skip:      26,507      Not in table: 160,325
+No field name:  2,034      Typed:          80.9%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (796,920 + 26,507 + 163,534 +
+The four buckets partition `Rows offered` exactly (800,129 + 26,507 + 160,325 +
 2,034 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
@@ -776,7 +776,7 @@ Physical value coverage is the fraction of `fields.parquet` rows with at
 least one non-null `value_*` column. It cannot be computed by adding overlay,
 effect-blob or struct counters: these count different units and may describe
 parent/child expansions of the same input. The current reference
-baseline has 914,117 typed rows out of 1,296,660 (70.50%), measured directly
+baseline has 917,326 typed rows out of 1,296,660 (70.75%), measured directly
 from its columns.
 Adding raw child windows changes this denominator even when every old typed
 value survives; compare raw preservation and newly typed values separately.
@@ -1003,7 +1003,7 @@ that way is a trap:
   rows cannot yet be split into named properties. `Malformed framing`,
   `Transform failed`, and `RPC payload lost` must remain zero; a non-zero
   `RPC unresolved/raw` count describes preserved, uninterpreted data.
-- The **~80.6% `Typed`** ratio reads low because of the *RPC-parameter
+- The **~80.9% `Typed`** ratio reads low because of the *RPC-parameter
   denominator* -- most of `Not in table` is RPC parameters with no C#
   descriptor. A low ratio is uninterpreted, not lost: those rows still carry
   `raw_bits`, and additive decoders (effects, structs, the economy typing)

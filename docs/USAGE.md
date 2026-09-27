@@ -200,11 +200,11 @@ member and handle by name.
 #### Reading the `Typed` ratio
 
 ```
-  Typed:            80.6% (properties + RPC parameters)
+  Typed:            80.9% (properties + RPC parameters)
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 796,920 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 800,129 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -223,7 +223,7 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 | |
+| `fields.parquet` | 1,296,660 | 16,460,477 | |
 | `movement.parquet` | 1,844,147 | 31,886,449 | |
 | `actors.parquet` | 3,827 | 87,281 | |
 | `net_guids.parquet` | 16,167 | 153,606 | |
