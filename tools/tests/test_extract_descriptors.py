@@ -37,7 +37,17 @@ internal static class AgentClassNetCacheDescriptors
 '''
 
 
-class ExtractDescriptorsTests(unittest.TestCase):
+class GeneratorHarness:
+    """The generator-running helpers both test classes below share.
+
+    A plain mixin, not a TestCase. `SilentDropTests` used to get these by
+    subclassing `ExtractDescriptorsTests`, and unittest collects inherited
+    `test_*` methods, so every test in that class -- 67 of them, each spawning
+    a generator subprocess -- ran a second time under `SilentDropTests`' name
+    and inflated the suite size the docs quote. The `assert*` calls resolve
+    through the `unittest.TestCase` each concrete class also inherits.
+    """
+
     def run_generator_process(
         self, sources: dict[str, str]
     ) -> tuple[subprocess.CompletedProcess[str], str | None]:
@@ -79,6 +89,13 @@ class ExtractDescriptorsTests(unittest.TestCase):
             if group.endswith("_ClassNetCache")
         }
 
+    def entries(self, output: str) -> set[tuple[str, str]]:
+        return {
+            (group, field) for group, field, _ in ENTRY_RE.findall(output)
+        }
+
+
+class ExtractDescriptorsTests(GeneratorHarness, unittest.TestCase):
     def test_virtual_movement_uses_concrete_override(self):
         output = self.run_generator({"Movement.cs": r'''
 public abstract class BaseFlash<T> : ExportGroupDescriptor<T>
@@ -2220,11 +2237,6 @@ public sealed class BoundedPayloadDescriptor : ExportGroupDescriptor<BoundedPayl
     # including Unknown, which is the C# default from the protected
     # parameterless constructor and NOT a "we did not look" marker.
 
-    def entries(self, output: str) -> set[tuple[str, str]]:
-        return {
-            (group, field) for group, field, _ in ENTRY_RE.findall(output)
-        }
-
     def test_fast_array_descriptor_contributes_nothing(self):
         output = self.run_generator(
             {
@@ -2491,7 +2503,7 @@ public sealed class EffectManagerComponentClassNetCacheDescriptor : ClassNetCach
         )
 
 
-class SilentDropTests(ExtractDescriptorsTests):
+class SilentDropTests(GeneratorHarness, unittest.TestCase):
     """Two ways a declared field left the table without saying so."""
 
     def test_an_unknown_primitive_type_is_rejected_not_dropped(self):
