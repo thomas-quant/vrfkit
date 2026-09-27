@@ -22,6 +22,10 @@ The 2026-09-25 ActiveBlinds fix restores 522 typed children in the 986-replay
 corpus audited that day, including explicit zero CausingActor references; it
 retains every prior field row and raw payload. See the [resolved findings](BUILD_VERIFICATION.md#resolved-findings).
 RequestedIgnoreActors, TransitionContext and the measured HawkFlash velocity now expose typed reference/vector values.
+Structured-array children are admitted per build and per route: 13.01--13.06
+expand every measured route, and 11.06--13.00 expand only the routes whose
+layout matched and decoded cleanly there. On those builds the other parents
+remain raw rows; see [the legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28).
 Qualified HealCauser actor references and map-targeting cursor/click vectors
 also expose values. Multi-click arrays retain raw parents and add vector children.
 Qualified reward names now retain complete text histories, string-table keys and format arguments. [KillData observations](KILL_OBSERVATIONS.md) preserve partial updates and scoped references.

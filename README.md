@@ -90,6 +90,9 @@ checkpoint-enabled export and the independent comparisons on observed
 evidence fields. The full report records counts and limits, and what changed
 since the 986-replay audit of 2026-09-25; this is not a claim that every field
 is understood.
+Structured-array child rows are admitted per build and per route: all
+measured routes on 13.01--13.06, a measured subset on 11.06--13.00
+([legacy route table](docs/LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
 
 All branches are `++Ares-Core+release-<build>`. Adding a build is one
 `SeededTransform` impl; see [Adding a new build](#supported-builds-and-the-cost-of-a-new-build).

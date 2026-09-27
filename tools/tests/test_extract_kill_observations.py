@@ -121,6 +121,88 @@ class ParserTests(unittest.TestCase):
             tool.exact_ref(b"\0\0", 16)
 
 
+#: Builds whose exports carry KillData children and passed every extractor
+#: check on all 48 available replays (2026-09-28, docs/KILL_OBSERVATIONS.md).
+#: Listed explicitly: iterating the tool's own set would test nothing.
+LEGACY_BUILDS = [
+    "11.06", "11.07", "11.08", "11.09", "11.10", "11.11", "12.00", "12.01",
+    "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09",
+]
+
+
+def build_export(root, build):
+    """A minimal export directory: one finisher-only KillData update."""
+    root.mkdir()
+    fields = [{"handle": h, "name": v[0], "compatible_checksum": v[1]}
+              for h, v in DECL[None].items()]
+    manifest = {"net_field_export_groups": [{"path": tool.GROUP, "fields": fields}]}
+    if build is not None:
+        manifest["replay_build"] = build
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    pq.write_table(pa.Table.from_pylist(fixture(), schema=SCHEMA), root / "fields.parquet")
+    empty = {
+        "checkpoint_fields": pa.schema(
+            [("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()), *SCHEMA]
+        ),
+        "net_guids": pa.schema([("net_guid", pa.uint32())]),
+        "checkpoint_actors": pa.schema(
+            [("checkpoint_index", pa.uint32()), ("actor_net_guid", pa.uint32())]
+        ),
+        "checkpoint_net_guids": pa.schema(
+            [("checkpoint_index", pa.uint32()), ("net_guid", pa.uint32())]
+        ),
+        "checkpoint_export_groups": pa.schema(
+            [("checkpoint_index", pa.uint32()), ("ordinal", pa.uint32()),
+             ("group_path", pa.string())]
+        ),
+        "checkpoint_export_fields": pa.schema(
+            [("checkpoint_index", pa.uint32()), ("group_ordinal", pa.uint32()),
+             ("handle", pa.uint32()), ("rendered_name", pa.string()),
+             ("compatible_checksum", pa.uint32())]
+        ),
+    }
+    for name, schema in empty.items():
+        pq.write_table(pa.Table.from_pylist([], schema=schema), root / f"{name}.parquet")
+    pq.write_table(
+        pa.Table.from_pylist([{"actor_net_guid": 4}],
+                             schema=pa.schema([("actor_net_guid", pa.uint32())])),
+        root / "actors.parquet",
+    )
+    return root
+
+
+class BuildScopeTests(unittest.TestCase):
+    def test_measured_legacy_builds_are_accepted(self):
+        import contextlib, io
+
+        for build in LEGACY_BUILDS:
+            branch = f"++Ares-Core+release-{build}"
+            with self.subTest(build=build), tempfile.TemporaryDirectory() as t:
+                export = build_export(Path(t) / "export", branch)
+                out = Path(t) / "observations.json"
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+                    code = tool.main(["--export", str(export), "--out", str(out)])
+                self.assertEqual(code, 0, printed.getvalue())
+                self.assertIn("1 serialized updates", printed.getvalue())
+                result = json.loads(out.read_text(encoding="utf-8"))
+                self.assertEqual(result["provenance"]["replay_build"], branch)
+                self.assertEqual(result["counts"]["fields"]["parent_rows"], 1)
+                [record] = result["observations"]
+                self.assertTrue(record["members"]["did_kill_trigger_finisher"])
+
+    def test_unmeasured_builds_are_still_refused(self):
+        # 12.10, 12.11 and 13.00 export no KillData children: the route is
+        # unobserved there, so an export from them cannot be checked.
+        for build in ("++Ares-Core+release-12.10", "++Ares-Core+release-12.11",
+                      "++Ares-Core+release-13.00", "++Ares-Core+release-13.07",
+                      "12.09", "++Ares-Core+release-12.09 ", None):
+            with self.subTest(build=build), tempfile.TemporaryDirectory() as t:
+                export = build_export(Path(t) / "export", build)
+                with self.assertRaisesRegex(tool.InputError, "outside the measured"):
+                    tool.extract(export)
+
+
 class ExtractionTests(unittest.TestCase):
     def run_rows(self, rows, decl=DECL, refs=None):
         with tempfile.TemporaryDirectory() as t:

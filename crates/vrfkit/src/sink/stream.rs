@@ -1899,6 +1899,97 @@ mod tests {
         }
     }
 
+    /// The projectile path is admitted per branch like the flattened arrays:
+    /// a valid path point expands on the builds whose samples held one, and
+    /// stays a single raw parameter row where the route was never observed.
+    #[test]
+    fn projectile_path_rpc_expands_only_on_admitting_branches() {
+        const CNC: &str =
+            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache";
+        const PARAMS: &str =
+            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:MulticastSetPath";
+        const PARENT: &str = "MulticastSetPath.NetworkedProjectilePath";
+
+        let mut array = Vec::new();
+        write_int_packed(&mut array, 1); // one path point
+        write_int_packed(&mut array, 1); // index zero
+        for (handle, payload) in [
+            (1, 2.5f32.to_le_bytes().to_vec()),
+            (2, vec![0; 24]),
+            (3, vec![0; 24]),
+        ] {
+            write_int_packed(&mut array, handle + 1);
+            write_int_packed(&mut array, (payload.len() * 8) as u32);
+            array.extend(
+                payload
+                    .iter()
+                    .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0)),
+            );
+        }
+        write_int_packed(&mut array, 0); // element terminator
+        write_int_packed(&mut array, 0); // array terminator
+        let mut rpc = vec![false]; // FunctionParameters checksum bit
+        write_int_packed(&mut rpc, 1); // parameter handle zero
+        write_int_packed(&mut rpc, array.len() as u32);
+        rpc.extend_from_slice(&array);
+        write_int_packed(&mut rpc, 0); // parameter terminator
+        let rpc_raw = bits_to_bytes(&rpc);
+
+        for (branch, want_children) in [
+            ("++Ares-Core+release-11.06", 0),
+            ("++Ares-Core+release-11.07", 3),
+            ("++Ares-Core+release-12.06", 0),
+            ("++Ares-Core+release-12.09", 3),
+            ("++Ares-Core+release-12.10", 0),
+            ("++Ares-Core+release-13.05", 3),
+        ] {
+            let mut cache = NetGuidCache::new();
+            cache
+                .add_export_group(vrf_schema::NetFieldExportGroup::new(CNC.into(), 7, 1))
+                .unwrap();
+            cache
+                .add_export_group(vrf_schema::NetFieldExportGroup::new(PARAMS.into(), 8, 1))
+                .unwrap();
+            assert!(cache.set_field_on_group(
+                7,
+                vrf_schema::NetFieldExport {
+                    handle: 0,
+                    compatible_checksum: 2_336_552_129,
+                    name: "MulticastSetPath".into(),
+                }
+            ));
+            assert!(cache.set_field_on_group(
+                8,
+                vrf_schema::NetFieldExport {
+                    handle: 0,
+                    compatible_checksum: 2_930_105_559,
+                    name: "NetworkedProjectilePath".into(),
+                }
+            ));
+            let mut channel_state = ChannelState::new();
+            let mut records = RecordBuffers::default();
+            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            sink.set_current_group_path(Arc::from(CNC));
+            sink.enable_measured_array_routes(branch);
+            sink.on_rpc(
+                0,
+                rpc.len() as u32,
+                BitReader::with_bit_len(&rpc_raw, rpc.len() as u64).unwrap(),
+            );
+            assert_eq!(sink.stats.array.errors, 0, "{branch}");
+            assert_eq!(sink.stats.array_leaf_decode_errors, 0, "{branch}");
+            drop(sink);
+
+            assert_eq!(records.fields.len(), want_children + 1, "{branch}");
+            let parent = records.fields.last().unwrap();
+            assert_eq!(parent.field_name.as_deref(), Some(PARENT), "{branch}");
+            assert_eq!(parent.bit_count, array.len() as u32, "{branch}");
+            if want_children > 0 {
+                assert_eq!(records.fields[0].value_f64, Some(2.5), "{branch}");
+            }
+        }
+    }
+
     /// The one permitted leftover stays silent.
     ///
     /// `FunctionParameters` grammar allows a single trailing alignment bit
