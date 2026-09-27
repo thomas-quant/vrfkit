@@ -235,9 +235,9 @@ Measured on `02d4d478` (48,215,213 bytes):
 | `checkpoint_actors.parquet` | 3,014 | 27,118 | requires `--checkpoints` |
 | `checkpoint_net_guids.parquet` | 74,270 | 277,718 | requires `--checkpoints` |
 | `checkpoint_blocks.parquet` | 22,247 | 175,103 | requires `--checkpoints` |
-| `checkpoint_guid_entries.parquet` | 74,270 | 928,714 | requires `--checkpoints` |
-| `checkpoint_export_groups.parquet` | 8,307 | 27,041 | requires `--checkpoints` |
-| `checkpoint_export_fields.parquet` | 49,314 | 287,130 | requires `--checkpoints` |
+| `checkpoint_guid_entries.parquet` | 74,270 | 396,821 | requires `--checkpoints` |
+| `checkpoint_export_groups.parquet` | 8,307 | 22,627 | requires `--checkpoints` |
+| `checkpoint_export_fields.parquet` | 49,314 | 121,648 | requires `--checkpoints` |
 | `manifest.json` | -- | ~660,030 | varies: it records `elapsed_ms` |
 
 Use [`bench_export.py`](#analysis-helpers) to measure runtime on your machine.
@@ -1015,7 +1015,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 910 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 911 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check

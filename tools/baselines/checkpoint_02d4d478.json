@@ -108,18 +108,18 @@
     },
     "checkpoint_guid_entries": {
       "rows": 74270,
-      "bytes": 928714,
-      "sha256": "693876842cc8dc60b3328c64c62446e022dde6e2a8ade2e25a3a5042143ec33e"
+      "bytes": 396821,
+      "sha256": "6f23b205653e3fce613137f3a1fc3da1d2f9dae71167e431c71b154e1fa11172"
     },
     "checkpoint_export_groups": {
       "rows": 8307,
-      "bytes": 27041,
-      "sha256": "91517ce00b415ae13779451a194a593304eada4bc69b4dd743220b48cc6c7fcd"
+      "bytes": 22627,
+      "sha256": "fed716c3bb170feca8257ea24938484383218d91d94c6c96f4b9d30031376bb0"
     },
     "checkpoint_export_fields": {
       "rows": 49314,
-      "bytes": 287130,
-      "sha256": "20dd02181ee904b521aef2382fbc644f30ad49f90b1e7d70930f73202726d174"
+      "bytes": 121648,
+      "sha256": "28590427c0f5f4724cebc2154e9d22f05d423f9f711b6305165ed3894d51e8d4"
     }
   },
   "replay": "02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf"

@@ -19,7 +19,7 @@ by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
 **Verified state (2026-09-28):** Rust has **727 passing** tests; Python has
-**910 passing** tests. All 24 supported builds received the same verification
+**911 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. The two
 ActiveBlinds decoding errors found by the first 2026-09-25 audit were fixed
 that day. See [build verification](docs/BUILD_VERIFICATION.md)
@@ -200,9 +200,9 @@ Parquet files plus a manifest when checkpoints are included:
 | `checkpoint_actors.parquet` | 3,014 | 27,118 |
 | `checkpoint_net_guids.parquet` | 74,270 | 277,718 |
 | `checkpoint_blocks.parquet` | 22,247 | 175,103 |
-| `checkpoint_guid_entries.parquet` | 74,270 | 928,714 |
-| `checkpoint_export_groups.parquet` | 8,307 | 27,041 |
-| `checkpoint_export_fields.parquet` | 49,314 | 287,130 |
+| `checkpoint_guid_entries.parquet` | 74,270 | 396,821 |
+| `checkpoint_export_groups.parquet` | 8,307 | 22,627 |
+| `checkpoint_export_fields.parquet` | 49,314 | 121,648 |
 | `manifest.json` |  | ~660,030 |
 
 `checkpoint_fields.parquet` requires `--checkpoints`. The partials row above
@@ -381,7 +381,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**727 passing**; the full Python suite also has **910 passing** tests. The
+**727 passing**; the full Python suite also has **911 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
