@@ -13,7 +13,7 @@
 use crate::decode::FieldType;
 
 /// Sorted by checksum; binary-searched by `lookup_checksum`.
-pub static CHECKSUM_TYPES: [(u32, FieldType); 453] = [
+pub static CHECKSUM_TYPES: [(u32, FieldType); 456] = [
     (5646457, FieldType::Float),
     (6302035, FieldType::EnumByte),
     (24357661, FieldType::ObjectNetGuid),
@@ -114,6 +114,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 453] = [
     (1051633025, FieldType::ObjectNetGuid),
     (1070392732, FieldType::ObjectNetGuid),
     (1073812927, FieldType::Bool),
+    (1076231069, FieldType::Int32),
     (1086860633, FieldType::SerializedInt { max: 16 }),
     (1111509696, FieldType::Bool),
     (1117738893, FieldType::Bool),
@@ -344,6 +345,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 453] = [
     (3091751246, FieldType::FName),
     (3150448967, FieldType::Float),
     (3151620371, FieldType::Float),
+    (3151779304, FieldType::EnumByte),
     (3155560253, FieldType::Int32),
     (3155614714, FieldType::Float),
     (3155865075, FieldType::Bool),
@@ -351,6 +353,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 453] = [
     (3181839897, FieldType::ObjectNetGuid),
     (3184494581, FieldType::Float),
     (3193971073, FieldType::Int32),
+    (3198546915, FieldType::Int32),
     (3199165706, FieldType::ObjectNetGuid),
     (3201434597, FieldType::Double),
     (3206196468, FieldType::Int32),

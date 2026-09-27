@@ -1472,6 +1472,44 @@ fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() 
     );
 }
 
+/// `ReadyingStateComponent.AuthEquipSpeed` and the two inventory correction
+/// counters. Measured over the 1,018-replay audit: `AuthEquipSpeed` is 3 bits
+/// on all 1,015,515 rows (main {0,1,2}, checkpoints always 0), matching its
+/// descriptor-typed sibling `AutoEquipTransitionContext.AutoEquipSpeed` in the
+/// same packet; `CorrectionIndex` and `LastSeenClientCorrectionIndex` are 32
+/// bits on all 1,222,930 / 1,129,599 rows, strictly increasing per actor, with
+/// `LastSeen <= Correction - 1` on every paired row.
+#[test]
+fn readying_speed_and_inventory_correction_counters_are_typed() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for (group, field, expected) in [
+        (
+            "/Script/ShooterGame.ReadyingStateComponent",
+            "AuthEquipSpeed",
+            FieldType::EnumByte,
+        ),
+        (
+            "/Script/ShooterGame.AresInventory",
+            "CorrectionIndex",
+            FieldType::Int32,
+        ),
+        (
+            "/Script/ShooterGame.AresInventory",
+            "LastSeenClientCorrectionIndex",
+            FieldType::Int32,
+        ),
+    ] {
+        assert_eq!(table.lookup(group, field), Some(expected), "{field}");
+    }
+    for (checksum, expected) in [
+        (3151779304u32, FieldType::EnumByte),
+        (3198546915, FieldType::Int32),
+        (1076231069, FieldType::Int32),
+    ] {
+        assert_eq!(lookup_checksum(checksum), Some(expected), "{checksum}");
+    }
+}
+
 /// Which named area of the map a player is standing in -- "A Site", "Mid",
 /// "Heaven", the callouts the game itself announces.
 ///

@@ -184,6 +184,12 @@ class AdditionsTests(unittest.TestCase):
         every paired row. Remove's ModuleType is not an addition: it follows
         through the checksum table, like HandleNumber does.
 
+        132 -> 135 types `ReadyingStateComponent.AuthEquipSpeed` (3 bits on
+        all 1,015,515 rows; equals its EnumByte sibling AutoEquipSpeed in the
+        same packet) and the two AresInventory correction counters (32 bits,
+        strictly increasing, LastSeen < Correction on every paired row, and
+        every checkpoint value equal to the preceding main-stream one).
+
         63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
         for being a wrong `FString`; it is back because a decoder now exists
         and the reason given for waiting was itself wrong -- `Statistic` was
@@ -220,7 +226,7 @@ class AdditionsTests(unittest.TestCase):
         2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
         reaches a real declaration and the guessed name is gone.
         """
-        self.assertEqual(len(atc.ADDITIONS), 132, atc.ADDITIONS)
+        self.assertEqual(len(atc.ADDITIONS), 135, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
         """Same guardrail for the handle -> name additions.

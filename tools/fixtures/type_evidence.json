@@ -134,5 +134,8 @@
   {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Base.DeathMontageEffectOverride","type":"ObjectNetGuid","checksum":1712763745},
   {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Point.DeathMontageEffectOverride","type":"ObjectNetGuid","checksum":1712763745},
   {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Base.DeathMontageEffectOverrideContext","type":"ObjectNetGuid","checksum":2397897524},
-  {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Point.DeathMontageEffectOverrideContext","type":"ObjectNetGuid","checksum":2397897524}
+  {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Point.DeathMontageEffectOverrideContext","type":"ObjectNetGuid","checksum":2397897524},
+  {"group":"/Script/ShooterGame.ReadyingStateComponent","field":"AuthEquipSpeed","type":"EnumByte","checksum":3151779304},
+  {"group":"/Script/ShooterGame.AresInventory","field":"CorrectionIndex","type":"Int32","checksum":3198546915},
+  {"group":"/Script/ShooterGame.AresInventory","field":"LastSeenClientCorrectionIndex","type":"Int32","checksum":1076231069}
 ]

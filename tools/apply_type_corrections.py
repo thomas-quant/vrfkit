@@ -506,6 +506,68 @@ ADDITIONS = [
     # typed from wire evidence, same bar as Ping/Money.
     ("/Script/ShooterGame.UsableComponent", "HighestProgress", "FieldType::Float"),
     ("/Script/ShooterGame.UsableComponent", "bIsActive", "FieldType::Bool"),
+    # `ReadyingStateComponent.AuthEquipSpeed`: the equip-speed state of a
+    # weapon being readied. No descriptor declares it. Measured 2026-09-28
+    # over the 1,018 replays audited at 259ed10, rows selected by name OR by
+    # checksum 3151779304 in any group (only this identity carries either):
+    # 866,096 main + 149,419 checkpoint rows, exactly 3 bits on every row of
+    # every build that has it (none on 12.10, 12.11, 13.00), zero padding.
+    # Main-stream values are {0, 1, 2} on every build (432,879 / 347,664 /
+    # 85,553; 11.06 alone 1,400 / 1,297 / 104). On every 25th export the
+    # transitions are only 0 <-> 1 and 0 <-> 2, and 2 holds for a median 203 ms.
+    #
+    # What makes it more than a width: the same-width sibling
+    # `AutoEquipTransitionContext.AutoEquipSpeed` (typed EnumByte by this
+    # repo's own vendored AdditionalComponentDescriptors.cs, 1dee99f -- so a
+    # sibling that decodes cleanly under the same reader, not an independent
+    # authority) is 3 bits with {0, 1, 2} on every build, its Rust value equals
+    # an independent decode on 58,384 of 58,384 sampled rows, and in the same
+    # packet on the same actor it equals AuthEquipSpeed on 1,986 of 1,999
+    # rows. At a uniform 3 bits the only SerializedInt reading that fits is
+    # max 8, which gives the same integers, so the ZoomMultiplier "wire count
+    # alone" refusal above does not apply.
+    #
+    # CHECKPOINT CAVEAT: all 149,419 checkpoint rows read 0 -- while the
+    # sibling AutoEquipSpeed and EquipSpeedOverride are non-zero in the same
+    # checkpoints and 0.2% of carriers are mid-readying at those instants. The
+    # bits really are 000; the meaning of this field at a checkpoint is
+    # unexplained, so checkpoint AuthEquipSpeed is not readying state. Enum
+    # member names are not established; only the integer is typed.
+    #
+    # Known limitation, shared by every ADDITIONS entry: the key is group +
+    # name, not checksum. decode_byte fails loudly only at 0 or >8 bits, so a
+    # future build that reused the name for a different enum of <=8 bits would
+    # decode silently as the wrong value. generate_scoped_types.py has no
+    # EnumByte, which is why this is not a checksum-scoped type.
+    ("/Script/ShooterGame.ReadyingStateComponent", "AuthEquipSpeed",
+     "FieldType::EnumByte"),
+    # `AresInventory.CorrectionIndex` / `LastSeenClientCorrectionIndex`: the
+    # inventory's server/client correction counters. AresInventoryDescriptor.cs
+    # declares neither, so these are wire-evidence ADDITIONS like Money.
+    # Measured 2026-09-28 over the 1,018 audit replays (checksums 3198546915 /
+    # 1076231069, each carried by this one field only):
+    #
+    #   CorrectionIndex: 1,041,822 main + 181,108 checkpoint rows, 32 bits on
+    #   every row of all 24 builds. As little-endian i32: 1..2011, never 0 or
+    #   negative, strictly increasing per (actor, object) on all 1,001,823
+    #   consecutive main-stream pairs. Every one of the 181,108 checkpoint
+    #   values equals the last main-stream value for the same (actor, object)
+    #   at or before the checkpoint -- two streams, one counter. Read as f32
+    #   every value is a denormal (the PlayerScoreComponent.Score shape), and
+    #   the max rules out a widened Bool.
+    #   LastSeenClientCorrectionIndex: 948,502 main + 181,097 checkpoint rows,
+    #   32 bits everywhere, 1..2010, strictly increasing per actor on all
+    #   921,268 pairs, and never >= CorrectionIndex at the same (time, actor,
+    #   object): L == C-1 on 814,054 main rows, L < C-1 on 134,448, L >= C on
+    #   0 (checkpoints 179,990 / 1,107 / 0).
+    #
+    # The wire handle steps from 29/30 (11.06-12.03) to 30/31 (12.04 on);
+    # name keying is immune to that. Int32 over UInt32 follows the Int32
+    # RespawnNumber of the same descriptor; 1..2011 cannot settle the sign.
+    # The meaning is inferred from the names and the counter shape only.
+    ("/Script/ShooterGame.AresInventory", "CorrectionIndex", "FieldType::Int32"),
+    ("/Script/ShooterGame.AresInventory", "LastSeenClientCorrectionIndex",
+     "FieldType::Int32"),
     # The 192-bit RPC vectors. Unreal serialises an FTransform parameter as
     # three separate double vectors on this wire -- rotation, translation,
     # scale -- and no descriptor declares any of them, so 54,859 rows arrived
