@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use vrf_container::Preamble;
 use vrf_decode::OverlayErrorReport;
+use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 use vrf_schema::NetGuidCache;
 
@@ -40,6 +41,10 @@ pub(crate) struct ManifestQuality<'a> {
     pub partial_bits: u64,
     pub event_trailing_bytes: u64,
     pub replay_data_trailing_bytes: u64,
+    /// ExternalData and GameSpecificFrameData bytes the ReplayData frames
+    /// stepped over. Published so a corpus guard can see them move; the
+    /// sections are length-prefixed, so nothing else would.
+    pub frame_skips: FrameSkips,
     pub event_layout_mismatches: u64,
     pub event_first_layout_mismatch: Option<&'a str>,
     pub event_payloads_decoded: u64,
@@ -446,6 +451,7 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
         &quality.replay_data_trailing_bytes.to_string(),
         2,
     );
+    write_frame_skips(&mut out, "frame_", &quality.frame_skips, 2);
     wkv(
         &mut out,
         "event_layout_mismatches",
@@ -548,6 +554,7 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
                 &checkpoints.frames.to_string(),
                 3,
             );
+            write_frame_skips(&mut out, "checkpoint_frame_", &checkpoints.frame_skips, 3);
             wkv(
                 &mut out,
                 "checkpoint_packets",
@@ -628,6 +635,19 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
     }
     out.push_str("  }");
     out
+}
+
+/// The three [`FrameSkips`] tallies as `<prefix>external_data_blobs`,
+/// `<prefix>external_data_bytes` and `<prefix>game_specific_bytes`, zeros
+/// included.
+fn write_frame_skips(out: &mut String, prefix: &str, skips: &FrameSkips, indent: usize) {
+    for (key, value) in [
+        ("external_data_blobs", skips.external_data_blobs),
+        ("external_data_bytes", skips.external_data_bytes),
+        ("game_specific_bytes", skips.game_specific_bytes),
+    ] {
+        wkv(out, &format!("{prefix}{key}"), &value.to_string(), indent);
+    }
 }
 
 fn write_net_quality(
@@ -932,6 +952,7 @@ mod tests {
             partial_bits: 0,
             event_trailing_bytes: 0,
             replay_data_trailing_bytes: 0,
+            frame_skips: FrameSkips::default(),
             event_layout_mismatches: 0,
             event_first_layout_mismatch: None,
             event_payloads_decoded: 0,
@@ -1020,6 +1041,9 @@ mod tests {
             "event_rows",
             "event_trailing_bytes",
             "replay_data_trailing_bytes",
+            "frame_external_data_blobs",
+            "frame_external_data_bytes",
+            "frame_game_specific_bytes",
             "event_layout_mismatches",
             "event_first_layout_mismatch",
             "event_payloads_decoded",
@@ -1033,6 +1057,9 @@ mod tests {
             "checkpoint_group_records",
             "checkpoint_exported_fields",
             "checkpoint_frames",
+            "checkpoint_frame_external_data_blobs",
+            "checkpoint_frame_external_data_bytes",
+            "checkpoint_frame_game_specific_bytes",
             "checkpoint_packets",
             "checkpoint_field_rows",
             "checkpoint_actor_rows_written",
@@ -1150,6 +1177,7 @@ mod tests {
             partial_bits: 0,
             event_trailing_bytes: 0,
             replay_data_trailing_bytes: 0,
+            frame_skips: FrameSkips::default(),
             event_layout_mismatches: 0,
             event_first_layout_mismatch: None,
             event_payloads_decoded: 0,
@@ -1169,6 +1197,55 @@ mod tests {
             "\"checkpoint_literal_paths\": 17",
             "\"checkpoint_indexed_paths\": 11",
             "\"checkpoint_resolved_path_indices\": 11",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// The frame-skip tallies reach the manifest with their measured values,
+    /// main and checkpoint apart. Six distinct numbers, so a key wired to the
+    /// wrong field or the wrong pass shows.
+    #[test]
+    fn frame_skips_publish_measured_values_for_both_passes() {
+        let net = NetStats::default();
+        let sink = SinkTotals::default();
+        let errors = OverlayErrorReport::default();
+        let mut main = FrameSkips::default();
+        main.external_data_blobs = 2;
+        main.external_data_bytes = 3;
+        main.game_specific_bytes = 5;
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.frame_skips.external_data_blobs = 7;
+        checkpoints.frame_skips.external_data_bytes = 11;
+        checkpoints.frame_skips.game_specific_bytes = 13;
+        let json = quality_json(&ManifestQuality {
+            chunks_processed: 0,
+            export_groups: 0,
+            movement_rows: 0,
+            net_guid_rows: 0,
+            event_rows: 0,
+            partial_rows: 0,
+            partial_bits: 0,
+            event_trailing_bytes: 0,
+            replay_data_trailing_bytes: 0,
+            frame_skips: main,
+            event_layout_mismatches: 0,
+            event_first_layout_mismatch: None,
+            event_payloads_decoded: 0,
+            event_payload_unknown_groups: 0,
+            net: &net,
+            sink: &sink,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+
+        for expected in [
+            "\"frame_external_data_blobs\": 2",
+            "\"frame_external_data_bytes\": 3",
+            "\"frame_game_specific_bytes\": 5",
+            "\"checkpoint_frame_external_data_blobs\": 7",
+            "\"checkpoint_frame_external_data_bytes\": 11",
+            "\"checkpoint_frame_game_specific_bytes\": 13",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }
@@ -1207,6 +1284,7 @@ mod tests {
             partial_bits: 0,
             event_trailing_bytes: 0,
             replay_data_trailing_bytes: 0,
+            frame_skips: FrameSkips::default(),
             event_layout_mismatches: 0,
             event_first_layout_mismatch: None,
             event_payloads_decoded: 0,

@@ -1,15 +1,19 @@
 //! The export summary printed to stderr.
 //!
-//! Every line here is pinned by `tools/check_export_baseline.py`, which reads
-//! the counters back out of this text and cross-checks three of them against
-//! the row counts of the files they name. Adding, removing or renaming a line
-//! breaks that harness; do it deliberately or not at all.
+//! `tools/check_export_baseline.py` reads counters back out of this text --
+//! every label in its `COUNTERS` and `CHECKPOINT_COUNTERS` -- pins them against
+//! a baseline and cross-checks some against the row counts of the files they
+//! name, and `tools/verify_build_corpus.py` requires the same labels. Adding,
+//! removing or renaming a line can break those harnesses; do it deliberately
+//! or not at all. A new label must not contain an existing one: some of those
+//! patterns are unanchored (`Frames:\s+(\d+)` among them).
 
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 use vrf_decode::{OverlayErrorReport, OverlayStats};
+use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 
 use super::checkpoints::CheckpointStats;
@@ -32,6 +36,13 @@ pub(super) struct RunTotals {
     /// so a second line spelled that way earlier in the output would silently
     /// feed this number to the `cp_frames` check.
     pub frames: u32,
+    /// ExternalData and GameSpecificFrameData bytes those frames stepped over.
+    ///
+    /// Printed as `Frame skips:`, which contains neither `Frames:` nor any
+    /// other label `tools/check_export_baseline.py` searches for unanchored.
+    /// The skip is length-prefixed, so a build that starts sending these
+    /// sections moves no other number here.
+    pub frame_skips: FrameSkips,
     pub total_packets: u32,
     pub export_groups: usize,
     pub movement_rows: u64,
@@ -87,6 +98,12 @@ pub(super) fn print(
     eprintln!("=== Export complete ===");
     eprintln!("  Chunks:           {}", totals.chunks_processed);
     eprintln!("  ReplayData frames: {}", totals.frames);
+    eprintln!(
+        "  Frame skips:      {} external blobs / {} external bytes / {} game-specific bytes",
+        totals.frame_skips.external_data_blobs,
+        totals.frame_skips.external_data_bytes,
+        totals.frame_skips.game_specific_bytes
+    );
     eprintln!("  Packets:          {}", totals.total_packets);
     eprintln!("  Export groups:    {}", totals.export_groups);
     eprintln!("  Content blocks:   {}", net_stats.content_blocks);
@@ -323,6 +340,12 @@ fn print_checkpoints(cp: &CheckpointStats) {
     eprintln!("  Exported fields:  {}", cp.exported_fields);
     eprintln!("  Frames:           {}", cp.frames);
     eprintln!("  Frame packets:    {}", cp.packets);
+    eprintln!(
+        "  Checkpoint frame skips: {} external blobs / {} external bytes / {} game-specific bytes",
+        cp.frame_skips.external_data_blobs,
+        cp.frame_skips.external_data_bytes,
+        cp.frame_skips.game_specific_bytes
+    );
     eprintln!("  Checkpoint rows:  {}", cp.field_rows);
     eprintln!("  Checkpoint actors:{} rows", cp.actor_rows_written);
     eprintln!("  Checkpoint GUID rows: {}", cp.net_guid_rows_written);

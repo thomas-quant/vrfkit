@@ -31,7 +31,10 @@
     "struct_blobs_decoded": 207,
     "struct_blobs_failed": 0,
     "targeting_world_locations_decoded": 0,
-    "tracked_rewards_opaque_empty_variants": 7
+    "tracked_rewards_opaque_empty_variants": 7,
+    "frame_external_data_blobs": 0,
+    "frame_external_data_bytes": 0,
+    "frame_game_specific_bytes": 0
   },
   "parquet": {
     "fields": {

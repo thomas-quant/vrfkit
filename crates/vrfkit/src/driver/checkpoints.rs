@@ -22,7 +22,7 @@ use vrf_export::{
     CheckpointGuidEntryRecord, CheckpointGuidEntryWriter, CheckpointIdentity,
     CheckpointNetGuidRecord, CheckpointNetGuidWriter, NetGuidRecord, PartialWriter,
 };
-use vrf_frame::iter_demo_frames;
+use vrf_frame::{FrameSkips, walk_demo_frames};
 use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::NetStats;
 use vrf_schema::{
@@ -54,6 +54,9 @@ pub(crate) struct CheckpointStats {
     /// DemoFrames walked, as `iter_demo_frames` actually counted them -- not
     /// assumed to be one per chunk.
     pub frames: u64,
+    /// ExternalData and GameSpecificFrameData bytes the snapshot frames
+    /// stepped over; the main pass's `frame_skips` has the same meaning.
+    pub frame_skips: FrameSkips,
     pub packets: u64,
     pub field_rows: u64,
     pub actor_rows_written: u64,
@@ -275,7 +278,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     let mut packet_count = 0u64;
     let mut block_count = 0u32;
     let mut packet_error = None;
-    let (_, frame_count) = iter_demo_frames(frame, ctx.flags, &mut cache, |pkt, packet_cache| {
+    let walk = walk_demo_frames(frame, ctx.flags, &mut cache, |pkt, packet_cache| {
         if packet_error.is_some() {
             return;
         }
@@ -380,7 +383,8 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     // pin used to be a tautology -- always equal, because this line always
     // added exactly 1 -- which could not have caught a build whose checkpoint
     // carries more than one DemoFrame.
-    stats.frames += u64::from(frame_count);
+    stats.frames += u64::from(walk.frames);
+    stats.frame_skips.absorb(walk.skipped);
     stats.packets += packet_count;
     Ok(())
 }
