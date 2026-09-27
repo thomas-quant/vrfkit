@@ -92,6 +92,108 @@ pub struct EventPayload {
     pub seconds: f32,
 }
 
+/// One Event group whose payload layout the corpus established: its word
+/// count, group tag and public enum-name FString.
+///
+/// [`KNOWN_EVENT_GROUPS`] is the only list of these. The three accessors below
+/// are lookups into it, and `crates/vrfkit/tests/adapter_contract.rs`
+/// enumerates it against `tools/to_valplay_bundle.py`'s allowlists. It used
+/// to be three independent `match` statements: a group added to all three
+/// published its words, tag and name in `events.parquet` while the contract
+/// test -- iterating its own hand-kept list of seven -- stayed green, and the
+/// adapter silently published that group with no words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnownEventGroup {
+    /// The Event chunk's `group` string, exactly as the wire spells it.
+    pub group: &'static str,
+    /// Group-dependent `u32` words between the tag and the FString.
+    pub word_count: usize,
+    /// The public enum-name FString the payload must carry.
+    pub payload_name: &'static str,
+    /// The leading group tag, constant across the corpus sweep.
+    pub payload_tag: u32,
+}
+
+/// Every Event group with a corpus-established payload layout; see
+/// [`KnownEventGroup`].
+pub const KNOWN_EVENT_GROUPS: [KnownEventGroup; 7] = [
+    KnownEventGroup {
+        group: "characterDeath",
+        word_count: 2,
+        payload_name: "EReplayEventGroup::CharacterDeath",
+        payload_tag: 8,
+    },
+    KnownEventGroup {
+        group: "characterUltimateUsed",
+        word_count: 1,
+        payload_name: "EReplayEventGroup::CharacterUltimateUsed",
+        payload_tag: 11,
+    },
+    KnownEventGroup {
+        group: "roundStarted",
+        word_count: 1,
+        payload_name: "EReplayEventGroup::RoundStart",
+        payload_tag: 2,
+    },
+    KnownEventGroup {
+        group: "switchTeams",
+        word_count: 1,
+        payload_name: "EReplayEventGroup::SwitchTeams",
+        payload_tag: 3,
+    },
+    KnownEventGroup {
+        group: "spikePlanted",
+        word_count: 0,
+        payload_name: "EReplayEventGroup::SpikePlanted",
+        payload_tag: 4,
+    },
+    KnownEventGroup {
+        group: "spikeDefused",
+        word_count: 0,
+        payload_name: "EReplayEventGroup::SpikeDefused",
+        payload_tag: 5,
+    },
+    KnownEventGroup {
+        group: "spikeExploded",
+        word_count: 0,
+        payload_name: "EReplayEventGroup::SpikeExploded",
+        payload_tag: 6,
+    },
+];
+
+/// The [`KNOWN_EVENT_GROUPS`] entry whose group is exactly `group`.
+///
+/// A `while` loop over bytes because the accessors are `const fn`: on the
+/// MSRV (1.86) neither iterators nor `==` on `&str`/`&[u8]` can be called in a
+/// const context.
+const fn known_event_group(group: &str) -> Option<KnownEventGroup> {
+    let wanted = group.as_bytes();
+    let mut index = 0;
+    while index < KNOWN_EVENT_GROUPS.len() {
+        let entry = KNOWN_EVENT_GROUPS[index];
+        if bytes_equal(entry.group.as_bytes(), wanted) {
+            return Some(entry);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Byte-for-byte equality, lengths included; `==` is not const on the MSRV.
+const fn bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// Return the corpus-established group-dependent word count for an Event
 /// group.
 ///
@@ -99,11 +201,9 @@ pub struct EventPayload {
 /// spike groups, while `None` means no structural claim can yet be made.
 #[must_use]
 pub const fn known_event_word_count(group: &str) -> Option<usize> {
-    match group.as_bytes() {
-        b"characterDeath" => Some(2),
-        b"characterUltimateUsed" | b"roundStarted" | b"switchTeams" => Some(1),
-        b"spikePlanted" | b"spikeDefused" | b"spikeExploded" => Some(0),
-        _ => None,
+    match known_event_group(group) {
+        Some(entry) => Some(entry.word_count),
+        None => None,
     }
 }
 
@@ -114,15 +214,9 @@ pub const fn known_event_word_count(group: &str) -> Option<usize> {
 /// searchable column. The original bytes remain available in `raw_payload`.
 #[must_use]
 pub const fn known_event_payload_name(group: &str) -> Option<&'static str> {
-    match group.as_bytes() {
-        b"characterDeath" => Some("EReplayEventGroup::CharacterDeath"),
-        b"characterUltimateUsed" => Some("EReplayEventGroup::CharacterUltimateUsed"),
-        b"roundStarted" => Some("EReplayEventGroup::RoundStart"),
-        b"switchTeams" => Some("EReplayEventGroup::SwitchTeams"),
-        b"spikePlanted" => Some("EReplayEventGroup::SpikePlanted"),
-        b"spikeDefused" => Some("EReplayEventGroup::SpikeDefused"),
-        b"spikeExploded" => Some("EReplayEventGroup::SpikeExploded"),
-        _ => None,
+    match known_event_group(group) {
+        Some(entry) => Some(entry.payload_name),
+        None => None,
     }
 }
 
@@ -135,15 +229,9 @@ pub const fn known_event_payload_name(group: &str) -> Option<&'static str> {
 /// publishing a stale tag.
 #[must_use]
 pub const fn known_event_payload_tag(group: &str) -> Option<u32> {
-    match group.as_bytes() {
-        b"characterDeath" => Some(8),
-        b"characterUltimateUsed" => Some(11),
-        b"roundStarted" => Some(2),
-        b"switchTeams" => Some(3),
-        b"spikePlanted" => Some(4),
-        b"spikeDefused" => Some(5),
-        b"spikeExploded" => Some(6),
-        _ => None,
+    match known_event_group(group) {
+        Some(entry) => Some(entry.payload_tag),
+        None => None,
     }
 }
 

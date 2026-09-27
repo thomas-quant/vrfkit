@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use vrf_container::{
-    ChunkIterator, ChunkType, decompress_replay_data_with_trailing,
+    ChunkIterator, ChunkType, KNOWN_EVENT_GROUPS, decompress_replay_data_with_trailing,
     event_payload_seconds_matches_time, known_event_payload_name, known_event_payload_tag,
     known_event_word_count, parse_event_chunk, parse_event_payload, parse_preamble,
 };
@@ -77,17 +77,14 @@ struct KnownEventObservation {
     time1: u32,
 }
 
+/// The parser's own `&'static str` for a known group, so an observation never
+/// retains the wire string. Read from `KNOWN_EVENT_GROUPS` rather than a
+/// third hand-kept copy of the list.
 fn canonical_known_event_group(group: &str) -> Option<&'static str> {
-    match group.as_bytes() {
-        b"characterDeath" => Some("characterDeath"),
-        b"characterUltimateUsed" => Some("characterUltimateUsed"),
-        b"roundStarted" => Some("roundStarted"),
-        b"switchTeams" => Some("switchTeams"),
-        b"spikePlanted" => Some("spikePlanted"),
-        b"spikeDefused" => Some("spikeDefused"),
-        b"spikeExploded" => Some("spikeExploded"),
-        _ => None,
-    }
+    KNOWN_EVENT_GROUPS
+        .iter()
+        .find(|known| known.group == group)
+        .map(|known| known.group)
 }
 
 /// Parse one replay as far as the container layer goes, collecting problems
