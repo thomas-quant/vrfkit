@@ -21,10 +21,10 @@
     "event_layout_mismatches": 0,
     "event_payloads_decoded": 195,
     "event_payload_unknown_groups": 0,
-    "overlay_decoded_ok": 796920,
+    "overlay_decoded_ok": 803015,
     "overlay_decode_errors": 0,
     "overlay_raw_skip": 26507,
-    "overlay_not_in_table": 163534,
+    "overlay_not_in_table": 157439,
     "overlay_no_field_name": 2034,
     "overlay_rows_offered": 988995,
     "effect_blobs_decoded": 61617,
@@ -36,8 +36,8 @@
   "parquet": {
     "fields": {
       "rows": 1296660,
-      "bytes": 16455178,
-      "sha256": "b186a9b50b4f73f1c3a7d8482431732af5413420ba2ca9992c314bc61cb41b93"
+      "bytes": 16455960,
+      "sha256": "59a80ca069957925f13987cbe902c24470336b75a448fb3dfc2f7fe00d6f7fed"
     },
     "movement": {
       "rows": 1844147,

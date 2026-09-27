@@ -1555,6 +1555,108 @@ fn targeting_vectors_and_heal_causer_require_exact_scoped_checksums() {
     }
 }
 
+const HEAL_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal";
+const DECAY_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay";
+
+/// The heal and overheal-decay references, each typed by its exact
+/// group/name/checksum from `tools/fixtures/scoped_type_evidence.json`.
+///
+/// Scoped because the same parameter names carry other checksums on the damage
+/// RPCs (`MulticastNotifyDamage_Base` / `_Point`), which the descriptor types by
+/// name in their own groups -- a name rule would merge signatures the schema
+/// keeps apart. The negatives pin that boundary: no checksum, a neighbouring
+/// checksum, the exported `_ClassNetCache` spelling, or the sibling RPC types
+/// nothing. Production resolves through `with_handles`, so this does too.
+#[test]
+fn heal_and_decay_references_require_exact_scoped_checksums() {
+    const CNC: &str = "/Script/ShooterGame.DamageableComponent_ClassNetCache";
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
+        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
+    };
+    let cases = [
+        (HEAL_PARAMS, "EventInstigator", 3_087_885_251),
+        (HEAL_PARAMS, "EventInstigatorPawn", 3_901_949_544),
+        (DECAY_PARAMS, "EventInstigator", 3_087_885_251),
+        (DECAY_PARAMS, "EventInstigatorPawn", 3_901_949_544),
+        (DECAY_PARAMS, "DecayCauser", 3_648_603_088),
+    ];
+    for (group, field, checksum) in cases {
+        assert_eq!(
+            resolve(group, field, Some(checksum)),
+            Some(FieldType::ObjectNetGuid),
+            "{group} {field}"
+        );
+        for other in [None, Some(checksum ^ 1)] {
+            assert_eq!(
+                resolve(group, field, other),
+                None,
+                "{group} {field} {other:?}"
+            );
+        }
+        let (_, function) = group.split_once(':').expect("a parameter group");
+        let exported = format!("{function}.{field}");
+        assert_eq!(resolve(CNC, &exported, Some(checksum)), None, "{exported}");
+    }
+    // Each causer is declared on one RPC only.
+    assert_eq!(
+        resolve(HEAL_PARAMS, "DecayCauser", Some(3_648_603_088)),
+        None
+    );
+    assert_eq!(resolve(DECAY_PARAMS, "HealCauser", Some(546_618_027)), None);
+}
+
+/// The scoped references decode through the ordinary packed-NetGUID reader,
+/// with the payload consumed exactly.
+///
+/// The 24-bit window is the widest the 2026-09-28 audit saw on these
+/// parameters (50,360 = 56 + 9*128 + 3*16384, low-bit continuation). The
+/// single zero byte is the null reference: 39 `DecayCauser` rows in that audit
+/// are exactly `0x00`, and they decode to 0 -- Unreal's null NetGUID, the same
+/// value the damage-side references already export -- not to an actor.
+#[test]
+fn heal_and_decay_references_decode_packed_guids_exactly() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, field: &str, handle: u32, checksum: u32, raw: &[u8], bits| {
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some(field),
+            handle,
+            Some(checksum),
+            Some(raw),
+            bits,
+            &mut stats,
+        )
+        .expect("a scoped reference is attempted")
+        .value_i64
+    };
+    let pawn = apply(
+        HEAL_PARAMS,
+        "EventInstigatorPawn",
+        8,
+        3_901_949_544,
+        &[0x71, 0x13, 0x06],
+        24,
+    );
+    assert_eq!(pawn, Some(50_360));
+    let null = apply(DECAY_PARAMS, "DecayCauser", 9, 3_648_603_088, &[0x00], 8);
+    assert_eq!(null, Some(0));
+    // A byte the packed value never claims is a residual, not a value.
+    let residual = apply(
+        HEAL_PARAMS,
+        "EventInstigator",
+        7,
+        3_087_885_251,
+        &[0x71, 0x13, 0x06, 0x00],
+        32,
+    );
+    assert_eq!(residual, None);
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 1));
+}
+
 /// The life-change array walks into its four members, on real wire bytes.
 ///
 /// `docs/DATA.md`'s health section rests on these and nothing shipped could

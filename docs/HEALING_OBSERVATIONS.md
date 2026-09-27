@@ -39,9 +39,16 @@ check, not proof of the character's identity at the observation time or proof
 that a player should receive healing credit.
 
 The direct `EventInstigator` and `EventInstigatorPawn` fields are retained
-separately from the causer's replicated references. The former is an opaque
-packed reference candidate: its target type has not been established. A
-resolved pawn reference is corroborating evidence, not a player-credit rule.
+separately from the causer's replicated references. Both are typed packed
+NetGUIDs (see [typed direct references](#typed-direct-references-2026-09-28)).
+`EventInstigatorPawn` names a character pawn that is open in the same export.
+`EventInstigator` names that pawn's **PlayerController**: it equals the pawn's
+replicated `Controller` and `Owner`, and in the 2026-09-28 corpus audit it
+never resolved to an opened actor or a `net_guids` path -- the replay does not
+open the controller as an actor. A failed join from `EventInstigator` to
+`actors.parquet` is therefore expected and is not a decode fault; join it
+through the pawn's `Controller` or `Owner` instead. A resolved pawn reference is corroborating evidence, not a
+player-credit rule.
 
 ## Output and validation behavior
 
@@ -69,6 +76,15 @@ and after extraction. Raw/typed integrity violations fail before replacing the
 output. A successful JSON write is atomic, and output paths cannot alias an
 input or implementation file. Unsupported or incomplete observed amounts
 remain as labelled records instead of silently becoming zero.
+
+Each of the three direct source edges (`HealCauser`, `EventInstigator`,
+`EventInstigatorPawn`) must carry a typed `value_i64` equal to its raw packed
+window. An export written by a parser that predates this typing therefore
+fails with `untyped reference` instead of quietly downgrading those edges;
+re-export the replay with the current parser. `counts.source_edge_status`
+tallies every edge status for the three edges, zeros included, because an
+`invalid` edge (for example a malformed reference window) keeps its amount
+validated and adds no ambiguity reason.
 
 ## Research baseline
 
@@ -127,3 +143,25 @@ accepted corpus. The final run preserves all 40 affected amount observations.
 
 This tool derives a view from already parsed values. It does not increase the
 parser's physical typed-row percentage or establish complete gameplay meaning.
+
+## Typed direct references (2026-09-28)
+
+The research and production runs above predate this change: they read
+`EventInstigator` and `EventInstigatorPawn` as untyped raw windows. Both are
+now typed `ObjectNetGuid` by exact group/name/checksum entries in
+[`scoped_type_evidence.json`](../tools/fixtures/scoped_type_evidence.json),
+which also records the corpus evidence (1,018 exports, 21 builds, 2,115,008
+rows per field, every payload consumed exactly by two independent readers).
+The extractor was changed in the same commit to require and cross-check the
+typed values. The previous extractor, run on a typed export, still exited 0
+but marked every such edge `invalid` with no counter moving; on the 13.01
+reference export that was 1,894 `EventInstigator` and 1,894
+`EventInstigatorPawn` edges.
+
+Measured on three fresh exports (13.01 `02d4d478`, one 13.05 and one 13.06
+replay) with the new parser and extractor: 7,711 observations, all amounts
+validated, zero ambiguous groups. Every observation that carries the direct
+references has all three edges `present` (7,653); the other 58 carry none of
+them and report `absent`. `counts.source_edge_status` reports zero `invalid`,
+`null` and `duplicate` edges. The same extractor on the older, untyped export
+of `02d4d478` exits 1.

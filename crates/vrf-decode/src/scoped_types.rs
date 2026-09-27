@@ -5,7 +5,7 @@
 use crate::decode::FieldType;
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 28] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 33] = [
     (
         "B",
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -143,6 +143,36 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 28] = [
         "/Script/ShooterGame.MapTargetingStateComponent",
         3280594315,
         FieldType::VectorDouble,
+    ),
+    (
+        "DecayCauser",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+        3648603088,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "EventInstigator",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+        3087885251,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "EventInstigator",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+        3087885251,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "EventInstigatorPawn",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+        3901949544,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "EventInstigatorPawn",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+        3901949544,
+        FieldType::ObjectNetGuid,
     ),
     (
         "HealCauser",

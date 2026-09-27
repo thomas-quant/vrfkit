@@ -200,11 +200,11 @@ member and handle by name.
 #### Reading the `Typed` ratio
 
 ```
-  Typed:            80.6% (properties + RPC parameters)
+  Typed:            81.2% (properties + RPC parameters)
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 796,920 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 803,015 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -223,7 +223,7 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 | |
+| `fields.parquet` | 1,296,660 | 16,455,960 | |
 | `movement.parquet` | 1,844,147 | 31,886,449 | |
 | `actors.parquet` | 3,827 | 87,281 | |
 | `net_guids.parquet` | 16,167 | 153,606 | |
@@ -260,8 +260,12 @@ Replicated properties and RPC parameters.
 | `raw_bits` | bytes? | Raw payload |
 | `value_i64` / `value_f64` / `value_bool` / `value_str` | | Only when the type is known |
 
-Qualified map cursor/click vectors use `(x,y,z)` in `value_str`, and HealCauser
-references use `value_i64`. Multi-click vectors appear as additive indexed
+Qualified map cursor/click vectors use `(x,y,z)` in `value_str`. The heal and
+overheal-decay references (`HealCauser`, `DecayCauser`, and both RPCs'
+`EventInstigator` and `EventInstigatorPawn`) use `value_i64`. A `DecayCauser`
+of 0 is the null NetGUID -- no causer -- not an actor. `EventInstigator` is a
+PlayerController reference that never joins to `actors.parquet`; that is
+expected, not a decode fault. Multi-click vectors appear as additive indexed
 children immediately before their raw parent. Their inner declaration handle
 differs from the exported enclosing function handle. See
 [TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) for exact routes,
@@ -874,8 +878,13 @@ meaning. Use it before adding overlay types and when comparing their emitted
 values after export (`--compare-typed`). The shipped `tools/fixtures/type_evidence.json`
 covers the 38 additions; `tools/fixtures/type_evidence_aliases.json` separately
 covers their existing Swiftplay class-alias propagation. Both were checked on
-all corresponding observed rows in the 714-replay corpus. A specimen must not
-be promoted to gameplay semantics just because this primitive check passes.
+all corresponding observed rows in the 714-replay corpus.
+`tools/fixtures/type_evidence_scoped.json` holds checksum-scoped
+specifications for the scoped types added on 2026-09-28, in their exported
+spelling (`_ClassNetCache` group and function-qualified name for RPC
+parameters). Every identity in it must be observed, so run it on a set of
+exports that contains each one. A specimen must not be promoted to gameplay
+semantics just because this primitive check passes.
 
 `validate_ability_array_evidence.py <export-directory> [...] --compare-typed
 --require-routes` checks the measured `ActiveBlinds` and
@@ -1008,12 +1017,12 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 714 passing
+cargo +1.86.0 test --workspace --locked                              # 716 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 910 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 914 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
@@ -1221,7 +1230,7 @@ live in `%LOCALAPPDATA%\vrfkit\baseline-corpora`.
 
 ## 8. Known limits
 
-- **Untyped residual** -- the [`export`](#export) `Typed` is ~80.6% (denominator
+- **Untyped residual** -- the [`export`](#export) `Typed` is ~81.2% (denominator
   including RPC parameters). **Untyped != lost** (`raw_bits` preserved). Typing
   the rest needs the game binary or UE headers -- this is not a table-editing
   problem (archive/PROJECT_STATUS.md section 24).

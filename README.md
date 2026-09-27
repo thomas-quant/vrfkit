@@ -18,8 +18,8 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
-**Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
-**910 passing** tests. All 24 supported builds received the same verification
+**Verified state:** Rust has **716 passing** tests; Python has
+**914 passing** tests. On 2026-09-25 all 24 supported builds received the same verification
 on **986 unique replays**; all **986** meet every strict criterion after fixing
 the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
@@ -134,7 +134,7 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
-- **714 Rust tests** plus a layered validation suite (framing / bytes / decode
+- **716 Rust tests** plus a layered validation suite (framing / bytes / decode
   errors / semantics).
 
 ## Table of contents
@@ -188,7 +188,7 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 |
+| `fields.parquet` | 1,296,660 | 16,455,960 |
 | `movement.parquet` | 1,844,147 | 31,886,449 |
 | `actors.parquet` | 3,827 | 87,281 |
 | `net_guids.parquet` | 16,167 | 153,606 |
@@ -379,7 +379,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**714 passing**; the full Python suite also has **910 passing** tests. The
+**716 passing**; the full Python suite also has **914 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
@@ -748,13 +748,13 @@ committed export baseline `tools/baselines/export_02d4d478.json` after the
 partial-header and shot-array corrections:
 
 ```
-Decoded OK:   796,920      Decode errors:      0
-Raw/Skip:      26,507      Not in table: 163,534
-No field name:  2,034      Typed:          80.6%
+Decoded OK:   803,015      Decode errors:      0
+Raw/Skip:      26,507      Not in table: 157,439
+No field name:  2,034      Typed:          81.2%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (796,920 + 26,507 + 163,534 +
+The four buckets partition `Rows offered` exactly (803,015 + 26,507 + 157,439 +
 2,034 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
@@ -775,7 +775,7 @@ Physical value coverage is the fraction of `fields.parquet` rows with at
 least one non-null `value_*` column. It cannot be computed by adding overlay,
 effect-blob or struct counters: these count different units and may describe
 parent/child expansions of the same input. The current reference
-baseline has 914,117 typed rows out of 1,296,660 (70.50%), measured directly
+baseline has 920,212 typed rows out of 1,296,660 (70.97%), measured directly
 from its columns.
 Adding raw child windows changes this denominator even when every old typed
 value survives; compare raw preservation and newly typed values separately.
@@ -1002,7 +1002,7 @@ that way is a trap:
   rows cannot yet be split into named properties. `Malformed framing`,
   `Transform failed`, and `RPC payload lost` must remain zero; a non-zero
   `RPC unresolved/raw` count describes preserved, uninterpreted data.
-- The **~80.6% `Typed`** ratio reads low because of the *RPC-parameter
+- The **~81.2% `Typed`** ratio reads low because of the *RPC-parameter
   denominator* -- most of `Not in table` is RPC parameters with no C#
   descriptor. A low ratio is uninterpreted, not lost: those rows still carry
   `raw_bits`, and additive decoders (effects, structs, the economy typing)

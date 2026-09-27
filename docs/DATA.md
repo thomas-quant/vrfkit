@@ -22,8 +22,9 @@ The subsequent ActiveBlinds fix restores 522 typed children in the current
 986-replay corpus, including explicit zero CausingActor references; it retains
 every prior field row and raw payload. See the [resolved findings](BUILD_VERIFICATION.md#resolved-findings).
 RequestedIgnoreActors, TransitionContext and the measured HawkFlash velocity now expose typed reference/vector values.
-Qualified HealCauser actor references and map-targeting cursor/click vectors
-also expose values. Multi-click arrays retain raw parents and add vector children.
+Qualified heal and overheal-decay references (HealCauser, DecayCauser and both
+RPCs' EventInstigator and EventInstigatorPawn) and map-targeting cursor/click
+vectors also expose values. Multi-click arrays retain raw parents and add vector children.
 Qualified reward names now retain complete text histories, string-table keys and format arguments. [KillData observations](KILL_OBSERVATIONS.md) preserve partial updates and scoped references.
 
 The [kill ledger](KILL_LEDGER.md) combines component-local KillData base/revision
@@ -112,6 +113,7 @@ requires corroborating credit changes; state rows alone are not that ledger.
 | Damage source (weapon, location, bone) | `MulticastNotifyDamage` (EquippableUsed, ImpactLocation, ImpactBone) | ✅ |
 | ADR | derived from CombatReport | ◐ +0.1–0.2 vs trackers (wire damage is fractional; not a bug) |
 | Health / armour / overheal, absolute | `DamageableComponent` RPCs → `LifeChangeEvents[]` / `LifeChangeBySection[]` | ✅ typed section updates; actor/section timelines require joins, see below |
+| Heal / overheal-decay source references | `MulticastNotifyHeal` `HealCauser`, `EventInstigator`, `EventInstigatorPawn`; `MulticastNotifyOverhealDecay` `DecayCauser`, `EventInstigator`, `EventInstigatorPawn` | ✅ `ObjectNetGuid` by exact group/name/checksum. `EventInstigator` is the instigator's PlayerController: it never joins to `actors.parquet` (join through the pawn's `Controller`/`Owner`), and that is expected, not a decode fault. `DecayCauser` = 0 means no causer. No heal credit is implied; see [TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) |
 
 **The historical "vs C#" figures here were measured on build 13.01 or earlier.**
 They describe the preserved comparison fixtures, not current upstream parser
@@ -723,7 +725,7 @@ errors still 0. Corpus-wide at the time, 215/215 replays with decode errors 0.
 
 Those are the deltas that change produced, not current totals. Later work moved
 both ends: `tools/baselines/export_02d4d478.json` pins today's figures
-(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 796,920`). Read this
+(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 803,015`). Read this
 paragraph as a dated before/after, which is what it was written as.
 
 **This is the one thing here that a game patch can silently invalidate.** A

@@ -1,0 +1,32 @@
+[
+ {
+  "group": "/Script/ShooterGame.DamageableComponent_ClassNetCache",
+  "field": "MulticastNotifyHeal.EventInstigator",
+  "checksum": 3087885251,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Script/ShooterGame.DamageableComponent_ClassNetCache",
+  "field": "MulticastNotifyHeal.EventInstigatorPawn",
+  "checksum": 3901949544,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Script/ShooterGame.DamageableComponent_ClassNetCache",
+  "field": "MulticastNotifyOverhealDecay.EventInstigator",
+  "checksum": 3087885251,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Script/ShooterGame.DamageableComponent_ClassNetCache",
+  "field": "MulticastNotifyOverhealDecay.EventInstigatorPawn",
+  "checksum": 3901949544,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Script/ShooterGame.DamageableComponent_ClassNetCache",
+  "field": "MulticastNotifyOverhealDecay.DecayCauser",
+  "checksum": 3648603088,
+  "type": "ObjectNetGuid"
+ }
+]
