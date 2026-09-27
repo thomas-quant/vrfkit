@@ -1,6 +1,6 @@
 //! The streaming writer every table shares.
 //!
-//! All five tables have the same shape: buffer rows, convert a batch of them to
+//! Every table has the same shape: buffer rows, convert a batch of them to
 //! Arrow when the buffer fills, finalise on `finish`. Only three things differ
 //! -- the Arrow schema, the columns worth dictionary-encoding, and how a slice
 //! of rows becomes a `RecordBatch`. Those three are the [`Table`] trait;

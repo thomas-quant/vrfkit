@@ -178,8 +178,10 @@ vrfkit export replay.vrf --out out/ --checkpoints
 `checkpoint_guid_entries.parquet`, `checkpoint_export_groups.parquet`, and
 `checkpoint_export_fields.parquet`.
 It is off by default because it is a separate pass
-that reads roughly 10% more of the file, and **with or without it, the other
-five tables are byte-for-byte identical.**
+that reads roughly 10% more of the file, and **with or without it, the five
+original tables (`fields`, `movement`, `actors`, `net_guids`, `events`) are
+byte-for-byte identical.** `partials.parquet` is shared by both passes: any
+checkpoint partial rejections land there too, distinguished by `source`.
 
 #### Lines to actually watch in the summary
 
