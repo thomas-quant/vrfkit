@@ -174,6 +174,16 @@ class AdditionsTests(unittest.TestCase):
         resolve to `EffectManager`, whose outer is the holder's pawn -- and
         equals the weapon's typed Instigator at that time on 3,111,803.
 
+        127 -> 132 is the rest of `NetMulticastApplyForceModule` beside the
+        already-typed HandleNumber/SourceLocation: RespawnNumber, NetTimestamp,
+        ModuleType, Module, Character -- 665,519 calls each. Each checks out
+        against something outside itself: RespawnNumber against the typed
+        AresInventory counter, NetTimestamp against two typed clocks, Module
+        by resolving to ForceModule classes, Character by equalling the row's
+        own actor GUID, and ModuleType by agreeing with the Remove RPC on
+        every paired row. Remove's ModuleType is not an addition: it follows
+        through the checksum table, like HandleNumber does.
+
         63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
         for being a wrong `FString`; it is back because a decoder now exists
         and the reason given for waiting was itself wrong -- `Statistic` was
@@ -210,7 +220,7 @@ class AdditionsTests(unittest.TestCase):
         2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
         reaches a real declaration and the guessed name is gone.
         """
-        self.assertEqual(len(atc.ADDITIONS), 127, atc.ADDITIONS)
+        self.assertEqual(len(atc.ADDITIONS), 132, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
         """Same guardrail for the handle -> name additions.

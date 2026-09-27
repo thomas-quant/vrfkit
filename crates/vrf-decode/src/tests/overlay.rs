@@ -1377,6 +1377,65 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
     );
 }
 
+/// The rest of `NetMulticastApplyForceModule`'s parameters, and the one
+/// `NetMulticastRemoveForceModule` parameter that only the checksum reaches.
+///
+/// Measured over the 1,018-replay audit (665,519 Apply rows, all main
+/// stream): `RespawnNumber` is 32 bits reading 0..38 and equals the same
+/// character's typed `AresInventory.RespawnNumber` on 665,363 of 665,370
+/// comparable rows; `NetTimestamp` is 32 bits of finite f32 on the 1/128 s
+/// tick grid; `ModuleType` is 3 bits reading {0, 2}; `Module` and `Character`
+/// are IntPacked GUIDs -- every `Module` resolves to a `ForceModule_*` class
+/// and every `Character` equals the row's own actor GUID.
+///
+/// `ModuleType` is declared once, on Apply. Remove carries the same property
+/// (checksum 3263282135) with no entry of its own, so its 2,743,504 rows are
+/// typed only if the regenerated checksum table learned the Apply donor --
+/// the same route `HandleNumber` takes above. Paired by (object, handle),
+/// Remove and Apply agree on 647,381 of 647,381 rows.
+#[test]
+fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() {
+    const APPLY: &str =
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
+    const REMOVE: &str =
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule";
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    for (field, expected) in [
+        ("RespawnNumber", FieldType::Int32),
+        ("NetTimestamp", FieldType::Float),
+        ("ModuleType", FieldType::EnumByte),
+        ("Module", FieldType::ObjectNetGuid),
+        ("Character", FieldType::ObjectNetGuid),
+    ] {
+        assert_eq!(table.lookup(APPLY, field), Some(expected), "Apply {field}");
+    }
+    assert_eq!(lookup_checksum(3263282135), Some(FieldType::EnumByte));
+    assert_eq!(
+        table.lookup(REMOVE, "ModuleType"),
+        None,
+        "typed by checksum, not by name"
+    );
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            REMOVE,
+            Some("ModuleType"),
+            None,
+            Some(3263282135)
+        ),
+        Some(FieldType::EnumByte),
+    );
+    // The component's own `RespawnNumber` property (checksum 3044239005) is a
+    // different property on a different group; the RPC entry does not reach it.
+    assert_eq!(
+        table.lookup(
+            "/Script/ShooterGame.ForceModuleManagerComponent",
+            "RespawnNumber"
+        ),
+        None
+    );
+}
+
 /// Which named area of the map a player is standing in -- "A Site", "Mid",
 /// "Heaven", the callouts the game itself announces.
 ///

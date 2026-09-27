@@ -618,6 +618,76 @@ ADDITIONS = [
     # `ForceModule`.
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
      "HandleNumber", "FieldType::Int32"),
+    # The other five `NetMulticastApplyForceModule` parameters. Descriptor-silent;
+    # measured 2026-09-28 over the 1,018 replays audited at 259ed10. The RPC
+    # occurs in 1,015 of them (not in the single 12.10, 12.11 and 13.00 files),
+    # 665,519 calls, every row in the main stream: checkpoint_fields carries no
+    # row of this RPC although checkpoint_export_fields declares it. Each
+    # checksum below is declared by this one parameter and no other property,
+    # and one width holds on every build that has rows. Handles quoted in the
+    # evidence are the manifest's PARAMETER handles; every exported row carries
+    # the ClassNetCache function slot, 1 for Apply.
+    #
+    # `RespawnNumber` (3960441757): 32 bits, little-endian i32 0..38, none
+    # negative. Cross-check against a typed field: it equals the same
+    # character's latest typed `AresInventory.RespawnNumber` (paired through
+    # this RPC's `Character` and the inventory's `Character`) on 665,363 of
+    # 665,370 comparable rows; 4 of the 7 others come after the export's last
+    # inventory row, 3 before its first. Int32 rather than UInt32 follows the
+    # Int32 declarations of the same-named AresInventory and DamageParameters
+    # siblings; 0..38 cannot settle the sign. NOT the component's own
+    # `ForceModuleManagerComponent.RespawnNumber` property (checksum 3044239005,
+    # declared in 554 manifests, never carrying a row), which is a different
+    # group key this entry cannot reach -- do not merge them.
+    #
+    # `NetTimestamp` (259706372): 32 bits of finite f32, 0.0..252.703125, 8,285
+    # exact zeros that are real 0x00000000 payloads; 8,622 of the 657,234
+    # non-zero values are off the 1/128 s tick grid. Two separately typed
+    # clocks agree with it: the character's AresInventory.NetTimestamp (residual
+    # under 0.1 s on 645,350 of 648,553 comparable rows) and the
+    # MulticastNotifyDamage_{Point,Base}.NetTimestamp on the same actor (under
+    # 0.05 s on 5,500 of 5,548 in a 7-export sample). The epoch is per actor /
+    # per life, NOT replay time: do not subtract it from time_ms.
+    #
+    # `ModuleType` (3263282135): 3 bits on every row, values {0, 2} (656,897 /
+    # 8,622); read LSB-first over the payload width as decode_byte does. What
+    # settles it is outside the field: every one of the 39 module class names
+    # maps to one type on unambiguously paired rows (2 is exactly the six
+    # displacement modules -- Clay knockbacks, Breach X knock-up, the two
+    # repel-other-character modules), and the same property on
+    # NetMulticastRemoveForceModule agrees with the paired Apply on 647,381 of
+    # 647,381 rows. That is what the ZoomMultiplier "wire count alone" refusal
+    # above lacked. Remove has no entry of its own and is typed by this donor
+    # through checksum_table.rs; its value 1 (2,081,004 rows, never on Apply,
+    # never paired) has no established meaning. Upstream's descriptor delta
+    # names Remove.ModuleType EnumRemainingBits: if that is ever vendored, the
+    # donors disagree, the checksum is dropped, and Remove goes raw again unless
+    # it gets its own entry. Enum names are unknown; only the integer is typed.
+    #
+    # `Module` (739992589): 16 bits, IntPacked, every row odd (a static GUID)
+    # and every one resolving in the same export's net_guids to a
+    # `ForceModule_*` / `DeathForceModule_*` / `FM_*` class (39 short names, 43
+    # class/package pairs; ForceModule_Tag_Heavy_C 425,735,
+    # DeathForceModule_C 142,089, ...) -- a TSubclassOf reference no other type
+    # could name.
+    #
+    # `Character` (1346692128): 16/24 bits, IntPacked, every row even (dynamic).
+    # net_guids resolves 0 of them -- dynamic actors are not registered there --
+    # but actors.parquet opens resolve all 665,519, to 43 character/pawn
+    # classes, and the value equals the row's own actor_net_guid (read from the
+    # channel header, independent of the payload) on every row. Redundant, and
+    # therefore self-checking. Join it through actors.parquet or
+    # actor_net_guid, not net_guids.
+    ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+     "RespawnNumber", "FieldType::Int32"),
+    ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+     "NetTimestamp", "FieldType::Float"),
+    ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+     "ModuleType", "FieldType::EnumByte"),
+    ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+     "Module", "FieldType::ObjectNetGuid"),
+    ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+     "Character", "FieldType::ObjectNetGuid"),
     # Which named area of the map a player is standing in -- "A Site", "Mid",
     # "Heaven" and so on, the same callouts the game announces. The group only
     # became reachable when the `CalloutRegionTracker` leaf was remapped, and

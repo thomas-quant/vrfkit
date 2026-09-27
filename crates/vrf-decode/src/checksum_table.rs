@@ -13,7 +13,7 @@
 use crate::decode::FieldType;
 
 /// Sorted by checksum; binary-searched by `lookup_checksum`.
-pub static CHECKSUM_TYPES: [(u32, FieldType); 446] = [
+pub static CHECKSUM_TYPES: [(u32, FieldType); 451] = [
     (5646457, FieldType::Float),
     (6302035, FieldType::EnumByte),
     (24357661, FieldType::ObjectNetGuid),
@@ -42,6 +42,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 446] = [
     (244888268, FieldType::Float),
     (256783480, FieldType::Int32),
     (257269800, FieldType::Float),
+    (259706372, FieldType::Float),
     (269137466, FieldType::Bool),
     (308487878, FieldType::Float),
     (315871828, FieldType::Float),
@@ -92,6 +93,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 446] = [
     (731914358, FieldType::Float),
     (732368061, FieldType::Bool),
     (739601100, FieldType::FString),
+    (739992589, FieldType::ObjectNetGuid),
     (747197698, FieldType::VectorDouble),
     (813917227, FieldType::Bool),
     (821289304, FieldType::ObjectNetGuid),
@@ -137,6 +139,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 446] = [
     (1329007843, FieldType::Float),
     (1335589074, FieldType::ObjectNetGuid),
     (1337472711, FieldType::FName),
+    (1346692128, FieldType::ObjectNetGuid),
     (1349831807, FieldType::ObjectNetGuid),
     (1358815924, FieldType::Float),
     (1364725577, FieldType::Bool),
@@ -355,6 +358,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 446] = [
     (3245353210, FieldType::Float),
     (3250755477, FieldType::ObjectNetGuid),
     (3251028568, FieldType::Float),
+    (3263282135, FieldType::EnumByte),
     (3269787121, FieldType::ObjectNetGuid),
     (3273043072, FieldType::Float),
     (3277153980, FieldType::Float),
@@ -423,6 +427,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 446] = [
     (3899377067, FieldType::FString),
     (3909815348, FieldType::Float),
     (3954716686, FieldType::EnumByte),
+    (3960441757, FieldType::Int32),
     (3964024390, FieldType::ObjectNetGuid),
     (3974878511, FieldType::Int32),
     (3979845188, FieldType::ObjectNetGuid),

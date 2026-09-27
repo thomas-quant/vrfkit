@@ -124,5 +124,11 @@
   {"group":"/Game/Equippables/Guns/SniperRifles/Leversniper/LeverSniperRifle.LeverSniperRifle_C_ClassNetCache","field":"MulticastPlayOneShotEffectFromClient.EffectManagerComponent","type":"ObjectNetGuid","checksum":1051633025},
   {"group":"/Game/Equippables/Guns/SubMachineGuns/MP5/SubMachineGun_MP5.SubMachineGun_MP5_C_ClassNetCache","field":"MulticastPlayContinuousEffectFromClient.EffectManagerComponent","type":"ObjectNetGuid","checksum":1051633025},
   {"group":"/Game/Equippables/Guns/SubMachineGuns/MP5/SubMachineGun_MP5.SubMachineGun_MP5_C_ClassNetCache","field":"MulticastPlayOneShotEffectFromClient.EffectManagerComponent","type":"ObjectNetGuid","checksum":1051633025},
-  {"group":"/Game/Equippables/Guns/SubMachineGuns/Vector/Vector.Vector_C_ClassNetCache","field":"MulticastPlayContinuousEffectFromClient.EffectManagerComponent","type":"ObjectNetGuid","checksum":1051633025}
+  {"group":"/Game/Equippables/Guns/SubMachineGuns/Vector/Vector.Vector_C_ClassNetCache","field":"MulticastPlayContinuousEffectFromClient.EffectManagerComponent","type":"ObjectNetGuid","checksum":1051633025},
+  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.RespawnNumber","type":"Int32","checksum":3960441757},
+  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.NetTimestamp","type":"Float","checksum":259706372},
+  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.ModuleType","type":"EnumByte","checksum":3263282135},
+  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastRemoveForceModule.ModuleType","type":"EnumByte","checksum":3263282135},
+  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.Module","type":"ObjectNetGuid","checksum":739992589},
+  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.Character","type":"ObjectNetGuid","checksum":1346692128}
 ]
