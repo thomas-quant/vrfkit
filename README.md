@@ -18,10 +18,11 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
-**Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
+**Verified state (2026-09-28):** Rust has **714 passing** tests; Python has
 **910 passing** tests. All 24 supported builds received the same verification
-on **986 unique replays**; all **986** meet every strict criterion after fixing
-the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
+on **1,018 unique replays**; all **1,018** meet every strict criterion. The two
+ActiveBlinds decoding errors found by the first 2026-09-25 audit were fixed
+that day. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
 
 - Run it: [`docs/USAGE.md`](docs/USAGE.md)
@@ -56,7 +57,7 @@ can be represented by their rows instead of a duplicate raw RPC.
 
 | 🎮 Build | 🌿 Branch | ✅ Clean/checked | 🔎 Verified by |
 |---|---|---:|---|
-| **13.06** | `release-13.06` | 6/6 | Validation + checkpoints + typed/raw |
+| **13.06** | `release-13.06` | 38/38 | Validation + checkpoints + typed/raw |
 | **13.05** | `release-13.05` | 401/401 | Validation + checkpoints + typed/raw |
 | **13.04** | `release-13.04` | 108/108 | Validation + checkpoints + typed/raw |
 | **13.02** | `release-13.02` | 205/205 | Validation + checkpoints + typed/raw |
@@ -81,13 +82,14 @@ can be represented by their rows instead of a duplicate raw RPC.
 | **11.07** | `release-11.07` | 3/3 | Validation + checkpoints + typed/raw |
 | **11.06** | `release-11.06` | 3/3 | Validation + checkpoints + typed/raw |
 
-Measured 2026-09-25 on all **986 unique available replays**, across all 24
+Measured 2026-09-28 on all **1,018 unique available replays**, across all 24
 supported branches. Every row uses the [same acceptance rule](docs/BUILD_VERIFICATION.md).
 **Clean/checked** includes the strict array and array-leaf error counters:
-✅ **986/986** are clean after the ActiveBlinds empty-delta and null-reference
-fixes. All 986 pass ReplayData validation, checkpoint-enabled export and
-the independent comparisons on observed evidence fields. The full report
-records counts and limits; this is not a claim that every field is understood.
+✅ **1,018/1,018** are clean. All 1,018 pass ReplayData validation,
+checkpoint-enabled export and the independent comparisons on observed
+evidence fields. The full report records counts and limits, and what changed
+since the 986-replay audit of 2026-09-25; this is not a claim that every field
+is understood.
 
 All branches are `++Ares-Core+release-<build>`. Adding a build is one
 `SeededTransform` impl; see [Adding a new build](#supported-builds-and-the-cost-of-a-new-build).
@@ -599,13 +601,14 @@ original is always left intact in `raw_payload`.
 
 ## Whole-corpus robustness
 
-The 2026-09-25 [common audit](docs/BUILD_VERIFICATION.md) checks 986 unique
+The 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 1,018 unique
 replays across 24 builds. Every ReplayData validation and checkpoint export
-succeeds. Independent typed/raw comparisons match 12,917,904
-observed values. All 986 pass the strict quality gate. The two ActiveBlinds
-fixes resolve the earlier 81-file findings and recover 522 additional typed
-children; an independent before/after comparison verifies those values and
-preserves every existing field row and raw payload.
+succeeds. Independent typed/raw comparisons match 13,387,751
+observed values. All 1,018 pass the strict quality gate. On 2026-09-25, the
+two ActiveBlinds fixes resolved the earlier 81-file findings and recovered 522
+additional typed children in the 986-replay corpus; an independent
+before/after comparison verified those values and preserved every existing
+field row and raw payload.
 
 The measurements below describe earlier corpus revisions.
 
@@ -908,9 +911,10 @@ rows, 20,756 decoded struct blobs, 3,129,483 decoded checkpoint fields and
 1,872 decoded checkpoint blobs. The
 machine-local corpus can rotate; the reproducible transform oracle remains the
 88 mechanically extracted upstream golden vectors (11 staging boundaries per
-build, eight builds). The 13.06 implementation was also validated on six real
+build, eight builds). The 13.06 implementation was first validated on six real
 replays; [the upstream parity report](docs/UPSTREAM_PARITY.md) records the
-before/after comparisons and the limits of that sample.
+before/after comparisons and the limits of that sample. The 2026-09-28
+[common audit](docs/BUILD_VERIFICATION.md) checks 38 replays of 13.06.
 
 The sixteen recovered 11.06--12.09 builds add 1,264 native-machine-code
 vectors and a full 48-sample main/checkpoint validation; see the

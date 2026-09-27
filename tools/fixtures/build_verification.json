@@ -1,15 +1,15 @@
 {
   "provenance": {
-    "date_utc": "2026-09-25T03:12:19.073810+00:00",
-    "parser_commit": "91dc679ccdfa2e1ef5e7f241d1bdc4087b743016",
-    "parser_sources_sha256": "28310ef9d5b46e73a8a8704876dfad1b81e8f2d9692b25948c046826a703c0c7",
-    "exe_sha256": "21c75e916c965f5ee8425e370dff496e4326239dab2bd4153d43f6cd52fbd911",
-    "runner_sha256": "e9307b921009d7e918d8c3a7b099f7e9ed2132288ebe8c688af994a1aa708444",
+    "date_utc": "2026-09-27T17:54:20.996252+00:00",
+    "parser_commit": "259ed10c7e0c9d87c852f80fab7535d38d2e187f",
+    "parser_sources_sha256": "657714c3cfc3047c2f4bb35a7cd32aa2327fb26de195b75666d9c924e50a4326",
+    "exe_sha256": "d08b8d1887fea96312894781b6f8ffead17a97fe3aa0f2055b2a938299f68d93",
+    "runner_sha256": "6fe10e7dce626d9dd55c21f2550c8d01b6a19300e7a14a481b879ed8caf79240",
     "evidence_sha256": "bfbbe1ec3847b0ec1b80a3c1d33b23679c53c2f545168855d88dbafc53f8436b",
-    "discovered_paths": 1048,
-    "unique_replays": 986,
-    "duplicates": 62,
-    "corpus_sha256": "87f950f834d71adb64839612ce179faf193ea5c2838e8d37026315d7d57dc8b5"
+    "discovered_paths": 1074,
+    "unique_replays": 1018,
+    "duplicates": 56,
+    "corpus_sha256": "a9692eb8ae8a8c319493c4994681fa2460352a7205d0397415d6e6b66a4e28fc"
   },
   "executable_changed": false,
   "builds": {
@@ -3138,12 +3138,12 @@
       },
       "evidence_fields": {
         "/Game/Characters/Deadeye/Deadeye_PC.Deadeye_PC_C::ReplayLastTransformUpdateTimeStamp": 773733,
+        "/Game/Characters/Gumshoe/Gumshoe_PC.Gumshoe_PC_C::ReplayLastTransformUpdateTimeStamp": 299668,
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bFadeCrosshairWithFiringError": 17039,
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bShowMinError": 167668,
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bShowSpectatedPlayerCrosshair": 39669,
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bUsePrimaryCrosshairForADS": 33561,
         "/Script/ShooterGame.EquippableStateMachineComponent::TransitionContext": 1223701,
-        "/Game/Characters/Gumshoe/Gumshoe_PC.Gumshoe_PC_C::ReplayLastTransformUpdateTimeStamp": 299668,
         "/Game/Characters/Thorne/Thorne_PC.Thorne_PC_C::ReplayLastTransformUpdateTimeStamp": 208498
       },
       "tables": {
@@ -4608,12 +4608,12 @@
       "checkpoint_evidence": "observed"
     },
     "++Ares-Core+release-13.06": {
-      "replays": 6,
-      "passed": 6,
+      "replays": 38,
+      "passed": 38,
       "failed": 0,
       "counts": {
-        "oracle_passed_blocks": 3369205,
-        "oracle_scored_blocks": 3369205,
+        "oracle_passed_blocks": 25546790,
+        "oracle_scored_blocks": 25546790,
         "content_blocks_lost": 0,
         "event_trailing_bytes": 0,
         "replay_data_trailing_bytes": 0,
@@ -4625,18 +4625,18 @@
         "main_channel_reopens_while_open": 0,
         "main_channel_state_limit_failures": 0,
         "main_content_block_framing_failures": 0,
-        "main_content_blocks": 3369208,
+        "main_content_blocks": 25546824,
         "main_field_stream_failures": 0,
         "main_malformed_content_blocks": 0,
         "main_malformed_packets": 0,
         "main_partial_errors": 0,
         "main_partial_resource_limit_failures": 0,
-        "main_rpc_stream_failures": 25460,
-        "main_skipped_bits": 52488160,
+        "main_rpc_stream_failures": 209945,
+        "main_skipped_bits": 352107792,
         "main_transform_failures": 0,
         "main_unfinished_partial_bits": 0,
         "main_unfinished_partials": 0,
-        "main_unresolved_rpc_payloads_preserved": 25460,
+        "main_unresolved_rpc_payloads_preserved": 209945,
         "main_array_errors": 0,
         "main_array_implicit_terminations": 0,
         "main_array_leaf_decode_errors": 0,
@@ -4645,34 +4645,34 @@
         "main_array_unconsumed_root_bits": 0,
         "main_movement_rpc_errors": 0,
         "main_overlay_decoded_err": 0,
-        "main_overlay_decoded_ok": 4594076,
+        "main_overlay_decoded_ok": 34780131,
         "main_overlay_handle_conflicts_refused": 0,
-        "main_overlay_no_field_name": 23267,
-        "main_overlay_not_in_table": 964157,
-        "main_overlay_raw_or_skip": 169799,
-        "main_rpc_suffix_bits_dropped": 137957,
-        "main_struct_blobs_decoded": 1029,
+        "main_overlay_no_field_name": 183876,
+        "main_overlay_not_in_table": 7142196,
+        "main_overlay_raw_or_skip": 1256062,
+        "main_rpc_suffix_bits_dropped": 956331,
+        "main_struct_blobs_decoded": 7606,
         "main_struct_blobs_failed": 0,
         "main_truncated_rpcs": 0,
         "main_rpc_loss": 0,
-        "main_overlay_offered": 5751299,
+        "main_overlay_offered": 43362265,
         "checkpoint_actor_opens_missing_spawn": 0,
         "checkpoint_bunch_header_failures": 0,
         "checkpoint_channel_reopens_while_open": 0,
         "checkpoint_channel_state_limit_failures": 0,
         "checkpoint_content_block_framing_failures": 0,
-        "checkpoint_content_blocks": 126702,
+        "checkpoint_content_blocks": 919543,
         "checkpoint_field_stream_failures": 0,
         "checkpoint_malformed_content_blocks": 0,
         "checkpoint_malformed_packets": 0,
         "checkpoint_partial_errors": 0,
         "checkpoint_partial_resource_limit_failures": 0,
-        "checkpoint_rpc_stream_failures": 0,
-        "checkpoint_skipped_bits": 0,
+        "checkpoint_rpc_stream_failures": 65,
+        "checkpoint_skipped_bits": 9815,
         "checkpoint_transform_failures": 0,
         "checkpoint_unfinished_partial_bits": 0,
         "checkpoint_unfinished_partials": 0,
-        "checkpoint_unresolved_rpc_payloads_preserved": 0,
+        "checkpoint_unresolved_rpc_payloads_preserved": 65,
         "checkpoint_array_errors": 0,
         "checkpoint_array_implicit_terminations": 0,
         "checkpoint_array_leaf_decode_errors": 0,
@@ -4681,95 +4681,129 @@
         "checkpoint_array_unconsumed_root_bits": 0,
         "checkpoint_movement_rpc_errors": 0,
         "checkpoint_overlay_decoded_err": 0,
-        "checkpoint_overlay_decoded_ok": 362428,
+        "checkpoint_overlay_decoded_ok": 2644563,
         "checkpoint_overlay_handle_conflicts_refused": 0,
-        "checkpoint_overlay_no_field_name": 38864,
-        "checkpoint_overlay_not_in_table": 107086,
-        "checkpoint_overlay_raw_or_skip": 27196,
+        "checkpoint_overlay_no_field_name": 291921,
+        "checkpoint_overlay_not_in_table": 759405,
+        "checkpoint_overlay_raw_or_skip": 201117,
         "checkpoint_rpc_suffix_bits_dropped": 0,
-        "checkpoint_struct_blobs_decoded": 1023,
+        "checkpoint_struct_blobs_decoded": 7568,
         "checkpoint_struct_blobs_failed": 0,
         "checkpoint_truncated_rpcs": 0,
         "checkpoint_rpc_loss": 0,
-        "checkpoint_overlay_offered": 535574,
-        "checkpoint_chunks": 99,
-        "typed_values_compared": 77750,
+        "checkpoint_overlay_offered": 3897006,
+        "checkpoint_chunks": 726,
+        "typed_values_compared": 547597,
         "type_width_failures": 0,
         "typed_mismatches": 0
       },
       "evidence_fields": {
-        "/Game/Characters/Deadeye/Deadeye_PC.Deadeye_PC_C::ReplayLastTransformUpdateTimeStamp": 35967,
-        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bFadeCrosshairWithFiringError": 320,
-        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bShowMinError": 4200,
-        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bShowSpectatedPlayerCrosshair": 1007,
-        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bUsePrimaryCrosshairForADS": 786,
-        "/Script/ShooterGame.EquippableStateMachineComponent::TransitionContext": 33960,
-        "/Game/Characters/Thorne/Thorne_PC.Thorne_PC_C::ReplayLastTransformUpdateTimeStamp": 1510
+        "/Game/Characters/Deadeye/Deadeye_PC.Deadeye_PC_C::ReplayLastTransformUpdateTimeStamp": 194593,
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bFadeCrosshairWithFiringError": 2734,
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bShowMinError": 29512,
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bShowSpectatedPlayerCrosshair": 7234,
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C::bUsePrimaryCrosshairForADS": 5678,
+        "/Script/ShooterGame.EquippableStateMachineComponent::TransitionContext": 236804,
+        "/Game/Characters/Thorne/Thorne_PC.Thorne_PC_C::ReplayLastTransformUpdateTimeStamp": 43012,
+        "/Game/Characters/Gumshoe/Gumshoe_PC.Gumshoe_PC_C::ReplayLastTransformUpdateTimeStamp": 28030
       },
       "tables": {
         "fields": {
-          "rows": 7325754,
-          "bytes": 89817903
+          "rows": 55759185,
+          "bytes": 692779886
         },
         "movement": {
-          "rows": 9574925,
-          "bytes": 158028004
+          "rows": 74154608,
+          "bytes": 1246888029
         },
         "actors": {
-          "rows": 23538,
-          "bytes": 522913
+          "rows": 169074,
+          "bytes": 3742893
         },
         "net_guids": {
-          "rows": 110911,
-          "bytes": 1002139
+          "rows": 769442,
+          "bytes": 7113446
         },
         "events": {
-          "rows": 1152,
-          "bytes": 78943
+          "rows": 7940,
+          "bytes": 531927
         },
         "partials": {
           "rows": 0,
-          "bytes": 15030
+          "bytes": 95190
         },
         "checkpoint_fields": {
-          "rows": 1979016,
-          "bytes": 7382725
+          "rows": 15402239,
+          "bytes": 58253765
         },
         "checkpoint_actors": {
-          "rows": 19694,
-          "bytes": 174288
+          "rows": 134530,
+          "bytes": 1192690
         },
         "checkpoint_net_guids": {
-          "rows": 401908,
-          "bytes": 1407036
+          "rows": 3138668,
+          "bytes": 11238482
         },
         "checkpoint_blocks": {
-          "rows": 126702,
-          "bytes": 1066252
+          "rows": 919543,
+          "bytes": 7648556
         },
         "checkpoint_guid_entries": {
-          "rows": 401908,
-          "bytes": 4926477
+          "rows": 3138668,
+          "bytes": 40224858
         },
         "checkpoint_export_groups": {
-          "rows": 43608,
-          "bytes": 181096
+          "rows": 353764,
+          "bytes": 1424222
         },
         "checkpoint_export_fields": {
-          "rows": 264727,
-          "bytes": 1839551
+          "rows": 2132665,
+          "bytes": 14527773
         }
       },
       "input_sha256": [
+        "0534376c743fb663935a0568800f51dd5fcce9b1d7320d5069382b5ec3fdc2c8",
+        "0bfff4b5123878fb282f4fa4523c746817396d6e1a8f78edde499ca8fd77a411",
+        "1c5b047397f1e83fc24b4bf74573656288f943b851f118e00a0e655dcce18b33",
+        "2df1a7b0e4a1a93804386accdcb6ac3ef3b7f2187b19593ce42eae27cd30a186",
         "2e1f3dd73ad593862e5f6880303a78338cecf4ebbc29acea0920b48d1a13f03f",
+        "310d6e7cb57192548ba855c65be2b4fa0af0597f3cac0e2bd479d6d3c46e969d",
+        "4567aed853a38368083fdbad49fbd5b0b8aa9b7d1dda2401f0293016c61757df",
+        "46dc8d5bf937be7ffaa1b93ca5b9a40bfe633e0cc4c8693af2dd3d5daca04d0e",
+        "52377212ec2843b4be24df5a56dcf2e787753b821084310e69c8b6ac64fce5ce",
+        "52deb23ebfe61dbe58d6d1f9ea59a9f6498f5de3f5fd63336e5ac9d06cfa6d99",
         "5bb8fd540f9211614c34ba470143787daa6ce070382a22ee3dd6a2873472119f",
+        "60ede0ddf4eefbe043585da9aff17e60e18610ee5c8d1bbf14d99e3d4cb96837",
+        "6fe9d05c846fc5637899481cc9a73b6f4c3d15203579db43741be9e803d7f8db",
+        "7801e3e8b7691c94b11e36e07927760810ffe511dd8c10e8bf1055e0889d35d6",
+        "78e43e1c028329b4a454a462ea193ea56940c723fea083d37a58a861257c0892",
+        "7f7749393e88d302d000c795eb3e0e8004b9f8063506721afcea4b9c594cc424",
+        "8a2b1bf8c281181a52505defe8b392808a3235d02af4417cd83a61b5f6683811",
+        "8fb1a7f7dd0e7f9128be465b477132794a21b8caccbaa7bb50775590f6cf65b8",
         "931557f82aaa0cec80fd9e4f9879c73e31b8a895f15ffbac3442381cf3b62e88",
+        "a10793b08f70afd5aadd2cd63aefe8493fa503944ca851007b1c50184887e26f",
+        "a5f34e732a5edb5d2a9fca250fd0f00b326c5a031c1b5ac9fd941822279b2174",
         "a6cde392d02e28fb90a812ecdc0dba99f32d2ff85bcdd02b2fd6fe067de02d38",
+        "a7e64c216b4dae418ed979c2980d47aab7dc327e21e8ef7886e8697f2b363b8a",
+        "adb26bd054de31fac5e4160c9bb377fd9430775d0f5a56818e9ca3e372f4f099",
+        "b2eb58ed351fd54c4126b0aa4fc2803241ef5a71aeacc12dd29b821267d4e358",
+        "b3538f3af27744acdd045cf48dc6883fde5677057241c9136aa7298ab4d91c49",
         "c1607855b3f36d82bfd885c79a38be13dafd16227b8181d0f9542a520c282c2d",
-        "ec8d9b0e2c661383220e7d8045a2fb668806cc0d8bef4089f1a2f6522c330acf"
+        "c2e8acfd19a95945990639a8db2ad1d9ed4f368d1f99510ec0eb28c9453968db",
+        "c76f928c84d6d96c1432ff425d693a532d71d74e43e44ad00b70f2b422f477c5",
+        "d41fdbe138d9a3b96e2ffa772da9f51887e18557fec85948dfaafbd74b31b23d",
+        "d429d1fee2c2b4c3b6a8f7f168afcf5e24253005f67f46a6d296f5d83f044831",
+        "d5a2fbf4023bba02a33875732dfd225453da845cc75d493a13c1d2927de907fc",
+        "e02444e88b9b7da38fe38c515c15fecf605fb30c2d92017191c4e85339031b39",
+        "ec8d9b0e2c661383220e7d8045a2fb668806cc0d8bef4089f1a2f6522c330acf",
+        "fa745532ae2cc64a63e1f9be76fcfc08ce6e8196a8be958dc3fe8c7b5cbe3dc8",
+        "fa87eac34351d1920e88c0a2a51f86d5693824dfeea2970a5130c167eac63118",
+        "fdcd53e7dc68f7a6856eaf36afc54d49e9d95c062b7d692a9429ca32e68cd01b",
+        "ff1cafbc313851d19675e5458ecd43dea71fa8b8acd3661d9b0da62652924dc3"
       ],
       "checkpoint_evidence": "observed"
     }
   },
+  "build_errors": [],
   "failures": []
 }
