@@ -225,23 +225,25 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 | |
-| `movement.parquet` | 1,844,147 | 31,886,449 | |
-| `actors.parquet` | 3,827 | 87,281 | |
-| `net_guids.parquet` | 16,167 | 153,606 | |
-| `events.parquet` | 195 | 13,411 | |
+| `fields.parquet` | 1,296,660 | 12,680,657 | |
+| `movement.parquet` | 1,844,147 | 19,984,802 | |
+| `actors.parquet` | 3,827 | 68,243 | |
+| `net_guids.parquet` | 16,167 | 114,423 | |
+| `events.parquet` | 195 | 12,455 | |
 | `partials.parquet` | 0 | 2,505 | main-only; with checkpoints: 0 rows, 2,505 bytes |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 | requires `--checkpoints` |
-| `checkpoint_actors.parquet` | 3,014 | 27,118 | requires `--checkpoints` |
-| `checkpoint_net_guids.parquet` | 74,270 | 277,718 | requires `--checkpoints` |
-| `checkpoint_blocks.parquet` | 22,247 | 175,103 | requires `--checkpoints` |
-| `checkpoint_guid_entries.parquet` | 74,270 | 396,821 | requires `--checkpoints` |
-| `checkpoint_export_groups.parquet` | 8,307 | 22,627 | requires `--checkpoints` |
-| `checkpoint_export_fields.parquet` | 49,314 | 121,648 | requires `--checkpoints` |
+| `checkpoint_fields.parquet` | 352,089 | 1,183,936 | requires `--checkpoints` |
+| `checkpoint_actors.parquet` | 3,014 | 24,345 | requires `--checkpoints` |
+| `checkpoint_net_guids.parquet` | 74,270 | 175,916 | requires `--checkpoints` |
+| `checkpoint_blocks.parquet` | 22,247 | 112,704 | requires `--checkpoints` |
+| `checkpoint_guid_entries.parquet` | 74,270 | 651,660 | requires `--checkpoints` |
+| `checkpoint_export_groups.parquet` | 8,307 | 20,799 | requires `--checkpoints` |
+| `checkpoint_export_fields.parquet` | 49,314 | 241,210 | requires `--checkpoints` |
 | `manifest.json` | -- | ~660,030 | varies: it records `elapsed_ms` |
 
 Use [`bench_export.py`](#analysis-helpers) to measure runtime on your machine.
-String columns are dictionary-encoded + ZSTD.
+String columns are dictionary-encoded + ZSTD. Other columns are PLAIN + ZSTD
+unless a dictionary measured smaller for that column; the per-table lists and
+the measurement are in [PERFORMANCE_NOTES.md](PERFORMANCE_NOTES.md#dictionary-encoding-is-chosen-per-column).
 
 ### `fields.parquet`
 

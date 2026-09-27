@@ -39,7 +39,10 @@ impl Table for NetGuidsTable {
 
     const DEFAULT_ROW_GROUP_SIZE: usize = DEFAULT_NET_GUID_ROW_GROUP_SIZE;
 
-    // Paths repeat heavily: 175 GUIDs share "FiringState" in one match.
+    // Paths repeat heavily: 175 GUIDs share "FiringState" in one match. Listed
+    // as a string by rule; measured, it is close to even (dictionary/plain
+    // 0.98 over the 45-replay sample, smaller on 30 of 45). Not listed,
+    // smaller PLAIN on all 45: outer_net_guid 2.07, net_guid 1.74.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &["path"];
 
     fn schema() -> Arc<Schema> {

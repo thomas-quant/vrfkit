@@ -53,8 +53,28 @@ impl Table for MovementTable {
 
     const DEFAULT_ROW_GROUP_SIZE: usize = DEFAULT_MOVEMENT_ROW_GROUP_SIZE;
 
-    // Every column is a fixed-width number; there is nothing to dictionary.
-    const DICTIONARY_COLUMNS: &'static [&'static str] = &[];
+    // No strings here, so every entry is measured (dictionary/plain bytes over
+    // the 45-replay sample; see `Table::DICTIONARY_COLUMNS`). Listed, where the
+    // dictionary measured smaller: move_type 0.76, movement_state 0.80, vel_y
+    // 0.92, vel_x 0.93, vel_z 0.93, character_net_guid 0.95. Not listed,
+    // smaller PLAIN on all 45 replays: packet_id 5.19, time_ms 5.12, timestamp
+    // 3.81, pos_x 1.79, pos_y 1.79, yaw 1.44, pos_z 1.42, pitch 1.36. On the
+    // reference replay pos_x holds 153-163 K distinct values in every full
+    // 256 Ki-row group (~650 KB of dictionary, under the 1 MiB fallback
+    // limit), so it was written as 18-bit indices that hide the
+    // sample-to-sample locality ZSTD uses on the raw floats; vel_x has ~14 K.
+    //
+    // This list used to be empty with the comment "there is nothing to
+    // dictionary", while parquet-rs's default dictionary-encoded all 14
+    // columns. See `Table::DICTIONARY_COLUMNS`.
+    const DICTIONARY_COLUMNS: &'static [&'static str] = &[
+        "character_net_guid",
+        "vel_x",
+        "vel_y",
+        "vel_z",
+        "movement_state",
+        "move_type",
+    ];
 
     fn schema() -> Arc<Schema> {
         movement_schema_ref()

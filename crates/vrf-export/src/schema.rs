@@ -266,7 +266,9 @@ pub fn actors_schema() -> Schema {
         Field::new("packet_id", DataType::UInt32, false),
         Field::new("channel_index", DataType::UInt32, false),
         Field::new("actor_net_guid", DataType::UInt32, false),
-        // "open", "close", or "dormant" -- small cardinality, dictionary is overkill.
+        // "open", "close", or "dormant". Plain Utf8 in Arrow; the Parquet
+        // column is still dictionary-encoded, which measured smaller -- see
+        // `ActorsTable::DICTIONARY_COLUMNS`.
         Field::new("event", DataType::Utf8, false),
         // Nullable: class path may be unresolvable for some actors.
         Field::new(

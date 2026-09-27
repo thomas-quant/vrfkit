@@ -190,19 +190,19 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 |
-| `movement.parquet` | 1,844,147 | 31,886,449 |
-| `actors.parquet` | 3,827 | 87,281 |
-| `net_guids.parquet` | 16,167 | 153,606 |
-| `events.parquet` | 195 | 13,411 |
+| `fields.parquet` | 1,296,660 | 12,680,657 |
+| `movement.parquet` | 1,844,147 | 19,984,802 |
+| `actors.parquet` | 3,827 | 68,243 |
+| `net_guids.parquet` | 16,167 | 114,423 |
+| `events.parquet` | 195 | 12,455 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 |
-| `checkpoint_actors.parquet` | 3,014 | 27,118 |
-| `checkpoint_net_guids.parquet` | 74,270 | 277,718 |
-| `checkpoint_blocks.parquet` | 22,247 | 175,103 |
-| `checkpoint_guid_entries.parquet` | 74,270 | 396,821 |
-| `checkpoint_export_groups.parquet` | 8,307 | 22,627 |
-| `checkpoint_export_fields.parquet` | 49,314 | 121,648 |
+| `checkpoint_fields.parquet` | 352,089 | 1,183,936 |
+| `checkpoint_actors.parquet` | 3,014 | 24,345 |
+| `checkpoint_net_guids.parquet` | 74,270 | 175,916 |
+| `checkpoint_blocks.parquet` | 22,247 | 112,704 |
+| `checkpoint_guid_entries.parquet` | 74,270 | 651,660 |
+| `checkpoint_export_groups.parquet` | 8,307 | 20,799 |
+| `checkpoint_export_fields.parquet` | 49,314 | 241,210 |
 | `manifest.json` |  | ~660,030 |
 
 `checkpoint_fields.parquet` requires `--checkpoints`. The partials row above

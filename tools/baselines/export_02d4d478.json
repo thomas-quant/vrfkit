@@ -36,28 +36,28 @@
   "parquet": {
     "fields": {
       "rows": 1296660,
-      "bytes": 16455178,
-      "sha256": "b186a9b50b4f73f1c3a7d8482431732af5413420ba2ca9992c314bc61cb41b93"
+      "bytes": 12680657,
+      "sha256": "67649bc8f25c5f5ba8bd19e9badf6eb9060b36fc2d05284d247e00dab27b6bde"
     },
     "movement": {
       "rows": 1844147,
-      "bytes": 31886449,
-      "sha256": "97004059bfdcc3cee3d95f208f08b7fa855c013816d4496c52bab7b1e9f1ccfd"
+      "bytes": 19984802,
+      "sha256": "3f512fba743b98923dc7366686d5be387b9ae98a4282f0abe33878311048ecfc"
     },
     "actors": {
       "rows": 3827,
-      "bytes": 87281,
-      "sha256": "84076cf7ca398c957c3e67148d0622f72e809cb4e2157f66cd4f18b197e65d7b"
+      "bytes": 68243,
+      "sha256": "7ac509108455ec9eaa0fa87ac0aa896f8ccab4354a54e6e36d9a6bb16ab36f05"
     },
     "net_guids": {
       "rows": 16167,
-      "bytes": 153606,
-      "sha256": "501cabc678770431d0fec9c37c4e21ed06193bb93263313959e87865625bba0f"
+      "bytes": 114423,
+      "sha256": "77b64c48bf205dbc8c08626a22fd6ddb363f65808846f36148eaa607746bdf9a"
     },
     "events": {
       "rows": 195,
-      "bytes": 13411,
-      "sha256": "e3879e2aabfc83ecae48be30ef8056fc8ec10ee1dab50c3882dc2b72d0f12af2"
+      "bytes": 12455,
+      "sha256": "f4a628909f2be9d616bdb440a86183c68e619c00d7883830b66e2e081e31cb51"
     },
     "partials": {
       "rows": 0,

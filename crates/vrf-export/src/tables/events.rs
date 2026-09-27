@@ -42,9 +42,25 @@ impl Table for EventsTable {
 
     const DEFAULT_ROW_GROUP_SIZE: usize = DEFAULT_EVENT_ROW_GROUP_SIZE;
 
-    // ~7 distinct groups over the whole file; dictionary is nearly free. `id`
-    // and `metadata` are near-unique per row and stay plain Utf8.
-    const DICTIONARY_COLUMNS: &'static [&'static str] = &["group"];
+    // Dictionary/plain bytes over the 45-replay sample (see
+    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule: payload_name 0.51,
+    // group 0.60. `id` 1.07 and `metadata` 1.49 are near-unique per row and
+    // measured larger under a dictionary on all 45 replays; they stay listed
+    // for the every-string-column rule (the table is ~200 rows per match).
+    // Their Arrow type is plain Utf8 either way; that is the schema, not the
+    // page encoding. Numbers listed: word1 0.74, payload_size 0.89, word0
+    // 0.89, payload_tag 0.91. Not listed, smaller PLAIN on all 45: time1 1.32,
+    // time2 1.32, payload_seconds 1.29, raw_payload 1.14.
+    const DICTIONARY_COLUMNS: &'static [&'static str] = &[
+        "id",
+        "group",
+        "metadata",
+        "payload_size",
+        "word0",
+        "word1",
+        "payload_tag",
+        "payload_name",
+    ];
 
     fn schema() -> Arc<Schema> {
         events_schema_ref()

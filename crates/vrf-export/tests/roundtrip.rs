@@ -5,6 +5,9 @@
 //! - Large writes (>1 row group) produce multiple row groups.
 //! - Binary column data is preserved exactly.
 //! - Dictionary-encoded columns round-trip correctly.
+//! - Every table's file carries a Parquet dictionary for exactly the columns
+//!   its `DICTIONARY_COLUMNS` lists (this module also needs the `partials`
+//!   and `checkpoint-context` features).
 //!
 //! Every test here exercises a writer, so the file is empty unless all five
 //! table features are on. That is the default; the gate exists so that
@@ -1237,5 +1240,414 @@ fn compatible_checksum_round_trips_with_its_nulls() {
         } else {
             assert!(checksum.is_null(i), "row {i} should be null");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary encoding is per column
+// ---------------------------------------------------------------------------
+
+/// The writers dictionary-encode exactly the columns each table lists in
+/// `Table::DICTIONARY_COLUMNS`, and nothing else.
+///
+/// The list was once applied over parquet-rs's default of dictionary-encoding
+/// every column, so it switched on what was already on and could not move a
+/// byte, while every table's comment read as though it decided the encoding.
+/// These tests read the written file's footer, not the list.
+///
+/// Gated on the two table features the file-level gate does not cover, so the
+/// rest of this file still builds with only the five main tables.
+#[cfg(all(feature = "partials", feature = "checkpoint-context"))]
+mod dictionary_encoding {
+    use super::*;
+
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use parquet::basic::Type as PhysicalType;
+    use vrf_export::{
+        ActorsTable, CheckpointActorRecord, CheckpointActorsTable, CheckpointBlockRecord,
+        CheckpointBlocksTable, CheckpointExportFieldRecord, CheckpointExportFieldsTable,
+        CheckpointExportGroupRecord, CheckpointExportGroupsTable, CheckpointFieldRecord,
+        CheckpointFieldsTable, CheckpointGuidEntriesTable, CheckpointGuidEntryRecord,
+        CheckpointIdentity, CheckpointNetGuidRecord, CheckpointNetGuidsTable, EventsTable,
+        FieldsTable, MovementTable, NetGuidsTable, PartialRecord, PartialsTable, Table,
+        TableWriter,
+    };
+
+    const ROWS: u32 = 8;
+
+    /// Write `rows` through the real writer and return every column whose
+    /// footer disagrees with `T::DICTIONARY_COLUMNS`.
+    ///
+    /// BOOLEAN columns are skipped: parquet-rs never gives them a dictionary,
+    /// and `dictionary_lists_name_real_columns_and_cover_every_string` rejects
+    /// one in a list. A column with no non-null value is reported rather than
+    /// checked, so a fixture that stops populating a column cannot make the
+    /// comparison depend on how an all-null chunk happens to be written.
+    fn footer_disagreements<T: Table>(table: &str, rows: Vec<T::Row>) -> Vec<String> {
+        let path = test_dir().join(format!("dictionary_encoding_{table}.parquet"));
+        {
+            let file = fs::File::create(&path).unwrap();
+            let mut writer = TableWriter::<T, fs::File>::new(file).unwrap();
+            writer.push_batch(rows).unwrap();
+            writer.finish().unwrap();
+        }
+        let reader = SerializedFileReader::new(fs::File::open(&path).unwrap()).unwrap();
+        let metadata = reader.metadata();
+        assert_eq!(
+            metadata.num_row_groups(),
+            1,
+            "{table}: one row group expected"
+        );
+
+        let expected_checked = T::schema()
+            .fields()
+            .iter()
+            .filter(|field| field.data_type() != &DataType::Boolean)
+            .count();
+        let mut problems = Vec::new();
+        let mut checked = 0;
+        for column in metadata.row_group(0).columns() {
+            let name = column.column_descr().name();
+            if column.column_type() == PhysicalType::BOOLEAN {
+                continue;
+            }
+            let nulls = column
+                .statistics()
+                .and_then(|stats| stats.null_count_opt())
+                .unwrap_or_else(|| panic!("{table}.{name}: the writer stopped writing statistics"));
+            if nulls >= column.num_values() as u64 {
+                problems.push(format!("{table}.{name}: the fixture has no non-null value"));
+                continue;
+            }
+            checked += 1;
+            let listed = T::DICTIONARY_COLUMNS.contains(&name);
+            let has_dictionary = column.dictionary_page_offset().is_some();
+            if listed != has_dictionary {
+                problems.push(format!(
+                    "{table}.{name}: DICTIONARY_COLUMNS {} it, but the file has {} dictionary page",
+                    if listed { "lists" } else { "omits" },
+                    if has_dictionary { "a" } else { "no" },
+                ));
+            }
+        }
+        if checked != expected_checked {
+            problems.push(format!(
+                "{table}: checked {checked} columns, the schema has {expected_checked} non-boolean"
+            ));
+        }
+        problems
+    }
+
+    fn identity(i: u32) -> CheckpointIdentity {
+        CheckpointIdentity {
+            checkpoint_index: i / 4,
+            checkpoint_id: Arc::from(format!("checkpoint-{}", i / 4)),
+        }
+    }
+
+    fn field_rows() -> Vec<FieldRecord> {
+        (0..ROWS)
+            .map(|i| FieldRecord {
+                // make_field_record never sets a checksum.
+                compatible_checksum: (i % 2 == 0).then_some(1_000 + i),
+                ..make_field_record(i)
+            })
+            .collect()
+    }
+
+    fn actor_rows() -> Vec<ActorRecord> {
+        (0..ROWS)
+            .map(|i| make_actor_record(i, i % 2 == 0))
+            .collect()
+    }
+
+    fn net_guid_rows() -> Vec<NetGuidRecord> {
+        (0..ROWS)
+            .map(|i| NetGuidRecord {
+                net_guid: 100 + i,
+                path: format!("Path_{}", i % 3),
+                outer_net_guid: (i % 2 == 0).then_some(i),
+            })
+            .collect()
+    }
+
+    fn event_rows() -> Vec<EventRecord> {
+        (0..ROWS)
+            .map(|i| EventRecord {
+                id: format!("event-{i}"),
+                group: format!("group{}", i % 2),
+                metadata: format!("meta{}", i % 3),
+                time1: 1_000 * i,
+                time2: 1_000 * i + 7,
+                payload_size: 4 * i as i32,
+                raw_payload: vec![i as u8; 4 * i as usize],
+                word0: (i % 2 == 0).then_some(i),
+                word1: (i % 3 == 0).then_some(i + 1),
+                payload_tag: (i % 2 == 1).then_some(2),
+                payload_name: (i % 2 == 1).then(|| format!("name{i}")),
+                payload_seconds: (i % 2 == 1).then_some(i as f32 * 0.5),
+            })
+            .collect()
+    }
+
+    fn partial_rows() -> Vec<PartialRecord> {
+        (0..ROWS)
+            .map(|i| PartialRecord {
+                source: if i % 2 == 0 { "main" } else { "checkpoint" },
+                checkpoint_id: (i % 2 == 1).then(|| format!("checkpoint-{i}")),
+                payload_kind: "current_fragment",
+                reason: "missing_initial",
+                source_packet_id: i as i32,
+                source_payload_bit_offset: 64 * i64::from(i),
+                rejection_packet_id: (i % 2 == 0).then_some(i as i32 + 1),
+                channel_index: i % 3,
+                channel_sequence: i as i32,
+                open: i % 2 == 0,
+                close: false,
+                dormant: false,
+                replication_paused: false,
+                reliable: true,
+                partial: true,
+                partial_initial: i == 0,
+                partial_final: i == ROWS - 1,
+                has_package_map_exports: false,
+                has_must_be_mapped_guids: false,
+                close_reason: (i % 2) as u8,
+                source_payload_bit_count: 8 * i as i32,
+                bit_count: 8 * u64::from(i),
+                raw_bits: vec![i as u8; i as usize + 1],
+            })
+            .collect()
+    }
+
+    fn checkpoint_block_rows() -> Vec<CheckpointBlockRecord> {
+        (0..ROWS)
+            .map(|i| CheckpointBlockRecord {
+                checkpoint: identity(i),
+                block_index: i,
+                time_ms: 7 * i,
+                packet_id: i,
+                channel_index: i % 3,
+                actor_net_guid: 200 + i,
+                object_net_guid: (i % 2 == 0).then_some(300 + i),
+                class_net_guid: (i % 2 == 1).then_some(400 + i),
+                outer_net_guid: (i % 3 == 0).then_some(500 + i),
+                has_rep_layout: i % 2 == 0,
+                is_actor: i % 3 == 0,
+                is_deleted: false,
+                is_stably_named: i % 2 == 1,
+                delete_flags: (i % 2) as u8,
+                resolved_group_path: Arc::from(format!("Group_{}", i % 2)),
+                group_resolution_source: "replay_declared_group",
+                group_declared: true,
+                resolution_memo_hit: i % 2 == 0,
+                function_count: i % 4,
+                function_count_source: "rep_layout_not_applicable",
+                actor_archetype_path: Some(format!("Archetype_{}", i % 2)),
+                actor_archetype_outer_path: Some("ArchetypeOuter".into()),
+                actor_guid_path: Some(format!("Actor_{i}")),
+                class_guid_path: Some("Class".into()),
+                object_guid_path: (i % 2 == 0).then(|| format!("Object_{i}")),
+                object_outer_path: (i % 2 == 1).then(|| format!("Outer_{i}")),
+                field_row_start: 16 * u64::from(i),
+                field_row_count: i % 5,
+            })
+            .collect()
+    }
+
+    fn checkpoint_guid_entry_rows() -> Vec<CheckpointGuidEntryRecord> {
+        (0..ROWS)
+            .map(|i| CheckpointGuidEntryRecord {
+                checkpoint: identity(i),
+                ordinal: i,
+                net_guid: 600 + i,
+                outer_net_guid: 600 + i / 2,
+                path_is_string: i % 2 == 0,
+                literal_path: (i % 2 == 0).then(|| format!("Literal_{i}")),
+                name_index: (i % 2 == 1).then_some(i),
+                flags: (i % 4) as u8,
+            })
+            .collect()
+    }
+
+    fn checkpoint_export_group_rows() -> Vec<CheckpointExportGroupRecord> {
+        (0..ROWS)
+            .map(|i| CheckpointExportGroupRecord {
+                checkpoint: identity(i),
+                ordinal: i,
+                path_name_index: 10 + i,
+                group_path: format!("ExportGroup_{i}"),
+                declared_slots: i % 3,
+            })
+            .collect()
+    }
+
+    fn checkpoint_export_field_rows() -> Vec<CheckpointExportFieldRecord> {
+        (0..ROWS)
+            .map(|i| CheckpointExportFieldRecord {
+                checkpoint: identity(i),
+                group_ordinal: i / 2,
+                path_name_index: 10 + i,
+                slot: i,
+                handle: i + 1,
+                compatible_checksum: 7_000 + i,
+                rendered_name: format!("Rendered_{i}"),
+                exported_flag: (i % 2) as u8,
+                fname_kind: (i % 3) as u8,
+                fname_base: (i % 2 == 0).then(|| format!("Base_{i}")),
+                fname_index: (i % 2 == 1).then_some(i),
+                fname_number: (i % 3 == 0).then_some(i as i32),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_table_writes_a_dictionary_page_for_exactly_its_listed_columns() {
+        let fields = field_rows();
+        let actors = actor_rows();
+        let net_guids = net_guid_rows();
+        let mut problems = Vec::new();
+        problems.extend(footer_disagreements::<FieldsTable>(
+            "fields",
+            fields.clone(),
+        ));
+        problems.extend(footer_disagreements::<MovementTable>(
+            "movement",
+            (0..ROWS).map(make_movement_record).collect(),
+        ));
+        problems.extend(footer_disagreements::<ActorsTable>(
+            "actors",
+            actors.clone(),
+        ));
+        problems.extend(footer_disagreements::<NetGuidsTable>(
+            "net_guids",
+            net_guids.clone(),
+        ));
+        problems.extend(footer_disagreements::<EventsTable>("events", event_rows()));
+        problems.extend(footer_disagreements::<PartialsTable>(
+            "partials",
+            partial_rows(),
+        ));
+        problems.extend(footer_disagreements::<CheckpointFieldsTable>(
+            "checkpoint_fields",
+            fields
+                .into_iter()
+                .zip(0..)
+                .map(|(field, i)| CheckpointFieldRecord {
+                    checkpoint: identity(i),
+                    field,
+                })
+                .collect(),
+        ));
+        problems.extend(footer_disagreements::<CheckpointActorsTable>(
+            "checkpoint_actors",
+            actors
+                .into_iter()
+                .zip(0..)
+                .map(|(actor, i)| CheckpointActorRecord {
+                    checkpoint: identity(i),
+                    actor,
+                })
+                .collect(),
+        ));
+        problems.extend(footer_disagreements::<CheckpointNetGuidsTable>(
+            "checkpoint_net_guids",
+            net_guids
+                .into_iter()
+                .zip(0..)
+                .map(|(net_guid, i)| CheckpointNetGuidRecord {
+                    checkpoint: identity(i),
+                    net_guid,
+                })
+                .collect(),
+        ));
+        problems.extend(footer_disagreements::<CheckpointBlocksTable>(
+            "checkpoint_blocks",
+            checkpoint_block_rows(),
+        ));
+        problems.extend(footer_disagreements::<CheckpointGuidEntriesTable>(
+            "checkpoint_guid_entries",
+            checkpoint_guid_entry_rows(),
+        ));
+        problems.extend(footer_disagreements::<CheckpointExportGroupsTable>(
+            "checkpoint_export_groups",
+            checkpoint_export_group_rows(),
+        ));
+        problems.extend(footer_disagreements::<CheckpointExportFieldsTable>(
+            "checkpoint_export_fields",
+            checkpoint_export_field_rows(),
+        ));
+        assert!(
+            problems.is_empty(),
+            "{} column(s) disagree with DICTIONARY_COLUMNS:\n  {}",
+            problems.len(),
+            problems.join("\n  ")
+        );
+    }
+
+    /// Every name in a table's list must be a real, non-boolean column of that
+    /// table, listed once -- parquet-rs silently ignores the other two cases --
+    /// and every string column must be listed, because the docs promise that
+    /// string columns are dictionary-encoded.
+    fn list_problems<T: Table>(table: &str) -> Vec<String> {
+        let schema = T::schema();
+        let mut problems = Vec::new();
+        let mut seen = HashSet::new();
+        for &name in T::DICTIONARY_COLUMNS {
+            if !seen.insert(name) {
+                problems.push(format!("{table}.{name}: listed twice"));
+            }
+            match schema.field_with_name(name) {
+                Err(_) => problems.push(format!(
+                    "{table}.{name}: no such column; parquet-rs ignores the name without an error"
+                )),
+                Ok(field) if field.data_type() == &DataType::Boolean => problems.push(format!(
+                    "{table}.{name}: BOOLEAN, which parquet-rs never dictionary-encodes"
+                )),
+                Ok(_) => {}
+            }
+        }
+        for field in schema.fields() {
+            let is_string = match field.data_type() {
+                DataType::Utf8 => true,
+                DataType::Dictionary(_, value) => value.as_ref() == &DataType::Utf8,
+                _ => false,
+            };
+            if is_string && !T::DICTIONARY_COLUMNS.contains(&field.name().as_str()) {
+                problems.push(format!(
+                    "{table}.{}: a string column missing from DICTIONARY_COLUMNS",
+                    field.name()
+                ));
+            }
+        }
+        problems
+    }
+
+    #[test]
+    fn dictionary_lists_name_real_columns_and_cover_every_string() {
+        let problems: Vec<String> = [
+            list_problems::<FieldsTable>("fields"),
+            list_problems::<MovementTable>("movement"),
+            list_problems::<ActorsTable>("actors"),
+            list_problems::<NetGuidsTable>("net_guids"),
+            list_problems::<EventsTable>("events"),
+            list_problems::<PartialsTable>("partials"),
+            list_problems::<CheckpointFieldsTable>("checkpoint_fields"),
+            list_problems::<CheckpointActorsTable>("checkpoint_actors"),
+            list_problems::<CheckpointNetGuidsTable>("checkpoint_net_guids"),
+            list_problems::<CheckpointBlocksTable>("checkpoint_blocks"),
+            list_problems::<CheckpointGuidEntriesTable>("checkpoint_guid_entries"),
+            list_problems::<CheckpointExportGroupsTable>("checkpoint_export_groups"),
+            list_problems::<CheckpointExportFieldsTable>("checkpoint_export_fields"),
+        ]
+        .concat();
+        assert!(
+            problems.is_empty(),
+            "{} problem(s) with DICTIONARY_COLUMNS:\n  {}",
+            problems.len(),
+            problems.join("\n  ")
+        );
     }
 }
