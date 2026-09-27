@@ -51,6 +51,7 @@ historical rather than a current coverage figure.
 | Account UUID (subject) | `manifest.players.subject` / `BombPlayerState.Subject` | ✅ |
 | Character NetGUID | `manifest.players.character_net_guid` / `SpawnedCharacter` | ✅ joins movement 10/10 on 71 of 71 replays |
 | Agent (characterId) | `manifest` game_specific_data.playerLoadouts | ✅ |
+| Agent GUID, replicated | `BombPlayerState` / Swiftplay player state `A`, `B`, `C`, `D` (checksums 988169428, 943211507, 965590766, 1032080829) | ✅ four `UInt32` words of one FGuid, non-negative in `value_i64`, main and checkpoint. Formatted `%08x-%04x-%04x-%04x-%04x%08x` from (A, B>>16, B&0xffff, C>>16, C&0xffff, D), they equalled the header `characterId` on all 4,112 comparable sets in a 30-replay check (0 mismatches; the sampled 11.06-11.09 replay headers carry no loadouts). Names stay `A`..`D` on the wire; the byte-shaped `B` fields are separate properties |
 | Two players on the same agent | disambiguated by `subject` (characterId alone can't) | ✅ |
 | Display name / Riot ID | — | ❌ not established by the available evidence |
 | `ProfileName` | PlayerState replicated FString | ✅ exact string decoded; its purpose is not established as a display name or Riot ID |
@@ -725,7 +726,7 @@ errors still 0. Corpus-wide at the time, 215/215 replays with decode errors 0.
 
 Those are the deltas that change produced, not current totals. Later work moved
 both ends: `tools/baselines/export_02d4d478.json` pins today's figures
-(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 803,015`). Read this
+(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 803,055`). Read this
 paragraph as a dated before/after, which is what it was written as.
 
 **This is the one thing here that a game patch can silently invalidate.** A

@@ -305,8 +305,13 @@ EXPECTED += [
 ADDITIONS = [
     # Crosshair settings: every adopted name was independently decoded on
     # retained 13.01/13.02/13.04/13.05 payloads with exact consumption. B is
-    # deliberately absent: its color handles are 8-bit, but handle 208 uses
-    # the same name for a 32-bit field, which a name-keyed overlay cannot split.
+    # deliberately absent: its color handles are 8-bit, but the same name also
+    # carries a 32-bit property (checksum 943211507, handle 220/205/208
+    # depending on the build), which a name-keyed overlay cannot split. Both
+    # are typed instead by exact group/name/checksum in
+    # tools/fixtures/scoped_type_evidence.json: the byte-shaped B's as Byte,
+    # and the 32-bit B (the second word of the player-state GUID, with A, C
+    # and D) as UInt32.
     *[("/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C", field,
        "FieldType::Bool") for field in (
         "bHasOutline", "bDisplayCenterDot", "bFadeCrosshairWithFiringError",

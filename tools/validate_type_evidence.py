@@ -12,7 +12,10 @@ Usage:
 ``EXPORT_DIR`` may be one export or a directory containing exports.  Both
 ``fields.parquet`` and ``checkpoint_fields.parquet`` are inspected when present.
 The JSON shape is ``[{"group": "...", "field": "...", "type": "Bool"}]``.
-Supported types are Bool, Byte, Int32, Float, Double, FString and ObjectNetGuid.
+Supported types are Bool, Byte, Int32, UInt32, Float, Double, FString and
+ObjectNetGuid. UInt32 is read unsigned, so a value with the high bit set must
+be exported positive; an Int32 reading of the same bits would pass the width
+check and still be wrong.
 """
 
 from __future__ import annotations
@@ -46,6 +49,10 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
         if bit_count != 32:
             raise ValueError("Int32 is not 32 bits")
         return struct.unpack("<i", raw)[0]
+    if type_name == "UInt32":
+        if bit_count != 32:
+            raise ValueError("UInt32 is not 32 bits")
+        return struct.unpack("<I", raw)[0]
     if type_name in {"Float", "Double"}:
         width, fmt = (32, "<f") if type_name == "Float" else (64, "<d")
         if bit_count != width:
@@ -110,7 +117,7 @@ def parquet_files(root: Path, export_ids=None):
 def validate(export_root: Path, specifications: list[dict], export_ids=None, compare_typed=False) -> dict:
     if not export_root.exists():
         raise ValueError(f"export root does not exist: {export_root}")
-    allowed = {"Bool", "Byte", "Int32", "Float", "Double", "FString", "ObjectNetGuid"}
+    allowed = {"Bool", "Byte", "Int32", "UInt32", "Float", "Double", "FString", "ObjectNetGuid"}
     if not specifications:
         raise ValueError("evidence specification is empty")
     for spec in specifications:
@@ -176,7 +183,7 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
                             "Bool": "value_bool", "FString": "value_str",
                             "Float": "value_f64", "Double": "value_f64",
                             "Byte": "value_i64", "Int32": "value_i64",
-                            "ObjectNetGuid": "value_i64",
+                            "UInt32": "value_i64", "ObjectNetGuid": "value_i64",
                         }[type_name]
                         if row[column] != value:
                             typed_mismatch_count += 1

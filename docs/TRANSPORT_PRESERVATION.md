@@ -63,6 +63,14 @@ exports. Diagnostic differences were limited to the corresponding increases
 in successful overlay decodes and decreases in not-in-table counts; all net
 counters and failure details remained equal across all 714 inputs.
 
+**2026-09-28 update:** the 32-bit `B` is no longer raw. It is the second word
+of the player-state GUID (`A`, `B`, `C`, `D`), and all four are now typed
+`UInt32` by their own exact group/name/checksum entries on both player-state
+groups. That supersedes the "remains raw" sentence above; the sixteen byte
+entries and every figure in this section are unchanged. Evidence is in
+[`scoped_type_evidence.json`](../tools/fixtures/scoped_type_evidence.json)
+and [DATA.md](DATA.md#player-identity).
+
 ## An untyped field row is not necessarily unresolved data
 
 The final raw-priority audit distinguished 300,038,586 untyped main rows:

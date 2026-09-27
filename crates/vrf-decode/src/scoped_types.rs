@@ -5,12 +5,30 @@
 use crate::decode::FieldType;
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 33] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 41] = [
+    (
+        "A",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        988169428,
+        FieldType::UInt32,
+    ),
+    (
+        "A",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        988169428,
+        FieldType::UInt32,
+    ),
     (
         "B",
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
         379198054,
         FieldType::Byte,
+    ),
+    (
+        "B",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        943211507,
+        FieldType::UInt32,
     ),
     (
         "B",
@@ -63,6 +81,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 33] = [
     (
         "B",
         "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        943211507,
+        FieldType::UInt32,
+    ),
+    (
+        "B",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
         1496132153,
         FieldType::Byte,
     ),
@@ -101,6 +125,18 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 33] = [
         "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
         3944193776,
         FieldType::Byte,
+    ),
+    (
+        "C",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        965590766,
+        FieldType::UInt32,
+    ),
+    (
+        "C",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        965590766,
+        FieldType::UInt32,
     ),
     (
         "ClickedLocation",
@@ -143,6 +179,18 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 33] = [
         "/Script/ShooterGame.MapTargetingStateComponent",
         3280594315,
         FieldType::VectorDouble,
+    ),
+    (
+        "D",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        1032080829,
+        FieldType::UInt32,
+    ),
+    (
+        "D",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        1032080829,
+        FieldType::UInt32,
     ),
     (
         "DecayCauser",

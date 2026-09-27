@@ -28,5 +28,53 @@
   "field": "MulticastNotifyOverhealDecay.DecayCauser",
   "checksum": 3648603088,
   "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+  "field": "A",
+  "checksum": 988169428,
+  "type": "UInt32"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+  "field": "B",
+  "checksum": 943211507,
+  "type": "UInt32"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+  "field": "C",
+  "checksum": 965590766,
+  "type": "UInt32"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+  "field": "D",
+  "checksum": 1032080829,
+  "type": "UInt32"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+  "field": "A",
+  "checksum": 988169428,
+  "type": "UInt32"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+  "field": "B",
+  "checksum": 943211507,
+  "type": "UInt32"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+  "field": "C",
+  "checksum": 965590766,
+  "type": "UInt32"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+  "field": "D",
+  "checksum": 1032080829,
+  "type": "UInt32"
  }
 ]

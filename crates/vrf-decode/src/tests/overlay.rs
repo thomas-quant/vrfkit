@@ -17,6 +17,9 @@ const SWIFT_GS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits
 const SWIFT_PS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
 /Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
 
+/// One name, two properties: the byte-shaped `B` and the 32-bit `B`
+/// (checksum 943211507, the second word of the player-state GUID -- see
+/// `player_state_guid_parts_are_scoped_uint32`) resolve by checksum alone.
 #[test]
 fn scoped_types_require_the_exact_group_name_and_checksum() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -25,7 +28,11 @@ fn scoped_types_require_the_exact_group_name_and_checksum() {
             resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(379198054)),
             Some(FieldType::Byte)
         );
-        for checksum in [None, Some(943211507), Some(1)] {
+        assert_eq!(
+            resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(943211507)),
+            Some(FieldType::UInt32)
+        );
+        for checksum in [None, Some(1)] {
             assert_eq!(
                 resolve_field_type_with_checksum(&table, group, Some("B"), None, checksum),
                 None
@@ -72,6 +79,86 @@ fn scoped_bytes_decode_exactly_and_reject_a_wider_payload() {
     assert_eq!(rejected.value_i64, None);
     assert_eq!(stats.decoded_ok, 1);
     assert_eq!(stats.decoded_err, 1);
+}
+
+/// The four 32-bit words `A`/`B`/`C`/`D` on the player state are one FGuid, whose
+/// members Unreal declares `uint32`, so they are `UInt32` -- scoped per group
+/// and checksum from `tools/fixtures/scoped_type_evidence.json`.
+///
+/// The scope is load-bearing. The handles drift by build (A is 219, 204 or 207)
+/// and 207 is D's handle on 11.11-12.05, so no handle key could work; `B` also
+/// names nine byte-shaped properties and `A` an 8-bit one (1036865991); and
+/// scoped entries never follow the Swiftplay alias, so each group needs its own.
+#[test]
+fn player_state_guid_parts_are_scoped_uint32() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
+        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
+    };
+    let parts = [
+        ("A", 988_169_428),
+        ("B", 943_211_507),
+        ("C", 965_590_766),
+        ("D", 1_032_080_829),
+    ];
+    for group in [BOMB_PS, SWIFT_PS] {
+        for (field, checksum) in parts {
+            assert_eq!(
+                resolve(group, field, Some(checksum)),
+                Some(FieldType::UInt32),
+                "{group} {field}"
+            );
+            for other in [None, Some(checksum ^ 1)] {
+                assert_eq!(resolve(group, field, other), None, "{field} {other:?}");
+            }
+        }
+    }
+    for (field, checksum) in parts {
+        assert_eq!(resolve("/Unobserved", field, Some(checksum)), None);
+        assert_eq!(resolve(BOMB_GS, field, Some(checksum)), None);
+    }
+    assert_eq!(resolve(BOMB_PS, "A", Some(1_036_865_991)), None);
+}
+
+/// The first overlay use of `UInt32`, proved end to end: scoped lookup, then
+/// `decode_u32`, then `value_i64`, with a high-bit word staying positive.
+///
+/// 0xe28c69d7 is a real `D` value from the 2026-09-28 audit. Read as `Int32`
+/// the same four bytes are -494114345 -- a plausible wrong number that a
+/// width check alone would accept. A payload of any other width is a decode
+/// error, not a truncated or padded value.
+#[test]
+fn player_state_guid_parts_decode_unsigned_and_exactly() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, raw: &[u8], bits| {
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some("D"),
+            210,
+            Some(1_032_080_829),
+            Some(raw),
+            bits,
+            &mut stats,
+        )
+        .expect("a scoped GUID part is attempted")
+        .value_i64
+    };
+    for group in [BOMB_PS, SWIFT_PS] {
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2], 32),
+            Some(3_800_852_951)
+        );
+        assert_eq!(apply(group, &[0xd7, 0x69, 0x8c], 24), None, "{group}");
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2, 0x00], 40),
+            None,
+            "{group}"
+        );
+    }
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 4));
 }
 
 /// A Bomb class is already canonical and must not be rewritten.
