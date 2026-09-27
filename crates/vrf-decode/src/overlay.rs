@@ -708,28 +708,35 @@ fn apply_overlay_inner(
         Err(e) => {
             stats.decoded_err += 1;
             let kind = match &e {
-                DecodeError::BitIo(_) => DecodeErrorKind::Eof,
+                // EOF only for a real EOF: an invalid string, a runaway
+                // IntPacked or a length prefix past the payload is not one,
+                // and all of them used to print as `EOF`.
+                DecodeError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
+                // The only `Residual`: bits left over is what the label means.
                 DecodeError::NotFullyConsumed { .. } => DecodeErrorKind::Residual,
                 DecodeError::RawOrSkip => DecodeErrorKind::ZeroBits, // unreachable here
-                // A UInt64 that overflows i64 is a value-range rejection, not a
-                // bit-level failure; no dedicated kind exists, so it is bucketed
-                // with Residual. Defensive: does not fire on supported replays.
-                DecodeError::UnsignedOverflow { .. } => DecodeErrorKind::Residual,
-                // Same shape: the bits read fine, the discriminator was one the
-                // decoder has never seen laid out. Refusing beats returning a
-                // plausible wrong string.
-                DecodeError::UnsupportedTextHistory { .. } => DecodeErrorKind::Residual,
+                // The rest are refusals, not bit-level failures, and each used
+                // to print as `Residual` for want of a kind. A UInt64 that
+                // overflows i64: defensive, does not fire on supported replays.
+                DecodeError::UnsignedOverflow { .. } => DecodeErrorKind::Rejected,
+                // The bits read fine; the discriminator was one the decoder
+                // has never seen laid out. Refusing beats returning a
+                // plausible wrong string -- and a mistyped FText, this repo's
+                // costliest bug shape, lands here, so it must not read as
+                // leftover bits.
+                DecodeError::UnsupportedTextHistory { .. } => DecodeErrorKind::Rejected,
                 // The bits read fine and the layout was right; the value they
-                // spell cannot be rendered as JSON. Same bucket for the same
-                // reason -- a value-range rejection, not a framing failure.
-                DecodeError::NonFiniteComponent { .. } => DecodeErrorKind::Residual,
+                // spell cannot be rendered as JSON.
+                DecodeError::NonFiniteComponent { .. } => DecodeErrorKind::Rejected,
+                // A zero divisor from the table, or an FName number with no
+                // display spelling.
                 DecodeError::InvalidQuantizationScale { .. }
-                | DecodeError::InvalidFNameNumber { .. } => DecodeErrorKind::Residual,
-                // A value-range rejection like the five above it, not a
-                // bit-level framing failure -- no field/remaining bit count was
-                // even measured yet. See the variant's own doc for why this
-                // used to be `NotFullyConsumed` and why that mislabeled it.
-                DecodeError::ByteArrayLengthCapExceeded { .. } => DecodeErrorKind::Residual,
+                | DecodeError::InvalidFNameNumber { .. } => DecodeErrorKind::Rejected,
+                // Split out of `NotFullyConsumed` because that label read as a
+                // layout mismatch when the fix is a table constant (see the
+                // variant's doc). Bucketing it as `Residual` here undid the
+                // split for the one reader who sees the kind.
+                DecodeError::ByteArrayLengthCapExceeded { .. } => DecodeErrorKind::Rejected,
             };
             stats
                 .error_report

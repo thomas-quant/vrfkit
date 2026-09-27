@@ -752,6 +752,87 @@ fn apply_overlay_graceful_on_decode_failure() {
     assert_eq!(stats.decoded_err, 1);
 }
 
+/// The error report's `kind` is the only column that tells an operator WHY a
+/// field failed -- `field_name` says which -- and the report is the permanent
+/// schema-drift diagnostic. So each failure must print the label of its own
+/// cause. Every `BitIo` error used to print `EOF`, including an invalid string
+/// that consumed its payload exactly, and six value refusals printed
+/// `Residual`, the label that means leftover bits.
+///
+/// Asserted on the printed label, because that is what reaches the operator.
+#[test]
+fn the_error_report_names_the_cause_of_each_failure() {
+    const fn entry(field_name: &'static str, field_type: FieldType) -> OverlayEntry {
+        OverlayEntry {
+            group_path: "/test",
+            field_name,
+            field_type,
+        }
+    }
+    static ENTRIES: [OverlayEntry; 8] = [
+        entry("BadUtf8", FieldType::FString),
+        entry("ByteArrayOverCap", FieldType::ByteArray { max_bytes: 1 }),
+        entry("LongInt", FieldType::Int32),
+        entry("OverlongPrefix", FieldType::FString),
+        entry("RunawayIntPacked", FieldType::ObjectNetGuid),
+        entry("ShortInt", FieldType::Int32),
+        entry("U64PastI64", FieldType::UInt64),
+        entry("ZeroSerializedIntMax", FieldType::SerializedInt { max: 0 }),
+    ];
+    let cases: &[(&str, &[u8], u32, &str)] = &[
+        // The payload is shorter than the type: a real EOF.
+        ("ShortInt", &[0x01, 0x00], 16, "EOF"),
+        // The type finished with bits to spare.
+        ("LongInt", &[0x01, 0, 0, 0, 0], 40, "Residual"),
+        // Length 3, then three bytes that are not UTF-8: consumed exactly,
+        // nothing ran out.
+        (
+            "BadUtf8",
+            &[0x03, 0, 0, 0, 0xff, 0xfe, 0x00],
+            56,
+            "Malformed",
+        ),
+        // A length prefix of 100 with one byte behind it.
+        ("OverlongPrefix", &[0x64, 0, 0, 0, 0x41], 40, "Malformed"),
+        // Five IntPacked bytes that never clear the continuation bit.
+        ("RunawayIntPacked", &[0xff; 5], 40, "Malformed"),
+        // Two bytes declared where the table allows one: the constant needs
+        // raising, which is why this variant was split from NotFullyConsumed.
+        ("ByteArrayOverCap", &[0x04, 0xaa, 0xbb], 24, "Rejected"),
+        // Reads fine; the value has no i64 spelling.
+        ("U64PastI64", &[0, 0, 0, 0, 0, 0, 0, 0x80], 64, "Rejected"),
+        // A table parameter no value can be read against. No bit is wrong.
+        ("ZeroSerializedIntMax", &[0x00], 8, "Rejected"),
+    ];
+    let table = OverlayTable::new(&ENTRIES);
+    let mut printed = Vec::new();
+    for &(field, data, bits, _) in cases {
+        let mut stats = OverlayStats::default();
+        let result = apply_overlay(
+            &table,
+            "/test",
+            group_hash_state("/test"),
+            Some(field),
+            Some(data),
+            bits,
+            &mut stats,
+        );
+        assert!(
+            result.is_some_and(|r| r.value_i64.is_none() && r.value_str.is_none()),
+            "{field}: must fail to decode"
+        );
+        assert_eq!(stats.decoded_err, 1, "{field}");
+        let rows = stats.error_report.top_n(2);
+        assert_eq!(rows.len(), 1, "{field}: one bucket");
+        printed.push((field, rows[0].error_kind.to_string()));
+    }
+    let wanted: Vec<(&str, String)> = cases
+        .iter()
+        .map(|&(field, _, _, want)| (field, want.to_owned()))
+        .collect();
+    assert_eq!(printed, wanted);
+}
+
 /// Byte-sized properties nested inside replicated arrays are written with
 /// only their significant bits, so the decoder must take its width from the
 /// payload rather than assuming 8.

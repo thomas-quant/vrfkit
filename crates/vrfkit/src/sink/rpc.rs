@@ -839,14 +839,112 @@ fn effect_array_kind_for_param(param_name: Option<&str>) -> Option<EffectArrayKi
 
 /// Map an effect-blob failure onto the overlay report's error kinds.
 ///
-/// `DecodeErrorKind` has three variants and this decoder has seven failures,
-/// so the mapping is lossy by construction; the report's `field_name` column
-/// carries the identification. `Residual` is the bucket for "the payload was
-/// not consumable as this format", which is what every structural failure
-/// means here.
+/// These rows share the report with overlay failures, so a kind must mean the
+/// same thing here as there. The report's `field_name` column identifies the
+/// parameter; the kind is the only column that says why. This used to be two
+/// arms -- every `BitIo` error `EOF`, everything else `Residual` -- so an
+/// invalid string printed as EOF and a non-finite float as leftover bits.
+///
+/// No wildcard: a new `EffectBlobError` has to be classified before it
+/// compiles, instead of silently joining whatever a `_` arm names.
 fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
     match err {
-        EffectBlobError::BitIo(_) => DecodeErrorKind::Eof,
-        _ => DecodeErrorKind::Residual,
+        EffectBlobError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
+        // The bits ran out before the structure did: the window ended before
+        // the terminator, a declared field runs past the window, or a
+        // member's type read past the end of its own field.
+        EffectBlobError::MissingTerminator { .. }
+        | EffectBlobError::PayloadTooLarge { .. }
+        | EffectBlobError::PayloadOverread { .. } => DecodeErrorKind::Eof,
+        // Bits the structure did not account for, after the terminator or
+        // inside a field whose type read short of it.
+        EffectBlobError::ResidualBits { .. } | EffectBlobError::PayloadUnderread { .. } => {
+            DecodeErrorKind::Residual
+        }
+        // Decoded values refused: a count over the configured maximum, a
+        // float JSON cannot carry.
+        EffectBlobError::ArrayCountTooLarge { .. } | EffectBlobError::NonFiniteFloat { .. } => {
+            DecodeErrorKind::Rejected
+        }
+        // The bits break a rule of this framing.
+        EffectBlobError::IndexOutOfBounds { .. }
+        | EffectBlobError::TooManyFields { .. }
+        | EffectBlobError::BitLengthExceedsBuffer { .. }
+        | EffectBlobError::UnexpectedPayloadWidth { .. }
+        | EffectBlobError::ElementFieldCount { .. }
+        | EffectBlobError::NonAdjacentHandles { .. }
+        | EffectBlobError::InconsistentHandleBase { .. }
+        | EffectBlobError::NonZeroTerminator { .. } => DecodeErrorKind::Malformed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vrf_bitio::BitError;
+
+    use super::{EffectBlobError, effect_error_kind};
+
+    /// Effect-blob failures land in the same error report as overlay failures,
+    /// so the same cause must print the same label. Every `BitIo` error used
+    /// to print `EOF`, and every other failure `Residual` -- the label that
+    /// means leftover bits -- whether bits were left over or not.
+    #[test]
+    fn effect_failures_print_the_label_of_their_cause() {
+        let cases = [
+            (
+                EffectBlobError::BitIo(BitError::Eof {
+                    position: 0,
+                    length: 8,
+                    requested: 8,
+                }),
+                "EOF",
+            ),
+            (
+                EffectBlobError::BitIo(BitError::MalformedIntPacked { position: 0 }),
+                "Malformed",
+            ),
+            (
+                EffectBlobError::BitIo(BitError::InvalidString { position: 0 }),
+                "Malformed",
+            ),
+            (
+                EffectBlobError::MissingTerminator { context: "array" },
+                "EOF",
+            ),
+            (
+                EffectBlobError::PayloadOverread {
+                    declared: 16,
+                    consumed: 32,
+                },
+                "EOF",
+            ),
+            (EffectBlobError::ResidualBits { remaining: 16 }, "Residual"),
+            (
+                EffectBlobError::PayloadUnderread {
+                    declared: 32,
+                    consumed: 16,
+                },
+                "Residual",
+            ),
+            (EffectBlobError::NonFiniteFloat { index: 0 }, "Rejected"),
+            (
+                EffectBlobError::ArrayCountTooLarge {
+                    count: 300,
+                    max: 256,
+                },
+                "Rejected",
+            ),
+            (EffectBlobError::NonZeroTerminator { value: 1 }, "Malformed"),
+            (EffectBlobError::ElementFieldCount { found: 3 }, "Malformed"),
+        ];
+        let printed: Vec<(String, String)> = cases
+            .iter()
+            .map(|(err, _)| (format!("{err:?}"), effect_error_kind(err).to_string()))
+            .collect();
+        let wanted: Vec<(String, String)> = cases
+            .iter()
+            .map(|(err, want)| (format!("{err:?}"), (*want).to_owned()))
+            .collect();
+        assert_eq!(printed, wanted);
     }
 }
