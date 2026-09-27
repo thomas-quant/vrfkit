@@ -217,6 +217,73 @@ internal static class Factories
 '''})
         self.assertIn("unsupported ClassNetCache factory", error)
 
+    def test_private_cache_factory_fails_instead_of_vanishing(self):
+        """Upstream 8b7afcb's ClayDescriptors builds its caches this way; a
+        marker that saw only public/internal factories let them go missing."""
+        error = self.run_generator_expecting_failure({"ClayDescriptors.cs": r'''
+public static class ClayDescriptors
+{
+    public static IReadOnlyList<ClassNetCacheDescriptor> CreateClassNetCacheDescriptors() =>
+    [
+        Rpc(ClayPaths.Rocket, Function(ClayPaths.Rocket, "MulticastStopProjectile", 3)),
+    ];
+
+    private static ClassNetCacheDescriptor Rpc(string path, params RpcDescriptor[] functions) =>
+        new(path + "_ClassNetCache", functions);
+    private static RpcDescriptor Function(string path, string name, uint handle) => new()
+    {
+        Name = name, FunctionExportPath = path + ":" + name, Handle = handle,
+    };
+}
+public static class ClayPaths
+{
+    public const string Rocket = "/Game/Rocket.Rocket_C";
+}
+'''})
+        self.assertIn("unsupported ClassNetCache factory Rpc", error)
+
+    def test_runtime_cache_construction_without_a_factory_list_fails_loudly(self):
+        """Upstream 8b7afcb's AgentClassNetCacheDescriptors passes a method
+        call where the list goes. Unguarded, every agent cache entry vanished
+        from the table and the run still succeeded."""
+        error = self.run_generator_expecting_failure({
+            "GenericAgentDescriptor.cs": r'''
+public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
+{
+    public override ExportCategory Categories => ExportCategory.Agent;
+}
+public sealed class LiveAgentDescriptor : GenericAgentDescriptor
+{
+    public override string Path => "/Game/Agents/Live.Live_C";
+}
+''',
+            "AgentClassNetCacheDescriptors.cs": r'''
+internal static class AgentClassNetCacheDescriptors
+{
+    public static IReadOnlyList<ClassNetCacheDescriptor> Create(
+        IEnumerable<ExportGroupDescriptor> agentDescriptors)
+    {
+        return agentDescriptors
+            .Select(agent => new ClassNetCacheDescriptor(
+                agent.Path + "_ClassNetCache",
+                CreateFunctions(agent)))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<RpcDescriptor> CreateFunctions(ExportGroupDescriptor agent)
+    {
+        return [CreateKillRpc()];
+    }
+
+    private static RpcDescriptor CreateKillRpc() => new RpcDescriptor
+    {
+        Name = "MulticastNotifyKilledEnemy",
+    };
+}
+''',
+        })
+        self.assertIn("unsupported runtime ClassNetCache construction", error)
+
     def test_unsupported_path_override_shape_fails(self):
         error = self.run_generator_expecting_failure({"Bad.cs": r'''
 public sealed class Bad : ExportGroupDescriptor<Bad>
