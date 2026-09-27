@@ -58,28 +58,28 @@
   "parquet": {
     "fields": {
       "rows": 1296660,
-      "bytes": 16455178,
-      "sha256": "b186a9b50b4f73f1c3a7d8482431732af5413420ba2ca9992c314bc61cb41b93"
+      "bytes": 12680657,
+      "sha256": "67649bc8f25c5f5ba8bd19e9badf6eb9060b36fc2d05284d247e00dab27b6bde"
     },
     "movement": {
       "rows": 1844147,
-      "bytes": 31886449,
-      "sha256": "97004059bfdcc3cee3d95f208f08b7fa855c013816d4496c52bab7b1e9f1ccfd"
+      "bytes": 19984802,
+      "sha256": "3f512fba743b98923dc7366686d5be387b9ae98a4282f0abe33878311048ecfc"
     },
     "actors": {
       "rows": 3827,
-      "bytes": 87281,
-      "sha256": "84076cf7ca398c957c3e67148d0622f72e809cb4e2157f66cd4f18b197e65d7b"
+      "bytes": 68243,
+      "sha256": "7ac509108455ec9eaa0fa87ac0aa896f8ccab4354a54e6e36d9a6bb16ab36f05"
     },
     "net_guids": {
       "rows": 16167,
-      "bytes": 153606,
-      "sha256": "501cabc678770431d0fec9c37c4e21ed06193bb93263313959e87865625bba0f"
+      "bytes": 114423,
+      "sha256": "77b64c48bf205dbc8c08626a22fd6ddb363f65808846f36148eaa607746bdf9a"
     },
     "events": {
       "rows": 195,
-      "bytes": 13411,
-      "sha256": "e3879e2aabfc83ecae48be30ef8056fc8ec10ee1dab50c3882dc2b72d0f12af2"
+      "bytes": 12455,
+      "sha256": "f4a628909f2be9d616bdb440a86183c68e619c00d7883830b66e2e081e31cb51"
     },
     "partials": {
       "rows": 0,
@@ -88,38 +88,38 @@
     },
     "checkpoint_fields": {
       "rows": 352089,
-      "bytes": 1218992,
-      "sha256": "21ce023b9a7c3b67c0d892cc519f50b097a7e97c88d6da93d98ad78cae00806e"
+      "bytes": 1183936,
+      "sha256": "95a2a3e7e37d799ce3db592c5507f49ec7543565e95ab3e79742183f355a6d29"
     },
     "checkpoint_actors": {
       "rows": 3014,
-      "bytes": 27118,
-      "sha256": "cccf3b020c33037781875090697f8a4ae0120c1499b5e56eb2a4c458bf02def2"
+      "bytes": 24345,
+      "sha256": "18db731697dae07835e0bd01898ae90ceef5365cd627b3ae2a38ecc43b2ae9b8"
     },
     "checkpoint_net_guids": {
       "rows": 74270,
-      "bytes": 277718,
-      "sha256": "45574e270bee63d03e05974d7532a68915b1dbb7f050a0e6c2281190fff196d7"
+      "bytes": 175916,
+      "sha256": "d380739c65c23f8f3d08dfe40156829633572181e21b787b85d271a75887d573"
     },
     "checkpoint_blocks": {
       "rows": 22247,
-      "bytes": 175103,
-      "sha256": "d9ae7c2e92d469b485bfe7a42d4407f9606b22353b5cfb68deb17dda90ea9b12"
+      "bytes": 112704,
+      "sha256": "f1e045f3a071e361fe09e78ca9e774aa8e349c42254c3fe47c446eff56ac5e4a"
     },
     "checkpoint_guid_entries": {
       "rows": 74270,
-      "bytes": 928714,
-      "sha256": "693876842cc8dc60b3328c64c62446e022dde6e2a8ade2e25a3a5042143ec33e"
+      "bytes": 651660,
+      "sha256": "1a7bfbf09ba183ce40da5239cf4b9446e7d3b07c2f7195a2618362864744265b"
     },
     "checkpoint_export_groups": {
       "rows": 8307,
-      "bytes": 27041,
-      "sha256": "91517ce00b415ae13779451a194a593304eada4bc69b4dd743220b48cc6c7fcd"
+      "bytes": 20799,
+      "sha256": "625e64c899bfe0db90f66fc7710b7813be7b952919730daa973788ba787540be"
     },
     "checkpoint_export_fields": {
       "rows": 49314,
-      "bytes": 287130,
-      "sha256": "20dd02181ee904b521aef2382fbc644f30ad49f90b1e7d70930f73202726d174"
+      "bytes": 241210,
+      "sha256": "b56da60b8099ecfbfc192e6f7ff23ab3f1c01416ca2f94788d3d5ce9203b244f"
     }
   },
   "replay": "02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf"

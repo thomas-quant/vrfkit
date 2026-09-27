@@ -18,8 +18,8 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
-**Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
-**910 passing** tests. All 24 supported builds received the same verification
+**Verified state (2026-09-25; test counts 2026-09-28):** Rust has **716 passing**
+tests; Python has **910 passing** tests. All 24 supported builds received the same verification
 on **986 unique replays**; all **986** meet every strict criterion after fixing
 the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
@@ -188,19 +188,19 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 |
-| `movement.parquet` | 1,844,147 | 31,886,449 |
-| `actors.parquet` | 3,827 | 87,281 |
-| `net_guids.parquet` | 16,167 | 153,606 |
-| `events.parquet` | 195 | 13,411 |
+| `fields.parquet` | 1,296,660 | 12,680,657 |
+| `movement.parquet` | 1,844,147 | 19,984,802 |
+| `actors.parquet` | 3,827 | 68,243 |
+| `net_guids.parquet` | 16,167 | 114,423 |
+| `events.parquet` | 195 | 12,455 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 |
-| `checkpoint_actors.parquet` | 3,014 | 27,118 |
-| `checkpoint_net_guids.parquet` | 74,270 | 277,718 |
-| `checkpoint_blocks.parquet` | 22,247 | 175,103 |
-| `checkpoint_guid_entries.parquet` | 74,270 | 928,714 |
-| `checkpoint_export_groups.parquet` | 8,307 | 27,041 |
-| `checkpoint_export_fields.parquet` | 49,314 | 287,130 |
+| `checkpoint_fields.parquet` | 352,089 | 1,183,936 |
+| `checkpoint_actors.parquet` | 3,014 | 24,345 |
+| `checkpoint_net_guids.parquet` | 74,270 | 175,916 |
+| `checkpoint_blocks.parquet` | 22,247 | 112,704 |
+| `checkpoint_guid_entries.parquet` | 74,270 | 651,660 |
+| `checkpoint_export_groups.parquet` | 8,307 | 20,799 |
+| `checkpoint_export_fields.parquet` | 49,314 | 241,210 |
 | `manifest.json` |  | ~660,030 |
 
 `checkpoint_fields.parquet` requires `--checkpoints`. The partials row above
@@ -379,7 +379,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**714 passing**; the full Python suite also has **910 passing** tests. The
+**716 passing**; the full Python suite also has **910 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.

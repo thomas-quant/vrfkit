@@ -35,11 +35,27 @@ impl Table for FieldsTable {
 
     const DEFAULT_ROW_GROUP_SIZE: usize = DEFAULT_ROW_GROUP_SIZE;
 
-    // The repetitive string columns. group_path and field_name are the address
-    // columns (~475 distinct group paths, a few thousand field names over 1.2 M
-    // rows); value_str carries the decoded typed values -- enum strings and
-    // JSON blobs that repeat heavily across rows.
-    const DICTIONARY_COLUMNS: &'static [&'static str] = &["group_path", "field_name", "value_str"];
+    // Figures are dictionary/plain bytes over the 45-replay sample (see
+    // `Table::DICTIONARY_COLUMNS`); below 1.00 the dictionary is smaller.
+    //
+    // Strings, listed by rule: group_path 0.27 and field_name 0.44 are the
+    // address columns (~475 distinct group paths, a few thousand field names
+    // over 1.2 M rows); value_str 0.92 carries enum strings and JSON blobs
+    // that repeat across rows. Numbers, listed because they measured smaller:
+    // handle 0.66, channel_index 0.76, actor_net_guid 0.87, value_i64 0.94,
+    // bit_count 0.95. Not listed, smaller PLAIN on all 45 replays: time_ms
+    // 3.16, packet_id 2.37, value_f64 1.32, object_net_guid 1.16, raw_bits
+    // 1.16, compatible_checksum 1.07.
+    const DICTIONARY_COLUMNS: &'static [&'static str] = &[
+        "channel_index",
+        "actor_net_guid",
+        "group_path",
+        "handle",
+        "field_name",
+        "bit_count",
+        "value_i64",
+        "value_str",
+    ];
 
     fn schema() -> Arc<Schema> {
         fields_schema_ref()

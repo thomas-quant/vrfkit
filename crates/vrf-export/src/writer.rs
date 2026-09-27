@@ -98,8 +98,35 @@ pub trait Table {
     /// ZSTD gets to work on.
     const DEFAULT_ROW_GROUP_SIZE: usize;
 
-    /// Columns to dictionary-encode. Dictionary is Parquet's default for Utf8,
-    /// but the tables pin it explicitly so the intent is in the source.
+    /// The only columns written with a Parquet dictionary. Every other column
+    /// is written PLAIN (and then ZSTD-compressed, like everything else).
+    ///
+    /// Every table follows one rule:
+    ///
+    /// - **Every string column is listed**, `Utf8` and `Dictionary<_, Utf8>`
+    ///   alike. The docs promise that string columns are dictionary-encoded,
+    ///   and this keeps that true. A few of them measured larger that way;
+    ///   they stay listed anyway, and docs/PERFORMANCE_NOTES.md names them.
+    /// - **Any other column is listed only where a dictionary measured
+    ///   smaller** than PLAIN, summed over a 45-replay sample. Each table's
+    ///   comment carries its own figures as dictionary/plain ratios.
+    ///
+    /// # Why this list used to do nothing
+    ///
+    /// parquet-rs dictionary-encodes every non-boolean column unless told
+    /// otherwise (`DEFAULT_DICTIONARY_ENABLED = true`, for every physical
+    /// type, not only strings). This list was applied as "switch these on"
+    /// over that default, so it switched on what was already on. Every
+    /// high-cardinality number -- movement positions, times, packet ids --
+    /// was hashed into a dictionary and written as bit-packed indices, which
+    /// ZSTD compresses worse than the neighbouring raw values. [`TableWriter`]
+    /// now turns the default off first. Method and per-table figures:
+    /// docs/PERFORMANCE_NOTES.md, "Dictionary encoding is chosen per column".
+    ///
+    /// parquet-rs ignores a name that matches no column without an error, and
+    /// never dictionary-encodes a BOOLEAN column. The roundtrip tests reject
+    /// both, and check that every written file's dictionary pages match this
+    /// list exactly.
     const DICTIONARY_COLUMNS: &'static [&'static str];
 
     /// Optional retained-row byte budget. Zero leaves row-count batching unchanged.
@@ -166,7 +193,8 @@ pub struct TableWriter<T: Table, W: Write + Send> {
 
 impl<T: Table, W: Write + Send> TableWriter<T, W> {
     /// Create a writer with the table's default settings (ZSTD compression,
-    /// dictionary encoding for the table's string columns, page statistics).
+    /// dictionary encoding for exactly the table's [`Table::DICTIONARY_COLUMNS`],
+    /// page statistics).
     pub fn new(sink: W) -> Result<Self, ExportError> {
         Self::with_row_group_size(sink, T::DEFAULT_ROW_GROUP_SIZE)
     }
@@ -297,7 +325,13 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
             // MAX_BUFFERED_ROWS has to stay a multiple of it. A parquet release
             // that changed the default would otherwise move this crate's output
             // bytes with nothing in this repository having changed.
-            .set_write_batch_size(PARQUET_WRITE_BATCH_SIZE);
+            .set_write_batch_size(PARQUET_WRITE_BATCH_SIZE)
+            // Off unless listed. parquet-rs defaults dictionary encoding to ON
+            // for every column, so without this line the loop below can only
+            // switch on what is already on -- which is all it did from this
+            // crate's first commit until it was measured. See
+            // `Table::DICTIONARY_COLUMNS`.
+            .set_dictionary_enabled(false);
         for column in T::DICTIONARY_COLUMNS {
             builder = builder
                 .set_column_dictionary_enabled(ColumnPath::new(vec![(*column).to_owned()]), true);
