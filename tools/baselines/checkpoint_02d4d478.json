@@ -32,6 +32,11 @@
     "struct_blobs_failed": 0,
     "targeting_world_locations_decoded": 0,
     "tracked_rewards_opaque_empty_variants": 7,
+    "cnc_rpcs_emitted": 4901,
+    "cnc_bruteforce_payloads_attempted": 4683,
+    "cnc_bruteforce_payloads_unwalked": 0,
+    "rep_layout_cnc_tails_decoded": 218,
+    "rep_layout_cnc_tails_preserved": 114,
     "cp_partial_rows": 0,
     "cp_partial_bits": 0,
     "cp_chunks": 18,
@@ -53,7 +58,12 @@
     "cp_struct_blobs_decoded": 205,
     "cp_struct_blobs_failed": 0,
     "cp_targeting_world_locations_decoded": 0,
-    "cp_tracked_rewards_opaque_empty_variants": 0
+    "cp_tracked_rewards_opaque_empty_variants": 0,
+    "cp_cnc_rpcs_emitted": 170,
+    "cp_cnc_bruteforce_payloads_attempted": 0,
+    "cp_cnc_bruteforce_payloads_unwalked": 0,
+    "cp_rep_layout_cnc_tails_decoded": 170,
+    "cp_rep_layout_cnc_tails_preserved": 0
   },
   "parquet": {
     "fields": {

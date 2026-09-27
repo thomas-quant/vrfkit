@@ -1,9 +1,12 @@
 //! The export summary printed to stderr.
 //!
-//! Every line here is pinned by `tools/check_export_baseline.py`, which reads
-//! the counters back out of this text and cross-checks three of them against
-//! the row counts of the files they name. Adding, removing or renaming a line
-//! breaks that harness; do it deliberately or not at all.
+//! `tools/check_export_baseline.py` reads counters back out of this text: it
+//! pins every line its `COUNTERS` and `CHECKPOINT_COUNTERS` tables name, and
+//! cross-checks some of them against the row counts of the files they name.
+//! Not every line here is in those tables -- they are the list, not this
+//! file. `tools/check_decode_errors_corpus.py` and `tools/verify_build_corpus.py`
+//! parse this text too. Adding, removing or renaming a line breaks those
+//! harnesses; do it deliberately or not at all.
 
 use std::fs;
 use std::path::Path;
@@ -268,6 +271,16 @@ pub(super) fn print(
     // AbilitiesAndBuffs brute-force decodes anything, so a build that stopped
     // reaching it would otherwise leave every line on this summary unchanged.
     eprintln!("  CNC RPC rows:     {}", totals.sink.cnc_rpcs_emitted);
+    // The failure side of the line above, zeros included. `CNC RPC rows`
+    // counts successes (and RepLayout-tail decodes), so a build that stopped
+    // fitting the fc=34 walk would only make it smaller; `unwalked` is the
+    // count that says the walk was tried and failed, `attempted` its
+    // denominator. The label must not share a prefix with the checkpoint
+    // block's, which check_export_baseline.py anchors on.
+    eprintln!(
+        "  CNC brute force:  {} attempted / {} unwalked",
+        totals.sink.cnc_bruteforce_payloads_attempted, totals.sink.cnc_bruteforce_payloads_unwalked
+    );
     eprintln!(
         "  RepLayout tails:  {} decoded / {} preserved",
         totals.sink.rep_layout_cnc_tails_decoded, totals.sink.rep_layout_cnc_tails_preserved
@@ -477,6 +490,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.multi_contents_items_emitted
     );
     eprintln!("  Checkpoint CNC:   {} RPC rows", cp.sink.cnc_rpcs_emitted);
+    eprintln!(
+        "  Checkpoint CNC brute force: {} attempted / {} unwalked",
+        cp.sink.cnc_bruteforce_payloads_attempted, cp.sink.cnc_bruteforce_payloads_unwalked
+    );
     eprintln!(
         "  Checkpoint tails: {} decoded / {} preserved",
         cp.sink.rep_layout_cnc_tails_decoded, cp.sink.rep_layout_cnc_tails_preserved

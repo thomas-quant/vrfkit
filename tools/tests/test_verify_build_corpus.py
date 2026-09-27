@@ -21,7 +21,8 @@ def manifest():
     sink = dict.fromkeys(audit.SINK_ZERO, 0)
     sink.update(overlay_decoded_ok=80, overlay_raw_or_skip=3, overlay_not_in_table=12,
                 overlay_no_field_name=5, struct_blobs_decoded=2,
-                rpc_suffix_bits_dropped=4, overlay_handle_conflicts_refused=1)
+                rpc_suffix_bits_dropped=4, overlay_handle_conflicts_refused=1,
+                cnc_bruteforce_payloads_attempted=6, cnc_bruteforce_payloads_unwalked=0)
     quality = dict.fromkeys(("content_blocks_lost", "event_trailing_bytes",
                             "replay_data_trailing_bytes", "event_layout_mismatches",
                             "overlay_error_buckets", "overlay_errors_reported"), 0)
@@ -61,6 +62,20 @@ class ManifestTests(unittest.TestCase):
         del data["quality"]["net"]["field_stream_failures"]
         with self.assertRaises(KeyError):
             audit.manifest_counts(data)
+
+    def test_cnc_bruteforce_counters_are_recorded_and_required_in_each_pass(self):
+        counts, failures = audit.manifest_counts(manifest())
+        self.assertEqual(failures, [])
+        for scope in ("main", "checkpoint"):
+            self.assertEqual(counts[f"{scope}_cnc_bruteforce_payloads_attempted"], 6)
+            self.assertEqual(counts[f"{scope}_cnc_bruteforce_payloads_unwalked"], 0)
+            for key in ("cnc_bruteforce_payloads_attempted", "cnc_bruteforce_payloads_unwalked"):
+                with self.subTest(scope=scope, key=key):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    del target["sink"][key]
+                    with self.assertRaises(KeyError):
+                        audit.manifest_counts(data)
 
     def test_lost_or_overcounted_rpc_fails(self):
         for preserved in (1, 3):

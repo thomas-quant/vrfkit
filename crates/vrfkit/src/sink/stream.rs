@@ -416,7 +416,11 @@ impl ExportSink<'_> {
             return;
         }
 
+        self.stats.cnc_bruteforce_payloads_attempted += 1;
         let Some(rpcs) = decode_cnc_payload(payload, bit_count, ABILITIES_AND_BUFFS_FC) else {
+            // The preservation row already holds the payload whole; what the
+            // caller must not lose is that the walk failed.
+            self.stats.cnc_bruteforce_payloads_unwalked += 1;
             return;
         };
 
@@ -2029,6 +2033,73 @@ mod tests {
         );
         assert!(rpc.raw_bits.is_some(), "raw bits should be extracted");
         assert_eq!(sink.stats.cnc_rpcs_emitted, 1);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 1);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_unwalked, 0);
+    }
+
+    /// An `AbilitiesAndBuffsComponent` payload the fc=34 walk cannot fit is
+    /// counted, not dropped in silence.
+    ///
+    /// The walk used to end in `let Some(rpcs) = .. else { return; }`, which
+    /// moved nothing. `cnc_rpcs_emitted` counts successes only (and RepLayout
+    /// tail decodes as well), so a build whose handle width changed would
+    /// shrink `CNC RPC rows` with no line on the summary and no key in the
+    /// manifest naming a failure. The fc=34 constant is empirical; its own doc
+    /// says an update "can fail this walk".
+    ///
+    /// The payload declares 64 payload bits and carries 32, the shape a
+    /// misread handle width leaves behind. The preservation row still carries
+    /// every bit; what was missing is the count.
+    #[test]
+    fn unresolved_abilities_and_buffs_that_does_not_walk_is_counted() {
+        let mut bits = Vec::new();
+        write_serialized_int(&mut bits, 1, 34); // handle=1, 6 bits
+        write_int_packed(&mut bits, 64); // declares 64 payload bits ...
+        bits.extend(std::iter::repeat_n(true, 32)); // ... but carries 32
+        let data = bits_to_bytes(&bits);
+        let bit_count = bits.len() as u32;
+        assert!(
+            decode_cnc_payload(&data, bit_count, ABILITIES_AND_BUFFS_FC).is_none(),
+            "the fixture must not walk under fc=34, or this tests nothing"
+        );
+
+        let mut cache = NetGuidCache::new();
+        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let header = ContentBlockHeader {
+            has_rep_layout: false,
+            is_actor: false,
+            object_net_guid: NetworkGuid(144),
+            is_stably_named: true,
+            ..ContentBlockHeader::default()
+        };
+        sink.on_content_block(3, NetworkGuid(89), &header);
+        let failure = StreamFailure {
+            kind: vrf_net::pipeline::StreamKind::Rpc,
+            actor_net_guid: NetworkGuid(89),
+            bit_count,
+            function_count: 0,
+            consumed_bits: 0,
+            remaining_bits: u64::from(bit_count),
+            cause: vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount,
+            record_handle: None,
+            record_offset: Some(0),
+            payload_preserved: true,
+        };
+        sink.on_unresolved_class_net_cache_payload(failure, &data);
+
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 1);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_unwalked, 1);
+        assert_eq!(sink.stats.cnc_rpcs_emitted, 0);
+        assert_eq!(sink.records.fields.len(), 1, "only the preservation row");
+        let preserved = &sink.records.fields[0];
+        assert_eq!(
+            preserved.field_name.as_deref(),
+            Some(UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME)
+        );
+        assert_eq!(preserved.raw_bits.as_deref(), Some(data.as_slice()));
     }
 
     /// An unresolved payload for a group OTHER than AbilitiesAndBuffsComponent
@@ -2087,6 +2158,10 @@ mod tests {
         // above), so only the group-path gate can be what stops it here.
         assert_eq!(sink.records.fields.len(), 1);
         assert_eq!(sink.stats.cnc_rpcs_emitted, 0);
+        // Gated out before the walk, so it was never attempted -- and an
+        // attempt that did not walk is not what happened either.
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 0);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_unwalked, 0);
     }
     /// A dormancy close is not a despawn, and must not be exported as one.
     ///

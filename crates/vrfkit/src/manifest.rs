@@ -758,6 +758,14 @@ fn write_sink_quality(
         ("rpc_suffix_bits_dropped", sink.rpc_suffix_bits_dropped),
         ("cnc_rpcs_emitted", sink.cnc_rpcs_emitted),
         (
+            "cnc_bruteforce_payloads_attempted",
+            sink.cnc_bruteforce_payloads_attempted,
+        ),
+        (
+            "cnc_bruteforce_payloads_unwalked",
+            sink.cnc_bruteforce_payloads_unwalked,
+        ),
+        (
             "rep_layout_cnc_tails_decoded",
             sink.rep_layout_cnc_tails_decoded,
         ),
@@ -1000,6 +1008,8 @@ mod tests {
             "truncated_rpcs",
             "rpc_suffix_bits_dropped",
             "cnc_rpcs_emitted",
+            "cnc_bruteforce_payloads_attempted",
+            "cnc_bruteforce_payloads_unwalked",
             "rep_layout_cnc_tails_decoded",
             "rep_layout_cnc_tails_preserved",
             // Run-level completeness and checkpoint-only accounting.
@@ -1096,6 +1106,8 @@ mod tests {
                 "truncated_rpcs",
                 "rpc_suffix_bits_dropped",
                 "cnc_rpcs_emitted",
+                "cnc_bruteforce_payloads_attempted",
+                "cnc_bruteforce_payloads_unwalked",
                 "rep_layout_cnc_tails_decoded",
                 "rep_layout_cnc_tails_preserved",
             ]
@@ -1157,6 +1169,50 @@ mod tests {
             "\"checkpoint_literal_paths\": 17",
             "\"checkpoint_indexed_paths\": 11",
             "\"checkpoint_resolved_path_indices\": 11",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// Both brute-force counters publish the measured value in each stream,
+    /// not a constant: `unwalked` is the one number that says the fc=34 walk
+    /// was tried and failed, so a key stuck at zero would hide exactly that.
+    #[test]
+    fn cnc_bruteforce_counters_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            cnc_bruteforce_payloads_attempted: 11,
+            cnc_bruteforce_payloads_unwalked: 2,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.cnc_bruteforce_payloads_attempted = 13;
+        checkpoints.sink.cnc_bruteforce_payloads_unwalked = 3;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            chunks_processed: 0,
+            export_groups: 0,
+            movement_rows: 0,
+            net_guid_rows: 0,
+            event_rows: 0,
+            partial_rows: 0,
+            partial_bits: 0,
+            event_trailing_bytes: 0,
+            replay_data_trailing_bytes: 0,
+            event_layout_mismatches: 0,
+            event_first_layout_mismatch: None,
+            event_payloads_decoded: 0,
+            event_payload_unknown_groups: 0,
+            net: &net,
+            sink: &sink,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"cnc_bruteforce_payloads_attempted\": 11",
+            "\"cnc_bruteforce_payloads_unwalked\": 2",
+            "\"cnc_bruteforce_payloads_attempted\": 13",
+            "\"cnc_bruteforce_payloads_unwalked\": 3",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }

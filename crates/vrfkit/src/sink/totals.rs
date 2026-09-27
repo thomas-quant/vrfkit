@@ -70,6 +70,10 @@ pub(crate) struct SinkTotals {
     pub truncated_rpcs: u64,
     pub rpc_suffix_bits_dropped: u64,
     pub cnc_rpcs_emitted: u64,
+    /// See `ExportStats::cnc_bruteforce_payloads_attempted`.
+    pub cnc_bruteforce_payloads_attempted: u64,
+    /// See `ExportStats::cnc_bruteforce_payloads_unwalked`.
+    pub cnc_bruteforce_payloads_unwalked: u64,
     /// Post-RepLayout ClassNetCache tails decoded as verified RPC structure.
     pub rep_layout_cnc_tails_decoded: u64,
     /// Post-RepLayout tails retained as whole raw payloads.
@@ -106,6 +110,8 @@ impl SinkTotals {
             struct_blobs_decoded,
             multi_contents_items_emitted,
             cnc_rpcs_emitted,
+            cnc_bruteforce_payloads_attempted,
+            cnc_bruteforce_payloads_unwalked,
             rep_layout_cnc_tails_decoded,
             rep_layout_cnc_tails_preserved,
             struct_blobs_failed,
@@ -141,6 +147,8 @@ impl SinkTotals {
         self.truncated_rpcs += *truncated_rpcs;
         self.rpc_suffix_bits_dropped += *rpc_suffix_bits_dropped;
         self.cnc_rpcs_emitted += *cnc_rpcs_emitted;
+        self.cnc_bruteforce_payloads_attempted += *cnc_bruteforce_payloads_attempted;
+        self.cnc_bruteforce_payloads_unwalked += *cnc_bruteforce_payloads_unwalked;
         self.rep_layout_cnc_tails_decoded += *rep_layout_cnc_tails_decoded;
         self.rep_layout_cnc_tails_preserved += *rep_layout_cnc_tails_preserved;
         error_report.merge_from(&overlay.error_report);

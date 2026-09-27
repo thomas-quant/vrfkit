@@ -645,6 +645,14 @@ fn push_sink_totals(out: &mut String, s: &SinkTotals) {
         ),
         ("cnc_rpcs_emitted", s.cnc_rpcs_emitted.to_string()),
         (
+            "cnc_bruteforce_payloads_attempted",
+            s.cnc_bruteforce_payloads_attempted.to_string(),
+        ),
+        (
+            "cnc_bruteforce_payloads_unwalked",
+            s.cnc_bruteforce_payloads_unwalked.to_string(),
+        ),
+        (
             "rep_layout_cnc_tails_decoded",
             s.rep_layout_cnc_tails_decoded.to_string(),
         ),
@@ -904,6 +912,8 @@ mod tests {
             truncated_rpcs: next(),
             rpc_suffix_bits_dropped: next(),
             cnc_rpcs_emitted: next(),
+            cnc_bruteforce_payloads_attempted: next(),
+            cnc_bruteforce_payloads_unwalked: next(),
             rep_layout_cnc_tails_decoded: next(),
             rep_layout_cnc_tails_preserved: next(),
         };

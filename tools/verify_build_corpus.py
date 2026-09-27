@@ -71,10 +71,15 @@ def manifest_counts(manifest):
                 keys.update(("content_blocks", "skipped_bits", "rpc_stream_failures",
                              "unresolved_rpc_payloads_preserved"))
             else:
+                # The brute-force pair is recorded and required, not yet
+                # gated on zero: `unwalked` has only been measured on a
+                # sample of builds, not on the whole corpus.
                 keys.update(("overlay_decoded_ok", "overlay_raw_or_skip",
                              "overlay_not_in_table", "overlay_no_field_name",
                              "struct_blobs_decoded", "rpc_suffix_bits_dropped",
-                             "overlay_handle_conflicts_refused"))
+                             "overlay_handle_conflicts_refused",
+                             "cnc_bruteforce_payloads_attempted",
+                             "cnc_bruteforce_payloads_unwalked"))
             for key in sorted(keys):
                 name = f"{prefix}_{key}"
                 counts[name] = require_count(source, key)

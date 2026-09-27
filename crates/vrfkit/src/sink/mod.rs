@@ -229,6 +229,23 @@ pub struct ExportStats {
     /// structure rather than silently leaving the opaque blob.
     pub cnc_rpcs_emitted: u64,
 
+    /// Unresolved `AbilitiesAndBuffsComponent` payloads offered to that
+    /// brute-force walk: the denominator [`Self::cnc_rpcs_emitted`] does not
+    /// have, since that counter also counts RepLayout-tail decodes.
+    pub cnc_bruteforce_payloads_attempted: u64,
+
+    /// Of those, payloads the fc=34 walk did not fit, so no RPC row was
+    /// emitted and only the whole-payload preservation row remains.
+    ///
+    /// This exit used to be `let Some(..) else { return; }` with no counter,
+    /// while only successes were counted -- the shape `struct_blobs_failed`
+    /// was added to remove. The constant 34 is empirical and its doc says an
+    /// update can fail the walk; if one does, `CNC RPC rows` shrinks and this
+    /// is the line that says why. No bits are lost either way: the
+    /// preservation row carries the payload whole. Zero on the replays
+    /// measured when it was added.
+    pub cnc_bruteforce_payloads_unwalked: u64,
+
     /// Post-RepLayout ClassNetCache tails decoded under verified component
     /// provenance and strict one-RPC framing.
     pub rep_layout_cnc_tails_decoded: u64,

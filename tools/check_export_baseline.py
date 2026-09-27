@@ -121,6 +121,27 @@ COUNTERS = {
     "tracked_rewards_opaque_empty_variants": (
         r"(?m)^\s*Reward opaque:\s+(\d+) empty variants\s*$"
     ),
+    # The AbilitiesAndBuffs ClassNetCache brute force and the post-RepLayout
+    # tails. `CNC RPC rows` counts successes only, and it also counts the
+    # tail decodes, so it can only shrink when the fc=34 walk stops fitting;
+    # `unwalked` is the line that names that failure and `attempted` its
+    # denominator. The summary.rs header claimed every line was pinned here
+    # while these had no pattern at all. Anchored at the line start: the
+    # checkpoint block prints "Checkpoint CNC brute force:", which an
+    # unanchored pattern would read whenever the main line went missing.
+    "cnc_rpcs_emitted": r"(?m)^\s*CNC RPC rows:\s+(\d+)\s*$",
+    "cnc_bruteforce_payloads_attempted": (
+        r"(?m)^\s*CNC brute force:\s+(\d+) attempted / \d+ unwalked\s*$"
+    ),
+    "cnc_bruteforce_payloads_unwalked": (
+        r"(?m)^\s*CNC brute force:\s+\d+ attempted / (\d+) unwalked\s*$"
+    ),
+    "rep_layout_cnc_tails_decoded": (
+        r"(?m)^\s*RepLayout tails:\s+(\d+) decoded / \d+ preserved\s*$"
+    ),
+    "rep_layout_cnc_tails_preserved": (
+        r"(?m)^\s*RepLayout tails:\s+\d+ decoded / (\d+) preserved\s*$"
+    ),
 }
 PATTERNS = {k: re.compile(v) for k, v in COUNTERS.items()}
 
@@ -153,6 +174,19 @@ CHECKPOINT_COUNTERS = {
     "cp_targeting_world_locations_decoded": r"(?m)^\s*Checkpoint targets:\s+(\d+) array children\s*$",
     "cp_tracked_rewards_opaque_empty_variants": (
         r"(?m)^\s*Checkpoint reward opaque:\s+(\d+) empty variants\s*$"
+    ),
+    "cp_cnc_rpcs_emitted": r"(?m)^\s*Checkpoint CNC:\s+(\d+) RPC rows\s*$",
+    "cp_cnc_bruteforce_payloads_attempted": (
+        r"(?m)^\s*Checkpoint CNC brute force:\s+(\d+) attempted / \d+ unwalked\s*$"
+    ),
+    "cp_cnc_bruteforce_payloads_unwalked": (
+        r"(?m)^\s*Checkpoint CNC brute force:\s+\d+ attempted / (\d+) unwalked\s*$"
+    ),
+    "cp_rep_layout_cnc_tails_decoded": (
+        r"(?m)^\s*Checkpoint tails:\s+(\d+) decoded / \d+ preserved\s*$"
+    ),
+    "cp_rep_layout_cnc_tails_preserved": (
+        r"(?m)^\s*Checkpoint tails:\s+\d+ decoded / (\d+) preserved\s*$"
     ),
 }
 
