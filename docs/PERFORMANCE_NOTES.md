@@ -117,14 +117,14 @@ The zero-blob figure above was one replay's. Re-measured on 2026-09-28, once
 the skips were counted (`vrf_frame::FrameSkips`, printed as `Frame skips:` by
 `export` and `validate`, and published in `manifest.json` quality and the
 `diag` JSON): `vrfkit diag` over 45 replays -- two from each of the 21 build
-directories of the local archive, the pinned 02d4d478 and the three public
-fixtures (12.10, 12.11, 13.00), 24 builds in all -- walked 10,614,694
-ReplayData frames and 860 checkpoint frames with **0** ExternalData blobs,
-**0** ExternalData bytes and **0** GameSpecificFrameData bytes. The last is
-structural on that sample: `vrfkit inspect` shows header flags `0x0002`
-(`HasStreamingFixes` only) on all 45, so the section never appears. A build
-that starts sending either section now moves these counters, and the pinned
-`frame_*` export baselines, instead of nothing.
+directories of the local archive (13.01's two include the pinned 02d4d478)
+and the three public fixtures (12.10, 12.11, 13.00), 24 builds in all --
+walked 10,614,694 ReplayData frames and 860 checkpoint frames with **0**
+ExternalData blobs, **0** ExternalData bytes and **0** GameSpecificFrameData
+bytes. The last is structural on that sample: `vrfkit inspect` shows header
+flags `0x0002` (`HasStreamingFixes` only) on all 45, so the section never
+appears. A build that starts sending either section now moves these counters,
+and the pinned `frame_*` export baselines, instead of nothing.
 
 ## Schema hot path (vrf-schema)
 

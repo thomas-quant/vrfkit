@@ -221,9 +221,10 @@ impl Verdict {
 /// payload and all, dropped before framing because its channel had no open
 /// actor -- the same class of loss as `bunch_header_failures`. It was added
 /// only after measuring it at 0 on every one of 45 replays (2026-09-28,
-/// `diag` for the main and checkpoint passes plus `validate`): two per build
-/// directory of the local archive, the pinned 02d4d478 and the three public
-/// fixtures, 24 builds, 23,818,049 main and 185,244 checkpoint bunches. Its two
+/// `diag` for the main and checkpoint passes plus `validate`): two from each
+/// of the 21 build directories of the local archive (13.01's two include the
+/// pinned 02d4d478) and the three public fixtures -- 24 builds, 23,818,049
+/// main and 185,244 checkpoint bunches. Its two
 /// companions stay out: a failed reopen is already a `bunch_header_failures`,
 /// and `unopened_channel_bits` moves only with the bunch count. The
 /// partial-reassembly carve-out above is not widened by this: a rejected
