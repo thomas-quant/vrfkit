@@ -871,7 +871,12 @@ reads raw payloads against explicit primitive type proposals. Each specification
 names an exact exported group and field, and the decoder requires full payload
 consumption. This checks structure and observed numeric ranges, not gameplay
 meaning. Use it before adding overlay types and when comparing their emitted
-values after export (`--compare-typed`). The shipped `tools/fixtures/type_evidence.json`
+values after export (`--compare-typed`). Besides the byte-aligned primitives it
+reads four bit-level types -- `EnumByte` (a 1..8-bit payload), `FName`,
+`RepMovementByte` and `RepMovementShort` -- with its own LSB-first reader rather
+than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
+`ReplicatedMovement` value is compared by parsing the exported JSON, so `1` and
+`1.0` are the same number there. The shipped `tools/fixtures/type_evidence.json`
 covers the 38 additions; `tools/fixtures/type_evidence_aliases.json` separately
 covers their existing Swiftplay class-alias propagation. Both were checked on
 all corresponding observed rows in the 714-replay corpus. A specimen must not
