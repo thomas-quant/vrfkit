@@ -37,6 +37,12 @@ Two independent checks run here, and they fail on different things:
 Both were confirmed to fail on a deliberately broken build before this was
 committed; see the commit message.
 
+With `--checkpoints` a third check runs, `checkpoint_guid_crosscheck`: every
+checkpoint GUID entry's path, rebuilt from the raw declaration record by the
+checkpoint reader's path-index rule, must equal the path the main stream's own
+reader declared for that GUID. It needs no baseline either; see its docstring
+and docs/CHECKPOINT_PATH_RESOLUTION.md.
+
 The .vrf lives outside the repo (under valplay), so a missing replay is
 reported and SKIPPED rather than failed -- the same reasoning as
 check_corpus_baseline.py: a guard that fails on someone else's machine gets
@@ -58,6 +64,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 if __package__:
@@ -300,6 +307,183 @@ def checkpoint_manifest_errors(out_dir: Path, counters: dict | None = None) -> l
     return errors
 
 
+#: The columns `checkpoint_guid_crosscheck` reads from each table.
+GUID_ENTRY_COLUMNS = ("checkpoint_index", "ordinal", "net_guid", "outer_net_guid",
+                      "path_is_string", "literal_path", "name_index")
+MAIN_GUID_COLUMNS = ("net_guid", "path", "outer_net_guid")
+
+#: Every count `checkpoint_guid_crosscheck` returns, in print order. All of them
+#: are always returned and printed, zeros included: a line that shows a count
+#: only when it is non-zero cannot tell "nothing differed" from "nothing ran".
+#: For each kind, joined = path_equal + path_differs = outer_equal +
+#: outer_value_differs + outer_presence_differs; indexed entries are joined,
+#: unjoined or unresolved.
+GUID_CROSSCHECK_KEYS = (
+    "indexed_joined", "indexed_path_equal", "indexed_path_differs",
+    "indexed_unresolved", "indexed_outer_equal", "indexed_outer_value_differs",
+    "indexed_outer_presence_differs", "indexed_unjoined",
+    "literal_joined", "literal_path_equal", "literal_path_differs",
+    "literal_outer_equal", "literal_outer_value_differs",
+    "literal_outer_presence_differs", "literal_unjoined",
+    "main_duplicate_guids", "malformed_entries", "ordinal_errors",
+)
+
+#: Counts that fail the check when non-zero. `indexed_joined == 0` fails too.
+#: Unjoined entries do not: a checkpoint may declare a GUID the main stream
+#: never exported.
+GUID_CROSSCHECK_FAILURES = {
+    "indexed_path_differs": "indexed entries resolve to a path the main stream does not declare for that GUID",
+    "indexed_unresolved": "indexed entries name a position past the literals that precede them",
+    "indexed_outer_value_differs": "indexed entries carry a different outer GUID than the main stream",
+    "indexed_outer_presence_differs": "indexed entries disagree with the main stream on whether an outer GUID exists",
+    "literal_path_differs": "literal entries carry a different path than the main stream",
+    "literal_outer_value_differs": "literal entries carry a different outer GUID than the main stream",
+    "literal_outer_presence_differs": "literal entries disagree with the main stream on whether an outer GUID exists",
+    "main_duplicate_guids": "net_guids.parquet rows repeat a net_guid, so the join is ambiguous",
+}
+
+
+def format_guid_crosscheck(counts: dict) -> str:
+    """One line with every cross-check count, zeros included."""
+    return "Checkpoint GUID cross-check: " + ", ".join(
+        f"{key.replace('_', ' ')} {counts[key]}" for key in GUID_CROSSCHECK_KEYS)
+
+
+def _outer_verdict(checkpoint_outer: int, main_outer: int | None) -> str:
+    """Compare outers under an explicit rule; never fold null into 0.
+
+    `checkpoint_guid_entries` keeps the wire value, where 0 means "no outer".
+    `net_guids` writes null for "no outer" and never writes 0, the invalid
+    GUID. So checkpoint 0 must meet main null, and a non-zero checkpoint outer
+    must meet the same main value. A main 0 is a presence difference, not a
+    match for checkpoint 0: folding null into 0 would let the main table start
+    writing 0 without this check noticing.
+    """
+    checkpoint_present = checkpoint_outer != 0
+    main_present = main_outer is not None
+    if checkpoint_present != main_present:
+        return "outer_presence_differs"
+    if checkpoint_present and checkpoint_outer != main_outer:
+        return "outer_value_differs"
+    return "outer_equal"
+
+
+def checkpoint_guid_crosscheck(out_dir: Path) -> tuple[dict, list[str]]:
+    """Check checkpoint GUID paths against the main stream's own declarations.
+
+    Returns `(counts, errors)`: every key of `GUID_CROSSCHECK_KEYS`, and one
+    message per reason the check fails. An empty error list is a pass.
+
+    A checkpoint GUID entry carries its path either as a literal or as an index.
+    `checkpoint_guid_entries.parquet` keeps the raw record, so the path is
+    rebuilt here by the reader's rule (docs/CHECKPOINT_PATH_RESOLUTION.md): the
+    index is a zero-based position among the literals that appeared earlier
+    in the same checkpoint, indexed entries are not added to that table, and
+    the table starts empty for every `checkpoint_index`. Grouping is by
+    `checkpoint_index`, never `checkpoint_id` -- IDs repeat within a replay.
+    Rows are put in `(checkpoint_index, ordinal)` order first rather than
+    trusted to arrive in it.
+
+    The main stream declares the same server GUIDs through a separate reader
+    into a separate cache, written as `net_guids.parquet`; its paths never pass
+    through the index rule. Each entry is joined to it by `net_guid` and the
+    path and outer GUID are compared (see `_outer_verdict`). Literal entries
+    are compared too: they do not test the rule, but they test the premise
+    that a GUID number names the same path in both tables. Agreement is
+    evidence for the path-index rule, not for actor identity across streams.
+
+    Fails on any path or outer difference, an index past the preceding
+    literals, duplicate `net_guid` keys in the main table, malformed rows or
+    non-contiguous ordinals, and when no indexed entry joined at all -- a check
+    that compared nothing must not read as one that passed.
+    """
+    counts = dict.fromkeys(GUID_CROSSCHECK_KEYS, 0)
+    try:
+        entries = pq.read_table(out_dir / "checkpoint_guid_entries.parquet",
+                                columns=list(GUID_ENTRY_COLUMNS)).to_pydict()
+        main = pq.read_table(out_dir / "net_guids.parquet",
+                             columns=list(MAIN_GUID_COLUMNS)).to_pydict()
+    except (OSError, ValueError, pa.ArrowException) as exc:
+        return counts, [f"checkpoint GUID cross-check cannot read its tables: {exc}"]
+
+    main_rows: dict[int, tuple] = {}
+    for guid, path, outer in zip(main["net_guid"], main["path"], main["outer_net_guid"]):
+        if guid in main_rows:
+            counts["main_duplicate_guids"] += 1
+        main_rows[guid] = (path, outer)
+
+    rows = list(zip(*(entries[name] for name in GUID_ENTRY_COLUMNS)))
+    well_formed = []
+    for row in rows:
+        checkpoint, ordinal, guid, outer, is_literal, literal, index = row
+        if (None in (checkpoint, ordinal, guid, outer, is_literal)
+                or (is_literal and (literal is None or index is not None))
+                or (not is_literal and (index is None or literal is not None))):
+            counts["malformed_entries"] += 1
+        else:
+            well_formed.append(row)
+    well_formed.sort(key=lambda row: (row[0], row[1]))
+    previous = None
+    for checkpoint, ordinal, *_ in well_formed:
+        expected = previous[1] + 1 if previous and previous[0] == checkpoint else 0
+        if ordinal != expected:
+            counts["ordinal_errors"] += 1
+        previous = (checkpoint, ordinal)
+    if counts["malformed_entries"] or counts["ordinal_errors"]:
+        return counts, [
+            f"checkpoint_guid_entries.parquet is not a complete raw record "
+            f"({counts['malformed_entries']} malformed entries, "
+            f"{counts['ordinal_errors']} ordinal errors); paths were not compared"]
+
+    # The first example of each difference, for the error message.
+    first: dict[str, str] = {}
+
+    def note(key: str, row: tuple, detail: str) -> None:
+        if key not in first:
+            first[key] = (f"checkpoint_index {row[0]} ordinal {row[1]} "
+                          f"net_guid {row[2]}: {detail}")
+
+    literals: list[str] = []
+    current = None
+    for row in well_formed:
+        checkpoint, _, guid, outer, is_literal, literal, index = row
+        if checkpoint != current:
+            current, literals = checkpoint, []
+        if is_literal:
+            literals.append(literal)
+            kind, path = "literal", literal
+        elif index < len(literals):
+            kind, path = "indexed", literals[index]
+        else:
+            counts["indexed_unresolved"] += 1
+            note("indexed_unresolved", row, f"index {index}, {len(literals)} preceding literals")
+            continue
+        if guid not in main_rows:
+            counts[f"{kind}_unjoined"] += 1
+            continue
+        counts[f"{kind}_joined"] += 1
+        main_path, main_outer = main_rows[guid]
+        if path == main_path:
+            counts[f"{kind}_path_equal"] += 1
+        else:
+            counts[f"{kind}_path_differs"] += 1
+            note(f"{kind}_path_differs", row, f"checkpoint {path!r}, main {main_path!r}")
+        verdict = _outer_verdict(outer, main_outer)
+        counts[f"{kind}_{verdict}"] += 1
+        if verdict != "outer_equal":
+            note(f"{kind}_{verdict}", row, f"checkpoint outer {outer}, main outer {main_outer}")
+
+    errors = []
+    if counts["indexed_joined"] == 0:
+        errors.append("no indexed checkpoint GUID entry joined a main-stream GUID, "
+                      "so the path-index rule was not compared at all")
+    for key, reason in GUID_CROSSCHECK_FAILURES.items():
+        if counts[key]:
+            example = f" (first: {first[key]})" if key in first else ""
+            errors.append(f"checkpoint GUID cross-check: {counts[key]} {reason}{example}")
+    return counts, errors
+
+
 def reward_opaque_manifest_errors(
     out_dir: Path, counters: dict, checkpoints: bool,
 ) -> list[str]:
@@ -400,6 +584,12 @@ def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -
         manifest_errors = checkpoint_manifest_errors(out_dir, counters)
         if manifest_errors:
             raise SystemExit("; ".join(manifest_errors))
+        # Printed, never pinned: adding these to `counters` would make every
+        # existing checkpoint baseline report them as drift from None.
+        guid_counts, guid_errors = checkpoint_guid_crosscheck(out_dir)
+        print(format_guid_crosscheck(guid_counts))
+        if guid_errors:
+            raise SystemExit("; ".join(guid_errors))
 
     return {"counters": counters, "parquet": parquet}
 

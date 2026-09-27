@@ -10,8 +10,17 @@ import tempfile
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from io import StringIO
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import verify_build_corpus as audit
+
+
+def guid_counts(**changes):
+    counts = dict.fromkeys(audit.baseline.GUID_CROSSCHECK_KEYS, 0)
+    counts.update(changes)
+    return counts
 
 
 def manifest():
@@ -115,6 +124,7 @@ class AuditExecutionTests(unittest.TestCase):
                          "typed_mismatch_count": 0, "missing": []}
         self.codes = [0, 0]
         self.write_manifest = True
+        self.guid_counts = guid_counts(indexed_joined=5, indexed_path_equal=5)
 
     def process(self, args, **kwargs):
         command = args[1]
@@ -136,7 +146,8 @@ class AuditExecutionTests(unittest.TestCase):
         with ExitStack() as stack:
             run = stack.enter_context(patch.object(audit.subprocess, "run", side_effect=error or self.process))
             stack.enter_context(patch.object(audit, "check_export", side_effect=compare_error,
-                                            return_value={"fields": {"rows": 4, "bytes": 80}}))
+                                            return_value=({"fields": {"rows": 4, "bytes": 80}},
+                                                          self.guid_counts)))
             stack.enter_context(patch.object(audit.evidence, "validate", side_effect=evidence_result))
             result = audit.audit_one((self.digest, self.replay), Path("vrfkit.exe"), self.work, [])
         saved = json.loads((self.work / self.digest / "result.json").read_text())
@@ -202,6 +213,56 @@ class AuditExecutionTests(unittest.TestCase):
         self.assertTrue(result["failures"])
         self.assertNotIn(str(self.root), json.dumps(result))
         self.assertIn(repr(str(self.replay)), (self.work / self.digest / "error.txt").read_text())
+
+    def test_guid_crosscheck_counts_reach_the_result_zeros_included(self):
+        result, _ = self.run_audit()
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(result["tables"], {"fields": {"rows": 4, "bytes": 80}})
+        self.assertEqual(result["counts"]["guid_crosscheck_indexed_joined"], 5)
+        self.assertEqual(result["counts"]["guid_crosscheck_indexed_path_differs"], 0)
+        self.assertEqual(
+            {key for key in result["counts"] if key.startswith("guid_crosscheck_")},
+            {f"guid_crosscheck_{key}" for key in audit.baseline.GUID_CROSSCHECK_KEYS})
+
+
+class CheckExportTests(unittest.TestCase):
+    """`check_export` must run the checkpoint GUID cross-check and surface it.
+
+    Every other check it calls is stubbed to pass, so these tests see only the
+    cross-check's wiring; the check itself is tested with the baseline guard.
+    """
+
+    def run_check_export(self, crosscheck_result):
+        with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+            directory = Path(temp)
+            for name in audit.baseline.PARQUET_FILES + audit.baseline.CHECKPOINT_PARQUET_FILES:
+                pq.write_table(pa.table({"value": [1]}), directory / f"{name}.parquet")
+            stack.enter_context(patch.object(audit.overlay, "read_counters", return_value=({}, None)))
+            stack.enter_context(patch.object(audit.overlay, "reconcile", return_value=None))
+            stack.enter_context(patch.dict(audit.baseline.PATTERNS, clear=True))
+            stack.enter_context(patch.dict(audit.baseline.CHECKPOINT_COUNTERS, clear=True))
+            for name in ("cross_checks", "checkpoint_manifest_errors",
+                         "reward_opaque_manifest_errors", "targeting_manifest_errors"):
+                stack.enter_context(patch.object(audit.baseline, name, return_value=[]))
+            crosscheck = stack.enter_context(patch.object(
+                audit.baseline, "checkpoint_guid_crosscheck", return_value=crosscheck_result))
+            try:
+                return audit.check_export("summary", directory)
+            finally:
+                crosscheck.assert_called_once_with(directory)
+
+    def test_passing_crosscheck_returns_its_counts_with_the_tables(self):
+        counts = guid_counts(indexed_joined=7, indexed_path_equal=7)
+        tables, returned = self.run_check_export((counts, []))
+        self.assertEqual(returned, counts)
+        self.assertEqual(tables["checkpoint_guid_entries"]["rows"], 1)
+
+    def test_failing_crosscheck_fails_the_export_and_keeps_its_counts(self):
+        counts = guid_counts(indexed_joined=7, indexed_path_equal=5, indexed_path_differs=2)
+        with self.assertRaises(ValueError) as raised:
+            self.run_check_export((counts, ["checkpoint GUID cross-check: 2 indexed entries differ"]))
+        self.assertIn("2 indexed entries differ", str(raised.exception))
+        self.assertIn("indexed path differs 2", str(raised.exception))
 
 
 class AuditCommandTests(unittest.TestCase):

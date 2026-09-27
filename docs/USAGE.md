@@ -688,7 +688,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `validate_corpus.py` | Framing (preserved corpus, top level; `--recursive` for subdirectories) |
 | `validate_metrics_corpus.py` | Metrics pipeline passes |
 | `check_corpus_baseline.py` | Per-build corpus baseline |
-| `check_export_baseline.py` | Export counters + per-file rows/bytes/SHA-256 content identity |
+| `check_export_baseline.py` | Export counters + per-file rows/bytes/SHA-256 content identity; with `--checkpoints`, also every checkpoint GUID path against the main stream's own declaration of that GUID ([method](CHECKPOINT_PATH_RESOLUTION.md#cross-check-against-the-main-stream)) |
 | `check_baseline_schemas.py` | All committed baseline schemas, measured SHA-256 hashes, and cross-file replay/counter/table identities. |
 | `check_decode_errors_corpus.py` | Overlay type errors + struct blob failures (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
 | `corpus_scan.py` | Not a check -- the `.vrf` discovery `validate_corpus.py` and `check_decode_errors_corpus.py` share, so the two can no longer glob a directory two different ways and disagree about what "the corpus" is without saying so. Non-recursive by default; read its docstring for why. |
@@ -1013,7 +1013,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 910 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 927 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
@@ -1300,6 +1300,11 @@ strict audit. Every build must also show positive checkpoint block and
 decoded-value counts; otherwise `build_errors` makes the command fail. Unknown
 RPCs preserved whole are counted separately from loss.
 Unobserved evidence fields are reported as absent, never as verified values.
+Each export's checkpoint GUID paths are also rebuilt from the raw declaration
+record and compared with the main stream's independent GUID registry. A path
+or outer difference, or an export where no indexed entry joined, fails that
+replay; every `guid_crosscheck_*` count reaches the report per build, zeros
+included. See [the cross-check](CHECKPOINT_PATH_RESOLUTION.md#cross-check-against-the-main-stream).
 
 ```powershell
 python tools/verify_build_corpus.py --exe target/release/vrfkit.exe --corpus '<replay-root>' --corpus '<preserved-fixture-root>' --work-dir '<new-private-work-dir>' --output '<new-report.json>' --jobs 4
