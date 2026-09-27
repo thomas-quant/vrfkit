@@ -372,6 +372,24 @@ fn the_death_montage_parameters_are_object_net_guids() {
     assert_eq!(lookup_checksum(2397897524), Some(FieldType::ObjectNetGuid));
 }
 
+/// `AresEquippableDataTracker.OriginalBuyerTeam` is an inline FName: 97 bits
+/// is 1 (isHardcoded = 0) + 32 (length 4) + `Red\0` + 32 (number 0), and 105
+/// bits the same around `Blue\0`. Those two payloads are the only ones in the
+/// 1,018-replay audit (748,381 rows, main and checkpoint), and the descriptor's
+/// EnumByte could read neither -- no row is 8 bits.
+#[test]
+fn original_buyer_team_is_an_fname() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        table.lookup(
+            "/Script/ShooterGame.AresEquippableDataTracker",
+            "OriginalBuyerTeam"
+        ),
+        Some(FieldType::FName)
+    );
+    assert_eq!(lookup_checksum(255019476), Some(FieldType::FName));
+}
+
 #[test]
 fn transition_context_is_an_object_net_guid() {
     let table = OverlayTable::new(&OVERLAY_TABLE);

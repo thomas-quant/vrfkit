@@ -75,7 +75,7 @@ EXPECTED += [
      "FieldType::Float"),
     ("SmokeScreen", "ReplicatedMovement",
      "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents }"),
-    ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::Raw"),
+    ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::FName"),
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Point", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Base", "DamageOrigin",
@@ -1413,22 +1413,36 @@ def main():
     # vrf-decode, so the field decodes as the FName the C# descriptor
     # declares and needs no correction here.
 
-    # Fix: EnumByte -> Raw for AresEquippableDataTracker.OriginalBuyerTeam.
-    # C# declares this as EnumByte (single byte), but on wire it arrives as
-    # 97-105 bits consistently (248 occurrences in 02d4d478). This is likely
-    # a serialized FastArray entry or struct, not a bare enum. Mark Raw.
-    blocks = content.split("    OverlayEntry {")
-    for i, block in enumerate(blocks):
-        if i == 0:
-            continue
-        if "AresEquippableDataTracker" not in block:
-            continue
-        if 'field_name: "OriginalBuyerTeam"' not in block:
-            continue
-        if "FieldType::EnumByte" in block:
-            blocks[i] = block.replace("FieldType::EnumByte", "FieldType::Raw")
-            count += 1
-    content = "    OverlayEntry {".join(blocks)
+    # Fix: EnumByte -> FName for AresEquippableDataTracker.OriginalBuyerTeam.
+    #
+    # AdditionalComponentDescriptors.cs declares it EnumByte ("a small team
+    # enum") and says itself to fall back if that fails to decode. It does:
+    # no row is 8 bits. This pass used to force Raw instead, on the guess that
+    # the 97-105-bit payloads (248 on 02d4d478) were "likely a serialized
+    # FastArray entry or struct". They are an inline FName, exactly:
+    #
+    #   97 bits  = 1 isHardcoded (0) + i32 length 4 + "Red\0"  + i32 number 0
+    #   105 bits = 1 isHardcoded (0) + i32 length 5 + "Blue\0" + i32 number 0
+    #
+    # Measured 2026-09-28 over the 1,018 replays audited at 259ed10 (every row
+    # of the group in fields + checkpoint_fields): 748,381 rows (636,009 main,
+    # 112,372 checkpoint), in every replay; checksum 255019476, declared by
+    # this field only and the group declares nothing else. Exactly two
+    # payloads exist in the whole corpus -- 97 bits 08000000a4cac8000000000000
+    # and 105 bits 0a00000084d8eaca000000000000 -- and an independent FName
+    # reader consumes all 748,381 rows exactly, to "Red" (376,779) and "Blue"
+    # (371,602), isHardcoded 0 and number 0 on every row. The shipped Rust
+    # decode_fname already turns the byte-identical payloads of
+    # CombatReport ParticipantTeamName into "Red"/"Blue" (3.98M rows). No
+    # byte-aligned FString could read either width.
+    #
+    # The value is the team NAME as sent. Nothing here maps Red/Blue to
+    # attacker/defender or to a player; 12.10, 12.11 and 13.00 carry one main
+    # row each, all "Blue".
+    content, n = retype_exact(
+        content, "/Script/ShooterGame.AresEquippableDataTracker", "OriginalBuyerTeam",
+        "FieldType::EnumByte", "FieldType::FName", expected=1)
+    count += n
 
     # Fix: Raw -> ObjectNetGuid for TransitionContext. The pinned C#
     # descriptor declares RawPayload("UTransitionContext"), so it does not
