@@ -695,7 +695,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `check_component_remaps.py` | Whether each Blueprint-component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
 | `compare_combat_report.py` | Metrics-input multiset |
-| `compare_rpc_params.py` | RPC parameter comparison |
+| `compare_rpc_params.py` | RPC parameters and records against the C# export, with its listed expected differences |
 | `compare_with_csharp.py` | Diff against the C# parser |
 | `check_effect_decoder.py` | Effect decoder (12 cases) |
 | `check_ascii.py` | Rust source ASCII sweep (147 files) |
@@ -1013,7 +1013,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 910 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 924 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
@@ -1088,11 +1088,20 @@ grep rpc_received "$REF/events.ndjson" | grep -E \
 rm "$REF/events.ndjson" "$REF/movement.ndjson"   # 3.2 GB; only the lines above are read
 ```
 
+Keep `$REF/manifest.json`: `compare_rpc_params.py` reads the replay's SHA-256
+from it. Without it no expected difference can be applied or checked, so the
+run cannot pass: it exits 2, or 1 if anything differs.
+
 Upstream (`b51d674`) will not do: it leaves CombatReport `Rounds` as a raw
 payload, and its Gekko descriptor misses every RPC on Gekko's character (see
 the README's C# comparison). On this replay `compare_combat_report.py` matches
-all ten shapes; `compare_rpc_params.py` exits 1 on one damage record vrfkit
-has and the C# export does not, documented there.
+all ten shapes, and `compare_rpc_params.py` matches every parameter and every
+record but one: a damage record vrfkit has and the C# export does not, because
+the C# resolver cannot name the class of a component stably named `Damageable`
+([FOLLOWUP.md](FOLLOWUP.md#the-damage-record-only-vrfkit-emits)). The tool
+lists that record as an expected difference and exits 0; it exits 1 on any
+other difference, and on that one if it stops occurring exactly as listed
+(`STALE`).
 
 ### What each check catches -- this is the point
 
