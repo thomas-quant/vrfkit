@@ -554,6 +554,43 @@ ADDITIONS = [
      "Translation", "FieldType::VectorDouble"),
     ("/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
      "Scale3D", "FieldType::VectorDouble"),
+    # `EffectManagerComponent` on the two weapon effect RPCs: the EffectManager
+    # of the pawn holding the weapon. Descriptor-silent; wire evidence only.
+    #
+    # One property: compatible_checksum 1051633025 is declared at parameter
+    # handle 0 of exactly these two functions in all 1,018 manifests audited at
+    # 259ed10 (the OneShot function exists in 993), always with this name. That
+    # is the manifest's parameter handle -- the `handle` column of the exported
+    # rows is the ClassNetCache function slot (1/2 Continuous, 2/3 OneShot).
+    #
+    # Measured 2026-09-28 over those 1,018 exports (fields + checkpoint_fields,
+    # checksum == 1051633025): 3,112,054 rows (Continuous 2,906,169 under 24
+    # weapon `_ClassNetCache` group paths, OneShot 205,885 under 17 -- DMR
+    # arrives under two folder spellings), all main stream: RPC parameters
+    # never reach checkpoints. Widths 16 bits
+    # (3,103,449) and 24 bits (8,605): read as IntPacked every row is consumed
+    # exactly, and every value resolves in the same export's net_guids.parquet,
+    # to one path only: `EffectManager`. 0 zero, 0 odd (all dynamic GUIDs). The
+    # resolved object's outer is a `*_PC_C` player character on 3,110,231 rows
+    # and Yoru's decoy (Pawn_Stealth_4_Decoy_V2_C) on 1,823. Cross-check against
+    # a separately typed field: the outer equals the weapon actor's latest
+    # typed `Instigator` at or before the RPC's time_ms on 3,111,803 rows; all
+    # 251 others match an earlier Instigator of that weapon, 250 of them with
+    # the current Instigator 0 (just dropped). Matching by packet_id instead of
+    # time_ms gives a lower rate (95.85% on OneShot); the figure is the time_ms
+    # one.
+    #
+    # Both twins, as for 249/Translation/Scale3D above: typing one would leave
+    # the other raw with decode errors at 0. The heal-block note above ("metadata
+    # refs this project does not type") is about DamageableComponent's heal
+    # Instigator/Causer and was itself superseded by the HealCauser scoped type
+    # (scoped_types.rs, fc50bfe); the siblings in this very RPC --
+    # EffectContainer, WaitOnReplicationActor, ClientControllerThatTriggered --
+    # were already ObjectNetGuid through the checksum table.
+    ("/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient",
+     "EffectManagerComponent", "FieldType::ObjectNetGuid"),
+    ("/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
+     "EffectManagerComponent", "FieldType::ObjectNetGuid"),
     ("/Script/ShooterGame.AresGameStateBase:MulticastResetForRespawn",
      "249", "FieldType::VectorDouble"),
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",

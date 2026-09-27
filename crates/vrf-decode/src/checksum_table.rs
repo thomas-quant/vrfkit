@@ -13,7 +13,7 @@
 use crate::decode::FieldType;
 
 /// Sorted by checksum; binary-searched by `lookup_checksum`.
-pub static CHECKSUM_TYPES: [(u32, FieldType); 445] = [
+pub static CHECKSUM_TYPES: [(u32, FieldType); 446] = [
     (5646457, FieldType::Float),
     (6302035, FieldType::EnumByte),
     (24357661, FieldType::ObjectNetGuid),
@@ -109,6 +109,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 445] = [
     (1046079544, FieldType::Float),
     (1046360960, FieldType::EnumByte),
     (1050480628, FieldType::Bool),
+    (1051633025, FieldType::ObjectNetGuid),
     (1070392732, FieldType::ObjectNetGuid),
     (1073812927, FieldType::Bool),
     (1086860633, FieldType::SerializedInt { max: 16 }),

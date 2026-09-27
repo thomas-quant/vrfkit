@@ -167,6 +167,13 @@ class AdditionsTests(unittest.TestCase):
         `AuthCurrentRandomSeed`, 120,853 rows of near-total distinctness across
         the full i32 range.
 
+        125 -> 127 is one finding on two twins: `EffectManagerComponent` on
+        the weapons' `MulticastPlay{Continuous,OneShot}EffectFromClient`.
+        Checksum 1051633025 belongs to these two parameters only; all
+        3,112,054 rows over the 1,018-replay audit are IntPacked GUIDs that
+        resolve to `EffectManager`, whose outer is the holder's pawn -- and
+        equals the weapon's typed Instigator at that time on 3,111,803.
+
         63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
         for being a wrong `FString`; it is back because a decoder now exists
         and the reason given for waiting was itself wrong -- `Statistic` was
@@ -203,7 +210,7 @@ class AdditionsTests(unittest.TestCase):
         2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
         reaches a real declaration and the guessed name is gone.
         """
-        self.assertEqual(len(atc.ADDITIONS), 125, atc.ADDITIONS)
+        self.assertEqual(len(atc.ADDITIONS), 127, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
         """Same guardrail for the handle -> name additions.

@@ -1315,6 +1315,29 @@ fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
     );
 }
 
+/// The weapon effect RPCs name the `EffectManager` of the pawn holding the
+/// weapon. Checksum 1051633025, declared only by these two functions: all
+/// 3,112,054 rows in the 1,018-replay audit are IntPacked 16/24-bit GUIDs that
+/// resolve in the same export's `net_guids` to `EffectManager`, whose outer is
+/// the holder's `*_PC_C` (or Yoru's decoy). Both twins are pinned: typing only
+/// one would be the "Viper typed, Phoenix not" shape this table has shipped
+/// before.
+#[test]
+fn the_weapon_effect_rpcs_type_their_effect_manager_reference() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in [
+        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient",
+        "/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
+    ] {
+        assert_eq!(
+            table.lookup(group, "EffectManagerComponent"),
+            Some(FieldType::ObjectNetGuid),
+            "{group}"
+        );
+    }
+    assert_eq!(lookup_checksum(1051633025), Some(FieldType::ObjectNetGuid));
+}
+
 /// The map is only useful if it holds something; a silently empty generated
 /// table would make every test above pass for the wrong reason.
 #[test]
