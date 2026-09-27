@@ -2,11 +2,13 @@ import base64
 import contextlib
 import io
 import json
+import math
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+import numpy
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -243,6 +245,96 @@ class MovementTruncationTests(unittest.TestCase):
             self.assertEqual(
                 (out / "movement.ndjson").read_text(encoding="utf-8"), ""
             )
+
+
+#: float32 values where a vectorised shortcut and the per-value encoder can
+#: disagree. Each is compared with the per-value rule the bulk path replaced
+#: -- `_JSON.encode(_f32_shortest(v))` for the shortened columns and
+#: `_JSON.encode(v)` for yaw/pitch -- never with a literal, so the test pins
+#: the contract and not today's spelling of it.
+TEXT_RULE_EDGES = (
+    float("inf"), float("-inf"), float("nan"),
+    # >= 2**24 every float32 is an integer, but not every one prints as its
+    # exact integer: 123456792 round-trips as 123456790.
+    123456792.0, 1e16, 1e20,
+    3.4028234663852886e38, -3.4028234663852886e38,        # +/- FLT_MAX
+    16777216.0, 16777215.0, -16777215.0, 33554436.0,
+    8388608.0, 12345670.0,
+    # numpy writes non-integral values from 1e6 up in scientific notation;
+    # the rule writes them positional. 999999.94 is the last one both agree on.
+    8388607.5, 1234567.5, -1234567.5, 1000000.0625, 999999.94,
+    # float32(1e-4) is 9.99999975e-05: numpy judges the binary value and
+    # writes '1e-04', repr judges the decimal and writes '0.0001'.
+    1e-4, -1e-4, 1.0000000474974513e-04, 9.9e-05,
+    1e-05, 1e-07, 1e-45, 1.1754943508222875e-38,          # exponent form,
+    #                                                       subnormal, min normal
+    2382.2, 349.99, -349.99, 253.289794921875, 0.1, 1.5,
+    0.0, -0.0,
+)
+
+
+def column_text(values, *, shorten):
+    """Per-row text `_json_scalar_column` produces for `values` as float32."""
+    arr = numpy.array(values, dtype=numpy.float32)
+    return list(bundle._json_scalar_column(arr, shorten=shorten))
+
+
+def per_value_text(values, *, shorten):
+    """The oracle: one encoder call per row, the rule before vectorisation."""
+    encode = bundle._JSON.encode
+    widened = [float(v) for v in numpy.array(values, dtype=numpy.float32)]
+    if shorten:
+        return [encode(bundle._f32_shortest(v)) for v in widened]
+    return [encode(v) for v in widened]
+
+
+class MovementTextRuleTests(unittest.TestCase):
+    """Movement text is built once per DISTINCT value and fanned out.
+
+    That is only sound if the text of a distinct value is exactly what the
+    per-value encoder wrote for it. The bulk shortcut (numpy's Dragon4 text
+    plus an int64 fix-up for integral values) was applied to every value and
+    is exact only on part of the float32 range: +/-inf went through the int64
+    cast and came out as -9223372036854775808, NaN printed as the invalid-JSON
+    `nan`, integral values above 2**24 printed their exact integer instead of
+    the shortest round-trip one, and non-integral values outside
+    [1e-4, 1e6) came out in numpy's scientific notation -- with, at most, a
+    numpy RuntimeWarning as the only signal.
+    """
+
+    def test_shortened_columns_match_the_per_value_encoder(self):
+        self.assertEqual(
+            column_text(TEXT_RULE_EDGES, shorten=True),
+            per_value_text(TEXT_RULE_EDGES, shorten=True),
+        )
+
+    def test_unshortened_columns_match_the_per_value_encoder(self):
+        self.assertEqual(
+            column_text(TEXT_RULE_EDGES, shorten=False),
+            per_value_text(TEXT_RULE_EDGES, shorten=False),
+        )
+
+    def test_non_finite_values_are_spelled_by_the_encoder(self):
+        """Spelled out too, so a failure names the three values that broke."""
+        for shorten in (True, False):
+            with self.subTest(shorten=shorten):
+                self.assertEqual(
+                    column_text([float("inf"), float("-inf"), float("nan")],
+                                shorten=shorten),
+                    ["Infinity", "-Infinity", "NaN"],
+                )
+
+    def test_each_zero_keeps_its_own_sign(self):
+        """-0.0 == 0.0, so a value-level unique merges them into one entry and
+        prints whichever sign sorted first for every zero in the column. Both
+        orders, because which sign wins depends on the sort's tie-break.
+        """
+        for values in ([0.0, -0.0, 5.0, -0.0], [-0.0, 0.0, 5.0, 0.0]):
+            with self.subTest(values=values):
+                self.assertEqual(column_text(values, shorten=False),
+                                 per_value_text(values, shorten=False))
+                self.assertEqual(column_text(values, shorten=True),
+                                 per_value_text(values, shorten=True))
 
 
 class TransactionalConversionTests(unittest.TestCase):
@@ -1680,6 +1772,109 @@ class AdapterAccountingTests(SeamTestCase):
         # Present and zero, not absent: a key that appears only when non-zero
         # cannot distinguish "clean" from "this counter stopped running".
         self.assertEqual(losses["unnamed_rpc_rows"], 0)
+
+    def test_the_loss_counter_set_is_pinned(self):
+        """Every counter reaches the manifest under a fixed name, zero or not.
+
+        Spelled out rather than read back from `_Tally.REASONS`: comparing the
+        manifest with the dict it was written from could not fail. A counter
+        that is renamed or dropped has to turn this red.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _, published, _ = self.build(tmp, manifest=self.full_manifest())
+        self.assertEqual(
+            sorted(published["adapter"]["losses"]),
+            sorted([
+                "unnamed_property_rows",
+                "unnamed_rpc_rows",
+                "unnamed_rpc_invocations",
+                "rpc_param_collisions",
+                "unparsable_path_segments",
+                "payload_shape_conflicts",
+                "multi_typed_rows",
+                "fabricated_shot_locations",
+                "fabricated_shot_rotations",
+                "effect_half_read_pairs",
+                "effect_array_residual_bits",
+                "missing_manifest",
+                "empty_gameplay_tag_table",
+                "events_time_ms_regressions",
+                "upstream_row_count_disagreement",
+                "unknown_actor_lifecycle_events",
+                "non_finite_movement_rows",
+            ]),
+        )
+
+
+class NonFiniteMovementTests(SeamTestCase):
+    """A non-finite movement value is written as the encoder spells it, and counted.
+
+    The decoder can produce one: vrf-movement reads raw f32/f64 components
+    with no finiteness check and stream.rs narrows f64 with a bare `as f32`.
+    `Infinity`/`NaN` is how every other float in this bundle is spelled, and
+    Python's json reads it; a strict parser (orjson) rejects the line. Before
+    this, the shortened columns wrote +/-inf as -9223372036854775808 -- valid
+    JSON, a plausible number, the wrong sign -- and NaN as `nan`, which no
+    parser accepts, with nothing but a numpy warning on stderr.
+    """
+
+    def convert(self, movement):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, published, summary = self.build(
+                tmp, movement_rows=movement,
+                manifest={"replay_version": "5.3.2"},
+            )
+            lines = (out / "movement.ndjson").read_text(
+                encoding="utf-8").splitlines()
+        return lines, published, summary
+
+    def test_non_finite_values_are_encoded_and_counted(self):
+        inf, nan = float("inf"), float("nan")
+        movement = [
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": inf},
+            {"time_ms": 2, "packet_id": 2, "char": 5, "vel_z": nan},
+            {"time_ms": 3, "packet_id": 3, "char": 5, "yaw": -inf},
+            {"time_ms": 4, "packet_id": 4, "char": 5, "pos_x": 1.5},
+        ]
+        lines, published, summary = self.convert(movement)
+        rows = [json.loads(line) for line in lines]  # stdlib: non-strict
+        self.assertEqual(len(rows), 4)
+        self.assertIn('"position":{"x":Infinity,', lines[0])
+        self.assertEqual(rows[0]["position"]["x"], inf)
+        self.assertTrue(math.isnan(rows[1]["velocity"]["z"]))
+        self.assertEqual(rows[2]["yaw"], -inf)
+        self.assertEqual(rows[3]["position"]["x"], 1.5)
+        # Rows, not values: three rows carry one non-finite value each.
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 3)
+        self.assertEqual(
+            published["adapter"]["losses"]["non_finite_movement_rows"], 3)
+        self.assertTrue(any("non_finite_movement_rows" in line
+                            for line in summary["tally"].lines()))
+
+    def test_a_row_is_counted_once_however_many_of_its_values_are_bad(self):
+        inf = float("inf")
+        movement = [{"time_ms": 1, "packet_id": 1, "char": 5,
+                     "pos_x": inf, "pos_y": -inf, "pitch": float("nan")}]
+        _, _, summary = self.convert(movement)
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 1)
+
+    def test_a_collapsed_sub_move_is_not_counted(self):
+        """Only rows the bundle writes are counted; movement.parquet keeps the rest."""
+        movement = [
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": float("inf")},
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 2.0},
+        ]
+        lines, published, summary = self.convert(movement)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 0)
+        self.assertEqual(
+            published["adapter"]["losses"]["non_finite_movement_rows"], 0)
+
+    def test_finite_movement_counts_nothing(self):
+        movement = [{"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 1e-05}]
+        _, published, summary = self.convert(movement)
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 0)
+        self.assertIn("non_finite_movement_rows", published["adapter"]["losses"])
 
 
 class ServerTimelineEventTests(SeamTestCase):

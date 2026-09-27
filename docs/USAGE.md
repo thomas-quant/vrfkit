@@ -774,6 +774,14 @@ ones the export declared, and the conversion `losses` tally.
 path independently recountable. `bundle_schema_version`
 names the shape; valplay's resume marker records it and rebuilds when it moves.
 
+`losses` carries every counter, zero included, so a clean conversion reads as
+zeros rather than as missing keys; the console summary prints only the ones
+that fired. `non_finite_movement_rows` counts movement lines holding a
+non-finite position, velocity, yaw or pitch. Those are written `Infinity` /
+`-Infinity` / `NaN`, as every non-finite float in the bundle is spelled: Python's
+`json` reads them, a strict parser such as orjson rejects the line. None occurs
+on the 1,018-export corpus, and the decoder does not rule them out.
+
 `players` is deliberately **not** forwarded: valplay derives the same table
 from the same `BombPlayerState` rows and its version keeps a *set* of character
 GUIDs, which is what attributes a resurrected player's kills. Forwarding the
@@ -1013,7 +1021,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 910 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 919 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check

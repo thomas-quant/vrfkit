@@ -289,6 +289,9 @@ class _Tally(dict):
         "unknown_actor_lifecycle_events":
             "actors.event values this adapter has no event type for "
             "(published as actor_lifecycle_unknown)",
+        "non_finite_movement_rows":
+            "movement rows written with a non-finite value (spelled "
+            "Infinity/NaN; strict JSON parsers reject the line)",
     }
 
     def __init__(self):
@@ -368,30 +371,85 @@ _MOVEMENT_LINE = (
 )
 
 
+#: Below this magnitude every integer is exactly representable in float32, so
+#: the shortest round-trip text of an integral float32 IS its integer text.
+#: From here up the two part ways: 123456792.0 round-trips as 123456790.
+_F32_EXACT_INT_LIMIT = 2 ** 24
+
+#: numpy's float32 text is positional only for 1e-4 <= |v| < 1e6, judged on
+#: the binary value; Python's float repr -- where the per-value rule ends --
+#: is positional from 1e-4 to 1e16, judged on the decimal. Outside the
+#: narrower band they disagree: 1234567.5 is '1.2345675e+06' to numpy, and
+#: float32(1e-4), which is 9.99999975e-05, is '1e-04' to numpy and '0.0001'
+#: to repr. Compared in float64, because 1e-4 is not a float32.
+_F32_POSITIONAL_BAND = (1e-4, 1e6)
+
+
 def _json_scalar_column(arr, *, shorten=False):
     """The JSON TEXT of each value, computed once per distinct value.
 
-    `arr` is a 1-D numpy array. `numpy.unique` collapses it to its distinct
-    values in C; the text is built once per distinct value and a fancy-index
-    gather fans it back out to every row, all vectorised. This is what lets
-    `_write_movement` skip building 1.8 million dicts and calling the encoder
-    1.8 million times -- there is no per-row Python loop here at all.
+    `arr` is a 1-D numpy float array. `numpy.unique` collapses it to its
+    distinct values in C; the text is built once per distinct value and a
+    fancy-index gather fans it back out to every row, all vectorised. This is
+    what lets `_write_movement` skip building 1.8 million dicts and calling
+    the encoder 1.8 million times -- there is no per-row Python loop here.
 
-    Exact by construction rather than by resemblance. For `shorten=False` the
-    string stored is whatever `_JSON.encode` produces for that exact value --
-    including the non-obvious cases, `Infinity` and `NaN`, which an f-string
-    would spell `inf` and `nan` and quietly emit as invalid JSON.
+    The contract is per value, and it is checked, not assumed: every row's
+    text is what the per-element version this replaced wrote for that row's
+    own value -- `_JSON.encode(_f32_shortest(v))` for `shorten=True`,
+    `_JSON.encode(v)` for `shorten=False` (`MovementTextRuleTests`).
 
-    For `shorten=True` the stored string is the shortest decimal that
-    round-trips through float32 -- what `_JSON.encode(_f32_shortest(v))`
-    produced in the previous per-element version. numpy's float32->str
-    formatter is the same Dragon4 shortest-round-trip algorithm, so
-    `uniq.astype(str)` emits the identical text, and integer-valued float32s
-    are normalised to int form (no decimal point) the way `_f32_shortest`
-    returned an `int` for them. Verified byte-identical over 1,274,448 real
-    movement float32s. (`shorten=True` assumes finite float32 data -- the
-    movement invariant; inf/nan would need the encoder's `Infinity`/`NaN` and
-    are not produced by the decoder.)
+    Distinct BIT PATTERNS, not distinct values. -0.0 == 0.0, so a value-level
+    unique merged the two zeros into one entry and wrote whichever sign the
+    sort put first for every zero in the column -- a genuine `0.0` yaw could
+    come out `-0.0`. Unique over the raw bits keeps them apart, and gives
+    each NaN payload its own entry (all spelled `NaN`). No movement column on
+    the corpus holds a -0.0 (0 in 1,973,922,078 rows x 8 columns, 1,018
+    exports, 2026-09-28), so this moved no line: it closes the case instead
+    of depending on its absence.
+
+    `shorten=False` encodes each distinct value, `Infinity` and `NaN`
+    included -- an f-string would spell those `inf` and `nan`, invalid JSON.
+
+    `shorten=True` takes a vectorised shortcut only where it is proven equal
+    to the per-value rule, and the per-value encoder everywhere else:
+
+    * an integral value below `_F32_EXACT_INT_LIMIT` is written as its int,
+      the way `_f32_shortest` returns an `int` for it;
+    * a non-integral value inside `_F32_POSITIONAL_BAND` is numpy's
+      `astype(str)` -- the same Dragon4 shortest round-trip, in the same
+      positional notation.
+
+    Both are checked EXHAUSTIVELY against the per-value rule, not sampled:
+    all 556,160,338 non-integral float32 inside the band (278,080,169 of each
+    sign) and all 33,554,430 integral ones with 0 < |v| < 2**24, 0
+    mismatches (numpy 2.5.2, 2026-09-28). The same run shows the edges are
+    real: just outside the band, float32(+/-1e-4) and every non-integral
+    value in 1e6 <= |v| < 2**20 differ.
+
+    The shortcut used to be applied to every value, and outside that domain
+    it is wrong:
+
+    * +/-inf pass `v == trunc(v)` and went through the int64 cast, which
+      wrote -9223372036854775808 -- valid JSON, a plausible number, the wrong
+      sign -- with a numpy RuntimeWarning on stderr as the only signal;
+    * NaN fell through to `astype(str)` and was written `nan`, which no JSON
+      parser accepts;
+    * an integral value at or above 2**24 was written as its exact integer
+      rather than its shortest round-trip (123456792 for 123456790), and one
+      at or above 2**63 (1e20) overflowed the cast the same way inf did;
+    * a non-integral value outside the band got numpy's scientific notation
+      where the rule writes positional (see `_F32_POSITIONAL_BAND`).
+
+    Those distinct values now take the per-value encoder. The old docstring
+    excused the first two as "not produced by the decoder"; nothing enforces
+    that -- vrf-movement reads raw f32/f64 components with no finiteness
+    check and stream.rs narrows f64 with a bare `as f32`. None of the four
+    occurs on the corpus (0 non-finite and 0 with |v| >= 2**24 in the scan
+    above; 0 distinct non-integral values outside the band in any shortened
+    column of any export), so this moved no line either. How a non-finite
+    value reaches the consumer, and why it is counted, is `_write_movement`'s
+    to say.
 
     Worth doing per-distinct because these columns are quantized on the wire
     and repeat heavily. Measured on 02d4d478's 1,837,220 kept movement rows:
@@ -403,17 +461,34 @@ def _json_scalar_column(arr, *, shorten=False):
     11,023,320 -- 7.4x fewer. yaw and pitch dedup too (65,491 and 16,943
     distinct) but are NOT shortened; see `_write_movement`.
     """
-    uniq, inverse = numpy.unique(arr, return_inverse=True)
+    if arr.dtype.kind != "f" or arr.dtype.itemsize not in (4, 8):
+        # The bit-pattern view below needs a same-width unsigned type, and a
+        # silent mis-view would print plausible numbers. Refuse instead.
+        raise TypeError(f"_json_scalar_column wants float32/float64, got {arr.dtype}")
+    ubits, inverse = numpy.unique(
+        arr.view(numpy.dtype(f"u{arr.dtype.itemsize}")), return_inverse=True
+    )
+    uniq = ubits.view(arr.dtype)
     if shorten:
-        # Bulk shortest float32 repr (Dragon4). Integer-valued entries are
-        # rewritten as int decimals to match `_f32_shortest`'s int return and
-        # the encoder's int output; an object array holds them so a wide int
-        # can never truncate against the float column's narrower `<U` width.
-        is_int = (uniq == numpy.trunc(uniq))
+        # The two shortcut domains, then the per-value encoder for the rest.
+        # An object array holds the texts so a wide int can never truncate
+        # against the float column's narrower `<U` width.
+        magnitude = numpy.abs(uniq.astype(numpy.float64))
+        finite = numpy.isfinite(uniq)
+        integral = finite & (uniq == numpy.trunc(uniq))
+        low, high = _F32_POSITIONAL_BAND
+        as_int = integral & (magnitude < _F32_EXACT_INT_LIMIT)
+        as_dragon4 = finite & ~integral & (magnitude >= low) & (magnitude < high)
         texts = numpy.empty(uniq.shape[0], dtype=object)
-        texts[:] = uniq.astype(str)
-        if is_int.any():
-            texts[is_int] = uniq[is_int].astype(numpy.int64).astype(str)
+        if as_dragon4.any():
+            texts[as_dragon4] = uniq[as_dragon4].astype(str)
+        if as_int.any():
+            texts[as_int] = uniq[as_int].astype(numpy.int64).astype(str)
+        per_value = ~(as_int | as_dragon4)
+        if per_value.any():
+            encode = _JSON.encode
+            texts[per_value] = [encode(_f32_shortest(v))
+                                for v in uniq[per_value].tolist()]
         texts = texts.tolist()
     else:
         encode = _JSON.encode
@@ -2693,12 +2768,24 @@ def _write_events(events: list, output_dir: Path, verbose: bool) -> tuple[int, i
 def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tuple:
     """Write movement.ndjson, keeping the last sub-move per (packet, character).
 
-    Returns ``(rows_read, rows_written)``. They differ by the intra-packet
-    sub-move collapse below, so only `rows_read` can be compared with what the
-    export manifest declared; publishing `rows_written` against
-    `quality.movement_rows` would report every healthy replay as lossy.
-    `rows_read` is `None` when the table is absent, which is a different fact
-    from an empty one.
+    Returns ``(rows_read, rows_written, non_finite_rows)``. The first two
+    differ by the intra-packet sub-move collapse below, so only `rows_read`
+    can be compared with what the export manifest declared; publishing
+    `rows_written` against `quality.movement_rows` would report every healthy
+    replay as lossy. `rows_read` is `None` when the table is absent, which is
+    a different fact from an empty one.
+
+    `non_finite_rows` counts WRITTEN rows with at least one non-finite float
+    (position, velocity, yaw or pitch); a collapsed sub-move is not in the
+    bundle and is not counted. Such a value is written the way the encoder
+    spells a non-finite float everywhere else in this bundle -- `Infinity`,
+    `-Infinity`, `NaN` (see `_json_scalar_column`) -- not as `null` and not as
+    a number. Python's json reads those tokens; a strict parser rejects the
+    line. valplay parses with orjson when it is installed, skips a line it
+    cannot parse, and then recounts fewer movement rows than
+    `adapter.movement_rows_written` declares, which stops the bundle from
+    publishing -- a refusal, not a quietly shorter track. The count is what
+    names the cause.
     """
     if not movement_path.exists():
         # Truncate rather than return. `convert` reuses an existing output
@@ -2711,7 +2798,7 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
         (output_dir / "movement.ndjson").write_text("", encoding='utf-8')
         if verbose:
             print("  movement.parquet not found, movement.ndjson written empty")
-        return None, 0
+        return None, 0, 0
 
     t0 = time.time()
     if verbose:
@@ -2809,17 +2896,24 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # `int.__repr__` is the same text the JSON encoder uses for an int, so
     # `astype(str)` on the uint32 array is the line's text directly -- no
     # encoder, no memo.
+    #
+    # One float column at a time, in `_MOVEMENT_LINE`'s slot order, so only
+    # one kept copy is alive at once; holding all eight cost +35-83 MB of peak
+    # working set across 11 exports.
+    non_finite = numpy.zeros(len(keep), dtype=bool)
+    float_texts = []
+    for column, shorten in ((mv_px, True), (mv_py, True), (mv_pz, True),
+                            (mv_vx, True), (mv_vy, True), (mv_vz, True),
+                            (mv_yaw, False), (mv_pitch, False)):
+        kept = column[keep]
+        non_finite |= ~numpy.isfinite(kept)
+        float_texts.append(_json_scalar_column(kept, shorten=shorten))
+    del kept
+    non_finite_rows = int(numpy.count_nonzero(non_finite))
     cols = (
         mv_time[keep].astype(str).tolist(),
         mv_char[keep].astype(str).tolist(),
-        _json_scalar_column(mv_px[keep], shorten=True),
-        _json_scalar_column(mv_py[keep], shorten=True),
-        _json_scalar_column(mv_pz[keep], shorten=True),
-        _json_scalar_column(mv_vx[keep], shorten=True),
-        _json_scalar_column(mv_vy[keep], shorten=True),
-        _json_scalar_column(mv_vz[keep], shorten=True),
-        _json_scalar_column(mv_yaw[keep]),
-        _json_scalar_column(mv_pitch[keep]),
+        *float_texts,
     )
     movement_written = len(keep)
 
@@ -2842,7 +2936,7 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
 
     if verbose:
         print(f"  {movement_written:,} movement rows written in {time.time()-t0:.1f}s")
-    return n_mv, movement_written
+    return n_mv, movement_written, non_finite_rows
 
 
 # ---------------------------------------------------------------------------
@@ -2965,9 +3059,12 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         tally.bump("events_time_ms_regressions", time_ms_regressions)
 
     # ---- Convert movement.parquet ----
-    movement_rows_read, movement_written = _write_movement(
+    movement_rows_read, movement_written, non_finite_movement_rows = _write_movement(
         movement_path, output_dir, verbose
     )
+    # Every row is still written, so this is not a loss; it is surfaced with
+    # the losses because a strict parser rejects the line it is on.
+    tally.bump("non_finite_movement_rows", non_finite_movement_rows)
 
     # ---- Cross-check what vrfkit declared against what was actually read ----
     #
