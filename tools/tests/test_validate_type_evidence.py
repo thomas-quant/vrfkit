@@ -1,3 +1,4 @@
+import base64
 import struct
 import sys
 import tempfile
@@ -9,7 +10,16 @@ import pyarrow.parquet as pq
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from validate_type_evidence import decode_exact, validate  # noqa: E402
+from validate_type_evidence import decode_exact, exported_matches, validate  # noqa: E402
+
+
+def pack_bits(*fields: tuple[int, int]) -> tuple[bytes, int]:
+    """(value, width) pairs, least significant bit first, as Unreal writes them."""
+    value = position = 0
+    for field, width in fields:
+        value |= (field & ((1 << width) - 1)) << position
+        position += width
+    return value.to_bytes((position + 7) // 8, "little"), position
 
 
 class DecodeExactTests(unittest.TestCase):
@@ -99,6 +109,133 @@ class DecodeExactTests(unittest.TestCase):
             self.assertEqual(report["failure_count"], 0)
             self.assertEqual(report["typed_mismatch_count"], 1)
             self.assertEqual(report["typed_mismatch_examples"][0]["decoded"], 17)
+
+
+class ShapedTypeTests(unittest.TestCase):
+    """The non-primitive decoders scoped entries may use.
+
+    The base64 vectors are upstream's own recorded payloads from replay
+    42e03082 (tests/Replay.Valorant.Tests/Descriptors/ClayDescriptorTests.cs at
+    8b7afcb), which is not in the local corpus: an independent statement of
+    what those exact bits decode to, and of their exact widths.
+    """
+
+    def test_upstream_recorded_raze_payloads_consume_their_exact_widths(self):
+        self.assertEqual(decode_exact(base64.b64decode("4elLQA=="), 32, "Int32"), 1078716897)
+        self.assertEqual(decode_exact(base64.b64decode("AQ=="), 3, "EnumRemainingBits"), 1)
+        self.assertEqual(decode_exact(base64.b64decode("Aw=="), 3, "EnumRemainingBits"), 3)
+        location = decode_exact(base64.b64decode("0yBnt6iXSAA="), 64, "VectorNetQuantize100")
+        self.assertEqual(location, (-782.71, -1366.59, 5.8))
+        rotation = decode_exact(base64.b64decode("AYDuJ/f/Bw=="), 51, "RotationShort")
+        self.assertEqual(rotation, (90.0, 284.0350341796875, 359.989013671875))
+        # Upstream's truncation case: one byte cannot hold a rotator's flags
+        # and the components they announce.
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            decode_exact(base64.b64decode("AQ=="), 8, "RotationShort")
+
+    def test_quantized_vector_scaled_components_and_double_fallback(self):
+        raw, bits = pack_bits((8 | 64, 7), (100, 8), (100, 8), (-100, 8))
+        self.assertEqual(bits, 31)
+        self.assertEqual(decode_exact(raw, bits, "VectorNetQuantize100"), (1.0, 1.0, -1.0))
+        with self.assertRaisesRegex(ValueError, "residual"):
+            decode_exact(*pack_bits((8 | 64, 7), (100, 8), (100, 8), (100, 8), (0, 1)),
+                         "VectorNetQuantize100")
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            decode_exact(*pack_bits((8 | 64, 7), (100, 8), (100, 8)), "VectorNetQuantize100")
+        doubles = [struct.unpack("<Q", struct.pack("<d", v))[0] for v in (1.5, -2.25, 3.0)]
+        raw, bits = pack_bits((64, 7), *((d, 64) for d in doubles))
+        self.assertEqual(decode_exact(raw, bits, "VectorNetQuantize100"), (1.5, -2.25, 3.0))
+        nan = struct.unpack("<I", struct.pack("<f", float("nan")))[0]
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            decode_exact(*pack_bits((0, 7), (nan, 32), (0, 32), (0, 32)), "VectorNetQuantize100")
+
+    def test_rotation_short_reads_only_the_announced_components(self):
+        self.assertEqual(decode_exact(*pack_bits((0, 3)), "RotationShort"), (0.0, 0.0, 0.0))
+        raw, bits = pack_bits((0, 1), (1, 1), (16384, 16), (0, 1))
+        self.assertEqual(bits, 19)
+        self.assertEqual(decode_exact(raw, bits, "RotationShort"), (0.0, 90.0, 0.0))
+
+    def test_rep_movement_quantization_is_decided_by_exact_consumption(self):
+        # Flags, a 31-bit location, byte rotation with only yaw, and a 7-bit
+        # zero-width velocity header that falls back to three floats.
+        fields = [(0, 4), (8 | 64, 7), (1, 8), (2, 8), (3, 8),
+                  (0, 1), (1, 1), (64, 8), (0, 1),
+                  (0, 7), (0, 32), (0, 32), (0, 32)]
+        raw, bits = pack_bits(*fields)
+        value = decode_exact(raw, bits, "RepMovementByte")
+        self.assertEqual(value["location"], (0.01, 0.02, 0.03))
+        self.assertEqual(value["rotation"], (0.0, 90.0, 0.0))
+        self.assertIsNone(value["angular_velocity"])
+        self.assertIsNone(value["server_frame"])
+        with self.assertRaises(ValueError):
+            decode_exact(raw, bits, "RepMovementShort")
+        raw, bits = pack_bits(*fields[:6], (1, 1), (16384, 16), *fields[8:])
+        self.assertEqual(decode_exact(raw, bits, "RepMovementShort")["rotation"], (0.0, 90.0, 0.0))
+        with self.assertRaises(ValueError):
+            decode_exact(raw, bits, "RepMovementByte")
+
+    def test_rep_movement_flags_gate_angular_velocity_and_packed_frames(self):
+        raw, bits = pack_bits((0b0110, 4), (8 | 64, 7), (0, 8), (0, 8), (0, 8), (0, 3),
+                              (8 | 64, 7), (1, 8), (1, 8), (1, 8),
+                              (8 | 64, 7), (2, 8), (2, 8), (2, 8),
+                              (0x59, 8), (0x04, 8))
+        value = decode_exact(raw, bits, "RepMovementByte")
+        self.assertEqual(value["angular_velocity"], (2.0, 2.0, 2.0))
+        self.assertEqual(value["server_frame"], 300)
+        self.assertIsNone(value["server_physics_handle"])
+        self.assertTrue(value["rep_physics"])
+
+    def test_enum_remaining_bits_takes_every_bit_and_refuses_wider_than_32(self):
+        self.assertEqual(decode_exact(None, 0, "EnumRemainingBits"), 0)
+        self.assertEqual(decode_exact(*pack_bits((6, 3)), "EnumRemainingBits"), 6)
+        with self.assertRaisesRegex(ValueError, "wider than 32"):
+            decode_exact(b"\0" * 5, 33, "EnumRemainingBits")
+
+    def test_compare_typed_parses_geometry_strings(self):
+        self.assertTrue(exported_matches("VectorNetQuantize100", "(1,1,-1)", (1.0, 1.0, -1.0)))
+        self.assertFalse(exported_matches("VectorNetQuantize100", "(1,1,1)", (1.0, 1.0, -1.0)))
+        self.assertFalse(exported_matches("VectorNetQuantize100", None, (1.0, 1.0, -1.0)))
+        rotation = (90.0, 284.0350341796875, 359.989013671875)
+        # Rust prints f32 in its shortest round-trip spelling: "359.989" is not
+        # the double 359.989013671875, but it is that single-precision value.
+        self.assertTrue(exported_matches("RotationShort", "rot(90,284.03503,359.989)", rotation))
+        self.assertFalse(exported_matches("RotationShort", "rot(90,284.03503,359.98)", rotation))
+        decoded = {"location": (0.01, 0.02, 0.03), "rotation": (0.0, 90.0, 0.0),
+                   "linear_velocity": (0.0, 0.0, 0.0), "angular_velocity": None,
+                   "simulated_physics_sleep": False, "rep_physics": False,
+                   "server_frame": None, "server_physics_handle": None}
+        exported = ('{"linear_velocity":{"x":0,"y":0,"z":0},"angular_velocity":null,'
+                    '"location":{"x":0.01,"y":0.02,"z":0.03},'
+                    '"rotation":{"pitch":0,"yaw":90,"roll":0},'
+                    '"simulated_physics_sleep":false,"rep_physics":false,'
+                    '"server_frame":null,"server_physics_handle":null}')
+        self.assertTrue(exported_matches("RepMovementByte", exported, decoded))
+        self.assertFalse(exported_matches(
+            "RepMovementByte", exported.replace('"yaw":90', '"yaw":91'), decoded))
+        self.assertFalse(exported_matches(
+            "RepMovementByte", exported.replace('"rep_physics":false', '"rep_physics":true'), decoded))
+        self.assertFalse(exported_matches("RepMovementByte", "not json", decoded))
+
+    def test_validate_reports_vector_component_ranges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fields.parquet"
+            first, bits = pack_bits((8 | 64, 7), (100, 8), (100, 8), (100, 8))
+            second, _ = pack_bits((8 | 64, 7), (-50, 8), (100, 8), (120, 8))
+            pq.write_table(pa.table({
+                "group_path": ["g", "g"], "field_name": ["RelativeScale3D"] * 2,
+                "handle": [6, 6], "compatible_checksum": [1992268157] * 2,
+                "bit_count": [bits, bits], "raw_bits": [first, second],
+                "value_str": ["(1,1,1)", "(-0.5,1,1.2)"], "value_i64": [None, None],
+                "value_f64": [None, None], "value_bool": [None, None],
+            }), path)
+            report = validate(Path(directory), [{"group": "g", "field": "RelativeScale3D",
+                                                 "type": "VectorNetQuantize100",
+                                                 "checksum": 1992268157}], compare_typed=True)
+            self.assertEqual(report["failure_count"], 0)
+            self.assertEqual(report["typed_mismatch_count"], 0)
+            field = report["fields"]["g::RelativeScale3D::checksum=1992268157"]
+            self.assertEqual(field["min"], (-0.5, 1.0, 1.0))
+            self.assertEqual(field["max"], (1.0, 1.0, 1.2))
 
 
 if __name__ == "__main__":

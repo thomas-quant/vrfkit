@@ -38,5 +38,45 @@ class ScopedTypeGenerationTests(unittest.TestCase):
             self.assertEqual(gen.main(["--output", str(path), "--check"]), 1)
 
 
+    def test_every_type_name_is_a_live_field_type_variant(self):
+        decode_rs = (gen.ROOT / "crates/vrf-decode/src/decode.rs").read_text(encoding="utf-8")
+        enum = decode_rs.split("pub enum FieldType {", 1)[1].split("\n}", 1)[0]
+        variants = {line.strip().split(" ")[0].rstrip(",{")
+                    for line in enum.splitlines()
+                    if line.strip() and not line.strip().startswith(("//", "///", "}"))
+                    and line.startswith("    ") and not line.startswith("        ")}
+        for name, expression in gen.TYPES.items():
+            with self.subTest(name=name):
+                head = expression[0]
+                self.assertTrue(head.startswith("FieldType::"))
+                self.assertIn(head.removeprefix("FieldType::").split(" ")[0], variants)
+
+    def test_rotator_quantization_import_only_when_an_entry_needs_it(self):
+        base = {"group": "/G.G_C", "field": "ReplicatedMovement", "checksum": 2749104612,
+                "observed_builds": ["b"], "evidence": "e"}
+        byte = gen.render([{**base, "type": "RepMovementByte"}])
+        self.assertIn("use crate::types::RotatorQuantization;", byte)
+        self.assertIn("        FieldType::RepMovement {\n"
+                      "            rotation: RotatorQuantization::ByteComponents,\n"
+                      "        },\n", byte)
+        short = gen.render([{**base, "type": "RepMovementShort"}])
+        self.assertIn("RotatorQuantization::ShortComponents", short)
+        plain = gen.render([{**base, "field": "Scale", "type": "VectorNetQuantize100"}])
+        self.assertNotIn("RotatorQuantization", plain)
+        self.assertIn("        FieldType::VectorNetQuantize { scale: 100 },\n", plain)
+
+    def test_quantization_is_part_of_the_scoped_identity_type(self):
+        # One group may not carry both quantizations for one checksum: the
+        # identity is exact, so the second entry is a duplicate, not a choice.
+        base = {"group": "/G.G_C", "field": "ReplicatedMovement", "checksum": 2749104612,
+                "observed_builds": ["b"], "evidence": "e"}
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "evidence.json"
+            path.write_text(json.dumps({"schema_version": 1, "entries": [
+                {**base, "type": "RepMovementByte"}, {**base, "type": "RepMovementShort"}]}))
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                gen.load(path)
+
+
 if __name__ == "__main__":
     unittest.main()
