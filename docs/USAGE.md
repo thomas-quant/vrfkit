@@ -700,7 +700,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `check_corpus_baseline.py` | Per-build corpus baseline |
 | `check_export_baseline.py` | Export counters + per-file rows/bytes/SHA-256 content identity |
 | `check_baseline_schemas.py` | All committed baseline schemas, measured SHA-256 hashes, and cross-file replay/counter/table identities. |
-| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, and array/leaf/truncated-RPC/movement failures -- the same zero-required counters as `verify_build_corpus.py` (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
+| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads and movement-section tails -- the same zero-required counters as `verify_build_corpus.py` (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
 | `corpus_scan.py` | Not a check -- the `.vrf` discovery `validate_corpus.py` and `check_decode_errors_corpus.py` share, so the two can no longer glob a directory two different ways and disagree about what "the corpus" is without saying so. Non-recursive by default; read its docstring for why. |
 | `check_component_remaps.py` | Whether each Blueprint-component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
@@ -1134,8 +1134,8 @@ has and the C# export does not, documented there.
 |---|---|---|---|
 | `validate_corpus.py` | Framing (top level of the corpus dir; `--recursive` for subdirectories) | Type errors, broken semantics | ~30 s |
 | `check_export_baseline.py` | 28 export counters + per-file rows/bytes | Other builds | 1 s |
-| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures (top level; `--recursive` for subdirectories) | Broken semantics; Checkpoint chunks, unless `--checkpoints` | ~50 s |
-| `check_decode_errors_corpus.py --checkpoints` | The same failure counters for every Checkpoint chunk too (overlay, struct blobs, array truncations/residual bits, leaf errors, truncated RPCs, movement) | Broken semantics | slower: `vrfkit export` also decodes every Checkpoint chunk per replay |
+| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads, movement-section tails (top level; `--recursive` for subdirectories) | Broken semantics; Checkpoint chunks, unless `--checkpoints` | ~50 s |
+| `check_decode_errors_corpus.py --checkpoints` | The same failure counters for every Checkpoint chunk too (overlay, struct blobs, array truncations/residual bits, leaf errors, truncated RPCs, movement, unwalked CNC payloads, movement tails) | Broken semantics | slower: `vrfkit export` also decodes every Checkpoint chunk per replay |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A (8 builds) | Errors in the metrics pipeline itself | ~46 s |
 | `compare_combat_report.py` | Metrics-input multiset | Framing | seconds |
 

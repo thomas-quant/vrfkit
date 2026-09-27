@@ -992,8 +992,9 @@ layered, and the layers catch different things:
 - **Bytes** (`check_export_baseline.py`, per-file row and byte counts) --
   regression in any of the 28 export counters.
 - **Decode** (`check_decode_errors_corpus.py`, scoped export corpora) -- overlay
-  type errors, struct-blob failures and array/leaf/truncated-RPC/movement
-  failures; the recorded 13.04 scope is all 108 files with checkpoints enabled.
+  type errors, struct-blob failures, array/leaf/truncated-RPC/movement
+  failures, unwalked CNC brute-force payloads and movement-section tails; the
+  recorded 13.04 scope is all 108 files with checkpoints enabled.
 - **Semantics** (`check_metrics_baseline.py`, 8 builds) -- round count,
   score, K/D/A invariants that need no baseline.
 

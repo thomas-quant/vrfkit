@@ -65,8 +65,9 @@ above while the match score silently stopped being written. "Struct blobs:
 N decoded / 0 failed" is the statement that did not exist then.
 
 Exit code is 0 only when every replay reported zero on every counter in
-`FAILURES` -- overlay decode errors, struct-blob failures, and the array,
-leaf, truncated-RPC and movement failures summary.rs prints beside them --
+`FAILURES` -- overlay decode errors, struct-blob failures, the array, leaf,
+truncated-RPC and movement failures summary.rs prints beside them, and the
+unwalked CNC brute-force payloads and movement-section tails --
 AND every replay reported every counter in `REQUIRED` at all, AND the corpus
 as a whole decoded something. A counter that stops being printed must not read
 as zero; that is how the corpus malformed figure stayed a vacuous 0 for the
@@ -82,6 +83,14 @@ gates now match verify_build_corpus.py's, pinned by
 test_check_decode_errors_corpus.py. `RPC suffix bits` stays ungated on
 purpose: verify_build_corpus.py records `rpc_suffix_bits_dropped` as a
 limitation, not a counter that must be zero.
+
+The same pin caught the next addition: verify_build_corpus.py's SINK_ZERO grew
+`cnc_bruteforce_payloads_unwalked`, `movement_sized_section_tails` and
+`movement_open_section_tails` (zero in both passes of all 1,018 audit replays
+when added), and this gate reads them off the `CNC brute force` and
+`Movement tails` lines and their checkpoint twins. Only the counts are gated,
+as there: `attempted` and the tails' bit totals are read and printed, not
+failed on.
 
 The last of those three is the same argument one step further, and it was
 missing: `Decoded OK` and `Struct blobs: N decoded` were summed, printed, and
@@ -159,6 +168,30 @@ ARRAY_NESTED_BITS = _line_field("Array residual:", ARRAY_RESIDUAL_UNITS, 1)
 ARRAY_IMPLICIT_ENDS = _line_field("Array residual:", ARRAY_RESIDUAL_UNITS, 2)
 ARRAY_LEAF_ERRORS = _line_field("Array leaf errs:", (), 0)
 TRUNCATED_RPCS = _line_field("Truncated RPCs:", (), 0)
+CNC_BRUTEFORCE_UNITS = ("attempted", "unwalked")
+CNC_ATTEMPTED = _line_field("CNC brute force:", CNC_BRUTEFORCE_UNITS, 0)
+CNC_UNWALKED = _line_field("CNC brute force:", CNC_BRUTEFORCE_UNITS, 1)
+
+
+def _movement_tails_field(label: str, index: int) -> re.Pattern[str]:
+    """Field `index` of summary.rs's `{} sized ({} bits) / {} open ({} bits)`.
+
+    Not `N unit` pairs joined by ` / `, so `_line_field` cannot spell it; the
+    anchoring is the same, and for the same reason. `Checkpoint movement
+    tails:` begins with `Checkpoint`, so the anchored main-pass pattern can
+    never read it.
+    """
+    fields = [r"\d+"] * 4
+    fields[index] = r"(\d+)"
+    return re.compile(
+        rf"(?m)^\s*{re.escape(label)}\s+{fields[0]} sized \({fields[1]} bits\) / "
+        rf"{fields[2]} open \({fields[3]} bits\)\s*$")
+
+
+MOVEMENT_SIZED_TAILS = _movement_tails_field("Movement tails:", 0)
+MOVEMENT_SIZED_TAIL_BITS = _movement_tails_field("Movement tails:", 1)
+MOVEMENT_OPEN_TAILS = _movement_tails_field("Movement tails:", 2)
+MOVEMENT_OPEN_TAIL_BITS = _movement_tails_field("Movement tails:", 3)
 
 
 #: `(key, regex)` for every counter read off the export summary. `no_field_name`
@@ -193,6 +226,12 @@ COUNTERS = (
     ("array_implicit_ends", ARRAY_IMPLICIT_ENDS),
     ("array_leaf_errors", ARRAY_LEAF_ERRORS),
     ("truncated_rpcs", TRUNCATED_RPCS),
+    ("cnc_bruteforce_attempted", CNC_ATTEMPTED),
+    ("cnc_bruteforce_unwalked", CNC_UNWALKED),
+    ("movement_sized_tails", MOVEMENT_SIZED_TAILS),
+    ("movement_sized_tail_bits", MOVEMENT_SIZED_TAIL_BITS),
+    ("movement_open_tails", MOVEMENT_OPEN_TAILS),
+    ("movement_open_tail_bits", MOVEMENT_OPEN_TAIL_BITS),
 )
 
 #: Counters a replay MUST report for its run to mean anything. `decoded_ok` and
@@ -223,10 +262,16 @@ REQUIRED = (
     ("array_implicit_ends", "Array residual ... implicit ends"),
     ("array_leaf_errors", "Array leaf errs"),
     ("truncated_rpcs", "Truncated RPCs"),
+    ("cnc_bruteforce_attempted", "CNC brute force ... attempted"),
+    ("cnc_bruteforce_unwalked", "CNC brute force ... unwalked"),
+    ("movement_sized_tails", "Movement tails ... sized"),
+    ("movement_sized_tail_bits", "Movement tails ... sized bits"),
+    ("movement_open_tails", "Movement tails ... open"),
+    ("movement_open_tail_bits", "Movement tails ... open bits"),
 )
 
 #: Main-pass counters that must be zero on every replay, and the label a
-#: failure is reported under. The same ten quantities verify_build_corpus.py's
+#: failure is reported under. The same thirteen quantities verify_build_corpus.py's
 #: SINK_ZERO requires to be zero, read off the summary rather than the
 #: manifest; test_check_decode_errors_corpus.py pins the correspondence, so a
 #: counter added there and not here turns that test red.
@@ -241,6 +286,9 @@ FAILURES = (
     ("array_implicit_ends", "Array residual implicit ends"),
     ("array_leaf_errors", "Array leaf errs"),
     ("truncated_rpcs", "Truncated RPCs"),
+    ("cnc_bruteforce_unwalked", "CNC brute force unwalked"),
+    ("movement_sized_tails", "Movement tails sized"),
+    ("movement_open_tails", "Movement tails open"),
 )
 
 #: Corpus totals that cannot legitimately stay at zero, and the label to name
@@ -289,6 +337,13 @@ CHECKPOINT_ARRAY = re.compile(
     r"(\d+) implicit ends\s*$")
 CHECKPOINT_LEAF = re.compile(
     r"(?m)^\s*Checkpoint leaf:\s+(\d+) typed decode errors\s*$")
+# The checkpoint twins of `CNC brute force` and `Movement tails`. Anchored:
+# `Checkpoint CNC:   N RPC rows` shares the `Checkpoint CNC` prefix.
+CHECKPOINT_CNC_BRUTEFORCE = re.compile(
+    r"(?m)^\s*Checkpoint CNC brute force:\s+(\d+) attempted / (\d+) unwalked\s*$")
+CHECKPOINT_MOVEMENT_TAILS = re.compile(
+    r"(?m)^\s*Checkpoint movement tails:\s+(\d+) sized \((\d+) bits\) / "
+    r"(\d+) open \((\d+) bits\)\s*$")
 
 #: `(key, regex, group)` for every checkpoint counter. Only consulted when the
 #: caller asks `read_counters` for `require_checkpoints=True` -- a summary from
@@ -316,6 +371,12 @@ CHECKPOINT_COUNTERS = (
     ("checkpoint_array_nested_bits", CHECKPOINT_ARRAY, 5),
     ("checkpoint_array_implicit_ends", CHECKPOINT_ARRAY, 6),
     ("checkpoint_leaf_errors", CHECKPOINT_LEAF, 1),
+    ("checkpoint_cnc_bruteforce_attempted", CHECKPOINT_CNC_BRUTEFORCE, 1),
+    ("checkpoint_cnc_bruteforce_unwalked", CHECKPOINT_CNC_BRUTEFORCE, 2),
+    ("checkpoint_movement_sized_tails", CHECKPOINT_MOVEMENT_TAILS, 1),
+    ("checkpoint_movement_sized_tail_bits", CHECKPOINT_MOVEMENT_TAILS, 2),
+    ("checkpoint_movement_open_tails", CHECKPOINT_MOVEMENT_TAILS, 3),
+    ("checkpoint_movement_open_tail_bits", CHECKPOINT_MOVEMENT_TAILS, 4),
 )
 
 #: Every checkpoint counter is REQUIRED, on the same reasoning as `REQUIRED`
@@ -346,9 +407,15 @@ CHECKPOINT_REQUIRED = (
     ("checkpoint_array_nested_bits", "Checkpoint array ... nested bits"),
     ("checkpoint_array_implicit_ends", "Checkpoint array ... implicit ends"),
     ("checkpoint_leaf_errors", "Checkpoint leaf ... typed decode errors"),
+    ("checkpoint_cnc_bruteforce_attempted", "Checkpoint CNC brute force ... attempted"),
+    ("checkpoint_cnc_bruteforce_unwalked", "Checkpoint CNC brute force ... unwalked"),
+    ("checkpoint_movement_sized_tails", "Checkpoint movement tails ... sized"),
+    ("checkpoint_movement_sized_tail_bits", "Checkpoint movement tails ... sized bits"),
+    ("checkpoint_movement_open_tails", "Checkpoint movement tails ... open"),
+    ("checkpoint_movement_open_tail_bits", "Checkpoint movement tails ... open bits"),
 )
 
-#: `FAILURES` for the checkpoint pass: the same ten quantities, read off the
+#: `FAILURES` for the checkpoint pass: the same thirteen quantities, read off the
 #: `=== Checkpoints ===` block. Consulted only under --checkpoints.
 CHECKPOINT_FAILURES = (
     ("checkpoint_errors", "Checkpoint overlay errors"),
@@ -361,6 +428,9 @@ CHECKPOINT_FAILURES = (
     ("checkpoint_array_implicit_ends", "Checkpoint array implicit ends"),
     ("checkpoint_leaf_errors", "Checkpoint leaf errors"),
     ("checkpoint_fail_truncated_rpc", "Checkpoint fails truncated RPC"),
+    ("checkpoint_cnc_bruteforce_unwalked", "Checkpoint CNC brute force unwalked"),
+    ("checkpoint_movement_sized_tails", "Checkpoint movement tails sized"),
+    ("checkpoint_movement_open_tails", "Checkpoint movement tails open"),
 )
 
 FAILURE_LABELS = dict(FAILURES + CHECKPOINT_FAILURES)
@@ -616,6 +686,12 @@ def main() -> int:
           f"{totals['array_implicit_ends']:,} implicit ends")
     print(f"array leaf errs   : {totals['array_leaf_errors']:,}")
     print(f"truncated RPCs    : {totals['truncated_rpcs']:,}")
+    print(f"cnc brute force   : {totals['cnc_bruteforce_attempted']:,} attempted / "
+          f"{totals['cnc_bruteforce_unwalked']:,} unwalked")
+    print(f"movement tails    : {totals['movement_sized_tails']:,} sized "
+          f"({totals['movement_sized_tail_bits']:,} bits) / "
+          f"{totals['movement_open_tails']:,} open "
+          f"({totals['movement_open_tail_bits']:,} bits)")
     if args.checkpoints:
         # Unconditional, zeros included, on the same reasoning as every other
         # line here: a conditional line could not tell "the checkpoint pass
@@ -640,6 +716,14 @@ def main() -> int:
               f"{totals['checkpoint_array_implicit_ends']:,} implicit ends")
         print(f"checkpoint leaf   : {totals['checkpoint_leaf_errors']:,} "
               f"typed decode errors")
+        print("checkpoint cnc brute force: "
+              f"{totals['checkpoint_cnc_bruteforce_attempted']:,} attempted / "
+              f"{totals['checkpoint_cnc_bruteforce_unwalked']:,} unwalked")
+        print("checkpoint movement tails: "
+              f"{totals['checkpoint_movement_sized_tails']:,} sized "
+              f"({totals['checkpoint_movement_sized_tail_bits']:,} bits) / "
+              f"{totals['checkpoint_movement_open_tails']:,} open "
+              f"({totals['checkpoint_movement_open_tail_bits']:,} bits)")
         print("checkpoint reward opaque: "
               f"{totals['checkpoint_tracked_rewards_opaque_empty_variants']:,} "
               "empty variants")
@@ -695,7 +779,8 @@ def main() -> int:
 
     ok_msg = (f"\nOK: {len(files)} replays reported 0 on all {len(FAILURES)} "
               f"failure counters (Decode errors: 0, 0 struct-blob failures, 0 "
-              f"array/leaf/truncated-RPC/movement failures), over "
+              f"array/leaf/truncated-RPC/movement failures, 0 unwalked CNC "
+              f"payloads, 0 movement tails), over "
               f"{totals['decoded_ok']:,} decoded rows and "
               f"{totals['struct_blobs_decoded']:,} decoded struct blobs")
     if args.checkpoints:
