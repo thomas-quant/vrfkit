@@ -13,14 +13,15 @@ values, so the inventory below remains the measured starting point. The
 remaining GAS task is item-schema and value interpretation.
 
 Follow-up, 2026-09-28: the extractor's build scope was re-measured on 1,018
-exports made by parser `259ed10`. All 3,999,493 inner windows across 22
-builds close exactly, and the extractor now accepts those builds. The 12.10
-and 12.11 exports have no rows on this route. See
+exports made by parser `259ed10`. All 3,999,493 `_cnc_h1` inner windows
+across 22 builds close exactly, and the extractor accepts those builds on that
+route. The 12.10 and 12.11 exports have no `_cnc_h1` rows. See
 [the build-scope entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#build-scope-re-measured-2026-09-28).
-That entry also records AbilitiesAndBuffs bodies filed under
-`/Script/ShooterGame.AresAbilitySystemComponent`, which the extractor does not
-select. The inventory below is still the 2026-09-09 measurement, and the open
-GAS task is unchanged.
+The AbilitiesAndBuffs bodies filed under
+`/Script/ShooterGame.AresAbilitySystemComponent` were at first outside the
+extractor's selection. They became a second route the same day: 250,053 main
+and 181,108 checkpoint windows, all exact, on all 24 builds. The inventory
+below is still the 2026-09-09 measurement, and the open GAS task is unchanged.
 
 Private evidence also validates a numeric FastArray walk over all 26,303
 selected PatchVolume whole/tail windows. PatchVolume still lacks a public

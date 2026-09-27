@@ -19,7 +19,7 @@ by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
 **Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
-**914 passing** tests. All 24 supported builds received the same verification
+**919 passing** tests. All 24 supported builds received the same verification
 on **986 unique replays**; all **986** meet every strict criterion after fixing
 the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
@@ -113,10 +113,11 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
   deduplication; unresolved ownership and incomplete effect pairs remain gaps.
 - **Numeric FastArray observations** — the standalone GAS extractor retains
   replication keys, deleted/changed item IDs and raw property boundaries.
-  All 3,999,493 inner windows measured on 2026-09-28 close exactly. They come
-  from 1,018 exports across 22 builds; 12.10 and 12.11 have none on this
-  route. Property names and gameplay meanings remain unverified. This output
-  is separate from Parquet typed-value coverage.
+  On 2026-09-28 every window it reads in 1,018 exports closed exactly:
+  3,999,493 `_cnc_h1` windows across 22 builds, and 431,161 chained windows,
+  main and checkpoint, across all 24. Property names and gameplay meanings
+  remain unverified. This output is separate from Parquet typed-value
+  coverage.
 - **Status-effect observations** — nearsight, slow, detain and suppress can
   arrive on affected actors. Matched start/stop records support intervals;
   unmatched records must not be assigned an invented duration.
@@ -380,7 +381,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**714 passing**; the full Python suite also has **914 passing** tests. The
+**714 passing**; the full Python suite also has **919 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
