@@ -7,6 +7,11 @@ and available observations are in [`CURRENT_STATUS.md`](CURRENT_STATUS.md).
 
 This document records the candidate structured-array expansion evaluated on the September 2026, 714-replay corpus (builds 13.01, 13.02, 13.04, and 13.05). It is a data-preservation and framing result, not a semantic event model.
 
+The routes now run on 13.01--13.06 and on a measured subset of routes for each
+legacy build (11.06--13.00); the gate is per build and per route. The
+2026-09-28 legacy measurement, and why each held-back route stays raw, is in
+[`LEGACY_BUILD_SUPPORT.md`](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28).
+
 The candidate export completed on all 714 inputs in 172.36 seconds with 12 workers (binary SHA-256 `d55dc77...`). The full corpus guards passed: `validate_corpus.py` in 100.469 seconds and `check_decode_errors_corpus.py` in 197.25 seconds, each over all 714 inputs. The independent all-file comparison passed 714/714 in 325.343 seconds using eight processes: all prior field values were preserved, new child windows and typed values matched independent decoding, and ten unaffected tables stayed byte-identical. Checkpoint block spans and diagnostic/export counters also passed on all 714 inputs. Rust and Python each passed 666 tests; the full documentation check passed. The implementation is integrated in this checkout; the retained candidate output is the measured evidence.
 
 ## Exact qualified routes
