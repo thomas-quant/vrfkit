@@ -571,7 +571,9 @@ impl ReplicationReader {
             // that were reassembled anyway, while `partial_errors`, which only
             // the accumulator counts, stayed at zero: a complete bunch dropped
             // with every cause counter reading 0. The accumulator gets a header
-            // carrying none of the reader's partial verdicts.
+            // carrying none of the reader's partial verdicts. The tracker itself
+            // stays, as published API for direct `read_packet` callers (see
+            // `RawPacketReader`'s doc); this strip is what keeps it advisory.
             let mut fragment_header = header.clone();
             fragment_header.has_partial_error = false;
             fragment_header.partial_error_kind = None;
