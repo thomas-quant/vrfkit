@@ -13,6 +13,12 @@ Usage:
 ``fields.parquet`` and ``checkpoint_fields.parquet`` are inspected when present.
 The JSON shape is ``[{"group": "...", "field": "...", "type": "Bool"}]``.
 Supported types are Bool, Byte, Int32, Float, Double, FString and ObjectNetGuid.
+
+A directory is searched recursively. That search skips the staging and backup
+directories ``vrfkit export`` leaves beside an interrupted export (listed under
+``skipped_generated_dirs``; see ``export_scan.py``) and refuses a table with no
+``manifest.json`` beside it, because vrfkit writes the manifest last.  A table
+file or ``--export-id`` names its input explicitly and is read as given.
 """
 
 from __future__ import annotations
@@ -28,6 +34,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+
+if __package__:
+    from .export_scan import generated_ancestor, leftover_note, skipped_report
+else:
+    from export_scan import generated_ancestor, leftover_note, skipped_report
 
 
 def decode_exact(raw: bytes, bit_count: int, type_name: str):
@@ -91,7 +102,13 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
     raise ValueError(f"unsupported evidence type {type_name!r}")
 
 
-def parquet_files(root: Path, export_ids=None):
+def parquet_files(root: Path, export_ids=None, skipped=None):
+    """Yield the field tables to read below `root`.
+
+    Only the recursive search filters: a generated staging/backup directory
+    is skipped (and added to the `skipped` set when one is given), and a
+    table without `manifest.json` beside it raises `ValueError`.
+    """
     if root.is_file():
         yield root
         return
@@ -104,7 +121,17 @@ def parquet_files(root: Path, export_ids=None):
                     yield path
         return
     for name in ("fields.parquet", "checkpoint_fields.parquet"):
-        yield from root.rglob(name)
+        for path in root.rglob(name):
+            leftover = generated_ancestor(path, root)
+            if leftover is not None:
+                if skipped is not None:
+                    skipped.add(leftover)
+                continue
+            if not (path.parent / "manifest.json").is_file():
+                raise ValueError(
+                    f"{path} has no manifest.json beside it; vrfkit writes the manifest last, "
+                    "so this is not a finished export (an interrupted export or a partial copy)")
+            yield path
 
 
 def validate(export_root: Path, specifications: list[dict], export_ids=None, compare_typed=False) -> dict:
@@ -139,9 +166,10 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
     failure_counts = Counter()
     typed_mismatch_count = 0
     typed_mismatch_examples = []
-    paths = list(parquet_files(export_root, export_ids))
+    skipped = set()
+    paths = list(parquet_files(export_root, export_ids, skipped))
     if not paths:
-        raise ValueError(f"no field parquet files below {export_root}")
+        raise ValueError(f"no field parquet files below {export_root}{leftover_note(skipped)}")
     wanted_groups = pa.array(sorted({group for group, _field, _checksum in expected}))
     for path in paths:
         parquet = pq.ParquetFile(path)
@@ -210,6 +238,7 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
         "failure_examples": failures,
         "typed_mismatch_count": typed_mismatch_count,
         "typed_mismatch_examples": typed_mismatch_examples,
+        "skipped_generated_dirs": skipped_report(skipped),
     }
 
 

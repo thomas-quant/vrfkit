@@ -47,6 +47,38 @@ class PhysicalCoverageTests(unittest.TestCase):
         self.assertEqual(main["typed_fraction"], 0.8)
         self.assertEqual((cp["exports_with_table"], cp["rows"], cp["typed_rows"]), (1, 5, 4))
 
+    def test_export_leftovers_beside_an_export_are_not_counted(self):
+        """`vrfkit export` siblings are not exports, and the report says so.
+
+        A `previous` sibling is a complete export. Measured at 259ed10 with
+        only that sibling beside `pub2`, the `*/fields.parquet` glob here
+        reported export_count 2, rows 10 instead of 5, complete, exit 0 -- a
+        plausible number. The staging sibling of a killed export holds a
+        footerless table, which at least failed the run.
+        """
+        self.write(self.root / "pub2")
+        self.write(self.root / ".pub2.vrfkit-previous-4242-7")
+        staging = self.root / ".pub2.vrfkit-staging-55396-0"
+        staging.mkdir()
+        (staging / "fields.parquet").write_bytes(b"PAR1 no footer")
+        expected_skipped = [str((self.root / name).resolve()) for name in (
+            ".pub2.vrfkit-previous-4242-7", ".pub2.vrfkit-staging-55396-0")]
+
+        self.assertEqual(coverage.discover([self.root]), [(self.root / "pub2").resolve()])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = coverage.main([str(self.root), "--jobs", "1"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(report["export_count"], 1)
+        self.assertEqual(report["tables"]["fields"]["rows"], 5)
+        self.assertEqual(report["skipped_generated_dirs"], expected_skipped)
+
+    def test_a_parent_holding_only_leftovers_is_an_error_that_counts_them(self):
+        self.write(self.root / ".pub2.vrfkit-previous-4242-7")
+        with self.assertRaisesRegex(ValueError, r"no direct child exports.*1 "):
+            coverage.discover([self.root])
+
     def test_bad_export_is_explicit_and_cli_fails(self):
         self.write(self.root / "good")
         broken = self.root / "broken"
