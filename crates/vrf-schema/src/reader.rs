@@ -134,7 +134,11 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
             name,
         };
 
-        // The C# code silently drops fields whose handle exceeds the group length.
+        // A handle beyond the group's declared length cannot be stored. The C#
+        // reference drops such a field with only a log warning;
+        // `set_field_on_group` drops it too but counts it in
+        // `dropped_field_exports`, which the manifest reports. The returned
+        // bool therefore carries nothing this caller still needs.
         cache.set_field_on_group(path_name_index, field);
     }
 
@@ -460,8 +464,19 @@ mod tests {
         assert!(matches!(err, SchemaError::UnknownPathIndex { index: 42 }));
     }
 
+    /// A handle beyond the group's declared length is dropped, and the drop is
+    /// counted. The counter is the only trace the drop leaves -- the manifest
+    /// reports it as `dropped_field_exports` -- and it read 0 in all 1,018
+    /// manifests of the 2026-09-28 full-corpus audit, so real data cannot show
+    /// that it still moves. This test is what can.
+    ///
+    /// It replaces `invalid_handle_is_silently_dropped`, which asserted only
+    /// that slot 0 was empty: a slot this fixture never writes. That test
+    /// stayed green with the increment deleted, with the increment moved to
+    /// the placed branch, and with `set_field` growing the group to store the
+    /// field at slot 2.
     #[test]
-    fn invalid_handle_is_silently_dropped() {
+    fn out_of_range_handle_is_dropped_and_counted() {
         // Group has capacity 1, field handle is 2 (out of range).
         let mut data = Vec::new();
         data.extend(encode_int_packed(1));
@@ -474,10 +489,38 @@ mod tests {
 
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
-        // Should not error.
+        // A drop is counted, not an error.
         read_net_field_exports(&mut reader, &mut cache).unwrap();
+
+        assert_eq!(cache.dropped_field_exports(), 1);
         let group = cache.get_group_by_index(11).unwrap();
-        assert!(group.get_field(0).is_none());
+        assert_eq!(group.len(), 1, "a dropped field must not grow the group");
+        assert_eq!(group.populated_fields().count(), 0);
+    }
+
+    /// Positive control for the test above: the same fixture with an in-range
+    /// handle places the field and leaves the counter at zero. Without it, a
+    /// counter that moved on every field would pass the drop test.
+    #[test]
+    fn in_range_handle_is_placed_and_not_counted() {
+        let mut data = Vec::new();
+        data.extend(encode_int_packed(1));
+        data.extend(build_new_group(
+            11,
+            "/Game/Test.Test_C",
+            1,
+            Some((0, "InRange")),
+        ));
+
+        let mut reader = BitReader::new(&data);
+        let mut cache = NetGuidCache::new();
+        read_net_field_exports(&mut reader, &mut cache).unwrap();
+
+        assert_eq!(cache.dropped_field_exports(), 0);
+        let group = cache.get_group_by_index(11).unwrap();
+        assert_eq!(group.len(), 1);
+        assert_eq!(group.get_field(0).unwrap().name, "InRange");
+        assert_eq!(group.populated_fields().count(), 1);
     }
 
     /// An FName is a string AND a number, and the number used to be read and
