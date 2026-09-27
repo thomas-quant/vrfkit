@@ -825,9 +825,11 @@ def _extract_type_name(line: str) -> str | None:
     """Extract the type method name (the .Type() call) from a line.
 
     Type arguments are skipped, so a generic `.Enum<EFoo>()` names `Enum` and
-    is rejected as an unknown method rather than as no method at all. The one
-    generic method the descriptors use, `RepLayoutDynamicArray<T>()`, has its
-    own branch earlier in the ladder and never reaches this.
+    is rejected as an unknown method rather than as no method at all. The
+    parameterless `RepLayoutDynamicArray<T>()` -- the only generic call the
+    descriptors make -- has its own branch earlier in the ladder; its
+    element-decoder overload, or a qualified `<Ns.T>`, falls through to here
+    and is rejected by name.
     """
     m = re.search(r'\)\s*\.(\w+)\s*(?:<[^()]*>)?\s*\(', line)
     return m.group(1) if m else None
