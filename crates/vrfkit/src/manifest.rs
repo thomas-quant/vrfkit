@@ -712,6 +712,17 @@ fn write_sink_quality(
     out.push_str(&format!("\"{key}\": {{\n"));
     let inner = indent + 1;
     for (key, value) in [
+        // The sink's own count of four events vrf-net also counts, in the
+        // callbacks it invokes beside each of its own increments. Each must
+        // equal the `net` block's `rpcs` / `actor_opens` / `actor_closes` /
+        // `content_blocks` for the same stream; tools/verify_build_corpus.py
+        // fails a replay where one does not. Prefixed because this object
+        // sits beside `net`, whose keys have the same names and a different
+        // source.
+        ("sink_rpcs_emitted", sink.rpcs_emitted),
+        ("sink_actor_opens", sink.actor_opens),
+        ("sink_actor_closes", sink.actor_closes),
+        ("sink_content_blocks", sink.content_blocks),
         ("overlay_decoded_ok", sink.overlay.decoded_ok),
         ("overlay_decoded_err", sink.overlay.decoded_err),
         ("overlay_raw_or_skip", sink.overlay.raw_or_skip),
@@ -981,6 +992,10 @@ mod tests {
             "diagnostics_retained",
             "diagnostics_dropped",
             // Every SinkTotals/OverlayStats/ArrayDecodeStats counter.
+            "sink_rpcs_emitted",
+            "sink_actor_opens",
+            "sink_actor_closes",
+            "sink_content_blocks",
             "overlay_decoded_ok",
             "overlay_decoded_err",
             "overlay_raw_or_skip",
@@ -1081,6 +1096,10 @@ mod tests {
                 "must_be_mapped_guids",
                 "diagnostics_retained",
                 "diagnostics_dropped",
+                "sink_rpcs_emitted",
+                "sink_actor_opens",
+                "sink_actor_closes",
+                "sink_content_blocks",
                 "overlay_decoded_ok",
                 "overlay_decoded_err",
                 "overlay_raw_or_skip",
@@ -1169,6 +1188,61 @@ mod tests {
             "\"checkpoint_literal_paths\": 17",
             "\"checkpoint_indexed_paths\": 11",
             "\"checkpoint_resolved_path_indices\": 11",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// The sink's event tallies are published so they can be compared.
+    ///
+    /// The export summary printed them beside NetStats' counts as `Sink tally`
+    /// for a desync check, but the manifest carried neither side's tally in
+    /// `sink`, so no script could compare them and none did.
+    /// `tools/verify_build_corpus.py` now fails a replay whose tally differs.
+    #[test]
+    fn sink_event_tallies_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            rpcs_emitted: 21,
+            actor_opens: 22,
+            actor_closes: 23,
+            content_blocks: 24,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.rpcs_emitted = 31;
+        checkpoints.sink.actor_opens = 32;
+        checkpoints.sink.actor_closes = 33;
+        checkpoints.sink.content_blocks = 34;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            chunks_processed: 0,
+            export_groups: 0,
+            movement_rows: 0,
+            net_guid_rows: 0,
+            event_rows: 0,
+            partial_rows: 0,
+            partial_bits: 0,
+            event_trailing_bytes: 0,
+            replay_data_trailing_bytes: 0,
+            event_layout_mismatches: 0,
+            event_first_layout_mismatch: None,
+            event_payloads_decoded: 0,
+            event_payload_unknown_groups: 0,
+            net: &net,
+            sink: &sink,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"sink_rpcs_emitted\": 21",
+            "\"sink_actor_opens\": 22",
+            "\"sink_actor_closes\": 23",
+            "\"sink_content_blocks\": 24",
+            "\"sink_rpcs_emitted\": 31",
+            "\"sink_actor_opens\": 32",
+            "\"sink_actor_closes\": 33",
+            "\"sink_content_blocks\": 34",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }

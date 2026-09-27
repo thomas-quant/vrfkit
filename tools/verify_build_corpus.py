@@ -42,6 +42,19 @@ SINK_ZERO = (
     "array_unconsumed_root_bits", "array_implicit_terminations",
     "array_leaf_decode_errors", "truncated_rpcs",
 )
+#: Each sink event tally the manifest publishes, and the NetStats counter it
+#: must equal. vrf-net calls the sink right beside its own increment for each
+#: of these events, so the two are one count taken twice; a difference means
+#: the sink's bookkeeping (a missing or extra `+= 1`) is broken. The export
+#: summary printed both sides as `Sink tally` for exactly this comparison, and
+#: nothing performed it. The sink's `fields_emitted` has no pair: it counts
+#: emitted rows, not framed properties.
+SINK_NET_EQUAL = (
+    ("sink_rpcs_emitted", "rpcs"),
+    ("sink_actor_opens", "actor_opens"),
+    ("sink_actor_closes", "actor_closes"),
+    ("sink_content_blocks", "content_blocks"),
+)
 
 
 def require_count(obj, key):
@@ -85,6 +98,11 @@ def manifest_counts(manifest):
                 counts[name] = require_count(source, key)
                 if key in zero_keys and counts[name]:
                     failures.append(f"{name}={counts[name]}")
+        for sink_key, net_key in SINK_NET_EQUAL:
+            tally = counts[f"{prefix}_{sink_key}"] = require_count(scope["sink"], sink_key)
+            framed = counts[f"{prefix}_{net_key}"] = require_count(scope["net"], net_key)
+            if tally != framed:
+                failures.append(f"{prefix}_{sink_key}={tally} != {prefix}_{net_key}={framed}")
         lost = counts[f"{prefix}_rpc_stream_failures"] - counts[f"{prefix}_unresolved_rpc_payloads_preserved"]
         counts[f"{prefix}_rpc_loss"] = lost
         if lost != 0:

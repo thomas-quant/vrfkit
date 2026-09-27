@@ -40,15 +40,26 @@ use super::ExportStats;
 /// Everything a packet's sink counted, summed across packets.
 #[derive(Debug, Default)]
 pub(crate) struct SinkTotals {
-    /// The sink's own tally of fields/RPCs/actor opens+closes/content blocks
-    /// it saw, kept alongside (not instead of) `NetStats`'s independent count
-    /// of the same events at the framing layer. The two are computed by
-    /// different code from the same callback sequence, so a mismatch is a
-    /// real desync signal, not noise -- but only if this side is ever
-    /// summed. Before this field existed it was not: `ExportStats` counted
-    /// it and the caller never read it, on every one of ~530,000 rebuilt
-    /// sinks.
+    /// Rows emitted at the sites that count them: property rows, RPC
+    /// parameter rows and whole-payload fallbacks, flattened array leaves,
+    /// `_cnc_h*` rows and RepLayout tail rows. A row count, and not every row
+    /// (movement batches, zero-bit RPC markers and unresolved-payload
+    /// preservation rows are not counted), so it is comparable neither with
+    /// NetStats' `fields` -- framed RepLayout properties -- nor with
+    /// `fields.parquet`. On 02d4d478 it reads 1,060,119 against `Fields:
+    /// 429,648` and 1,296,660 table rows.
     pub fields_emitted: u64,
+    /// The sink's own count of four events vrf-net counts too: RPC callbacks,
+    /// actor opens, actor closes, and content blocks, live and deleted.
+    /// vrf-net invokes each of these callbacks right beside its own increment,
+    /// so each pair is one count taken twice and must be equal. A difference
+    /// means the sink's bookkeeping -- a missing or extra `+= 1` -- is broken;
+    /// it cannot detect framing going out of step, since both sides see the
+    /// same callbacks. Published in the manifest as `sink_rpcs_emitted`,
+    /// `sink_actor_opens`, `sink_actor_closes` and `sink_content_blocks`,
+    /// where `tools/verify_build_corpus.py` fails a replay whose value differs
+    /// from the `net` block's. Before these totals existed, `ExportStats`
+    /// counted all five per packet and no caller read them.
     pub rpcs_emitted: u64,
     pub actor_opens: u64,
     pub actor_closes: u64,

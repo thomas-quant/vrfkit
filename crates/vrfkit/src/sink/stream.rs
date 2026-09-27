@@ -2200,6 +2200,50 @@ mod tests {
         assert_eq!(sink.stats.actor_closes, 2);
     }
 
+    /// A deleted block and a live one are both content blocks to the sink,
+    /// as they are to vrf-net.
+    ///
+    /// `NetStats::content_blocks` counts both kinds beside the callback it
+    /// makes, and `tools/verify_build_corpus.py` fails a replay whose
+    /// `sink_content_blocks` differs from it. A replay without deleted blocks
+    /// -- the 13.06 one this check was first measured on has none -- cannot
+    /// notice `on_deleted_block` forgetting its count, so it is pinned here.
+    #[test]
+    fn deleted_and_live_blocks_both_advance_the_sink_block_tally() {
+        let mut cache = NetGuidCache::new();
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let header = ContentBlockHeader {
+            has_rep_layout: true,
+            is_actor: true,
+            ..ContentBlockHeader::default()
+        };
+
+        sink.on_content_block(7, NetworkGuid(1234), &header);
+        assert_eq!(sink.stats.content_blocks, 1);
+        sink.on_deleted_block(7, NetworkGuid(1234), &header);
+        assert_eq!(sink.stats.content_blocks, 2);
+    }
+
+    /// Every RPC callback advances `rpcs_emitted` exactly once, whatever row
+    /// shape it produces, because vrf-net counts `NetStats::rpcs` once per
+    /// callback. The zero-bit marker row is the branch a misplaced increment
+    /// would most easily skip.
+    #[test]
+    fn every_rpc_shape_advances_the_sink_rpc_tally_once() {
+        let mut cache = NetGuidCache::new();
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+
+        sink.on_rpc(5, 0, BitReader::with_bit_len(&[], 0).unwrap());
+        assert_eq!(sink.stats.rpcs_emitted, 1, "zero-bit marker row");
+        sink.on_rpc(6, 8, BitReader::with_bit_len(&[0xA5], 8).unwrap());
+        assert_eq!(sink.stats.rpcs_emitted, 2, "whole-payload fallback row");
+        assert_eq!(sink.records.fields.len(), 2);
+    }
+
     /// A static actor (no archetype) must not get its class_path filled in
     /// from its own GUID path on close, the same way `on_actor_open` already
     /// refuses to: that path is the level's instance name, not a class, and

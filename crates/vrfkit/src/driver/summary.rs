@@ -103,12 +103,14 @@ pub(super) fn print(
         "  Partial raw rows: {} ({} bits)",
         totals.partial_rows, totals.partial_bits
     );
-    // The sink's own tally of the same five events, computed independently at
-    // the vrfkit layer rather than the vrf-net framing layer above. Not
-    // redundant to drop: a mismatch against the five lines above is a real
-    // desync between what vrf-net framed and what the sink actually saw, and
-    // before this line existed these counters were summed on `ExportStats`
-    // and read by nothing (see `sink::totals`).
+    // The sink's own tally beside vrf-net's. The RPC, open, close and
+    // content-block terms must equal `RPCs:`, `Actor opens:`, `Actor closes:`
+    // and `Content blocks:` above: vrf-net makes each sink callback right
+    // beside its own increment, so a difference means the sink's bookkeeping
+    // is broken, not that framing desynchronized. The manifest publishes the
+    // four and tools/verify_build_corpus.py fails a replay where they differ.
+    // The `fields` term is a count of emitted rows, not of framed properties,
+    // and is NOT comparable with `Fields:` (see `SinkTotals::fields_emitted`).
     eprintln!(
         "  Sink tally:       {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
         totals.sink.fields_emitted,
@@ -429,11 +431,11 @@ fn print_checkpoints(cp: &CheckpointStats) {
         "  Checkpoint blobs: {} decoded / {} failed",
         cp.sink.struct_blobs_decoded, cp.sink.struct_blobs_failed
     );
-    // The same five the main pass prints as "Sink tally". They were accumulated
-    // for the checkpoint pass by the shared SinkTotals::absorb and reached no
-    // output at all, which is the state totals.rs's own doc warns about: a
-    // mismatch against the framing-layer counts "is a real desync signal, not
-    // noise -- but only if this side is ever summed".
+    // The checkpoint twin of "Sink tally". Its RPC, open, close and
+    // content-block terms must equal the `Checkpoint net` RPCs and blocks and
+    // the `Checkpoint life` opens and closes, for the reason given on the main
+    // line; tools/verify_build_corpus.py checks them through the manifest.
+    // The `fields` term counts emitted rows and matches nothing above.
     eprintln!(
         "  Checkpoint sink:  {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
         cp.sink.fields_emitted,
