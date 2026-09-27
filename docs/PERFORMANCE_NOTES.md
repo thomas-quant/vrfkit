@@ -178,6 +178,38 @@ comment, section "Why a visitor and not a `Vec<String>`", lines ~32-43.
 > Handing out `&str` makes that case allocation-free. An alias still costs one
 > `String`, because it is genuinely new text.
 
+### Registering a new export group
+
+Source: `crates/vrf-schema/src/cache.rs`, `NetGuidCache::index_group`, whose
+doc comment points here. Measured 2026-09-28 against main 259ed10, on a
+shared machine that other jobs kept fully loaded throughout.
+
+`add_export_group` used to end every successful call by clearing `by_path`,
+`by_index` and `by_leaf` and registering every group again, one `String` per
+path spelling plus one per leaf. The checkpoint pass reads each checkpoint
+into a fresh cache and adds its groups one at a time, all of them new, so a
+checkpoint of n groups paid n(n+1)/2 registrations: 3.6-4.5 million per
+export on the replays below, where 14-17 thousand are needed. A new group now
+registers only itself; a merge or a reused index still rebuilds.
+
+`vrfkit export <replay> --out <new dir> --checkpoints`, 7 A/B pairs per
+replay alternating which side runs first, both sides at ABOVE_NORMAL
+priority, wall clock around the process, medians:
+
+| replay | checkpoints / groups | before | after | paired difference | faster |
+|---|---|---|---|---|---|
+| 13.05 `f2872006` (88 MB) | 33 / 17,102 | 5.574 s | 4.445 s | 1.082 s | 7 of 7 |
+| 13.05 `535c22e5` (84 MB) | 30 / 15,152 | 5.182 s | 4.191 s | 1.092 s | 6 of 7 |
+| 13.06 `c129014f` (89 MB) | 28 / 13,925 | 5.451 s | 4.621 s | 0.764 s | 6 of 7 |
+
+The manifest's `elapsed_ms` moved the same way (paired medians 1,154, 1,124
+and 836 ms). The same checkpoint group rows fed in-process through the crate
+before and after the change -- fresh cache per checkpoint, the reader's
+collision probe, then `add_export_group`, 9 alternating rounds -- took 1.30 s
+-> 18 ms, 1.72 s -> 22 ms and 1.00 s -> 11 ms (medians). Peak commit did not
+move: 200-202 MiB on both sides for `f2872006` over 3 pairs. Every Parquet
+file stays byte-identical.
+
 ## Replication pipeline (vrf-net)
 
 ### Measured rates, reference replay 02d4d478
