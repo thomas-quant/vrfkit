@@ -1160,10 +1160,10 @@ silent change must be impossible.
 | 13.02 | 205/205 | Validation + checkpoints + typed/raw |
 | 13.04 | 108/108 | Validation + checkpoints + typed/raw |
 | 13.05 | 401/401 | Validation + checkpoints + typed/raw |
-| 13.06 | 6/6 | Validation + checkpoints + typed/raw |
+| 13.06 | 38/38 | Validation + checkpoints + typed/raw |
 
-All rows use the [common 2026-09-25 audit](BUILD_VERIFICATION.md): 986 unique
-replays, all 986 strictly clean after the two ActiveBlinds fixes. Every
+All rows use the [common 2026-09-28 audit](BUILD_VERIFICATION.md): 1,018 unique
+replays, all 1,018 strictly clean. Every
 replay passes block validation and checkpoint export; all observed evidence
 values match the independent Python decoder. `Clean/checked` also requires
 zero array and array-leaf errors. The report defines each denominator.
