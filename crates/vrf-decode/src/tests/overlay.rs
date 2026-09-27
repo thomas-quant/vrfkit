@@ -1250,20 +1250,69 @@ fn an_unlearned_checksum_resolves_nothing() {
 
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 18 groups and `ShortComponents`
+/// is the one that matters -- `ByteComponents` on 19 groups and `ShortComponents`
 /// on 6, which differ in width, so guessing would desync the block rather than
 /// read a wrong value.
+///
+/// `AllianceFilter` used to be the second entry here and is not any more: its
+/// donors disagreed only in the table, never on the wire -- see
+/// `alliance_filter_donors_agree_so_the_checksum_types_the_receivers`.
 #[test]
 fn checksums_whose_donors_disagree_are_omitted() {
-    for (checksum, why) in [
-        (
-            2749104612u32,
-            "ReplicatedMovement: Byte vs Short components",
-        ),
-        (2270825073, "AllianceFilter: EnumByte vs EnumRemainingBits"),
+    assert_eq!(
+        lookup_checksum(2749104612),
+        None,
+        "ReplicatedMovement: Byte vs Short components"
+    );
+}
+
+/// `AllianceFilter` is one property, checksum 2270825073, declared by three
+/// effect RPCs and received by five more: the weapon `...FromClient` pair,
+/// `ReplayPlayOneShotEffectAtLocation` and both `ReplayRecord*Effect`.
+///
+/// The descriptors typed the three donors two ways -- `EnumByte` on the two
+/// `EffectManagerComponent` multicasts, `EnumRemainingBits` on
+/// `ReplayPlayContinuousEffectAtLocation` -- so the checksum learner dropped
+/// the checksum and the receivers shipped raw: 4,560,248 rows over the 1,018
+/// replays audited at 259ed10, every one of the 16,030,813 rows under this
+/// checksum 3 bits wide, where both readers return the same number. A
+/// correction makes the donors agree. This pins both halves: the donors, and
+/// the propagation that only a regenerated `checksum_table.rs` delivers -- a
+/// corrected table with a stale checksum table would still leave the
+/// receivers raw.
+#[test]
+fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    for group in [
+        "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+        "/Script/ShooterGame.EffectManagerComponent:MulticastPlayOneShotEffect",
+        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
     ] {
-        assert_eq!(lookup_checksum(checksum), None, "{why}");
+        assert_eq!(
+            table.lookup(group, "AllianceFilter"),
+            Some(FieldType::EnumByte),
+            "donor {group}"
+        );
     }
+    assert_eq!(lookup_checksum(2270825073), Some(FieldType::EnumByte));
+
+    const RECEIVER: &str =
+        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient";
+    assert_eq!(
+        table.lookup(RECEIVER, "AllianceFilter"),
+        None,
+        "typed by checksum, not by name"
+    );
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            RECEIVER,
+            Some("AllianceFilter"),
+            None,
+            Some(2270825073)
+        ),
+        Some(FieldType::EnumByte),
+    );
 }
 
 /// The map is only useful if it holds something; a silently empty generated

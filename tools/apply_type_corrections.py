@@ -90,6 +90,8 @@ EXPECTED += [
     ("MulticastNotifyDamage_Point", "DamageImpactNormal", "FieldType::VectorNetQuantizeNormal"),
     ("/Script/ShooterGame.EquippableStateMachineComponent", "TransitionContext",
      "FieldType::ObjectNetGuid"),
+    ("ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation", "AllianceFilter",
+     "FieldType::EnumByte"),
 ]
 
 #: Entries the WIRE carries that the C# descriptors cannot declare, because the
@@ -824,6 +826,47 @@ def apply_additions(content: str) -> tuple[str, int]:
     return content, added
 
 
+def retype_exact(content: str, group: str, field: str, old: str, new: str,
+                 expected: int) -> tuple[str, int]:
+    """Rewrite `old` -> `new` on the entries keyed EXACTLY `(group, field)`.
+
+    The older passes below match a substring of the group and the field line
+    anywhere in a split block. That is only safe by luck: splitting on
+    `    OverlayEntry {` leaves the whole OVERLAY_HANDLE_TABLE inside the LAST
+    block, and that table repeats group paths and field names -- including
+    `ReplayPlayContinuousEffectAtLocation` / `AllianceFilter` (handle 28) and
+    `MulticastNotifyDamage_Point` / `DeathMontageEffectOverride` (handle 43).
+    A substring pass on either would reach into the tail block and hold only
+    because the last OverlayEntry happens not to carry the old type.
+
+    Here the key is each block's OWN entry: the first `group_path` and
+    `field_name` in the block, compared with `==`, and its own `field_type`
+    compared in full. The type is then replaced once, and its first
+    occurrence in the block is the entry's own `field_type`.
+
+    `expected` is how many entries a freshly generated table must change. On an
+    already corrected table the answer is 0; any other count means the key
+    matched something it was not written for, and that is a hard failure
+    rather than a quiet extra rewrite.
+    """
+    blocks = content.split("    OverlayEntry {")
+    changed = 0
+    for i, block in enumerate(blocks[1:], 1):
+        g, f = GROUP_RE.search(block), FIELD_RE.search(block)
+        if not (g and f and g.group(1) == group and f.group(1) == field):
+            continue
+        if _field_type_of(block) != normalize_type(old):
+            continue
+        blocks[i] = block.replace(old, new, 1)
+        changed += 1
+    if changed not in (0, expected):
+        raise SystemExit(
+            f"{TABLE_RS}: {group}/{field} {old} -> {new} changed {changed} "
+            f"entries, expected {expected} (or 0 on a corrected table)."
+        )
+    return "    OverlayEntry {".join(blocks), changed
+
+
 #: The weapon half of the "215"/"216" correction, which EXPECTED cannot list.
 #:
 #: The pass discovers its targets from the table itself -- every group under
@@ -1307,6 +1350,51 @@ def main():
                 count += 1
             break
     content = "    OverlayEntry {".join(blocks)
+
+    # Fix: EnumRemainingBits -> EnumByte for AllianceFilter on
+    # `ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation`.
+    #
+    # A table-consistency correction, not a wire/declaration mismatch: the wire
+    # agrees with both declarations. `AllianceFilter` (EAresAlliance) is ONE
+    # property, compatible_checksum 2270825073, and three RPCs declare it --
+    # `EffectManagerComponent:MulticastPlayContinuousEffect` and
+    # `:MulticastPlayOneShotEffect` as `byte AllianceFilter` (EnumByte), and
+    # ReplayPlayContinuousEffectAtLocationParameters.cs:43 as
+    # `.EnumRemainingBits()`. Two donor types for one checksum is exactly what
+    # extract_checksum_types.py drops, so the five RPCs that carry the same
+    # parameter with no declaration of their own never got a type:
+    # `AresEquippable:MulticastPlay{Continuous,OneShot}EffectFromClient` under
+    # every weapon's `_ClassNetCache`, `ReplayPlayOneShotEffectAtLocation`, and
+    # both `EffectManagerComponent:ReplayRecord*Effect`.
+    #
+    # Measured 2026-09-28 over all 1,018 replays audited at 259ed10 (24 builds,
+    # 11.06-13.06), fields.parquet and checkpoint_fields.parquet, rows selected
+    # by compatible_checksum == 2270825073: 16,030,813 rows, every one exactly
+    # 3 bits wide on every build; 0 in checkpoints (RPC parameters never reach
+    # them). The manifests declare the checksum under those eight groups only,
+    # always named AllianceFilter. 11,470,565 rows were typed through the
+    # donors and 4,560,248 were raw. Read LSB-first the donors hold {1, 3} and
+    # every raw row holds 3 (AllianceAny), all inside EAresAlliance 0..5; an
+    # independent Python decode matched the exported value on 11,470,565 of
+    # 11,470,565 typed rows.
+    #
+    # EnumByte rather than EnumRemainingBits on the other two, because it is
+    # the stricter reader: decode_byte refuses 0-bit and >8-bit payloads, while
+    # EnumRemainingBits answers 0 for no bits and reads up to 32. At 1..8 bits
+    # both return the same integer, so the 3,094,607 existing rows of this RPC
+    # keep their values exactly -- and 0 of them are 0 bits wide, the one width
+    # where `apply_overlay_inner`'s zero-bit special case used to answer here.
+    #
+    # The vendored descriptor stays verbatim. `checksum_table.rs` only learns
+    # 2270825073 -> EnumByte when extract_checksum_types.py runs AFTER this, and
+    # `alliance_filter_donors_agree_so_the_checksum_types_the_receivers` in
+    # crates/vrf-decode/src/tests/overlay.rs fails until both have happened.
+    content, n = retype_exact(
+        content,
+        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+        "AllianceFilter", "FieldType::EnumRemainingBits", "FieldType::EnumByte",
+        expected=1)
+    count += n
 
     # Additions last, so the bucket recount below sees them.
     content, n_added = apply_additions(content)

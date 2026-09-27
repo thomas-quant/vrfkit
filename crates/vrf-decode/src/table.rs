@@ -6377,7 +6377,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
     OverlayEntry {
         group_path: "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
         field_name: "AllianceFilter",
-        field_type: FieldType::EnumRemainingBits,
+        field_type: FieldType::EnumByte,
     },
     OverlayEntry {
         group_path: "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",

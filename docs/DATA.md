@@ -857,11 +857,22 @@ the schema itself distinguishes.
 
 (An earlier revision of this section offered `AllianceFilter` as the
 counterexample -- `EnumByte` on one group, `EnumRemainingBits` on another. It is
-not one. Both groups declare it under checksum 2270825073 and every row is 3
-bits wide, and `decode_byte` reads `bits_remaining()` for any width in 1..=8, so
-the two declarations return the same value. It is an inconsistency in the table,
-not a difference on the wire. The conclusion stands on the checksum evidence
-above.)
+not one. Every group that declares it does so under checksum 2270825073, and
+every row is 3 bits wide, and `decode_byte` reads `bits_remaining()` for any
+width in 1..=8, so the two declarations return the same value. It was an
+inconsistency in the table, not a difference on the wire. The conclusion stands
+on the checksum evidence above.
+
+That inconsistency had a cost this section did not count at the time. Two
+donor types for one checksum is what the checksum learner drops, so the five
+RPCs that carry `AllianceFilter` with no declaration of their own -- the
+weapons' `MulticastPlay{Continuous,OneShot}EffectFromClient`,
+`ReplayPlayOneShotEffectAtLocation` and both `ReplayRecord*Effect` -- stayed
+raw: 4,560,248 of the 16,030,813 rows under the checksum in the 1,018-replay
+audit, all reading 3 (`AllianceAny`). `apply_type_corrections.py` now declares
+the third donor `EnumByte` like the other two, so the checksum is learned and
+those rows are typed through it. `ReplicatedMovement` is still dropped, and
+should be.)
 
 Three names did clear the mechanical bar -- `AttachComponent` (declared `Raw`,
 so it would produce no values at all), `PreventPickupCharacter` and

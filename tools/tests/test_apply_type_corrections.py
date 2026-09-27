@@ -340,6 +340,61 @@ class AdditionsTests(unittest.TestCase):
         self.assertEqual(out.count("];\n"), 1)
 
 
+class RetypeExactTests(unittest.TestCase):
+    """`retype_exact` keys on each block's OWN entry, never on text elsewhere.
+
+    The split on `    OverlayEntry {` leaves OVERLAY_HANDLE_TABLE in the last
+    block, and that table repeats group paths and field names. A substring pass
+    would read them as the last entry's; these pin that it does not.
+    """
+
+    GROUP = "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation"
+
+    def table(self, last_type):
+        body = formatted_typed([
+            (self.GROUP, "AllianceFilter", "FieldType::EnumRemainingBits"),
+            (self.GROUP, "AllianceFilterX", "FieldType::EnumRemainingBits"),
+            ("/Script/ShooterGame.ZzzTailComponent", "Stripes", last_type),
+        ])
+        return body + (
+            "\npub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; 1] = [\n"
+            "    OverlayHandleEntry {\n"
+            f'        group_path: "{self.GROUP}",\n'
+            "        handle: 28,\n"
+            '        field_name: "AllianceFilter",\n'
+            "    },\n"
+            "];\n"
+        )
+
+    def test_only_the_exact_entry_changes(self):
+        # The tail entry carries the old type too, and the handle table after
+        # it names the same group and field -- the shape a substring pass
+        # would misread as "the last entry is AllianceFilter".
+        source = self.table("FieldType::EnumRemainingBits")
+        out, n = atc.retype_exact(
+            source, self.GROUP, "AllianceFilter",
+            "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=1)
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            [(f, t) for _g, f, t in atc.parse_entries(out)],
+            [("AllianceFilter", "FieldType::EnumByte"),
+             ("AllianceFilterX", "FieldType::EnumRemainingBits"),
+             ("Stripes", "FieldType::EnumRemainingBits")])
+
+    def test_an_already_corrected_table_changes_nothing(self):
+        out, n = atc.retype_exact(
+            self.table("FieldType::Float"), self.GROUP, "AllianceFilter",
+            "FieldType::EnumByte", "FieldType::Raw", expected=1)
+        self.assertEqual(n, 0)
+        self.assertEqual(out, self.table("FieldType::Float"))
+
+    def test_an_unexpected_count_is_a_hard_failure(self):
+        with self.assertRaises(SystemExit):
+            atc.retype_exact(
+                self.table("FieldType::Float"), self.GROUP, "AllianceFilter",
+                "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=2)
+
+
 #: A weapon group of the shape the "215"/"216" pass discovers for itself.
 WEAPON_GROUP = "/Game/Equippables/Guns/Rifles/Vandal.Vandal_C"
 WEAPON_ROWS = [
