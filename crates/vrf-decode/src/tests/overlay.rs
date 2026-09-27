@@ -336,6 +336,42 @@ fn equippable_used_is_an_object_net_guid() {
     }
 }
 
+/// The two death-montage parameters of both damage RPCs are IntPacked GUIDs,
+/// not the opaque payload the descriptor's `AddRaw` declares. Over the
+/// 1,018-replay audit (959,445 rows each): 8-bit rows are all the null GUID,
+/// and the rest resolve 100% -- `DeathMontageEffectOverride` through
+/// `net_guids` to an `FXC_*_C` finisher effect class, and
+/// `DeathMontageEffectOverrideContext` through `actors.parquet` to a `*_PC_C`
+/// pawn open at the event. `Raw` table entries win before the checksum and
+/// the scoped types, so this has to be a table correction, and the
+/// exact-quote match must not reach `...IsQueued` (a Bool).
+#[test]
+fn the_death_montage_parameters_are_object_net_guids() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in [
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
+    ] {
+        for field in [
+            "DeathMontageEffectOverride",
+            "DeathMontageEffectOverrideContext",
+        ] {
+            assert_eq!(
+                table.lookup(group, field),
+                Some(FieldType::ObjectNetGuid),
+                "{field} in {group}"
+            );
+        }
+        assert_eq!(
+            table.lookup(group, "bDeathMontageEffectOverrideIsQueued"),
+            Some(FieldType::Bool),
+            "the Bool sibling is untouched in {group}"
+        );
+    }
+    assert_eq!(lookup_checksum(1712763745), Some(FieldType::ObjectNetGuid));
+    assert_eq!(lookup_checksum(2397897524), Some(FieldType::ObjectNetGuid));
+}
+
 #[test]
 fn transition_context_is_an_object_net_guid() {
     let table = OverlayTable::new(&OVERLAY_TABLE);

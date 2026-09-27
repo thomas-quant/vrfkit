@@ -92,6 +92,12 @@ EXPECTED += [
      "FieldType::ObjectNetGuid"),
     ("ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation", "AllianceFilter",
      "FieldType::EnumByte"),
+    ("MulticastNotifyDamage_Base", "DeathMontageEffectOverride", "FieldType::ObjectNetGuid"),
+    ("MulticastNotifyDamage_Point", "DeathMontageEffectOverride", "FieldType::ObjectNetGuid"),
+    ("MulticastNotifyDamage_Base", "DeathMontageEffectOverrideContext",
+     "FieldType::ObjectNetGuid"),
+    ("MulticastNotifyDamage_Point", "DeathMontageEffectOverrideContext",
+     "FieldType::ObjectNetGuid"),
 ]
 
 #: Entries the WIRE carries that the C# descriptors cannot declare, because the
@@ -1502,6 +1508,53 @@ def main():
         "AllianceFilter", "FieldType::EnumRemainingBits", "FieldType::EnumByte",
         expected=1)
     count += n
+
+    # Fix: Raw -> ObjectNetGuid for DeathMontageEffectOverride and
+    # DeathMontageEffectOverrideContext on both MulticastNotifyDamage_* RPCs.
+    #
+    # The descriptors declare both with AddRaw
+    # (MulticastNotifyDamagePointParameters.cs:55-56, ...BaseParameters.cs:29-30):
+    # an opaque payload, not a stated wire type -- the TransitionContext case
+    # above. A scoped type or the checksum cannot reach them, because a Raw
+    # table entry wins in resolve_entry before either is consulted.
+    #
+    # Measured 2026-09-28 over the 1,018 replays audited at 259ed10, both
+    # fields, both RPCs: 959,445 rows each (Point 632,906, Base 326,539), all
+    # main stream; the 3 replays without them (12.10, 12.11, 13.00) never
+    # declare the fields. Each name carries one checksum corpus-wide
+    # (1712763745 / 2397897524) and no other property carries either. The
+    # handle drifts by build (Point 40-43 / 41-44, Base 32-35 / 33-36); the
+    # name lookup is what keys this, so do not "fix" OVERLAY_HANDLE_TABLE from
+    # it. Read as IntPacked every row is consumed exactly, and in every build
+    # every 8-bit row is 0x00 -- the null reference -- so the widths carry the
+    # value's size, as IntPacked requires:
+    #
+    #   DeathMontageEffectOverride: 8 bits 947,364, 16 bits 12,081. The
+    #   12,081 non-zero values are all odd (static GUIDs), 2,642 distinct, and
+    #   every one resolves in the same export's net_guids to one of 190
+    #   `FXC_*_C` effect classes -- finisher kill effects
+    #   (FXC_Finisher_Afterglow_Victim_C, ..._Demonstone_..., ...). Non-zero
+    #   only on events with bDamageKilledTarget, and only with a non-zero
+    #   Context.
+    #   DeathMontageEffectOverrideContext: 8 / 16 / 24 bits (897,283 / 62,075
+    #   / 87). The 62,162 non-zero values are all even (dynamic): net_guids
+    #   resolves 0 of them, as it does for the already-typed
+    #   EventInstigatorPawn on the same events, while actors.parquet resolves
+    #   62,162 of 62,162 to a `*_PC_C` player pawn open at the event's time_ms
+    #   -- the EquippableUsed standard above. Non-zero only on killing events.
+    #   It equals EventInstigatorPawn on 22,224 of them and Character on
+    #   1,537, so it is a pawn reference and nothing more specific: not "the
+    #   killer", not "the victim".
+    #
+    # Second implementation: validate_type_evidence.py (ObjectNetGuid,
+    # checksum-scoped) over the whole corpus for the Override, exit 0 with
+    # 0 failures; over 5 exports (11.06-13.06) for the Context, exit 0.
+    for field in ("DeathMontageEffectOverride", "DeathMontageEffectOverrideContext"):
+        for rpc in ("MulticastNotifyDamage_Base", "MulticastNotifyDamage_Point"):
+            content, n = retype_exact(
+                content, f"/Script/ShooterGame.DamageableComponent:{rpc}", field,
+                "FieldType::Raw", "FieldType::ObjectNetGuid", expected=1)
+            count += n
 
     # Additions last, so the bucket recount below sees them.
     content, n_added = apply_additions(content)

@@ -542,6 +542,66 @@ class ShotEffectRawSourceTests(unittest.TestCase):
         self.assertEqual(rpc, raw_rpc)
         self.assertEqual(summary["tally"]["multi_typed_rows"], 3)
 
+class DeathMontageBlobTests(unittest.TestCase):
+    """The death-montage pair keeps the reference's blob shape once typed.
+
+    The parser types both parameters as ObjectNetGuid; the reference bundle
+    carries each as a {BitCount, Data, TypeName} blob. Without the RPC loop
+    handing the wire bits back, the typed row would reach rpc_received as a
+    bare integer and change the event's shape.
+    """
+
+    GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
+    # 16-bit IntPacked 5055 (an FXC finisher class) and 8-bit 0 (null).
+    OVERRIDE = (b"\x7f\x4e", 16, 5055)
+    CONTEXT = (b"\x00", 8, 0)
+
+    def payload(self, typed: bool) -> dict:
+        rows = []
+        for param, (raw, bits, guid) in (
+            ("DeathMontageEffectOverride", self.OVERRIDE),
+            ("DeathMontageEffectOverrideContext", self.CONTEXT),
+        ):
+            rows.append({
+                "time_ms": 40, "packet_id": 4, "actor": 2, "object": 22,
+                "group_path": self.GROUP, "handle": 2,
+                "field_name": f"MulticastNotifyDamage_Point.{param}",
+                "bit_count": bits, "raw_bits": raw,
+                **({"value_i64": guid} if typed else {}),
+            })
+        rows.append({
+            "time_ms": 40, "packet_id": 4, "actor": 2, "object": 22,
+            "group_path": self.GROUP, "handle": 2,
+            "field_name": "MulticastNotifyDamage_Point.bDeathMontageEffectOverrideIsQueued",
+            "bit_count": 1, "raw_bits": b"\x00", "value_bool": False,
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            export = Path(tmp) / "export"
+            export.mkdir()
+            write_fields_parquet(export / "fields.parquet", rows)
+            bundle.convert(export, Path(tmp) / "bundle")
+            events = [json.loads(line) for line in (Path(tmp) / "bundle" / "events.ndjson")
+                      .read_text(encoding="utf-8").splitlines()]
+        rpcs = [e for e in events if e["type"] == "rpc_received"]
+        self.assertEqual(len(rpcs), 1)
+        return rpcs[0]["payload"]
+
+    def test_typed_rows_keep_the_reference_blob(self):
+        typed = self.payload(typed=True)
+        self.assertEqual(typed, self.payload(typed=False))
+        for param, (raw, bits, _guid) in (
+            ("DeathMontageEffectOverride", self.OVERRIDE),
+            ("DeathMontageEffectOverrideContext", self.CONTEXT),
+        ):
+            self.assertEqual(typed[param], {
+                "BitCount": bits,
+                "Data": base64.b64encode(raw).decode("ascii"),
+                "TypeName": param,
+            })
+        # The Bool sibling is not swept into the blob branch.
+        self.assertIs(typed["bDeathMontageEffectOverrideIsQueued"], False)
+
+
 class BlockPayloadExclusionTests(unittest.TestCase):
     marker = "__vrfkit_unresolved_class_net_cache_payload__"
 

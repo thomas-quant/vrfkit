@@ -130,5 +130,9 @@
   {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.ModuleType","type":"EnumByte","checksum":3263282135},
   {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastRemoveForceModule.ModuleType","type":"EnumByte","checksum":3263282135},
   {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.Module","type":"ObjectNetGuid","checksum":739992589},
-  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.Character","type":"ObjectNetGuid","checksum":1346692128}
+  {"group":"/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache","field":"NetMulticastApplyForceModule.Character","type":"ObjectNetGuid","checksum":1346692128},
+  {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Base.DeathMontageEffectOverride","type":"ObjectNetGuid","checksum":1712763745},
+  {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Point.DeathMontageEffectOverride","type":"ObjectNetGuid","checksum":1712763745},
+  {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Base.DeathMontageEffectOverrideContext","type":"ObjectNetGuid","checksum":2397897524},
+  {"group":"/Script/ShooterGame.DamageableComponent_ClassNetCache","field":"MulticastNotifyDamage_Point.DeathMontageEffectOverrideContext","type":"ObjectNetGuid","checksum":2397897524}
 ]
