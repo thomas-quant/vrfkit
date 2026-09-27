@@ -308,7 +308,8 @@ struct ChannelSlot {
     /// How many bunches this channel has carried, 1-based. Reported in
     /// diagnostics as `channel_bunch_index`.
     bunch_count: u64,
-    /// `None` until the channel opens.
+    /// `None` until the channel opens, and again once a failed open has
+    /// retired the live actor it held (`retire_after_failed_open`).
     state: Option<ActorChannelState>,
 }
 
@@ -777,6 +778,49 @@ impl ReplicationReader {
         payload.skip_remaining();
     }
 
+    /// Take the channel away from the actor it held before an open that failed.
+    ///
+    /// `handle_channel_open` writes the new state only after the actor GUID and
+    /// the spawn block have both read, so a failure leaves whatever the slot
+    /// held. When that was a live actor, the wire has just said the channel
+    /// belongs to someone else and this reader cannot say who: keeping the old
+    /// state framed every later bunch on the channel under the old actor's
+    /// archetype and class. The state is cleared instead, which sends those
+    /// bunches to [`Self::drop_unopened`], where they are counted.
+    ///
+    /// No close is emitted for the displaced actor -- the same rule
+    /// `channel_reopens_while_open` follows for a reopen that succeeds: the
+    /// replay sent no close for it, and a fabricated one would be a row the
+    /// wire never carried. A dormant or already-closed state is not live and
+    /// is left as it is; bunches after it are dropped at the guard either way.
+    fn retire_after_failed_open(ch_index: u32, stage: &mut Stage<'_>) {
+        let live = stage
+            .channels
+            .get_mut(&ch_index)
+            .filter(|slot| slot.state.as_ref().is_some_and(|state| state.is_open));
+        if let Some(slot) = live {
+            slot.state = None;
+            stage.stats.failed_reopens_while_open += 1;
+        }
+    }
+
+    /// Count and discard a bunch whose channel has no open actor.
+    ///
+    /// Only bits still unread after the bunch's preambles are dropped, so only
+    /// those are counted: a bunch whose must-be-mapped list consumed its whole
+    /// payload lost nothing. `bits_remaining()` is the right measure here, not
+    /// the whole window [`Self::abandon_bunch`] charges: nothing failed to
+    /// read, so the reader stands exactly where the unframed content begins.
+    fn drop_unopened(payload: &mut BitReader<'_>, stage: &mut Stage<'_>) {
+        let dropped = payload.bits_remaining();
+        if dropped == 0 {
+            return;
+        }
+        stage.stats.bunches_on_unopened_channel += 1;
+        stage.stats.unopened_channel_bits += dropped;
+        payload.skip_remaining();
+    }
+
     /// Walk one whole (reassembled, if it was partial) bunch payload.
     fn process_complete_payload(
         header: &RawBunchHeader,
@@ -808,24 +852,32 @@ impl ReplicationReader {
             return;
         }
 
-        // Actor channel open. On failure the channel is never inserted, so the
-        // guard below skips the rest of the bunch; the count makes that skip
-        // visible instead of looking like a channel that was never used.
+        // Actor channel open. A failed open writes no new state, and it used to
+        // leave the old one alone as well: a channel still holding a live
+        // actor kept it, and every later bunch there was framed as that actor's
+        // -- the stale-schema shape, reported only as one header failure. See
+        // `retire_after_failed_open`.
         if header.b_open
             && channel::handle_channel_open(header, payload, stage.channels, stage.stats, sink)
                 .is_err()
         {
             Self::abandon_bunch(payload, stage);
+            Self::retire_after_failed_open(ch_index, stage);
+            return;
         }
 
-        // Look up channel -- if it never opened, or is not open now, skip.
+        // Look up channel -- if it never opened, or is not open now, the rest
+        // of the bunch has no actor to be framed under and is dropped. Counted:
+        // these two returns used to move nothing but `bunches`.
         let Some(ch) = stage.channels.get(&ch_index).and_then(|s| s.state.as_ref()) else {
+            Self::drop_unopened(payload, stage);
             return;
         };
         let (actor_net_guid, is_open, archetype_net_guid) =
             (ch.actor_net_guid, ch.is_open, ch.archetype_net_guid);
 
         if !is_open {
+            Self::drop_unopened(payload, stage);
             return;
         }
 
@@ -1285,14 +1337,18 @@ mod tests {
     // --- bunch builders for the lifecycle tests below ---
 
     /// The header flags one synthetic bunch varies. Everything not named here
-    /// is fixed: reliable, no must-be-mapped GUIDs, and the hardcoded channel
-    /// FName a reliable bunch always carries.
+    /// is fixed: reliable, and the hardcoded channel FName a reliable bunch
+    /// always carries.
     #[derive(Default)]
     struct BunchSpec {
         ch_index: u32,
         b_open: bool,
         b_close: bool,
+        /// Close reason Dormancy rather than Destroyed; only read with
+        /// `b_close`.
+        dormant: bool,
         b_has_package_map_exports: bool,
+        b_has_must_be_mapped_guids: bool,
         b_partial: bool,
         b_partial_initial: bool,
         b_partial_final: bool,
@@ -1307,14 +1363,19 @@ mod tests {
             bits.push(spec.b_close);
         }
         if spec.b_close {
-            // Close reason Destroyed (0), read as SerializedInt(MAX).
-            write_serialized_int(bits, 0, crate::types::ChannelCloseReason::MAX);
+            // Close reason Destroyed (0) or Dormancy (1), read as
+            // SerializedInt(MAX).
+            write_serialized_int(
+                bits,
+                u32::from(spec.dormant),
+                crate::types::ChannelCloseReason::MAX,
+            );
         }
         bits.push(false); // bIsReplicationPaused
         bits.push(true); // bReliable
         write_int_packed(bits, spec.ch_index);
         bits.push(spec.b_has_package_map_exports);
-        bits.push(false); // bHasMustBeMappedGUIDs
+        bits.push(spec.b_has_must_be_mapped_guids);
         bits.push(spec.b_partial);
         bits.push(false); // VALORANT bit
         if spec.b_partial {
@@ -1582,6 +1643,250 @@ mod tests {
             stats.channel_reopens_while_open, 1,
             "the overwrite of a live channel must be counted"
         );
+    }
+
+    /// A failed open must not leave the previous actor live on the channel.
+    ///
+    /// Channel 2 opens static actor 3; a second open on it, for dynamic actor
+    /// 4, stops before its mandatory spawn block and fails. The failure used
+    /// to leave actor 3's state in place, still open, so the next non-open
+    /// bunch on channel 2 was framed as actor 3's -- the stale-schema shape
+    /// CLAUDE.md lists -- while only `bunch_header_failures` moved.
+    #[test]
+    fn a_failed_reopen_does_not_leave_the_previous_actor_live() {
+        let mut bits = Vec::new();
+        let mut first: Vec<bool> = Vec::new();
+        write_int_packed(&mut first, 3); // static actor: no spawn block
+        write_empty_actor_block(&mut first);
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                ..Default::default()
+            },
+            &first,
+        );
+        let mut failed: Vec<bool> = Vec::new();
+        write_int_packed(&mut failed, 4); // dynamic actor, spawn block missing
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                ..Default::default()
+            },
+            &failed,
+        );
+        let mut later: Vec<bool> = Vec::new();
+        write_empty_actor_block(&mut later);
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 2,
+                ..Default::default()
+            },
+            &later,
+        );
+
+        let packet = build_packet(&bits);
+        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut sink = TestSink::default();
+        reader.process_packet(&packet, 0, &mut sink);
+
+        let stats = reader.stats();
+        assert_eq!(stats.bunch_header_failures, 1, "the failed open itself");
+        assert_eq!(stats.actor_opens, 1);
+        assert_eq!(
+            stats.content_blocks, 1,
+            "the bunch after the failed open has no actor to be framed under"
+        );
+        assert_eq!(
+            sink.content_blocks.len(),
+            1,
+            "nothing may reach the sink under actor 3's schema"
+        );
+        assert_eq!(
+            stats.actor_closes, 0,
+            "no close is fabricated for the displaced actor"
+        );
+        assert_eq!(stats.failed_reopens_while_open, 1);
+        assert_eq!(
+            (
+                stats.bunches_on_unopened_channel,
+                stats.unopened_channel_bits
+            ),
+            (1, 10),
+            "the dropped bunch is counted, with its whole 10-bit block"
+        );
+    }
+
+    /// A failed open on a channel with no actor leaves nothing to retire, but
+    /// every later bunch on it is dropped at the channel guard -- and that drop
+    /// used to move no counter at all. The failed open's own 8 bits are the
+    /// bunch-header failure's; the later bunch's 10 are counted apart from
+    /// `skipped_bits`, which the oracle reads as block-level loss.
+    #[test]
+    fn a_bunch_after_a_failed_first_open_is_counted_not_silent() {
+        let mut bits = Vec::new();
+        let mut failed: Vec<bool> = Vec::new();
+        write_int_packed(&mut failed, 4); // dynamic actor, spawn block missing
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 7,
+                b_open: true,
+                ..Default::default()
+            },
+            &failed,
+        );
+        let mut later: Vec<bool> = Vec::new();
+        write_empty_actor_block(&mut later);
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 7,
+                ..Default::default()
+            },
+            &later,
+        );
+
+        let packet = build_packet(&bits);
+        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut sink = TestSink::default();
+        reader.process_packet(&packet, 0, &mut sink);
+
+        let stats = reader.stats();
+        assert_eq!(stats.bunch_header_failures, 1);
+        assert_eq!(
+            stats.failed_reopens_while_open, 0,
+            "there was no live actor to retire"
+        );
+        assert_eq!(stats.bunches_on_unopened_channel, 1);
+        assert_eq!(stats.unopened_channel_bits, 10);
+        assert_eq!(
+            stats.skipped_bits, 8,
+            "only the failed open's own window; the dropped bunch has its own tally"
+        );
+        assert_eq!(stats.content_blocks, 0);
+        assert!(sink.content_blocks.is_empty());
+    }
+
+    /// Dormancy is not destruction, and a dormant channel is not an open one.
+    /// A reopen of it that fails leaves it not open -- nothing live to retire --
+    /// and a bunch that then arrives on it is counted, not framed under the
+    /// dormant actor.
+    #[test]
+    fn a_bunch_on_a_dormant_channel_after_a_failed_reopen_is_counted() {
+        let mut bits = Vec::new();
+        let mut first: Vec<bool> = Vec::new();
+        write_int_packed(&mut first, 3);
+        write_empty_actor_block(&mut first);
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                ..Default::default()
+            },
+            &first,
+        );
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 2,
+                b_close: true,
+                dormant: true,
+                ..Default::default()
+            },
+            &[],
+        );
+        let mut failed: Vec<bool> = Vec::new();
+        write_int_packed(&mut failed, 4); // dynamic actor, spawn block missing
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                ..Default::default()
+            },
+            &failed,
+        );
+        let mut later: Vec<bool> = Vec::new();
+        write_empty_actor_block(&mut later);
+        write_bunch(
+            &mut bits,
+            &BunchSpec {
+                ch_index: 2,
+                ..Default::default()
+            },
+            &later,
+        );
+
+        let packet = build_packet(&bits);
+        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut sink = TestSink::default();
+        reader.process_packet(&packet, 0, &mut sink);
+
+        let stats = reader.stats();
+        assert_eq!(stats.actor_closes, 1, "the dormant close");
+        assert_eq!(stats.bunch_header_failures, 1, "the failed reopen");
+        assert_eq!(
+            stats.failed_reopens_while_open, 0,
+            "a dormant channel holds no live actor"
+        );
+        assert_eq!(stats.content_blocks, 1, "only the first open's block");
+        assert_eq!(
+            (
+                stats.bunches_on_unopened_channel,
+                stats.unopened_channel_bits
+            ),
+            (1, 10)
+        );
+    }
+
+    /// The guard counts what it drops, which is the payload left after the
+    /// bunch's preambles -- not the whole window, and nothing at all for a bunch
+    /// whose preamble consumed every bit. A must-be-mapped GUID list is read
+    /// and counted before the guard whether or not the channel is open.
+    #[test]
+    fn a_bunch_on_a_never_opened_channel_counts_only_what_it_drops() {
+        let mut preamble: Vec<bool> = Vec::new();
+        // u16 count = 1, little-endian, then one IntPacked GUID.
+        preamble.extend([true, false, false, false, false, false, false, false]);
+        preamble.extend([false; 8]);
+        write_int_packed(&mut preamble, 6);
+        let spec = BunchSpec {
+            ch_index: 9,
+            b_has_must_be_mapped_guids: true,
+            ..Default::default()
+        };
+
+        let mut bits = Vec::new();
+        write_bunch(&mut bits, &spec, &preamble);
+        let mut with_block = preamble.clone();
+        write_empty_actor_block(&mut with_block);
+        write_bunch(&mut bits, &spec, &with_block);
+
+        let packet = build_packet(&bits);
+        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut sink = TestSink::default();
+        reader.process_packet(&packet, 0, &mut sink);
+
+        let stats = reader.stats();
+        assert_eq!(stats.bunches, 2);
+        assert_eq!(stats.must_be_mapped_guids, 2);
+        assert_eq!(
+            stats.bunches_on_unopened_channel, 1,
+            "the preamble-only bunch dropped nothing"
+        );
+        assert_eq!(
+            stats.unopened_channel_bits, 10,
+            "the 24 preamble bits were read, not dropped"
+        );
+        assert_eq!(stats.bunch_header_failures, 0);
+        assert_eq!(stats.skipped_bits, 0);
+        assert_eq!(stats.content_blocks, 0);
     }
 
     /// A channel that was closed and is opened again is the ordinary case and

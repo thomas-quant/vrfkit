@@ -160,8 +160,9 @@ pub(super) fn print(
     // Unconditional, zeros included, for the reason spelled out on the struct
     // blob line below: a line that only appears when non-zero cannot tell
     // "nothing was lost" apart from "the code that counts stopped running".
-    // These five all read 0 on a healthy replay, which is exactly why a 0 that
-    // is present is worth more than a line that is absent.
+    // Every line down to `RepLayout exports` reads 0 on a healthy replay, which
+    // is exactly why a 0 that is present is worth more than a line that is
+    // absent.
     eprintln!(
         "  Unfinished partials: {} ({} bits)",
         net_stats.unfinished_partials, net_stats.unfinished_partial_bits
@@ -173,6 +174,18 @@ pub(super) fn print(
     eprintln!(
         "  Opens w/o spawn:  {}",
         net_stats.actor_opens_missing_spawn
+    );
+    // A failed open that took a live actor off its channel, and the bunches
+    // dropped afterwards for want of an open channel. Before these existed the
+    // drop moved nothing but `Bunches`, and the stale actor it replaced went on
+    // absorbing blocks that were not its own.
+    eprintln!(
+        "  Failed reopens:   {}",
+        net_stats.failed_reopens_while_open
+    );
+    eprintln!(
+        "  Unopened channel: {} bunches / {} bits",
+        net_stats.bunches_on_unopened_channel, net_stats.unopened_channel_bits
     );
     eprintln!(
         "  Resource limits:  {} channel / {} partial reassembly",
@@ -375,6 +388,14 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.net.actor_closes,
         cp.net.channel_reopens_while_open,
         cp.net.actor_opens_missing_spawn
+    );
+    // Its own line, not appended to `Checkpoint life:`, so that line's format
+    // is unchanged for anything already reading it.
+    eprintln!(
+        "  Checkpoint unopened: {} bunches / {} bits / {} failed reopens",
+        cp.net.bunches_on_unopened_channel,
+        cp.net.unopened_channel_bits,
+        cp.net.failed_reopens_while_open
     );
     eprintln!(
         "  Checkpoint limits: {} channel / {} partial reassembly",

@@ -34,7 +34,8 @@ NET_ZERO = (
     "content_block_framing_failures", "malformed_content_blocks",
     "transform_failures", "field_stream_failures", "channel_reopens_while_open",
     "actor_opens_missing_spawn", "channel_state_limit_failures",
-    "partial_resource_limit_failures",
+    "partial_resource_limit_failures", "failed_reopens_while_open",
+    "bunches_on_unopened_channel", "unopened_channel_bits",
 )
 SINK_ZERO = (
     "overlay_decoded_err", "struct_blobs_failed", "movement_rpc_errors",

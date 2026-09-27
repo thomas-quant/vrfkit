@@ -177,6 +177,35 @@ pub struct NetStats {
     /// other truncated read; this names the specific shape so a corpus run can
     /// say whether it ever happens.
     pub actor_opens_missing_spawn: u64,
+    /// Opens that failed on a channel still holding a live actor.
+    ///
+    /// The failed open is already one [`Self::bunch_header_failures`]; this
+    /// names what it used to leave behind. The new state is written only after
+    /// the spawn block reads, so a failed open left the previous actor on the
+    /// channel, still open, and every later bunch there was framed as that
+    /// actor's -- its archetype, its class, plausible field names and typed
+    /// values for an object the wire had replaced. That state is now retired,
+    /// and, as for [`Self::channel_reopens_while_open`], no close is fabricated
+    /// for it. Later bunches on the channel land in
+    /// [`Self::bunches_on_unopened_channel`] instead of a stranger's schema.
+    pub failed_reopens_while_open: u64,
+    /// Bunches that reached content-block framing with payload left and no
+    /// open actor on their channel -- it never opened, its open failed, it was
+    /// destroyed, or it is dormant -- and were dropped whole.
+    ///
+    /// The only trace used to be [`Self::bunches`], so one failed open that
+    /// cost every later bunch on its channel reported a single
+    /// `bunch_header_failures`. How many content blocks those bunches carried
+    /// is unknowable -- they were never framed -- so they are counted here as
+    /// bunches and bits, not added to [`Self::lost_content_blocks`].
+    pub bunches_on_unopened_channel: u64,
+    /// Payload bits those bunches still held after their preambles.
+    ///
+    /// Kept out of [`Self::skipped_bits`] for the reason
+    /// [`Self::rep_layout_export_bunches`] is: the oracle reads that tally as
+    /// bits lost across failed content blocks, and no content block was framed
+    /// here.
+    pub unopened_channel_bits: u64,
     /// Bunches refused because a channel-state table was at capacity or a
     /// reliable sequence could not advance representably.
     pub channel_state_limit_failures: u64,
@@ -282,6 +311,9 @@ impl NetStats {
         self.actor_closes += other.actor_closes;
         self.channel_reopens_while_open += other.channel_reopens_while_open;
         self.actor_opens_missing_spawn += other.actor_opens_missing_spawn;
+        self.failed_reopens_while_open += other.failed_reopens_while_open;
+        self.bunches_on_unopened_channel += other.bunches_on_unopened_channel;
+        self.unopened_channel_bits += other.unopened_channel_bits;
         self.channel_state_limit_failures += other.channel_state_limit_failures;
         self.partial_resource_limit_failures += other.partial_resource_limit_failures;
         self.package_map_exports += other.package_map_exports;
@@ -709,6 +741,9 @@ mod tests {
             actor_closes: 23,
             channel_reopens_while_open: 24,
             actor_opens_missing_spawn: 25,
+            failed_reopens_while_open: 44,
+            bunches_on_unopened_channel: 45,
+            unopened_channel_bits: 46,
             channel_state_limit_failures: 26,
             partial_resource_limit_failures: 27,
             package_map_exports: 28,
@@ -758,6 +793,9 @@ mod tests {
         assert_eq!(totals.actor_closes, 46);
         assert_eq!(totals.channel_reopens_while_open, 48);
         assert_eq!(totals.actor_opens_missing_spawn, 50);
+        assert_eq!(totals.failed_reopens_while_open, 88);
+        assert_eq!(totals.bunches_on_unopened_channel, 90);
+        assert_eq!(totals.unopened_channel_bits, 92);
         assert_eq!(totals.channel_state_limit_failures, 52);
         assert_eq!(totals.partial_resource_limit_failures, 54);
         assert_eq!(totals.package_map_exports, 56);

@@ -89,6 +89,7 @@ and reports a block pass rate. **It writes no files.**
   Transform failed:   0          <- payload transform failed. Signals an unsupported build
   RPC payload lost:   0          <- unresolved payloads that were not preserved. Must stay zero
   RPC unresolved/raw: 6471       <- full decoded payload preserved, but inner handles cannot be named
+  Unopened channel:   0 bunches / 0 bits  <- whole bunches dropped: their channel had no open actor. Must stay zero
   NOT COVERED:          18 Checkpoint chunk(s) were NOT walked
   Field stream failed: 0
   ORACLE PASS RATE:     100.000000% (608011 / 608011 blocks passed)
@@ -106,8 +107,11 @@ says how many were skipped. Use `export --checkpoints` to decode them.
 Partial reassembly rejections discard payloads before block framing and are
 also reported under `NOT COVERED`. They are excluded from the block score and
 exit verdict; a pass does not establish end-to-end preservation. Other counted
-transport failures, including unfinished partials and resource limits, fail
-the verdict.
+transport failures, including unfinished partials, resource limits and
+bunches dropped because their channel had no open actor, fail the verdict.
+That holds even when the channel's open arrived in a rejected partial
+fragment: the fragment itself stays unscored, but the complete bunches dropped
+after it count as loss.
 
 The example is the preserved `02d4d478` replay after the September 2026
 tail-preservation change. All 714 ReplayData block runs in that historical
@@ -1008,7 +1012,7 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 714 passing
+cargo +1.86.0 test --workspace --locked                              # 719 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files

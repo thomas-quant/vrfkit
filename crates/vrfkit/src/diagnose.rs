@@ -610,6 +610,15 @@ fn push_net_stats(out: &mut String, s: &NetStats) {
             s.actor_opens_missing_spawn.to_string(),
         ),
         (
+            "failed_reopens_while_open",
+            s.failed_reopens_while_open.to_string(),
+        ),
+        (
+            "bunches_on_unopened_channel",
+            s.bunches_on_unopened_channel.to_string(),
+        ),
+        ("unopened_channel_bits", s.unopened_channel_bits.to_string()),
+        (
             "channel_state_limit_failures",
             s.channel_state_limit_failures.to_string(),
         ),
@@ -844,9 +853,32 @@ fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagSinkTotals, build_label, push_json_string, reject_input_output_alias, write_json_file,
+        DiagSinkTotals, build_label, push_json_string, push_net_stats, reject_input_output_alias,
+        write_json_file,
     };
     use crate::sink::ExportStats;
+    use vrf_net::stats::NetStats;
+
+    /// The channel-guard counters reach the diag JSON with their measured
+    /// values. Distinct values, so a key wired to the wrong field shows.
+    #[test]
+    fn net_stats_json_carries_the_channel_guard_counters() {
+        let stats = NetStats {
+            failed_reopens_while_open: 3,
+            bunches_on_unopened_channel: 5,
+            unopened_channel_bits: 7,
+            ..NetStats::default()
+        };
+        let mut json = String::new();
+        push_net_stats(&mut json, &stats);
+        for expected in [
+            "\"failed_reopens_while_open\": 3",
+            "\"bunches_on_unopened_channel\": 5",
+            "\"unopened_channel_bits\": 7",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
 
     /// The branch-to-build label the corpus aggregation joins on. A branch
     /// without the `release-` marker stays unlabelled rather than guessed.

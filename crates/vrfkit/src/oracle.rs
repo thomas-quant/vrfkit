@@ -27,10 +27,11 @@
 //! a whole-file losslessness proof.
 //!
 //! Packet/header/framing failures, transform or inner-stream failures,
-//! unfinished reassembly state, and bytes trailing the declared ReplayData
-//! payload fail the verdict. Partial reassembly rejections are discarded before
-//! content-block framing and are explicitly reported as not covered by the block
-//! score or verdict. An unresolved ClassNetCache table is reported separately
+//! unfinished reassembly state, bunches dropped for want of an open channel,
+//! and bytes trailing the declared ReplayData payload fail the verdict.
+//! Partial reassembly rejections are discarded before content-block framing
+//! and are explicitly reported as not covered by the block score or verdict.
+//! An unresolved ClassNetCache table is reported separately
 //! when the sink retained the whole decoded block; unsupported attribution with
 //! a recoverable raw payload is not treated as block loss.
 //!
@@ -215,6 +216,19 @@ impl Verdict {
 /// restated here: `NetStats::lost_content_blocks` already owns that sum, and
 /// duplicating it by hand is exactly how this verdict and
 /// `quality.content_blocks_lost` would drift apart.
+///
+/// `bunches_on_unopened_channel` is a hard failure: each is a complete bunch,
+/// payload and all, dropped before framing because its channel had no open
+/// actor -- the same class of loss as `bunch_header_failures`. It was added
+/// only after measuring it at 0 on every one of 45 replays (2026-09-28,
+/// `diag` for the main and checkpoint passes plus `validate`): two per build
+/// directory of the local archive, the pinned 02d4d478 and the three public
+/// fixtures, 24 builds, 23,818,049 main and 185,244 checkpoint bunches. Its two
+/// companions stay out: a failed reopen is already a `bunch_header_failures`,
+/// and `unopened_channel_bits` moves only with the bunch count. The
+/// partial-reassembly carve-out above is not widened by this: a rejected
+/// fragment is still unscored, but when it carried a channel's open, the
+/// complete bunches dropped after it are loss, and they fail the verdict.
 fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verdict {
     let total_with_content = stats.rep_layout_blocks + stats.class_net_cache_blocks;
     let failures = stats.malformed_packets
@@ -222,6 +236,7 @@ fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verd
         + stats.channel_state_limit_failures
         + stats.partial_resource_limit_failures
         + stats.bunch_header_failures
+        + stats.bunches_on_unopened_channel
         + stats.lost_content_blocks()
         + u64::from(replay_data_trailing_bytes != 0);
     Verdict::decide(total_with_content, failures)
@@ -336,6 +351,17 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         stats.partial_overclassified_errors()
     );
     println!("    Bunch header failed:{}", stats.bunch_header_failures);
+    // Printed unconditionally, zeros included: a drop at the channel guard
+    // used to move nothing but `Bunches`, so an absent line would read the
+    // same as "the guard never ran".
+    println!(
+        "    Failed reopens:     {}",
+        stats.failed_reopens_while_open
+    );
+    println!(
+        "    Unopened channel:   {} bunches / {} bits",
+        stats.bunches_on_unopened_channel, stats.unopened_channel_bits
+    );
     println!("    Malformed framing:  {malformed}");
     println!("    Transform failed:   {}", stats.transform_failures);
     println!("    Field stream failed:{}", stats.field_stream_failures);
@@ -724,6 +750,13 @@ mod tests {
             NetStats {
                 rep_layout_blocks: 1,
                 content_block_framing_failures: 1,
+                ..NetStats::default()
+            },
+            // Whole bunches dropped because their channel had no open actor.
+            NetStats {
+                rep_layout_blocks: 1,
+                bunches_on_unopened_channel: 1,
+                unopened_channel_bits: 10,
                 ..NetStats::default()
             },
         ] {
