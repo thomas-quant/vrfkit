@@ -14,6 +14,12 @@ quantization is part of its type name because the checksum cannot carry it:
 `ReplicatedMovement` has one checksum whether a class replicates byte or short
 rotation components, which is why it is the dropped conflict in
 `extract_checksum_types.py`. The exact group in the key is what separates them.
+
+`FieldType::RepMovement` reads every location at scale 100, and exact
+consumption cannot catch a wrong scale. Projectiles and game objects replicate
+whole centimetres (docs/UPSTREAM_RAZE_WARDEN.md), so a `RepMovement` entry also
+needs its first location compared with the actor's spawn location, and only a
+class that matches at scale 100 may be admitted.
 """
 from __future__ import annotations
 

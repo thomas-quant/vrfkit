@@ -25,6 +25,13 @@ gating angular velocity, server frame and server physics handle.
 ``--compare-typed`` parses the exported ``value_str`` back into numbers rather
 than comparing spellings: vectors as doubles, rotator components as the single
 precision floats Rust prints them from.
+
+``ReplicatedMovement`` locations are read at scale 100 because that is what
+``FieldType::RepMovement`` does. Exact consumption cannot check that scale --
+it changes no width. Measured against actors.parquet spawn locations
+(docs/UPSTREAM_RAZE_WARDEN.md), pawns replicate hundredths of a centimetre but
+projectiles and game objects replicate whole centimetres, so for those classes
+a value this accepts is still 100 times too small.
 """
 
 from __future__ import annotations

@@ -74,6 +74,195 @@ fn scoped_bytes_decode_exactly_and_reject_a_wider_payload() {
     assert_eq!(stats.decoded_err, 1);
 }
 
+const CLAY_SATCHEL_ABILITY: &str =
+    "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C";
+const CLAY_SATCHEL: &str = "/Game/Characters/Clay/S0/Ability_Q/\
+Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C";
+const CLAY_BOOMBOT: &str =
+    "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C";
+const CLAY_ROCKET: &str =
+    "/Game/Characters/Clay/S0/Ability_X/Projectile_Clay_X_Rocket.Projectile_Clay_X_Rocket_C";
+const FORCE_APPLY: &str =
+    "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
+const REPLICATED_MOVEMENT_CHECKSUM: u32 = 2_749_104_612;
+
+/// Upstream 8b7afcb's Raze fields are typed by exact identity only: the
+/// checksum is part of the key, and another group or checksum resolves to
+/// nothing rather than borrowing the type.
+#[test]
+fn raze_scoped_identities_require_their_exact_checksum() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    let resolve = |group, name, checksum| {
+        resolve_field_type_with_checksum(&table, group, Some(name), None, checksum)
+    };
+    assert_eq!(
+        resolve(
+            CLAY_SATCHEL_ABILITY,
+            "CosmeticRandomSeed",
+            Some(2_863_861_815)
+        ),
+        Some(FieldType::Int32)
+    );
+    assert_eq!(
+        resolve(CLAY_SATCHEL_ABILITY, "CosmeticRandomSeed", Some(1)),
+        None
+    );
+    assert_eq!(
+        resolve(CLAY_SATCHEL_ABILITY, "CosmeticRandomSeed", None),
+        None
+    );
+    assert_eq!(
+        resolve("/Unobserved", "CosmeticRandomSeed", Some(2_863_861_815)),
+        None
+    );
+    assert_eq!(
+        resolve(FORCE_APPLY, "ModuleType", Some(3_263_282_135)),
+        Some(FieldType::EnumRemainingBits)
+    );
+    // The same enum on the Remove RPC shares the checksum, but no entry names
+    // that group: exact identity means no propagation.
+    assert_eq!(
+        resolve(
+            "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule",
+            "ModuleType",
+            Some(3_263_282_135)
+        ),
+        None
+    );
+    assert_eq!(
+        resolve(
+            "/Script/ShooterGame.ShooterCharacter:ClientResetRemoteMovementPrediction",
+            "isPossess",
+            Some(3_522_099_335)
+        ),
+        Some(FieldType::Bool)
+    );
+}
+
+/// The Boom Bot replicates short rotation components and a location in
+/// hundredths of a centimetre, verified against its spawn location. Raze's
+/// byte-rotation projectiles are deliberately left untyped: their location is
+/// whole centimetres, and `RepMovement` reads every location at scale 100 --
+/// a value 100 times too small, as it already is on 24 of the 25 groups the
+/// table types this way (all but the one pawn among them). See
+/// docs/UPSTREAM_RAZE_WARDEN.md.
+#[test]
+fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            CLAY_BOOMBOT,
+            Some("ReplicatedMovement"),
+            None,
+            Some(REPLICATED_MOVEMENT_CHECKSUM)
+        ),
+        Some(FieldType::RepMovement {
+            rotation: crate::types::RotatorQuantization::ShortComponents
+        })
+    );
+    for group in [CLAY_SATCHEL, CLAY_ROCKET] {
+        assert_eq!(
+            resolve_field_type_with_checksum(
+                &table,
+                group,
+                Some("ReplicatedMovement"),
+                None,
+                Some(REPLICATED_MOVEMENT_CHECKSUM)
+            ),
+            None,
+            "{group}"
+        );
+    }
+}
+
+/// Upstream's own recorded payloads from replay 42e03082 (not in the local
+/// corpus), decoded through the scoped identities: exact widths, exact values.
+#[test]
+fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
+    fn decode(
+        stats: &mut OverlayStats,
+        group: &str,
+        name: &str,
+        handle: u32,
+        checksum: u32,
+        raw: &[u8],
+        bits: u32,
+    ) -> crate::overlay::OverlayResult {
+        let table = OverlayTable::new(&OVERLAY_TABLE);
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some(name),
+            handle,
+            Some(checksum),
+            Some(raw),
+            bits,
+            stats,
+        )
+        .expect("a scoped identity is attempted")
+    }
+    let mut stats = OverlayStats::default();
+    let seed = decode(
+        &mut stats,
+        CLAY_SATCHEL_ABILITY,
+        "CosmeticRandomSeed",
+        56,
+        2_863_861_815,
+        &[0xE1, 0xE9, 0x4B, 0x40],
+        32,
+    );
+    assert_eq!(seed.value_i64, Some(1_078_716_897));
+    let offset = decode(
+        &mut stats,
+        CLAY_SATCHEL,
+        "LocationOffset",
+        5,
+        111_823_753,
+        &[0xD3, 0x20, 0x67, 0xB7, 0xA8, 0x97, 0x48, 0x00],
+        64,
+    );
+    assert_eq!(offset.value_str.as_deref(), Some("(-782.71,-1366.59,5.8)"));
+    let rotation = decode(
+        &mut stats,
+        CLAY_SATCHEL,
+        "RotationOffset",
+        7,
+        1_473_289_183,
+        &[0x01, 0x80, 0xEE, 0x27, 0xF7, 0xFF, 0x07],
+        51,
+    );
+    assert_eq!(
+        rotation.value_str.as_deref(),
+        Some("rot(90,284.03503,359.989)")
+    );
+    let module_type = decode(
+        &mut stats,
+        FORCE_APPLY,
+        "ModuleType",
+        1,
+        3_263_282_135,
+        &[0x02],
+        3,
+    );
+    assert_eq!(module_type.value_i64, Some(2));
+    assert_eq!(stats.decoded_ok, 4);
+    // Upstream's truncation case: one byte cannot carry the rotator its
+    // presence bits announce. Rejected and counted, not truncated.
+    let truncated = decode(
+        &mut stats,
+        CLAY_SATCHEL,
+        "RotationOffset",
+        7,
+        1_473_289_183,
+        &[0x01],
+        8,
+    );
+    assert_eq!(truncated.value_str, None);
+    assert_eq!(stats.decoded_err, 1);
+}
+
 /// A Bomb class is already canonical and must not be rewritten.
 #[test]
 fn canonical_group_leaves_a_bomb_class_alone() {
