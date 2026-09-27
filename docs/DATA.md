@@ -656,7 +656,10 @@ consumers had a usable dictionary. The current `extract_ability_stats.py` pairs
 it with `LocalizedStat` inside the same serialized cast/effect slot and exposes
 a build-scoped mapping. All 714 exports yielded 155,150 paired observations,
 with no missing partners or mapping conflicts: 31 IDs in each of 13.01, 13.02
-and 13.04, and 32 in 13.05. Unobserved IDs remain unknown.
+and 13.04, and 32 in 13.05. Unobserved IDs remain unknown. On 2026-09-28,
+38 13.06 exports gave 14,814 paired observations of 29 IDs, again with no
+missing partners or conflicts, each under exactly its 13.05 name. 13.05's
+IDs 57, 62 and 65 were not observed on 13.06 and stay unknown for that build.
 
 ### Done, and where the reasoning lives
 

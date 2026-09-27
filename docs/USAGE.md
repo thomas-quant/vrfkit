@@ -930,9 +930,9 @@ semantic evidence.
 | Script | What it does |
 |---|---|
 | `analyze_coverage.py` | Coverage analysis |
-| `extract_ability_stats.py` | Validates a build-scoped Statistic/FText dictionary from exact cast/effect array slots, with main and checkpoint observations separate. Unknown IDs, changed names, missing partners and conflicts remain visible and return a nonzero exit. Counts are snapshots, not casts. |
-| `extract_kill_observations.py` | Exports main and checkpoint KillData element snapshots with physical parent-row identity, independently checked raw values, nullable missing members and scoped reference status. Keeps all clocks separately; updates are not deduplicated kills. See [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md). |
-| `extract_kill_ledger.py` | Retains character-death events, projects component-local KillData state and links mutually unique same-round PlayerState identities. Preserves unmatched events and observations. See [KILL_LEDGER.md](KILL_LEDGER.md). |
+| `extract_ability_stats.py` | Validates a build-scoped Statistic/FText dictionary from exact cast/effect array slots, with main and checkpoint observations separate. Dictionaries exist for the measured builds 13.01, 13.02, 13.04, 13.05 and 13.06; any other build's mappings are `unknown_build`. Unknown IDs, changed names, missing partners and conflicts remain visible and return a nonzero exit. Counts are snapshots, not casts. |
+| `extract_kill_observations.py` | Exports main and checkpoint KillData element snapshots with physical parent-row identity, independently checked raw values, nullable missing members and scoped reference status. Keeps all clocks separately; updates are not deduplicated kills. Reads only the measured builds 13.01, 13.02, 13.04, 13.05 and 13.06 and refuses any other. See [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md#measured-builds). |
+| `extract_kill_ledger.py` | Retains character-death events, projects component-local KillData state and links mutually unique same-round PlayerState identities. Preserves unmatched events and observations. Reads the same measured builds as the observation extractor. See [KILL_LEDGER.md](KILL_LEDGER.md). |
 | `extract_healing_observations.py` | Retains serialized heal amounts, section state, raw source rows and separate identity corroboration. Amount sums do not establish effective HP restored or player healing credit. See [HEALING_OBSERVATIONS.md](HEALING_OBSERVATIONS.md) for validation status. |
 | `extract_fastarray_observations.py` | Writes numeric AbilitiesAndBuffs FastArray headers, deleted/changed item IDs and raw field offsets to NDJSON, retaining each input window and physical row identity. Field meanings remain unknown. See [the wire investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md). |
 | `extract_section_observations.py` | Retains damage, healing, overheal-decay and reset section observations with raw parent/child checks. Distinguishes parentless records, known non-health sections and unresolved references. See [SECTION_OBSERVATIONS.md](SECTION_OBSERVATIONS.md). |
@@ -980,6 +980,17 @@ Repeat `--export` for the stat dictionary when comparing builds. The observed
 `TimeSprinting`, for a union of 32. The previous investigation's 33-ID headline
 did not reproduce in the full 714-export scan. These names are wire FText keys,
 not independently validated units or causal interpretations of their values.
+
+13.06 was measured on 2026-09-28 over all 38 13.06 exports that parser
+`259ed10` wrote with `--checkpoints` for the common audit. They paired 14,814
+observations of 29 IDs, from 29,628 member rows, with zero pairing issues and
+zero ID or name collisions. Every one of the 29 IDs carries exactly its 13.05
+name, and none is new, so the union stays 32. IDs 57 `EnemiesJammed`,
+62 `UtilDestroyed` and 65 `DebuffResisted` were not observed on 13.06 and are
+absent from its dictionary: a 13.06 export that carries one fails as
+`unknown_statistic_id` until it is measured. The 13.06 dictionary was built from
+those 38 exports, so their `known` status holds by construction; the evidence
+is the agreement with 13.05 and the zero pairing issues.
 
 The raw-property inventory defaults to six size-stratified replays per selected
 build and holds only one temporary export at a time. Select builds explicitly,
