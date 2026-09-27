@@ -68,10 +68,13 @@ else:  # direct script execution
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
 
-# Every counter the export summary prints, except `Elapsed` and the manifest
-# path. Anchored on the exact labels driver.rs emits; a label that stops being
-# printed is reported as missing rather than defaulted to 0, because a counter
-# that silently reads as absent is how this class of bug survives.
+# Counters the export summary prints, anchored on the exact labels
+# crates/vrfkit/src/driver/summary.rs emits. NOT every line: on 2026-09-28,
+# 57 of the 114 labelled `eprintln!` lines in summary.rs had no pattern here
+# or in CHECKPOINT_COUNTERS, and a line in neither dict is not pinned. A label
+# listed here that stops being printed is reported as missing rather than
+# defaulted to 0, because a counter that silently reads as absent is how this
+# class of bug survives.
 COUNTERS = {
     "chunks": r"Chunks:\s+(\d+)",
     "packets": r"Packets:\s+(\d+)",
