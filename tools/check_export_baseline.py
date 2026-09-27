@@ -142,6 +142,21 @@ COUNTERS = {
     "rep_layout_cnc_tails_preserved": (
         r"(?m)^\s*RepLayout tails:\s+\d+ decoded / (\d+) preserved\s*$"
     ),
+    # Movement sections that stopped with bits of their window unread, in
+    # sized and open windows. A measured tally, not a loss verdict: pinned so
+    # a change in either direction on the reference replay is seen.
+    "movement_sized_section_tails": (
+        r"(?m)^\s*Movement tails:\s+(\d+) sized \(\d+ bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "movement_sized_section_tail_bits": (
+        r"(?m)^\s*Movement tails:\s+\d+ sized \((\d+) bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "movement_open_section_tails": (
+        r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / (\d+) open \(\d+ bits\)\s*$"
+    ),
+    "movement_open_section_tail_bits": (
+        r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
+    ),
 }
 PATTERNS = {k: re.compile(v) for k, v in COUNTERS.items()}
 
@@ -187,6 +202,18 @@ CHECKPOINT_COUNTERS = {
     ),
     "cp_rep_layout_cnc_tails_preserved": (
         r"(?m)^\s*Checkpoint tails:\s+\d+ decoded / (\d+) preserved\s*$"
+    ),
+    "cp_movement_sized_section_tails": (
+        r"(?m)^\s*Checkpoint movement tails:\s+(\d+) sized \(\d+ bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "cp_movement_sized_section_tail_bits": (
+        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \((\d+) bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "cp_movement_open_section_tails": (
+        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / (\d+) open \(\d+ bits\)\s*$"
+    ),
+    "cp_movement_open_section_tail_bits": (
+        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
     ),
 }
 

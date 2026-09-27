@@ -30,6 +30,8 @@ def manifest():
                 overlay_no_field_name=5, struct_blobs_decoded=2,
                 rpc_suffix_bits_dropped=4, overlay_handle_conflicts_refused=1,
                 cnc_bruteforce_payloads_attempted=6, cnc_bruteforce_payloads_unwalked=0,
+                movement_sized_section_tails=1, movement_sized_section_tail_bits=40,
+                movement_open_section_tails=0, movement_open_section_tail_bits=0,
                 sink_rpcs_emitted=40, sink_actor_opens=7, sink_actor_closes=5,
                 sink_content_blocks=100)
     quality = dict.fromkeys(("content_blocks_lost", "event_trailing_bytes",
@@ -85,6 +87,18 @@ class ManifestTests(unittest.TestCase):
                     del target["sink"][key]
                     with self.assertRaises(KeyError):
                         audit.manifest_counts(data)
+
+    def test_movement_tails_are_recorded_and_required_but_not_failures(self):
+        counts, failures = audit.manifest_counts(manifest())
+        self.assertEqual(failures, [], "a nonzero tail is a measurement, not a failure")
+        self.assertEqual(counts["main_movement_sized_section_tail_bits"], 40)
+        for key in ("movement_sized_section_tails", "movement_sized_section_tail_bits",
+                    "movement_open_section_tails", "movement_open_section_tail_bits"):
+            with self.subTest(key=key):
+                data = manifest()
+                del data["quality"]["checkpoints"]["sink"][key]
+                with self.assertRaises(KeyError):
+                    audit.manifest_counts(data)
 
     def test_sink_event_tallies_must_equal_the_framing_counts(self):
         """The export summary's `Sink tally` promised a desync check nobody ran.

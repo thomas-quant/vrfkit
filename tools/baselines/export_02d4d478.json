@@ -36,7 +36,11 @@
     "cnc_bruteforce_payloads_attempted": 4683,
     "cnc_bruteforce_payloads_unwalked": 0,
     "rep_layout_cnc_tails_decoded": 218,
-    "rep_layout_cnc_tails_preserved": 114
+    "rep_layout_cnc_tails_preserved": 114,
+    "movement_sized_section_tails": 0,
+    "movement_sized_section_tail_bits": 0,
+    "movement_open_section_tails": 0,
+    "movement_open_section_tail_bits": 0
   },
   "parquet": {
     "fields": {

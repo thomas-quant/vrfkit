@@ -279,6 +279,20 @@ pub struct ExportStats {
     /// The first movement-decode problem verbatim, for the summary to name.
     pub movement_first_error: Option<String>,
 
+    /// Movement sections, in a window sized by `movementBitCount`, that
+    /// stopped with bits of it unread -- see
+    /// `vrf_movement::RpcDecodeResult::sized_section_tails`. A soft tally:
+    /// it does not make a batch count as failed, so it moves no Parquet row.
+    pub movement_sized_section_tails: u64,
+    /// Bits those sections left unread.
+    pub movement_sized_section_tail_bits: u64,
+    /// The same for sections whose window ran to the end of the component
+    /// stream, where what follows may be other component data; kept apart so
+    /// the two readings are never summed into one number.
+    pub movement_open_section_tails: u64,
+    /// Bits those sections left unread.
+    pub movement_open_section_tail_bits: u64,
+
     /// RPC payloads whose RepLayout parameter loop broke on a malformed read
     /// before the terminating zero handle.
     ///
@@ -326,16 +340,31 @@ impl ExportStats {
         result: Result<&vrf_movement::RpcDecodeResult, &vrf_movement::MovementError>,
     ) {
         match result {
-            Ok(r) if r.error_count > 0 => {
-                self.movement_rpc_errors = self
-                    .movement_rpc_errors
-                    .saturating_add(u64::from(r.error_count));
-                self.movement_first_error.get_or_insert(format!(
-                    "{} movement update(s) skipped mid-decode",
-                    r.error_count
-                ));
+            Ok(r) => {
+                // No `..`: a counter added to the decoder's result must be
+                // read here, or it would reach nothing.
+                let vrf_movement::RpcDecodeResult {
+                    total_moves: _,
+                    update_count: _,
+                    error_count,
+                    sized_section_tails,
+                    sized_section_tail_bits,
+                    open_section_tails,
+                    open_section_tail_bits,
+                } = *r;
+                self.movement_sized_section_tails += u64::from(sized_section_tails);
+                self.movement_sized_section_tail_bits += sized_section_tail_bits;
+                self.movement_open_section_tails += u64::from(open_section_tails);
+                self.movement_open_section_tail_bits += open_section_tail_bits;
+                if error_count > 0 {
+                    self.movement_rpc_errors = self
+                        .movement_rpc_errors
+                        .saturating_add(u64::from(error_count));
+                    self.movement_first_error.get_or_insert(format!(
+                        "{error_count} movement update(s) skipped mid-decode"
+                    ));
+                }
             }
-            Ok(_) => {}
             Err(e) => {
                 self.movement_rpc_errors = self.movement_rpc_errors.saturating_add(1);
                 self.movement_first_error
@@ -359,7 +388,45 @@ mod movement_stats_tests {
             total_moves,
             update_count,
             error_count,
+            sized_section_tails: 0,
+            sized_section_tail_bits: 0,
+            open_section_tails: 0,
+            open_section_tail_bits: 0,
         })
+    }
+
+    fn with_tails(
+        error_count: u32,
+        sized: (u32, u64),
+        open: (u32, u64),
+    ) -> Result<RpcDecodeResult, MovementError> {
+        Ok(RpcDecodeResult {
+            total_moves: 1,
+            update_count: 1,
+            error_count,
+            sized_section_tails: sized.0,
+            sized_section_tail_bits: sized.1,
+            open_section_tails: open.0,
+            open_section_tail_bits: open.1,
+        })
+    }
+
+    /// Section tails are a soft tally: they are summed from every decode that
+    /// returned `Ok`, with or without soft errors, and they never count as a
+    /// movement error -- a nonzero error count is what makes the sink keep a
+    /// batch's whole payload as a raw row.
+    #[test]
+    fn section_tails_are_summed_from_every_ok_decode_and_are_not_errors() {
+        let mut s = ExportStats::default();
+        s.record_movement_decode(with_tails(0, (1, 40), (0, 0)).as_ref());
+        s.record_movement_decode(with_tails(2, (2, 7), (3, 90)).as_ref());
+        assert_eq!(s.movement_sized_section_tails, 3);
+        assert_eq!(s.movement_sized_section_tail_bits, 47);
+        assert_eq!(s.movement_open_section_tails, 3);
+        assert_eq!(s.movement_open_section_tail_bits, 90);
+        assert_eq!(s.movement_rpc_errors, 2, "only the soft errors");
+        s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
+        assert_eq!(s.movement_sized_section_tails, 3, "an Err carries no tally");
     }
 
     #[test]

@@ -221,6 +221,18 @@ pub(super) fn print(
     if let Some(err) = &totals.sink.movement_first_error {
         eprintln!("  Movement err:     {err}");
     }
+    // Movement sections that stopped with bits of their window unread, other
+    // than the padding the grammar allows. Printed unconditionally, zeros
+    // included: this is a tally being measured, not an error, and a line that
+    // appeared only when nonzero could not say it had been looked for. Sized
+    // and open windows stay apart; see `RpcDecodeResult::sized_section_tails`.
+    eprintln!(
+        "  Movement tails:   {} sized ({} bits) / {} open ({} bits)",
+        totals.sink.movement_sized_section_tails,
+        totals.sink.movement_sized_section_tail_bits,
+        totals.sink.movement_open_section_tails,
+        totals.sink.movement_open_section_tail_bits
+    );
     // Printed unconditionally, zeros included, for the reason the `Struct blobs`
     // line above gives: a line that appears only when non-zero cannot tell
     // "the array walker found nothing wrong" from "the array walker was never
@@ -483,6 +495,13 @@ fn print_checkpoints(cp: &CheckpointStats) {
     if let Some(error) = &cp.sink.movement_first_error {
         eprintln!("  Checkpoint movement error: {error}");
     }
+    eprintln!(
+        "  Checkpoint movement tails: {} sized ({} bits) / {} open ({} bits)",
+        cp.sink.movement_sized_section_tails,
+        cp.sink.movement_sized_section_tail_bits,
+        cp.sink.movement_open_section_tails,
+        cp.sink.movement_open_section_tail_bits
+    );
     eprintln!(
         "  Checkpoint suffix:{} RPC bits",
         cp.sink.rpc_suffix_bits_dropped

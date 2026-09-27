@@ -74,6 +74,12 @@ pub(crate) struct SinkTotals {
     pub multi_contents_items_emitted: u64,
     pub movement_rpc_errors: u64,
     pub movement_first_error: Option<String>,
+    /// See `ExportStats::movement_sized_section_tails` and its three
+    /// neighbours.
+    pub movement_sized_section_tails: u64,
+    pub movement_sized_section_tail_bits: u64,
+    pub movement_open_section_tails: u64,
+    pub movement_open_section_tail_bits: u64,
     pub array: ArrayDecodeStats,
     pub tracked_rewards_opaque_empty_variants: u64,
     pub array_leaf_decode_errors: u64,
@@ -129,6 +135,10 @@ impl SinkTotals {
             struct_blob_first_error,
             movement_rpc_errors,
             movement_first_error,
+            movement_sized_section_tails,
+            movement_sized_section_tail_bits,
+            movement_open_section_tails,
+            movement_open_section_tail_bits,
             truncated_rpcs,
             rpc_suffix_bits_dropped,
             array_leaf_decode_errors,
@@ -151,6 +161,10 @@ impl SinkTotals {
         if self.movement_first_error.is_none() {
             self.movement_first_error = movement_first_error.take();
         }
+        self.movement_sized_section_tails += *movement_sized_section_tails;
+        self.movement_sized_section_tail_bits += *movement_sized_section_tail_bits;
+        self.movement_open_section_tails += *movement_open_section_tails;
+        self.movement_open_section_tail_bits += *movement_open_section_tail_bits;
         self.array.merge_from(array);
         self.tracked_rewards_opaque_empty_variants += *tracked_rewards_opaque_empty_variants;
         self.array_leaf_decode_errors += *array_leaf_decode_errors;

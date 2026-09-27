@@ -359,6 +359,27 @@ class CncCounterTests(unittest.TestCase):
         self.assertIn("cnc_bruteforce_payloads_unwalked", " ".join(reasons))
 
 
+class MovementTailCounterTests(unittest.TestCase):
+    """Each of the four numbers on each tails line reads its own position."""
+
+    SUMMARY = (
+        "  Movement tails:   11 sized (12 bits) / 13 open (14 bits)\n"
+        "  Checkpoint movement tails: 21 sized (22 bits) / 23 open (24 bits)\n"
+    )
+
+    def test_each_position_is_its_own_counter_in_its_own_block(self):
+        names = ("movement_sized_section_tails", "movement_sized_section_tail_bits",
+                 "movement_open_section_tails", "movement_open_section_tail_bits")
+        for offset, name in enumerate(names):
+            with self.subTest(name=name):
+                self.assertEqual(int(guard.PATTERNS[name].search(self.SUMMARY).group(1)),
+                                 11 + offset)
+                self.assertEqual(int(re.search(guard.CHECKPOINT_COUNTERS["cp_" + name],
+                                               self.SUMMARY).group(1)), 21 + offset)
+                checkpoint_only = self.SUMMARY.splitlines(True)[1]
+                self.assertIsNone(guard.PATTERNS[name].search(checkpoint_only))
+
+
 class RequiredInputTests(unittest.TestCase):
     def test_explicit_required_mode_cannot_report_missing_replay_as_skip(self):
         with tempfile.TemporaryDirectory() as temp:

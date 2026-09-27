@@ -70,4 +70,36 @@ pub struct RpcDecodeResult {
     /// counted here is loss, not severity: one update may contribute more than
     /// one.
     pub error_count: u32,
+    /// Movement sections whose window was sized by `movementBitCount` and
+    /// that stopped with bits of that window unread.
+    ///
+    /// A section ends at a 3-bit zero marker, or when at most 31 bits remain
+    /// after a move -- the padding the grammar allows, which is not counted
+    /// here. Every other stop used to return `Ok` with no trace: a zero
+    /// marker read with bits still behind it, a window too short for the
+    /// 8-bit magic, or one too short for the first marker. A cursor that has
+    /// drifted and happens to read `000` takes the first of those exits, and
+    /// every move after it is gone -- the shape `decode_movement_rpc` already
+    /// counts one layer up as an early terminator.
+    ///
+    /// A tally, not an error, and deliberately not part of `error_count`: a
+    /// batch with a nonzero `error_count` keeps its whole payload as a raw
+    /// row, and how often a tail is legitimate has not been measured. A
+    /// window with no bits at all is not counted; the C# reference still
+    /// reports "Missing movement magic" for it, but this counts unread bits,
+    /// not missing fields.
+    pub sized_section_tails: u32,
+    /// Bits left unread by the sections counted in
+    /// [`Self::sized_section_tails`].
+    pub sized_section_tail_bits: u64,
+    /// The same, for sections whose window ran to the end of the component
+    /// stream because `movementBitCount` was 0 or larger than what remained.
+    ///
+    /// Kept apart from [`Self::sized_section_tails`] because the two cannot be
+    /// read the same way: after a zero marker in an open window, the rest may
+    /// be component data that is not movement at all, rather than lost moves.
+    pub open_section_tails: u32,
+    /// Bits left unread by the sections counted in
+    /// [`Self::open_section_tails`].
+    pub open_section_tail_bits: u64,
 }

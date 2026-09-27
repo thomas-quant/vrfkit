@@ -608,6 +608,22 @@ fn push_sink_totals(out: &mut String, s: &SinkTotals) {
         ),
         ("movement_rpc_errors", s.movement_rpc_errors.to_string()),
         (
+            "movement_sized_section_tails",
+            s.movement_sized_section_tails.to_string(),
+        ),
+        (
+            "movement_sized_section_tail_bits",
+            s.movement_sized_section_tail_bits.to_string(),
+        ),
+        (
+            "movement_open_section_tails",
+            s.movement_open_section_tails.to_string(),
+        ),
+        (
+            "movement_open_section_tail_bits",
+            s.movement_open_section_tail_bits.to_string(),
+        ),
+        (
             "array_elements_decoded",
             s.array.elements_decoded.to_string(),
         ),
@@ -897,6 +913,10 @@ mod tests {
             multi_contents_items_emitted: next(),
             movement_rpc_errors: next(),
             movement_first_error: None,
+            movement_sized_section_tails: next(),
+            movement_sized_section_tail_bits: next(),
+            movement_open_section_tails: next(),
+            movement_open_section_tail_bits: next(),
             array: ArrayDecodeStats {
                 elements_decoded: next(),
                 fields_emitted: next(),

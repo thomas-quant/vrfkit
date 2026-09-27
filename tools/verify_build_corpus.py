@@ -92,7 +92,13 @@ def manifest_counts(manifest):
                              "struct_blobs_decoded", "rpc_suffix_bits_dropped",
                              "overlay_handle_conflicts_refused",
                              "cnc_bruteforce_payloads_attempted",
-                             "cnc_bruteforce_payloads_unwalked"))
+                             "cnc_bruteforce_payloads_unwalked",
+                             # A measured tally, recorded per build; whether
+                             # a tail is loss is not established.
+                             "movement_sized_section_tails",
+                             "movement_sized_section_tail_bits",
+                             "movement_open_section_tails",
+                             "movement_open_section_tail_bits"))
             for key in sorted(keys):
                 name = f"{prefix}_{key}"
                 counts[name] = require_count(source, key)

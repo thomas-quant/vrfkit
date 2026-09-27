@@ -740,6 +740,22 @@ fn write_sink_quality(
             sink.multi_contents_items_emitted,
         ),
         ("movement_rpc_errors", sink.movement_rpc_errors),
+        (
+            "movement_sized_section_tails",
+            sink.movement_sized_section_tails,
+        ),
+        (
+            "movement_sized_section_tail_bits",
+            sink.movement_sized_section_tail_bits,
+        ),
+        (
+            "movement_open_section_tails",
+            sink.movement_open_section_tails,
+        ),
+        (
+            "movement_open_section_tail_bits",
+            sink.movement_open_section_tail_bits,
+        ),
         ("array_elements_decoded", sink.array.elements_decoded),
         ("array_fields_emitted", sink.array.fields_emitted),
         ("array_truncations", sink.array.truncations),
@@ -1011,6 +1027,10 @@ mod tests {
             "multi_contents_items_emitted",
             "movement_rpc_errors",
             "movement_first_error",
+            "movement_sized_section_tails",
+            "movement_sized_section_tail_bits",
+            "movement_open_section_tails",
+            "movement_open_section_tail_bits",
             "array_elements_decoded",
             "array_fields_emitted",
             "array_truncations",
@@ -1113,6 +1133,10 @@ mod tests {
                 "multi_contents_items_emitted",
                 "movement_rpc_errors",
                 "movement_first_error",
+                "movement_sized_section_tails",
+                "movement_sized_section_tail_bits",
+                "movement_open_section_tails",
+                "movement_open_section_tail_bits",
                 "array_elements_decoded",
                 "array_fields_emitted",
                 "array_truncations",
@@ -1188,6 +1212,58 @@ mod tests {
             "\"checkpoint_literal_paths\": 17",
             "\"checkpoint_indexed_paths\": 11",
             "\"checkpoint_resolved_path_indices\": 11",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// The four movement-section tail counters publish the measured value in
+    /// each stream; a key stuck at zero would say no section ever stopped
+    /// early whether or not one had.
+    #[test]
+    fn movement_section_tails_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            movement_sized_section_tails: 41,
+            movement_sized_section_tail_bits: 42,
+            movement_open_section_tails: 43,
+            movement_open_section_tail_bits: 44,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.movement_sized_section_tails = 51;
+        checkpoints.sink.movement_sized_section_tail_bits = 52;
+        checkpoints.sink.movement_open_section_tails = 53;
+        checkpoints.sink.movement_open_section_tail_bits = 54;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            chunks_processed: 0,
+            export_groups: 0,
+            movement_rows: 0,
+            net_guid_rows: 0,
+            event_rows: 0,
+            partial_rows: 0,
+            partial_bits: 0,
+            event_trailing_bytes: 0,
+            replay_data_trailing_bytes: 0,
+            event_layout_mismatches: 0,
+            event_first_layout_mismatch: None,
+            event_payloads_decoded: 0,
+            event_payload_unknown_groups: 0,
+            net: &net,
+            sink: &sink,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"movement_sized_section_tails\": 41",
+            "\"movement_sized_section_tail_bits\": 42",
+            "\"movement_open_section_tails\": 43",
+            "\"movement_open_section_tail_bits\": 44",
+            "\"movement_sized_section_tails\": 51",
+            "\"movement_sized_section_tail_bits\": 52",
+            "\"movement_open_section_tails\": 53",
+            "\"movement_open_section_tail_bits\": 54",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }

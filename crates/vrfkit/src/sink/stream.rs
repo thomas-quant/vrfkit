@@ -228,6 +228,11 @@ impl FieldSink for ExportSink<'_> {
             // Clean batches are represented row-for-row in movement.parquet.
             // A failed or partial batch is different: its missing rows cannot
             // reproduce the input, so retain the entire RPC payload here.
+            // One exception is counted rather than retained: a movement
+            // section that stops with bits of its window unread leaves the
+            // batch "clean" here, so those bits reach no row. They are
+            // tallied (`movement_*_section_tail*`) until measurement says
+            // whether they are loss; see `RpcDecodeResult::sized_section_tails`.
             self.push_field(FieldValues {
                 handle,
                 field_name,
