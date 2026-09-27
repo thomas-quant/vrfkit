@@ -72,6 +72,16 @@ jobs:
           }
       - name: standalone probe tool
         run: cargo +1.86.0 check --manifest-path tools/probe_offset/Cargo.toml --locked
+      # Standalone like probe_offset, so none of the workspace steps above
+      # format, lint or test it.
+      - name: standalone component class tool
+        shell: pwsh
+        run: |
+          cargo +1.86.0 fmt --manifest-path tools/extract_component_classes/Cargo.toml --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.86.0 clippy --manifest-path tools/extract_component_classes/Cargo.toml --all-targets --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.86.0 test --manifest-path tools/extract_component_classes/Cargo.toml --locked
       - name: strict rustdoc
         run: cargo +1.86.0 doc --workspace --all-features --no-deps --locked
         env:

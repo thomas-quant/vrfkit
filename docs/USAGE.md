@@ -16,7 +16,7 @@ record, not things to run.
 2. [CLI](#2-cli) -- [`inspect`](#inspect) / [`validate`](#validate) / [`diag`](#diag) / [`export`](#export)
 3. [Output](#3-output) -- [`fields`](#fieldsparquet) / [`movement`](#movementparquet) / [`actors`](#actorsparquet) / [`net_guids`](#net_guidsparquet) / [`events`](#eventsparquet) / [`checkpoint_fields`](#checkpoint_fieldsparquet) / [`manifest.json`](#manifestjson)
 4. [Using it as a library](#4-using-it-as-a-library)
-5. [`tools/` reference](#5-tools-reference) -- [Generators](#generators) / [Validation](#validation) / [Downstream conversion](#downstream-conversion) / [Analysis helpers](#analysis-helpers)
+5. [`tools/` reference](#5-tools-reference) -- [Generators](#generators) / [Validation](#validation) / [Reading the installed game](#reading-the-installed-game) / [Downstream conversion](#downstream-conversion) / [Analysis helpers](#analysis-helpers)
 6. [Validation suite](#6-validation-suite)
 7. [Supported builds](#7-supported-builds)
 8. [Known limits](#8-known-limits)
@@ -212,7 +212,7 @@ member and handle by name.
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 796,920 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 797,309 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -702,13 +702,13 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `check_baseline_schemas.py` | All committed baseline schemas, measured SHA-256 hashes, and cross-file replay/counter/table identities. |
 | `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads and movement-section tails -- the same zero-required counters as `verify_build_corpus.py` (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
 | `corpus_scan.py` | Not a check -- the `.vrf` discovery `validate_corpus.py` and `check_decode_errors_corpus.py` share, so the two can no longer glob a directory two different ways and disagree about what "the corpus" is without saying so. Non-recursive by default; read its docstring for why. |
-| `check_component_remaps.py` | Whether each Blueprint-component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. |
+| `check_component_remaps.py` | Whether each component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. Fails, too, when an entry of the Rust table does not parse, since that pair would otherwise go unchecked. Re-derive a broken or renamed pair with `extract_component_classes` ([below](#reading-the-installed-game)). |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
 | `compare_combat_report.py` | Metrics-input multiset |
 | `compare_rpc_params.py` | RPC parameter comparison |
 | `compare_with_csharp.py` | Diff against the C# parser |
 | `check_effect_decoder.py` | Effect decoder (12 cases) |
-| `check_ascii.py` | Rust source ASCII sweep (148 files) |
+| `check_ascii.py` | Rust source ASCII sweep (158 files) |
 | `check_docs.py` | This document itself (below) |
 | `atomic_io.py` | Internal containment, recursive-removal and atomic-replacement helpers shared by mutating tools |
 
@@ -735,6 +735,45 @@ passes every test, so no other check catches it.
 python tools/check_docs.py           # also runs the test suites to compare counts
 python tools/check_docs.py --fast    # skip the count comparison
 ```
+
+### Reading the installed game
+
+`tools/extract_component_classes/` is a standalone Rust tool -- like
+`tools/probe_offset/`, not a workspace member, with its own lockfile -- and the
+only thing in this repo that reads game files rather than replays. It lists the
+class of every component template in an installed game's IoStore containers,
+which is where `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs`
+comes from. It opens the files for reading only, shares them with every other
+handle, and writes nothing except `--out`.
+
+```bash
+cargo +1.86.0 build --release --manifest-path tools/extract_component_classes/Cargo.toml --locked
+tools/extract_component_classes/target/release/extract-component-classes \
+    "<VALORANT>/live/ShooterGame/Content/Paks" --out classes.tsv
+# one lookup, JSON with provenance and every counter:
+tools/extract_component_classes/target/release/extract-component-classes \
+    "<VALORANT>/live/ShooterGame/Content/Paks" --format json --name ZoomStateMachine
+```
+
+One row per component template, sorted: `instance` (the name the replay
+sends), `kind` (`gen_variable` for a Blueprint-added component,
+`cdo_subobject` for one the C++ class creates), `class`, `class_kind`
+(`script_import`, `package_import` for a Blueprint class, or an `_unresolved`
+form), `native_class` (the first `/Script` ancestor), `asset` (the owning
+package), `export`, `outer`, `class_ref` and `container`. `--kind` keeps one
+shape; `--name` (repeatable) keeps named instances and reports the ones not
+found. Anything that cannot be resolved prints as `?`.
+
+The summary goes to stderr and prints every counter, zeros included, with each
+container's id, size and modification time. Exit 0 means every package was read
+and every self-check held -- each rebuilt script path hashes back to the index
+the game stores, each package name to its chunk id; 1 means something could not
+be read or a check failed (the readable rows are still written); 2 is a usage or
+setup error. The legacy `.pak` files beside the containers have encrypted
+indexes and are not read; the summary lists them.
+
+Procedure and what the output does and does not establish:
+[`DATA.md`](DATA.md#reading-component-classes-out-of-the-game).
 
 ### Unresolved payload and observation audits
 
@@ -1045,7 +1084,7 @@ field meaning; the analyzer deliberately performs no type inference.
 cargo +1.86.0 test --workspace --locked                              # 727 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
-python -W error tools/check_ascii.py --check                         # 148 files
+python -W error tools/check_ascii.py --check                         # 158 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
 python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 911 tests
 python -W error tools/check_docs.py --fast

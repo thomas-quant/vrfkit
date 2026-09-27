@@ -567,7 +567,8 @@ guessing -- which is the only reason the failure was findable.
   (equipped weapon / spike carrier) included. ZoomStateMachine, ReserveAmmo and
   CalloutRegionTracker were listed here as still needing that map; they have it.
   All three are in `KNOWN_SUBOBJECT_CLASS_PATHS` and are pinned by the test at
-  `crates/vrfkit/src/sink/paths.rs`. The procedure that produced them is under
+  `crates/vrfkit/src/sink/paths.rs`, with 29 more added from the 13.06 game.
+  The procedure that produced them, and the tool that repeats it, are under
   "Reading component classes out of the game" below. A bare component group that
   turns up on a new build still needs the same treatment, and the map is not
   name-derivable -- it comes from the game's class hierarchy.
@@ -645,6 +646,9 @@ are in `docs/USAGE.md` under the fields schema.
    out of one build; a later one can rename a component and nothing here would
    notice on its own. Run `tools/check_component_remaps.py --export <dir>`
    against a replay from a new build. It needs no game install and no baseline.
+   When it or its unclaimed-group list points at a component, re-read the class
+   from that build's game with `tools/extract_component_classes` rather than
+   guessing one.
 
 **Type nothing you have not seen decode.** `LocalizedStat` was typed `FString`
 on the strength of the name and produced null on 3,011 of 3,011 rows while
@@ -694,32 +698,70 @@ starts from typed columns.**
 ### Reading component classes out of the game
 
 The bare group names -- `ZoomStateMachine`, `ReserveAmmo`, `CalloutRegionTracker`
-and a dozen others -- are Blueprint *component instance* names, not classes, so
-nothing in a replay says what they are. The installed game does say, and it does
-not need decryption: VALORANT's IoStore containers are `Compressed+Signed+
-Indexed` with a zero encryption GUID, so the `Encrypted` flag is simply off.
+and many others -- are component *instance* names, not classes, so nothing in a
+replay says what they are. The installed game does say, and it does not need
+decryption: VALORANT's IoStore containers are `Compressed+Signed+Indexed` with a
+zero encryption GUID, so the `Encrypted` flag is simply off.
 
-The chain, for the record, since nothing in `tools/` reproduces it:
+`tools/extract_component_classes` reads it (build and flags:
+[USAGE.md](USAGE.md#reading-the-installed-game)). Given the `Paks` directory it
+prints one row per component template -- the instance name the replay sends, the
+package that owns it, and the class. The chain it follows:
 
-1. `.utoc` -> directory index -> the asset paths in each container.
-2. A cooked Blueprint stores each component as a `<Name>_GEN_VARIABLE` export.
-   Its `ClassIndex` is an `FPackageObjectIndex` of type `ScriptImport`, which is
-   a hash rather than a name.
-3. `global.ucas` holds the script object map -- a name batch followed by
-   `FScriptObjectEntry` records -- which turns that hash into
-   `/Script/ShooterGame.<Class>` by walking the outer chain.
+1. `.utoc` -> chunk ids, compression blocks and the directory index. Only TOC
+   version 5 is accepted, the one the 13.06 containers use.
+2. Each `ExportBundleData` chunk starts with the package header -- name map and
+   export map. Only the blocks the header spans are decompressed, with the same
+   `oozextract` vrf-container uses for replay chunks, which keeps a full scan of
+   the 30 GB of `.ucas` to seconds.
+3. A component shows up in one of two export shapes. A Blueprint-added component
+   is a `<Name>_GEN_VARIABLE` export; a component the C++ class creates is a
+   subobject of the class default object (`Default__<Class>`) under its instance
+   name. The first shape alone cannot reproduce the table: in 13.06,
+   `InventoryComponent`, `AbilitiesAndBuffsComponent`, `CalloutRegionTracker`,
+   `VisionComponent` and `DamageHandlerComponent` exist only in the second.
+4. The export's `ClassIndex` is an `FPackageObjectIndex`. A `ScriptImport` is a
+   hash, which `global.ucas`'s script object map -- a name batch followed by
+   `FScriptObjectEntry` records -- turns into `/Script/<Module>.<Class>` by
+   walking the outer chain. A `PackageImport` names a public export of another
+   package; the tool follows it to that package's Blueprint class and on up the
+   super chain to the first native class.
 
-Chunks are Oodle-compressed, so this needs an Oodle-capable reader; vrfkit
-already depends on `oozextract` for replay chunks, which is what was used.
+The game checks the result, which is what makes it more than a parse. On the
+13.06 containers (17 containers, 379,670 TOC entries, 289,267 packages; five of
+them, the three largest included, were rewritten on 2026-09-25 UTC, two days
+after `global.utoc` -- the tool prints each container's id, size and time, so a
+run can be matched to the files it read):
 
-Every pair landed in `KNOWN_SUBOBJECT_CLASS_PATHS` in
-`crates/vrfkit/src/sink/paths.rs`. The check on the method is that the same pass
-independently reproduced `InventoryComponent -> AresInventory` and
-`AbilitiesAndBuffsComponent -> AresAbilitySystemComponent`, which had been
-inferred from handle shapes and are now confirmed.
+- every one of the 80,800 script object paths the tool rebuilds hashes back to
+  the index the game stores for it -- CityHash64 of the lowercased UTF-16 path,
+  which is how the engine forms that index, so a wrong separator or name index
+  cannot pass;
+- every package name hashes back to its chunk id, and agrees with the directory
+  index's file name;
+- every TOC file is consumed to its last byte, and 0 packages fail.
 
-It also corrected one guess. `MagazineAmmo` and `ReserveAmmo` are both
-`AmmoComponent`, a group the replay declares with handle 2 as
+Anything the tool cannot resolve prints as `?`. One format fact came out of the
+first run: UTF-16 names in a name batch are **not** aligned to two bytes.
+Aligning them misread 26 packages whose name maps hold a Chinese texture name at
+an odd offset.
+
+What it does not read: the 17 legacy `.pak` files beside the containers. Their
+indexes are encrypted, so a package stored only there would be invisible. Nothing
+so far points at one -- every pair below came from the IoStore containers.
+
+**The existing table reproduces** (2026-09-28, 13.06). Every pair a cooked asset
+can hold came back with the class it already had: the 16 read from the game
+before, `InventoryComponent -> AresInventory` and
+`AbilitiesAndBuffsComponent -> AresAbilitySystemComponent` (first argued from
+handle shapes), and the C# reference's four effect components. None was
+contradicted. `AresAttributeSet_2` is in no package, as expected of a runtime
+subobject. The chain as this section used to state it -- `_GEN_VARIABLE` exports
+only -- finds five of those pairs nowhere in 13.06 (step 3), so the class
+default object shape was always part of the method, written down or not.
+
+The earlier pass also corrected one guess. `MagazineAmmo` and `ReserveAmmo` are
+both `AmmoComponent`, a group the replay declares with handle 2 as
 `AuthResourceAmount` -- so the hand-written `AmmoCount` name, the one entry
 `HANDLE_ADDITIONS` ever had, was in the right place with the wrong word. Both
 ammo counters now read the real declaration and that mechanism is empty.
@@ -729,9 +771,97 @@ Effect on 02d4d478, measured when that change landed: unnamed handles
 errors still 0. Corpus-wide at the time, 215/215 replays with decode errors 0.
 
 Those are the deltas that change produced, not current totals. Later work moved
-both ends: `tools/baselines/export_02d4d478.json` pins today's figures
-(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 796,920`). Read this
+both ends: `tools/baselines/export_02d4d478.json` pins today's figures. Read this
 paragraph as a dated before/after, which is what it was written as.
+
+#### Pairs added from 13.06 (2026-09-28)
+
+Every bare group of at least 9,000 rows in the 1,018-replay corpus inventory
+(builds 11.06-13.06) was looked up in the tool's output. "About 10,000" was the
+brief; 9,000 is the cut actually applied, and it admits one group under 10,000
+(`SwapCameras_StateMachine`, 9,478). A pair went in only when all of these held,
+measured over every replay's main-stream rows and, separately, every
+checkpoint's rows:
+
+- **one class.** The instance name has exactly one class across every package
+  and both export shapes;
+- **declared.** The replay declares that class's group wherever the bare group
+  carries RepLayout rows -- rows whose `field_name` is null or carries no
+  `_cnc_h` / unresolved-payload marker;
+- **handles fit.** The handles those rows use are a subset of the handles the
+  target declares in the same replay, and checkpoint rows of the handles their
+  own checkpoint declares;
+- **widths agree** wherever the target group also has rows of its own in the
+  same replay, handle for handle.
+
+All are RepLayout-only, like every pair before them, so their ClassNetCache rows
+stay bare by design.
+
+| leaves | class | RepLayout rows, main | checkpoint | ClassNetCache rows left bare |
+|---|---|---:|---:|---:|
+| `Resume_StateMachine`, `Sprint_StateMachine`, `Slide_StateMachine`, `ProjectileStateMachine`, `EquipStateMachine`, `PrimaryTriggerActionStateMachine`, `EquippableStateMachine_Activate`, `LaserStateMachine`, `SelfResStateMachine`, `Ability State Machine (EquippableStateMachine)`, `TimerStateMachine`, `CloakStateMachine`, `SpontaneousEquip_StateMachine`, `EquippableStateMachine_Dart`, `EquippableStateMachine_Attack`, `EquippableStateMachine_PickUpOnCooldown`, `SwapCameras_StateMachine` | `EquippableStateMachineComponent` | 1,786,888 | 259,401 | 107,750 |
+| `ShieldDamageSection`, `OverhealDamageSection` | `ChildDamageSectionComponent` | 45,157 | 246,317 | 0 |
+| `PreventDeathDamageSection` | `AttachedDamageSectionComponent` | 572 | 10,087 | 10,115 |
+| `PMAimToolingTarget` | `/Script/InputTooling.AimToolingSkeletalTargetComponent` | 34,662 | 543,324 | 0 |
+| `Usable_PickUp` | `UsableComponent` | 18,512 | 0 | 0 |
+| `StealthComp` | `SimpleVisualTimelineStealthComp` | 23,400 | 0 | 0 |
+| `StealthV1AddedForAISight` | `StealthComponent` | 11,564 | 0 | 0 |
+| `Collision Static Mesh` | `/Script/Engine.StaticMeshComponent` | 10,924 | 1,698 | 0 |
+| `Comp_Ability_CooldownComponent1` | Blueprint `Comp_Ability_CooldownComponent_C` | 35,381 | 21,945 | 0 |
+| `DamageSection_Vampire_Q_BloodArmor` | Blueprint `DamageSection_Vampire_Q_Heal_BloodArmor_C` | 13,055 | 19,396 | 20,967 |
+| `ChooseTeleportSpot_StateComponent` | Blueprint `ChooseMapLocationOnNavMesh_StateComponent_C` | 14,866 | 1,939 | 3,505 |
+| `AresAttributeSet_1` | `AresAttributeSet` (wire evidence, below) | 131,014 | 2,550,032 | 0 |
+
+Classes without a module are `/Script/ShooterGame`; the three Blueprint classes
+are declared by the replay under their full `/Game/..._C` paths, which is what
+the pairs name. In all, 2,125,995 main-stream and 3,654,139 checkpoint
+RepLayout rows of the corpus inventory move from a bare group into a declared
+one.
+
+`AresAttributeSet_1` is not a component, so it is held to `AresAttributeSet_2`'s
+standard instead of the tool's: over all 536 replays that carry it, every
+main-stream handle it uses (116 per replay) is declared by the native group in
+that replay, every checkpoint's by that checkpoint (10,455 checkpoints), and all
+2,681,046 rows are 32 bits wide, the width the named instance has on each handle
+(124,280 per-replay comparisons, none different). The only pair whose widths
+differ from its target's own rows is `PMAimToolingTarget`, on handle 2:
+`AttachParent` is a packed object reference, so 16 bits against 24 is the size
+of the NetGUID it carries. For four pairs the target has no rows of its own in
+any replay, so the width condition says nothing about them and the other three
+carry them alone: `StealthComp`, `Collision Static Mesh`,
+`DamageSection_Vampire_Q_BloodArmor` and `ChooseTeleportSpot_StateComponent`.
+
+Re-exported afterwards (92 replays: one or more for every (pair, build) that
+occurs, plus all 38 of 13.06), against the same replays exported by the parent
+commit: every row keeps its identity -- time, packet, channel, actor, object,
+handle, bit count and raw bits, row for row -- in both `fields.parquet` and
+`checkpoint_fields.parquet`; the only rows that change are the remapped groups'
+(202,329 main-stream and 334,729 checkpoint rows, every one named, 195,595 and
+300,583 typed); `checkpoint_blocks` changes only in the three resolution columns
+of the remapped blocks; every other file is byte-identical; `manifest.json`
+moves only the overlay counters, where the drop in `overlay_no_field_name`
+equals the rows that moved and the rise in `overlay_decoded_ok` plus
+`overlay_not_in_table` equals the drop. Decode errors and struct-blob failures
+stay 0. `check_component_remaps.py` reads all 29 new pairs `ok` or `absent` on
+those exports, none `broken` -- and, run on the parent's exports of the same
+replays, `broken` wherever a pair's RepLayout rows appear, so the verdict does
+distinguish the two. Rows that are named but untyped -- `CursorWorldLocation`,
+`RelativeLocation`, `TargetID`, the two stealth flags, a section's `Life` -- have
+no overlay type yet, and none was added -- "type nothing you have not seen
+decode", under "What's next" above.
+
+Not added, and why:
+
+| group | rows | why not |
+|---|---:|---|
+| `PatchVolume` | 113,654 | Class `/Script/DynamicVolume.GroundVolumeComponent`, declared in 955 replays -- but in 915 of them its RepLayout rows include handle 0 (the preserved tails, 2,166 to 36,538 bits), which the target never declares, and handles 20-22 change meaning between builds. Not a name remap. It is a lead for the [PatchVolume investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md): the declared handle set contains exactly the twelve FastArray item handles that investigation left unassigned (23, 24, 25, 26, 30, 33, 36, 39, 40, 41, 42, 43). |
+| `DefenderAnnouncer`, `AttackerAnnouncer` | 52,239 / 41,964 | Blueprint `AnnouncerVOComponent_C`, declared in none of 1,018 replays; every row is ClassNetCache. |
+| `BeforePostRoundTransitionSyncTimer` | 36,376 | `SyncedTimerComponent`, declared in 2 of 1,018 replays; every main-stream row is ClassNetCache. |
+| `WaitForInitialKillOrAssistState` | 15,993 | Blueprint `StateComponent_WaitForKillOrAssist_Smonk_Child_C`, declared in none; ClassNetCache only. |
+| `Comp_Equippable_Subequippable` | 36,702 | No export by that name in 13.06; the group is absent from 13.05 and 13.06 replays too. |
+| `Switch_BlackMarket_5`, `RespawningPlummetShootable3_UAID_*` (two), `B_Site_Door_Switch_0`, `RespawningWallPlate2_2`, `RespawningWallPlate2_7`, `Drawbridge6` | 9,607-31,254 | Actors placed in a map, not components: no component export carries these names. |
+| `MapTargetingState` | 743,457 | Two classes: the Blueprint `StateComponent_RangeLimited_MultiMapTargeting_C` in 9 packages, native `MapTargetingStateComponent` in 7. No name remap can be right for both. |
+| `AttachedDamageSection` | 820,561 | Left out of this change on purpose -- see below. |
 
 **This is the one thing here that a game patch can silently invalidate.** A
 renamed component stops matching and its handles go quiet again, and the replay
@@ -739,21 +869,46 @@ never named it either, so no unit test can see it.
 
 `tools/check_component_remaps.py` is what watches for that. It needs only an
 export -- not the game, not a baseline -- so it works on a replay from a new
-build, which is exactly when the question comes up. For each pair it compares
-the rows still bare under the leaf against the rows that reached the native
-group; healthy is ~0.1%, and a rename measured 15.6%. Asking only whether the
-target has rows is not enough: nine leaves share
-`EquippableStateMachineComponent`, so one going quiet leaves the other eight
-covering for it. ClassNetCache rows are excluded, because the two RepLayout-only
-remaps leave their RPC stream bare by design.
+build, which is exactly when the question comes up. For each RepLayout pair it
+counts the RepLayout rows still bare under the leaf, and any at all is `broken`:
+across the 92 re-exported replays not one of the 48 RepLayout pairs left a
+single row bare, so healthy is exactly zero. ClassNetCache rows are excluded,
+because the RepLayout-only remaps leave their RPC stream bare by design.
 
-Three bare names are left, and the game says why none of them can be fixed this
-way. `AttachedDamageSection` and `MapTargetingState` do name real classes --
-`AttachedDamageSectionComponent`, `MapTargetingStateComponent` -- but **the
-replay declares neither group**, so a remap would point at nothing; their
-handles have no declaration to pick up anywhere in the file. `AresAttributeSet_2`
-is a GAS attribute set rather than a component, which is the same wall as item 4
-above. Nothing further to get from the paks for these.
+It used to allow up to 5% of the target's rows, and that could not fail where it
+mattered. Asking only whether the target has rows is not enough -- 26 leaves now
+share `EquippableStateMachineComponent` -- and a share of the target is not
+enough either: run against the 92 replays exported before the 29 pairs above
+were added, it read 22 of them `ok` in 773 (pair, replay) cases where every one
+of their RepLayout rows was still bare, at up to 4.9% of the target
+(`ShieldDamageSection` beside `ChildDamageSectionComponent`). Simulating a
+rename used to put a leaf at 15.6% of its target, which the old rule did catch;
+a leaf whose remap simply did not fire was the case it missed. The C# reference's four ClassNetCache pairs still use
+the ratio, and on two old-build exports (12.03, 12.06) `DamageHandlerComponent`
+reads `broken` under it on one or two bare RepLayout rows -- before this change
+too; that pair does not remap RepLayout blocks at all.
+
+What the checker cannot see is a rename itself: the old leaf simply vanishes.
+The renamed component arrives under its new name, which is why the checker
+prints the bare groups no pair claims on every run. When that list or a
+`broken` verdict points at a component, re-read its class from the new build's
+game with `tools/extract_component_classes` rather than guessing a name.
+
+Three names were left here with one reason -- "the replay declares neither
+group" -- and the tool shows the reason was measured on the wrong class for two
+of them. `AttachedDamageSection` is not an `AttachedDamageSectionComponent` but
+a Blueprint subclass of it, `/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C`,
+in all four armour items. The native group is indeed never declared where the
+bare group has RepLayout rows, but the Blueprint class's group is, in all 529 of
+those replays, with handles 2 and 5 (`bAlive`, `LastKnownDamageOwner`) -- exactly
+the handles the rows use, main stream and all 6,895 checkpoints that carry
+them. It meets every condition above (the width one says nothing: the class has
+no rows of its own); it was left out of this change because the change was scoped to leave the names this section
+already discussed, and a pair touching the armour rows the health-and-armour
+analysis reads deserves its own review. `MapTargetingState` names two classes
+(above), so that half of the old reason stands on different ground.
+`AresAttributeSet_2` now has `AresAttributeSet_1` beside it. Nothing changes for
+the AbilitiesAndBuffs item.
 
 ### Closed: what the three mechanisms cannot reach
 
