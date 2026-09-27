@@ -27,7 +27,7 @@ Evidence comes from all 1,018 unique replays of the local corpus (builds
 | `8b7afcb` Boom Bot pawn: `bAIControlled`, `ReplicatedMovement` (short rotation) | Adopted with evidence | 2 exact identities; the location scale was checked against spawn positions. |
 | `8b7afcb` `ReplicatedMovement` (byte rotation) on the satchel, the three Paint Shells projectiles and the rocket | Declined | The rotation width is right, but `RepMovement` would export these locations 100 times too small. See [below](#declined-projectile-replicatedmovement). |
 | `8b7afcb` `RazeForceParameters` (`ForceModuleManagerComponent:NetMulticastApplyForceModule`) | Adopted with evidence | 7 exact identities. `HandleNumber` and `SourceLocation` were already typed with the same types. |
-| `8b7afcb` `ClientResetRemoteMovementPrediction(isPossess)` on Raze and the Boom Bot | Adopted with evidence, wider than upstream | The wire declares one native `ShooterCharacter` parameter group, so the identity covers every character and pawn that sends the RPC. Constant `true` in this corpus. |
+| `8b7afcb` `ClientResetRemoteMovementPrediction(isPossess)` on Raze and the Boom Bot | Adopted with evidence, wider than upstream | The wire declares one native `ShooterCharacter` parameter group, so the identity covers every character and pawn that sends the RPC: Raze's character and Boom Bot account for 8,511 of the 291,346 rows, and the other 282,835 follow from the wire identity rather than from a choice. Constant `true` in this corpus. |
 | `8b7afcb` roles `215`/`216`, `Owner`, `Instigator`, `AttachParent`, `Controller`, `PlayerState`, the Boom Bot's timestamp, gravity, movement mode and `bReplicateMovement`, the satchel explosion's fields, and every other `ClayAgentDescriptor` handle except the array | Not applicable | Already typed, with the same types, through the table, engine object references or checksum donors: 1,716,934 main and 179,976 checkpoint rows in the Raze property groups. |
 | `8b7afcb` `ClayAgentDescriptor.FocusProjectiles` (`RepLayoutDynamicArray`) | Deferred | Mapped to `Raw` even by faithful vendoring. Needs a measured array route; see [below](#deferred-focusprojectiles). |
 | `8b7afcb` parameterless RPCs (`MulticastOnItemMovedToPersistentData`, `MulticastOnBoombaNoLongerActivatable`, `MulticastStopProjectile`, `Multicast Event Triggered`) | Not applicable | No parameters to type. Every invocation is already exported as a 0-bit row (69,375 `Multicast Event Triggered` alone). |
@@ -39,6 +39,25 @@ Every field and function `8b7afcb` declares occurs in the corpus, so nothing
 here rests on the descriptor alone. Its handle numbers match the wire from
 12.09 on; older builds carry the same names at other handles, which the
 name-keyed identities do not depend on.
+
+## Observed but not declared by `8b7afcb`
+
+The survey also saw fields in the same groups that neither commit names. They
+stay as they were (raw unless something else already typed them); they are
+listed so the absence reads as a decision, not an oversight. Rows are main /
+checkpoint over the 1,018 replays.
+
+| Group | Field | Rows | Note |
+|---|---|---:|---|
+| Raze Paint Shells and their spawner under the 11.06-12.09 paths (`Projectile_Clay_4_ProjectilePrimary_C`, `..._ProjectileSecondary_C`, `..._SecondarySpawner_C`) | `ReplicatedMovement` | 8,385 / 23,336 / 392 | Upstream names only the 13.01+ paths. Measured the same way: byte rotation consumes all 32,113, and every one of the 2,352 actors lands within 1 m of its spawn only at 100 times the decoded location |
+| `Clay_PC_C` | `NumResetsForRespawn`, `bAllowCorpseMovement`, `bHidden`, `bShouldUseMeshMaterialManager` | 0 / 5,499; 24 / 80; 32 / 175; 17 / 325 | Not in `ClayAgentDescriptor` |
+| `Clay_PC_C` cache | `UpdateHalosEvent.CommActionEnum`, `MulticastItemPickedUp.*`, `MulticastApplyLastSeenMinimapSnapshot.*` | 10,076; 4,750; 30 | Not in upstream's agent cache |
+| Boom Bot pawn and cache | `bShouldUseMeshMaterialManager`, `MultiCastSetMinimapPulse.Pulsate` | 144; 874 | Not declared |
+| Satchel projectile and cache | `AttachSocket`, `HideSatchelStuckToLocalPawn.108` | 6; 5 | Not declared |
+| Force-module apply RPC | `ContextActor` (handle 9) | 7,990 | Upstream declares handles 0-8 only |
+| Force-module remove RPC | `ModuleType` | 2,743,504 | Declared `EnumRemainingBits` by upstream `99d9646`, not by these commits; shares the adopted checksum and agrees with it on every paired handle, but is not typed here |
+| `ForceModuleManagerComponent` | `AuthActivePredictedForceModules`, `NetMulticastEnforceEndOfLifeCleanup.ModulesCleanedUpByServer` | 61,969 / 52,575; 40,765 | Arrays; not declared |
+| `Comp_Projectile_CosmeticPlayEffectUntilTriggerMarker` / `...SoundLoop` | unresolved cache payloads | 2,016; 838 | Bare instance names with no class; upstream's cosmetic descriptor covers the base component only |
 
 ## Why no `8b7afcb` descriptor file is vendored
 
