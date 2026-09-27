@@ -118,10 +118,39 @@ class DictionaryTests(unittest.TestCase):
             "statistic_name_conflict",
         )
 
-    def test_measured_dictionary_has_31_or_32_one_to_one_entries(self):
+    def test_13_06_dictionary_holds_only_its_observed_ids(self):
+        self.assertEqual(
+            stats.validation_status("13.06", 27, "TimeSprinting"), "known"
+        )
+        self.assertEqual(
+            stats.validation_status("13.06", 0, "DamageDealt"),
+            "statistic_name_conflict",
+        )
+        # Named in 13.05 but never observed in a 13.06 export: unmeasured there,
+        # so it must not validate on the strength of the previous build.
+        for statistic_id, name in (
+            (57, "EnemiesJammed"),
+            (62, "UtilDestroyed"),
+            (65, "DebuffResisted"),
+        ):
+            self.assertEqual(
+                stats.validation_status("13.05", statistic_id, name), "known"
+            )
+            self.assertEqual(
+                stats.validation_status("13.06", statistic_id, name),
+                "unknown_statistic_id",
+            )
+
+    def test_unmeasured_build_has_no_dictionary(self):
+        self.assertEqual(
+            stats.validation_status("13.07", 0, "EnemiesBlinded"),
+            "unknown_build",
+        )
+
+    def test_measured_dictionaries_are_one_to_one_with_their_measured_sizes(self):
         self.assertEqual(
             {build: len(mapping) for build, mapping in stats.KNOWN_STAT_NAMES.items()},
-            {"13.01": 31, "13.02": 31, "13.04": 31, "13.05": 32},
+            {"13.01": 31, "13.02": 31, "13.04": 31, "13.05": 32, "13.06": 29},
         )
         for mapping in stats.KNOWN_STAT_NAMES.values():
             self.assertEqual(len(mapping), len(set(mapping.values())))
@@ -253,6 +282,39 @@ class CliTests(unittest.TestCase):
         document = json.loads(out.read_text(encoding="utf-8"))
         observed = document["observed_by_build"]["13.05"]["mappings"]
         self.assertEqual(observed[0]["validation"], "unknown_statistic_id")
+
+    def test_measured_13_06_export_validates(self):
+        export = self.make_export(
+            "13.06",
+            pair(27, "TimeSprinting"),
+            pair(0, "EnemiesBlinded", packet=20, time_ms=200),
+        )
+        out = self.tmp / "13.06.json"
+        code, stdout, stderr = self.run_main(
+            "--export", str(export), "--out", str(out)
+        )
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("0 validation failure(s)", stdout)
+        mappings = json.loads(out.read_text(encoding="utf-8"))[
+            "observed_by_build"
+        ]["13.06"]["mappings"]
+        self.assertEqual(
+            [(m["statistic_id"], m["validation"]) for m in mappings],
+            [(0, "known"), (27, "known")],
+        )
+
+    def test_unmeasured_build_is_written_and_returns_failure(self):
+        export = self.make_export("13.07", pair(0, "EnemiesBlinded"), [])
+        out = self.tmp / "13.07.json"
+        code, _stdout, stderr = self.run_main(
+            "--export", str(export), "--out", str(out)
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("13.07: 0='EnemiesBlinded' is unknown_build", stderr)
+        mapping = json.loads(out.read_text(encoding="utf-8"))[
+            "observed_by_build"
+        ]["13.07"]["mappings"][0]
+        self.assertEqual(mapping["validation"], "unknown_build")
 
     def test_observed_collision_is_explicit_even_for_unknown_ids(self):
         rows = pair(99, "FutureStat", packet=10, time_ms=100)
