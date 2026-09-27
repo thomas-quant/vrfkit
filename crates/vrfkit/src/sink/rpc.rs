@@ -491,20 +491,10 @@ impl ExportSink<'_> {
         ];
         let mut isolated = vrf_decode::ArrayDecodeStats::default();
         let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut isolated);
-        let walker_clean = isolated.errors == 0
-            && isolated.truncations == 0
-            && isolated.implicit_terminations == 0
-            && isolated.unconsumed_nested_bits == 0
-            && isolated.unconsumed_root_bits == 0;
+        let walker_clean = isolated.is_clean();
         let complete_points = isolated.fields_emitted == flattened.len() as u64
             && isolated.elements_decoded.saturating_mul(3) == flattened.len() as u64;
-        self.stats.array.elements_decoded += isolated.elements_decoded;
-        self.stats.array.fields_emitted += isolated.fields_emitted;
-        self.stats.array.truncations += isolated.truncations;
-        self.stats.array.errors += isolated.errors;
-        self.stats.array.unconsumed_nested_bits += isolated.unconsumed_nested_bits;
-        self.stats.array.unconsumed_root_bits += isolated.unconsumed_root_bits;
-        self.stats.array.implicit_terminations += isolated.implicit_terminations;
+        self.stats.array.merge_from(&isolated);
         // The generic walker reports a clean frame even when a path point
         // omits one of its three members. Count that separate shape refusal;
         // malformed framing already moved a walker diagnostic above.
@@ -589,24 +579,15 @@ impl ExportSink<'_> {
         raw: &[u8],
         bit_count: u32,
     ) {
-        let before = self.stats.array.clone();
         let declared = [None, Some("WorldLocation")];
-        let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut self.stats.array);
-        let diagnostics_clean = self.stats.array.errors == before.errors
-            && self.stats.array.truncations == before.truncations
-            && self.stats.array.unconsumed_nested_bits == before.unconsumed_nested_bits
-            && self.stats.array.unconsumed_root_bits == before.unconsumed_root_bits
-            && self.stats.array.implicit_terminations == before.implicit_terminations;
-        let decoded_elements = self
-            .stats
-            .array
-            .elements_decoded
-            .saturating_sub(before.elements_decoded);
-        let decoded_fields = self
-            .stats
-            .array
-            .fields_emitted
-            .saturating_sub(before.fields_emitted);
+        let mut isolated = vrf_decode::ArrayDecodeStats::default();
+        let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut isolated);
+        // Folded in before anything else reads the running total, so every
+        // walk is counted whether or not its children are accepted below.
+        self.stats.array.merge_from(&isolated);
+        let diagnostics_clean = isolated.is_clean();
+        let decoded_elements = isolated.elements_decoded;
+        let decoded_fields = isolated.fields_emitted;
         let unique_paths = flattened
             .iter()
             .map(|field| field.path.as_str())

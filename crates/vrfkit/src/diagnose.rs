@@ -41,84 +41,14 @@ use vrf_container::{
     ChunkIterator, ChunkType, decompress_checkpoint, decompress_replay_data_with_trailing,
     parse_checkpoint_chunk, parse_preamble,
 };
-use vrf_decode::{ArrayDecodeStats, OverlayStats};
+use vrf_decode::OverlayErrorReport;
 use vrf_frame::iter_demo_frames;
 use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::NetStats;
 use vrf_schema::{NetGuidCache, read_checkpoint_tables};
 
 use crate::error::CliError;
-use crate::sink::{ChannelState, ExportSink, FailureAggregate, RecordBuffers};
-
-/// Every sink counter the diag JSON carries, summed across packets.
-///
-/// Mirrors what `driver::totals::SinkTotals` accumulates, deliberately
-/// re-declared here: that struct lives in the `export`-gated driver and is
-/// shaped for the summary's printer. This one is the subset the corpus
-/// baseline (`quality_totals.json`'s `sink.*` keys) can reconcile against,
-/// and it is read only by this module. If a counter is added to
-/// `ExportStats` and matters here, it has to be added to `absorb` below --
-/// the per-file totals would then read zero against a live counter, which is
-/// the loudest way a stale list can fail.
-#[derive(Debug, Default)]
-struct DiagSinkTotals {
-    fields_emitted: u64,
-    rpcs_emitted: u64,
-    actor_opens: u64,
-    actor_closes: u64,
-    content_blocks: u64,
-    overlay: OverlayStats,
-    effect_blobs_decoded: u64,
-    struct_blobs_decoded: u64,
-    struct_blobs_failed: u64,
-    multi_contents_items_emitted: u64,
-    movement_rpc_errors: u64,
-    array: ArrayDecodeStats,
-    tracked_rewards_opaque_empty_variants: u64,
-    array_leaf_decode_errors: u64,
-    targeting_world_locations_decoded: u64,
-    truncated_rpcs: u64,
-    rpc_suffix_bits_dropped: u64,
-    cnc_rpcs_emitted: u64,
-    rep_layout_cnc_tails_decoded: u64,
-    rep_layout_cnc_tails_preserved: u64,
-}
-
-impl DiagSinkTotals {
-    fn absorb(&mut self, stats: &mut crate::sink::ExportStats) {
-        self.fields_emitted += stats.fields_emitted;
-        self.rpcs_emitted += stats.rpcs_emitted;
-        self.actor_opens += stats.actor_opens;
-        self.actor_closes += stats.actor_closes;
-        self.content_blocks += stats.content_blocks;
-        self.overlay.decoded_ok += stats.overlay.decoded_ok;
-        self.overlay.decoded_err += stats.overlay.decoded_err;
-        self.overlay.raw_or_skip += stats.overlay.raw_or_skip;
-        self.overlay.not_in_table += stats.overlay.not_in_table;
-        self.overlay.no_field_name += stats.overlay.no_field_name;
-        self.overlay.handle_conflicts_refused += stats.overlay.handle_conflicts_refused;
-        self.effect_blobs_decoded += stats.effect_blobs_decoded;
-        self.struct_blobs_decoded += stats.struct_blobs_decoded;
-        self.struct_blobs_failed += stats.struct_blobs_failed;
-        self.multi_contents_items_emitted += stats.multi_contents_items_emitted;
-        self.movement_rpc_errors += stats.movement_rpc_errors;
-        self.array.elements_decoded += stats.array.elements_decoded;
-        self.array.fields_emitted += stats.array.fields_emitted;
-        self.array.truncations += stats.array.truncations;
-        self.array.errors += stats.array.errors;
-        self.array.unconsumed_nested_bits += stats.array.unconsumed_nested_bits;
-        self.array.implicit_terminations += stats.array.implicit_terminations;
-        self.array.unconsumed_root_bits += stats.array.unconsumed_root_bits;
-        self.tracked_rewards_opaque_empty_variants += stats.tracked_rewards_opaque_empty_variants;
-        self.array_leaf_decode_errors += stats.array_leaf_decode_errors;
-        self.targeting_world_locations_decoded += stats.targeting_world_locations_decoded;
-        self.truncated_rpcs += stats.truncated_rpcs;
-        self.rpc_suffix_bits_dropped += stats.rpc_suffix_bits_dropped;
-        self.cnc_rpcs_emitted += stats.cnc_rpcs_emitted;
-        self.rep_layout_cnc_tails_decoded += stats.rep_layout_cnc_tails_decoded;
-        self.rep_layout_cnc_tails_preserved += stats.rep_layout_cnc_tails_preserved;
-    }
-}
+use crate::sink::{ChannelState, ExportSink, FailureAggregate, RecordBuffers, SinkTotals};
 
 /// Per-checkpoint-chunk metadata the JSON reports alongside the checkpoint
 /// pass's counters, so the checkpoint walk is auditable rather than a black
@@ -140,7 +70,17 @@ struct DiagCheckpointStats {
     actor_rows_dropped: u64,
     movement_rows_dropped: u64,
     net: NetStats,
-    sink: DiagSinkTotals,
+    /// The same [`SinkTotals`] `export` sums, through the same `absorb`. `diag`
+    /// used to re-declare it as `DiagSinkTotals` with a line-for-line copy of
+    /// `absorb`, justified by `SinkTotals` living in the `export`-gated driver.
+    /// It now lives in `sink`, so the copy -- a second place a new counter had
+    /// to be wired in by hand, with nothing to say it had been missed -- is
+    /// gone.
+    sink: SinkTotals,
+    /// Where `absorb` merges the checkpoint pass's per-field overlay
+    /// breakdown. Filled and never printed: the diag JSON carries counters,
+    /// not the breakdown.
+    overlay_errors: OverlayErrorReport,
     failures: FailureAggregate,
 }
 
@@ -170,7 +110,10 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut replay_data_frames: u64 = 0;
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
-    let mut sink_totals = DiagSinkTotals::default();
+    let mut sink_totals = SinkTotals::default();
+    // Where `absorb` merges the main pass's per-field overlay breakdown. Filled
+    // and never printed, like `DiagCheckpointStats::overlay_errors`.
+    let mut overlay_errors = OverlayErrorReport::default();
     let mut channel_state = ChannelState::new();
     channel_state.enable_failure_aggregate(include_payloads);
     let mut buffers = RecordBuffers::default();
@@ -216,7 +159,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                             sink.time_ms = pkt.time_ms;
                             sink.packet_id = pkt_id;
                             repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
-                            sink_totals.absorb(&mut sink.stats);
+                            sink_totals.absorb(&mut sink.stats, &mut overlay_errors);
                         }
                         // The records are dropped, not written; the counters they
                         // produced were already absorbed above. Draining keeps the
@@ -462,7 +405,7 @@ fn process_checkpoint_chunk(
             sink.time_ms = pkt.time_ms;
             sink.packet_id = packet_count as u32;
             reader.process_packet(pkt.data, packet_count as i32, &mut sink);
-            cp.sink.absorb(&mut sink.stats);
+            cp.sink.absorb(&mut sink.stats, &mut cp.overlay_errors);
         }
         cp.field_rows_dropped += buffers.fields.len() as u64;
         cp.actor_rows_dropped += buffers.actors.len() as u64;
@@ -640,7 +583,7 @@ fn push_net_stats(out: &mut String, s: &NetStats) {
     out.push_str("  }");
 }
 
-fn push_sink_totals(out: &mut String, s: &DiagSinkTotals) {
+fn push_sink_totals(out: &mut String, s: &SinkTotals) {
     let pairs: Vec<(&str, String)> = vec![
         ("fields_emitted", s.fields_emitted.to_string()),
         ("rpcs_emitted", s.rpcs_emitted.to_string()),
@@ -664,6 +607,22 @@ fn push_sink_totals(out: &mut String, s: &DiagSinkTotals) {
             s.multi_contents_items_emitted.to_string(),
         ),
         ("movement_rpc_errors", s.movement_rpc_errors.to_string()),
+        (
+            "movement_sized_section_tails",
+            s.movement_sized_section_tails.to_string(),
+        ),
+        (
+            "movement_sized_section_tail_bits",
+            s.movement_sized_section_tail_bits.to_string(),
+        ),
+        (
+            "movement_open_section_tails",
+            s.movement_open_section_tails.to_string(),
+        ),
+        (
+            "movement_open_section_tail_bits",
+            s.movement_open_section_tail_bits.to_string(),
+        ),
         (
             "array_elements_decoded",
             s.array.elements_decoded.to_string(),
@@ -701,6 +660,14 @@ fn push_sink_totals(out: &mut String, s: &DiagSinkTotals) {
             s.rpc_suffix_bits_dropped.to_string(),
         ),
         ("cnc_rpcs_emitted", s.cnc_rpcs_emitted.to_string()),
+        (
+            "cnc_bruteforce_payloads_attempted",
+            s.cnc_bruteforce_payloads_attempted.to_string(),
+        ),
+        (
+            "cnc_bruteforce_payloads_unwalked",
+            s.cnc_bruteforce_payloads_unwalked.to_string(),
+        ),
         (
             "rep_layout_cnc_tails_decoded",
             s.rep_layout_cnc_tails_decoded.to_string(),
@@ -844,9 +811,10 @@ fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagSinkTotals, build_label, push_json_string, reject_input_output_alias, write_json_file,
+        build_label, push_json_string, push_sink_totals, reject_input_output_alias, write_json_file,
     };
-    use crate::sink::ExportStats;
+    use crate::sink::SinkTotals;
+    use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
 
     /// The branch-to-build label the corpus aggregation joins on. A branch
     /// without the `release-` marker stays unlabelled rather than guessed.
@@ -905,22 +873,89 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Every counter a fresh sink holds must survive the absorb as zero -- a
-    /// line here that stops compiling when `ExportStats` grows is fine, but a
-    /// field that silently stops being read would print zeros forever.
+    /// Every counter `SinkTotals` holds reaches the diag JSON exactly once.
+    ///
+    /// The key list in `push_sink_totals` is written by hand, and a counter
+    /// missing from it is not printed as zero -- it is absent from the
+    /// document, so no reader of the JSON could ever notice. The literal
+    /// below has no `..`, so a counter added to `SinkTotals`, `OverlayStats`
+    /// or `ArrayDecodeStats` stops this test compiling until it is given the
+    /// next value from `next()`; if the printer then omits it, that value is
+    /// missing from the printed set. The expected set is counted from the
+    /// literal itself, so there is no second number to keep in step.
     #[test]
-    fn absorbing_a_default_sink_keeps_every_counter_at_zero() {
-        let mut totals = DiagSinkTotals::default();
-        let mut stats = ExportStats::default();
-        stats.overlay.decoded_ok = 5;
-        stats.array.errors = 2;
-        totals.absorb(&mut stats);
-        let mut stats2 = ExportStats::default();
-        stats2.overlay.decoded_ok = 7;
-        stats2.array.errors = 0;
-        totals.absorb(&mut stats2);
-        assert_eq!(totals.overlay.decoded_ok, 12);
-        assert_eq!(totals.array.errors, 2);
-        assert_eq!(totals.fields_emitted, 0);
+    fn push_sink_totals_prints_every_sink_counter_exactly_once() {
+        let last = std::cell::Cell::new(0u64);
+        let next = || {
+            last.set(last.get() + 1);
+            last.get()
+        };
+        let totals = SinkTotals {
+            fields_emitted: next(),
+            rpcs_emitted: next(),
+            actor_opens: next(),
+            actor_closes: next(),
+            content_blocks: next(),
+            overlay: OverlayStats {
+                decoded_ok: next(),
+                decoded_err: next(),
+                raw_or_skip: next(),
+                not_in_table: next(),
+                no_field_name: next(),
+                handle_conflicts_refused: next(),
+                error_report: OverlayErrorReport::default(),
+            },
+            effect_blobs_decoded: next(),
+            struct_blobs_decoded: next(),
+            struct_blobs_failed: next(),
+            // Text, not a counter: the diag JSON carries counters only.
+            struct_blob_first_error: None,
+            multi_contents_items_emitted: next(),
+            movement_rpc_errors: next(),
+            movement_first_error: None,
+            movement_sized_section_tails: next(),
+            movement_sized_section_tail_bits: next(),
+            movement_open_section_tails: next(),
+            movement_open_section_tail_bits: next(),
+            array: ArrayDecodeStats {
+                elements_decoded: next(),
+                fields_emitted: next(),
+                truncations: next(),
+                errors: next(),
+                unconsumed_nested_bits: next(),
+                unconsumed_root_bits: next(),
+                implicit_terminations: next(),
+            },
+            tracked_rewards_opaque_empty_variants: next(),
+            array_leaf_decode_errors: next(),
+            targeting_world_locations_decoded: next(),
+            truncated_rpcs: next(),
+            rpc_suffix_bits_dropped: next(),
+            cnc_rpcs_emitted: next(),
+            cnc_bruteforce_payloads_attempted: next(),
+            cnc_bruteforce_payloads_unwalked: next(),
+            rep_layout_cnc_tails_decoded: next(),
+            rep_layout_cnc_tails_preserved: next(),
+        };
+        let assigned = last.get();
+
+        let mut json = String::new();
+        push_sink_totals(&mut json, &totals);
+        let mut printed: Vec<u64> = json
+            .lines()
+            .filter_map(|line| line.split_once("\": "))
+            .map(|(_, value)| {
+                value
+                    .trim_end_matches(',')
+                    .parse()
+                    .unwrap_or_else(|_| panic!("non-numeric counter {value:?} in {json}"))
+            })
+            .collect();
+        printed.sort_unstable();
+        assert_eq!(
+            printed,
+            (1..=assigned).collect::<Vec<_>>(),
+            "diag sink JSON must print each of the {assigned} counters once: {json}"
+        );
     }
 }

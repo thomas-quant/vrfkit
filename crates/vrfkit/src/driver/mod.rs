@@ -17,7 +17,6 @@
 pub(crate) mod checkpoints;
 mod publish;
 mod summary;
-pub(crate) mod totals;
 mod writers;
 
 use std::fs;
@@ -45,11 +44,10 @@ use vrf_schema::NetGuidCache;
 
 use crate::error::CliError;
 use crate::manifest::{self, ManifestQuality};
-use crate::sink::{ChannelState, ExportSink, RecordBuffers};
+use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 use checkpoints::{CheckpointStats, ReplayContext};
 use publish::OutputTransaction;
 use summary::RunTotals;
-use totals::SinkTotals;
 use writers::WriterThread;
 
 /// The structural payload for an Event group that declares `word_count` words,
@@ -171,7 +169,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     let mut event_trailing_bytes: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut error_report = OverlayErrorReport::default();
-    // Every sink-derived counter, in one place. See `totals`.
+    // Every sink-derived counter, in one place. See `sink::totals`.
     let mut sink_totals = SinkTotals::default();
     let mut event_layout_mismatches: u64 = 0;
     let mut event_first_layout_mismatch: Option<String> = None;
@@ -302,7 +300,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
 
                     // The sink is dropped at the end of this scope, so a counter
                     // not read here is a counter that never existed. All of them
-                    // go through one function; see `totals`.
+                    // go through one function; see `sink::totals`.
                     sink_totals.absorb(&mut sink.stats, &mut error_report);
                 }
 

@@ -25,8 +25,8 @@ use vrf_net::stats::NetStats;
 use vrf_schema::NetGuidCache;
 
 use crate::driver::checkpoints::CheckpointStats;
-use crate::driver::totals::SinkTotals;
 use crate::error::CliError;
+use crate::sink::SinkTotals;
 
 /// Every run-level value needed to judge whether the published tables are
 /// complete and how much typed decoding fell back to preserved raw data.
@@ -712,6 +712,17 @@ fn write_sink_quality(
     out.push_str(&format!("\"{key}\": {{\n"));
     let inner = indent + 1;
     for (key, value) in [
+        // The sink's own count of four events vrf-net also counts, in the
+        // callbacks it invokes beside each of its own increments. Each must
+        // equal the `net` block's `rpcs` / `actor_opens` / `actor_closes` /
+        // `content_blocks` for the same stream; tools/verify_build_corpus.py
+        // fails a replay where one does not. Prefixed because this object
+        // sits beside `net`, whose keys have the same names and a different
+        // source.
+        ("sink_rpcs_emitted", sink.rpcs_emitted),
+        ("sink_actor_opens", sink.actor_opens),
+        ("sink_actor_closes", sink.actor_closes),
+        ("sink_content_blocks", sink.content_blocks),
         ("overlay_decoded_ok", sink.overlay.decoded_ok),
         ("overlay_decoded_err", sink.overlay.decoded_err),
         ("overlay_raw_or_skip", sink.overlay.raw_or_skip),
@@ -729,6 +740,22 @@ fn write_sink_quality(
             sink.multi_contents_items_emitted,
         ),
         ("movement_rpc_errors", sink.movement_rpc_errors),
+        (
+            "movement_sized_section_tails",
+            sink.movement_sized_section_tails,
+        ),
+        (
+            "movement_sized_section_tail_bits",
+            sink.movement_sized_section_tail_bits,
+        ),
+        (
+            "movement_open_section_tails",
+            sink.movement_open_section_tails,
+        ),
+        (
+            "movement_open_section_tail_bits",
+            sink.movement_open_section_tail_bits,
+        ),
         ("array_elements_decoded", sink.array.elements_decoded),
         ("array_fields_emitted", sink.array.fields_emitted),
         ("array_truncations", sink.array.truncations),
@@ -757,6 +784,14 @@ fn write_sink_quality(
         ("truncated_rpcs", sink.truncated_rpcs),
         ("rpc_suffix_bits_dropped", sink.rpc_suffix_bits_dropped),
         ("cnc_rpcs_emitted", sink.cnc_rpcs_emitted),
+        (
+            "cnc_bruteforce_payloads_attempted",
+            sink.cnc_bruteforce_payloads_attempted,
+        ),
+        (
+            "cnc_bruteforce_payloads_unwalked",
+            sink.cnc_bruteforce_payloads_unwalked,
+        ),
         (
             "rep_layout_cnc_tails_decoded",
             sink.rep_layout_cnc_tails_decoded,
@@ -906,7 +941,7 @@ fn json_str(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::driver::checkpoints::CheckpointStats;
-    use crate::driver::totals::SinkTotals;
+    use crate::sink::SinkTotals;
     use vrf_decode::OverlayErrorReport;
     use vrf_net::stats::NetStats;
 
@@ -973,6 +1008,10 @@ mod tests {
             "diagnostics_retained",
             "diagnostics_dropped",
             // Every SinkTotals/OverlayStats/ArrayDecodeStats counter.
+            "sink_rpcs_emitted",
+            "sink_actor_opens",
+            "sink_actor_closes",
+            "sink_content_blocks",
             "overlay_decoded_ok",
             "overlay_decoded_err",
             "overlay_raw_or_skip",
@@ -988,6 +1027,10 @@ mod tests {
             "multi_contents_items_emitted",
             "movement_rpc_errors",
             "movement_first_error",
+            "movement_sized_section_tails",
+            "movement_sized_section_tail_bits",
+            "movement_open_section_tails",
+            "movement_open_section_tail_bits",
             "array_elements_decoded",
             "array_fields_emitted",
             "array_truncations",
@@ -1000,6 +1043,8 @@ mod tests {
             "truncated_rpcs",
             "rpc_suffix_bits_dropped",
             "cnc_rpcs_emitted",
+            "cnc_bruteforce_payloads_attempted",
+            "cnc_bruteforce_payloads_unwalked",
             "rep_layout_cnc_tails_decoded",
             "rep_layout_cnc_tails_preserved",
             // Run-level completeness and checkpoint-only accounting.
@@ -1071,6 +1116,10 @@ mod tests {
                 "must_be_mapped_guids",
                 "diagnostics_retained",
                 "diagnostics_dropped",
+                "sink_rpcs_emitted",
+                "sink_actor_opens",
+                "sink_actor_closes",
+                "sink_content_blocks",
                 "overlay_decoded_ok",
                 "overlay_decoded_err",
                 "overlay_raw_or_skip",
@@ -1084,6 +1133,10 @@ mod tests {
                 "multi_contents_items_emitted",
                 "movement_rpc_errors",
                 "movement_first_error",
+                "movement_sized_section_tails",
+                "movement_sized_section_tail_bits",
+                "movement_open_section_tails",
+                "movement_open_section_tail_bits",
                 "array_elements_decoded",
                 "array_fields_emitted",
                 "array_truncations",
@@ -1096,6 +1149,8 @@ mod tests {
                 "truncated_rpcs",
                 "rpc_suffix_bits_dropped",
                 "cnc_rpcs_emitted",
+                "cnc_bruteforce_payloads_attempted",
+                "cnc_bruteforce_payloads_unwalked",
                 "rep_layout_cnc_tails_decoded",
                 "rep_layout_cnc_tails_preserved",
             ]
@@ -1157,6 +1212,157 @@ mod tests {
             "\"checkpoint_literal_paths\": 17",
             "\"checkpoint_indexed_paths\": 11",
             "\"checkpoint_resolved_path_indices\": 11",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// The four movement-section tail counters publish the measured value in
+    /// each stream; a key stuck at zero would say no section ever stopped
+    /// early whether or not one had.
+    #[test]
+    fn movement_section_tails_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            movement_sized_section_tails: 41,
+            movement_sized_section_tail_bits: 42,
+            movement_open_section_tails: 43,
+            movement_open_section_tail_bits: 44,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.movement_sized_section_tails = 51;
+        checkpoints.sink.movement_sized_section_tail_bits = 52;
+        checkpoints.sink.movement_open_section_tails = 53;
+        checkpoints.sink.movement_open_section_tail_bits = 54;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            chunks_processed: 0,
+            export_groups: 0,
+            movement_rows: 0,
+            net_guid_rows: 0,
+            event_rows: 0,
+            partial_rows: 0,
+            partial_bits: 0,
+            event_trailing_bytes: 0,
+            replay_data_trailing_bytes: 0,
+            event_layout_mismatches: 0,
+            event_first_layout_mismatch: None,
+            event_payloads_decoded: 0,
+            event_payload_unknown_groups: 0,
+            net: &net,
+            sink: &sink,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"movement_sized_section_tails\": 41",
+            "\"movement_sized_section_tail_bits\": 42",
+            "\"movement_open_section_tails\": 43",
+            "\"movement_open_section_tail_bits\": 44",
+            "\"movement_sized_section_tails\": 51",
+            "\"movement_sized_section_tail_bits\": 52",
+            "\"movement_open_section_tails\": 53",
+            "\"movement_open_section_tail_bits\": 54",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// The sink's event tallies are published so they can be compared.
+    ///
+    /// The export summary printed them beside NetStats' counts as `Sink tally`
+    /// for a desync check, but the manifest carried neither side's tally in
+    /// `sink`, so no script could compare them and none did.
+    /// `tools/verify_build_corpus.py` now fails a replay whose tally differs.
+    #[test]
+    fn sink_event_tallies_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            rpcs_emitted: 21,
+            actor_opens: 22,
+            actor_closes: 23,
+            content_blocks: 24,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.rpcs_emitted = 31;
+        checkpoints.sink.actor_opens = 32;
+        checkpoints.sink.actor_closes = 33;
+        checkpoints.sink.content_blocks = 34;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            chunks_processed: 0,
+            export_groups: 0,
+            movement_rows: 0,
+            net_guid_rows: 0,
+            event_rows: 0,
+            partial_rows: 0,
+            partial_bits: 0,
+            event_trailing_bytes: 0,
+            replay_data_trailing_bytes: 0,
+            event_layout_mismatches: 0,
+            event_first_layout_mismatch: None,
+            event_payloads_decoded: 0,
+            event_payload_unknown_groups: 0,
+            net: &net,
+            sink: &sink,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"sink_rpcs_emitted\": 21",
+            "\"sink_actor_opens\": 22",
+            "\"sink_actor_closes\": 23",
+            "\"sink_content_blocks\": 24",
+            "\"sink_rpcs_emitted\": 31",
+            "\"sink_actor_opens\": 32",
+            "\"sink_actor_closes\": 33",
+            "\"sink_content_blocks\": 34",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// Both brute-force counters publish the measured value in each stream,
+    /// not a constant: `unwalked` is the one number that says the fc=34 walk
+    /// was tried and failed, so a key stuck at zero would hide exactly that.
+    #[test]
+    fn cnc_bruteforce_counters_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            cnc_bruteforce_payloads_attempted: 11,
+            cnc_bruteforce_payloads_unwalked: 2,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.cnc_bruteforce_payloads_attempted = 13;
+        checkpoints.sink.cnc_bruteforce_payloads_unwalked = 3;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            chunks_processed: 0,
+            export_groups: 0,
+            movement_rows: 0,
+            net_guid_rows: 0,
+            event_rows: 0,
+            partial_rows: 0,
+            partial_bits: 0,
+            event_trailing_bytes: 0,
+            replay_data_trailing_bytes: 0,
+            event_layout_mismatches: 0,
+            event_first_layout_mismatch: None,
+            event_payloads_decoded: 0,
+            event_payload_unknown_groups: 0,
+            net: &net,
+            sink: &sink,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"cnc_bruteforce_payloads_attempted\": 11",
+            "\"cnc_bruteforce_payloads_unwalked\": 2",
+            "\"cnc_bruteforce_payloads_attempted\": 13",
+            "\"cnc_bruteforce_payloads_unwalked\": 3",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }

@@ -16,9 +16,11 @@
 //! - [`rpc`] -- the ClassNetCache RPC parameter walker.
 //! - [`blobs`] -- the struct-blob and flattened-array decoders.
 //! - [`stream`] -- the `vrf-net` trait impls that drive all of the above.
+//! - [`totals`] -- the per-run sum of every packet sink's counters, shared by
+//!   `export` (both passes) and `diag`.
 //!
-//! This module holds what those five share: the sink, the per-packet record
-//! buffers, and the state that must outlive a packet.
+//! This module holds what the first five share: the sink, the per-packet
+//! record buffers, and the state that must outlive a packet.
 //!
 //! # What the sink costs
 //!
@@ -34,8 +36,10 @@ mod intern;
 mod paths;
 mod rpc;
 mod stream;
+mod totals;
 
 pub use failure_stats::FailureAggregate;
+pub(crate) use totals::SinkTotals;
 
 use std::sync::Arc;
 
@@ -225,6 +229,23 @@ pub struct ExportStats {
     /// structure rather than silently leaving the opaque blob.
     pub cnc_rpcs_emitted: u64,
 
+    /// Unresolved `AbilitiesAndBuffsComponent` payloads offered to that
+    /// brute-force walk: the denominator [`Self::cnc_rpcs_emitted`] does not
+    /// have, since that counter also counts RepLayout-tail decodes.
+    pub cnc_bruteforce_payloads_attempted: u64,
+
+    /// Of those, payloads the fc=34 walk did not fit, so no RPC row was
+    /// emitted and only the whole-payload preservation row remains.
+    ///
+    /// This exit used to be `let Some(..) else { return; }` with no counter,
+    /// while only successes were counted -- the shape `struct_blobs_failed`
+    /// was added to remove. The constant 34 is empirical and its doc says an
+    /// update can fail the walk; if one does, `CNC RPC rows` shrinks and this
+    /// is the line that says why. No bits are lost either way: the
+    /// preservation row carries the payload whole. Zero on the replays
+    /// measured when it was added.
+    pub cnc_bruteforce_payloads_unwalked: u64,
+
     /// Post-RepLayout ClassNetCache tails decoded under verified component
     /// provenance and strict one-RPC framing.
     pub rep_layout_cnc_tails_decoded: u64,
@@ -258,6 +279,20 @@ pub struct ExportStats {
     /// The first movement-decode problem verbatim, for the summary to name.
     pub movement_first_error: Option<String>,
 
+    /// Movement sections, in a window sized by `movementBitCount`, that
+    /// stopped with bits of it unread -- see
+    /// `vrf_movement::RpcDecodeResult::sized_section_tails`. A soft tally:
+    /// it does not make a batch count as failed, so it moves no Parquet row.
+    pub movement_sized_section_tails: u64,
+    /// Bits those sections left unread.
+    pub movement_sized_section_tail_bits: u64,
+    /// The same for sections whose window ran to the end of the component
+    /// stream, where what follows may be other component data; kept apart so
+    /// the two readings are never summed into one number.
+    pub movement_open_section_tails: u64,
+    /// Bits those sections left unread.
+    pub movement_open_section_tail_bits: u64,
+
     /// RPC payloads whose RepLayout parameter loop broke on a malformed read
     /// before the terminating zero handle.
     ///
@@ -273,17 +308,44 @@ pub struct ExportStats {
     /// one trailing alignment bit the `FunctionParameters` grammar permits.
     ///
     /// The terminator used to end the walk without asking what remained. Any
-    /// parameter already emitted set `emitted_any`, which suppresses the
+    /// parameter already emitted set `emitted_any`, which suppressed the
     /// caller's whole-payload fallback row, so the tail reached no row, no
     /// [`Self::truncated_rpcs`] and not even `skipped_bits`. Every *leaf*
     /// payload in this crate is checked for full consumption
     /// (`decode_field` returns `NotFullyConsumed`); the *container's* was not,
     /// which is the same omission one level up.
     ///
-    /// Counted rather than rejected. The parameters that parsed are good, and
-    /// throwing them away to punish an unexplained tail would lose data to make
-    /// a point. Zero on every payload the project has measured; a non-zero
-    /// value means the parameter grammar no longer describes this build.
+    /// Counted rather than rejected, and not lost. The parameters that parsed
+    /// keep their rows, and a payload with a suffix also gets a whole-payload
+    /// row under the function's name (`try_parse_rpc_params`, or the caller's
+    /// raw row when no parameter parsed), so every counted bit is still in
+    /// `raw_bits`.
+    ///
+    /// It is not zero on real replays. In the 259ed10 corpus audit (1,018
+    /// unique replays, exported with `--checkpoints`) the main-pass total is
+    /// nonzero in 21 of 24 builds -- from 26,766 bits (12.07, 3 replays) to
+    /// 9,329,665 (13.05, 401 replays) -- and zero only in the three builds
+    /// with a single public fixture (12.10, 12.11, 13.00); some individual
+    /// replays read zero too. The checkpoint pass is zero in every build.
+    ///
+    /// Every counted bit had one source: the handle named
+    /// `ActiveGameplayEffects` under
+    /// `/Script/ShooterGame.AresAbilitySystemComponent_ClassNetCache`, whose
+    /// payload walks as parameters up to a zero handle and then continues.
+    /// ClassNetCache framing carries custom-delta properties as well as RPCs
+    /// (see `ActiveGameplayEffects` in docs/DATA.md), so this counts the part
+    /// of that payload the RPC parameter grammar does not describe; what those
+    /// bits encode is not established here. A suffix on any other handle would
+    /// be new, and would mean the grammar no longer describes that payload.
+    ///
+    /// Method (2026-09-28): a separate Python re-walk of the grammar --
+    /// checksum bit, IntPacked handle and length pairs to a zero handle, one
+    /// trailing bit allowed -- over every bare-named ClassNetCache row with a
+    /// payload in `fields.parquet` and `checkpoint_fields.parquet` reproduced
+    /// this counter exactly in 90 of 90 (export, stream) pairs: two exports
+    /// per build, one for each single-fixture build. In another 40 exports,
+    /// 1,416 of 32,391 such rows carried a suffix, every one of them
+    /// `ActiveGameplayEffects`, from 128 to 1,239 bits each.
     pub rpc_suffix_bits_dropped: u64,
 
     /// Flattened array leaves with a resolved type whose payload failed that
@@ -305,16 +367,31 @@ impl ExportStats {
         result: Result<&vrf_movement::RpcDecodeResult, &vrf_movement::MovementError>,
     ) {
         match result {
-            Ok(r) if r.error_count > 0 => {
-                self.movement_rpc_errors = self
-                    .movement_rpc_errors
-                    .saturating_add(u64::from(r.error_count));
-                self.movement_first_error.get_or_insert(format!(
-                    "{} movement update(s) skipped mid-decode",
-                    r.error_count
-                ));
+            Ok(r) => {
+                // No `..`: a counter added to the decoder's result must be
+                // read here, or it would reach nothing.
+                let vrf_movement::RpcDecodeResult {
+                    total_moves: _,
+                    update_count: _,
+                    error_count,
+                    sized_section_tails,
+                    sized_section_tail_bits,
+                    open_section_tails,
+                    open_section_tail_bits,
+                } = *r;
+                self.movement_sized_section_tails += u64::from(sized_section_tails);
+                self.movement_sized_section_tail_bits += sized_section_tail_bits;
+                self.movement_open_section_tails += u64::from(open_section_tails);
+                self.movement_open_section_tail_bits += open_section_tail_bits;
+                if error_count > 0 {
+                    self.movement_rpc_errors = self
+                        .movement_rpc_errors
+                        .saturating_add(u64::from(error_count));
+                    self.movement_first_error.get_or_insert(format!(
+                        "{error_count} movement update(s) skipped mid-decode"
+                    ));
+                }
             }
-            Ok(_) => {}
             Err(e) => {
                 self.movement_rpc_errors = self.movement_rpc_errors.saturating_add(1);
                 self.movement_first_error
@@ -338,7 +415,45 @@ mod movement_stats_tests {
             total_moves,
             update_count,
             error_count,
+            sized_section_tails: 0,
+            sized_section_tail_bits: 0,
+            open_section_tails: 0,
+            open_section_tail_bits: 0,
         })
+    }
+
+    fn with_tails(
+        error_count: u32,
+        sized: (u32, u64),
+        open: (u32, u64),
+    ) -> Result<RpcDecodeResult, MovementError> {
+        Ok(RpcDecodeResult {
+            total_moves: 1,
+            update_count: 1,
+            error_count,
+            sized_section_tails: sized.0,
+            sized_section_tail_bits: sized.1,
+            open_section_tails: open.0,
+            open_section_tail_bits: open.1,
+        })
+    }
+
+    /// Section tails are a soft tally: they are summed from every decode that
+    /// returned `Ok`, with or without soft errors, and they never count as a
+    /// movement error -- a nonzero error count is what makes the sink keep a
+    /// batch's whole payload as a raw row.
+    #[test]
+    fn section_tails_are_summed_from_every_ok_decode_and_are_not_errors() {
+        let mut s = ExportStats::default();
+        s.record_movement_decode(with_tails(0, (1, 40), (0, 0)).as_ref());
+        s.record_movement_decode(with_tails(2, (2, 7), (3, 90)).as_ref());
+        assert_eq!(s.movement_sized_section_tails, 3);
+        assert_eq!(s.movement_sized_section_tail_bits, 47);
+        assert_eq!(s.movement_open_section_tails, 3);
+        assert_eq!(s.movement_open_section_tail_bits, 90);
+        assert_eq!(s.movement_rpc_errors, 2, "only the soft errors");
+        s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
+        assert_eq!(s.movement_sized_section_tails, 3, "an Err carries no tally");
     }
 
     #[test]

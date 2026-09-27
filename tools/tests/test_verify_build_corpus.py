@@ -14,14 +14,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import verify_build_corpus as audit
 
 
+#: Each sink event tally and the NetStats counter it must equal.
+SINK_NET_PAIRS = (("sink_rpcs_emitted", "rpcs"), ("sink_actor_opens", "actor_opens"),
+                  ("sink_actor_closes", "actor_closes"),
+                  ("sink_content_blocks", "content_blocks"))
+
+
 def manifest():
     net = dict.fromkeys(audit.NET_ZERO, 0)
     net.update(content_blocks=100, skipped_bits=20, rpc_stream_failures=2,
-               unresolved_rpc_payloads_preserved=2)
+               unresolved_rpc_payloads_preserved=2, rpcs=40, actor_opens=7,
+               actor_closes=5)
     sink = dict.fromkeys(audit.SINK_ZERO, 0)
     sink.update(overlay_decoded_ok=80, overlay_raw_or_skip=3, overlay_not_in_table=12,
                 overlay_no_field_name=5, struct_blobs_decoded=2,
-                rpc_suffix_bits_dropped=4, overlay_handle_conflicts_refused=1)
+                rpc_suffix_bits_dropped=4, overlay_handle_conflicts_refused=1,
+                cnc_bruteforce_payloads_attempted=6, cnc_bruteforce_payloads_unwalked=0,
+                movement_sized_section_tails=0, movement_sized_section_tail_bits=0,
+                movement_open_section_tails=0, movement_open_section_tail_bits=0,
+                sink_rpcs_emitted=40, sink_actor_opens=7, sink_actor_closes=5,
+                sink_content_blocks=100)
     quality = dict.fromkeys(("content_blocks_lost", "event_trailing_bytes",
                             "replay_data_trailing_bytes", "event_layout_mismatches",
                             "overlay_error_buckets", "overlay_errors_reported"), 0)
@@ -61,6 +73,78 @@ class ManifestTests(unittest.TestCase):
         del data["quality"]["net"]["field_stream_failures"]
         with self.assertRaises(KeyError):
             audit.manifest_counts(data)
+
+    def test_cnc_bruteforce_counters_are_recorded_and_required_in_each_pass(self):
+        counts, failures = audit.manifest_counts(manifest())
+        self.assertEqual(failures, [])
+        for scope in ("main", "checkpoint"):
+            self.assertEqual(counts[f"{scope}_cnc_bruteforce_payloads_attempted"], 6)
+            self.assertEqual(counts[f"{scope}_cnc_bruteforce_payloads_unwalked"], 0)
+            for key in ("cnc_bruteforce_payloads_attempted", "cnc_bruteforce_payloads_unwalked"):
+                with self.subTest(scope=scope, key=key):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    del target["sink"][key]
+                    with self.assertRaises(KeyError):
+                        audit.manifest_counts(data)
+
+    def test_movement_tails_are_recorded_and_required(self):
+        data = manifest()
+        data["quality"]["sink"]["movement_open_section_tail_bits"] = 40
+        counts, _ = audit.manifest_counts(data)
+        self.assertEqual(counts["main_movement_open_section_tail_bits"], 40)
+        for key in ("movement_sized_section_tails", "movement_sized_section_tail_bits",
+                    "movement_open_section_tails", "movement_open_section_tail_bits"):
+            with self.subTest(key=key):
+                data = manifest()
+                del data["quality"]["checkpoints"]["sink"][key]
+                with self.assertRaises(KeyError):
+                    audit.manifest_counts(data)
+
+    def test_unwalked_cnc_payloads_and_movement_tails_fail_the_audit(self):
+        """Named here, not read from SINK_ZERO: the generic test above iterates
+        SINK_ZERO itself, so it cannot notice a key being dropped from it."""
+        for scope in ("main", "checkpoint"):
+            for key in ("cnc_bruteforce_payloads_unwalked", "movement_sized_section_tails",
+                        "movement_open_section_tails"):
+                with self.subTest(scope=scope, key=key):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    target["sink"][key] = 2
+                    self.assertIn(f"{scope}_{key}=2", audit.manifest_counts(data)[1])
+
+    def test_sink_event_tallies_must_equal_the_framing_counts(self):
+        """The export summary's `Sink tally` promised a desync check nobody ran.
+
+        The sink counts RPCs, actor opens and closes and content blocks in the
+        callbacks vrf-net invokes right beside its own counters, so the two
+        must be equal; a difference means the sink's bookkeeping is broken.
+        """
+        counts, failures = audit.manifest_counts(manifest())
+        self.assertEqual(failures, [])
+        self.assertEqual(counts["checkpoint_sink_content_blocks"], 100)
+        for scope in ("main", "checkpoint"):
+            for sink_key, net_key in SINK_NET_PAIRS:
+                for delta in (-1, 1):
+                    with self.subTest(scope=scope, key=sink_key, delta=delta):
+                        data = manifest()
+                        target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                        target["sink"][sink_key] += delta
+                        failures = audit.manifest_counts(data)[1]
+                        self.assertTrue(
+                            any(f.startswith(f"{scope}_{sink_key}=") and net_key in f
+                                for f in failures), failures)
+
+    def test_sink_event_tallies_and_their_framing_counts_are_required(self):
+        for scope in ("main", "checkpoint"):
+            for sink_key, net_key in SINK_NET_PAIRS:
+                for category, key in (("sink", sink_key), ("net", net_key)):
+                    with self.subTest(scope=scope, key=key):
+                        data = manifest()
+                        target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                        del target[category][key]
+                        with self.assertRaises(KeyError):
+                            audit.manifest_counts(data)
 
     def test_lost_or_overcounted_rpc_fails(self):
         for preserved in (1, 3):
@@ -173,6 +257,12 @@ class AuditExecutionTests(unittest.TestCase):
         result, _ = self.run_audit()
         self.assertIn("main_array_errors=2", result["failures"])
         self.assertIn("checkpoint_array_leaf_decode_errors=1", result["failures"])
+
+    def test_a_sink_tally_mismatch_fails_the_replay(self):
+        self.data["quality"]["checkpoints"]["sink"]["sink_actor_closes"] = 4
+        result, _ = self.run_audit()
+        self.assertTrue(any(f.startswith("checkpoint_sink_actor_closes=4")
+                            for f in result["failures"]), result["failures"])
 
     def test_missing_counter_cannot_pass(self):
         del self.data["quality"]["sink"]["array_errors"]

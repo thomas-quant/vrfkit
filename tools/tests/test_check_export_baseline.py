@@ -312,6 +312,74 @@ class TargetingCounterTests(unittest.TestCase):
         self.assertIsNone(guard.PATTERNS[key].search("Checkpoint targets: 12 array children"))
 
 
+class CncCounterTests(unittest.TestCase):
+    """The brute-force and tail lines, main and checkpoint, read their own line."""
+
+    SUMMARY = (
+        "  CNC RPC rows:     529\n"
+        "  CNC brute force:  454 attempted / 0 unwalked\n"
+        "  RepLayout tails:  75 decoded / 17 preserved\n"
+        "  Checkpoint CNC:   3 RPC rows\n"
+        "  Checkpoint CNC brute force: 3 attempted / 1 unwalked\n"
+        "  Checkpoint tails: 0 decoded / 2 preserved\n"
+    )
+    MAIN = {"cnc_rpcs_emitted": 529, "cnc_bruteforce_payloads_attempted": 454,
+            "cnc_bruteforce_payloads_unwalked": 0, "rep_layout_cnc_tails_decoded": 75,
+            "rep_layout_cnc_tails_preserved": 17}
+    CHECKPOINT = {"cp_cnc_rpcs_emitted": 3, "cp_cnc_bruteforce_payloads_attempted": 3,
+                  "cp_cnc_bruteforce_payloads_unwalked": 1,
+                  "cp_rep_layout_cnc_tails_decoded": 0,
+                  "cp_rep_layout_cnc_tails_preserved": 2}
+
+    def test_each_counter_reads_its_own_value(self):
+        for key, value in self.MAIN.items():
+            with self.subTest(key=key):
+                self.assertEqual(int(guard.PATTERNS[key].search(self.SUMMARY).group(1)), value)
+        for key, value in self.CHECKPOINT.items():
+            with self.subTest(key=key):
+                self.assertEqual(
+                    int(re.search(guard.CHECKPOINT_COUNTERS[key], self.SUMMARY).group(1)), value)
+
+    def test_a_missing_main_line_is_not_read_off_the_checkpoint_block(self):
+        """`Checkpoint CNC brute force:` contains `CNC brute force:`; an
+        unanchored main pattern would silently pin the checkpoint value."""
+        checkpoint_only = "".join(
+            line for line in self.SUMMARY.splitlines(True) if "Checkpoint" in line)
+        for key in self.MAIN:
+            with self.subTest(key=key):
+                self.assertIsNone(guard.PATTERNS[key].search(checkpoint_only))
+        main_only = "".join(
+            line for line in self.SUMMARY.splitlines(True) if "Checkpoint" not in line)
+        for key in self.CHECKPOINT:
+            with self.subTest(key=key):
+                self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS[key], main_only))
+
+    def test_the_counters_cannot_be_pinned_when_unprinted(self):
+        reasons = guard.unpinnable(measurement(cnc_bruteforce_payloads_unwalked=None))
+        self.assertIn("cnc_bruteforce_payloads_unwalked", " ".join(reasons))
+
+
+class MovementTailCounterTests(unittest.TestCase):
+    """Each of the four numbers on each tails line reads its own position."""
+
+    SUMMARY = (
+        "  Movement tails:   11 sized (12 bits) / 13 open (14 bits)\n"
+        "  Checkpoint movement tails: 21 sized (22 bits) / 23 open (24 bits)\n"
+    )
+
+    def test_each_position_is_its_own_counter_in_its_own_block(self):
+        names = ("movement_sized_section_tails", "movement_sized_section_tail_bits",
+                 "movement_open_section_tails", "movement_open_section_tail_bits")
+        for offset, name in enumerate(names):
+            with self.subTest(name=name):
+                self.assertEqual(int(guard.PATTERNS[name].search(self.SUMMARY).group(1)),
+                                 11 + offset)
+                self.assertEqual(int(re.search(guard.CHECKPOINT_COUNTERS["cp_" + name],
+                                               self.SUMMARY).group(1)), 21 + offset)
+                checkpoint_only = self.SUMMARY.splitlines(True)[1]
+                self.assertIsNone(guard.PATTERNS[name].search(checkpoint_only))
+
+
 class RequiredInputTests(unittest.TestCase):
     def test_explicit_required_mode_cannot_report_missing_replay_as_skip(self):
         with tempfile.TemporaryDirectory() as temp:

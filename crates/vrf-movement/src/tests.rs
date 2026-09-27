@@ -497,3 +497,143 @@ fn invalid_magic_returns_error() {
         Err(e) => panic!("unexpected error: {e}"),
     }
 }
+
+/// A movement section: the magic, then `moves` variant-1 moves under the
+/// usual marker sequence, then an explicit 3-bit zero marker and `tail_bits`
+/// set bits the decoder has no reason to read.
+fn section_with_zero_marker_and_tail(moves: usize, tail_bits: u32) -> BitWriter {
+    let mut section = BitWriter::new();
+    section.write_u8(MOVEMENT_MAGIC);
+    let mut marker: u8 = 1;
+    for i in 0..moves {
+        section.write_bits_u64(u64::from(marker), 3);
+        section.write_other(&build_move(true, 10 + i as u32, 1.0, 2.0, 3.0));
+        marker = next_marker(marker);
+    }
+    section.write_bits_u64(0, 3);
+    for _ in 0..tail_bits {
+        section.write_bit(true);
+    }
+    section
+}
+
+/// Wrap `section` in a direct (not byte-wrapped) component stream. `sized`
+/// declares the section's own length as `movementBitCount`; otherwise the
+/// count is 0, which makes the section run to the end of the stream.
+fn component_stream(section: &BitWriter, sized: bool) -> BitWriter {
+    let mut payload = BitWriter::new();
+    payload.write_u16(if sized { section.bit_count() as u16 } else { 0 });
+    payload.write_other(section);
+    payload
+}
+
+/// `(sized tails, sized tail bits, open tails, open tail bits)`.
+fn tails(result: &crate::types::RpcDecodeResult) -> (u32, u64, u32, u64) {
+    (
+        result.sized_section_tails,
+        result.sized_section_tail_bits,
+        result.open_section_tails,
+        result.open_section_tail_bits,
+    )
+}
+
+#[test]
+fn a_zero_marker_with_bits_left_in_a_sized_section_is_tallied() {
+    // After the move 43 bits remain, more than the 31 bits of padding the
+    // grammar allows, so the decoder reads another marker; it is 0 and the
+    // section ends with 40 bits unread. That returned Ok with nothing counted,
+    // the same shape `decode_movement_rpc` already counts one layer up. A
+    // tally, not an error: it must not change which batches keep raw bits.
+    let stream = component_stream(&section_with_zero_marker_and_tail(1, 40), true);
+    let (result, moves) = decode(&build_rpc_payload(77, &stream));
+
+    assert_eq!(result.total_moves, 1);
+    assert_eq!(moves.len(), 1);
+    assert_eq!(result.error_count, 0, "a tally, not an error");
+    assert_eq!(tails(&result), (1, 40, 0, 0));
+}
+
+#[test]
+fn a_sized_section_that_ends_right_after_its_first_marker_is_tallied() {
+    let stream = component_stream(&section_with_zero_marker_and_tail(0, 40), true);
+    let (result, moves) = decode(&build_rpc_payload(77, &stream));
+
+    assert!(moves.is_empty());
+    assert_eq!(result.error_count, 0);
+    assert_eq!(tails(&result), (1, 40, 0, 0));
+}
+
+#[test]
+fn a_sized_window_too_short_for_the_magic_is_tallied() {
+    // Five bits cannot hold the 8-bit magic. The C# reference reports
+    // "Missing movement magic"; this decoder returned Ok with no trace.
+    let mut section = BitWriter::new();
+    section.write_bits_u64(0b10110, 5);
+    let (result, moves) = decode(&build_rpc_payload(77, &component_stream(&section, true)));
+
+    assert!(moves.is_empty());
+    assert_eq!(result.error_count, 0);
+    assert_eq!(tails(&result), (1, 5, 0, 0));
+}
+
+#[test]
+fn a_window_too_short_for_the_first_marker_is_tallied() {
+    // The magic, then two bits: not enough for a 3-bit marker ("Missing first
+    // movement marker" in the C# reference).
+    let mut section = BitWriter::new();
+    section.write_u8(MOVEMENT_MAGIC);
+    section.write_bits_u64(0b11, 2);
+    let (result, moves) = decode(&build_rpc_payload(77, &component_stream(&section, true)));
+
+    assert!(moves.is_empty());
+    assert_eq!(result.error_count, 0);
+    assert_eq!(tails(&result), (1, 2, 0, 0));
+}
+
+#[test]
+fn an_open_window_tail_is_tallied_apart_from_a_sized_one() {
+    // With movementBitCount 0 the section runs to the end of the component
+    // stream, so what follows a zero marker may be other component data
+    // rather than lost moves. Counted, but kept apart so the two readings
+    // are never summed into one number.
+    let stream = component_stream(&section_with_zero_marker_and_tail(1, 40), false);
+    let (result, moves) = decode(&build_rpc_payload(77, &stream));
+
+    assert_eq!(moves.len(), 1);
+    assert_eq!(result.error_count, 0);
+    assert_eq!(tails(&result), (0, 0, 1, 40));
+}
+
+#[test]
+fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
+    // The grammar's own end: at most 31 bits after a decoded move. The
+    // builder's trailing zero marker is 3 of them and is never read.
+    let stream = build_component_data_stream(&[
+        build_move(false, 42, 1.0, 2.0, 3.0),
+        build_move(true, 84, 10.0, 11.0, 12.0),
+    ]);
+    let (result, moves) = decode(&build_rpc_payload(9999, &stream));
+    assert_eq!(moves.len(), 2);
+    assert_eq!(tails(&result), (0, 0, 0, 0));
+
+    // An open window with no bits at all leaves nothing unread. (The C#
+    // reference still reports "Missing movement magic" here; this tally
+    // measures unread bits, not missing fields.)
+    let mut empty = BitWriter::new();
+    empty.write_u16(0);
+    let (result, moves) = decode(&build_rpc_payload(9999, &empty));
+    assert!(moves.is_empty());
+    assert_eq!(result.error_count, 0);
+    assert_eq!(tails(&result), (0, 0, 0, 0));
+
+    // A section that ends exactly on its zero marker leaves nothing either,
+    // whether the marker follows a move (read as padding) or the magic (read
+    // and taken as the end).
+    for moves_before in [1, 0] {
+        let exact = component_stream(&section_with_zero_marker_and_tail(moves_before, 0), true);
+        let (result, moves) = decode(&build_rpc_payload(9999, &exact));
+        assert_eq!(moves.len(), moves_before);
+        assert_eq!(result.error_count, 0);
+        assert_eq!(tails(&result), (0, 0, 0, 0), "{moves_before} move(s)");
+    }
+}

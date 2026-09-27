@@ -42,6 +42,10 @@ pub fn decode_movement_rpc(
         total_moves: 0,
         update_count: 0,
         error_count: 0,
+        sized_section_tails: 0,
+        sized_section_tail_bits: 0,
+        open_section_tails: 0,
+        open_section_tail_bits: 0,
     };
 
     // First bit: consumed but value ignored (C# discards via `TryReadBit(out _)`).
@@ -300,7 +304,16 @@ fn parse_movement_with_bit_count(
     };
 
     let mut movement_reader = reader.sub_reader(bits)?;
-    parse_movement_section(&mut movement_reader, shooter_guid, result, emit)?;
+    let tail_bits = parse_movement_section(&mut movement_reader, shooter_guid, result, emit)?;
+    if tail_bits > 0 {
+        if uses_all_remaining {
+            result.open_section_tails += 1;
+            result.open_section_tail_bits += tail_bits;
+        } else {
+            result.sized_section_tails += 1;
+            result.sized_section_tail_bits += tail_bits;
+        }
+    }
 
     if !uses_all_remaining {
         // Skip any remaining bits after movement section.

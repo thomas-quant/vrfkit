@@ -29,9 +29,8 @@ use vrf_schema::{
     CheckpointReadError, CheckpointTableSink, NetGuidCache, read_checkpoint_tables_with_sink,
 };
 
-use super::totals::SinkTotals;
 use crate::error::CliError;
-use crate::sink::{ChannelState, ExportSink, RecordBuffers};
+use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 
 /// Counters for the optional checkpoint pass. Kept together so the summary
 /// cannot report one and quietly omit another.
@@ -287,7 +286,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
             sink.packet_id = packet_count as u32;
             reader.process_packet(pkt.data, packet_count as i32, &mut sink);
             // Same aggregation the ReplayData pass uses, so the two cannot
-            // diverge on which counters they bother to read. See `totals`.
+            // diverge on which counters they bother to read. See `sink::totals`.
             stats.sink.absorb(&mut sink.stats, error_report);
         }
         let result = (|| -> Result<(), CliError> {

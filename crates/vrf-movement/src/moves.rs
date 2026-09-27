@@ -26,14 +26,21 @@ pub(crate) const MOVEMENT_MAGIC: u8 = 0x52;
 const MAX_MOVEMENT_PADDING_BITS: u64 = 31;
 
 /// Parse the movement section: magic byte, then a sequence of moves.
+///
+/// Returns the bits of the section's window left unread at a stop the grammar
+/// does not explain: a zero marker with bits still behind it, or a window too
+/// short for the magic or the first marker. The up-to-31 bits of padding after
+/// a decoded move are the grammar's own end and return 0, as does a window
+/// that was read to its last bit. The caller tallies a nonzero return; see
+/// [`RpcDecodeResult::sized_section_tails`] for why it is not an error.
 pub(crate) fn parse_movement_section(
     reader: &mut BitReader<'_>,
     shooter_guid: u32,
     result: &mut RpcDecodeResult,
     emit: &mut impl FnMut(MovementMove),
-) -> Result<(), MovementError> {
+) -> Result<u64, MovementError> {
     if reader.bits_remaining() < 8 {
-        return Ok(());
+        return Ok(reader.bits_remaining());
     }
 
     let magic = reader.read_u8()?;
@@ -42,7 +49,7 @@ pub(crate) fn parse_movement_section(
     }
 
     if reader.bits_remaining() < 3 {
-        return Ok(());
+        return Ok(reader.bits_remaining());
     }
 
     let mut expected_marker: u8 = 1;
@@ -62,14 +69,17 @@ pub(crate) fn parse_movement_section(
 
         // Check if we're in trailing padding territory.
         if reader.bits_remaining() <= MAX_MOVEMENT_PADDING_BITS {
-            return Ok(());
+            return Ok(0);
         }
 
         expected_marker = next_marker(expected_marker);
         marker = reader.read_bits(3)? as u8;
     }
 
-    Ok(())
+    // A zero marker ended the section. Inside the loop that is only reachable
+    // with more than the allowed padding behind the move, so anything left
+    // here is a tail; after the magic it may be exactly nothing.
+    Ok(reader.bits_remaining())
 }
 
 /// Compute the next expected marker in the sequence 1->2->3->4->5->6->7->1->2->...
