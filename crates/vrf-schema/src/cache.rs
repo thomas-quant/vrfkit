@@ -154,6 +154,9 @@ impl NetGuidCache {
             self.groups[idx].merge_from(&group);
             self.groups[idx].path = group.path;
             self.groups[idx].path_name_index = group.path_name_index;
+            // The path can have arrived as another spelling and the index can
+            // be new; either retires keys, so every lookup is rebuilt.
+            self.rebuild_group_indexes();
             idx
         } else if let Some(idx) = existing_by_index {
             // Index matched, path did not: `path_name_index` was reused for a
@@ -167,30 +170,69 @@ impl NetGuidCache {
             // declared. Replace the group outright instead of merging into
             // it.
             self.groups[idx] = group;
+            // The old class's spellings and leaf claim go with it.
+            self.rebuild_group_indexes();
             idx
         } else {
+            // Neither coordinate is known: a new group. It retires no key, so
+            // it is registered on its own rather than by rebuilding every
+            // group; `index_group` says why both leave the same lookups.
             let idx = self.groups.len();
             self.groups.push(group);
+            self.index_group(idx);
             idx
         };
 
-        self.rebuild_group_indexes();
         self.schema_generation = self.schema_generation.wrapping_add(1);
         Ok(idx)
     }
 
     /// Rebuild every group-derived lookup after a canonical identity changes.
+    ///
+    /// A merge or a replacement can retire keys: a group's old spellings, its
+    /// old index, its claim on a leaf. None of that can be taken back one key
+    /// at a time -- `AMBIGUOUS_LEAF` does not record which groups claimed the
+    /// leaf, and a spelling given up by one group may belong to another that
+    /// `by_path` no longer names -- so those two arms rebuild from `groups`.
+    /// A new group retires nothing; see [`Self::index_group`].
     fn rebuild_group_indexes(&mut self) {
         self.by_path.clear();
         self.by_index.clear();
         self.by_leaf.clear();
-        for (idx, group) in self.groups.iter().enumerate() {
-            for_each_replay_path_key(&group.path, |alias| {
-                self.by_path.insert(alias.to_owned(), idx);
-            });
-            self.by_index.insert(group.path_name_index, idx);
-            register_leaf(&mut self.by_leaf, &group.path, idx);
+        for idx in 0..self.groups.len() {
+            self.index_group(idx);
         }
+    }
+
+    /// Register group `idx` in the lookups: every spelling of its path, its
+    /// `path_name_index`, and its leaf. A later registration wins a spelling
+    /// or an index; a second claimant turns a leaf ambiguous.
+    ///
+    /// [`Self::rebuild_group_indexes`] is this, called for every group in
+    /// storage order. Calling it once, for a group just pushed, leaves the
+    /// maps that rebuild would, because:
+    ///
+    /// - the maps already equal a rebuild of the older groups. Every successful
+    ///   `add_export_group` ends in one of the two, an error returns before it
+    ///   touches anything, `clear` empties both sides, and nothing else writes
+    ///   these maps or a group's path or index; and
+    /// - a rebuild registers the new group last, and each write here is final
+    ///   for the last group either way: a spelling or index it shares with an
+    ///   older group ends up pointing at it, and a leaf it shares ends up
+    ///   ambiguous.
+    ///
+    /// The cache tests hold every arm of `add_export_group` to a full rebuild
+    /// after every call. The rebuild this spares a new group re-registers every
+    /// existing group, and the checkpoint pass -- a fresh cache per checkpoint,
+    /// every group new -- paid it once per group; the measured cost is in
+    /// docs/PERFORMANCE_NOTES.md#registering-a-new-export-group.
+    fn index_group(&mut self, idx: usize) {
+        let group = &self.groups[idx];
+        for_each_replay_path_key(&group.path, |key| {
+            self.by_path.insert(key.to_owned(), idx);
+        });
+        self.by_index.insert(group.path_name_index, idx);
+        register_leaf(&mut self.by_leaf, &group.path, idx);
     }
 
     /// Look up a group by its `path_name_index`.
@@ -202,6 +244,10 @@ impl NetGuidCache {
     }
 
     /// Get a mutable reference to a group by its `path_name_index`.
+    ///
+    /// For its field slots only. The lookups are keyed on the group's `path`
+    /// and `path_name_index`; changing either through this reference would
+    /// leave them naming the old values.
     #[must_use]
     pub fn get_group_by_index_mut(
         &mut self,
