@@ -990,7 +990,7 @@ layered, and the layers catch different things:
 - **Decode** (`check_decode_errors_corpus.py`, scoped export corpora) -- overlay
   type errors, struct-blob failures and array/leaf/truncated-RPC/movement
   failures; the recorded 13.04 scope is all 108 files with checkpoints enabled.
-- **Semantics** (`check_metrics_baseline.py`, 7 builds) -- round count,
+- **Semantics** (`check_metrics_baseline.py`, 8 builds) -- round count,
   score, K/D/A invariants that need no baseline.
 
 Two of the headline metrics are **not** "100% / high is good" and reading them

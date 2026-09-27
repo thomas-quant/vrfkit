@@ -1102,7 +1102,7 @@ has and the C# export does not, documented there.
 | `check_export_baseline.py` | 28 export counters + per-file rows/bytes | Other builds | 1 s |
 | `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures (top level; `--recursive` for subdirectories) | Broken semantics; Checkpoint chunks, unless `--checkpoints` | ~50 s |
 | `check_decode_errors_corpus.py --checkpoints` | The same failure counters for every Checkpoint chunk too (overlay, struct blobs, array truncations/residual bits, leaf errors, truncated RPCs, movement) | Broken semantics | slower: `vrfkit export` also decodes every Checkpoint chunk per replay |
-| `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A (7 builds) | Errors in the metrics pipeline itself | ~46 s |
+| `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A (8 builds) | Errors in the metrics pipeline itself | ~46 s |
 | `compare_combat_report.py` | Metrics-input multiset | Framing | seconds |
 
 **The layers differ.** The first three of those four read framing counters or
