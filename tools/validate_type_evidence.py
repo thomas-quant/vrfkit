@@ -26,12 +26,21 @@ multiples and one of them does not even start on a byte boundary:
   number (0 renders the bare name, ``N`` renders ``name_{N-1}``). Everything
   after the flag bit is one bit off byte alignment.
 * ``RepMovementByte`` / ``RepMovementShort`` -- ``FRepMovement``: four flag
-  bits, a quantized location (scaled by 100 when the header says so), a
-  rotator with 8- or 16-bit components, a quantized linear velocity, then the
-  optional angular velocity and IntPacked server frame/handle. With
-  ``--compare-typed`` the exported ``value_str`` JSON is parsed and compared
-  numerically, rotator components after rounding to f32 -- a string compare
-  would fail on ``1`` against ``1.0`` rather than on a wrong value.
+  bits, a quantized location, a rotator with 8- or 16-bit components, a
+  quantized linear velocity, then the optional angular velocity and IntPacked
+  server frame/handle. With ``--compare-typed`` the exported ``value_str`` JSON
+  is parsed and compared numerically, rotator components after rounding to
+  f32 -- a string compare would fail on ``1`` against ``1.0`` rather than on a
+  wrong value.
+
+  The location is compared WITHOUT assuming its scale. The packed header only
+  says "scaled"; the scale itself is not on the wire. The Rust reader divides
+  by 100, which measures as world/100 on every observed class but one
+  (Pawn_Aggrobot_SeekerNade_C, where it is world units) -- a known,
+  separately tracked divergence. So the check accepts the packed integers at
+  /100 or at /1, requires everything else to match exactly, and reports
+  which scale each row was exported at (``location_scales``). A fixture that
+  pinned /100 would fail the day that divergence is fixed, for no wrong bit.
 
 Bit-level payloads must also carry zero padding above ``bit_count``.
 """
@@ -133,21 +142,33 @@ def _fname(reader: _Bits) -> str:
     return name if number == 0 else f"{name}_{number - 1}"
 
 
-def _quantized_vector(reader: _Bits, scale: int) -> tuple[float, float, float]:
+def _packed_vector(reader: _Bits) -> dict:
     """``ReadPackedVector``: a SerializeInt(128) header whose low six bits are
     the component width and whose seventh says "scaled"; width 0 falls back to
-    three raw floats, or doubles when the seventh bit is set."""
+    three raw floats, or doubles when the seventh bit is set.
+
+    Returned unscaled -- ``{"packed": ints, "scaled": flag}`` or
+    ``{"floats": values}`` -- because the scale is the reader's choice, not
+    the wire's.
+    """
     header = reader.serialized_int(1 << 7)
-    width, scaled = header & 63, header >> 6
+    width, scaled = header & 63, bool(header >> 6)
     if width:
-        parts = [_signed(reader.bits(width), width) for _ in range(3)]
-        return tuple(p / scale if scaled else float(p) for p in parts)
+        return {"packed": tuple(_signed(reader.bits(width), width) for _ in range(3)),
+                "scaled": scaled}
     size, fmt = (64, "<d") if scaled else (32, "<f")
     parts = [struct.unpack(fmt, reader.bits(size).to_bytes(size // 8, "little"))[0]
              for _ in range(3)]
     if not all(math.isfinite(p) for p in parts):
         raise ValueError("non-finite packed vector component")
-    return tuple(parts)
+    return {"floats": tuple(parts)}
+
+
+def _unit_scale(vector: dict) -> tuple[float, float, float]:
+    """A velocity: whole units, where dividing by its scale of 1 is a no-op."""
+    if "floats" in vector:
+        return vector["floats"]
+    return tuple(float(p) for p in vector["packed"])
 
 
 def _rep_movement(reader: _Bits, rotation_bits: int) -> dict:
@@ -156,14 +177,14 @@ def _rep_movement(reader: _Bits, rotation_bits: int) -> dict:
     physics = reader.bit()
     frame = reader.bit()
     handle = reader.bit()
-    location = _quantized_vector(reader, 100)
+    location = _packed_vector(reader)
     scale = 360.0 / (1 << rotation_bits)
     rotation = []
     for _axis in ("pitch", "yaw", "roll"):
         present = reader.bit()
         rotation.append(_f32(reader.bits(rotation_bits) * scale) if present else 0.0)
-    velocity = _quantized_vector(reader, 1)
-    angular = _quantized_vector(reader, 1) if physics else None
+    velocity = _unit_scale(_packed_vector(reader))
+    angular = _unit_scale(_packed_vector(reader)) if physics else None
     server_frame = reader.int_packed() if frame else None
     server_handle = reader.int_packed() if handle else None
     return {
@@ -295,6 +316,41 @@ TYPED_COLUMNS = {
 }
 
 
+#: Location scales a RepMovement comparison accepts, in the order tried.
+LOCATION_SCALES = (100, 1)
+
+
+def rep_movement_location_scale(decoded: dict, exported) -> str | None:
+    """How `exported` renders `decoded`'s location, or None if it does not.
+
+    Every other member must be equal exactly. The location may be the packed
+    integers divided by any scale in LOCATION_SCALES -- the same one on all
+    three components, since the tuple is compared whole. A float fallback or
+    an unscaled packing has only one rendering.
+    """
+    if not isinstance(exported, dict) or exported.keys() != decoded.keys():
+        return None
+    if any(decoded[k] != exported[k] for k in decoded if k != "location"):
+        return None
+    location, got = decoded["location"], exported["location"]
+    if "floats" in location:
+        return "raw floats" if location["floats"] == got else None
+    if not location["scaled"]:
+        return "unscaled" if tuple(float(p) for p in location["packed"]) == got else None
+    for scale in LOCATION_SCALES:
+        if tuple(p / scale for p in location["packed"]) == got:
+            return f"/{scale}"
+    return None
+
+
+def values_match(type_name: str, decoded, exported) -> tuple[bool, str | None]:
+    """`(matches, detail)`; detail is a RepMovement row's location scale."""
+    if type_name.startswith("RepMovement"):
+        scale = rep_movement_location_scale(decoded, exported)
+        return scale is not None, scale
+    return exported == decoded, None
+
+
 def exported_value(row: dict, type_name: str):
     """The exported typed value, in the shape `decode_exact` returns.
 
@@ -359,6 +415,7 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
     failure_counts = Counter()
     typed_mismatch_count = 0
     typed_mismatch_examples = []
+    location_scales = defaultdict(Counter)
     paths = list(parquet_files(export_root, export_ids))
     if not paths:
         raise ValueError(f"no field parquet files below {export_root}")
@@ -398,7 +455,10 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
                     value = decode_exact(row["raw_bits"], row["bit_count"], type_name)
                     if compare_typed:
                         exported = exported_value(row, type_name)
-                        if exported != value:
+                        matched, detail = values_match(type_name, value, exported)
+                        if detail is not None:
+                            location_scales[label][detail] += 1
+                        if not matched:
                             typed_mismatch_count += 1
                             if len(typed_mismatch_examples) < 32:
                                 typed_mismatch_examples.append({
@@ -422,6 +482,8 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
                 "widths": dict(sorted(widths[label].items())),
                 "wire_keys": dict(sorted(wire_keys[label].items())),
                 **({"min": minima[label], "max": maxima[label]} if label in minima else {}),
+                **({"location_scales": dict(sorted(location_scales[label].items()))}
+                   if label in location_scales else {}),
             }
             for label, count in sorted(counts.items())
         },

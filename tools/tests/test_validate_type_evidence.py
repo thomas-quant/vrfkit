@@ -9,7 +9,9 @@ import pyarrow.parquet as pq
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from validate_type_evidence import decode_exact, exported_value, validate  # noqa: E402
+from validate_type_evidence import (  # noqa: E402
+    decode_exact, exported_value, validate, values_match,
+)
 
 
 def pack_bits(*fields):
@@ -89,7 +91,26 @@ class BitLevelTypeTests(unittest.TestCase):
         ):
             decoded = decode_exact(bytes.fromhex(hex_bits), bits, type_name)
             self.assertEqual(
-                exported_value({"value_str": text}, type_name), decoded, type_name)
+                values_match(type_name, decoded,
+                             exported_value({"value_str": text}, type_name)),
+                (True, "/100"), type_name)
+
+    def test_the_location_scale_is_reported_not_assumed(self):
+        """The same bits exported in world units still match, at "/1"; a
+        scale nobody uses, or two scales in one vector, does not."""
+        hex_bits, bits, text = DIVEBOMB_BYTE
+        decoded = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
+        self.assertEqual(decoded["location"], {"packed": (2525, -4404, 680), "scaled": True})
+        for location, expected in (
+            ('{"x":2525,"y":-4404,"z":680}', (True, "/1")),
+            ('{"x":252.5,"y":-440.4,"z":68}', (False, None)),
+            ('{"x":2525,"y":-44.04,"z":6.8}', (False, None)),
+        ):
+            world = text.replace('{"x":25.25,"y":-44.04,"z":6.8}', location)
+            self.assertEqual(
+                values_match("RepMovementByte", decoded,
+                             exported_value({"value_str": world}, "RepMovementByte")),
+                expected, location)
 
     def test_the_wrong_rotator_width_is_caught(self):
         """A Byte row read as Short runs off the end. The reverse can consume
@@ -99,14 +120,17 @@ class BitLevelTypeTests(unittest.TestCase):
             decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementShort")
         hex_bits, bits, text = SEEKER_NADE_SHORT
         as_byte = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
-        self.assertNotEqual(exported_value({"value_str": text}, "RepMovementByte"), as_byte)
+        self.assertEqual(
+            values_match("RepMovementByte", as_byte,
+                         exported_value({"value_str": text}, "RepMovementByte")),
+            (False, None))
 
     def test_rep_movement_optional_members_are_read_in_wire_order(self):
         # flags: physics, server frame and server handle set; every vector and
         # rotator component present and non-zero.
         raw, bits = pack_bits(
             (0, 1), (1, 1), (1, 1), (1, 1),
-            (70, 7), (5, 6), (-3, 6), (1, 6),         # location, scaled x100
+            (70, 7), (5, 6), (-3, 6), (1, 6),         # location, "scaled" set
             (1, 1), (64, 8), (0, 1), (1, 1), (128, 8),  # pitch, no yaw, roll
             (6, 7), (-7, 6), (0, 6), (31, 6),          # velocity, unscaled
             (6, 7), (1, 6), (2, 6), (3, 6),            # angular velocity
@@ -115,7 +139,7 @@ class BitLevelTypeTests(unittest.TestCase):
         self.assertEqual(decode_exact(raw, bits, "RepMovementByte"), {
             "linear_velocity": (-7.0, 0.0, 31.0),
             "angular_velocity": (1.0, 2.0, 3.0),
-            "location": (0.05, -0.03, 0.01),
+            "location": {"packed": (5, -3, 1), "scaled": True},
             "rotation": (90.0, 0.0, 180.0),
             "simulated_physics_sleep": False,
             "rep_physics": True,
@@ -126,8 +150,10 @@ class BitLevelTypeTests(unittest.TestCase):
     def test_an_unparseable_export_is_a_mismatch_not_a_crash(self):
         hex_bits, bits, _text = DIVEBOMB_BYTE
         decoded = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
-        self.assertNotEqual(
-            exported_value({"value_str": "{not json"}, "RepMovementByte"), decoded)
+        self.assertEqual(
+            values_match("RepMovementByte", decoded,
+                         exported_value({"value_str": "{not json"}, "RepMovementByte")),
+            (False, None))
 
     def test_compare_typed_checks_every_bit_level_type(self):
         rows = [
@@ -156,6 +182,7 @@ class BitLevelTypeTests(unittest.TestCase):
         clean = run(rows)
         self.assertEqual((clean["failure_count"], clean["typed_mismatch_count"]), (0, 0))
         self.assertEqual(clean["missing"], [])
+        self.assertEqual(clean["fields"]["g::m"]["location_scales"], {"/100": 1})
         wrong = [
             ("g", "e", 3, bytes.fromhex("05"), 4, None),
             ("g", "n", 97, bytes.fromhex("08000000a4cac8000000000000"), None, "Blue"),
