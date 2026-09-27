@@ -74,7 +74,8 @@ EXPECTED += [
     ("/Game/Characters/", "ReplayLastTransformUpdateTimeStamp",
      "FieldType::Float"),
     ("SmokeScreen", "ReplicatedMovement",
-     "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents }"),
+     "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+     "location: VectorQuantization::RoundTwoDecimals }"),
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::Raw"),
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Point", "EquippableUsed", "FieldType::ObjectNetGuid"),

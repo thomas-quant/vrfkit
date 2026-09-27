@@ -6,7 +6,7 @@
 
 use crate::decode::FieldType;
 use crate::overlay::{OverlayEntry, OverlayHandleEntry};
-use crate::types::RotatorQuantization;
+use crate::types::{RotatorQuantization, VectorQuantization};
 
 pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
     OverlayEntry {
@@ -94,6 +94,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -111,6 +112,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -128,6 +130,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -145,6 +148,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -177,6 +181,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -339,6 +344,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -1146,6 +1152,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -1243,6 +1250,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -1465,6 +1473,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -1482,6 +1491,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -1734,6 +1744,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -1846,6 +1857,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2133,6 +2145,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2150,6 +2163,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2167,6 +2181,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2184,6 +2199,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2326,6 +2342,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2478,6 +2495,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2495,6 +2513,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2642,6 +2661,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2724,6 +2744,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2741,6 +2762,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2758,6 +2780,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -2840,6 +2863,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {
@@ -5182,6 +5206,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1319] = [
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     },
     OverlayEntry {

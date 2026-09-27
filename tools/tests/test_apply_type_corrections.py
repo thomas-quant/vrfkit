@@ -404,7 +404,8 @@ def whole_table(overrides=None, drop=(), one_line=False):
 #: applies in BOTH layouts: a file carrying ShortComponents is correctable.
 UNCORRECTED_SMOKESCREEN = {
     ("SmokeScreen", "ReplicatedMovement"):
-        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents }",
+        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+        "location: VectorQuantization::RoundTwoDecimals }",
 }
 #: `TimedBomb.TimeRemainingToExplode` is rewritten by a pass that matches a
 #: one-line literal, so in the rustfmt'd layout it is DEAD -- the file is not

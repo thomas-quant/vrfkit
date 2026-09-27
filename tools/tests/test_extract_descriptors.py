@@ -102,8 +102,43 @@ public sealed class ByteFlash : BaseFlash<ByteFlash>
         ERotatorQuantization.ByteComponents;
 }
 '''})
-        self.assertIn('group_path: "/short", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents }', output)
-        self.assertIn('group_path: "/byte", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents }', output)
+        self.assertIn('group_path: "/short", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }', output)
+        self.assertIn('group_path: "/byte", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundTwoDecimals }', output)
+
+    def test_every_movement_form_states_its_location_quantization(self):
+        """The explicit, bare and virtual `.ReplicatedMovement` forms all emit
+        the location level. The wire does not carry it, so an entry without it
+        would leave the reader to assume one -- the constant divisor this
+        field exists to replace."""
+        output = self.run_generator({"Movement.cs": r'''
+public sealed class Explicit : ExportGroupDescriptor<Explicit>
+{
+    public override string Path => "/explicit";
+    protected override void Configure()
+    {
+        AddProperty(x => x.ReplicatedMovement)
+            .ReplicatedMovement(ERotatorQuantization.ByteComponents);
+    }
+}
+public sealed class Bare : ExportGroupDescriptor<Bare>
+{
+    public override string Path => "/bare";
+    protected override void Configure()
+    {
+        AddProperty(x => x.ReplicatedMovement).ReplicatedMovement();
+    }
+}
+'''})
+        types = {
+            group: field_type.strip()
+            for group, field, field_type in ENTRY_RE.findall(output)
+            if field == "ReplicatedMovement"
+        }
+        self.assertEqual(types, {
+            "/explicit": "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundTwoDecimals }",
+            "/bare": "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }",
+        })
+        self.assertIn("use crate::types::{RotatorQuantization, VectorQuantization};", output)
 
     def test_unresolved_movement_property_fails(self):
         error = self.run_generator_expecting_failure({"Movement.cs": r'''
