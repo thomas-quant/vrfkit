@@ -86,6 +86,7 @@ replays joined all ten and the worst managed 7; after it, 71 of 71 do.
 | Source (buy/ability/etc.) | `PurchasableTransactionSource` | ◐ partial (some rows) |
 | Inventory slot → item | `ItemSlot.Contents`, `AresInventory.ItemSlots` | ✅ / ◐ (MultiItemSlot raw) |
 | Charges purchasable this round | `EquipmentChargeComponent.TotalChargesAllowedToPurchaseThisRound` | ✅ |
+| Inventory correction counters | `AresInventory.CorrectionIndex` / `LastSeenClientCorrectionIndex` | ✅ Int32; strictly increasing per inventory, `LastSeen` always below `Correction`. What they count is inferred from the names only |
 
 Join `Purchaseable` to `net_guids`, `PurchasingPlayerState` to player identity,
 and update time to the latest preceding round boundary. Fields arrive as
@@ -110,6 +111,8 @@ requires corroborating credit changes; state rows alone are not that ledger.
 | Regional damage (head/body/leg) | `Interactions[].Regions[].Hits/Damage` | ✅ multiset-identical (on 13.01) |
 | Wallbang | `bIsWallPen` | ✅ |
 | Damage source (weapon, location, bone) | `MulticastNotifyDamage` (EquippableUsed, ImpactLocation, ImpactBone) | ✅ |
+| Finisher effect on a kill | `MulticastNotifyDamage_{Point,Base}.DeathMontageEffectOverride` → `net_guids.path` | ✅ ObjectNetGuid; 0 (the null reference) except on some kills, where it names an `FXC_*_C` finisher effect class |
+| Death-montage context | `MulticastNotifyDamage_{Point,Base}.DeathMontageEffectOverrideContext` → `actors.parquet` (a dynamic actor: `net_guids` has no path for it) | ✅ ObjectNetGuid; 0 (the null reference) except on kills, where it is a player-character pawn open at the event. Not established as the killer or the victim |
 | ADR | derived from CombatReport | ◐ +0.1–0.2 vs trackers (wire damage is fractional; not a bug) |
 | Health / armour / overheal, absolute | `DamageableComponent` RPCs → `LifeChangeEvents[]` / `LifeChangeBySection[]` | ✅ typed section updates; actor/section timelines require joins, see below |
 
@@ -407,6 +410,7 @@ crouch speed is ~190 cm/s.
 | Time (128 Hz tick, resets per round) / global | movement `timestamp` / `time_ms` | ✅ — `timestamp` is a **tick counter**, not milliseconds |
 | Posture (crouch) | `fields.bCrouchHeld` (not movement_state) | ✅ |
 | Trajectory | movement time series per character | ✅ |
+| Force modules on a character (tagging, knockback, movement modifiers) | `ForceModuleManagerComponent` RPCs: `NetMulticastApplyForceModule` -- `Module` (→ `net_guids`, a `ForceModule_*` class), `ModuleType`, `Character` (equals the row's actor), `RespawnNumber`, `NetTimestamp`, `HandleNumber`, `SourceLocation`; `NetMulticastRemoveForceModule` -- `HandleNumber`, `ModuleType` | ✅ typed. `ModuleType` names are unknown: 0 is most modules and 2 the six displacement ones on Apply; Remove's 1 has no established meaning. `NetTimestamp` is a per-actor/per-life clock, not replay time |
 
 ### The tick is 128 Hz by a 3:13 pattern, not by alternating
 
@@ -474,6 +478,9 @@ rows, on build 13.02.
 | Reserve ammo over time | `AmmoComponent.AuthResourceAmount` (Int32) | ✅ via the `ReserveAmmo` remap -- same native component, second instance; reads 0..200, plus a 999 sentinel (below) |
 | Equipped weapon (per player, over time) | `AresInventory.CurrentEquippable` / `NewCurrentEquippable` -> actor class | ✅ via InventoryComponent->AresInventory remap (resolve the NetGUID to its equippable actor) |
 | Equipped weapon (on damage) | `MulticastNotifyDamage.EquippableUsed` | ✅ |
+| Holder of a weapon effect | `AresEquippable:MulticastPlay{Continuous,OneShot}EffectFromClient.EffectManagerComponent` → `net_guids` (`EffectManager`, whose outer is the holding pawn) | ✅ ObjectNetGuid; a just-dropped weapon can still name its previous holder |
+| Weapon readying speed | `ReadyingStateComponent.AuthEquipSpeed` | ✅ EnumByte, {0, 1, 2} in the main stream (same values as `AutoEquipSpeed`); member names unknown. Always 0 in checkpoints, so not readying state there |
+| Buyer team recorded on an equippable | `AresEquippableDataTracker.OriginalBuyerTeam` | ✅ FName as sent, `Red` or `Blue`; nothing maps it to attacker/defender or to a player |
 | Skin / spray / charm | `manifest` playerLoadouts (per subject) | ✅ |
 
 **999 means infinite reserve, not infinite ammo.** It appears on 53 rows over
@@ -724,7 +731,7 @@ errors still 0. Corpus-wide at the time, 215/215 replays with decode errors 0.
 
 Those are the deltas that change produced, not current totals. Later work moved
 both ends: `tools/baselines/export_02d4d478.json` pins today's figures
-(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 796,920`). Read this
+(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 813,810`). Read this
 paragraph as a dated before/after, which is what it was written as.
 
 **This is the one thing here that a game patch can silently invalidate.** A

@@ -437,7 +437,10 @@ class MeasuredCountTests(unittest.TestCase):
         # expectation_count() includes the generated table's dynamic weapon
         # entries. Keep this pin explicit: verified new typing changes the
         # count, and the test must make that intentional change visible.
-        self.assertEqual(guard.measured_counts()["corrections"], 187)
+        # 187 -> 204: the September 2026 table typing -- 12 ADDITIONS plus the
+        # AllianceFilter and four DeathMontage corrections (OriginalBuyerTeam
+        # changed type but not count).
+        self.assertEqual(guard.measured_counts()["corrections"], 204)
 
 
 class GeneratedInventoryTests(unittest.TestCase):

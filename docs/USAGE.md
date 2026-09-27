@@ -200,11 +200,11 @@ member and handle by name.
 #### Reading the `Typed` ratio
 
 ```
-  Typed:            80.6% (properties + RPC parameters)
+  Typed:            82.3% (properties + RPC parameters)
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 796,920 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 813,810 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -223,13 +223,13 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 | |
+| `fields.parquet` | 1,296,660 | 16,473,488 | |
 | `movement.parquet` | 1,844,147 | 31,886,449 | |
 | `actors.parquet` | 3,827 | 87,281 | |
 | `net_guids.parquet` | 16,167 | 153,606 | |
 | `events.parquet` | 195 | 13,411 | |
 | `partials.parquet` | 0 | 2,505 | main-only; with checkpoints: 0 rows, 2,505 bytes |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 | requires `--checkpoints` |
+| `checkpoint_fields.parquet` | 352,089 | 1,221,329 | requires `--checkpoints` |
 | `checkpoint_actors.parquet` | 3,014 | 27,118 | requires `--checkpoints` |
 | `checkpoint_net_guids.parquet` | 74,270 | 277,718 | requires `--checkpoints` |
 | `checkpoint_blocks.parquet` | 22,247 | 175,103 | requires `--checkpoints` |
@@ -629,7 +629,7 @@ needs it.
 
 | Script | Produces |
 |---|---|
-| `extract_descriptors.py` | `crates/vrf-decode/src/table.rs` (overlay table 1,319 + 96 handles) from the vendored C# descriptors in `third_party/vrp/Replay.Valorant` |
+| `extract_descriptors.py` | `crates/vrf-decode/src/table.rs` (overlay table 1,331 + 96 handles) from the vendored C# descriptors in `third_party/vrp/Replay.Valorant` |
 | `apply_type_corrections.py` | Applies verified corrections/additions to that file and recomputes the two-line generation header |
 | `extract_checksum_types.py` | `crates/vrf-decode/src/checksum_table.rs` -- `compatible_checksum` -> `FieldType`, learned from the fields the overlay table already declares. Needs an export directory rather than the C# tree, since checksums come from the replay. Checksums whose donors disagree are dropped, which is the safety property. Repeat `--export` to widen the basis; the run **merges** into the committed table rather than replacing it, because a checksum this basis did not happen to see is still correct. `--check` asks whether the two agree *where they overlap* -- not whether they are byte-identical, which a content-addressed table cannot be across different sets of replays. |
 | `extract_sboxes.py` | `crates/vrf-transform/src/sbox.rs` |
@@ -645,7 +645,7 @@ state after applying** and fails if it disagrees.
 ```bash
 python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
     crates/vrf-decode/src/table.rs
-python tools/apply_type_corrections.py           # apply, then verify (187 corrections)
+python tools/apply_type_corrections.py           # apply, then verify (204 corrections)
 cargo +1.86.0 fmt -p vrf-decode
 
 python tools/apply_type_corrections.py --check   # verify only
@@ -654,11 +654,11 @@ python tools/apply_type_corrections.py --check   # verify only
 CI runs the extract, apply and fmt lines on every push and fails if
 `table.rs` then differs from the committed file.
 
-Those 187 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
+Those 204 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
 subset absent from the vendored C# descriptor input (`third_party/vrp`).
 
 The `ADDITIONS` pass inserts items the pinned C# input is **silent on**. There are
-currently 125 of them, and every one is admitted on wire evidence written into the
+currently 137 of them, and every one is admitted on wire evidence written into the
 comment above the list -- bit width, value range, distribution -- and nothing else.
 The original three still show the bar: `BaseTeamState.LoadoutValue` /
 `AverageLoadoutValue` (26-I, where the reference declares the type of the same
@@ -669,7 +669,7 @@ first, and read the "Deliberately NOT added" note in the same comment, which
 records the fields that failed the bar and why.
 
 Both counts above are measured, not maintained by hand. `check_docs.py` reads the
-187 against `expectation_count(table.rs)`, so a stale one is caught -- but
+204 against `expectation_count(table.rs)`, so a stale one is caught -- but
 **nothing checks the `ADDITIONS` figure**, which is why it sat at 70 while the
 list held 73. Re-measure it by importing the module rather than counting the
 source by eye (`tools/` has to be on the path; the module imports `atomic_io`
@@ -876,11 +876,27 @@ reads four bit-level types -- `EnumByte` (a 1..8-bit payload), `FName`,
 `RepMovementByte` and `RepMovementShort` -- with its own LSB-first reader rather
 than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
 `ReplicatedMovement` value is compared by parsing the exported JSON, so `1` and
-`1.0` are the same number there. The shipped `tools/fixtures/type_evidence.json`
-covers the 38 additions; `tools/fixtures/type_evidence_aliases.json` separately
-covers their existing Swiftplay class-alias propagation. Both were checked on
-all corresponding observed rows in the 714-replay corpus. A specimen must not
-be promoted to gameplay semantics just because this primitive check passes.
+`1.0` are the same number there. Its `location` is compared at either scale the
+packed integers allow -- divided by 100, as the reader does today, or in whole
+units -- and the report says which (`location_scales`): the reader's /100 is
+world/100 on every observed class but `Pawn_Aggrobot_SeekerNade_C`, a known
+divergence that a fixture must not lock in.
+
+The shipped `tools/fixtures/type_evidence.json` covers the 38 crosshair and
+Tidal Wave additions plus 104 checksum-scoped wire entries for the September
+2026 table typing -- `AllianceFilter`, the weapon `EffectManagerComponent`, the
+ForceModule parameters, the two death-montage references, `AuthEquipSpeed`,
+the inventory correction counters, `OriginalBuyerTeam` and HawkFlash's
+movement and banking -- one entry per exported group that carries each, which
+is why every weapon `_ClassNetCache` group is listed. All 142 were checked
+without `--compare-typed` on every row of the 1,018-replay audit exports
+(44,934,425 rows, 0 failures, nothing missing), and with `--compare-typed` on
+31 fresh exports covering all 24 builds. `tools/fixtures/type_evidence_aliases.json`
+separately covers the existing Swiftplay class-alias propagation of the
+original additions, checked in the 714-replay corpus. Run on a sample, the
+`missing` list names every entry that sample lacks, and the exit status is 1
+for that reason alone. A specimen must not be promoted to gameplay semantics
+just because this primitive check passes.
 
 `validate_ability_array_evidence.py <export-directory> [...] --compare-typed
 --require-routes` checks the measured `ActiveBlinds` and
@@ -1013,14 +1029,14 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 714 passing
+cargo +1.86.0 test --workspace --locked                              # 721 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 910 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 925 tests
 python -W error tools/check_docs.py --fast
-python -W error tools/apply_type_corrections.py --check              # 187 corrections
+python -W error tools/apply_type_corrections.py --check              # 204 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
 python -W error tools/extract_equippables.py --check
 python -W error tools/check_baseline_schemas.py
@@ -1226,7 +1242,7 @@ live in `%LOCALAPPDATA%\vrfkit\baseline-corpora`.
 
 ## 8. Known limits
 
-- **Untyped residual** -- the [`export`](#export) `Typed` is ~80.6% (denominator
+- **Untyped residual** -- the [`export`](#export) `Typed` is ~82.3% (denominator
   including RPC parameters). **Untyped != lost** (`raw_bits` preserved). Typing
   the rest needs the game binary or UE headers -- this is not a table-editing
   problem (archive/PROJECT_STATUS.md section 24).

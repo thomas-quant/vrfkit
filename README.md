@@ -18,9 +18,9 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
-**Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
-**910 passing** tests. All 24 supported builds received the same verification
-on **986 unique replays**; all **986** meet every strict criterion after fixing
+**Verified state:** Rust has **721 passing** tests; Python has **925 passing**
+tests (2026-09-28). All 24 supported builds received the same verification
+(2026-09-25) on **986 unique replays**; all **986** meet every strict criterion after fixing
 the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
 
@@ -134,7 +134,7 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
-- **714 Rust tests** plus a layered validation suite (framing / bytes / decode
+- **721 Rust tests** plus a layered validation suite (framing / bytes / decode
   errors / semantics).
 
 ## Table of contents
@@ -188,13 +188,13 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 |
+| `fields.parquet` | 1,296,660 | 16,473,488 |
 | `movement.parquet` | 1,844,147 | 31,886,449 |
 | `actors.parquet` | 3,827 | 87,281 |
 | `net_guids.parquet` | 16,167 | 153,606 |
 | `events.parquet` | 195 | 13,411 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 |
+| `checkpoint_fields.parquet` | 352,089 | 1,221,329 |
 | `checkpoint_actors.parquet` | 3,014 | 27,118 |
 | `checkpoint_net_guids.parquet` | 74,270 | 277,718 |
 | `checkpoint_blocks.parquet` | 22,247 | 175,103 |
@@ -379,7 +379,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**714 passing**; the full Python suite also has **910 passing** tests. The
+**721 passing**; the full Python suite also has **925 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
@@ -726,7 +726,7 @@ cannot be expanded into fields, so it emits one preservation row (`handle` =
 diagnostic rather than pretending the properties were decoded.
 
 The overlay table is extracted mechanically from the C# descriptors
-(`tools/extract_descriptors.py`) -- 219 groups, 1,319 entries, 96 handles.
+(`tools/extract_descriptors.py`) -- 220 groups, 1,331 entries, 96 handles.
 Those descriptors are vendored verbatim in
 [`third_party/vrp/`](third_party/vrp/README.md),
 and CI regenerates the table from them on every push.
@@ -748,13 +748,13 @@ committed export baseline `tools/baselines/export_02d4d478.json` after the
 partial-header and shot-array corrections:
 
 ```
-Decoded OK:   796,920      Decode errors:      0
-Raw/Skip:      26,507      Not in table: 163,534
-No field name:  2,034      Typed:          80.6%
+Decoded OK:   813,810      Decode errors:      0
+Raw/Skip:      24,747      Not in table: 148,404
+No field name:  2,034      Typed:          82.3%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (796,920 + 26,507 + 163,534 +
+The four buckets partition `Rows offered` exactly (813,810 + 24,747 + 148,404 +
 2,034 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
@@ -775,7 +775,7 @@ Physical value coverage is the fraction of `fields.parquet` rows with at
 least one non-null `value_*` column. It cannot be computed by adding overlay,
 effect-blob or struct counters: these count different units and may describe
 parent/child expansions of the same input. The current reference
-baseline has 914,117 typed rows out of 1,296,660 (70.50%), measured directly
+baseline has 931,007 typed rows out of 1,296,660 (71.80%), measured directly
 from its columns.
 Adding raw child windows changes this denominator even when every old typed
 value survives; compare raw preservation and newly typed values separately.
@@ -833,7 +833,7 @@ checkpoint decode failures. This separate check exists because `vrfkit
 validate` does not print overlay counters, so `validate_corpus.py` alone cannot
 see a wrong type. Reaching zero found three places where the wire disagreed
 with the C# declarations; they are recorded with evidence in
-`tools/apply_type_corrections.py` (187 corrections, verified with `--check`).
+`tools/apply_type_corrections.py` (204 corrections, verified with `--check`).
 
 | Symptom | Actual | Evidence |
 |---|---|---|
@@ -1002,7 +1002,7 @@ that way is a trap:
   rows cannot yet be split into named properties. `Malformed framing`,
   `Transform failed`, and `RPC payload lost` must remain zero; a non-zero
   `RPC unresolved/raw` count describes preserved, uninterpreted data.
-- The **~80.6% `Typed`** ratio reads low because of the *RPC-parameter
+- The **~82.3% `Typed`** ratio reads low because of the *RPC-parameter
   denominator* -- most of `Not in table` is RPC parameters with no C#
   descriptor. A low ratio is uninterpreted, not lost: those rows still carry
   `raw_bits`, and additive decoders (effects, structs, the economy typing)
@@ -1014,7 +1014,7 @@ The following files are generated and must never be edited by hand:
 
 | Generated file | Generator | Notes |
 |---|---|---|
-| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,319 entries, 219 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
+| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,331 entries, 220 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
 | `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum primitive types for ambiguous field names; no cross-group propagation |
 | `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` | 768-byte S-box, shared across builds |

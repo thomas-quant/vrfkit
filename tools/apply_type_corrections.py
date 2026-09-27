@@ -887,7 +887,11 @@ ADDITIONS = [
     # Pawn_Aggrobot_SeekerNade_C); it is not this entry's to fix, and nothing
     # here pins a location value. Multiply by 100 for world coordinates, and
     # expect roll 0.0 always -- it is never replicated, so that is the
-    # absent-flag default, not a measurement.
+    # absent-flag default, not a measurement. Re-measured on this change's own
+    # exports (31 replays, 15 builds with the class, 327 actors, first update
+    # at the actor's open time): median 8,043 cm from spawn as decoded, 0.50 cm
+    # (max 0.87) after x100. So when the location scale becomes part of the
+    # table entry, this one is whole units, like the other projectiles.
     #
     # `Banking` (checksum 677106858, handle 17 on 11.06-11.09 and 18 after --
     # where PostControlVelocity took 17, so a handle rule would have mistyped
