@@ -82,8 +82,8 @@
   "parquet": {
     "fields": {
       "rows": 1296660,
-      "bytes": 12680657,
-      "sha256": "67649bc8f25c5f5ba8bd19e9badf6eb9060b36fc2d05284d247e00dab27b6bde"
+      "bytes": 12679221,
+      "sha256": "43b84a71df383cbea78b1a6bc9e44edde6fb294bcd8544d2d7235cb7130858a2"
     },
     "movement": {
       "rows": 1844147,
@@ -112,8 +112,8 @@
     },
     "checkpoint_fields": {
       "rows": 352089,
-      "bytes": 1183936,
-      "sha256": "95a2a3e7e37d799ce3db592c5507f49ec7543565e95ab3e79742183f355a6d29"
+      "bytes": 1183648,
+      "sha256": "4d8cefcfbf641ec99f874bfded5278f5cee5fa51943eeaaac256de5da81d6358"
     },
     "checkpoint_actors": {
       "rows": 3014,
@@ -127,23 +127,23 @@
     },
     "checkpoint_blocks": {
       "rows": 22247,
-      "bytes": 112704,
-      "sha256": "f1e045f3a071e361fe09e78ca9e774aa8e349c42254c3fe47c446eff56ac5e4a"
+      "bytes": 112647,
+      "sha256": "e17927af29fc4d6f8080018e4c21e1fc7fae9f54007251673d2bd6763969ba4e"
     },
     "checkpoint_guid_entries": {
       "rows": 74270,
-      "bytes": 651660,
-      "sha256": "1a7bfbf09ba183ce40da5239cf4b9446e7d3b07c2f7195a2618362864744265b"
+      "bytes": 219662,
+      "sha256": "cd59c5c3e51b2c440291df78bfa0ac5c9c0e496840f96f444560e4ab51a04afd"
     },
     "checkpoint_export_groups": {
       "rows": 8307,
-      "bytes": 20799,
-      "sha256": "625e64c899bfe0db90f66fc7710b7813be7b952919730daa973788ba787540be"
+      "bytes": 16481,
+      "sha256": "0c0039daecedfc0dd9f2fdaed82ee3febb63406706f05b4bd014c5947d5d4630"
     },
     "checkpoint_export_fields": {
       "rows": 49314,
-      "bytes": 241210,
-      "sha256": "b56da60b8099ecfbfc192e6f7ff23ab3f1c01416ca2f94788d3d5ce9203b244f"
+      "bytes": 106370,
+      "sha256": "cb10bea2ebe68c4af60d987b376804cfc33e7908f69dd76f5c0777c3eb613ac1"
     }
   },
   "replay": "02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf"
