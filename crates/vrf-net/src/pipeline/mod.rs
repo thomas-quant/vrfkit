@@ -2767,11 +2767,133 @@ mod tests {
         assert_eq!(sink.stream_failures[0].record_offset, Some(9));
     }
 
+    /// Frame `bits` as one whole bunch payload, straight through
+    /// `frame_content_blocks`, on channel 5 for static actor 42.
+    fn frame_bits(bits: &[bool]) -> (NetStats, TestSink) {
+        let mut data = vec![0u8; bits.len().div_ceil(8)];
+        for (i, &bit) in bits.iter().enumerate() {
+            if bit {
+                data[i >> 3] |= 1 << (i & 7);
+            }
+        }
+        let mut payload = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
+        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut sink = TestSink::default();
+        let mut stats = NetStats::default();
+        let mut channels = ChannelTable::default();
+        let header = RawBunchHeader {
+            payload_bit_count: bits.len() as i32,
+            ..Default::default()
+        };
+        let ctx = BunchContext {
+            header: &header,
+            ids: BunchIds {
+                bunch_index_in_packet: 0,
+                global_bunch_index: 0,
+                channel_bunch_index: 1,
+            },
+        };
+        let mut stage = Stage {
+            stats: &mut stats,
+            channels: &mut channels,
+            transform: reader.transform,
+            scratch: &mut reader.scratch,
+        };
+        framing::frame_content_blocks(
+            &mut payload,
+            5,
+            NetworkGuid(42),
+            &mut stage,
+            &mut sink,
+            &ctx,
+        );
+        assert!(
+            payload.at_end(),
+            "an abort leaves nothing behind for a caller to misread"
+        );
+        (stats, sink)
+    }
+
+    /// A subobject header that runs out at its class GUID: hasRepLayout,
+    /// isActor = 0, object GUID IntPacked(5), not stably named, not deleted --
+    /// 12 bits, all read, and then the class GUID's first byte is not there.
+    fn truncated_subobject_header() -> Vec<bool> {
+        let mut bits = vec![true, false];
+        write_int_packed(&mut bits, 5);
+        bits.extend([false, false]);
+        bits
+    }
+
+    /// A header that fails to read has already consumed what it read. The
+    /// abort charged `bits_remaining()`, which is 0 here, so
+    /// `content_block_framing_failures` moved with no bit tally behind it --
+    /// the undercount `abandoned_on_error` and `abandon_bunch` already fixed
+    /// one depth down and one depth up.
+    #[test]
+    fn a_truncated_block_header_charges_the_bits_it_consumed() {
+        let (stats, sink) = frame_bits(&truncated_subobject_header());
+
+        assert_eq!(stats.content_block_framing_failures, 1);
+        assert_eq!(stats.skipped_bits, 12, "the whole failed block, not 0");
+        assert_eq!(stats.content_blocks, 0);
+        assert!(sink.content_blocks.is_empty());
+        #[cfg(feature = "diagnostics")]
+        {
+            use crate::stats::SkipReason;
+            let ev = &stats.diagnostics[0];
+            assert!(matches!(ev.reason, SkipReason::HeaderReadError));
+            assert_eq!(ev.bits_skipped, 12);
+            assert_eq!((ev.consumed_bits, ev.remaining_bits), (0, 0));
+        }
+    }
+
+    /// `content_bits` is an IntPacked; a continuation byte followed by the end
+    /// of the bunch consumes 8 bits before the read fails. With the 2-bit
+    /// actor header that is 10 bits lost, and the abort charged 0.
+    #[test]
+    fn a_truncated_content_bits_field_charges_the_bits_it_consumed() {
+        let mut bits = vec![true, true]; // hasRepLayout, isActor
+        bits.extend([true, false, false, false, false, false, false, false]); // 0x01: more follows
+
+        let (stats, _) = frame_bits(&bits);
+
+        assert_eq!(stats.content_block_framing_failures, 1);
+        assert_eq!(stats.skipped_bits, 10);
+        assert_eq!(stats.content_blocks, 0);
+        #[cfg(feature = "diagnostics")]
+        {
+            use crate::stats::SkipReason;
+            let ev = &stats.diagnostics[0];
+            assert!(matches!(ev.reason, SkipReason::ContentBitsReadError));
+            assert_eq!(ev.bits_skipped, 10);
+            assert_eq!((ev.consumed_bits, ev.remaining_bits), (2, 0));
+        }
+    }
+
+    /// The charge starts at the failing block, not at the bunch: a block that
+    /// framed before it keeps its bits out of the loss.
+    #[test]
+    fn a_framing_abort_does_not_recharge_blocks_that_framed() {
+        let mut bits = Vec::new();
+        write_empty_actor_block(&mut bits); // 10 bits, frames cleanly
+        bits.extend(truncated_subobject_header()); // 12 bits, fails
+
+        let (stats, sink) = frame_bits(&bits);
+
+        assert_eq!(stats.content_blocks, 1);
+        assert_eq!(sink.content_blocks.len(), 1);
+        assert_eq!(stats.content_block_framing_failures, 1);
+        assert_eq!(stats.skipped_bits, 12, "22 bits, of which 10 framed");
+    }
+
     /// Verifies that a content-block overrun produces a DiagnosticEvent with
     /// full context (packet id, channel, bunch flags, consumed/remaining bits).
     ///
-    /// This exercises the same code path as the "malformed 1 / skipped 695"
-    /// structural residual found in every VALORANT replay's first bunch.
+    /// This is the path the resolved "malformed 1 / skipped 695" residue took
+    /// (see the oracle's module doc), not something every replay still shows.
+    /// The overrun, too, is charged from the failing block's first bit: its
+    /// header and `content_bits` were read and framed nothing, so the loss is
+    /// 2 + 16 + 8 = 26 bits while 8 remained after the read.
     #[cfg(feature = "diagnostics")]
     #[test]
     fn content_bits_overrun_emits_diagnostic() {
@@ -2846,6 +2968,10 @@ mod tests {
 
         // Verify diagnostic was emitted
         assert_eq!(stats.malformed_content_blocks, 1);
+        assert_eq!(
+            stats.skipped_bits, 26,
+            "the block's header and content_bits were read and framed nothing"
+        );
         assert_eq!(stats.diagnostics.len(), 1);
 
         let ev = &stats.diagnostics[0];
@@ -2858,9 +2984,10 @@ mod tests {
         assert_eq!(ev.block_index_in_bunch, 0);
         assert!(ev.content_bits.is_some());
         assert_eq!(ev.content_bits.unwrap(), 999);
-        // remaining_bits should be 8 (the padding bits we added)
+        // remaining_bits should be 8 (the padding bits we added); what the
+        // overrun lost is the whole block from its first bit.
         assert_eq!(ev.remaining_bits, 8);
-        assert_eq!(ev.bits_skipped, 8);
+        assert_eq!(ev.bits_skipped, 26);
         assert!(
             ev.bunch_flags.b_open && ev.bunch_flags.b_reliable && !ev.bunch_flags.b_partial,
             "flags are snapshotted from the bunch header on the failure path"

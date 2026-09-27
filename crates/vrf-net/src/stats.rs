@@ -445,7 +445,12 @@ pub struct DiagnosticEvent {
     pub content_bits: Option<u32>,
     /// Which content block within this bunch (0-based).
     pub block_index_in_bunch: u32,
-    /// Number of bits actually skipped in this event.
+    /// Number of bits this event charged to [`NetStats::skipped_bits`].
+    ///
+    /// For a block-framing abort that is the failing block's first bit to the
+    /// end of the bunch, so it can exceed `remaining_bits`: the header and
+    /// `content_bits` reads before the failure consumed bits that framed
+    /// nothing.
     pub bits_skipped: u64,
 }
 
