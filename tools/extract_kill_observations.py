@@ -19,11 +19,26 @@ else:
 SCHEMA_VERSION = 1
 GROUP = "/Script/ShooterGame.PlayerMatchStatsComponent"
 PARENT = ("KillData", 1493759848)
+#: Builds whose KillData identities and values were measured. This is a
+#: measured list, not the parser's supported builds: any other build fails in
+#: declarations() before a row is read, even when its names and checksums
+#: agree, until it has been measured the same way.
+#:
+#: 2026-09-08: 13.01, 13.02, 13.04 and 13.05, the 714-export corpus in
+#: docs/KILL_LEDGER.md.
+#:
+#: 2026-09-28: 13.06. All 38 13.06 exports that parser 259ed10 wrote with
+#: --checkpoints for the 1,018-replay common audit exited 0 here. On each one
+#: the main and checkpoint declarations equal PARENT and DECL, every child
+#: matches its parent raw window and every typed value its raw decode. That is
+#: 5,371 main and 6,434 checkpoint parent rows (5,381 and 53,563 element
+#: updates); a separate Parquet recount agrees for every export and table.
 MEASURED_BUILDS = {
     "++Ares-Core+release-13.01",
     "++Ares-Core+release-13.02",
     "++Ares-Core+release-13.04",
     "++Ares-Core+release-13.05",
+    "++Ares-Core+release-13.06",
 }
 DECL = {
     3: ("Victim", 3990035472),

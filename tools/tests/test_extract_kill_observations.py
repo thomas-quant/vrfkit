@@ -266,6 +266,59 @@ class ExtractionTests(unittest.TestCase):
                 tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})
 
 
+def declaration_export(root, build):
+    """Write only what `declarations()` reads: a manifest declaring the measured
+    KillData identities under `build`, and empty checkpoint declaration tables."""
+    root.mkdir()
+    fields = [
+        {"handle": handle, "name": name, "compatible_checksum": checksum}
+        for handle, (name, checksum) in {0: tool.PARENT, **tool.DECL}.items()
+    ]
+    manifest = {
+        "replay_build": build,
+        "net_field_export_groups": [{"path": tool.GROUP, "fields": fields}],
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    for name, columns in (
+        (
+            "checkpoint_export_groups",
+            [("checkpoint_index", pa.uint32()), ("ordinal", pa.uint32()),
+             ("group_path", pa.string())],
+        ),
+        (
+            "checkpoint_export_fields",
+            [("checkpoint_index", pa.uint32()), ("group_ordinal", pa.uint32()),
+             ("handle", pa.uint32()), ("rendered_name", pa.string()),
+             ("compatible_checksum", pa.uint32())],
+        ),
+    ):
+        pq.write_table(
+            pa.Table.from_pylist([], schema=pa.schema(columns)),
+            root / f"{name}.parquet",
+        )
+    return root
+
+
+class BuildGateTests(unittest.TestCase):
+    def test_measured_13_06_declarations_are_accepted(self):
+        with tempfile.TemporaryDirectory() as t:
+            export = declaration_export(Path(t) / "export", "++Ares-Core+release-13.06")
+            manifest, declared = tool.declarations(export)
+        self.assertEqual(manifest["replay_build"], "++Ares-Core+release-13.06")
+        self.assertEqual(declared, {None: {0: tool.PARENT, **tool.DECL}})
+
+    def test_unmeasured_build_is_rejected_despite_measured_declarations(self):
+        # The declarations match every measured identity; only the build is new.
+        # A future build must be measured before it is read, not admitted because
+        # its names and checksums happen to agree.
+        with tempfile.TemporaryDirectory() as t:
+            export = declaration_export(Path(t) / "export", "++Ares-Core+release-13.07")
+            with self.assertRaisesRegex(
+                tool.InputError, "outside the measured KillData set"
+            ):
+                tool.declarations(export)
+
+
 class OutputTests(unittest.TestCase):
     def test_source_overwrite_is_rejected(self):
         with tempfile.TemporaryDirectory() as t:
