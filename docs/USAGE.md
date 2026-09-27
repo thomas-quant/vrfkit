@@ -204,7 +204,7 @@ member and handle by name.
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 796,920 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 797,309 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -223,16 +223,16 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 | |
+| `fields.parquet` | 1,296,660 | 16,457,034 | |
 | `movement.parquet` | 1,844,147 | 31,886,449 | |
 | `actors.parquet` | 3,827 | 87,281 | |
 | `net_guids.parquet` | 16,167 | 153,606 | |
 | `events.parquet` | 195 | 13,411 | |
 | `partials.parquet` | 0 | 2,505 | main-only; with checkpoints: 0 rows, 2,505 bytes |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 | requires `--checkpoints` |
+| `checkpoint_fields.parquet` | 352,089 | 1,217,231 | requires `--checkpoints` |
 | `checkpoint_actors.parquet` | 3,014 | 27,118 | requires `--checkpoints` |
 | `checkpoint_net_guids.parquet` | 74,270 | 277,718 | requires `--checkpoints` |
-| `checkpoint_blocks.parquet` | 22,247 | 175,103 | requires `--checkpoints` |
+| `checkpoint_blocks.parquet` | 22,247 | 175,046 | requires `--checkpoints` |
 | `checkpoint_guid_entries.parquet` | 74,270 | 928,714 | requires `--checkpoints` |
 | `checkpoint_export_groups.parquet` | 8,307 | 27,041 | requires `--checkpoints` |
 | `checkpoint_export_fields.parquet` | 49,314 | 287,130 | requires `--checkpoints` |
@@ -1013,7 +1013,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 157 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 910 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 919 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check

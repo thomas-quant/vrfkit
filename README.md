@@ -19,7 +19,7 @@ by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
 **Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
-**910 passing** tests. All 24 supported builds received the same verification
+**919 passing** tests. All 24 supported builds received the same verification
 on **986 unique replays**; all **986** meet every strict criterion after fixing
 the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
@@ -188,16 +188,16 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 |
+| `fields.parquet` | 1,296,660 | 16,457,034 |
 | `movement.parquet` | 1,844,147 | 31,886,449 |
 | `actors.parquet` | 3,827 | 87,281 |
 | `net_guids.parquet` | 16,167 | 153,606 |
 | `events.parquet` | 195 | 13,411 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 |
+| `checkpoint_fields.parquet` | 352,089 | 1,217,231 |
 | `checkpoint_actors.parquet` | 3,014 | 27,118 |
 | `checkpoint_net_guids.parquet` | 74,270 | 277,718 |
-| `checkpoint_blocks.parquet` | 22,247 | 175,103 |
+| `checkpoint_blocks.parquet` | 22,247 | 175,046 |
 | `checkpoint_guid_entries.parquet` | 74,270 | 928,714 |
 | `checkpoint_export_groups.parquet` | 8,307 | 27,041 |
 | `checkpoint_export_fields.parquet` | 49,314 | 287,130 |
@@ -379,7 +379,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**714 passing**; the full Python suite also has **910 passing** tests. The
+**714 passing**; the full Python suite also has **919 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
@@ -745,17 +745,18 @@ export sweep, it typed 6,048 further rows with decode errors still at zero.
 
 `02d4d478` (`02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf`), as recorded by the
 committed export baseline `tools/baselines/export_02d4d478.json` after the
-partial-header and shot-array corrections:
+partial-header and shot-array corrections and the component remaps read from the
+13.06 game:
 
 ```
-Decoded OK:   796,920      Decode errors:      0
-Raw/Skip:      26,507      Not in table: 163,534
-No field name:  2,034      Typed:          80.6%
+Decoded OK:   797,309      Decode errors:      0
+Raw/Skip:      26,507      Not in table: 163,567
+No field name:  1,612      Typed:          80.6%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (796,920 + 26,507 + 163,534 +
-2,034 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
+The four buckets partition `Rows offered` exactly (797,309 + 26,507 + 163,567 +
+1,612 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
 in table`, and they contradicted the baseline this repo commits for the same

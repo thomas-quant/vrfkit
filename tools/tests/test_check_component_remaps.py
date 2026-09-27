@@ -43,11 +43,12 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual([x.state for x in v], ["absent"])
 
     def test_a_leaf_lingering_beside_a_working_target_is_still_ok(self):
-        """Some blocks resolve by another route and stay bare; that is normal.
+        """The ratio path, which only a pair with no RepLayout kind still takes.
 
         On the reference replay `ZoomStateMachine` drops from 8,112 rows to 70
-        rather than to zero, so requiring the leaf to disappear would fail on a
-        healthy export. 70 against 60,101 is 0.12%.
+        rather than to zero -- 0.12% of 60,101. Those 70 turned out to be
+        ClassNetCache rows, which `bare_counts` now drops, so a RepLayout pair
+        no longer needs this tolerance; see `StrictRepLayoutTests`.
         """
         v = guard.verdicts(PAIRS, {
             "/Script/ShooterGame.EquippableStateMachineComponent": 60101,
@@ -98,6 +99,49 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(guard.exit_code(ok), 0)
         self.assertEqual(guard.exit_code(absent), 0)
         self.assertEqual(guard.exit_code(broken), 1)
+
+
+class StrictRepLayoutTests(unittest.TestCase):
+    """A RepLayout pair is broken by any RepLayout row left bare.
+
+    Healthy is exactly zero -- 92 exports, 48 RepLayout pairs, not one row --
+    and the ratio could not see a dead leaf behind a busy shared target.
+    """
+
+    NATIVE = "/Script/ShooterGame.EquippableStateMachineComponent"
+    KINDS = {"ZoomStateMachine": "RepLayout"}
+
+    def test_nothing_bare_is_ok(self):
+        v = guard.verdicts(PAIRS, {self.NATIVE: 60101}, self.KINDS)
+        self.assertEqual([x.state for x in v], ["ok"])
+
+    def test_one_bare_row_is_broken(self):
+        v = guard.verdicts(PAIRS, {self.NATIVE: 60101, "ZoomStateMachine": 1}, self.KINDS)
+        self.assertEqual([x.state for x in v], ["broken"])
+
+    def test_a_dead_leaf_behind_a_busy_shared_target_is_caught(self):
+        """The case the ratio missed: 2,495 bare rows against 62,000 is 4%.
+
+        Measured shape, from a 13.06 export made before `Resume_StateMachine`
+        was mapped: every one of its RepLayout rows was bare, and the ratio
+        called it `ok` because 25 other leaves keep the target busy.
+        """
+        rows = {self.NATIVE: 62000, "ZoomStateMachine": 2495}
+        self.assertEqual([x.state for x in guard.verdicts(PAIRS, rows)], ["ok"])
+        self.assertEqual(
+            [x.state for x in guard.verdicts(PAIRS, rows, self.KINDS)], ["broken"])
+
+    def test_a_class_net_cache_pair_keeps_the_ratio(self):
+        rows = {self.NATIVE: 60101, "ZoomStateMachine": 70}
+        v = guard.verdicts(PAIRS, rows, {"ZoomStateMachine": "ClassNetCache"})
+        self.assertEqual([x.state for x in v], ["ok"])
+
+    def test_every_real_pair_has_a_kind(self):
+        kinds = guard.remap_kinds()
+        self.assertEqual(set(kinds), {leaf for leaf, _ in guard.remap_pairs()})
+        self.assertEqual(set(kinds.values()), {"RepLayout", "ClassNetCache"})
+        self.assertEqual(kinds["ZoomStateMachine"], "RepLayout")
+        self.assertEqual(kinds["EffectManager"], "ClassNetCache")
 
 
 class RenameSignalTests(unittest.TestCase):
@@ -210,6 +254,20 @@ class MainTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("OK:", result.stdout)
 
+    def test_main_judges_a_rep_layout_pair_strictly(self):
+        """`main` must hand the table's kinds to `verdicts`.
+
+        One bare RepLayout row against 100 on the target is 1% -- `ok` by the
+        ratio, `broken` by the rule a RepLayout pair is held to.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            native = "/Script/ShooterGame.EquippableStateMachineComponent"
+            self._export(directory, [(native, "CurrentState")] * 100
+                         + [("ZoomStateMachine", None)])
+            result = self._run(directory)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("broken  ZoomStateMachine", result.stdout)
+
     def test_the_failure_text_no_longer_blames_a_rename(self):
         """A `broken` verdict cannot be produced by a rename; see the class above."""
         with tempfile.TemporaryDirectory() as directory:
@@ -232,9 +290,50 @@ class PairParsingTests(unittest.TestCase):
             ("InventoryComponent", "/Script/ShooterGame.AresInventory"), pairs
         )
 
-    def test_every_target_is_a_script_path(self):
-        for leaf, native in guard.remap_pairs():
-            self.assertTrue(native.startswith("/Script/"), f"{leaf} -> {native}")
+    def test_every_target_is_an_absolute_object_path(self):
+        """Native `/Script/` classes and, for three pairs, Blueprint classes."""
+        for leaf, target in guard.remap_pairs():
+            self.assertTrue(target.startswith(("/Script/", "/Game/")), f"{leaf} -> {target}")
+            self.assertIn(".", target, f"{leaf} -> {target}")
+
+    def test_a_blueprint_class_target_is_read(self):
+        """The shape the `/Script/`-only pattern silently skipped."""
+        table = """const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
+    (
+        "ZoomStateMachine",
+        "/Script/ShooterGame.EquippableStateMachineComponent",
+        GroupKind::RepLayout,
+    ),
+    (
+        "Comp_Ability_CooldownComponent1",
+        "/Game/Characters/Components/Comp_Ability_CooldownComponent.Comp_Ability_CooldownComponent_C",
+        GroupKind::RepLayout,
+    ),"""
+        pairs = guard.remap_pairs(table)
+        self.assertEqual(
+            [leaf for leaf, _ in pairs],
+            ["ZoomStateMachine", "Comp_Ability_CooldownComponent1"])
+        self.assertEqual(guard.unparsed_entries(table, pairs), 0)
+
+    def test_an_entry_the_pattern_cannot_read_is_counted(self):
+        """A pair nothing checks must not pass as a table with one fewer pair."""
+        table = """    (
+        "ZoomStateMachine",
+        "/Script/ShooterGame.EquippableStateMachineComponent",
+        GroupKind::RepLayout,
+    ),
+    (
+        "RelativeTarget",
+        "Script/NoLeadingSlash.Thing",
+        GroupKind::RepLayout,
+    ),"""
+        pairs = guard.remap_pairs(table)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(guard.unparsed_entries(table, pairs), 1)
+
+    def test_the_real_table_parses_completely(self):
+        table = guard.table_source()
+        self.assertEqual(guard.unparsed_entries(table, guard.remap_pairs(table)), 0)
 
 
 if __name__ == "__main__":

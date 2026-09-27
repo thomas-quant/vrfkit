@@ -2,31 +2,48 @@
 """Check that the Blueprint-component remaps still match a build's replays.
 
 `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs` maps bare
-Blueprint component names to the native groups a replay declares. Those pairs
-were read out of a shipped game, and a later build can rename a component
-without anything here noticing: the replay never named it either, so no test
-can fail on its own.
+component instance names to the class groups a replay declares -- usually a
+native `/Script/...` class, for three pairs a Blueprint `/Game/..._C` class.
+Those pairs were read out of a shipped game
+(`tools/extract_component_classes` lists them), and a later build can rename a
+component without anything here noticing: the replay never named it either, so
+no test can fail on its own.
 
 The export baseline does pin `overlay_no_field_name` and would catch it -- on
 the one replay that has a baseline. This works on any export, which is the point:
 run it against a replay from a new build before trusting the output.
 
-For each pair it compares how many rows are still bare under the leaf against
-how many reached the native group.
+For each pair it compares the rows still bare under the leaf with the rows
+that reached the class group. Only RepLayout rows count as bare: ClassNetCache
+rows are dropped (see `CNC_MARKERS`), because every RepLayout remap leaves its
+component's RPC stream bare by design.
 
-    bare well under the target -> ok       (the remap is doing work)
-    bare a large share of it   -> broken   (it stopped matching)
-    neither present            -> absent   (not in this replay; says nothing)
+    RepLayout pair, no RepLayout row left bare       -> ok      (the remap is doing work)
+    RepLayout pair, any RepLayout row left bare      -> broken  (it did not fire for them)
+    ClassNetCache pair, bare well under the target   -> ok
+    ClassNetCache pair, bare a large share of it     -> broken
+    neither present                                  -> absent  (not in this replay; says nothing)
 
-Asking only "does the target have rows" is not enough, and that is the whole
-reason for the ratio: nine leaves map to `EquippableStateMachineComponent`, so
-one of them being renamed leaves the other eight keeping the target busy while
-that component's blocks are all bare again.
+A RepLayout pair tolerates nothing because healthy is exactly zero. It used to
+be judged by a ratio -- bare rows up to 5% of the target's -- on the grounds
+that a leaf lingers beside a working target: on the reference replay
+`ZoomStateMachine` keeps 70 rows. All 70 are ClassNetCache rows, which this
+check has excluded since, and across 92 exports covering every supported build
+(2026-09-28) not one of the 48 RepLayout pairs left a single RepLayout row
+bare.
 
-A leaf lingering beside a working target is normal -- some blocks resolve by
-another route. On the reference replay `ZoomStateMachine` drops from 8,112 rows
-to 70, not to zero: 0.12% of the target. Simulating a rename puts it at 15.58%.
-The threshold sits between those, far from both.
+The ratio could not fail where it mattered most. Asking only "does the target
+have rows" is not enough, because 26 leaves share
+`EquippableStateMachineComponent` -- and 5% of a target that other leaves keep
+busy is not enough either. Run against the same 92 replays exported before 29
+pairs were added, it read 22 of those pairs `ok` in 773 (pair, replay) cases
+where every one of their RepLayout rows was still bare, at up to 4.9% of the
+target (`ShieldDamageSection` beside `ChildDamageSectionComponent`). The strict
+rule reads those `broken`, and `ok` once the remap is in.
+
+The four ClassNetCache pairs (the C# reference's effect components) keep the
+ratio. Their verdict compares bare RepLayout rows with the RepLayout group,
+which is not what those pairs remap, so it is a coarse signal and no more.
 
 What the ratio verdicts DO NOT cover
 ------------------------------------
@@ -67,13 +84,19 @@ from typing import NamedTuple
 REPO = Path(__file__).resolve().parents[1]
 PATHS_RS = REPO / "crates" / "vrfkit" / "src" / "sink" / "paths.rs"
 
-#: One `(leaf, native, GroupKind)` tuple of the remap table, rustfmt'd.
+#: One `(leaf, class path, GroupKind)` tuple of the remap table, rustfmt'd.
+#: The target used to be required to start with `/Script/`, and the first
+#: Blueprint-class targets (`/Game/..._C`) were then silently skipped: the
+#: table held 52 pairs and this read 49, with nothing reporting the three it
+#: could not see. Any absolute path is accepted now, and `unparsed_entries`
+#: turns a pair the pattern still cannot read into a failure.
 PAIR_RE = re.compile(
-    r'\(\s*"([^"]+)",\s*"(/Script/[^"]+)",\s*GroupKind::\w+\s*,?\s*\)', re.S
+    r'\(\s*"([^"]+)",\s*"(/[^"]+)",\s*GroupKind::(\w+)\s*,?\s*\)', re.S
 )
 
-#: Share of the native group's rows the bare leaf may still hold. Healthy is
-#: ~0.1%; a renamed component measured 15.6%. Nothing observed lands between.
+#: Share of the target group's rows the bare leaf may still hold, for the
+#: ClassNetCache pairs only; a RepLayout pair may hold none (see the module
+#: docstring). A renamed component once measured 15.6%.
 BARE_SHARE_LIMIT = 0.05
 
 #: Field names that mark a ClassNetCache block rather than a RepLayout property.
@@ -89,22 +112,62 @@ class Verdict(NamedTuple):
     detail: str
 
 
-def remap_pairs() -> list[tuple[str, str]]:
-    """The `(leaf, native path)` pairs, read from the Rust table itself."""
+def table_source() -> str:
+    """The body of the Rust remap table, as text."""
     src = PATHS_RS.read_text(encoding="utf-8")
     start = src.index("const KNOWN_SUBOBJECT_CLASS_PATHS")
     end = src.index("\n];", start)
-    return PAIR_RE.findall(src[start:end])
+    return src[start:end]
 
 
-def verdicts(pairs, rows_by_group) -> list[Verdict]:
-    """Classify each pair against a `{group_path: row count}` map."""
+def remap_entries(table: str | None = None) -> list[tuple[str, str, str]]:
+    """`(leaf, class path, GroupKind)` for every entry of the Rust table."""
+    return PAIR_RE.findall(table_source() if table is None else table)
+
+
+def remap_pairs(table: str | None = None) -> list[tuple[str, str]]:
+    """The `(leaf, class path)` pairs, read from the Rust table itself."""
+    return [(leaf, target) for leaf, target, _ in remap_entries(table)]
+
+
+def remap_kinds(table: str | None = None) -> dict[str, str]:
+    """`{leaf: "RepLayout" | "ClassNetCache"}`, from the same table."""
+    return {leaf: kind for leaf, _, kind in remap_entries(table)}
+
+
+def unparsed_entries(table: str, pairs) -> int:
+    """Entries in the table that `PAIR_RE` did not read.
+
+    Every entry carries exactly one `GroupKind::` variant, so the count of
+    those is the number of pairs the table holds. A difference is a pair this
+    check would never look at -- report it rather than check fewer.
+    """
+    return table.count("GroupKind::") - len(pairs)
+
+
+def verdicts(pairs, rows_by_group, kinds=None) -> list[Verdict]:
+    """Classify each pair against a `{group_path: row count}` map.
+
+    `kinds` maps a leaf to its `GroupKind`. A `RepLayout` pair is judged
+    strictly; any other (or one with no kind given) by the ratio.
+    """
+    kinds = kinds or {}
     out = []
     for leaf, native in pairs:
         native_rows = rows_by_group.get(native, 0)
         bare_rows = rows_by_group.get(leaf, 0)
         if not native_rows and not bare_rows:
             out.append(Verdict(leaf, native, "absent", "not in this replay"))
+            continue
+        if kinds.get(leaf) == "RepLayout":
+            if bare_rows:
+                out.append(Verdict(
+                    leaf, native, "broken",
+                    f"{bare_rows} RepLayout rows still bare ({native_rows} on the "
+                    f"class group); a working RepLayout remap leaves none"))
+            else:
+                out.append(Verdict(leaf, native, "ok",
+                                   f"{native_rows} rows, 0 still bare"))
             continue
         share = bare_rows / native_rows if native_rows else float("inf")
         if share > BARE_SHARE_LIMIT:
@@ -197,13 +260,20 @@ def main() -> int:
         print(f"SKIP: no fields.parquet in {args.export}", file=sys.stderr)
         return 0
 
-    pairs = remap_pairs()
+    table = table_source()
+    pairs = remap_pairs(table)
     if not pairs:
         print(f"FAILED: parsed no pairs out of {PATHS_RS.name}", file=sys.stderr)
         return 1
+    missing = unparsed_entries(table, pairs)
+    if missing:
+        print(f"FAILED: {missing} entr{'y' if missing == 1 else 'ies'} of the "
+              f"remap table in {PATHS_RS.name} did not parse, so nothing here "
+              f"would check them", file=sys.stderr)
+        return 1
 
     rows = row_counts(args.export)
-    results = verdicts(pairs, rows)
+    results = verdicts(pairs, rows, remap_kinds(table))
     tally = collections.Counter(v.state for v in results)
 
     for v in results:

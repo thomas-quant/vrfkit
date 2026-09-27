@@ -723,7 +723,7 @@ errors still 0. Corpus-wide at the time, 215/215 replays with decode errors 0.
 
 Those are the deltas that change produced, not current totals. Later work moved
 both ends: `tools/baselines/export_02d4d478.json` pins today's figures
-(`overlay_no_field_name = 2,034`, `overlay_decoded_ok = 796,920`). Read this
+(`overlay_no_field_name = 1,612`, `overlay_decoded_ok = 797,309`). Read this
 paragraph as a dated before/after, which is what it was written as.
 
 **This is the one thing here that a game patch can silently invalidate.** A
