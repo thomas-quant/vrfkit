@@ -118,9 +118,12 @@ pub struct ArrayDecodeStats {
     /// flattened leaves were lost. Mirrors `struct_blobs_failed`: counted and
     /// surfaced, never silently dropped.
     pub errors: u64,
-    /// Bits left inside a nested array's window after that array stopped
-    /// decoding, without moving any other counter. See the increment site in
-    /// `decode_array_level` for why this is a tally, not an error.
+    /// Declared bits inside a nested window that the walk stepped past without
+    /// reading, and without moving any other counter: what a nested array
+    /// left in its own window after it stopped decoding, and -- in the
+    /// object-reference walker -- the payload of any field after an element's
+    /// first. See the increment site in `decode_struct_fields` for why this is
+    /// a tally, not an error.
     pub unconsumed_nested_bits: u64,
     /// Bits left after the root array's explicit terminator or an early stop.
     ///
@@ -281,8 +284,19 @@ fn decode_object_ref_array_reader(
         return out;
     }
 
+    // An explicit `0` index ends the array. Running out of bits instead is
+    // accepted but tallied, the same call `decode_array_level` makes: it is
+    // also what a payload cut short after a complete element looks like, and
+    // this array is delta-replicated -- the slots after the cut would pass for
+    // slots that were simply not re-sent. An element that runs out of bits
+    // has already tallied itself and leaves through the `element_complete`
+    // break below, not through here, so the same EOF is never counted twice.
     let mut elements_seen = 0u32;
-    while !reader.at_end() {
+    loop {
+        if reader.at_end() {
+            stats.implicit_terminations += 1;
+            break;
+        }
         if elements_seen == MAX_ELEMENTS {
             let mut probe = reader.clone();
             match probe.read_int_packed() {
@@ -317,6 +331,20 @@ fn decode_object_ref_array_reader(
         // item's IntPacked NetGUID. The bounded loop keeps a multi-field element
         // (none seen on the wire, but the framing permits it) from
         // desynchronising the rest of the array.
+        //
+        // Staying aligned is not the same as having read the bits: a field
+        // after the first is stepped over, not decoded, so its payload width
+        // goes to `unconsumed_nested_bits` -- the tally for declared bits a
+        // walk stepped past. Measured when that was added: in the 1,018-replay
+        // audit corpus, each of the 273,386 elements (all main stream; every
+        // checkpoint `MultiContents` array is empty) carries exactly one
+        // populated field, so it reads zero on real data.
+        //
+        // A zero-width field is skipped with no tally, deliberately: it has no
+        // payload, so skipping it leaves no bit unread. An element made only
+        // of them yields no NetGUID and therefore no row (it still counts in
+        // `elements_decoded`, not in `fields_emitted`); none occur in that
+        // corpus either.
         let mut guid = None;
         let mut element_complete = false;
         for field_idx in 0..=MAX_FIELDS_PER_ELEMENT {
@@ -368,6 +396,8 @@ fn decode_object_ref_array_reader(
                     Ok(v) if sub.at_end() => guid = Some(v),
                     Ok(_) | Err(_) => stats.errors += 1,
                 }
+            } else {
+                stats.unconsumed_nested_bits += u64::from(payload_bits);
             }
         }
 
@@ -1139,6 +1169,140 @@ mod tests {
 
         assert!(guids.is_empty());
         assert_eq!(stats.errors, 1, "{stats:?}");
+    }
+
+    /// Every counter a clean walk must leave at zero.
+    fn anomalies(stats: &ArrayDecodeStats) -> [u64; 5] {
+        [
+            stats.errors,
+            stats.truncations,
+            stats.implicit_terminations,
+            stats.unconsumed_root_bits,
+            stats.unconsumed_nested_bits,
+        ]
+    }
+
+    /// One `MultiContents` element at wire index 0 carrying NetGUID 5 in an
+    /// 8-bit window, closed by its zero handle.
+    fn push_one_closed_item(bits: &mut Vec<bool>) {
+        write_int_packed(bits, 1); // encodedIndex -> index 0
+        write_int_packed(bits, 3); // encodedHandle -> handle 2
+        write_int_packed(bits, 8); // payloadBits
+        write_int_packed(bits, 5); // ObjectNetGuid payload
+        write_int_packed(bits, 0); // element terminator
+    }
+
+    /// A payload cut short after a complete element, before the index
+    /// terminator, must not read as the whole array.
+    ///
+    /// The struct walker tallies this (`decode_array_level`); the object-ref
+    /// walker's loop just stopped at EOF. Delta arrays are sparse, so the
+    /// elements that never arrived look exactly like elements that were not
+    /// re-sent -- the rows emitted before the cut would pass for all of them.
+    #[test]
+    fn an_object_ref_array_ending_at_eof_is_not_a_clean_terminator() {
+        let mut bits = Vec::new();
+        write_int_packed(&mut bits, 2); // elementCount: two slots
+        push_one_closed_item(&mut bits);
+        // No second element and no array terminator: the payload just ends.
+        let data = bits_to_bytes(&bits);
+        let mut stats = ArrayDecodeStats::default();
+
+        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+
+        assert_eq!(guids, vec![(0, 5)], "the complete element is still decoded");
+        assert_eq!(stats.implicit_terminations, 1, "{stats:?}");
+        assert_eq!(stats.errors, 0, "{stats:?}");
+        assert_eq!(stats.unconsumed_root_bits, 0, "{stats:?}");
+    }
+
+    /// A window holding only the element count ends the same way.
+    #[test]
+    fn a_count_only_object_ref_window_is_an_implicit_termination() {
+        let mut stats = ArrayDecodeStats::default();
+        let guids = decode_object_ref_array_with_stats(&[0x02], 8, &mut stats);
+
+        assert!(guids.is_empty());
+        assert_eq!(stats.implicit_terminations, 1, "{stats:?}");
+        assert_eq!(stats.errors, 0, "{stats:?}");
+    }
+
+    /// An element that runs out of bits is ONE implicit termination: the
+    /// element's own tally already fires, and the array loop must not add a
+    /// second for the same missing bits.
+    #[test]
+    fn an_object_ref_element_ending_at_eof_counts_once() {
+        let mut bits = Vec::new();
+        write_int_packed(&mut bits, 1); // elementCount
+        write_int_packed(&mut bits, 1); // encodedIndex -> index 0
+        write_int_packed(&mut bits, 3); // handle 2
+        write_int_packed(&mut bits, 8); // payloadBits
+        write_int_packed(&mut bits, 5); // NetGUID -- then EOF, no terminators
+        let data = bits_to_bytes(&bits);
+        let mut stats = ArrayDecodeStats::default();
+
+        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+
+        assert_eq!(guids, vec![(0, 5)]);
+        assert_eq!(stats.implicit_terminations, 1, "{stats:?}");
+    }
+
+    /// A second populated field in an element is stepped over to stay
+    /// aligned, and its payload bits are tallied rather than dropped unseen.
+    ///
+    /// `TArray<AAresItem*>` elements have exactly one property, so a second
+    /// field means the framing is not what this walker thinks it is. The
+    /// window is 16 bits so that the tally is seen to count bits, not fields.
+    #[test]
+    fn an_extra_field_in_an_object_ref_element_is_tallied() {
+        let mut bits = Vec::new();
+        write_int_packed(&mut bits, 1); // elementCount
+        write_int_packed(&mut bits, 1); // encodedIndex -> index 0
+        write_int_packed(&mut bits, 3); // handle 2
+        write_int_packed(&mut bits, 8); // payloadBits
+        write_int_packed(&mut bits, 5); // NetGUID 5
+        write_int_packed(&mut bits, 4); // handle 3: a field the type does not have
+        write_int_packed(&mut bits, 16); // payloadBits
+        write_int_packed(&mut bits, 300); // two IntPacked bytes
+        write_int_packed(&mut bits, 0); // element terminator
+        write_int_packed(&mut bits, 0); // array terminator
+        let data = bits_to_bytes(&bits);
+        let mut stats = ArrayDecodeStats::default();
+
+        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+
+        assert_eq!(guids, vec![(0, 5)], "the first field is still the item");
+        assert_eq!(stats.unconsumed_nested_bits, 16, "{stats:?}");
+        assert_eq!(stats.errors, 0, "{stats:?}");
+        assert_eq!(stats.implicit_terminations, 0, "{stats:?}");
+    }
+
+    /// The counters above must stay silent on well-formed arrays, or they
+    /// would flag every `MultiContents` blob in the corpus.
+    #[test]
+    fn terminated_object_ref_arrays_report_no_anomaly() {
+        // Two populated slots.
+        let mut two = Vec::new();
+        write_int_packed(&mut two, 2);
+        push_one_closed_item(&mut two);
+        write_int_packed(&mut two, 2); // encodedIndex -> index 1
+        write_int_packed(&mut two, 3);
+        write_int_packed(&mut two, 24);
+        write_int_packed(&mut two, 25492); // three IntPacked bytes
+        write_int_packed(&mut two, 0);
+        write_int_packed(&mut two, 0); // array terminator
+        // An empty array: count, then the terminator.
+        let mut empty = Vec::new();
+        write_int_packed(&mut empty, 0);
+        write_int_packed(&mut empty, 0);
+
+        for (bits, want) in [(two, vec![(0, 5), (1, 25492)]), (empty, vec![])] {
+            let data = bits_to_bytes(&bits);
+            let mut stats = ArrayDecodeStats::default();
+            let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+            assert_eq!(guids, want);
+            assert_eq!(anomalies(&stats), [0; 5], "{stats:?}");
+        }
     }
 
     /// A BitIo read failure (fewer than 8 bits left for an IntPacked read) must
