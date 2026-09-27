@@ -40,14 +40,16 @@ use super::ExportStats;
 /// Everything a packet's sink counted, summed across packets.
 #[derive(Debug, Default)]
 pub(crate) struct SinkTotals {
-    /// Rows emitted at the sites that count them: property rows, RPC
-    /// parameter rows and whole-payload fallbacks, flattened array leaves,
-    /// `_cnc_h*` rows and RepLayout tail rows. A row count, and not every row
-    /// (movement batches, zero-bit RPC markers and unresolved-payload
-    /// preservation rows are not counted), so it is comparable neither with
-    /// NetStats' `fields` -- framed RepLayout properties -- nor with
-    /// `fields.parquet`. On 02d4d478 it reads 1,060,119 against `Fields:
-    /// 429,648` and 1,296,660 table rows.
+    /// Rows pushed at the sites that count them: replicated properties, RPC
+    /// parameters and the extra whole-payload row a partial parameter walk
+    /// adds, life-change and path-point members, flattened array leaves,
+    /// struct-blob members, `_cnc_h*` rows and RepLayout tail rows. Not every
+    /// row: movement batch rows, zero-bit RPC markers, the raw row of an RPC
+    /// whose parameters did not walk, unresolved-payload preservation rows
+    /// and targeting world-location children are pushed without it. So it is
+    /// comparable neither with NetStats' `fields` -- framed RepLayout
+    /// properties -- nor with the `fields.parquet` row count. On 02d4d478 it
+    /// reads 1,060,119 against `Fields: 429,648` and 1,296,660 table rows.
     pub fields_emitted: u64,
     /// The sink's own count of four events vrf-net counts too: RPC callbacks,
     /// actor opens, actor closes, and content blocks, live and deleted.
