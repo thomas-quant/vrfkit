@@ -1,4 +1,6 @@
 """Wire boundaries and preserved failure evidence for numeric FastArray updates."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import struct
@@ -10,6 +12,34 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tools import extract_fastarray_observations as fast
+
+#: The `replay_build` strings, exactly as the manifests spell them, of every
+#: build whose AbilitiesAndBuffs inner windows were walked exactly in the
+#: 2026-09-28 measurement recorded next to `fast.BUILDS`. Typed out rather than
+#: derived so that a change to the extractor's set -- a build added without a
+#: measurement, or a measured one dropped -- fails here instead of agreeing
+#: with itself.
+MEASURED_BUILDS = frozenset({
+    "++Ares-Core+release-11.06", "++Ares-Core+release-11.07",
+    "++Ares-Core+release-11.08", "++Ares-Core+release-11.09",
+    "++Ares-Core+release-11.10", "++Ares-Core+release-11.11",
+    "++Ares-Core+release-12.00", "++Ares-Core+release-12.01",
+    "++Ares-Core+release-12.02", "++Ares-Core+release-12.03",
+    "++Ares-Core+release-12.04", "++Ares-Core+release-12.05",
+    "++Ares-Core+release-12.06", "++Ares-Core+release-12.07",
+    "++Ares-Core+release-12.08", "++Ares-Core+release-12.09",
+    "++Ares-Core+release-13.00", "++Ares-Core+release-13.01",
+    "++Ares-Core+release-13.02", "++Ares-Core+release-13.04",
+    "++Ares-Core+release-13.05", "++Ares-Core+release-13.06",
+})
+
+#: Builds the gate must keep rejecting: 12.10 and 12.11 were in the measured
+#: corpus but had no rows on this route (unobserved is not validated); 13.07
+#: stands for any future build; the rest are malformed spellings of a
+#: measured one, because the gate compares the manifest string exactly.
+UNMEASURED_BUILDS = ("++Ares-Core+release-12.10", "++Ares-Core+release-12.11",
+                     "++Ares-Core+release-13.07", "++Ares-Core+release-11.05",
+                     "13.06", "++Ares-Core+release-13.06 ", "")
 
 
 def packed(value):
@@ -102,10 +132,55 @@ class FastArrayTests(unittest.TestCase):
             self.assertEqual(record["physical_row_ordinal"], 27)
             self.assertIsNone(record["structure"])
 
-    def make_export(self, root, malformed=False):
+    def test_accepted_builds_are_exactly_the_measured_set(self):
+        self.assertEqual(fast.BUILDS, MEASURED_BUILDS)
+
+    def test_every_measured_build_decodes_on_the_main_route(self):
+        raw, count = payload([1, 3], [(5, [(0, b"\x96\xab")])])
+        row = {"group_path": fast.GROUP, "field_name": "_cnc_h1", "handle": 1,
+               "raw_bits": raw, "bit_count": count}
+        for build in sorted(MEASURED_BUILDS):
+            with self.subTest(build=build):
+                record = fast.observation(dict(row), 3, "fields", build)
+                self.assertEqual(record["status"], "structural_exact")
+                self.assertEqual(record["structure"]["deleted_item_ids"], [1, 3])
+                # The checkpoint route stays unvalidated on every build.
+                record = fast.observation(dict(row), 3, "checkpoint_fields", build)
+                self.assertEqual(record["status"], "unvalidated_checkpoint_route")
+
+    def test_unmeasured_builds_are_rejected_with_raw_bits_kept(self):
+        # A body that decodes exactly: only the build can reject it.
+        raw, count = payload([1, 3], [(5, [(0, b"\x96\xab")])])
+        self.assertEqual(fast.decode(raw, count)["consumed_bits"], count)
+        row = {"group_path": fast.GROUP, "field_name": "_cnc_h1", "handle": 1,
+               "raw_bits": raw, "bit_count": count}
+        for build in UNMEASURED_BUILDS:
+            with self.subTest(build=build):
+                record = fast.observation(dict(row), 4, "fields", build)
+                self.assertEqual(record["status"], "unvalidated_build")
+                self.assertIsNone(record["structure"])
+                self.assertEqual(record["raw_bits_hex"], raw.hex())
+
+    def test_cli_exit_follows_the_build_gate(self):
+        for build, code in (("++Ares-Core+release-11.06", 0), ("++Ares-Core+release-13.06", 0),
+                            ("++Ares-Core+release-12.10", 1), ("++Ares-Core+release-13.07", 1)):
+            with self.subTest(build=build), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); source = self.make_export(root, build=build); out = root / "result"
+                printed = io.StringIO()
+                with patch.object(fast.sys, "argv", ["extract", "--export-dir", str(source), "--out-dir", str(out)]), \
+                        contextlib.redirect_stdout(printed):
+                    self.assertEqual(fast.main(), code)
+                receipt = json.loads((out / "receipt.json").read_text())
+                self.assertEqual(json.loads(printed.getvalue()), receipt["counts"])
+                self.assertEqual(receipt["replay_build"], build)
+                self.assertEqual(receipt["counts"]["rows"], 1)
+                self.assertEqual(receipt["counts"]["rejected"], code)
+                self.assertEqual(receipt["rejection_reasons"], {"unvalidated_build": 1} if code else {})
+
+    def make_export(self, root, malformed=False, build="++Ares-Core+release-13.05"):
         source = root / "export"
         source.mkdir()
-        (source / "manifest.json").write_text(json.dumps({"replay_build": "++Ares-Core+release-13.05"}))
+        (source / "manifest.json").write_text(json.dumps({"replay_build": build}))
         raw, count = payload([1, 3])
         row = {name: 0 for name in fast.COLUMNS}
         row.update(group_path=fast.GROUP, field_name="_cnc_h1", handle=1,

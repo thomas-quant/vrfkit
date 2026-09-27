@@ -61,6 +61,19 @@ boundaries while preserving the original bits. It does not add typed values to
 `fields.parquet` or `checkpoint_fields.parquet`, so the accepted Parquet counts
 and typed-presence ratio above remain unchanged.
 
+On 2026-09-28 the extractor's build scope was re-measured on 1,018 exports
+made by parser `259ed10` across all 24 supported builds. All 3,999,493
+AbilitiesAndBuffs inner windows close exactly, and an independent reader
+agrees on every boundary. The extractor now accepts the 22 builds that carry
+such windows. 12.10 and 12.11 have none on this route and remain unvalidated,
+as do checkpoint rows. See
+[the build-scope entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#build-scope-re-measured-2026-09-28).
+This widens where numeric structure can be extracted. It adds no field
+meanings and no typed Parquet values. The same entry records 250,053 main
+and 181,108 checkpoint AbilitiesAndBuffs bodies filed under another group.
+The grammar reads all of them exactly, but the extractor does not select
+them.
+
 The investigation also records private structural evidence that the same
 generic walk fully consumes 26,303 selected PatchVolume windows. PatchVolume
 does not yet have a public extraction route or an established item/property

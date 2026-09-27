@@ -119,11 +119,15 @@ refer to the original inner window; raw property values can be sliced without
 guessing their types. The receipt includes source and output hashes, explicit
 success/rejection counts and item/field totals.
 
-The tool accepts the measured main route on builds 13.01, 13.02, 13.04 and
-13.05. It preserves malformed or unvalidated observations with a rejection
-reason and returns nonzero if any are rejected. Checkpoint occurrences and
-future builds remain unvalidated. Output must be a new directory outside the
-source export. Existing Parquets and their typed-value counts do not change.
+When first published on 2026-09-09, the tool accepted the measured main route
+on builds 13.01, 13.02, 13.04 and 13.05. Since the
+[2026-09-28 re-measurement](#build-scope-re-measured-2026-09-28) it accepts 22
+builds: every supported build except 12.10 and 12.11. It preserves malformed or
+unvalidated observations with a rejection reason and returns nonzero if any are
+rejected. Checkpoint occurrences remain unvalidated, and so does any build that
+is not listed, including every future one. Output must be a new directory
+outside the source export. Existing Parquets and their typed-value counts do
+not change.
 
 The public extractor was run on all 714 exports and its saved observations
 were compared with a separate reader. Every source identity, original raw
@@ -131,6 +135,119 @@ window, header value, deleted ID, changed ID, and field handle/offset/width
 agreed. The retained NDJSON files total 5,181,243,102 bytes; all 2,882,152
 observations are structurally exact and the rejection count is zero. This
 validates the extraction artifact, not the still-unknown field meanings.
+
+### Build scope re-measured, 2026-09-28
+
+The 2026-09-09 figures above are kept as the original 714-export measurement.
+This entry measures a later and larger export set: all 1,018 unique replays
+across the 24 supported builds, exported with checkpoints by
+`tools/verify_build_corpus.py` at parser commit `259ed10`. The manifests do not
+record the parser commit. The audit's provenance links the exports to it
+through the executable's SHA-256, and the audit reports that executable
+unchanged over the run.
+
+**Method.** Both `fields.parquet` and `checkpoint_fields.parquet` were scanned
+for `group_path` `AbilitiesAndBuffsComponent` with `field_name` `_cnc_h1` or
+`__vrfkit_chained_cnc_h1__`. This is the extractor's selection without its
+handle filter. Each window was read three ways:
+
+- by the extractor's own `decode()`;
+- by an independent reader that shares no code with it (the whole window as
+  one integer, shifted per read);
+- by that independent reader with one extra flag bit after each changed ID.
+  This is the checksum-present variant (`ChecksumMode::Present` in
+  `crates/vrf-decode/src/fastarray.rs`), run as a control.
+
+The first two were compared on every header word, deleted ID, changed ID and
+field handle/offset/width.
+
+| Build | Replays | Windows, all exact | With changed items | Of those, control also closes |
+|---|---:|---:|---:|---:|
+| 11.06 | 3 | 8,937 | 6,574 | 0 |
+| 11.07 | 3 | 23,967 | 21,818 | 11 |
+| 11.08 | 3 | 13,931 | 11,799 | 121 |
+| 11.09 | 3 | 11,793 | 9,488 | 69 |
+| 11.10 | 3 | 8,319 | 6,302 | 0 |
+| 11.11 | 3 | 10,784 | 8,082 | 82 |
+| 12.00 | 3 | 11,125 | 8,995 | 0 |
+| 12.01 | 3 | 14,804 | 12,258 | 0 |
+| 12.02 | 3 | 23,344 | 20,935 | 126 |
+| 12.03 | 3 | 16,389 | 14,101 | 137 |
+| 12.04 | 3 | 23,317 | 20,377 | 0 |
+| 12.05 | 3 | 14,236 | 11,924 | 466 |
+| 12.06 | 3 | 19,719 | 17,848 | 0 |
+| 12.07 | 3 | 14,629 | 12,246 | 95 |
+| 12.08 | 3 | 19,901 | 17,575 | 1 |
+| 12.09 | 3 | 15,509 | 13,481 | 225 |
+| 12.10 | 1 | 0 | 0 | 0 |
+| 12.11 | 1 | 0 | 0 | 0 |
+| 13.00 | 1 | 6 | 3 | 2 |
+| 13.01 | 215 | 762,412 | 619,258 | 20,480 |
+| 13.02 | 205 | 855,152 | 704,717 | 3,078 |
+| 13.04 | 108 | 459,718 | 386,483 | 1,597 |
+| 13.05 | 401 | 1,520,893 | 1,245,517 | 1,873 |
+| 13.06 | 38 | 150,608 | 123,425 | 66 |
+| Total | 1,018 | 3,999,493 | 3,293,206 | 28,429 |
+
+- All 3,999,493 selected windows are main `fields` rows named `_cnc_h1` with
+  handle 1. Both readers consume every one exactly and agree on every
+  boundary. Together they carry 1,217,291 deleted IDs, 3,403,315 changed items
+  and 51,049,725 raw property windows.
+- No `checkpoint_fields` row in any export has group
+  `AbilitiesAndBuffsComponent`, so the checkpoint route remains unvalidated.
+- The 12.10 and 12.11 exports have no rows with group
+  `AbilitiesAndBuffsComponent` in either table. The extractor selects nothing
+  from them and reports `rows: 0`, so both builds stay outside the accepted
+  set. Their AbilitiesAndBuffs bodies appear only on the chained route
+  described below, which the extractor does not select.
+- Bodies without changed items close under both variants, so only windows
+  with changed items can tell the variants apart. The control also closes
+  28,429 of the 3,293,206 windows with changed items. Every build except 13.00
+  still has at least 6,302 windows that only the no-checksum variant closes.
+- 13.00 is accepted on thin evidence: six windows in one replay, three of them
+  deletion-only. The control closes two of the other three, so by closure
+  alone only one window separates the variants in that build. Its three
+  changed items do show the same handle sequence as every other build (next
+  paragraph). Re-measure 13.00 first when more of its replays are available.
+
+The updated extractor was then run end to end on all 1,018 exports. Every run
+exited 0 with zero rejections, and every input hash was unchanged. For each
+export, a digest of the observations (row identity, original raw window,
+header, IDs and every field boundary) equals the digest the independent reader
+computed from the Parquet. All 3,403,315 changed items carry the same fifteen
+zero-based handle numbers in the same order: 26, 27, 33 to 38, 41, 42, 45 to
+48, and 51. That holds in every accepted build, 13.00 included. A parse that
+had slipped by even one bit would be unlikely to reproduce one sequence
+millions of times, so this checks alignment. It is not a property schema.
+
+The extractor now accepts exactly the 22 builds with observed windows. A
+selected row from 12.10, 12.11 or any unlisted build would still be rejected
+as `unvalidated_build`, which keeps the exit code nonzero. This
+re-measurement covers structure only: replication keys, item IDs and property
+boundaries. It assigns no ability, effect, property name or value meaning.
+
+**Outside the extractor's selection.** The selection also names
+`__vrfkit_chained_cnc_h1__`, but on these exports that name never occurs
+under `AbilitiesAndBuffsComponent`. It occurs only under
+`/Script/ShooterGame.AresAbilitySystemComponent`. That is where the parser
+places AbilitiesAndBuffs handle-1 bodies recovered from RepLayout tails. The
+extractor selects none of these rows, and its receipt does not count them.
+The same three readers walked them separately:
+
+| Table | Windows, all exact | With changed items | Of those, control also closes |
+|---|---:|---:|---:|
+| `fields` | 250,053 | 250,053 | 1,260 |
+| `checkpoint_fields` | 181,108 | 60,833 | 273 |
+
+Both readers agree on every boundary. The other 120,275 checkpoint windows
+carry neither deletions nor changes. The population includes 12.10 (7 main
+and 6 checkpoint windows) and 12.11 (6 and 5).
+
+This does not change the accepted set above, which is defined by the
+extractor's selection. It does mean that selection misses a population the
+same grammar reads exactly. Admitting those rows would change the route
+definition and bring in checkpoint rows, so it is left for a separate,
+reviewed change.
 
 ## PatchVolume: numeric structure with an unresolved item schema
 
@@ -183,6 +300,10 @@ structure; its property values remain raw pending an independent item schema.
   require source-time lifecycle and identity evidence for further joins.
 - Resolve the changed-item property schemas for the now-consumed GAS windows.
   Do not promote raw property widths or GUID-number coincidences to semantics.
+- Decide whether the extractor should also select the chained AbilitiesAndBuffs
+  bodies filed under `/Script/ShooterGame.AresAbilitySystemComponent`. They
+  are main and checkpoint rows, and on 2026-09-28 the grammar read all of them
+  exactly.
 - Seek an independent PatchVolume subobject/item schema before assigning
   names or decoding property values in its now-consumed windows.
 - The section arithmetic discrepancies and InputEventData action meanings
@@ -192,7 +313,9 @@ Private evidence is retained under `gas-reference-census-root`,
 `gas-reference-investigation-root`, `healing-role-association-root`,
 `gas-inner-investigation`, `fastarray-root-corpus`, `fastarray-observations-corpus`,
 `gas-fastarray-main-comparison`, `patchvolume-investigation`,
-`patchvolume-fastarray-entries`, and `patchvolume-fastarray-root-accepted`.
-The reports keep
+`patchvolume-fastarray-entries`, `patchvolume-fastarray-root-accepted`, and,
+for the 2026-09-28 build-scope entry, `auto-20260928/scratch-fastarray`: the
+walkers, per-export results, end-to-end receipts, and the mutation check of
+the build gate's tests. The reports keep
 sample scope and source/output hashes; private player observations are not
 included in this repository document.

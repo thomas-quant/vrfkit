@@ -24,7 +24,36 @@ import pyarrow.parquet as pq
 SCHEMA_VERSION = 1
 GROUP = "AbilitiesAndBuffsComponent"
 INNER_NAMES = ("_cnc_h1", "__vrfkit_chained_cnc_h1__")
-BUILDS = {f"++Ares-Core+release-{v}" for v in ("13.01", "13.02", "13.04", "13.05")}
+#: Builds whose main-route windows were all walked exactly -- a measured list,
+#: not a supported-builds list. A build missing here is rejected per row with
+#: `unvalidated_build`, which keeps the exit nonzero, until someone measures it.
+#:
+#: 2026-09-09: 13.01, 13.02, 13.04 and 13.05 -- 2,882,152 windows in 714
+#: exports; see docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md.
+#:
+#: 2026-09-28: every export of the 1,018-replay common audit made by parser
+#: 259ed10. Selection: both field tables, group AbilitiesAndBuffsComponent,
+#: field _cnc_h1 or __vrfkit_chained_cnc_h1__, any handle. 3,999,493 of
+#: 3,999,493 windows closed exactly under decode(). All were main rows with
+#: handle 1. An independent reader agreed on every header word, ID and field
+#: boundary. No checkpoint row carries this group, so the checkpoint route
+#: stays unvalidated.
+#:
+#: 12.10 and 12.11 (one replay each) have no AbilitiesAndBuffsComponent rows
+#: at all. Nothing was observed, and unobserved is not validated, so they stay
+#: out. Their AbilitiesAndBuffs bodies exist only as __vrfkit_chained_cnc_h1__
+#: rows, filed under /Script/ShooterGame.AresAbilitySystemComponent. GROUP
+#: does not match that group on any build (see the investigation doc).
+#:
+#: 13.00 is thin: six windows in one replay. Only one of them tells this
+#: variant apart from the one-flag-bit-per-item variant (ChecksumMode::Present
+#: in crates/vrf-decode/src/fastarray.rs); every other build has at least
+#: 6,302 such windows. Its three changed items do carry the one handle
+#: sequence that all 3,403,315 changed items in the 22 builds share.
+BUILDS = {f"++Ares-Core+release-{v}" for v in (
+    "11.06", "11.07", "11.08", "11.09", "11.10", "11.11",
+    "12.00", "12.01", "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09",
+    "13.00", "13.01", "13.02", "13.04", "13.05", "13.06")}
 COLUMNS = ["time_ms", "packet_id", "channel_index", "actor_net_guid",
            "object_net_guid", "group_path", "handle", "field_name",
            "compatible_checksum", "bit_count", "raw_bits"]

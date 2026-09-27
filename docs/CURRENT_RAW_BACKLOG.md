@@ -12,6 +12,16 @@ boundaries, and the original bits. This output is separate from Parquet typed
 values, so the inventory below remains the measured starting point. The
 remaining GAS task is item-schema and value interpretation.
 
+Follow-up, 2026-09-28: the extractor's build scope was re-measured on 1,018
+exports made by parser `259ed10`. All 3,999,493 inner windows across 22
+builds close exactly, and the extractor now accepts those builds. The 12.10
+and 12.11 exports have no rows on this route. See
+[the build-scope entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#build-scope-re-measured-2026-09-28).
+That entry also records AbilitiesAndBuffs bodies filed under
+`/Script/ShooterGame.AresAbilitySystemComponent`, which the extractor does not
+select. The inventory below is still the 2026-09-09 measurement, and the open
+GAS task is unchanged.
+
 Private evidence also validates a numeric FastArray walk over all 26,303
 selected PatchVolume whole/tail windows. PatchVolume still lacks a public
 extraction route and an established class/item/property schema.
