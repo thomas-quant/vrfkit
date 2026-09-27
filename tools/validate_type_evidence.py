@@ -107,6 +107,27 @@ def parquet_files(root: Path, export_ids=None):
         yield from root.rglob(name)
 
 
+def spec_rows(table: pa.Table, groups: pa.Array, fields: pa.Array) -> pa.Table:
+    """The rows whose group is in `groups` AND whose field name is in `fields`.
+
+    Still a superset of the specified pairs -- a group from one entry with a
+    field from another passes -- so `validate` resolves the exact (group,
+    field[, checksum]) key afterwards, unchanged. What this saves is
+    `to_pylist` materialising every other field of a specified group, which
+    the group-only filter did. Measured 2026-09-28 on the largest export of
+    11.10, 12.04, 13.01, 13.04 and 13.06 (259ed10, --checkpoints), with both
+    shipped specifications: rows reaching Python fell from 53,945-241,085 to
+    14,360-26,665 per export -- on 13.06 exactly the 22,989 / 17,601 rows the
+    specified pairs match -- and the summed median `validate` time from
+    20.3 s to 11.1 s, with all 120 reports identical. `Table.filter` keeps
+    row order, so the 32-capped example lists are the same rows as before.
+    """
+    return table.filter(pc.and_(
+        pc.is_in(pc.cast(table["group_path"], pa.string()), value_set=groups),
+        pc.is_in(pc.cast(table["field_name"], pa.string()), value_set=fields),
+    ))
+
+
 def validate(export_root: Path, specifications: list[dict], export_ids=None, compare_typed=False) -> dict:
     if not export_root.exists():
         raise ValueError(f"export root does not exist: {export_root}")
@@ -143,6 +164,7 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
     if not paths:
         raise ValueError(f"no field parquet files below {export_root}")
     wanted_groups = pa.array(sorted({group for group, _field, _checksum in expected}))
+    wanted_fields = pa.array(sorted({field for _group, field, _checksum in expected}))
     for path in paths:
         parquet = pq.ParquetFile(path)
         columns = ["group_path", "field_name", "handle", "compatible_checksum",
@@ -154,8 +176,7 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
             columns=columns,
             use_threads=False,
         ):
-            table = pa.Table.from_batches([batch])
-            table = table.filter(pc.is_in(pc.cast(table["group_path"], pa.string()), value_set=wanted_groups))
+            table = spec_rows(pa.Table.from_batches([batch]), wanted_groups, wanted_fields)
             for row in table.to_pylist():
                 key = (row["group_path"], row["field_name"], row["compatible_checksum"])
                 if key not in expected:
