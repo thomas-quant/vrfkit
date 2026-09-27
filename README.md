@@ -115,9 +115,11 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
   deduplication; unresolved ownership and incomplete effect pairs remain gaps.
 - **Numeric FastArray observations** — the standalone GAS extractor retains
   replication keys, deleted/changed item IDs and raw property boundaries.
-  All 2,882,152 measured inner windows close exactly; property names and
-  gameplay meanings remain unverified. This output is separate from Parquet
-  typed-value coverage.
+  On 2026-09-28 every window it reads in 1,018 exports closed exactly:
+  3,999,493 `_cnc_h1` windows across 22 builds, and 431,161 chained windows,
+  main and checkpoint, across all 24. Property names and gameplay meanings
+  remain unverified. This output is separate from Parquet typed-value
+  coverage.
 - **Status-effect observations** — nearsight, slow, detain and suppress can
   arrive on affected actors. Matched start/stop records support intervals;
   unmatched records must not be assigned an invented duration.
