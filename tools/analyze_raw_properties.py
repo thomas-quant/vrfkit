@@ -538,87 +538,57 @@ def render_report(
             ]
         )
 
-    signatures = list(inventory.signatures.values())
-    repeated_rows = sum(item.rows for item in signatures if item.rows > 1)
-    cross_replay = sum(len(item.replay_ordinals) > 1 for item in signatures)
-    cross_build = sum(len(item.builds) > 1 for item in signatures)
-    constant = sum(item.rows > 1 and not item.payload_varied for item in signatures)
-    varied = sum(item.payload_varied for item in signatures)
-    shapes = list(inventory.block_shapes.values())
-    block_count = sum(item.blocks for item in shapes)
-    repeated_blocks = sum(item.blocks for item in shapes if item.blocks > 1)
-    shape_cross_replay = sum(len(item.replay_ordinals) > 1 for item in shapes)
-    shape_cross_build = sum(len(item.builds) > 1 for item in shapes)
-
-    ranked_shapes = sorted(
-        inventory.block_shapes.items(), key=lambda item: item[1].blocks, reverse=True
-    )[:12]
-    builds = sorted(selected_by_build)
-    signatures_by_build = {
-        build: sum(item.rows_by_build[build] > 0 for item in signatures)
-        for build in builds
-    }
-    signature_rows_by_build = {
-        build: sum(item.rows_by_build[build] for item in signatures)
-        for build in builds
-    }
-    shared_signature_rows_by_build = {
-        build: sum(
-            item.rows_by_build[build]
-            for item in signatures
-            if len(item.builds) > 1
-        )
-        for build in builds
-    }
-    layouts_by_build = {
-        build: sum(item.blocks_by_build[build] > 0 for item in shapes)
-        for build in builds
-    }
-    layout_blocks_by_build = {
-        build: sum(item.blocks_by_build[build] for item in shapes)
-        for build in builds
-    }
-    shared_layout_blocks_by_build = {
-        build: sum(
-            item.blocks_by_build[build]
-            for item in shapes
-            if len(item.builds) > 1
-        )
-        for build in builds
-    }
+    # The recurrence figures are the JSON document's; only the per-build
+    # aggregates above read the inventory, so ties keep its insertion order.
+    recurrence = summary_document(
+        inventory, eligible_by_build, selected_by_build, excluded, recursive
+    )["structural_recurrence"]
+    layouts = recurrence["top_anonymous_layouts"]
     lines.extend(
         [
             "=== Anonymous structural recurrence ===",
-            f"field signatures: {len(signatures)}",
-            f"rows in repeated signatures: {repeated_rows}",
-            f"signatures seen in multiple replays / builds: {cross_replay} / {cross_build}",
-            f"repeated signatures with constant / varying payload: {constant} / {varied}",
-            f"property updates containing unnamed rows: {block_count}",
-            f"distinct unnamed layouts: {len(shapes)}",
-            f"updates in repeated layouts: {repeated_blocks}",
+            f"field signatures: {recurrence['field_signatures']}",
+            f"rows in repeated signatures: {recurrence['rows_in_repeated_signatures']}",
+            (
+                f"signatures seen in multiple replays / builds: "
+                f"{recurrence['signatures_seen_in_multiple_replays']} / "
+                f"{recurrence['signatures_seen_in_multiple_builds']}"
+            ),
+            (
+                f"repeated signatures with constant / varying payload: "
+                f"{recurrence['repeated_constant_payload_signatures']} / "
+                f"{recurrence['varying_payload_signatures']}"
+            ),
+            (
+                f"property updates containing unnamed rows: "
+                f"{recurrence['property_updates_with_unnamed_rows']}"
+            ),
+            f"distinct unnamed layouts: {recurrence['distinct_unnamed_layouts']}",
+            f"updates in repeated layouts: {recurrence['updates_in_repeated_layouts']}",
             (
                 f"layouts seen in multiple replays / builds: "
-                f"{shape_cross_replay} / {shape_cross_build}"
+                f"{recurrence['layouts_seen_in_multiple_replays']} / "
+                f"{recurrence['layouts_seen_in_multiple_builds']}"
             ),
             "per-build structural reuse:",
             *(
-                f"  release-{build}: {signatures_by_build[build]} signatures; "
-                f"{shared_signature_rows_by_build[build]}/"
-                f"{signature_rows_by_build[build]} rows use a cross-build signature; "
-                f"{layouts_by_build[build]} layouts; "
-                f"{shared_layout_blocks_by_build[build]}/"
-                f"{layout_blocks_by_build[build]} updates use a cross-build layout"
-                for build in builds
+                f"  release-{build}: {item['field_signatures']} signatures; "
+                f"{item['rows_using_cross_build_signature']}/"
+                f"{item['signature_rows']} rows use a cross-build signature; "
+                f"{item['layouts']} layouts; "
+                f"{item['updates_using_cross_build_layout']}/"
+                f"{item['layout_updates']} updates use a cross-build layout"
+                for build, item in recurrence["per_build"].items()
             ),
             "top anonymous layouts (rank:updates,fields,replays,builds):",
+            *(
+                f"  {layout['rank']}:{layout['updates']},{layout['fields_per_update']},"
+                f"{layout['replays']},{layout['builds']}"
+                for layout in layouts
+            ),
         ]
     )
-    for rank, (shape, recurrence) in enumerate(ranked_shapes, 1):
-        lines.append(
-            f"  {rank}:{recurrence.blocks},{len(shape[1])},"
-            f"{len(recurrence.replay_ordinals)},{len(recurrence.builds)}"
-        )
-    if not ranked_shapes:
+    if not layouts:
         lines.append("  none")
     lines.extend(
         [
