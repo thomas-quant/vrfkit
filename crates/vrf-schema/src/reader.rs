@@ -92,6 +92,7 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
             let group = NetFieldExportGroup::try_new(path_name, path_name_index, num_fields)?;
             cache.add_export_group(group)?;
         } else {
+            // A reference to an existing group, which must already be known.
             if cache.get_group_by_index(path_name_index).is_none() {
                 return Err(SchemaError::UnknownPathIndex {
                     index: path_name_index,
