@@ -477,7 +477,7 @@ fn a_replay_with_nothing_decompressed_is_reported() {
 }
 
 /// Bytes after the header's layout are a problem, not a note. Real replays
-/// have shown none, so this fixture is the only input that runs the check.
+/// have shown none, so this fixture is the only input the check fires on.
 #[test]
 fn header_bytes_past_the_parsed_layout_are_reported() {
     let report = scan_file(&fixture::with_header_residual(2));
