@@ -2,7 +2,7 @@
 //!
 //! These tests verify:
 //! - Write -> read round-trip preserves all values and nulls.
-//! - Large writes (>1 row group) produce multiple row groups.
+//! - Rows are cut into row groups at exactly the row-group size.
 //! - Binary column data is preserved exactly.
 //! - Dictionary-encoded columns round-trip correctly.
 //! - Every table's file carries a Parquet dictionary for exactly the columns
@@ -390,57 +390,6 @@ fn unresolved_class_net_cache_payload_marker_roundtrips_exact_bits() {
     }
 }
 
-#[test]
-fn field_multiple_row_groups() {
-    // 200_000 rows with row_group_size=65_536 -> should produce at least 3 groups.
-    let row_count = 200_000u32;
-    let row_group_size = 65_536;
-    let path = test_dir().join("field_multiple_row_groups.parquet");
-
-    {
-        let file = fs::File::create(&path).unwrap();
-        let mut writer = FieldWriter::with_row_group_size(file, row_group_size).unwrap();
-        for i in 0..row_count {
-            writer.push(make_field_record(i)).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    // Use the low-level reader to count row groups.
-    let file = fs::File::open(&path).unwrap();
-    let file_reader = SerializedFileReader::new(file).unwrap();
-    let metadata = file_reader.metadata();
-    let num_row_groups = metadata.num_row_groups();
-
-    // 200_000 / 65_536 = 3.05 -> expect at least 3 row groups.
-    assert!(
-        num_row_groups >= 3,
-        "expected at least 3 row groups, got {num_row_groups}"
-    );
-
-    // Verify total row count.
-    let total: i64 = (0..num_row_groups)
-        .map(|i| metadata.row_group(i).num_rows())
-        .sum();
-    assert_eq!(total, row_count as i64);
-}
-
-#[test]
-fn field_push_batch() {
-    let path = test_dir().join("field_push_batch.parquet");
-    {
-        let file = fs::File::create(&path).unwrap();
-        let mut writer = FieldWriter::with_row_group_size(file, 1024).unwrap();
-        let records: Vec<FieldRecord> = (0..300).map(make_field_record).collect();
-        writer.push_batch(records).unwrap();
-        writer.finish().unwrap();
-    }
-
-    let batches = read_all_batches(&path);
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 300);
-}
-
 // --- Movement Writer Tests ------------------------------------------------
 
 #[test]
@@ -467,36 +416,6 @@ fn movement_roundtrip_basic() {
         .unwrap();
     assert!((pos_x.value(0) - 0.0).abs() < f32::EPSILON);
     assert!((pos_x.value(1) - 1.5).abs() < f32::EPSILON);
-}
-
-#[test]
-fn movement_multiple_row_groups() {
-    let row_count = 200_000u32;
-    let row_group_size = 65_536;
-    let path = test_dir().join("movement_multiple_row_groups.parquet");
-
-    {
-        let file = fs::File::create(&path).unwrap();
-        let mut writer = MovementWriter::with_row_group_size(file, row_group_size).unwrap();
-        for i in 0..row_count {
-            writer.push(make_movement_record(i)).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    let file = fs::File::open(&path).unwrap();
-    let file_reader = SerializedFileReader::new(file).unwrap();
-    let metadata = file_reader.metadata();
-    let num_row_groups = metadata.num_row_groups();
-    assert!(
-        num_row_groups >= 3,
-        "expected at least 3 row groups, got {num_row_groups}"
-    );
-
-    let total: i64 = (0..num_row_groups)
-        .map(|i| metadata.row_group(i).num_rows())
-        .sum();
-    assert_eq!(total, row_count as i64);
 }
 
 #[test]
@@ -540,22 +459,6 @@ fn movement_f32_precision() {
         .downcast_ref::<Float32Array>()
         .unwrap();
     assert_eq!(vel_x.value(0), f32::MAX);
-}
-
-#[test]
-fn movement_push_batch() {
-    let path = test_dir().join("movement_push_batch.parquet");
-    {
-        let file = fs::File::create(&path).unwrap();
-        let mut writer = MovementWriter::with_row_group_size(file, 1024).unwrap();
-        let records: Vec<MovementRecord> = (0..500).map(make_movement_record).collect();
-        writer.push_batch(records).unwrap();
-        writer.finish().unwrap();
-    }
-
-    let batches = read_all_batches(&path);
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 500);
 }
 
 #[test]
@@ -877,21 +780,6 @@ fn actor_spawn_location_nullable() {
     assert!(spawn_x.is_null(1));
 }
 
-#[test]
-fn actor_push_finish_empty() {
-    // Verify that finishing a writer with zero rows produces a valid file.
-    let path = test_dir().join("actor_empty.parquet");
-    {
-        let file = fs::File::create(&path).unwrap();
-        let writer = ActorWriter::new(file).unwrap();
-        writer.finish().unwrap();
-    }
-    // File should still be valid Parquet with 0 rows.
-    let batches = read_all_batches(&path);
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 0);
-}
-
 // ---------------------------------------------------------------------------
 // net_guids table
 // ---------------------------------------------------------------------------
@@ -981,19 +869,6 @@ fn field_object_net_guid_roundtrips_and_is_nullable() {
         .unwrap();
     assert!(col.is_null(0), "actor blocks carry no subobject GUID");
     assert_eq!(col.value(1), 4242);
-}
-
-#[test]
-fn net_guid_push_finish_empty() {
-    let path = test_dir().join("net_guid_empty.parquet");
-    {
-        let file = fs::File::create(&path).unwrap();
-        let writer = NetGuidWriter::new(file).unwrap();
-        writer.finish().unwrap();
-    }
-    let batches = read_all_batches(&path);
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,60 +1014,6 @@ fn event_roundtrip_preserves_payload_bytes_exactly() {
     assert!(payload_seconds.is_null(1));
 }
 
-#[test]
-fn event_multiple_row_groups() {
-    let path = test_dir().join("event_multi_row_group.parquet");
-    {
-        let file = fs::File::create(&path).unwrap();
-        let mut writer = EventWriter::with_row_group_size(file, 64).unwrap();
-        for i in 0..200u32 {
-            let group = if i % 2 == 0 {
-                "characterDeath"
-            } else {
-                "spikePlanted"
-            };
-            writer
-                .push(EventRecord {
-                    id: format!("id_{i}"),
-                    group: group.into(),
-                    metadata: String::new(),
-                    time1: i * 1000,
-                    time2: i * 1000,
-                    payload_size: 4,
-                    raw_payload: i.to_le_bytes().to_vec(),
-                    word0: None,
-                    word1: None,
-                    payload_tag: None,
-                    payload_name: None,
-                    payload_seconds: None,
-                })
-                .unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    let file = fs::File::open(&path).unwrap();
-    let reader = SerializedFileReader::new(file).unwrap();
-    assert!(reader.metadata().num_row_groups() > 1);
-
-    let batches = read_all_batches(&path);
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 200);
-}
-
-#[test]
-fn event_push_finish_empty() {
-    let path = test_dir().join("event_empty.parquet");
-    {
-        let file = fs::File::create(&path).unwrap();
-        let writer = EventWriter::new(file).unwrap();
-        writer.finish().unwrap();
-    }
-    let batches = read_all_batches(&path);
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 0);
-}
-
 /// The replay's own `compatible_checksum` survives the round trip, nulls
 /// included.
 ///
@@ -1241,6 +1062,137 @@ fn compatible_checksum_round_trips_with_its_nulls() {
             assert!(checksum.is_null(i), "row {i} should be null");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// One writer serves every table: row groups, empty files, push_batch
+// ---------------------------------------------------------------------------
+
+use vrf_export::{
+    ActorsTable, EventsTable, FieldsTable, MovementTable, NetGuidsTable, Table, TableWriter,
+};
+
+/// An event row that varies with `i`, alternating between two groups.
+fn make_event_record(i: u32) -> EventRecord {
+    EventRecord {
+        id: format!("id_{i}"),
+        group: ["characterDeath", "spikePlanted"][(i % 2) as usize].into(),
+        metadata: String::new(),
+        time1: i * 1000,
+        time2: i * 1000,
+        payload_size: 4,
+        raw_payload: i.to_le_bytes().to_vec(),
+        word0: None,
+        word1: None,
+        payload_tag: None,
+        payload_name: None,
+        payload_seconds: None,
+    }
+}
+
+/// Write `rows` through table `T`'s writer at `row_group_size`, one `push`
+/// per row or all of them through one `push_batch`, and return the path.
+fn write_rows<T: Table>(
+    name: &str,
+    row_group_size: usize,
+    rows: impl IntoIterator<Item = T::Row>,
+    one_batch: bool,
+) -> PathBuf {
+    let path = test_dir().join(format!("{name}.parquet"));
+    let file = fs::File::create(&path).unwrap();
+    let mut writer = TableWriter::<T, fs::File>::with_row_group_size(file, row_group_size).unwrap();
+    if one_batch {
+        writer.push_batch(rows).unwrap();
+    } else {
+        for row in rows {
+            writer.push(row).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+    path
+}
+
+/// Every row group's row count in file order, after checking that the whole
+/// file reads back with that many rows.
+fn row_groups(path: &std::path::Path) -> Vec<i64> {
+    let reader = SerializedFileReader::new(fs::File::open(path).unwrap()).unwrap();
+    let counts: Vec<i64> = reader
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|group| group.num_rows())
+        .collect();
+    let read_back: usize = read_all_batches(path)
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum();
+    assert_eq!(
+        read_back as i64,
+        counts.iter().sum::<i64>(),
+        "{}",
+        path.display()
+    );
+    counts
+}
+
+#[test]
+fn row_groups_close_at_the_row_group_size_not_at_each_batch() {
+    // 200,000 rows at 65,536 per row group: three full groups and the rest.
+    // Each full group spans eight batches of MAX_BUFFERED_ROWS, so a writer
+    // that closed a row group whenever it handed over a batch would write 24
+    // groups of 8,192 and one of 3,392 -- which the ">= 3 row groups" these
+    // assertions replace accepted. Only the exact vector tells them apart.
+    const ROWS: u32 = 200_000;
+    const _: () = assert!(vrf_export::writer::MAX_BUFFERED_ROWS < 65_536);
+    let expected = vec![65_536, 65_536, 65_536, 3_392];
+
+    let rows = (0..ROWS).map(make_field_record);
+    let path = write_rows::<FieldsTable>("row_groups_fields", 65_536, rows, false);
+    assert_eq!(row_groups(&path), expected, "fields");
+    let rows = (0..ROWS).map(make_movement_record);
+    let path = write_rows::<MovementTable>("row_groups_movement", 65_536, rows, false);
+    assert_eq!(row_groups(&path), expected, "movement");
+    let rows = (0..ROWS).map(make_event_record);
+    let path = write_rows::<EventsTable>("row_groups_events", 65_536, rows, false);
+    assert_eq!(row_groups(&path), expected, "events");
+}
+
+#[test]
+fn a_writer_finished_with_no_rows_writes_a_readable_empty_file() {
+    fn rows_in_empty_file<T: Table>(name: &str) -> i64 {
+        let path = write_rows::<T>(name, T::DEFAULT_ROW_GROUP_SIZE, [], false);
+        row_groups(&path).iter().sum()
+    }
+    assert_eq!(rows_in_empty_file::<FieldsTable>("empty_fields"), 0);
+    assert_eq!(rows_in_empty_file::<MovementTable>("empty_movement"), 0);
+    assert_eq!(rows_in_empty_file::<ActorsTable>("empty_actors"), 0);
+    assert_eq!(rows_in_empty_file::<NetGuidsTable>("empty_net_guids"), 0);
+    assert_eq!(rows_in_empty_file::<EventsTable>("empty_events"), 0);
+}
+
+/// Write rows `0..count` once through `push_batch` and once through one
+/// `push` per row, at 128 rows per row group so the flushes fall inside the
+/// batch. Asserts the two files are byte-identical; returns the row groups.
+fn push_batch_against_push<T: Table>(name: &str, count: u32, make: fn(u32) -> T::Row) -> Vec<i64> {
+    let batched = write_rows::<T>(&format!("{name}_batched"), 128, (0..count).map(make), true);
+    let pushed = write_rows::<T>(&format!("{name}_pushed"), 128, (0..count).map(make), false);
+    assert!(
+        fs::read(&batched).unwrap() == fs::read(pushed).unwrap(),
+        "{name}: push_batch wrote a different file"
+    );
+    row_groups(&batched)
+}
+
+#[test]
+fn push_batch_writes_the_same_file_as_one_push_per_row() {
+    assert_eq!(
+        push_batch_against_push::<FieldsTable>("push_batch_fields", 300, make_field_record),
+        vec![128, 128, 44]
+    );
+    assert_eq!(
+        push_batch_against_push::<MovementTable>("push_batch_movement", 500, make_movement_record),
+        vec![128, 128, 128, 116]
+    );
 }
 
 // ---------------------------------------------------------------------------
