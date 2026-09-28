@@ -408,7 +408,8 @@ ADDITIONS = [
     # 15, p90 19, p99 25, max 473, 57 distinct).
     # SerializedInt{65536} reads exactly those 16 bits, LSB-first, and passes
     # decode_field's full-consumption guard.
-    # Typed despite PROJECT_STATUS 18-D: it passed Money's gate; per-player latency is now wanted.
+    # Typed despite PROJECT_STATUS 18-D: it passed Money's gate; per-player
+    # latency is now wanted.
     ("/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
      "Ping", "FieldType::SerializedInt { max: 65536 }"),
     # BasicCombatStatsComponent, the cumulative scoreboard K/D/A: on
