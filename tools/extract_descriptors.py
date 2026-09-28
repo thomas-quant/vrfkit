@@ -315,20 +315,6 @@ KIND_OVERRIDE_RE = re.compile(
     rf'{EXPORT_GROUP_KIND_TYPE}\s*\.\s*(?P<kind>\w+)\s*;'
 )
 
-# The handle argument of AddPropertyHandle.
-#
-# Usually a literal, but a descriptor may factor a run of handles into a helper
-# that takes the first one: MulticastNotifyDamageBaseParameters.cs:24 declares
-# AddDeathFields(uint firstHandle) and calls it as AddDeathFields(32), so its
-# six statements read `firstHandle` and `firstHandle + 5`.
-#
-# Requiring a literal here made those six invisible. The table is keyed on
-# (group_path, field_name) and never reads the handle, so the value does not
-# need resolving -- only the shape has to be recognised. The trailing comma in
-# every caller is what keeps this from swallowing a lambda: `x => x.Prop` has
-# no comma after `x`.
-HANDLE_ARG = r'(?:\d+|[A-Za-z_]\w*(?:\s*\+\s*\d+)?)'
-
 # Sentinel `rejected` label for an AddProperty whose type method IS classified
 # but whose export name could not be extracted (e.g. a named constant instead
 # of a string literal or lambda leaf). Distinct from a real type-method name so
@@ -730,13 +716,8 @@ def _parse_csharp_string_literal(
     return None
 
 
-def _extract_field_name(
-    raw_line: str, code_line: str | None = None
-) -> str | None:
+def _extract_field_name(raw_line: str, code_line: str) -> str | None:
     """Extract a live explicit export name or semantic lambda property leaf."""
-    if code_line is None:
-        code_line = csharp_code_view(raw_line)
-
     invocation = re.match(
         rf'@?(?P<method>AddProperty\w*)\s*\(', code_line
     )
@@ -819,11 +800,9 @@ def find_class_body_range(source: str, class_start: int) -> tuple[int, int]:
 
 
 def extract_parameterless_method_body(
-    source: str, method_name: str, code_view: str | None = None
+    source: str, method_name: str, code_view: str
 ) -> str | None:
     """Return the unique live parameterless method's block or expression body."""
-    if code_view is None:
-        code_view = csharp_code_view(source)
     declaration_re = re.compile(
         rf'\b(?:public|internal|protected|private)\s+(?:static\s+)?'
         rf'[\w@.<>,?\[\]]+\s+@?{re.escape(method_name)}\s*\(\s*\)\s*'
@@ -1194,14 +1173,12 @@ def fields_for_export_group_kind(
     kind: str,
     fields: list[tuple[str, str, int | None]],
 ) -> list[tuple[str, str, int | None]]:
-    """Keep only the declared fields this kind can actually put on the wire."""
-    policy = EXPORT_GROUP_KIND_POLICY.get(kind)
-    if policy is None:
-        raise SystemExit(
-            f"{class_name}: unhandled ExportGroupKind {kind!r}. "
-            "Decide whether this kind's properties can be wire field names and "
-            "add it to EXPORT_GROUP_KIND_POLICY; the generator will not guess."
-        )
+    """Keep only the declared fields this kind can actually put on the wire.
+
+    `kind` is a key of EXPORT_GROUP_KIND_POLICY: `extract_kind_override`
+    refuses any other, and the default is one.
+    """
+    policy = EXPORT_GROUP_KIND_POLICY[kind]
     if policy == "emit":
         return fields
     if policy == "drop":
@@ -1927,9 +1904,6 @@ def main(argv: list[str]) -> int:
     # Phase 3: build final entries
     entries: list[tuple[str, str, str]] = []  # (group_path, field_name, rust_type)
     handle_entries: list[tuple[str, int, str]] = []
-    type_counts: Counter[str] = Counter()
-    raw_count = 0
-    skip_count = 0
     groups_seen: set[str] = set()
 
     # 3a: ExportGroupDescriptor entries (RepLayout + RPC parameter groups)
@@ -1980,13 +1954,6 @@ def main(argv: list[str]) -> int:
             entries.append((path, field_name, rust_type))
             if literal_handle is not None:
                 handle_entries.append((path, literal_handle, field_name))
-            if rust_type == "FieldType::Raw":
-                raw_count += 1
-            elif rust_type == "FieldType::Skip":
-                skip_count += 1
-            else:
-                base_type = rust_type.split("{")[0].strip().replace("FieldType::", "")
-                type_counts[base_type] += 1
 
     # 3b: ClassNetCache function entries
     # Each function in a CNC group gets a Skip entry. This tells analyze_coverage
@@ -2000,7 +1967,6 @@ def main(argv: list[str]) -> int:
         groups_seen.add(path)
         for func_name in funcs:
             entries.append((path, func_name, "FieldType::Skip"))
-            skip_count += 1
 
     def has_effective_agent_category(cls: str) -> bool:
         return bool(
@@ -2019,35 +1985,27 @@ def main(argv: list[str]) -> int:
             cache_path = path + suffix
             groups_seen.add(cache_path)
             entries.append((cache_path, function_name, "FieldType::Skip"))
-            skip_count += 1
 
     # Concrete calls to simple static cache factories carry a path constant
     # and one RPC name. They have no descriptor subclass for phase 3b to see.
     for cache_path, function_name in sorted(set(static_cache_specs)):
         groups_seen.add(cache_path)
         entries.append((cache_path, function_name, "FieldType::Skip"))
-        skip_count += 1
 
     # Deduplicate entries (same path + field_name can appear if parent+child both declare)
-    seen_keys: set[tuple[str, str]] = set()
-    deduped: list[tuple[str, str, str]] = []
+    first: dict[tuple[str, str], tuple[str, str, str]] = {}
     for entry in entries:
-        key = (entry[0], entry[1])
-        if key not in seen_keys:
-            seen_keys.add(key)
-            deduped.append(entry)
-    entries = deduped
+        first.setdefault(entry[:2], entry)
+    entries = list(first.values())
 
     handle_by_key: dict[tuple[str, int], str] = {}
     for group_path, handle, field_name in handle_entries:
-        key = (group_path, handle)
-        previous = handle_by_key.get(key)
-        if previous is not None and previous != field_name:
+        previous = handle_by_key.setdefault((group_path, handle), field_name)
+        if previous != field_name:
             raise SystemExit(
                 "conflicting explicit handles for "
                 f"{group_path} handle {handle}: {previous!r} vs {field_name!r}"
             )
-        handle_by_key[key] = field_name
     handle_entries = [
         (group_path, handle, field_name)
         for (group_path, handle), field_name in handle_by_key.items()
@@ -2057,10 +2015,10 @@ def main(argv: list[str]) -> int:
     entries.sort(key=lambda e: (e[0], e[1]))
     handle_entries.sort(key=lambda e: (e[0], e[1]))
 
-    # Recount after dedup
+    # Count after dedup
     raw_count = sum(1 for _, _, t in entries if t == "FieldType::Raw")
     skip_count = sum(1 for _, _, t in entries if t == "FieldType::Skip")
-    type_counts = Counter()
+    type_counts: Counter[str] = Counter()
     for _, _, t in entries:
         if t != "FieldType::Raw" and t != "FieldType::Skip":
             base_type = t.split("{")[0].strip().replace("FieldType::", "")
