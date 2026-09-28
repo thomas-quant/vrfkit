@@ -1016,6 +1016,40 @@ mod tests {
         assert_eq!(sink.stats.overlay.decoded_err, 1);
     }
 
+    /// The failure framing reports for an unresolved ClassNetCache block of
+    /// `bit_count` bits: nothing consumed, the whole payload preserved.
+    fn unresolved_failure(actor: u32, bit_count: u32) -> StreamFailure {
+        StreamFailure {
+            kind: vrf_net::pipeline::StreamKind::Rpc,
+            actor_net_guid: NetworkGuid(actor),
+            bit_count,
+            function_count: 0,
+            consumed_bits: 0,
+            remaining_bits: u64::from(bit_count),
+            cause: StreamFailureCause::UnresolvedFunctionCount,
+            record_handle: None,
+            record_offset: Some(0),
+            payload_preserved: true,
+        }
+    }
+
+    /// A 200-bit RepLayout stream on actor 7 abandoned at `consumed`, in
+    /// handle 3's record.
+    fn abandoned_tail(consumed: u64) -> StreamFailure {
+        StreamFailure {
+            kind: vrf_net::pipeline::StreamKind::RepLayout,
+            actor_net_guid: NetworkGuid(7),
+            bit_count: 200,
+            function_count: 0,
+            consumed_bits: consumed,
+            remaining_bits: 200 - consumed,
+            cause: StreamFailureCause::AbandonedTail,
+            record_handle: Some(3),
+            record_offset: Some(consumed),
+            payload_preserved: false,
+        }
+    }
+
     /// A whole unresolved block is one preservation row, not an RPC or a set
     /// of invented fields. The reserved field name is its sole discriminator.
     #[test]
@@ -1038,18 +1072,7 @@ mod tests {
         let function_count = sink.on_content_block(7, NetworkGuid(89), &header);
         assert_eq!(function_count, 0);
 
-        let failure = StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::Rpc,
-            actor_net_guid: NetworkGuid(89),
-            bit_count: 7,
-            function_count: 0,
-            consumed_bits: 0,
-            remaining_bits: 7,
-            cause: vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount,
-            record_handle: None,
-            record_offset: Some(0),
-            payload_preserved: true,
-        };
+        let failure = unresolved_failure(89, 7);
         sink.on_unresolved_class_net_cache_payload(failure, &[0x66]);
 
         assert_eq!(sink.records.fields.len(), 1);
@@ -1327,6 +1350,22 @@ mod tests {
         (records, stats)
     }
 
+    const TARGETING_GROUP: &str =
+        "/Script/ShooterGame.MapTargetingStateComponent:MulticastRespondToValidMapClick";
+
+    /// `targeting_rpc` with the measured parent and child declarations.
+    fn valid_targeting(array_bits: &[bool]) -> (RecordBuffers, ExportStats) {
+        targeting_rpc(
+            TARGETING_GROUP,
+            0,
+            "WorldLocation",
+            2052180909,
+            "WorldLocation",
+            3965480401,
+            array_bits,
+        )
+    }
+
     fn append_world_location(bits: &mut Vec<bool>, values: [f64; 3]) {
         packed(bits, 2);
         packed(bits, 192);
@@ -1354,17 +1393,7 @@ mod tests {
     #[test]
     fn guarded_targeting_array_emits_vector_child_and_raw_parent() {
         let array = one_world_location([12.5, -9.25, 3.0]);
-        let group =
-            "/Script/ShooterGame.MapTargetingStateComponent:MulticastRespondToValidMapClick";
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &array,
-        );
+        let (records, stats) = valid_targeting(&array);
         assert_eq!(records.fields.len(), 2);
         assert_eq!(
             records.fields[0].field_name.as_deref(),
@@ -1391,15 +1420,7 @@ mod tests {
         assert_eq!(stats.targeting_world_locations_decoded, 1);
 
         let signed_zero = one_world_location([-0.0, 0.0, -0.0]);
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &signed_zero,
-        );
+        let (records, stats) = valid_targeting(&signed_zero);
         let expected_raw: Vec<u8> = [-0.0f64, 0.0, -0.0]
             .into_iter()
             .flat_map(f64::to_le_bytes)
@@ -1414,25 +1435,15 @@ mod tests {
 
     #[test]
     fn targeting_array_requires_exact_child_declaration_and_complete_grammar() {
-        let group =
-            "/Script/ShooterGame.MapTargetingStateComponent:MulticastRespondToValidMapClick";
         let array = one_world_location([1.0, 2.0, 3.0]);
         let empty = world_locations(&[]);
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &empty,
-        );
+        let (records, stats) = valid_targeting(&empty);
         assert_eq!(records.fields.len(), 1);
         assert_eq!(stats.targeting_world_locations_decoded, 0);
         assert_eq!(stats.array_leaf_decode_errors, 0);
         for (name, checksum) in [("Other", 3965480401), ("WorldLocation", 7)] {
             let (records, stats) = targeting_rpc(
-                group,
+                TARGETING_GROUP,
                 0,
                 "WorldLocation",
                 2052180909,
@@ -1444,9 +1455,9 @@ mod tests {
             assert_eq!(stats.targeting_world_locations_decoded, 0);
         }
         for (candidate_group, handle, name, checksum) in [
-            (group, 0, "WorldLocation", 7),
-            (group, 0, "Other", 2052180909),
-            (group, 2, "WorldLocation", 2052180909),
+            (TARGETING_GROUP, 0, "WorldLocation", 7),
+            (TARGETING_GROUP, 0, "Other", 2052180909),
+            (TARGETING_GROUP, 2, "WorldLocation", 2052180909),
             (
                 "/Script/ShooterGame.Other:MulticastRespondToValidMapClick",
                 0,
@@ -1467,15 +1478,7 @@ mod tests {
             assert_eq!(stats.targeting_world_locations_decoded, 0);
         }
         let truncated = &array[..array.len() - 8];
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            truncated,
-        );
+        let (records, stats) = valid_targeting(truncated);
         assert_eq!(records.fields.len(), 1);
         assert_eq!(stats.targeting_world_locations_decoded, 0);
         assert!(
@@ -1486,15 +1489,7 @@ mod tests {
 
         let mut residual = array.clone();
         residual.push(true);
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &residual,
-        );
+        let (records, stats) = valid_targeting(&residual);
         assert_eq!(records.fields.len(), 1);
         assert!(stats.array.unconsumed_root_bits > 0);
 
@@ -1508,15 +1503,7 @@ mod tests {
             packed(&mut bits, 0);
             bits
         };
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &wrong_handle,
-        );
+        let (records, stats) = valid_targeting(&wrong_handle);
         assert_eq!(records.fields.len(), 1);
         assert!(stats.array_leaf_decode_errors > 0);
 
@@ -1530,28 +1517,12 @@ mod tests {
             packed(&mut bits, 0);
             bits
         };
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &wrong_width,
-        );
+        let (records, stats) = valid_targeting(&wrong_width);
         assert_eq!(records.fields.len(), 1);
         assert!(stats.array_leaf_decode_errors > 0);
 
         let nonfinite = one_world_location([f64::NAN, 0.0, -0.0]);
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &nonfinite,
-        );
+        let (records, stats) = valid_targeting(&nonfinite);
         assert_eq!(records.fields.len(), 1);
         assert!(stats.array_leaf_decode_errors > 0);
 
@@ -1562,28 +1533,12 @@ mod tests {
         append_world_location(&mut duplicate_member, [4.0, 5.0, 6.0]);
         packed(&mut duplicate_member, 0);
         packed(&mut duplicate_member, 0);
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &duplicate_member,
-        );
+        let (records, stats) = valid_targeting(&duplicate_member);
         assert_eq!(records.fields.len(), 1);
         assert!(stats.array_leaf_decode_errors > 0);
 
         let mixed = world_locations(&[[1.0, 2.0, 3.0], [f64::NAN, 5.0, 6.0]]);
-        let (records, stats) = targeting_rpc(
-            group,
-            0,
-            "WorldLocation",
-            2052180909,
-            "WorldLocation",
-            3965480401,
-            &mixed,
-        );
+        let (records, stats) = valid_targeting(&mixed);
         assert_eq!(
             records.fields.len(),
             1,
@@ -1724,14 +1679,85 @@ mod tests {
         assert_eq!(records.fields[0].raw_bits.as_deref(), Some(data.as_slice()));
     }
 
+    const PROJECTILE_CNC: &str =
+        "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache";
+    const PROJECTILE_PARAMS: &str =
+        "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:MulticastSetPath";
+    const PROJECTILE_PARENT: &str = "MulticastSetPath.NetworkedProjectilePath";
+
+    /// One path point: ElapsedSeconds, Location and Velocity at handles 1-3,
+    /// optionally without the velocity or with an unknown zero-width member.
+    fn path_point_array(elapsed: f32, omit_velocity: bool, extra_zero_width: bool) -> Vec<bool> {
+        let mut array = Vec::new();
+        packed(&mut array, 1); // one path point
+        packed(&mut array, 1); // index zero
+        for (handle, payload) in [
+            (1, elapsed.to_le_bytes().to_vec()),
+            (2, vec![0; 24]),
+            (3, vec![0; 24]),
+        ] {
+            if omit_velocity && handle == 3 {
+                continue;
+            }
+            packed(&mut array, handle + 1);
+            packed(&mut array, (payload.len() * 8) as u32);
+            array.extend(bits_from_bytes(&payload));
+        }
+        if extra_zero_width {
+            packed(&mut array, 5); // unknown handle 4
+            packed(&mut array, 0);
+        }
+        packed(&mut array, 0); // element terminator
+        packed(&mut array, 0); // array terminator
+        array
+    }
+
+    /// Send `array` as `MulticastSetPath`'s only parameter through `on_rpc`,
+    /// with the measured routes of `branch` admitted.
+    fn projectile_path_rpc(array: &[bool], branch: &str) -> (RecordBuffers, ExportStats) {
+        let mut rpc = vec![false]; // FunctionParameters checksum bit
+        packed(&mut rpc, 1); // parameter handle zero
+        packed(&mut rpc, array.len() as u32);
+        rpc.extend_from_slice(array);
+        packed(&mut rpc, 0); // parameter terminator
+        let rpc_raw = bytes(&rpc);
+
+        let mut cache = NetGuidCache::new();
+        for (index, path) in [(7, PROJECTILE_CNC), (8, PROJECTILE_PARAMS)] {
+            cache
+                .add_export_group(vrf_schema::NetFieldExportGroup::new(path.into(), index, 1))
+                .unwrap();
+        }
+        for (index, checksum, name) in [
+            (7, 2_336_552_129, "MulticastSetPath"),
+            (8, 2_930_105_559, "NetworkedProjectilePath"),
+        ] {
+            assert!(cache.set_field_on_group(
+                index,
+                vrf_schema::NetFieldExport {
+                    handle: 0,
+                    compatible_checksum: checksum,
+                    name: name.into(),
+                }
+            ));
+        }
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        sink.set_current_group_path(Arc::from(PROJECTILE_CNC));
+        sink.enable_measured_array_routes(branch);
+        sink.on_rpc(
+            0,
+            rpc.len() as u32,
+            BitReader::with_bit_len(&rpc_raw, rpc.len() as u64).unwrap(),
+        );
+        let stats = sink.stats.clone();
+        drop(sink);
+        (records, stats)
+    }
+
     #[test]
     fn projectile_path_rpc_rejects_unknown_missing_and_nonfinite_members() {
-        const CNC: &str =
-            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache";
-        const PARAMS: &str =
-            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:MulticastSetPath";
-        const PARENT: &str = "MulticastSetPath.NetworkedProjectilePath";
-
         for (
             case,
             elapsed,
@@ -1746,83 +1772,21 @@ mod tests {
             ("missing_velocity", 1.5f32, false, true, 0, 0, 1),
             ("nan_elapsed", f32::NAN, false, false, 0, 0, 1),
         ] {
-            let mut array = Vec::new();
-            packed(&mut array, 1); // one path point
-            packed(&mut array, 1); // index zero
-            for (handle, payload) in [
-                (1, elapsed.to_le_bytes().to_vec()),
-                (2, vec![0; 24]),
-                (3, vec![0; 24]),
-            ] {
-                if omit_velocity && handle == 3 {
-                    continue;
-                }
-                packed(&mut array, handle + 1);
-                packed(&mut array, (payload.len() * 8) as u32);
-                array.extend(bits_from_bytes(&payload));
-            }
-            if extra_zero_width {
-                packed(&mut array, 5); // unknown handle 4
-                packed(&mut array, 0);
-            }
-            packed(&mut array, 0); // element terminator
-            packed(&mut array, 0); // array terminator
-            let array_raw = bytes(&array);
-
-            let mut rpc = vec![false]; // FunctionParameters checksum bit
-            packed(&mut rpc, 1); // parameter handle zero
-            packed(&mut rpc, array.len() as u32);
-            rpc.extend_from_slice(&array);
-            packed(&mut rpc, 0); // parameter terminator
-            let rpc_raw = bytes(&rpc);
-
-            let mut cache = NetGuidCache::new();
-            cache
-                .add_export_group(vrf_schema::NetFieldExportGroup::new(CNC.into(), 7, 1))
-                .unwrap();
-            cache
-                .add_export_group(vrf_schema::NetFieldExportGroup::new(PARAMS.into(), 8, 1))
-                .unwrap();
-            assert!(cache.set_field_on_group(
-                7,
-                vrf_schema::NetFieldExport {
-                    handle: 0,
-                    compatible_checksum: 2_336_552_129,
-                    name: "MulticastSetPath".into(),
-                }
-            ));
-            assert!(cache.set_field_on_group(
-                8,
-                vrf_schema::NetFieldExport {
-                    handle: 0,
-                    compatible_checksum: 2_930_105_559,
-                    name: "NetworkedProjectilePath".into(),
-                }
-            ));
-            let mut channel_state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-            sink.set_current_group_path(Arc::from(CNC));
-            sink.enable_measured_array_routes("++Ares-Core+release-13.05");
-            sink.on_rpc(
-                0,
-                rpc.len() as u32,
-                BitReader::with_bit_len(&rpc_raw, rpc.len() as u64).unwrap(),
-            );
-            assert_eq!(sink.stats.array.errors, wanted_array_errors, "{case}");
-            assert_eq!(
-                sink.stats.array_leaf_decode_errors, wanted_leaf_errors,
-                "{case}"
-            );
-            drop(sink);
-
+            let array = path_point_array(elapsed, omit_velocity, extra_zero_width);
+            let (records, stats) = projectile_path_rpc(&array, "++Ares-Core+release-13.05");
+            assert_eq!(stats.array.errors, wanted_array_errors, "{case}");
+            assert_eq!(stats.array_leaf_decode_errors, wanted_leaf_errors, "{case}");
             assert_eq!(records.fields.len(), wanted_children + 1, "{case}");
             let parent = records.fields.last().unwrap();
-            assert_eq!(parent.field_name.as_deref(), Some(PARENT), "{case}");
+            assert_eq!(
+                parent.field_name.as_deref(),
+                Some(PROJECTILE_PARENT),
+                "{case}"
+            );
             assert_eq!(parent.bit_count, array.len() as u32, "{case}");
             assert_eq!(
                 parent.raw_bits.as_deref(),
-                Some(array_raw.as_slice()),
+                Some(bytes(&array).as_slice()),
                 "{case}"
             );
             assert!(
@@ -1831,7 +1795,7 @@ mod tests {
                     .all(|row| row
                         .field_name
                         .as_deref()
-                        .is_some_and(|name| name.starts_with(PARENT)))
+                        .is_some_and(|name| name.starts_with(PROJECTILE_PARENT)))
             );
         }
     }
@@ -1841,33 +1805,7 @@ mod tests {
     /// stays a single raw parameter row where the route was never observed.
     #[test]
     fn projectile_path_rpc_expands_only_on_admitting_branches() {
-        const CNC: &str =
-            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache";
-        const PARAMS: &str =
-            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:MulticastSetPath";
-        const PARENT: &str = "MulticastSetPath.NetworkedProjectilePath";
-
-        let mut array = Vec::new();
-        packed(&mut array, 1); // one path point
-        packed(&mut array, 1); // index zero
-        for (handle, payload) in [
-            (1, 2.5f32.to_le_bytes().to_vec()),
-            (2, vec![0; 24]),
-            (3, vec![0; 24]),
-        ] {
-            packed(&mut array, handle + 1);
-            packed(&mut array, (payload.len() * 8) as u32);
-            array.extend(bits_from_bytes(&payload));
-        }
-        packed(&mut array, 0); // element terminator
-        packed(&mut array, 0); // array terminator
-        let mut rpc = vec![false]; // FunctionParameters checksum bit
-        packed(&mut rpc, 1); // parameter handle zero
-        packed(&mut rpc, array.len() as u32);
-        rpc.extend_from_slice(&array);
-        packed(&mut rpc, 0); // parameter terminator
-        let rpc_raw = bytes(&rpc);
-
+        let array = path_point_array(2.5, false, false);
         for (branch, want_children) in [
             ("++Ares-Core+release-11.06", 0),
             ("++Ares-Core+release-11.07", 3),
@@ -1876,46 +1814,16 @@ mod tests {
             ("++Ares-Core+release-12.10", 0),
             ("++Ares-Core+release-13.05", 3),
         ] {
-            let mut cache = NetGuidCache::new();
-            cache
-                .add_export_group(vrf_schema::NetFieldExportGroup::new(CNC.into(), 7, 1))
-                .unwrap();
-            cache
-                .add_export_group(vrf_schema::NetFieldExportGroup::new(PARAMS.into(), 8, 1))
-                .unwrap();
-            assert!(cache.set_field_on_group(
-                7,
-                vrf_schema::NetFieldExport {
-                    handle: 0,
-                    compatible_checksum: 2_336_552_129,
-                    name: "MulticastSetPath".into(),
-                }
-            ));
-            assert!(cache.set_field_on_group(
-                8,
-                vrf_schema::NetFieldExport {
-                    handle: 0,
-                    compatible_checksum: 2_930_105_559,
-                    name: "NetworkedProjectilePath".into(),
-                }
-            ));
-            let mut channel_state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-            sink.set_current_group_path(Arc::from(CNC));
-            sink.enable_measured_array_routes(branch);
-            sink.on_rpc(
-                0,
-                rpc.len() as u32,
-                BitReader::with_bit_len(&rpc_raw, rpc.len() as u64).unwrap(),
-            );
-            assert_eq!(sink.stats.array.errors, 0, "{branch}");
-            assert_eq!(sink.stats.array_leaf_decode_errors, 0, "{branch}");
-            drop(sink);
-
+            let (records, stats) = projectile_path_rpc(&array, branch);
+            assert_eq!(stats.array.errors, 0, "{branch}");
+            assert_eq!(stats.array_leaf_decode_errors, 0, "{branch}");
             assert_eq!(records.fields.len(), want_children + 1, "{branch}");
             let parent = records.fields.last().unwrap();
-            assert_eq!(parent.field_name.as_deref(), Some(PARENT), "{branch}");
+            assert_eq!(
+                parent.field_name.as_deref(),
+                Some(PROJECTILE_PARENT),
+                "{branch}"
+            );
             assert_eq!(parent.bit_count, array.len() as u32, "{branch}");
             if want_children > 0 {
                 assert_eq!(records.fields[0].value_f64, Some(2.5), "{branch}");
@@ -2023,18 +1931,7 @@ mod tests {
         };
         sink.on_content_block(3, NetworkGuid(89), &header);
 
-        let failure = StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::Rpc,
-            actor_net_guid: NetworkGuid(89),
-            bit_count,
-            function_count: 0,
-            consumed_bits: 0,
-            remaining_bits: u64::from(bit_count),
-            cause: vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount,
-            record_handle: None,
-            record_offset: Some(0),
-            payload_preserved: true,
-        };
+        let failure = unresolved_failure(89, bit_count);
         sink.on_unresolved_class_net_cache_payload(failure, &data);
 
         // Two rows: the preservation row + one additive CNC RPC row.
@@ -2105,18 +2002,7 @@ mod tests {
             ..ContentBlockHeader::default()
         };
         sink.on_content_block(3, NetworkGuid(89), &header);
-        let failure = StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::Rpc,
-            actor_net_guid: NetworkGuid(89),
-            bit_count,
-            function_count: 0,
-            consumed_bits: 0,
-            remaining_bits: u64::from(bit_count),
-            cause: vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount,
-            record_handle: None,
-            record_offset: Some(0),
-            payload_preserved: true,
-        };
+        let failure = unresolved_failure(89, bit_count);
         sink.on_unresolved_class_net_cache_payload(failure, &data);
 
         assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 1);
@@ -2169,18 +2055,7 @@ mod tests {
         // current_group_path resolves to a bare name that is NOT
         // AbilitiesAndBuffsComponent.
 
-        let failure = StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::Rpc,
-            actor_net_guid: NetworkGuid(89),
-            bit_count,
-            function_count: 0,
-            consumed_bits: 0,
-            remaining_bits: u64::from(bit_count),
-            cause: vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount,
-            record_handle: None,
-            record_offset: Some(0),
-            payload_preserved: true,
-        };
+        let failure = unresolved_failure(89, bit_count);
         sink.on_unresolved_class_net_cache_payload(failure, &data);
 
         // Only the preservation row, no CNC rows: the payload walks (proven
@@ -2415,21 +2290,8 @@ mod tests {
         let mut records = RecordBuffers::default();
         let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
         sink.set_current_group_path(Arc::from("/Script/ShooterGame.AresAbilitySystemComponent"));
-        let failure = |consumed: u64| StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::RepLayout,
-            actor_net_guid: NetworkGuid(7),
-            bit_count: 200,
-            function_count: 0,
-            consumed_bits: consumed,
-            remaining_bits: 200 - consumed,
-            cause: vrf_net::pipeline::StreamFailureCause::AbandonedTail,
-            record_handle: Some(3),
-            record_offset: Some(consumed),
-            payload_preserved: false,
-        };
-
         for i in 0..100 {
-            sink.on_stream_failure(failure(i % 2));
+            sink.on_stream_failure(abandoned_tail(i % 2));
         }
 
         assert_eq!(
@@ -2471,18 +2333,7 @@ mod tests {
 
         // The framing layer's exact sequence for an unresolved block:
         // on_unresolved_class_net_cache_payload, then on_stream_failure.
-        let unresolved = StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::Rpc,
-            actor_net_guid: NetworkGuid(9),
-            bit_count: 64,
-            function_count: 0,
-            consumed_bits: 0,
-            remaining_bits: 64,
-            cause: vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount,
-            record_handle: None,
-            record_offset: Some(0),
-            payload_preserved: true,
-        };
+        let unresolved = unresolved_failure(9, 64);
         for i in 0..40 {
             let _ = i;
             sink.on_unresolved_class_net_cache_payload(unresolved, &[0xDE, 0xAD]);
@@ -2491,18 +2342,7 @@ mod tests {
 
         // ...plus a real RepLayout loss.
         sink.set_current_group_path(Arc::from("/Script/ShooterGame.AresAbilitySystemComponent"));
-        sink.on_stream_failure(StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::RepLayout,
-            actor_net_guid: NetworkGuid(7),
-            bit_count: 200,
-            function_count: 0,
-            consumed_bits: 185,
-            remaining_bits: 15,
-            cause: vrf_net::pipeline::StreamFailureCause::AbandonedTail,
-            record_handle: Some(3),
-            record_offset: Some(185),
-            payload_preserved: false,
-        });
+        sink.on_stream_failure(abandoned_tail(185));
 
         let agg = sink.channel_state.failures.as_ref().unwrap();
         assert_eq!(agg.total_failures(), 41);
@@ -2536,18 +2376,7 @@ mod tests {
         let mut records = RecordBuffers::default();
         let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
         sink.set_current_group_path(Arc::from("SomeGroup"));
-        sink.on_stream_failure(StreamFailure {
-            kind: vrf_net::pipeline::StreamKind::RepLayout,
-            actor_net_guid: NetworkGuid(1),
-            bit_count: 16,
-            function_count: 0,
-            consumed_bits: 8,
-            remaining_bits: 8,
-            cause: vrf_net::pipeline::StreamFailureCause::ReadError,
-            record_handle: Some(0),
-            record_offset: Some(1),
-            payload_preserved: false,
-        });
+        sink.on_stream_failure(abandoned_tail(8));
 
         let taken = sink.channel_state.take_failure_aggregate();
         assert_eq!(taken.total_failures(), 1);
