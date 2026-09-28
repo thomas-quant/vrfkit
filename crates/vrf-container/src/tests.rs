@@ -981,11 +981,11 @@ fn archive_with_unread_input(plain: &[u8], unread: usize) -> Vec<u8> {
 /// The codec stops once its output is full and never asks whether its input
 /// is used up, so bytes inside the declared archive that no block reads used
 /// to vanish with no error and no tally. They are counted with the framing
-/// residual, and an archive the codec reads to the end reports zero.
+/// residual past `SizeInBytes`, and an archive read to the end reports zero.
 #[cfg(feature = "oodle")]
 #[test]
 fn replay_data_input_the_codec_never_reads_is_counted() {
-    for unread in [7, 0] {
+    for (unread, past_archive) in [(7, 0), (0, 0), (7, 3)] {
         let archive = archive_with_unread_input(&[1, 2, 3, 4, 5], unread);
         let mut payload = Vec::new();
         helpers::add_u32(&mut payload, 0); // Time1
@@ -993,10 +993,15 @@ fn replay_data_input_the_codec_never_reads_is_counted() {
         helpers::add_i32(&mut payload, archive.len() as i32); // SizeInBytes
         helpers::add_i32(&mut payload, 5); // MemorySizeInBytes
         payload.extend_from_slice(&archive);
+        payload.extend(std::iter::repeat_n(0xCD, past_archive));
 
         let (plain, count) = decompress_replay_data_with_trailing(&payload, true, false).unwrap();
         assert_eq!(plain, [1, 2, 3, 4, 5]);
-        assert_eq!(count, unread, "input the codec never read must be counted");
+        assert_eq!(
+            count,
+            unread + past_archive,
+            "every payload byte no reader consumed must be counted"
+        );
     }
 }
 
