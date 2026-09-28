@@ -12,6 +12,7 @@ import struct
 import tempfile
 import unittest
 from unittest.mock import patch
+import zlib
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -56,6 +57,53 @@ CELL = {"253": 7, "bIsActive": True, "Status": 1,
         "ConvexHullTravelDistances": [1.0, 0.0, 1.0, 1.4142135381698608],
         "X": -1, "Y": 2, "TravelDistance": 0.8535534143447876,
         "Ceiling": 346.0000305175781, "Floor": 99.99999237060547}
+
+
+def compatible_checksum(name, cpp_type, parent=0, static_index=0):
+    """Unreal's RepLayout compatible checksum, computed here from names; the
+    tool holds only the numbers the replays declare. CRC-32 over the
+    UTF-32LE lower-cased name, then the lower-cased C++ type, then the
+    little-endian 32-bit static array index, seeded with the parent's."""
+    crc = zlib.crc32(name.lower().encode("utf-32-le"), parent)
+    crc = zlib.crc32(cpp_type.lower().encode("utf-32-le"), crc)
+    return zlib.crc32(struct.pack("<I", static_index), crc)
+
+
+#: The item struct and its parents, as named in the 13.06 game executable's
+#: reflection data: FragmentInfo:FGroundVolumeFragmentArray -> Items:TArray ->
+#: Items:FGroundVolumeFragment. A struct makes no RepLayout command, so none
+#: of these three is itself declared; only the members below are.
+ITEM_PARENT = compatible_checksum("Items", "FGroundVolumeFragment", compatible_checksum(
+    "Items", "TArray", compatible_checksum("FragmentInfo", "FGroundVolumeFragmentArray")))
+#: Declared identity -> its path below FGroundVolumeFragment, one (name, C++
+#: type) step per struct or array level; an array element repeats the name.
+REPRODUCED = {
+    ("253", 1175316786): [("ID", "int32")],
+    ("bIsActive", 518428974): [("bIsActive", "bool")],
+    ("ExteriorSegments", 3326329067): [("ExteriorSegments", "TArray")],
+    ("ConvexHullPoints", 3039966384): [("ConvexHullPoints", "TArray")],
+    ("ConvexHullPoints", 2749781999): [("ConvexHullPoints", "TArray"), ("ConvexHullPoints", "FVector")],
+    ("ConvexHullCeilings", 3975907906): [("ConvexHullCeilings", "TArray")],
+    ("ConvexHullCeilings", 1547370894): [("ConvexHullCeilings", "TArray"), ("ConvexHullCeilings", "float")],
+    ("ConvexHullTravelDistances", 1031017464): [("ConvexHullTravelDistances", "TArray")],
+    ("ConvexHullTravelDistances", 1566128181): [("ConvexHullTravelDistances", "TArray"),
+                                                ("ConvexHullTravelDistances", "float")],
+    ("TJunctions", 1038854951): [("TJunctions", "TArray")],
+    ("X", 2123226522): [("GridPos", "FIntPoint"), ("X", "int32")],
+    ("Y", 2134384775): [("GridPos", "FIntPoint"), ("Y", "int32")],
+    ("TravelDistance", 956522941): [("TravelDistance", "float")],
+    ("Ceiling", 1959526051): [("Ceiling", "float")],
+    ("Floor", 3454040167): [("Floor", "float")],
+}
+#: Declared identities no spelling tried reproduces: an enum, and the two byte
+#: members of the segment struct. Their types rest on widths and relations.
+WIDTH_ONLY = {("Status", 2380676387), ("Begin", 3658211664), ("End", 1988330146)}
+#: C++ type -> how the tool must read a member its checksum says has it.
+READ_AS = {"int32": gv.Scalar("int32", 32), "bool": gv.Scalar("bool", 1),
+           "float": gv.Scalar("float32", 32), "FVector": gv.Scalar("vector3d", 192)}
+B1306, B1305 = "++Ares-Core+release-13.06", "++Ares-Core+release-13.05"
+STATUS = ("Status", 2380676387)
+STATUS_COUNTERS = ("status_named", "status_unnamed_declaration", "status_unnamed_value")
 
 
 class BitWriter:
@@ -298,6 +346,93 @@ class DecodeTests(unittest.TestCase):
         self.assertRejects("empty_window", (b"", 0))
 
 
+class ChecksumTests(unittest.TestCase):
+    """Declared checksums against the formula, computed in this file.
+
+    The numbers come from the replays (held in the tool); the CRC is computed
+    here from each member's path in the game's struct. A mistyped checksum,
+    a wrong resolved name, or a member read as a type other than the one its
+    checksum encodes fails here.
+    """
+
+    @staticmethod
+    def path_checksum(steps):
+        crc = ITEM_PARENT
+        for name, cpp_type in steps:
+            crc = compatible_checksum(name, cpp_type, crc)
+        return crc
+
+    def test_declared_checksums_reproduce_from_the_struct_chain(self):
+        # Every identity the tool decodes, except the width-only ones.
+        for identity in (set(gv.MEMBERS) | gv.ELEMENT_IDENTITIES) - WIDTH_ONLY:
+            with self.subTest(identity=identity):
+                self.assertIn(identity, REPRODUCED)
+                self.assertEqual(self.path_checksum(REPRODUCED[identity]), identity[1])
+
+    def test_every_member_is_reproduced_or_width_only(self):
+        # A new identity in MEMBERS needs a decision: which of the two it is.
+        self.assertEqual(set(gv.MEMBERS) | gv.ELEMENT_IDENTITIES, set(REPRODUCED) | WIDTH_ONLY)
+        self.assertFalse(set(REPRODUCED) & WIDTH_ONLY)
+
+    def test_members_are_read_as_the_type_their_checksum_encodes(self):
+        for identity, steps in REPRODUCED.items():
+            spec = gv.MEMBERS.get(identity)
+            if spec is None:
+                holders = [s for s in gv.MEMBERS.values() if isinstance(s, gv.Array) and identity in s.elements]
+                self.assertEqual(len(holders), 1, identity)
+                spec = holders[0].elements[identity]
+            cpp_type = steps[-1][1]
+            with self.subTest(identity=identity):
+                if identity[0] == "TJunctions":
+                    # An array whose element was never sent: kept raw at the
+                    # 16 bits an empty array's count and terminator take.
+                    self.assertEqual((cpp_type, spec), ("TArray", gv.Untyped(16)))
+                elif cpp_type == "TArray":
+                    self.assertIsInstance(spec, gv.Array)
+                else:
+                    self.assertEqual(spec, READ_AS[cpp_type])
+
+    def test_resolved_names_are_the_paths_their_checksums_encode(self):
+        self.assertEqual(set(gv.RESOLVED_NAMES), {("253", 1175316786), ("X", 2123226522), ("Y", 2134384775)})
+        for identity, path in gv.RESOLVED_NAMES.items():
+            steps = REPRODUCED[identity]
+            with self.subTest(identity=identity):
+                self.assertIn(identity, gv.MEMBERS)
+                self.assertEqual(".".join(name for name, _ in steps), path)
+                self.assertEqual(self.path_checksum(steps), identity[1])
+
+
+class NameTests(unittest.TestCase):
+    def test_status_names_only_for_the_declaration_they_were_read_from(self):
+        self.assertEqual([gv.status_label(B1306, STATUS, value) for value in range(4)],
+                         [("AllInside", "status_named"), ("PartiallyOutside", "status_named"),
+                          ("PartiallyBlocked", "status_named"), ("Invalid", "status_named")])
+        # Same identity in another build: a checksum does not carry the
+        # enumerators, and this one does not even reproduce.
+        self.assertEqual(gv.status_label(B1305, STATUS, 1), (None, "status_unnamed_declaration"))
+        # Same build, another checksum under the name. Decoding cannot reach
+        # this today (MEMBERS admits one Status identity), hence a direct call.
+        self.assertEqual(gv.status_label(B1306, ("Status", STATUS[1] ^ 1), 1),
+                         (None, "status_unnamed_declaration"))
+        # Count, the enum's count sentinel, and the rest of the 3-bit range.
+        for value in (4, 5, 7):
+            with self.subTest(value=value):
+                self.assertEqual(gv.status_label(B1306, STATUS, value), (None, "status_unnamed_value"))
+
+    def test_resolved_names_follow_the_declared_checksum(self):
+        everything = {"253": "ID", "X": "GridPos.X", "Y": "GridPos.Y"}
+        self.assertEqual(gv.resolved_names(schema()), everything)
+        # Handles move between builds; the names follow the identity.
+        shifted = {handle - 1: identity for handle, identity in DECL.items() if handle >= 23}
+        self.assertEqual(gv.resolved_names(schema(shifted)), everything)
+        # The same name under another checksum is not relabelled.
+        other = {**DECL, 23: ("253", 1175316786 ^ 1), 39: ("X", 2123226522 ^ 1)}
+        self.assertEqual(gv.resolved_names(schema(other)), {"Y": "GridPos.Y"})
+        # Builds before 12.08 declare no `253`.
+        self.assertEqual(gv.resolved_names(schema({h: i for h, i in DECL.items() if i[0] != "253"})),
+                         {"X": "GridPos.X", "Y": "GridPos.Y"})
+
+
 def table(rows, types):
     return pa.Table.from_pylist(rows, schema=pa.schema(list(types.items())))
 
@@ -466,6 +601,25 @@ class CliTests(unittest.TestCase):
                 gv.extract(source, out)
             with self.assertRaisesRegex(ValueError, "outside"):
                 gv.extract(source, source / "forbidden")
+
+    def test_status_name_is_written_and_counted_per_declaration(self):
+        cases = (("13.06", {}, (), "PartiallyOutside", "status_named"),
+                 ("13.05", {}, (), None, "status_unnamed_declaration"),
+                 ("13.06", {"Status": 4}, (), None, "status_unnamed_value"),
+                 ("13.06", {}, ("Status",), None, None))
+        for build, values, drop, name, counter in cases:
+            with self.subTest(build=build, values=values, drop=drop), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = make_export(root, [window_row([(1, item_bits(values, drop=drop))])], build=build)
+                receipt = gv.extract(source, root / "result")
+                item = json.loads((root / "result" / "items.ndjson").read_text())
+                self.assertEqual(item["status_name"], name)
+                self.assertEqual(item["fields"].get("Status"), None if drop else values.get("Status", CELL["Status"]))
+                self.assertEqual({k: receipt["counts"][k] for k in STATUS_COUNTERS},
+                                 {k: int(k == counter) for k in STATUS_COUNTERS})
+                self.assertEqual(receipt["declarations"]["resolved_names"],
+                                 {"253": "ID", "X": "GridPos.X", "Y": "GridPos.Y"})
+                self.assertEqual(receipt["schema_version"], 2)
 
     def test_every_counter_is_written_even_when_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
