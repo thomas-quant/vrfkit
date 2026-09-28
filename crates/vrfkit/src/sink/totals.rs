@@ -28,11 +28,12 @@ use super::ExportStats;
 pub(crate) struct SinkTotals {
     /// Rows pushed at the sites that count them (properties, RPC parameters and
     /// a partial walk's whole-payload row, life-change and path-point members,
-    /// array leaves, struct-blob members, `_cnc_h*` and tail rows); movement
-    /// batch rows, zero-bit RPC markers, unwalked RPCs' raw rows, preservation
-    /// rows and targeting children are not. So it matches neither NetStats'
-    /// `fields` (framed RepLayout properties) nor the `fields.parquet` row
-    /// count: on 02d4d478, 1,060,119 against `Fields: 429,648` and 1,296,660 rows.
+    /// array leaves, struct-blob members, `_cnc_h*` and RepLayout tail rows);
+    /// movement batch rows, zero-bit RPC markers, unwalked RPCs' raw rows,
+    /// unresolved-payload preservation rows and targeting children are not. So
+    /// it matches neither NetStats' `fields` (framed RepLayout properties) nor
+    /// the `fields.parquet` row count: on 02d4d478, 1,060,119 against
+    /// `Fields: 429,648` and 1,296,660 rows.
     pub fields_emitted: u64,
     /// The sink's own count of four events vrf-net counts beside the same
     /// callbacks (RPCs, actor opens and closes, content blocks live and
