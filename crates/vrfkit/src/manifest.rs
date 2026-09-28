@@ -1,18 +1,11 @@
-//! Hand-rolled JSON serialization for manifest.json.
+//! Hand-rolled JSON for manifest.json: no serde, and one String, which is fine
+//! because the export groups run to a few hundred entries.
 //!
-//! No external dependencies (serde_json, etc.) -- just plain formatting.
-//! Generating the whole document as a String is fine: the export groups array
-//! is a few hundred entries, and the one genuinely large member is
-//! `game_specific_data`, which is copied through verbatim rather than parsed.
-//!
-//! # game_specific_data
-//!
-//! The header's game-specific data entries are themselves JSON documents (on
-//! the reference replay entry 1 is a ~219 KB blob holding the match roster).
-//! They are emitted as JSON *strings*, escaped like any other string. Parsing
-//! and re-serialising a document this crate did not author would risk silently
-//! altering it -- number formatting, key order, duplicate keys -- for no gain,
-//! since a consumer recovers the object with a single nested parse.
+//! The header's game-specific data entries are JSON documents themselves (on
+//! 02d4d478 entry 1 is a 219,304-character match roster). They are emitted as
+//! JSON strings, never parsed and re-serialised, which could silently alter
+//! number formatting, key order or duplicate keys; a consumer recovers the
+//! object with one nested parse.
 
 use std::fs;
 use std::io::Write;
@@ -58,7 +51,7 @@ pub fn write_manifest(
     let mut out = String::with_capacity(64 * 1024 + gsd_bytes * 2);
     out.push_str("{\n");
 
-    // The first five keys are read by tools/to_valplay_bundle.py; keep their
+    // The first six keys are read by tools/to_valplay_bundle.py; keep their
     // names and types stable.
     wkvs(
         &mut out,
@@ -81,7 +74,9 @@ pub fn write_manifest(
             // 1601: read as FILETIME the reference replay dates to 3626).
             // Raw, because the wire records no timezone.
             ("timestamp_ticks", info.timestamp.to_string()),
-            // The info section's unvalidated copy, not the header's.
+            // The info section's copy, which nothing validates (480767974 on
+            // 02d4d478). The header's validated network_version (19 there) is
+            // not emitted; `game_network_protocol_version` is another field.
             ("info_network_version", info.network_version.to_string()),
             ("network_checksum", header.network_checksum.to_string()),
             (
@@ -127,8 +122,7 @@ pub fn write_manifest(
         .collect();
     wkv_array(&mut out, "level_names_and_times", &levels, 1);
 
-    // Placed after the small scalars so the readable metadata precedes the
-    // quarter-megabyte blob rather than following it.
+    // After the scalars, so the readable metadata precedes the large blob.
     let gsd: Vec<String> = header
         .game_specific_data
         .iter()
@@ -187,18 +181,14 @@ pub fn write_manifest(
     );
     out.push_str("  },\n");
 
-    // Complete quality accounting. The older `stats` and `counts` objects are
-    // retained unchanged for consumers that already read them; this additive
-    // section carries every loss/fallback counter, including the independent
-    // checkpoint pass when requested.
+    // Every loss and fallback counter, checkpoint pass included; `stats` and
+    // `counts` above stay unchanged for the readers they already have.
     out.push_str(&quality_json(quality));
     out.push_str(",\n");
 
-    // Player identity: each BombPlayerState actor's account `subject` UUID and
-    // `SpawnedCharacter` (== movement.character_net_guid). Bridges the wire
-    // actor GUIDs to the account identities in game_specific_data's
-    // playerLoadouts, so every actor-keyed table can join to a stable player
-    // identity even when two players share an agent.
+    // Each BombPlayerState actor's account `subject` and `SpawnedCharacter`
+    // (== movement.character_net_guid): the join from actor-keyed tables to
+    // playerLoadouts identities, even when two players share an agent.
     out.push_str("  \"players\": [");
     if players.is_empty() {
         out.push_str("],\n");
@@ -220,10 +210,9 @@ pub fn write_manifest(
         out.push_str("  ],\n");
     }
 
-    // Net-field exports the cache could not place -- an out-of-range handle
-    // (or, unreachably from this call site, an unknown group). The C#
-    // reference silently drops these; this is that drop made visible.
-    // Expected zero.
+    // Net-field exports the cache could not place: an out-of-range handle (an
+    // unknown group cannot reach this call site). The C# reference drops these
+    // silently; expected zero.
     wkv(
         &mut out,
         "dropped_field_exports",
@@ -231,7 +220,6 @@ pub fn write_manifest(
         1,
     );
 
-    // Export groups
     out.push_str("  \"net_field_export_groups\": [\n");
     let groups = cache.groups();
     for (gi, group) in groups.iter().enumerate() {
@@ -283,13 +271,9 @@ pub fn write_manifest(
 fn quality_json(quality: &ManifestQuality<'_>) -> String {
     let mut out = String::with_capacity(8 * 1024);
     out.push_str("  \"quality\": {\n");
-    // First, because it is the one key that answers "is anything missing from
-    // the tables next to this file". Everything below it is evidence; this is
-    // the verdict, and it is the same arithmetic `validate` prints, taken from
-    // the same function so the two cannot disagree.
-    //
-    // Zero is printed, not omitted. A line that appears only when non-zero
-    // cannot distinguish "nothing was lost" from "this code stopped running".
+    // `content_blocks_lost` first: the verdict on whether anything is missing
+    // from the tables, from the function `validate` prints, zero included.
+    // Everything after it is evidence.
     let q = quality;
     let run = q.run;
     wkvs(
@@ -431,8 +415,7 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
 }
 
 /// The three [`FrameSkips`] tallies as `<prefix>external_data_blobs`,
-/// `<prefix>external_data_bytes` and `<prefix>game_specific_bytes`, zeros
-/// included.
+/// `<prefix>external_data_bytes` and `<prefix>game_specific_bytes`.
 fn write_frame_skips(out: &mut String, prefix: &str, skips: &FrameSkips, indent: usize) {
     for (key, value) in [
         ("external_data_blobs", skips.external_data_blobs),
@@ -531,13 +514,9 @@ fn write_sink_quality(
     out.push_str(&format!("\"{key}\": {{\n"));
     let inner = indent + 1;
     for (key, value) in [
-        // The sink's own count of four events vrf-net also counts, in the
-        // callbacks it invokes beside each of its own increments. Each must
-        // equal the `net` block's `rpcs` / `actor_opens` / `actor_closes` /
-        // `content_blocks` for the same stream; tools/verify_build_corpus.py
-        // fails a replay where one does not. Prefixed because this object
-        // sits beside `net`, whose keys have the same names and a different
-        // source.
+        // Each must equal the `net` block's `rpcs` / `actor_opens` /
+        // `actor_closes` / `content_blocks` (tools/verify_build_corpus.py);
+        // prefixed because `net` beside it uses those names for another source.
         ("sink_rpcs_emitted", sink.rpcs_emitted),
         ("sink_actor_opens", sink.actor_opens),
         ("sink_actor_closes", sink.actor_closes),
@@ -650,39 +629,32 @@ fn json_option(value: Option<&str>) -> String {
     value.map(json_str).unwrap_or_else(|| "null".to_string())
 }
 
-/// Push `indent` levels of two-space indentation.
 fn push_indent(out: &mut String, indent: usize) {
     for _ in 0..indent {
         out.push_str("  ");
     }
 }
 
-/// Write key-value pair with trailing comma.
 fn wkv(out: &mut String, key: &str, value: &str, indent: usize) {
     push_indent(out, indent);
     out.push_str(&format!("\"{key}\": {value},\n"));
 }
 
-/// [`wkv`] for each member, in order.
 fn wkvs(out: &mut String, members: &[(&str, String)], indent: usize) {
     for (key, value) in members {
         wkv(out, key, value, indent);
     }
 }
 
-/// Write key-value pair WITHOUT trailing comma (last in object).
+/// [`wkv`] without the trailing comma, for the last member of an object.
 fn wkvl(out: &mut String, key: &str, value: &str, indent: usize) {
     push_indent(out, indent);
     out.push_str(&format!("\"{key}\": {value}\n"));
 }
 
-/// Write an array whose elements are already rendered JSON values, one per
-/// line, with a trailing comma after the closing bracket.
-///
-/// Like [`wkv`] and unlike [`wkvl`], this always emits the trailing comma, so
-/// the array must not be the last member of its object. There is deliberately
-/// no comma-less variant: add one before moving an array to the end of an
-/// object, rather than dropping the comma by hand.
+/// An array of already-rendered JSON values, one per line. Always followed by
+/// a comma, so it must not end its object; add a comma-less variant before
+/// moving an array there, rather than dropping the comma by hand.
 fn wkv_array(out: &mut String, key: &str, values: &[String], indent: usize) {
     push_indent(out, indent);
     out.push_str(&format!("\"{key}\": ["));
@@ -703,14 +675,11 @@ fn wkv_array(out: &mut String, key: &str, values: &[String], indent: usize) {
     out.push_str("],\n");
 }
 
-/// JSON literal for a boolean.
 fn json_bool(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
-/// Render an optional value as its JSON text, or the literal `null` when
-/// absent. `players` renders `subject` and `character_net_guid` this way;
-/// only how a present value becomes text differs between the two.
+/// `present(v)` for `Some(v)`, JSON `null` for `None`.
 fn json_opt<T>(value: &Option<T>, present: impl FnOnce(&T) -> String) -> String {
     match value {
         Some(v) => present(v),
@@ -718,14 +687,9 @@ fn json_opt<T>(value: &Option<T>, present: impl FnOnce(&T) -> String) -> String 
     }
 }
 
-/// JSON number for an `f32`, or `null` when the value is not finite.
-///
-/// This is the one place where "emit what the wire says" collides with "the
-/// output must be valid JSON": Rust renders NaN as `NaN` and the infinities as
-/// `inf`/`-inf`, none of which JSON admits. The recording-rate fields are
-/// floats read straight off the wire, so a corrupt or unusual header could
-/// carry any of the three. `null` says "the wire held a value JSON cannot
-/// represent" instead of producing a file no parser will accept.
+/// JSON number for an `f32`, or `null` when it is not finite: Rust prints
+/// `NaN`, `inf` and `-inf`, which JSON does not admit, and the recording-rate
+/// floats come straight off the wire.
 fn json_f32(value: f32) -> String {
     if value.is_finite() {
         format!("{value}")
@@ -734,17 +698,10 @@ fn json_f32(value: f32) -> String {
     }
 }
 
-/// JSON-escape a string value.
-///
-/// RFC 8259 requires escaping exactly `"`, `\`, and U+0000..U+001F; every
-/// other code point may appear literally in a UTF-8 document, so the remaining
-/// characters are passed through and the manifest is written as UTF-8.
-///
-/// That is sufficient even for the game-specific data blob, which arrives as
-/// UTF-16 on the wire: `BitReader::read_fstring` decodes it with the strict
-/// `String::from_utf16`, so an unpaired surrogate is a parse error rather than
-/// something that reaches this function. Every `&str` here is therefore
-/// well-formed Unicode, and no code point above U+001F needs special handling.
+/// JSON-escape a string: only what RFC 8259 requires (`"`, `\`, U+0000..U+001F);
+/// everything else passes through into the UTF-8 manifest. That holds for the
+/// UTF-16 game-specific blob too: `BitReader::read_fstring` decodes with the
+/// strict `String::from_utf16`, so no unpaired surrogate reaches this function.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -956,9 +913,6 @@ mod tests {
         }
     }
 
-    /// The four movement-section tail counters publish the measured value in
-    /// each stream; a key stuck at zero would say no section ever stopped
-    /// early whether or not one had.
     #[test]
     fn movement_section_tails_publish_measured_values() {
         let net = NetStats::default();
@@ -998,12 +952,6 @@ mod tests {
         }
     }
 
-    /// The sink's event tallies are published so they can be compared.
-    ///
-    /// The export summary printed them beside NetStats' counts as `Sink tally`
-    /// for a desync check, but the manifest carried neither side's tally in
-    /// `sink`, so no script could compare them and none did.
-    /// `tools/verify_build_corpus.py` now fails a replay whose tally differs.
     #[test]
     fn sink_event_tallies_publish_measured_values() {
         let net = NetStats::default();
@@ -1043,9 +991,6 @@ mod tests {
         }
     }
 
-    /// Both brute-force counters publish the measured value in each stream,
-    /// not a constant: `unwalked` is the one number that says the fc=34 walk
-    /// was tried and failed, so a key stuck at zero would hide exactly that.
     #[test]
     fn cnc_bruteforce_counters_publish_measured_values() {
         let net = NetStats::default();
@@ -1077,9 +1022,7 @@ mod tests {
         }
     }
 
-    /// The frame-skip tallies reach the manifest with their measured values,
-    /// main and checkpoint apart. Six distinct numbers, so a key wired to the
-    /// wrong field or the wrong pass shows.
+    /// Six distinct numbers, so a key wired to the wrong field or pass shows.
     #[test]
     fn frame_skips_publish_measured_values_for_both_passes() {
         let net = NetStats::default();
@@ -1114,15 +1057,9 @@ mod tests {
         }
     }
 
-    /// The published verdict has to be the measured one.
-    ///
-    /// `quality.content_blocks_lost` is the single number a downstream
-    /// consumer reads to decide whether recounting the exported tables can
-    /// yield a coverage claim at all. A constant zero there would be exactly
-    /// the "counter that cannot move" this repository forbids -- it would read
-    /// as "nothing was lost" on a run that lost everything -- so this asserts
-    /// the emitted digits against `NetStats::lost_content_blocks`, on stats
-    /// where all four failure depths are non-zero and unequal.
+    /// The number a consumer reads before any coverage claim, so it is checked
+    /// against `NetStats::lost_content_blocks` with all four failure depths
+    /// non-zero and unequal: a constant zero would read as nothing lost.
     #[test]
     fn content_blocks_lost_publishes_the_measured_number() {
         let net = NetStats {
@@ -1160,9 +1097,8 @@ mod tests {
 
     #[test]
     fn json_str_passes_non_ascii_through_verbatim() {
-        // Source stays ASCII (check_ascii.py) while the runtime values are not.
-        // DEL and the C1 range sit above U+001F, so JSON admits them literally;
-        // escaping them would be wrong, not merely redundant.
+        // ASCII source (check_ascii.py), non-ASCII values. DEL and the C1
+        // range sit above U+001F, so escaping them would be wrong.
         for s in [
             "\u{7f}",           // DEL
             "\u{80}\u{9f}",     // C1 controls
