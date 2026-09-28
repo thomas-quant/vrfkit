@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """Pin a corpus's oracle numbers and fail when they drift.
 
-validate_corpus.py prints what a corpus currently does. That answers "is it
-working today" but not "did my change move it", which is the question a
-regression guard has to answer. The 13.01 numbers are pinned by hand in
-docs/archive/PROJECT_STATUS.md; the 13.02 build had nothing pinned at all, so
-a transform change could have broken it silently -- that gap is item 7-E.
+validate_corpus.py prints what a corpus currently does; a regression guard
+has to answer "did my change move it". This stores per-file and total figures
+in a JSON baseline and exits non-zero on any difference.
 
-This stores per-file and total figures in a JSON baseline and compares
-against it, exiting non-zero on any difference.
-
-The 13.02 replays live outside the repo (%LOCALAPPDATA%\\VALORANT\\Saved\\Demos)
-and are machine-specific, so a missing corpus is reported and SKIPPED rather
-than failed. A guard that fails on someone else's machine gets disabled, and
-a disabled guard protects nothing.
+The replays live outside the repo (a relative corpus path resolves against
+VRFKIT_CORPUS_DIR), so a missing corpus is reported and SKIPPED rather than
+failed, unless --require-input or VRFKIT_REQUIRE_CORPUS is set: a guard that
+fails on someone else's machine gets disabled, and a disabled guard protects
+nothing.
 
 Usage:
     python tools/check_corpus_baseline.py --baseline tools/baselines/build_1302.json
@@ -62,9 +58,8 @@ def measure(exe: Path, root: Path) -> dict:
         for key in totals:
             match = got.get(key)
             if match is None:
-                # Recorded rather than defaulted to 0: a counter the oracle
-                # stopped printing is a change worth failing on, and folding
-                # it into a total would hide it.
+                # None, not 0: a counter the oracle stopped printing is a
+                # change worth failing on, which a total would hide.
                 entry[key] = None
                 continue
             value = int(match.group(1))
@@ -78,13 +73,9 @@ def measure(exe: Path, root: Path) -> dict:
 def unpinnable(current: dict) -> list[str]:
     """Why this run must not become a baseline, if it must not.
 
-    `measure` records a replay the oracle could not validate as
-    `{"error": ...}` and skips it when summing, and a counter the oracle did
-    not print as None. Pinning either stores a number that was never measured:
-    the totals lose that replay's contribution, and a later run that fails in
-    exactly the same way then MATCHES and reports OK. A baseline is a record of
-    a run that worked; refusing here is the same rule
-    `check_metrics_baseline.py` states as "refusing to pin a broken run".
+    A replay the oracle could not validate (recorded as `{"error": ...}` and
+    left out of the totals) or a counter it did not print (None) would pin a
+    number never measured, which a later run failing the same way MATCHES.
     """
     reasons = []
     if not current["per_file"]:

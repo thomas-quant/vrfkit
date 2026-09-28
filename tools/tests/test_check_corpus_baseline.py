@@ -1,13 +1,6 @@
-"""Guards for the corpus baseline pinner.
-
-`--update` wrote whatever the run produced, including runs where the oracle
-failed. `measure` records a failed replay as `{"error": "exit 1: ..."}` and skips it
-when summing, so pinning such a run stored zeros -- and a later run that failed
-in exactly the same way then MATCHED the baseline and reported OK.
-
-`check_metrics_baseline.py` already refuses to pin a broken run ("baseline NOT
-updated -- refusing to pin a broken run"). This is the same rule for the
-validate path.
+"""Guards for the corpus baseline pinner: a run with a failed replay or an
+unprinted counter must not be pinned (the same rule check_metrics_baseline.py
+applies), and a baseline naming no corpus is missing input.
 """
 import contextlib
 import io
@@ -50,11 +43,8 @@ class UnpinnableTests(unittest.TestCase):
         self.assertIn("b.vrf", " ".join(reasons))
 
     def test_a_counter_the_oracle_did_not_print_cannot_be_pinned(self):
-        """`measure` records it as None rather than 0, and None must not pin.
-
-        A None in the baseline is matched by the same counter going missing
-        again, which is the vacuous-zero failure one level up.
-        """
+        """`measure` records it as None, and a pinned None would match the
+        same counter going missing again."""
         entry = dict(CLEAN_ENTRY, malformed=None)
         reasons = guard.unpinnable(measurement({"a.vrf": entry}))
         self.assertTrue(reasons)
@@ -65,8 +55,6 @@ class UnpinnableTests(unittest.TestCase):
 
 
 class DiffTests(unittest.TestCase):
-    """Unchanged behaviour, pinned so the refusal cannot be bolted on wrongly."""
-
     def test_identical_measurements_do_not_drift(self):
         m = measurement({"a.vrf": CLEAN_ENTRY})
         self.assertEqual(guard.diff(m, m), [])
@@ -166,12 +154,9 @@ class RequiredInputTests(unittest.TestCase):
 
 
 class NoCorpusNamedTests(unittest.TestCase):
-    """A baseline that names no corpus is missing input, not the working directory.
-
-    `Path("")` is `Path(".")`, which exists, so with neither `--corpus` nor a
-    stored corpus the guard walked the directory it was started in, and
-    `--update` pinned that walk as `"corpus": "."`.
-    """
+    """A baseline that names no corpus is missing input, not the working
+    directory: `Path("")` is `Path(".")`, which exists, and `--update` would
+    pin that walk as `"corpus": "."`."""
 
     def run_main(self, root: Path, *extra: str) -> tuple[int, str]:
         argv = ["check_corpus_baseline.py", "--baseline", str(root / "baseline.json"),
