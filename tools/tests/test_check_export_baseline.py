@@ -618,15 +618,25 @@ class SummaryLabelTests(unittest.TestCase):
     """Every counter pattern reads exactly one line summary.rs can print, each
     quoted `"  ..."` literal rendered with its placeholders filled in: a
     pattern matching two reads whichever comes first, and one matching none
-    reports a printed counter as missing on every run."""
+    reports a printed counter as missing on every run. A literal whose first
+    argument is a `report::` formatter prints that formatter's text
+    (report.rs) in place of its first placeholder."""
 
     SUMMARY_RS = (Path(__file__).resolve().parents[2]
                   / "crates" / "vrfkit" / "src" / "driver" / "summary.rs")
+    REPORT_RS = SUMMARY_RS.parents[1] / "report.rs"
 
     def test_every_counter_pattern_reads_exactly_one_summary_line(self):
         source = self.SUMMARY_RS.read_text(encoding="utf-8")
-        literals = re.findall(r'"(  [^"\\]*(?:\\.[^"\\]*)*)"', source)
-        rendered = [re.sub(r"\{[^{}]*\}", "7", literal) for literal in literals]
+        formatters = dict(re.findall(
+            r'pub fn (\w+)\([^)]*\) -> String \{\s*format!\(\s*"([^"\\]*)"',
+            self.REPORT_RS.read_text(encoding="utf-8")))
+        self.assertIn("frame_skips", formatters, "report.rs formatters were not found")
+        literals = re.findall(
+            r'"(  [^"\\]*(?:\\.[^"\\]*)*)"(?:,\s*report::(\w+)\()?', source)
+        rendered = [re.sub(r"\{[^{}]*\}", "7",
+                           literal.replace("{}", formatters[call], 1) if call else literal)
+                    for literal, call in literals]
         self.assertGreater(len(rendered), 100, "summary.rs literals were not found")
         patterns = {**guard.COUNTERS, **guard.CHECKPOINT_COUNTERS}
         for key, pattern in patterns.items():
