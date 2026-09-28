@@ -8,8 +8,6 @@ impl SeededTransform for V13_05 {
     const BRANCH: &'static str = "++Ares-Core+release-13.05";
     const SEED_ADDEND: u32 = 0x48c2_6613;
     const INIT_A_OFFSET: u32 = 0x13;
-    /// The second build that adds instead of subtracting, and the first to do so
-    /// since 12.11.
     const ADD_OFFSET: bool = true;
 
     fn word64(mut v: u64, state: u32) -> u64 {
@@ -48,8 +46,6 @@ impl SeededTransform for V13_05 {
 
     fn byte(mut v: u8, state: u32) -> u8 {
         let state_byte = state as u8;
-        // 0x1b0829 is 11^6; every byte-stage constant in every build so far has
-        // been a power of 11, which is what makes a transcription slip visible.
         let mix_a = state.wrapping_mul(0x001b_0829);
 
         v = ((mix_a.wrapping_mul(0x79) as u8) ^ v).wrapping_sub(mix_a.wrapping_mul(0x0b) as u8);

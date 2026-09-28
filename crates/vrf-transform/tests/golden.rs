@@ -1,12 +1,7 @@
-//! Bit-exactness of every registered transform against vectors this port did
-//! not produce: the upstream builds' vectors are lifted mechanically from the
-//! reference fixture (`tools/extract_golden.py`), and the legacy builds' are
-//! captured from the original executables' reader functions
-//! (`tools/capture_native_transforms.py`).
-//!
-//! Everything downstream -- field framing, schema binding, metrics -- is built
-//! on the assumption that these bytes are right, so a failure here invalidates
-//! all of it.
+//! Every registered transform against vectors this port did not produce:
+//! lifted from the reference fixture (`tools/extract_golden.py`) or captured
+//! from the original executables (`tools/capture_native_transforms.py`). A
+//! failure here invalidates everything downstream.
 
 include!("data/golden_vectors.rs");
 include!("data/native_vectors.rs");
@@ -14,9 +9,8 @@ include!("data/native_vectors.rs");
 use vrf_bitio::BitReader;
 use vrf_transform::{ALL_VERSIONS, TransformVersion, seed_for};
 
-/// `(branch, bit count, seed, input hex, expected output hex)` for every
-/// vector. The golden vectors share one payload and derive their seed from
-/// the bit count; the native ones carry both.
+/// `(branch, bits, seed, input hex, expected hex)`. The golden vectors share
+/// one payload and derive their seed from the bit count.
 fn vectors() -> impl Iterator<Item = (&'static str, usize, u32, &'static str, &'static str)> {
     VECTORS
         .iter()
@@ -63,9 +57,8 @@ fn transforms_match_the_golden_and_native_vectors() {
 
 #[test]
 fn vectors_cover_the_staging_boundaries() {
-    // The transform stages 64 -> 32 -> 8 -> tail. If a build's vectors skipped a
-    // boundary, an error in one stage could pass unnoticed; a build with no
-    // vectors at all fails the first boundary.
+    // A vector at every staging boundary (64 -> 32 -> 8 -> tail), so no stage
+    // goes unchecked; a build with no vectors fails the first.
     for version in ALL_VERSIONS.iter().copied() {
         let bits: Vec<usize> = vectors()
             .filter(|v| v.0 == version.branch())

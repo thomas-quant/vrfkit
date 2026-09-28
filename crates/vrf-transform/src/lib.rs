@@ -1,29 +1,13 @@
 //! Payload transforms for VALORANT replay content blocks.
 //!
-//! # What is transformed, and when
+//! Only a content block's payload is transformed; block headers and their
+//! declared bit lengths are plaintext, so a replay is framed sequentially and
+//! the per-block decode can run in parallel. The key comes from the stream:
+//! `seed = (bit_count as u32) ^ actor_net_guid` ([`seed_for`]).
 //!
-//! The obfuscation is applied per **content block payload**, not to the file, a
-//! chunk, or a packet. Content block *headers* and their declared bit lengths are
-//! plaintext; only the field data that follows is transformed. That split has a
-//! useful consequence: a replay can be framed into blocks without decoding any
-//! of them, so framing stays sequential while the expensive per-block decode can
-//! be spread across threads.
-//!
-//! # Seed derivation
-//!
-//! ```text
-//! seed = (bit_count as u32) ^ actor_net_guid
-//! ```
-//!
-//! Both inputs come from the surrounding stream, so nothing is stored in the file
-//! that identifies the key. See [`seed_for`].
-//!
-//! # Per-build variation
-//!
-//! The algorithm skeleton has been stable from release-11.06 to release-13.06.
-//! What changes per build is two constants and the order of a handful of bit
-//! primitives; see [`versions`]. Adding a build means writing one `impl` with
-//! two constants and three word functions.
+//! The skeleton is shared from release-11.06 to release-13.06. A build supplies
+//! its branch, `SEED_ADDEND`, `INIT_A_OFFSET`, optionally `ADD_OFFSET` and
+//! `TAIL_XOR` (both defaulted), and three word functions; see [`versions`].
 //!
 //! # Example
 //!
@@ -40,23 +24,9 @@
 //! version.decode_from(&mut reader, bit_count, seed_for(bit_count, 2), &mut out).unwrap();
 //! ```
 //!
-//! # Module map
-//!
-//! | Module | Responsibility |
-//! |--------|----------------|
-//! | `lib` | [`seed_for`], [`TransformVersion`] dispatch, the staging driver |
-//! | [`helpers`] | PRNG and bit primitives shared by every build |
-//! | [`versions`] | One file per build, plus the [`versions::SeededTransform`] trait |
-//! | [`sbox`] | Generated substitution tables (`tools/extract_sboxes.py`) |
-//!
-//! # Cargo features
-//!
-//! **None, deliberately.** [`ALL_VERSIONS`] is a length-independent slice and
-//! [`TransformVersion`] is non-exhaustive, so adding a build does not change the
-//! registry's public type and external callers cannot match every future variant.
-//! Per-build gating would still remove existing, publicly named variants and is
-//! therefore not offered. The cost is small: the per-build `impl`s are branch-free
-//! arithmetic, and the only sizeable data is the three S-box tables shared by multiple builds.
+//! No Cargo features: per-build gating would remove publicly named
+//! [`TransformVersion`] variants, and the only sizeable data is the three
+//! shared S-box tables.
 
 #![forbid(unsafe_code)]
 
@@ -71,27 +41,21 @@ use versions::{
 };
 use vrf_bitio::{BitError, BitReader, Result as BitResult};
 
-/// Derive the transform seed for a content block.
-///
-/// `bit_count` is the block's declared payload length and `actor_net_guid` the
-/// network GUID of the actor channel carrying it. Both are read from plaintext
-/// parts of the stream.
+/// The transform seed for a content block: its declared payload length in
+/// bits, XOR the network GUID of the actor channel carrying it.
 #[must_use]
 #[inline]
 pub const fn seed_for(bit_count: usize, actor_net_guid: u32) -> u32 {
     (bit_count as u32) ^ actor_net_guid
 }
 
-/// Run a build's transform over `buf` in place.
+/// Run a build's transform over `buf`, which holds the payload's bits
+/// LSB-first as [`BitReader::copy_bits_to`] writes them. The final byte's
+/// padding is left as found (the tail XOR is masked); callers that hand that
+/// byte on whole rely on `copy_bits_to` having zeroed it.
 ///
-/// `buf` must already hold the payload's bits, LSB-first, with the final byte's
-/// padding zeroed -- [`BitReader::copy_bits_to`] guarantees both. Stale padding
-/// would be folded into the tail byte and corrupt it.
-///
-/// Processing is staged 64 bits at a time, then 32, then 8, then the remaining
-/// 1..7 bits, advancing the PRNG once per stage iteration. The staging order is
-/// part of the format: the keystream position depends on how many words of each
-/// width came before.
+/// Staged 64 bits at a time, then 32, then 8, then the last 1..7, with one PRNG
+/// advance per stage iteration. The staging order is part of the format.
 pub fn transform_in_place<T: SeededTransform>(
     buf: &mut [u8],
     bit_count: usize,
@@ -109,9 +73,8 @@ pub fn transform_in_place<T: SeededTransform>(
     }
 
     let mut state = seed;
-    // Before the first PRNG advance the keystream byte is just the low seed byte.
-    // A payload shorter than 8 bits never advances, so the tail XOR below relies
-    // on this initial value.
+    // Until the first advance the keystream byte is the seed's low byte; a
+    // payload under 8 bits never advances.
     let mut stream_byte = seed as u8;
     let mut prng_a = T::initial_prng_a(seed);
     let mut prng_b = helpers::initial_prng_b(seed);
@@ -139,8 +102,7 @@ pub fn transform_in_place<T: SeededTransform>(
         left -= 8;
     }
     if left != 0 {
-        // Only the bits that are actually part of the payload are touched; the
-        // mask keeps the padding at zero so a re-encode stays byte-identical.
+        // The mask confines the XOR to payload bits.
         let mask = 0xffu8 >> (7 - ((bit_count - 1) & 7));
         buf[offset] ^= mask & (stream_byte ^ T::TAIL_XOR);
     }
@@ -148,9 +110,8 @@ pub fn transform_in_place<T: SeededTransform>(
 }
 
 /// A game build's payload transform, selected by replay branch string.
-///
-/// Dispatch happens once per content block, and each arm calls a monomorphised
-/// [`transform_in_place`], so the inner word loops carry no indirection.
+/// Dispatch is once per content block; each arm calls a monomorphised
+/// [`transform_in_place`], so the word loops carry no indirection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TransformVersion {
@@ -204,13 +165,9 @@ pub enum TransformVersion {
     V1306,
 }
 
-/// Every transform this build of the crate knows about.
-///
-/// The public type deliberately does not encode the current number of builds:
-/// adding another variant and registry entry remains source-compatible for
-/// callers that iterate this slice. [`TransformVersion`] is also
-/// [`non_exhaustive`](https://doc.rust-lang.org/reference/attributes/type_system.html#the-non_exhaustive-attribute),
-/// so downstream matches must retain a fallback arm for future builds.
+/// Every transform this build of the crate knows about. A slice, so adding a
+/// build does not change the public type; [`TransformVersion`] is
+/// non-exhaustive for the same reason.
 pub const ALL_VERSIONS: &[TransformVersion] = &[
     TransformVersion::V1106,
     TransformVersion::V1107,
@@ -238,11 +195,8 @@ pub const ALL_VERSIONS: &[TransformVersion] = &[
     TransformVersion::V1306,
 ];
 
-/// A replay whose branch has no registered transform.
-///
-/// Reported rather than worked around: guessing a transform yields plausible-
-/// looking garbage instead of an error, and downstream metrics cannot tell the
-/// difference. The branch string is carried so callers can name it in a message.
+/// A replay branch with no registered transform: reported, never guessed,
+/// because a guessed transform yields plausible garbage instead of an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedBranch {
     /// The replay branch that could not be matched.
@@ -348,10 +302,8 @@ impl TransformVersion {
         }
     }
 
-    /// Copy `bit_count` bits out of `reader` into `out`, then transform them.
-    ///
-    /// This is the shape the parser uses: the payload is never materialised
-    /// twice, and `out` is expected to be a reused scratch buffer.
+    /// Copy `bit_count` bits from `reader` into `out`, typically a reused
+    /// scratch buffer, and transform them there.
     pub fn decode_from(
         self,
         reader: &mut BitReader<'_>,
@@ -388,9 +340,8 @@ mod tests {
 
     #[test]
     fn public_registry_type_does_not_encode_its_length() {
-        // This assignment is the regression guard: changing ALL_VERSIONS back
-        // to `[TransformVersion; N]` makes the public API depend on N and fails
-        // to compile here when the next build is added.
+        // Fails to compile if the registry becomes a `[TransformVersion; N]`,
+        // whose length would then be public API.
         let _: &'static [TransformVersion] = ALL_VERSIONS;
     }
 

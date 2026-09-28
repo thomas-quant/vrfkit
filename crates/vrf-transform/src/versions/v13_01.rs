@@ -1,7 +1,4 @@
 //! `++Ares-Core+release-13.01`
-//!
-//! The build every replay in the 215-file corpus was recorded on, so this is
-//! the transform the golden vectors exercise most heavily.
 
 use super::SeededTransform;
 use crate::helpers::*;
@@ -20,8 +17,6 @@ impl SeededTransform for V13_01 {
     }
 
     fn word32(mut v: u32, state: u32) -> u32 {
-        // Note the asymmetry with word64: the rotated state is not complemented
-        // here, and the rotations are left rather than right.
         v = swap_adjacent_bits_u32(!v) ^ state.rotate_left(5);
         v = !v.rotate_right((state.rotate_left(4) % 31) + 1);
         v.wrapping_add(state.rotate_left(1))

@@ -19,8 +19,6 @@ impl SeededTransform for V12_10 {
         v = swap_adjacent_bits_u64(v);
         v = v.wrapping_sub(u64::from(ror6));
         v = v.rotate_right((ror5 % 63) + 1);
-        // `!(ror4 as u64)` -- the reference NOTs the *zero-extended* value, so
-        // the upper 32 bits become ones. Negating before widening would differ.
         swap_adjacent_bits_u64(v ^ !u64::from(ror4))
     }
 
@@ -33,7 +31,6 @@ impl SeededTransform for V12_10 {
         v = swap_adjacent_bits_u32(v);
         v = v.wrapping_sub(rot6);
         v = v.rotate_right((rot5 % 31) + 1);
-        // No complement in the 32-bit lane, unlike word64.
         swap_adjacent_bits_u32(v ^ rot4)
     }
 
