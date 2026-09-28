@@ -280,8 +280,10 @@ class _Tally(dict):
         return sum(self.values())
 
     def lines(self) -> list[str]:
-        """One line per counter that fired, in REASONS order; the manifest's
-        `losses` carries every counter, zeros included (docs/USAGE.md)."""
+        """One line per counter that fired, in REASONS order. Zeros stay off
+        the console on purpose, despite CLAUDE.md's print-zeros rule: a block
+        of zeros trains the reader to skip it. The manifest's `losses` carries
+        every counter, zeros included (docs/USAGE.md)."""
         return [f"  {name}: {self[name]:,} -- {reason}"
                 for name, reason in self.REASONS.items() if self[name]]
 
