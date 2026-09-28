@@ -115,13 +115,25 @@ impl Container {
                 // A fresh extractor per block: `Extractor` keeps decoder state
                 // across calls, and a block is an independent stream -- see the
                 // same choice, and why, in crates/vrf-container/src/oodle.rs.
+                // `read` over a slice, not `read_from_slice`, for the reason
+                // given there too: the codec stops once the output is full, and
+                // only this form shows what it left unread.
+                let mut unread: &[u8] = &raw;
                 let n = oozextract::Extractor::new()
-                    .read_from_slice(&raw, &mut out[start..])
+                    .read(&mut unread, &mut out[start..])
                     .map_err(|e| Error(format!("{}: block {index}: Oodle: {e:?}", self.name)))?;
                 if n != size {
                     return fail(format!(
                         "{}: block {index} decompressed to {n} bytes, declares {size}",
                         self.name
+                    ));
+                }
+                if !unread.is_empty() {
+                    return fail(format!(
+                        "{}: block {index}: Oodle left {} of {} compressed bytes unread",
+                        self.name,
+                        unread.len(),
+                        raw.len()
                     ));
                 }
             }
@@ -209,5 +221,64 @@ mod tests {
         c.toc.blocks[1].uncompressed_size = 9;
         let mut f = IoCursor::new(ucas);
         assert!(c.read_chunk(&mut f, 0, u64::MAX).is_err());
+    }
+
+    /// One Oodle block holding an uncompressed Kraken block (`0x4C`: header
+    /// nibble `0xC` with the uncompressed bit set; `0x06`: Kraken, no
+    /// checksums) of eight bytes, then `unread` bytes inside the block's
+    /// compressed size that the codec never reaches.
+    fn oodle(unread: usize) -> (Container, Vec<u8>) {
+        let mut ucas = vec![0x4C, 0x06];
+        ucas.extend(0u8..8);
+        ucas.extend(std::iter::repeat_n(0xAB, unread));
+        let spec = TocSpec {
+            flags: crate::toc::FLAG_INDEXED,
+            block_size: 8,
+            methods: vec!["Oodle"],
+            chunks: vec![(
+                ChunkId {
+                    id: 1,
+                    index: 0,
+                    chunk_type: 1,
+                },
+                OffsetLength {
+                    offset: 0,
+                    length: 8,
+                },
+            )],
+            blocks: vec![CompressedBlock {
+                offset: 0,
+                compressed_size: ucas.len() as u32,
+                uncompressed_size: 8,
+                method: 1,
+            }],
+            ..TocSpec::default()
+        };
+        let toc = parse_toc(&build_toc(&spec)).unwrap();
+        (
+            Container {
+                name: "t".to_owned(),
+                ucas_path: PathBuf::new(),
+                toc,
+            },
+            ucas,
+        )
+    }
+
+    /// The codec stops once its output is full and never checks that its
+    /// input is used up, so bytes of a block it never reads would vanish.
+    #[test]
+    fn an_oodle_block_the_codec_does_not_read_to_the_end_is_an_error() {
+        let (c, ucas) = oodle(0);
+        let mut f = IoCursor::new(ucas);
+        assert_eq!(
+            c.read_chunk(&mut f, 0, u64::MAX).unwrap(),
+            (0u8..8).collect::<Vec<_>>()
+        );
+
+        let (c, ucas) = oodle(5);
+        let mut f = IoCursor::new(ucas);
+        let err = c.read_chunk(&mut f, 0, u64::MAX).unwrap_err();
+        assert!(err.0.contains("5 of 15"), "{err}");
     }
 }
