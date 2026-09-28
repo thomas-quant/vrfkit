@@ -224,7 +224,7 @@ byte-for-byte identical across the checkpoint flag.
 
 The main export writes six Parquet tables plus `manifest.json`; `--checkpoints`
 adds seven checkpoint tables. String columns are dictionary-encoded with ZSTD.
-Every column, table and join rule is in
+The tables, their columns and the join rules are described in
 [`docs/USAGE.md` section 3](docs/USAGE.md#3-output). Four traps to know before
 reading them:
 

@@ -14,7 +14,7 @@ record, not things to run.
 
 1. [Build](#1-build)
 2. [CLI](#2-cli) -- [`inspect`](#inspect) / [`validate`](#validate) / [`diag`](#diag) / [`export`](#export)
-3. [Output](#3-output) -- [`fields`](#fieldsparquet) / [`movement`](#movementparquet) / [`actors`](#actorsparquet) / [`net_guids`](#net_guidsparquet) / [`events`](#eventsparquet) / [`checkpoint_fields`](#checkpoint_fieldsparquet) / [`manifest.json`](#manifestjson)
+3. [Output](#3-output) -- [`fields`](#fieldsparquet) / [`movement`](#movementparquet) / [`actors`](#actorsparquet) / [`net_guids`](#net_guidsparquet) / [`events`](#eventsparquet) / [`partials`](#partialsparquet) / [`checkpoint_fields`](#checkpoint_fieldsparquet) / [`manifest.json`](#manifestjson)
 4. [Using it as a library](#4-using-it-as-a-library)
 5. [`tools/` reference](#5-tools-reference) -- [Generators](#generators) / [Validation](#validation) / [Reading the installed game](#reading-the-installed-game) / [Downstream conversion](#downstream-conversion-tools) / [Analysis helpers](#analysis-helpers)
 6. [Validation suite](#6-validation-suite)
@@ -128,15 +128,9 @@ unparsed tails as well as unresolved standalone RPC blocks.
 `--diagnostics` prints context for every failed block. By default it shows up to
 32 lines and prints totals / shown / omitted counts in the header.
 
-Export also writes `partials.parquet` for rejected partial fragments and
-abandoned partial accumulators. `source` separates main and checkpoint rows;
-the checkpoint ID disambiguates their independently numbered packet streams.
-Source packet/bit offset and header flags identify the original wire input.
-The payload kind distinguishes a single current fragment from an accumulated
-buffer; the latter retains its first fragment's source header and a separate
-aggregate bit count. These payloads remain unresolved and do not enter the
-block validation numerator. Main/checkpoint row and bit totals are available
-in both the export summary and manifest quality object.
+Rejected partial fragments and abandoned partial accumulators are preserved in
+[`partials.parquet`](#partialsparquet); they remain unresolved and do not enter
+the block validation numerator.
 
 ### `diag`
 
@@ -525,6 +519,36 @@ the `(killer, killed)` NetGUID; for `roundStarted`, `word0` is the round
 number. On any future layout mismatch the overlay stays null and the original
 remains intact in `raw_payload`.
 
+### `partials.parquet`
+
+One row per rejected partial fragment or abandoned partial accumulator, with
+its exact raw bits. These are preserved evidence, not reconstructed blocks or
+RPCs, and they do not enter the block validation numerator. With
+`--checkpoints`, both streams share this table.
+
+| Column | Type | Description |
+|---|---|---|
+| `source` | str | `main` or `checkpoint` |
+| `checkpoint_id` | str? | Original checkpoint wire ID; null on main rows. Each checkpoint numbers its packets independently |
+| `payload_kind` | str | `current_fragment` (one fragment) or `accumulated_payload` (an assembly buffer) |
+| `reason` | str | Rejection cause: `PartialPayloadReason` (`crates/vrf-net/src/pipeline/mod.rs`) in snake case, e.g. `missing_initial`, `channel_closed`, `end_of_stream` |
+| `source_packet_id` | i32 | Packet of the source bunch |
+| `source_payload_bit_offset` | i64 | Bit offset where the source bunch's payload begins within that packet |
+| `rejection_packet_id` | i32? | Packet whose event rejected the payload; null for an accumulator still open at the end of the stream (`end_of_stream`) |
+| `channel_index` | u32 | Channel |
+| `channel_sequence` | i32 | The channel's reliable sequence, or the packet ID for an unreliable partial |
+| `open` / `close` / `dormant` / `replication_paused` / `reliable` / `partial` / `partial_initial` / `partial_final` / `has_package_map_exports` / `has_must_be_mapped_guids` | bool | Source bunch header flags |
+| `close_reason` | u8 | Source bunch close reason |
+| `source_payload_bit_count` | i32 | Source bunch's payload size in bits |
+| `bit_count` | u64 | Preserved bits |
+| `raw_bits` | bytes | The preserved bits; bits past `bit_count` in the last byte are zero |
+
+An accumulator's source columns describe its first fragment, while its
+`bit_count` covers the assembled buffer. Main and checkpoint totals are in the
+export summary (`Partial raw rows`, `Checkpoint partial raw`) and in the
+manifest's `quality` object (`partial_rows` / `partial_bits`,
+`checkpoint_partial_rows` / `checkpoint_partial_bits`).
+
 ### `checkpoint_fields.parquet`
 
 The existing `fields.parquet` columns, preceded by non-null `checkpoint_index`
@@ -758,9 +782,14 @@ to also walk subdirectories; pass it on both if you need them to agree on a
 wider corpus than the top level.
 
 `check_docs.py` checks this document and the others it lists: every `tools/`
-script mentioned, every crate in the table, every link and `#anchor` resolving,
-and every quoted count -- table sizes in Rust doc comments and `Cargo.toml`
-included -- the live value. A stale sentence compiles and passes every test.
+script mentioned, every crate in the table, every link and `#anchor`
+resolving, and the live value of each number it can re-derive, in the
+phrasings it reads -- the overlay and handle table sizes (in Rust doc comments
+and `Cargo.toml` too), the test counts, the reference replay's printed overlay
+counters, `Typed` ratio and export rows/bytes, the build tables' clean/checked
+counts, and the counts its `MEASURED_RE` names. Any other figure, DATA.md's
+measurements among them, is a measurement nothing re-runs, and nothing checks
+it. A stale sentence compiles and passes every test.
 
 ```bash
 python tools/check_docs.py           # also runs the test suites to compare counts
@@ -796,7 +825,8 @@ shape; `--name` (repeatable) keeps named instances and reports the ones not
 found. Anything that cannot be resolved prints as `?`.
 
 The summary goes to stderr and prints every counter, zeros included -- among
-them `indexed_files_dropped`, directory-index files that name no chunk -- and
+them `indexed_files_dropped`, directory-index files that cannot be attached to
+a chunk (an entry past the TOC's end, or one a later file also names) -- and
 each container's id, size and modification time, `global` included; a size or
 time that cannot be read prints as `?` (`null` in JSON). Exit 0 means every
 package was read, each compressed block to its last byte, and every self-check
