@@ -309,17 +309,20 @@ impl ExportSink<'_> {
         failed
     }
 
-    /// Resolve the class path an actor channel should be labelled with.
+    /// Resolve the `(class_path, archetype_path)` an actor channel should be
+    /// labelled with.
     ///
     /// Shared by open and close so the two cannot drift: a channel that opened
     /// as one class and closed as another would be a join key that silently
     /// does not join.
-    fn actor_class_path(&self, archetype: Option<NetworkGuid>) -> Option<String> {
-        let archetype = archetype.filter(|g| g.is_valid())?;
+    fn actor_paths(&self, archetype: Option<NetworkGuid>) -> (Option<String>, Option<String>) {
+        let Some(archetype) = archetype.filter(|g| g.is_valid()) else {
+            return (None, None);
+        };
         let outer = self.cache.get_outer_path(archetype.0).map(str::to_owned);
         let arch_path = self.cache.get_path_by_guid(archetype.0).map(str::to_owned);
         let combined = self.create_combined_candidate(outer.as_deref(), arch_path.as_deref());
-        combined.or(outer)
+        (combined.or(outer), arch_path)
     }
 
     /// Capture BombPlayerState identity for the manifest `players` array.
@@ -528,16 +531,7 @@ impl ReplicationSink for ExportSink<'_> {
         // Nothing is lost by dropping it: all 27 paths are byte-identical to
         // the `path` column net_guids.parquet already carries for the same
         // GUID, so a consumer that wants the instance name can join for it.
-        let class_path = self.actor_class_path(Some(state.archetype_net_guid));
-
-        // Resolve archetype_path from the archetype GUID.
-        let archetype_path = if state.archetype_net_guid.is_valid() {
-            self.cache
-                .get_path_by_guid(state.archetype_net_guid.0)
-                .map(str::to_owned)
-        } else {
-            None
-        };
+        let (class_path, archetype_path) = self.actor_paths(Some(state.archetype_net_guid));
 
         // Spawn location (only for dynamic actors that have it).
         let (spawn_x, spawn_y, spawn_z) = match state.spawn_location {
@@ -580,11 +574,7 @@ impl ReplicationSink for ExportSink<'_> {
         // shipped `class_path = NULL` while its close row shipped an instance
         // name in the same column.
         let archetype = channel_archetype(self.channel_state, channel_index, actor_net_guid);
-        let class_path = self.actor_class_path(archetype);
-
-        // Archetype path from channel state.
-        let archetype_path =
-            archetype.and_then(|g| self.cache.get_path_by_guid(g.0).map(str::to_owned));
+        let (class_path, archetype_path) = self.actor_paths(archetype);
 
         // `ChannelCloseReason::Dormancy` means the server stopped replicating an
         // actor that is still alive; every other reason is the actor going
