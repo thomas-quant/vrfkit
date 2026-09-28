@@ -3394,27 +3394,34 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     }
     _write_manifest(manifest, output_dir, adapter_accounting)
 
-    # ---- Summary ----
-    #
-    # "complete" is a claim, so it is only made when it is true. A run that
-    # dropped rows or invented values says how many and of what; the counters
-    # that did not fire are not printed, because a block of ten zeroes is a
-    # block readers learn to skip.
-    if tally.total:
-        print(f"\nConversion finished WITH LOSSES: {output_dir}")
-    else:
-        print(f"\nConversion complete: {output_dir}")
-    print(f"  events.ndjson:   {events_written:,} lines")
-    print(f"  movement.ndjson: {movement_written:,} lines")
-    print(f"  manifest.json:   written")
-    for line in tally.lines():
-        print(line)
-
     return {
         "events_written": events_written,
         "movement_written": movement_written,
         "tally": tally,
     }
+
+
+def _print_summary(output_dir: Path, result: dict) -> None:
+    """The console summary, printed once the bundle is published.
+
+    "complete" is a claim, so it is only made when it is true. A run that
+    dropped rows or invented values says how many and of what; the counters
+    that did not fire are not printed, because a block of ten zeroes is a
+    block readers learn to skip. `convert` calls this after the publish
+    commit, with the final path: printed from the staging step, it named a
+    directory the publish renamed away, and it claimed completion before a
+    publish that could still fail.
+    """
+    tally = result["tally"]
+    if tally.total:
+        print(f"\nConversion finished WITH LOSSES: {output_dir}")
+    else:
+        print(f"\nConversion complete: {output_dir}")
+    print(f"  events.ndjson:   {result['events_written']:,} lines")
+    print(f"  movement.ndjson: {result['movement_written']:,} lines")
+    print(f"  manifest.json:   written")
+    for line in tally.lines():
+        print(line)
 
 
 def _validate_separate_trees(export_dir: Path, output_dir: Path) -> tuple[Path, Path]:
@@ -3485,11 +3492,12 @@ def convert(export_dir: Path, output_dir: Path, *, verbose: bool = False):
             if not (staging / required).is_file():
                 raise ValueError(f"generated bundle is missing {required}")
         _publish_bundle(staging, output_dir)
-        return result
     except BaseException:
         if staging.exists():
             remove_tree(staging, parent)
         raise
+    _print_summary(output_dir, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

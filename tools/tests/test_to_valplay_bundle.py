@@ -601,6 +601,32 @@ class TransactionalConversionTests(unittest.TestCase):
 
             self.assertEqual((export / "manifest.json").read_bytes(), original)
 
+    def test_the_summary_names_the_published_bundle(self):
+        """The summary used to print from inside the staging step, naming a
+        `.bundle.*` directory the publish then renamed away."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_export(root / "export")
+            output = root / "bundle"
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                bundle.convert(root / "export", output)
+            summary = [ln for ln in printed.getvalue().splitlines()
+                       if ln.startswith("Conversion ")]
+            self.assertEqual(len(summary), 1, printed.getvalue())
+            self.assertTrue(summary[0].endswith(": " + str(output.resolve())), summary)
+            self.assertTrue(output.is_dir())
+
+    def test_a_failed_publish_prints_no_completion_claim(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_export(root / "export")
+            printed = io.StringIO()
+            with mock.patch.object(bundle, "_publish_bundle",
+                                   side_effect=OSError("disk full")),                     contextlib.redirect_stdout(printed),                     self.assertRaises(OSError):
+                bundle.convert(root / "export", root / "bundle")
+            self.assertNotIn("Conversion ", printed.getvalue())
+
     def test_backup_cleanup_failure_does_not_turn_a_committed_publish_into_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
