@@ -1,15 +1,7 @@
-//! One module per export table.
-//!
-//! Each module holds that table's row-group size, its dictionary columns, and
-//! the row-slice-to-`RecordBatch` conversion -- the three things
-//! [`crate::writer::Table`] abstracts over. The buffer-and-flush machinery
-//! itself lives once in [`crate::writer`].
-//!
-//! Every table is behind its own feature so a consumer can take, say, `fields`
-//! without linking the movement writer. The record structs are not gated: they
-//! carry no Arrow types and callers producing records for a table they do not
-//! write (the validation oracle does exactly that) must still be able to name
-//! them.
+//! One module per export table, each behind its own feature, so a consumer can
+//! take `fields` without linking the movement writer. The record structs are
+//! not gated: the validation oracle builds records for tables it does not
+//! write.
 
 #[cfg(feature = "actors")]
 pub mod actors;
@@ -26,12 +18,10 @@ pub mod net_guids;
 #[cfg(feature = "partials")]
 pub mod partials;
 
-/// Column builders the table modules share: the `RecordBatch` every
-/// `build_batch` returns, the dictionary string column, and the column lists
-/// of `fields`, `actors` and `net_guids`, which their checkpoint tables write
-/// again after two identity columns. They live here, not in those table
-/// modules, because `checkpoint-context` builds without the three features.
-/// Each item is compiled only with a feature that uses it.
+/// Column builders the tables share, including the `fields`, `actors` and
+/// `net_guids` column lists their checkpoint twins repeat after two identity
+/// columns. Here rather than in those modules because `checkpoint-context`
+/// builds without their features; each item compiles only where used.
 #[cfg(any(
     feature = "actors",
     feature = "checkpoint-context",
@@ -106,12 +96,9 @@ mod columns {
             Arc::new(UInt32Array::from_iter(
                 rows.clone().map(|r| r.object_net_guid),
             )),
-            // `&*r.group_path` derefs the interned `Arc<str>` to the same
-            // `&str` a `String` would have produced, so the builder sees an
-            // identical value sequence and the encoded dictionary is
-            // unchanged. Interning must not be exploited here -- e.g. by
-            // keying on `Arc::as_ptr` to skip an append -- or the
-            // row-to-value mapping stops being one-to-one.
+            // `&*r.group_path` is the `&str` a `String` would give, so the
+            // dictionary is unchanged by interning. Never key on `Arc::as_ptr`
+            // to skip an append: rows and values would stop matching one-to-one.
             dict(
                 len,
                 256,
@@ -139,9 +126,6 @@ mod columns {
             Arc::new(Int64Array::from_iter(rows.clone().map(|r| r.value_i64))),
             Arc::new(Float64Array::from_iter(rows.clone().map(|r| r.value_f64))),
             Arc::new(BooleanArray::from_iter(rows.clone().map(|r| r.value_bool))),
-            // The decoded typed values are highly repetitive -- enum strings,
-            // JSON blobs, repeated struct JSON -- so a dictionary shrinks the
-            // column and speeds up downstream readers.
             dict(len, 2048, len * 32, rows.map(|r| r.value_str.as_deref())),
         ]
     }

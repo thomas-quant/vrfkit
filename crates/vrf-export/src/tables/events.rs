@@ -1,14 +1,5 @@
-//! The `events` table: one row per Event chunk.
-//!
-//! Event chunks are the server's own labelled game timeline. Round starts,
-//! character deaths, spike plants and defuses arrive here already named, with a
-//! millisecond timestamp, instead of having to be inferred from replicated
-//! properties and RPCs.
-//!
-//! The bytes it wraps contain a group-dependent word list with no count on the
-//! wire (see `vrf_container::EventChunk`). Groups with an established count
-//! expose the structural tag, FString and trailing f32 alongside neutral word
-//! columns; `raw_payload` keeps every byte either way.
+//! The `events` table: one row per Event chunk, the server's own labelled
+//! timeline (round starts, deaths, plants, defuses; see `schema::events_schema`).
 
 use std::sync::Arc;
 
@@ -23,11 +14,7 @@ use crate::record::EventRecord;
 use crate::schema::events_schema_ref;
 use crate::writer::{Table, TableWriter};
 
-/// Default row group size for the events table.
-///
-/// A full competitive match yields a couple of hundred rows, so this holds the
-/// whole table in one row group while keeping the streaming shape the other
-/// writers use.
+/// Rows per row group by default; a match's couple of hundred rows fit in one.
 pub const DEFAULT_EVENT_ROW_GROUP_SIZE: usize = 131_072;
 
 /// Table marker for `events`. See [`EventWriter`].
@@ -41,15 +28,13 @@ impl Table for EventsTable {
 
     const DEFAULT_ROW_GROUP_SIZE: usize = DEFAULT_EVENT_ROW_GROUP_SIZE;
 
-    // Dictionary/plain bytes over the 45-replay sample (see
-    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule: payload_name 0.51,
-    // group 0.60. `id` 1.07 and `metadata` 1.49 are near-unique per row and
-    // measured larger under a dictionary on all 45 replays; they stay listed
-    // for the every-string-column rule (the table is ~200 rows per match).
-    // Their Arrow type is plain Utf8 either way; that is the schema, not the
-    // page encoding. Numbers listed: word1 0.74, payload_size 0.89, word0
-    // 0.89, payload_tag 0.91. Not listed, smaller PLAIN on all 45: time1 1.32,
-    // time2 1.32, payload_seconds 1.29, raw_payload 1.14.
+    // Dictionary/plain bytes over the 45-replay sample of
+    // `Table::DICTIONARY_COLUMNS`. Strings, listed by rule: payload_name 0.51,
+    // group 0.60, and id 1.07 and metadata 1.49, near-unique per row and larger
+    // as a dictionary on all 45 (a table of ~200 rows a match). Numbers listed:
+    // word1 0.74, payload_size 0.89, word0 0.89, payload_tag 0.91. Not listed,
+    // smaller PLAIN on all 45: time1 1.32, time2 1.32, payload_seconds 1.29,
+    // raw_payload 1.14.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &[
         "id",
         "group",

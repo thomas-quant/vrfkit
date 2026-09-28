@@ -1,13 +1,5 @@
-//! The `net_guids` table: one row per NetGUID the replay registered.
-//!
-//! Each row carries the GUID's object path and the GUID of its containing
-//! object -- the containment hierarchy Unreal builds while reading export-GUID
-//! bunches.
-//!
-//! Why it needs its own table: `actors.parquet` only records GUIDs that opened
-//! a channel. Subobjects never do. A weapon's `FiringState` -- the only handle a
-//! shot event carries back to the gun that fired it -- appears in no other
-//! export. The parser has always computed this mapping and then discarded it.
+//! The `net_guids` table: one row per NetGUID the replay registered, with its
+//! object path and containing object (why: `schema::net_guids_schema`).
 
 use std::sync::Arc;
 
@@ -20,11 +12,7 @@ use crate::record::NetGuidRecord;
 use crate::schema::net_guids_schema_ref;
 use crate::writer::{Table, TableWriter};
 
-/// Default row group size for the net_guid table.
-///
-/// The table is small -- roughly 16 K rows for a full competitive match -- so
-/// this holds it in a single row group while keeping the streaming shape the
-/// other writers use.
+/// Rows per row group by default; the ~16 K rows of a match fit in one.
 pub const DEFAULT_NET_GUID_ROW_GROUP_SIZE: usize = 131_072;
 
 /// Table marker for `net_guids`. See [`NetGuidWriter`].
