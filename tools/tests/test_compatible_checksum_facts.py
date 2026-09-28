@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_checksum_types as ect  # noqa: E402
+import generate_scoped_types as gst  # noqa: E402
 
 
 def _crc(text: str, seed: int) -> int:
@@ -119,16 +120,56 @@ FACTS = [
      "the effect-placement RPCs' 248"),
 ]
 
+#: Blueprint properties typed by exact group, name and checksum
+#: (tools/fixtures/scoped_type_evidence.json -> scoped_types.rs):
+#: (replay checksum, property name, C++ type, rival types that must NOT
+#:  reproduce it, the FieldType every scoped entry carrying the checksum must
+#:  have, where).
+#:
+#: Each name and C++ type is a name-level fact from the 13.06 Blueprint class
+#: definitions (read-only, 2026-09-28): the property's FProperty class, and
+#: for an object reference its class, which fixes the `A`/`U` prefix. A
+#: top-level Blueprint property has no parent, so its chain is one step.
+SCOPED_FACTS = [
+    (3110715024, "TrailPosition", "FVector", ["FVector3f", "FRotator"],
+     "FieldType::VectorDouble", "Projectile_Hunter_{Q_RevealBolt,4_ExplosiveBolt}_C"),
+    (1066899736, "IsPossessed", "bool", ["uint8"], "FieldType::Bool",
+     "(Rift_)PossessableActorComponent_C"),
+    (2181339745, "Possessed", "bool", ["uint8"], "FieldType::Bool",
+     "Pawn_Gumshoe_E_PossessableCamera_C"),
+    (2029268412, "IsDeployed", "bool", ["uint8"], "FieldType::Bool",
+     "Pawn_Gumshoe_E_PossessableCamera_C"),
+    (2740089937, "DeployedActor", "AActor*", ["UActor*", "APawn*"],
+     "FieldType::ObjectNetGuid", "Ability_Killjoy_{E_Turret,Q_Alarmbot}_C"),
+    (1908355023, "CurrentCharge", "double", ["float"], "FieldType::Double",
+     "Comp_Equippable_Charged_C"),
+    (1863385026, "CurrentLossStreak", "int32", ["uint32", "float"], "FieldType::Int32",
+     "BombGameState_C"),
+    (22256526, "LossStreakTeam", "UBaseTeamComponent*", ["ABaseTeamComponent*"],
+     "FieldType::ObjectNetGuid", "BombGameState_C, Swiftplay_EoRCredits_GameState_C"),
+    (2889152318, "ShouldOverrideMatchTimer", "bool", ["uint8"], "FieldType::Bool",
+     "BombGameState_C, Swiftplay_EoRCredits_GameState_C"),
+]
+
 #: The C++ leaf type each checksum-table FieldType above stands for.
 FIELD_TYPE_OF = {
     "int64": "FieldType::Int64",
     "uint32": "FieldType::UInt32",
+    "int32": "FieldType::Int32",
+    "double": "FieldType::Double",
     "bool": "FieldType::Bool",
     # Three doubles on this wire (UE5 large world coordinates); FQuat sends
     # X/Y/Z only, W implied.
     "FQuat": "FieldType::VectorDouble",
     "FVector": "FieldType::VectorDouble",
 }
+
+
+def field_type_of(cpp_type: str) -> str:
+    """An object reference of any class is a NetGUID on the wire."""
+    if cpp_type.endswith("*"):
+        return "FieldType::ObjectNetGuid"
+    return FIELD_TYPE_OF[cpp_type]
 
 
 class FormulaTests(unittest.TestCase):
@@ -163,6 +204,37 @@ class FactTests(unittest.TestCase):
                     continue
                 self.assertEqual(FIELD_TYPE_OF[chain[-1][1]], table_type)
                 self.assertEqual(committed.get(checksum), table_type)
+
+
+class ScopedFactTests(unittest.TestCase):
+    """The scoped Blueprint entries against the type their checksum proves."""
+
+    def test_every_blueprint_property_reproduces_its_replay_checksum(self):
+        for checksum, name, cpp_type, _rivals, _field_type, where in SCOPED_FACTS:
+            with self.subTest(where=where, name=name):
+                self.assertEqual(compatible_checksum([(name, cpp_type)]), checksum)
+
+    def test_no_rival_type_reproduces_it(self):
+        for checksum, name, _cpp_type, rivals, _field_type, where in SCOPED_FACTS:
+            for rival in rivals:
+                with self.subTest(where=where, name=name, rival=rival):
+                    self.assertNotEqual(compatible_checksum([(name, rival)]), checksum)
+
+    def test_every_scoped_entry_with_the_checksum_has_the_proven_type(self):
+        """Each fact must be used, by entries of its own name and its type.
+
+        Read from the reviewed fixture; `generate_scoped_types.py --check`
+        (in the sweep) holds scoped_types.rs to the same entries.
+        """
+        entries = gst.load(gst.EVIDENCE)
+        for checksum, name, cpp_type, _rivals, field_type, where in SCOPED_FACTS:
+            with self.subTest(where=where, name=name):
+                self.assertEqual(field_type_of(cpp_type), field_type)
+                carriers = [e for e in entries if e["checksum"] == checksum]
+                self.assertTrue(carriers, "no scoped entry uses this fact")
+                for entry in carriers:
+                    self.assertEqual(entry["field"], name)
+                    self.assertEqual(gst.TYPES[entry["type"]], (field_type,))
 
 
 if __name__ == "__main__":

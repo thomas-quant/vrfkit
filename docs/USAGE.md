@@ -1021,7 +1021,9 @@ consumption. Its recursive search skips the leftovers of an interrupted export
 and refuses a table without `manifest.json` beside it. This checks structure and observed numeric ranges, not gameplay
 meaning. Use it before adding overlay types and when comparing their emitted
 values after export (`--compare-typed`). Besides the byte-aligned primitives (`UInt32`
-read unsigned) it reads seven bit-level types -- `EnumByte` (a 1..8-bit
+read unsigned, and `VectorDouble` as exactly 192 bits of three finite
+little-endian doubles, compared by parsing the exported `(x,y,z)` back into
+doubles) it reads seven bit-level types -- `EnumByte` (a 1..8-bit
 payload), `EnumRemainingBits`, `FName`, `RotationShort`, `VectorNetQuantize100`,
 `RepMovementByte` and `RepMovementShort` -- with its own LSB-first reader rather
 than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
@@ -1053,8 +1055,11 @@ original additions, checked in the 714-replay corpus. Run on a sample, the
 for that reason alone. `tools/fixtures/type_evidence_scoped.json` holds checksum-scoped
 specifications for the scoped types added on 2026-09-28, in their exported
 spelling (`_ClassNetCache` group and function-qualified name for RPC
-parameters). Every identity in it must be observed, so run it on a set of
-exports that contains each one. A specimen must not be promoted to gameplay semantics
+parameters), and the Blueprint properties typed by exact identity from the
+same date on (the Sova bolts' `TrailPosition`, the possession flags, Killjoy's
+`DeployedActor`, `CurrentCharge` and the round-loss-streak and match-timer
+fields of the Bomb and Swiftplay game states). Every identity in it must be
+observed, so run it on a set of exports that contains each one. A specimen must not be promoted to gameplay semantics
 just because this primitive check passes.
 
 `validate_ability_array_evidence.py <export-directory> [...] --compare-typed

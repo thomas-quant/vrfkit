@@ -6,7 +6,7 @@ use crate::decode::FieldType;
 use crate::types::{RotatorQuantization, VectorQuantization};
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 84] = [
     (
         "A",
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -254,6 +254,18 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
         FieldType::ObjectNetGuid,
     ),
     (
+        "CurrentCharge",
+        "/Game/Characters/Global/ChargedProjectileTargeting/Comp_Equippable_Charged.Comp_Equippable_Charged_C",
+        1908355023,
+        FieldType::Double,
+    ),
+    (
+        "CurrentLossStreak",
+        "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+        1863385026,
+        FieldType::Int32,
+    ),
+    (
         "CursorWorldLocation",
         "/Script/ShooterGame.MapTargetingStateComponent",
         3280594315,
@@ -275,6 +287,18 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
         "DecayCauser",
         "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
         3648603088,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "DeployedActor",
+        "/Game/Characters/Killjoy/S0/Ability_E/Ability_Killjoy_E_Turret.Ability_Killjoy_E_Turret_C",
+        2740089937,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "DeployedActor",
+        "/Game/Characters/Killjoy/S0/Ability_Q/Ability_Killjoy_Q_Alarmbot.Ability_Killjoy_Q_Alarmbot_C",
+        2740089937,
         FieldType::ObjectNetGuid,
     ),
     (
@@ -314,10 +338,46 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
         FieldType::ObjectNetGuid,
     ),
     (
+        "IsDeployed",
+        "/Game/Characters/Gumshoe/S0/Ability_E/Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C",
+        2029268412,
+        FieldType::Bool,
+    ),
+    (
+        "IsPossessed",
+        "/Game/Characters/Rift/S0/Ability_X/WorldTargeting/Rift_PossessableActorComponent.Rift_PossessableActorComponent_C",
+        1066899736,
+        FieldType::Bool,
+    ),
+    (
+        "IsPossessed",
+        "/Game/Characters/States/PossessableActorComponent.PossessableActorComponent_C",
+        1066899736,
+        FieldType::Bool,
+    ),
+    (
         "LocationOffset",
         "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
         111823753,
         FieldType::VectorNetQuantize { scale: 100 },
+    ),
+    (
+        "LossStreakTeam",
+        "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+        22256526,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "LossStreakTeam",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+        22256526,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "Possessed",
+        "/Game/Characters/Gumshoe/S0/Ability_E/Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C",
+        2181339745,
+        FieldType::Bool,
     ),
     (
         "RelativeScale3D",
@@ -365,10 +425,34 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
         FieldType::RotationShort,
     ),
     (
+        "ShouldOverrideMatchTimer",
+        "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+        2889152318,
+        FieldType::Bool,
+    ),
+    (
+        "ShouldOverrideMatchTimer",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+        2889152318,
+        FieldType::Bool,
+    ),
+    (
         "Source",
         "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
         1966913909,
         FieldType::ObjectNetGuid,
+    ),
+    (
+        "TrailPosition",
+        "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
+        3110715024,
+        FieldType::VectorDouble,
+    ),
+    (
+        "TrailPosition",
+        "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+        3110715024,
+        FieldType::VectorDouble,
     ),
     (
         "bAIControlled",

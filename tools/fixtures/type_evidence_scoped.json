@@ -76,5 +76,89 @@
   "field": "D",
   "checksum": 1032080829,
   "type": "UInt32"
+ },
+ {
+  "group": "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+  "field": "TrailPosition",
+  "checksum": 3110715024,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
+  "field": "TrailPosition",
+  "checksum": 3110715024,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Characters/States/PossessableActorComponent.PossessableActorComponent_C",
+  "field": "IsPossessed",
+  "checksum": 1066899736,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Rift/S0/Ability_X/WorldTargeting/Rift_PossessableActorComponent.Rift_PossessableActorComponent_C",
+  "field": "IsPossessed",
+  "checksum": 1066899736,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Gumshoe/S0/Ability_E/Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C",
+  "field": "Possessed",
+  "checksum": 2181339745,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Gumshoe/S0/Ability_E/Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C",
+  "field": "IsDeployed",
+  "checksum": 2029268412,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Killjoy/S0/Ability_E/Ability_Killjoy_E_Turret.Ability_Killjoy_E_Turret_C",
+  "field": "DeployedActor",
+  "checksum": 2740089937,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Killjoy/S0/Ability_Q/Ability_Killjoy_Q_Alarmbot.Ability_Killjoy_Q_Alarmbot_C",
+  "field": "DeployedActor",
+  "checksum": 2740089937,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Global/ChargedProjectileTargeting/Comp_Equippable_Charged.Comp_Equippable_Charged_C",
+  "field": "CurrentCharge",
+  "checksum": 1908355023,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+  "field": "CurrentLossStreak",
+  "checksum": 1863385026,
+  "type": "Int32"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+  "field": "LossStreakTeam",
+  "checksum": 22256526,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+  "field": "ShouldOverrideMatchTimer",
+  "checksum": 2889152318,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+  "field": "LossStreakTeam",
+  "checksum": 22256526,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+  "field": "ShouldOverrideMatchTimer",
+  "checksum": 2889152318,
+  "type": "Bool"
  }
 ]

@@ -1418,6 +1418,294 @@
         "++Ares-Core+release-13.06"
       ],
       "evidence": "Upstream 8b7afcb (feat: add raze descriptors) binds ClientResetRemoteMovementPrediction(isPossess: Bool) on Raze's character and Boom Bot caches. Every export declares that parameter group once, as this native ShooterCharacter function (1,018 of 1,018), so the one identity types it for all 48 character and pawn ClassNetCache groups that invoke it, not only Raze's. audit-main raw audit of all 1,018 unique corpus exports (11.06-13.06, made with 259ed10), 2026-09-28; tools/validate_type_evidence.py consumed every observed payload exactly under this type: 291,346 main rows, exactly 1 bit; true on every observed row (291,346), so the column is constant in this corpus."
+    },
+    {
+      "group": "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+      "field": "TrailPosition",
+      "checksum": 3110715024,
+      "type": "VectorDouble",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Projectile_Hunter_Q_RevealBolt_C declares TrailPosition as a replicated (CPF_Net) StructProperty<Vector>, inherited from Projectile_Hunter_BoltParent_C; the declared compatible checksum 3110715024 reproduces as (TrailPosition, FVector) and not as FVector3f (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 17,827 main plus 0 checkpoint rows in 526 replays on 14 builds, every one exactly 192 bits; an independent reader (exactly 192 bits read as three little-endian f64, all finite) consumed every payload, 0 failures, none typed before. Values are world positions. One to three values per bolt actor (12,032 actors: 12,032 / 4,388 / 1,407 with a first / second / third value), the first in the packet that opens the channel. Every value lies on the same bolt's own path -- its actors.parquet spawn point followed by its ReplicatedMovement locations -- at a median 24.3 and at most 100.3 world units (17,814 of 17,827 within 50), against a median 2,145.5 (1,035 within 50) for the path of another bolt of the same replay. Re-exported by this change: all 17,827 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
+      "field": "TrailPosition",
+      "checksum": 3110715024,
+      "type": "VectorDouble",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Projectile_Hunter_4_ExplosiveBolt_C declares TrailPosition as a replicated (CPF_Net) StructProperty<Vector>, inherited from Projectile_Hunter_BoltParent_C; the declared compatible checksum 3110715024 reproduces as (TrailPosition, FVector) and not as FVector3f (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 8,342 main plus 0 checkpoint rows in 435 replays on 5 builds, every one exactly 192 bits; an independent reader (exactly 192 bits read as three little-endian f64, all finite) consumed every payload, 0 failures, none typed before. Values are world positions. One to three values per bolt actor (5,280 actors: 5,280 / 2,588 / 474 with a first / second / third value), the first in the packet that opens the channel. Every value lies on the same bolt's own path -- its actors.parquet spawn point followed by its ReplicatedMovement locations -- at a median 22.3 and at most 94.4 world units (8,337 of 8,342 within 50), against a median 1,129.1 (484 within 50) for the path of another bolt of the same replay. Re-exported by this change: all 8,342 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/States/PossessableActorComponent.PossessableActorComponent_C",
+      "field": "IsPossessed",
+      "checksum": 1066899736,
+      "type": "Bool",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): PossessableActorComponent_C declares IsPossessed as a replicated (CPF_Net) BoolProperty; the declared compatible checksum 1066899736 reproduces as (IsPossessed, bool) and not as uint8 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 44,534 main plus 0 checkpoint rows in 959 replays on 21 builds, every one exactly 1 bit; an independent reader (exactly one bit) consumed every payload, 0 failures, none typed before. Values: 33,832 true, 10,702 false. The owning channels are Pawn_Gumshoe_E_PossessableCamera_C, Smonk_PostDeath_PC_C, Pawn_Hunter_E_Drone_C, Pawn_Guide_Q_PossessableScout_C, Pawn_Cashew_4_Spider_LockOn_C, Pawn_Gumshoe_Q_PossessableCamera_C and Pawn_Aggrobot_RollyPolly_C. Re-exported by this change: all 44,534 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/Rift/S0/Ability_X/WorldTargeting/Rift_PossessableActorComponent.Rift_PossessableActorComponent_C",
+      "field": "IsPossessed",
+      "checksum": 1066899736,
+      "type": "Bool",
+      "observed_builds": [
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Rift_PossessableActorComponent_C declares IsPossessed as a replicated (CPF_Net) BoolProperty, inherited from PossessableActorComponent_C; the declared compatible checksum 1066899736 reproduces as (IsPossessed, bool) and not as uint8 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 6,399 main plus 0 checkpoint rows in 72 replays on 9 builds, every one exactly 1 bit; an independent reader (exactly one bit) consumed every payload, 0 failures, none typed before. Values: 3,203 true, 3,196 false. Carried only by Rift_TargetingForm_PC_C channels. Re-exported by this change: all 6,399 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/Gumshoe/S0/Ability_E/Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C",
+      "field": "Possessed",
+      "checksum": 2181339745,
+      "type": "Bool",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Pawn_Gumshoe_E_PossessableCamera_C declares Possessed as a replicated (CPF_Net) BoolProperty; the declared compatible checksum 2181339745 reproduces as (Possessed, bool) and not as uint8 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 18,002 main plus 0 checkpoint rows in 268 replays on 5 builds, every one exactly 1 bit; an independent reader (exactly one bit) consumed every payload, 0 failures, none typed before. Values: 9,675 true, 8,327 false. Re-exported by this change: all 18,002 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/Gumshoe/S0/Ability_E/Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C",
+      "field": "IsDeployed",
+      "checksum": 2029268412,
+      "type": "Bool",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Pawn_Gumshoe_E_PossessableCamera_C declares IsDeployed as a replicated (CPF_Net) BoolProperty; the declared compatible checksum 2029268412 reproduces as (IsDeployed, bool) and not as uint8 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 4,583 main plus 0 checkpoint rows in 269 replays on 5 builds, every one exactly 1 bit; an independent reader (exactly one bit) consumed every payload, 0 failures, none typed before. Values: 4,583 true, 0 false. One row per camera actor (4,583 actors), true on every one; no false row is ever sent. Re-exported by this change: all 4,583 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/Killjoy/S0/Ability_E/Ability_Killjoy_E_Turret.Ability_Killjoy_E_Turret_C",
+      "field": "DeployedActor",
+      "checksum": 2740089937,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Ability_Killjoy_E_Turret_C declares DeployedActor as a replicated (CPF_Net) ObjectProperty<Actor>, inherited from Ability_Killjoy_Recallable_Deployable_Base_C; the declared compatible checksum 2740089937 reproduces as (DeployedActor, AActor*) (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 3,683 main plus 1,851 checkpoint rows in 114 replays on 5 builds, 3,490 of 8, 727 of 16 and 1,317 of 24 bits; an independent reader (IntPacked (7 payload bits per byte, low bit continues) ending exactly at the payload end) consumed every payload, 0 failures, none typed before. Values: 3,490 null (GUID 0), 2,044 resolve to an actor and 0 to a net_guids path of the same export, 0 unresolved. Every 8-bit row is GUID 0 (null); every non-null value names a Pawn_Killjoy_E_Turret_C actor of the same export. Re-exported by this change: all 5,534 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/Killjoy/S0/Ability_Q/Ability_Killjoy_Q_Alarmbot.Ability_Killjoy_Q_Alarmbot_C",
+      "field": "DeployedActor",
+      "checksum": 2740089937,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Ability_Killjoy_Q_Alarmbot_C declares DeployedActor as a replicated (CPF_Net) ObjectProperty<Actor>, inherited from Ability_Killjoy_Recallable_Deployable_Base_C; the declared compatible checksum 2740089937 reproduces as (DeployedActor, AActor*) (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 2,851 main plus 1,657 checkpoint rows in 110 replays on 5 builds, 2,945 of 8, 534 of 16 and 1,029 of 24 bits; an independent reader (IntPacked (7 payload bits per byte, low bit continues) ending exactly at the payload end) consumed every payload, 0 failures, none typed before. Values: 2,945 null (GUID 0), 1,563 resolve to an actor and 0 to a net_guids path of the same export, 0 unresolved. Every 8-bit row is GUID 0 (null); every non-null value names a Pawn_Killjoy_Q_StealthAlarmbot_C actor of the same export. Re-exported by this change: all 4,508 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/Characters/Global/ChargedProjectileTargeting/Comp_Equippable_Charged.Comp_Equippable_Charged_C",
+      "field": "CurrentCharge",
+      "checksum": 1908355023,
+      "type": "Double",
+      "observed_builds": [
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Comp_Equippable_Charged_C declares CurrentCharge as a replicated (CPF_Net) DoubleProperty; the declared compatible checksum 1908355023 reproduces as (CurrentCharge, double) and not as float (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 233,363 main plus 9,050 checkpoint rows in 455 replays on 14 builds, every one exactly 64 bits; an independent reader (exactly 64 bits read as a little-endian f64, finite) consumed every payload, 0 failures, none typed before. Values 0.014999999664723873..1.0 (1794 distinct). Carried by Ability_Wraith_4_Smoke_C and Ability_Mage_E_WorldSmoke_C channels. Re-exported by this change: all 242,413 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+      "field": "CurrentLossStreak",
+      "checksum": 1863385026,
+      "type": "Int32",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-12.10",
+        "++Ares-Core+release-12.11",
+        "++Ares-Core+release-13.00",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): BombGameState_C declares CurrentLossStreak as a replicated (CPF_Net) IntProperty; the declared compatible checksum 1863385026 reproduces as (CurrentLossStreak, int32) and not as uint32 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 11,219 main plus 16,520 checkpoint rows in 971 replays on 24 builds, every one exactly 32 bits; an independent reader (exactly 32 bits read as a little-endian i32) consumed every payload, 0 failures, none typed before. Values 0..2 (3 distinct). Re-exported by this change: all 27,739 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+      "field": "LossStreakTeam",
+      "checksum": 22256526,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-12.10",
+        "++Ares-Core+release-12.11",
+        "++Ares-Core+release-13.00",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): BombGameState_C declares LossStreakTeam as a replicated (CPF_Net) ObjectProperty<BaseTeamComponent>; the declared compatible checksum 22256526 reproduces as (LossStreakTeam, UBaseTeamComponent*) (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 10,094 main plus 17,906 checkpoint rows in 971 replays on 24 builds, 6,824 of 8 and 21,176 of 16 bits; an independent reader (IntPacked (7 payload bits per byte, low bit continues) ending exactly at the payload end) consumed every payload, 0 failures, none typed before. Values: 2,300 null (GUID 0), 0 resolve to an actor and 25,700 to a net_guids path of the same export, 0 unresolved. Every non-null value resolves in net_guids to the RedTeam or BlueTeam object. Re-exported by this change: all 28,000 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+      "field": "ShouldOverrideMatchTimer",
+      "checksum": 2889152318,
+      "type": "Bool",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): BombGameState_C declares ShouldOverrideMatchTimer as a replicated (CPF_Net) BoolProperty; the declared compatible checksum 2889152318 reproduces as (ShouldOverrideMatchTimer, bool) and not as uint8 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 6,991 main plus 13,894 checkpoint rows in 913 replays on 21 builds, every one exactly 1 bit; an independent reader (exactly one bit) consumed every payload, 0 failures, none typed before. Values: 6,994 true, 13,891 false. Every row arrives in the same packet as an OverrideMatchTimerText row of the same actor: true with its 376-bit formatted-number form on every one, false with its 72-bit empty form on every one. Re-exported by this change: all 20,885 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+      "field": "LossStreakTeam",
+      "checksum": 22256526,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Swiftplay_EoRCredits_GameState_C declares LossStreakTeam as a replicated (CPF_Net) ObjectProperty<BaseTeamComponent>, inherited from BombGameState_C; the declared compatible checksum 22256526 reproduces as (LossStreakTeam, UBaseTeamComponent*) (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 251 main plus 282 checkpoint rows in 47 replays on 5 builds, 181 of 8 and 352 of 16 bits; an independent reader (IntPacked (7 payload bits per byte, low bit continues) ending exactly at the payload end) consumed every payload, 0 failures, none typed before. Values: 94 null (GUID 0), 0 resolve to an actor and 439 to a net_guids path of the same export, 0 unresolved. Every non-null value resolves in net_guids to the RedTeam or BlueTeam object. Scoped entries do not follow the Swiftplay class alias, so this group has its own. Re-exported by this change: all 533 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+      "field": "ShouldOverrideMatchTimer",
+      "checksum": 2889152318,
+      "type": "Bool",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Swiftplay_EoRCredits_GameState_C declares ShouldOverrideMatchTimer as a replicated (CPF_Net) BoolProperty, inherited from BombGameState_C; the declared compatible checksum 2889152318 reproduces as (ShouldOverrideMatchTimer, bool) and not as uint8 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 105 main plus 114 checkpoint rows in 32 replays on 5 builds, every one exactly 1 bit; an independent reader (exactly one bit) consumed every payload, 0 failures, none typed before. Values: 105 true, 114 false. Every row arrives in the same packet as an OverrideMatchTimerText row of the same actor: true with its 376-bit formatted-number form on every one, false with its 72-bit empty form on every one. Scoped entries do not follow the Swiftplay class alias, so this group has its own. Re-exported by this change: all 219 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
     }
   ]
 }

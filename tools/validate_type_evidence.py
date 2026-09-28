@@ -12,15 +12,18 @@ Usage:
 ``EXPORT_DIR`` may be one export or a directory containing exports.  Both
 ``fields.parquet`` and ``checkpoint_fields.parquet`` are inspected when present.
 The JSON shape is ``[{"group": "...", "field": "...", "type": "Bool"}]``.
-Supported types are Bool, Byte, Int32, UInt32, Float, Double, FString,
-ObjectNetGuid, EnumByte, EnumRemainingBits, FName, RotationShort,
+Supported types are Bool, Byte, Int32, UInt32, Float, Double, VectorDouble,
+FString, ObjectNetGuid, EnumByte, EnumRemainingBits, FName, RotationShort,
 VectorNetQuantize100, RepMovementByte and RepMovementShort -- among them
 every non-primitive name ``generate_scoped_types.py`` accepts. UInt32 is
 read unsigned, so a value with the high bit set must be exported positive;
 an Int32 reading of the same bits would pass the width check and still be
-wrong.
+wrong. VectorDouble is an ``FVector`` sent as three little-endian doubles,
+exactly 192 bits, every component finite; with ``--compare-typed`` the
+exported ``value_str`` ``(x,y,z)`` is parsed back into doubles, which the
+shortest round-trip spelling Rust prints them in reproduces exactly.
 
-All but the first eight are read bit by bit, because their payloads are not
+All but the first nine are read bit by bit, because their payloads are not
 byte multiples and some of them do not even start on a byte boundary:
 
 * ``EnumByte`` -- 1..8 bits, the whole payload is the value. A byte-sized enum
@@ -341,6 +344,13 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
         if not math.isfinite(value):
             raise ValueError(f"{type_name} is non-finite")
         return value
+    if type_name == "VectorDouble":
+        if bit_count != 192:
+            raise ValueError("VectorDouble is not 192 bits")
+        value = struct.unpack("<3d", raw)
+        if not all(math.isfinite(component) for component in value):
+            raise ValueError("VectorDouble is non-finite")
+        return value
     if type_name == "FString":
         if bit_count % 8 or bit_count < 32:
             raise ValueError("FString is not byte-aligned or lacks its length")
@@ -381,7 +391,7 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
 #: Every supported evidence type, and the column its exported value lives in.
 TYPED_COLUMNS = {
     "Bool": "value_bool", "FString": "value_str",
-    "Float": "value_f64", "Double": "value_f64",
+    "Float": "value_f64", "Double": "value_f64", "VectorDouble": "value_str",
     "Byte": "value_i64", "Int32": "value_i64",
     "UInt32": "value_i64", "ObjectNetGuid": "value_i64",
     **BIT_LEVEL_TYPES,
@@ -442,7 +452,7 @@ def exported_matches(type_name: str, exported, decoded) -> bool:
         if exported is None or isinstance(exported, str):
             exported = exported_value({TYPED_COLUMNS[type_name]: exported}, type_name)
         return rep_movement_location_scale(decoded, exported) is not None
-    if type_name == "VectorNetQuantize100":
+    if type_name in {"VectorNetQuantize100", "VectorDouble"}:
         return _parse_triple(exported, "(") == decoded
     if type_name == "RotationShort":
         parsed = _parse_triple(exported, "rot(")

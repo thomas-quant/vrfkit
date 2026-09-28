@@ -430,6 +430,31 @@ class DecodeExactTests(unittest.TestCase):
             0xffffffff,
         )
 
+    #: A real `Projectile_Hunter_Q_RevealBolt_C.TrailPosition` payload (13.06),
+    #: and the three doubles an independent `struct.unpack("<3d")` gives it.
+    TRAIL = ("000000606cc8ba40000000e0079cbec0000000c081c27c40",
+             (6856.42333984375, -7836.03076171875, 460.15667724609375))
+
+    def test_vector_double_is_three_finite_little_endian_doubles(self):
+        raw = bytes.fromhex(self.TRAIL[0])
+        self.assertEqual(decode_exact(raw, 192, "VectorDouble"), self.TRAIL[1])
+        with self.assertRaisesRegex(ValueError, "192 bits"):
+            decode_exact(raw[:12], 96, "VectorDouble")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            decode_exact(raw[:16] + struct.pack("<d", float("inf")), 192, "VectorDouble")
+
+    def test_vector_double_compares_the_exported_spelling_numerically(self):
+        decoded = self.TRAIL[1]
+        exported = "(6856.42333984375,-7836.03076171875,460.15667724609375)"
+        self.assertTrue(exported_matches("VectorDouble", exported, decoded))
+        # A spelling that drops digits of the same double, and a different
+        # number, both differ: the comparison is exact, not approximate.
+        self.assertFalse(exported_matches(
+            "VectorDouble", exported.replace("460.15667724609375", "460.1566772460938"), decoded))
+        self.assertFalse(exported_matches(
+            "VectorDouble", exported.replace("6856.", "6857."), decoded))
+        self.assertFalse(exported_matches("VectorDouble", None, decoded))
+
     def test_non_finite_float_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "non-finite"):
             decode_exact(struct.pack("<f", float("nan")), 32, "Float")
