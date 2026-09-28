@@ -252,7 +252,12 @@ impl PartialBunchAccumulator {
         if !header.b_partial_final && payload_bit_count % 8 != 0 {
             *stats_partial_errors += 1;
             header.has_partial_error = true;
-            let extra = self.take(ch_index);
+            // For an initial, the state taken here is the empty one
+            // `validate_sequence` started for this fragment. It is retired but
+            // not a displaced payload: it holds no bits, and the caller already
+            // reports the fragment itself, so returning it wrote a phantom
+            // 0-bit row beside that one. Same in the two resource arms below.
+            let extra = self.take(ch_index).filter(|_| !header.b_partial_initial);
             let discarded_bits = sequence_discarded_bits
                 .saturating_add(extra.as_ref().map_or(0, |p| p.bit_count))
                 .saturating_add(payload_bit_count);
@@ -287,7 +292,7 @@ impl PartialBunchAccumulator {
             {
                 *stats_partial_errors += 1;
                 header.has_partial_error = true;
-                let prior = self.take(ch_index);
+                let prior = self.take(ch_index).filter(|_| !header.b_partial_initial);
                 return PartialBunchResult {
                     should_process: false,
                     header,
@@ -318,7 +323,7 @@ impl PartialBunchAccumulator {
             ) {
                 *stats_partial_errors += 1;
                 header.has_partial_error = true;
-                let prior = self.take(ch_index);
+                let prior = self.take(ch_index).filter(|_| !header.b_partial_initial);
                 return PartialBunchResult {
                     should_process: false,
                     header,
@@ -956,6 +961,61 @@ mod tests {
         );
     }
 
+    /// A refused initial displaces nothing of its own. `validate_sequence`
+    /// starts an empty assembly for every initial before the alignment and
+    /// budget checks run, so a refusal retires that assembly -- it held no bits
+    /// and belongs to the current fragment, which the caller reports itself --
+    /// rather than handing it back as a displaced payload.
+    #[test]
+    fn a_refused_initial_displaces_nothing_of_its_own() {
+        let initial = RawBunchHeader {
+            ch_index: 1,
+            b_partial: true,
+            b_partial_initial: true,
+            ..Default::default()
+        };
+        let displaced_bits = |result: &PartialBunchResult| {
+            result
+                .displaced
+                .iter()
+                .map(|(p, _)| p.bit_count)
+                .collect::<Vec<_>>()
+        };
+        let mut errs = 0;
+        let mut frags = 0;
+        let mut comps = 0;
+
+        let mut acc = PartialBunchAccumulator::new();
+        let unaligned = acc.add_fragment(
+            1,
+            initial.clone(),
+            &[0x1F],
+            5,
+            &mut errs,
+            &mut frags,
+            &mut comps,
+        );
+        assert_eq!(
+            unaligned.error_kind,
+            Some(PartialSequenceKind::NonByteAlignedFragment)
+        );
+        assert_eq!(displaced_bits(&unaligned), Vec::<usize>::new());
+        assert_eq!(unaligned.discarded_bits, 5);
+        assert_eq!((acc.active_count(), acc.total_buffered_bits()), (0, 0));
+
+        let mut acc = PartialBunchAccumulator::with_limits(2, 4);
+        let over_budget =
+            acc.add_fragment(1, initial, &[0xAA], 8, &mut errs, &mut frags, &mut comps);
+        assert_eq!(
+            over_budget.resource_limit,
+            Some(PartialResourceLimit::BufferedBits)
+        );
+        assert_eq!(displaced_bits(&over_budget), Vec::<usize>::new());
+        assert_eq!(over_budget.discarded_bits, 8);
+        assert_eq!((acc.active_count(), acc.total_buffered_bits()), (0, 0));
+        assert_eq!(errs, 2);
+    }
+
     #[test]
     fn overlapping_empty_initial_retains_its_cause() {
         let mut acc = PartialBunchAccumulator::new();
@@ -1009,15 +1069,16 @@ mod tests {
             result.error_kind,
             Some(PartialSequenceKind::NonByteAlignedFragment)
         );
-        assert_eq!(result.displaced.len(), 2);
+        // Both causes stand: `overlapping_initial` and `error_kind` above, and
+        // two errors counted. The one displaced payload is the 8-bit assembly
+        // the initial replaced; the empty one it started is not a payload.
+        assert_eq!(result.displaced.len(), 1);
         assert_eq!(
             result.displaced[0].1,
             PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
         );
-        assert_eq!(
-            result.displaced[1].1,
-            PartialDiscardCause::Sequence(PartialSequenceKind::NonByteAlignedFragment)
-        );
+        assert_eq!(result.displaced[0].0.bit_count, 8);
+        assert_eq!(result.discarded_bits, 11, "8 replaced + 3 current");
         assert_eq!(errs, 2);
     }
 
@@ -1056,15 +1117,16 @@ mod tests {
             result.resource_limit,
             Some(PartialResourceLimit::BufferedBits)
         );
-        assert_eq!(result.displaced.len(), 2);
+        // Both causes stand: `overlapping_initial` and `resource_limit` above,
+        // and two errors counted. The one displaced payload is the 8-bit
+        // assembly the initial replaced; the empty one it started is not.
+        assert_eq!(result.displaced.len(), 1);
         assert_eq!(
             result.displaced[0].1,
             PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
         );
-        assert_eq!(
-            result.displaced[1].1,
-            PartialDiscardCause::Resource(PartialResourceLimit::BufferedBits)
-        );
+        assert_eq!(result.displaced[0].0.bit_count, 8);
+        assert_eq!(result.discarded_bits, 24, "8 replaced + 16 current");
         assert_eq!(errs, 2);
     }
 }

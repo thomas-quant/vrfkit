@@ -3748,6 +3748,60 @@ mod tests {
         assert_eq!(rejected_bits(&sink), stats.skipped_bits);
     }
 
+    /// A refused initial fragment is one rejected row. The accumulator starts
+    /// an empty assembly for every initial before its alignment and budget
+    /// checks, and a refusal used to hand that assembly back as a displaced
+    /// payload: a 0-bit `accumulated_payload` row carrying the fragment's own
+    /// header, beside its `current_fragment` row, for one rejection that
+    /// `partial_non_byte_aligned` counts once.
+    #[test]
+    fn a_refused_initial_fragment_is_one_rejected_row() {
+        let (reader, sink) = run_packets(&[partial_packet(false, true, false, &[true; 5])]);
+
+        let stats = reader.stats();
+        assert_eq!(stats.partial_errors, 1);
+        assert_eq!(stats.partial_non_byte_aligned, 1);
+        assert_eq!(
+            rejected_rows(&sink),
+            vec![(
+                "current_fragment",
+                PartialPayloadReason::NonByteAlignedFragment,
+                5
+            )]
+        );
+        assert_eq!(stats.skipped_bits, 5);
+        assert_eq!(rejected_bits(&sink), stats.skipped_bits);
+        assert_eq!(
+            reader.accumulator.active_count(),
+            0,
+            "the refused initial leaves no assembly behind"
+        );
+
+        // Over a buffered assembly, the assembly it replaced is still a row,
+        // under the cause that displaced it; only the empty one is not.
+        let (reader, sink) = run_packets(&[
+            partial_packet(true, true, false, &guid_three()),
+            partial_packet(false, true, false, &[true; 5]),
+        ]);
+        assert_eq!(
+            rejected_rows(&sink),
+            vec![
+                (
+                    "accumulated_payload",
+                    PartialPayloadReason::OverlappingInitial,
+                    8
+                ),
+                (
+                    "current_fragment",
+                    PartialPayloadReason::NonByteAlignedFragment,
+                    5
+                ),
+            ]
+        );
+        assert_eq!(sink.rejected_partials[0].payload, vec![6]);
+        assert_eq!(rejected_bits(&sink), reader.stats().skipped_bits);
+    }
+
     // --- the preservation hand-off itself ---
     //
     // The accumulator's own tests cover what it displaces. What they cannot see
