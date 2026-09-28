@@ -1202,12 +1202,12 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 814 passing
+cargo +1.86.0 test --workspace --locked                              # 819 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 159 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1121 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1133 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 219 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
