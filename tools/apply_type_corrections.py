@@ -1484,8 +1484,12 @@ def main():
                   f"missing from {TABLE_RS}", file=sys.stderr)
             for line in dead:
                 print(f"  {line}", file=sys.stderr)
-            print("If table.rs was regenerated, run extract_descriptors.py, "
-                  "then THIS script, and only then cargo fmt.", file=sys.stderr)
+            print("A missing correction means extract_descriptors.py no longer "
+                  "emits that entry, emits it at a type no RETYPES rule "
+                  "rewrites, or now declares an ADDITION's key at another "
+                  "type: update RETYPES, ADDITIONS or EXPECTED. The run order "
+                  "cannot cause it; every rule rewrites both layouts.",
+                  file=sys.stderr)
         if uncorrected:
             print(f"FAILED: {len(uncorrected)} of {checked} corrections are "
                   f"absent from {TABLE_RS} but ARE applied by this script -- "
