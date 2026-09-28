@@ -2,29 +2,22 @@
 //!
 //! Measured block/bunch/actor-open rates on the reference replay: docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
 //!
-//! Everything in this module runs per block, so anything that can be hoisted
-//! out of it or made conditional on a failure path belongs somewhere else.
-//!
-//! The loop is: read a block header, read its declared payload bit count,
-//! hand the header to the sink (which answers with a function count for
-//! ClassNetCache blocks), then decode the payload and walk the field or RPC
-//! stream inside it.
+//! Everything here runs per block, so anything that can be hoisted out or
+//! made conditional on a failure path belongs elsewhere. The loop reads a
+//! block header and its payload bit count, hands the header to the sink
+//! (which answers a function count for ClassNetCache blocks), then decodes
+//! the payload and walks its field or RPC stream.
 //!
 //! # Failure policy
 //!
-//! Three depths can fail and each is counted separately, because they mean
-//! different things:
+//! Three depths fail and are counted separately:
 //!
-//! - the block header or its bit count could not be read -- the rest of the
-//!   bunch is unframeable and is abandoned;
+//! - the block header or its bit count does not read -- the rest of the bunch
+//!   is unframeable and is abandoned, charging [`abandoned_from`];
 //! - the declared bit count overruns the bunch -- likewise;
-//! - the payload decoded but its inner stream did not walk -- only that one
-//!   block's bits are lost, and the sink is told which class it was.
-//!
-//! The first two charge [`abandoned_from`] -- the failing block's first bit to
-//! the end of the bunch -- to `skipped_bits`, never what the reader happened
-//! to have left. That is the rule the stream `Err` arms apply one depth down
-//! (see [`decode_and_parse_rep_layout`]) and `abandon_bunch` one depth up.
+//! - the payload decoded but its inner stream did not walk -- only that
+//!   block's bits are lost ([`decode_and_parse_rep_layout`]), and the sink is
+//!   told which class it was.
 
 use vrf_bitio::BitReader;
 use vrf_transform::TransformVersion;
@@ -40,16 +33,10 @@ use super::{
     RepLayoutTailOutcome, ReplicationSink, Stage, StreamFailure, StreamFailureCause, StreamKind,
 };
 
-/// Per-bunch context carried through content-block framing for diagnostics.
-///
-/// This is not part of the hot path -- it is only read when a diagnostic event
-/// is emitted (malformed/skipped). It holds a borrow of the bunch header rather
-/// than a copy of its flags so that the flag snapshot is built only on the
-/// failure path; building one per bunch cost nine bool copies plus a `Vec`
-/// clone per event for a field read on well under one bunch in a thousand.
-///
+/// Per-bunch context for diagnostic events, read only on a failure path. It
+/// borrows the header, so the flag snapshot is built only when an event is.
 /// Every field is diagnostics-only; see [`super::BunchIds`] for why they are
-/// still threaded through a build that has diagnostics switched off.
+/// threaded through a build without that feature.
 #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(super) struct BunchContext<'a> {
     pub header: &'a RawBunchHeader,
@@ -100,7 +87,6 @@ pub(super) fn frame_content_blocks(
             continue;
         }
 
-        // Read content payload bit count
         let consumed_before_bits_read = payload.position();
         let Ok(content_bits) = payload.read_int_packed() else {
             let remaining = payload.bits_remaining();
@@ -194,12 +180,9 @@ pub(super) fn frame_content_blocks(
     }
 }
 
-/// Decode a block payload into `stage.scratch` and return the byte length, or
-/// `None` when the transform failed (already counted).
-///
-/// The scratch buffer is grown, never shrunk, and its tail past `byte_count` is
-/// left untouched -- callers that hand the decoded payload to the sink must
-/// slice to `byte_count` so the previous block's bytes never leak out.
+/// Decode a block payload into `stage.scratch` and return its byte length, or
+/// `None` when the transform failed (already counted). The scratch tail past
+/// `byte_count` is stale: slice to it before anything reaches the sink.
 fn decode_into_scratch(
     payload: &mut BitReader<'_>,
     bit_count: usize,
@@ -224,64 +207,38 @@ fn decode_into_scratch(
     Some(byte_count)
 }
 
-/// Bits to charge to `skipped_bits` when block framing aborts the bunch: from
-/// the failing block's first bit to the end of the bunch window.
+/// Bits a framing abort charges to `skipped_bits`: from the failing block's
+/// first bit to the end of the bunch window (`payload` is that window).
 ///
-/// Not `bits_remaining()`, for the reason [`decode_and_parse_rep_layout`]
-/// gives one depth down and `abandon_bunch` one depth up. The header reader consumes its
-/// flags and GUIDs before the read that fails, and `read_int_packed` consumes
-/// its bytes before discovering the value runs off the end, so a block whose
-/// header or `content_bits` expires at the window's end left
-/// `bits_remaining() == 0` and charged nothing: `content_block_framing_failures`
-/// moved with no bit tally behind it. The overrun arm has read both too, and
-/// they framed nothing. `payload` is the bunch-payload window (see
-/// `abandon_bunch`), so `len_bits()` is its end; blocks that framed before
-/// this one keep their bits out of the charge.
+/// Never `bits_remaining()`: the header reader consumes its flags and GUIDs,
+/// and `read_int_packed` its chunks, before discovering the read runs off the
+/// end, so one that expires at the window's end leaves 0 remaining and would
+/// charge nothing while a failure counter moves; the overrun arm, too, read
+/// bits that framed nothing. Blocks that framed earlier keep their bits. The
+/// stream `Err` arms ([`decode_and_parse_rep_layout`]) and `abandon_bunch`
+/// follow the same rule one depth down and up.
 fn abandoned_from(payload: &BitReader<'_>, block_start: u64) -> u64 {
     payload.len_bits() - block_start
 }
 
 /// Decode one RepLayout block payload and walk its field stream.
 ///
-/// Returns `false` only when the payload transform failed. That failure is
-/// already counted (`transform_failures`, `skipped_bits`); the caller records
-/// its `ParseFailure` event, because only the caller holds the block's header
-/// and position. Every other outcome, a stream failure included, is reported
-/// here and returns `true`.
+/// Returns `false` only when the payload transform failed: that is already
+/// counted, and the caller records its `ParseFailure` event, since only it
+/// holds the block's header and position. Every other outcome, a stream
+/// failure included, is reported here and returns `true`.
 ///
 /// # A stream `Err` charges the whole block
 ///
-/// When the walk returns `Err`, this function and its ClassNetCache twin
-/// charge the block's `bit_count` to `skipped_bits`, not the reader's
-/// `bits_remaining()`.
-///
-/// `bits_remaining()` is what the reader had not yet reached, which is not what
-/// the failure lost. `read_int_packed` consumes its chunks *before* discovering
-/// the value runs off the end, so a block whose last `IntPacked` expires exactly
-/// at the block end leaves the reader at `position() == len` with
-/// `bits_remaining() == 0`. Charging the remainder charged **zero** for a block
-/// that lost every bit it had, and `field_stream_failures` /
-/// `rpc_stream_failures` then moved with no bit tally behind them -- a failure
-/// counted at block level and nowhere in the bit accounting.
-///
-/// The whole block is also what the two sibling failure paths in each caller
-/// already charge: a transform failure and a rejected `with_bit_len` window
-/// both add `bit_count` and increment the same stream-failure counter. And it
-/// agrees with [`NetStats::lost_content_blocks`], which counts one of these
-/// failures as an entirely lost block regardless of how many records the parser
-/// emitted before it stopped. Nothing downstream re-charges these bits: this is
-/// the last frame that sees the block, and the caller has already advanced the
-/// bunch reader past `content_bits`.
-///
-/// The `Ok` arms are left alone -- there the parser walked its records
-/// successfully and reports the abandoned tail itself.
-///
-/// Tradeoff, stated rather than hidden: a parser that emitted some records
-/// before failing has those bits counted in `fields` / `rpcs` *and* here. The
-/// alternative needs the doomed record's start offset, which only the parser
-/// holds and does not return on `Err`. Charging the block whose loss is already
-/// declared one counter over is the error this file prefers, because the
-/// direction it errs in is loud.
+/// This and its ClassNetCache twin charge `bit_count`, never
+/// `bits_remaining()`, which is 0 when the last `IntPacked` expires at the
+/// block end (see [`abandoned_from`]). The whole block is also what the
+/// transform and `with_bit_len` failure paths charge, and what
+/// [`NetStats::lost_content_blocks`] counts as lost; nothing downstream
+/// re-charges it. Records emitted before the failure are then counted in
+/// `fields` / `rpcs` *and* here: the doomed record's start is not returned on
+/// `Err`, and double-counting errs in the loud direction. The `Ok` arms
+/// report their own abandoned tail.
 pub(super) fn decode_and_parse_rep_layout(
     payload: &mut BitReader<'_>,
     bit_count: usize,
@@ -294,10 +251,8 @@ pub(super) fn decode_and_parse_rep_layout(
     };
 
     let Ok(mut field_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
-        // Diagnostics only, and the one arm that never told the sink: the
-        // scratch buffer is sized by the same bit count, so this has never
-        // fired. Naming it rather than leaving the sink unaware keeps the
-        // sink-side failure aggregate reconcilable with `field_stream_failures`.
+        // Never observed (the scratch is sized by the same bit count); told to
+        // the sink so its failure aggregate reconciles with the counter.
         sink.on_stream_failure(StreamFailure {
             kind: StreamKind::RepLayout,
             actor_net_guid,
@@ -412,17 +367,15 @@ pub(super) fn decode_and_parse_rep_layout(
                 sink.on_stream_failure_payload(failure, &stage.scratch[..byte_count]);
             }
             stage.stats.field_stream_failures += 1;
-            // The whole block, not what the reader has left; see this
-            // function's doc.
+            // The whole block; see this function's doc.
             stage.stats.skipped_bits += bit_count as u64;
         }
     }
     true
 }
 
-/// Decode one ClassNetCache block payload and walk its RPC stream. Returns
-/// `false` only when the payload transform failed, and charges a stream `Err`
-/// the whole block, as [`decode_and_parse_rep_layout`] does.
+/// Decode one ClassNetCache block payload and walk its RPC stream; returns
+/// and charges as [`decode_and_parse_rep_layout`] does.
 pub(super) fn decode_and_parse_class_net_cache(
     payload: &mut BitReader<'_>,
     bit_count: usize,
@@ -436,8 +389,7 @@ pub(super) fn decode_and_parse_class_net_cache(
     };
 
     let Ok(mut rpc_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
-        // Diagnostics only, and the one arm that never told the sink; see the
-        // RepLayout twin above for why it is named rather than silent.
+        // Never observed; see the RepLayout twin.
         sink.on_stream_failure(StreamFailure {
             kind: StreamKind::Rpc,
             actor_net_guid,
@@ -527,13 +479,9 @@ pub(super) fn decode_and_parse_class_net_cache(
     true
 }
 
-/// Diagnostic-event construction, compiled out entirely without the
-/// `diagnostics` feature.
-///
-/// Without the feature each function keeps its signature and loses its one
-/// statement, so the framing loop above reads the same either way; the
-/// arguments are all scalars the loop already holds, so the empty call
-/// optimises away.
+/// Diagnostic-event construction. Without the `diagnostics` feature each
+/// function keeps its signature and loses its one statement, so the loop above
+/// reads the same in both builds and the empty call optimises away.
 mod diagnostics {
     use super::{BunchContext, ContentBlockHeader, NetStats, NetworkGuid};
 
@@ -675,10 +623,10 @@ mod diagnostics {
         });
     }
 
-    /// A block that framed but whose payload transform failed. The charge is
-    /// the block's `content_bits`, what `decode_into_scratch` added to
-    /// `skipped_bits`; `consumed_bits` and `remaining_bits` are taken where
-    /// the block's payload begins, the point the overrun event reports too.
+    /// A block that framed but whose payload transform failed. It charges the
+    /// block's `content_bits`, as `decode_into_scratch` did; `consumed_bits`
+    /// and `remaining_bits` are taken where the payload begins, as for an
+    /// overrun.
     #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn parse_failure(
@@ -715,11 +663,9 @@ mod tests {
     use super::*;
     use crate::stats::SkipReason;
 
-    /// The `ParseFailure` event names the block whose transform failed: its
-    /// header and declared length, where its payload began, the bits it
-    /// charged, and the bunch and channel it sat in. Framing cannot reach this
-    /// helper on real input (see `SkipReason::ParseFailure`), so it is pinned
-    /// directly.
+    /// The `ParseFailure` event names the block whose transform failed, where
+    /// it sat and what it charged. Framing cannot reach this helper on real
+    /// input (see `SkipReason::ParseFailure`), so it is pinned directly.
     #[test]
     fn a_parse_failure_event_names_the_block_it_skipped() {
         let bunch = RawBunchHeader {
