@@ -17,7 +17,3 @@ default = ["alloc"]
 # else in the crate is optional in any meaningful sense. `BitError` stays
 # unconditional so the error type does not change shape with the feature.
 alloc = []
-
-[dependencies]
-
-[dev-dependencies]

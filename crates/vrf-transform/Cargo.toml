@@ -9,5 +9,3 @@ description = "Per-build payload transforms for VALORANT replay content blocks"
 
 [dependencies]
 vrf-bitio = { workspace = true }
-
-[dev-dependencies]
