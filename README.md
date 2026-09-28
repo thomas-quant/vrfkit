@@ -19,7 +19,7 @@ by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
 **Verified state (2026-09-28):** Rust has **814 passing** tests; Python has
-**1121 passing** tests. All 24 supported builds received the same verification
+**1155 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. The two
 ActiveBlinds decoding errors found by the first 2026-09-25 audit were fixed
 that day. See [build verification](docs/BUILD_VERIFICATION.md)
@@ -388,7 +388,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**814 passing**; the full Python suite also has **1121 passing** tests. The
+**814 passing**; the full Python suite also has **1155 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
