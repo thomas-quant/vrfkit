@@ -38,9 +38,11 @@ mod spawn;
 use vrf_bitio::BitReader;
 use vrf_transform::TransformVersion;
 
-use crate::bunch::{PartialBunchAccumulator, RawBunchHeader};
+use crate::bunch::{
+    PartialBunchAccumulator, PartialDiscardCause, PartialResourceLimit, RawBunchHeader,
+};
 use crate::content::ContentBlockHeader;
-use crate::error::Result;
+use crate::error::{PartialSequenceKind, Result};
 use crate::field::FieldSink;
 use crate::net_guid::GuidPathSink;
 use crate::packet::RawPacketReader;
@@ -406,25 +408,30 @@ impl ReplicationReader {
     ///
     /// Idempotent: the accumulator is drained, so a second call counts nothing.
     pub fn finish_with_sink(&mut self, sink: &mut dyn ReplicationSink) {
-        for partial in self.accumulator.drain_unfinished() {
-            self.stats.unfinished_partials += 1;
-            self.stats.unfinished_partial_bits += partial.bit_count as u64;
-            sink.on_rejected_partial(RejectedPartialFragment {
-                header: &partial.header,
-                payload_kind: "accumulated_payload",
-                reason: PartialPayloadReason::EndOfStream,
-                bit_count: partial.bit_count,
-                payload: &partial.buffer,
-                rejection_packet_id: None,
-            });
-        }
+        self.finish_partials(Some(sink));
     }
 
     /// Account for unfinished partials without a preservation consumer.
     pub fn finish(&mut self) {
+        self.finish_partials(None);
+    }
+
+    /// Count every assembly still in flight and, given a sink, preserve it
+    /// there as [`PartialPayloadReason::EndOfStream`].
+    fn finish_partials(&mut self, mut sink: Option<&mut dyn ReplicationSink>) {
         for partial in self.accumulator.drain_unfinished() {
             self.stats.unfinished_partials += 1;
             self.stats.unfinished_partial_bits += partial.bit_count as u64;
+            if let Some(sink) = sink.as_deref_mut() {
+                sink.on_rejected_partial(RejectedPartialFragment {
+                    header: &partial.header,
+                    payload_kind: "accumulated_payload",
+                    reason: PartialPayloadReason::EndOfStream,
+                    bit_count: partial.bit_count,
+                    payload: &partial.buffer,
+                    rejection_packet_id: None,
+                });
+            }
         }
     }
 
@@ -436,15 +443,6 @@ impl ReplicationReader {
         sink: &mut dyn ReplicationSink,
     ) {
         self.stats.packets += 1;
-
-        if packet_data.is_empty() {
-            return;
-        }
-
-        if packet_data[packet_data.len() - 1] == 0 {
-            self.stats.malformed_packets += 1;
-            return;
-        }
 
         // Why inline beat two phases, and what the old copies cost on the reference replay: docs/PERFORMANCE_NOTES.md#packet-processing-is-interleaved.
         //
@@ -600,21 +598,14 @@ impl ReplicationReader {
 
             let reason = result
                 .error_kind
-                .map(reason_for_sequence_kind)
-                .or_else(|| result.resource_limit.map(reason_for_resource_limit));
+                .map(PartialDiscardCause::Sequence)
+                .or_else(|| result.resource_limit.map(PartialDiscardCause::Resource))
+                .map(partial_payload_reason);
             for (displaced, discard_cause) in &result.displaced {
-                let displaced_reason = match discard_cause {
-                    crate::bunch::PartialDiscardCause::Sequence(kind) => {
-                        reason_for_sequence_kind(*kind)
-                    }
-                    crate::bunch::PartialDiscardCause::Resource(limit) => {
-                        reason_for_resource_limit(*limit)
-                    }
-                };
                 sink.on_rejected_partial(RejectedPartialFragment {
                     header: &displaced.header,
                     payload_kind: "accumulated_payload",
-                    reason: displaced_reason,
+                    reason: partial_payload_reason(*discard_cause),
                     bit_count: displaced.bit_count,
                     payload: &displaced.buffer,
                     rejection_packet_id: Some(header.packet_id),
@@ -644,7 +635,7 @@ impl ReplicationReader {
                 stage.stats.partial_overlapping_initial += 1;
             }
             match result.error_kind {
-                Some(crate::error::PartialSequenceKind::MissingInitial) => {
+                Some(PartialSequenceKind::MissingInitial) => {
                     stage.stats.partial_missing_initial += 1;
                     stage.stats.partial_missing_initial_bits += bit_count;
                     if header.b_partial_final {
@@ -654,11 +645,11 @@ impl ReplicationReader {
                         stage.stats.partial_missing_initial_reliable += 1;
                     }
                 }
-                Some(crate::error::PartialSequenceKind::OverlappingInitial) => {}
-                Some(crate::error::PartialSequenceKind::MismatchedContinuation) => {
+                Some(PartialSequenceKind::OverlappingInitial) => {}
+                Some(PartialSequenceKind::MismatchedContinuation) => {
                     stage.stats.partial_mismatched_continuation += 1;
                 }
-                Some(crate::error::PartialSequenceKind::NonByteAlignedFragment) => {
+                Some(PartialSequenceKind::NonByteAlignedFragment) => {
                     stage.stats.partial_non_byte_aligned += 1;
                 }
                 None => {}
@@ -669,55 +660,41 @@ impl ReplicationReader {
                 stage.stats.partial_resource_limit_failures += 1;
             }
 
-            if !result.should_process {
-                if header.b_close {
-                    Self::close_channel(header, stage, accumulator, sink);
-                }
-                return;
-            }
-
             // Take completed payload
-            if let Some((buf, total_bits, stored_header)) = accumulator.take_completed(ch_index) {
-                let Ok(mut payload_reader) = BitReader::with_bit_len(&buf, total_bits as u64)
-                else {
-                    stage.stats.partial_errors += 1;
-                    return;
-                };
-                Self::process_complete_payload(
-                    &stored_header,
-                    &mut payload_reader,
-                    stage,
-                    sink,
-                    ids,
-                );
+            if result.should_process {
+                if let Some((buf, total_bits, stored_header)) = accumulator.take_completed(ch_index)
+                {
+                    let Ok(mut payload_reader) = BitReader::with_bit_len(&buf, total_bits as u64)
+                    else {
+                        // Returns before the close below as well; see
+                        // docs/FOLLOWUP.md on this arm.
+                        stage.stats.partial_errors += 1;
+                        return;
+                    };
+                    Self::process_complete_payload(
+                        &stored_header,
+                        &mut payload_reader,
+                        stage,
+                        sink,
+                        ids,
+                    );
+                }
             }
-
-            // The close flag belongs to the FINAL fragment, not to the initial
-            // one `stored_header` came from: Unreal's `UChannel::SendBunch` puts
-            // `bOpen` on the first fragment and `bClose` on the last, and
-            // `ReceivedNextBunch` copies the last one's close flags onto the
-            // reassembled bunch. This branch used to return before ever reaching
-            // `handle_channel_close`, so a partial bunch could not close a
-            // channel at all: the actor stayed open for the rest of the replay,
-            // its close row was never emitted, and `actor_closes` never moved.
-            if header.b_close {
-                Self::close_channel(header, stage, accumulator, sink);
-            }
-            return;
+        } else if bit_count != 0 {
+            // Non-partial: process directly
+            let mut payload = payload;
+            Self::process_complete_payload(header, &mut payload, stage, sink, ids);
         }
 
-        // Non-partial: process directly
-        if bit_count == 0 {
-            // Handle close
-            if header.b_close {
-                Self::close_channel(header, stage, accumulator, sink);
-            }
-            return;
-        }
-
-        let mut payload = payload;
-        Self::process_complete_payload(header, &mut payload, stage, sink, ids);
-
+        // For a partial bunch the close flag belongs to the FINAL fragment,
+        // not to the initial one `stored_header` came from: Unreal's
+        // `UChannel::SendBunch` puts `bOpen` on the first fragment and `bClose`
+        // on the last, and `ReceivedNextBunch` copies the last one's close
+        // flags onto the reassembled bunch. The partial branch used to return
+        // before ever reaching `handle_channel_close`, so a partial bunch could
+        // not close a channel at all: the actor stayed open for the rest of the
+        // replay, its close row was never emitted, and `actor_closes` never
+        // moved.
         if header.b_close {
             Self::close_channel(header, stage, accumulator, sink);
         }
@@ -963,33 +940,27 @@ fn stage_fragment(payload: BitReader<'_>, buffer: &mut Vec<u8>) -> usize {
     byte_count
 }
 
-/// Map a partial-sequence error to the reason reported to the sink.
+/// Map an accumulator discard cause to the reason reported to the sink.
 ///
 /// Shared by the current fragment's own rejection and by every earlier
 /// assembly the same fragment displaced, so both name a discard with the
 /// same [`PartialPayloadReason`] rather than drifting out of step.
-fn reason_for_sequence_kind(kind: crate::error::PartialSequenceKind) -> PartialPayloadReason {
-    match kind {
-        crate::error::PartialSequenceKind::MissingInitial => PartialPayloadReason::MissingInitial,
-        crate::error::PartialSequenceKind::OverlappingInitial => {
+fn partial_payload_reason(cause: PartialDiscardCause) -> PartialPayloadReason {
+    use PartialDiscardCause::{Resource, Sequence};
+    match cause {
+        Sequence(PartialSequenceKind::MissingInitial) => PartialPayloadReason::MissingInitial,
+        Sequence(PartialSequenceKind::OverlappingInitial) => {
             PartialPayloadReason::OverlappingInitial
         }
-        crate::error::PartialSequenceKind::MismatchedContinuation => {
+        Sequence(PartialSequenceKind::MismatchedContinuation) => {
             PartialPayloadReason::MismatchedContinuation
         }
-        crate::error::PartialSequenceKind::NonByteAlignedFragment => {
+        Sequence(PartialSequenceKind::NonByteAlignedFragment) => {
             PartialPayloadReason::NonByteAlignedFragment
         }
-    }
-}
-
-/// Map a partial-reassembly resource refusal to the reason reported to the
-/// sink. See [`reason_for_sequence_kind`]: same sharing, same reason why.
-fn reason_for_resource_limit(limit: crate::bunch::PartialResourceLimit) -> PartialPayloadReason {
-    match limit {
-        crate::bunch::PartialResourceLimit::ActiveStates => PartialPayloadReason::ActiveStateLimit,
-        crate::bunch::PartialResourceLimit::BufferedBits => PartialPayloadReason::BufferedBitsLimit,
-        crate::bunch::PartialResourceLimit::Allocation => PartialPayloadReason::AllocationFailure,
+        Resource(PartialResourceLimit::ActiveStates) => PartialPayloadReason::ActiveStateLimit,
+        Resource(PartialResourceLimit::BufferedBits) => PartialPayloadReason::BufferedBitsLimit,
+        Resource(PartialResourceLimit::Allocation) => PartialPayloadReason::AllocationFailure,
     }
 }
 
@@ -2297,6 +2268,7 @@ mod tests {
         reader.process_packet(&[], 0, &mut sink);
         assert_eq!(reader.stats().packets, 1);
         assert_eq!(reader.stats().bunches, 0);
+        assert_eq!(reader.stats().malformed_packets, 0);
     }
 
     #[test]
