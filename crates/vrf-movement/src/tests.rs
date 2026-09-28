@@ -1,10 +1,6 @@
-//! Decoder tests: build a full RPC payload bit by bit, then decode it.
-//!
-//! These live in their own module because they exercise the whole stack --
-//! `rpc` framing down through `moves` into `primitives` -- so they belong to
-//! none of those modules individually. The `BitWriter` below is the inverse of
-//! the reader under test and is deliberately written out rather than shared
-//! with `vrf-bitio`: a bug mirrored in both would cancel out.
+//! Decoder tests: build a whole RPC payload bit by bit, then decode it. The
+//! `BitWriter` is written out rather than shared with `vrf-bitio`, so a bug
+//! mirrored in both cannot cancel out.
 use vrf_bitio::BitReader;
 
 use crate::error::MovementError;
@@ -15,7 +11,6 @@ use crate::rpc::{
     SHOOTER_CHARACTER_NET_GUID_HANDLE, decode_movement_rpc,
 };
 
-/// Helper: build a bit vector from individual bit values, then convert to bytes.
 struct BitWriter {
     bits: Vec<bool>,
 }
@@ -103,54 +98,48 @@ fn build_move(variant1: bool, timestamp: u32, x: f32, y: f32, z: f32) -> BitWrit
     let mut w = BitWriter::new();
 
     // 25-bit header: moveType(1) + rotationYawMultiplier(8) + movementState(8) + unused(8)
-    w.write_bit(variant1); // moveType
-    w.write_u8(2); // rotationYawMultiplier
-    w.write_u8(3); // movementState
-    w.write_u8(0); // unused
+    w.write_bit(variant1);
+    w.write_u8(2);
+    w.write_u8(3);
+    w.write_u8(0);
 
-    // FixedVector rotationInput: 3 x u16 = 48 bits (all zero = center)
+    // rotationInput: 3 x u16 at the centre, 0x8000
     w.write_serialized_int(0x8000, 0x10000);
     w.write_serialized_int(0x8000, 0x10000);
     w.write_serialized_int(0x8000, 0x10000);
 
-    // Timestamp VLQ (= IntPacked)
     w.write_int_packed(timestamp);
 
-    // Position: QuantizedVector(scaleFactor=100)
-    // Use componentBits=0, extraInfo=0 -> 3 x f32
-    w.write_serialized_int(0, 128); // info = 0 -> componentBits=0, extraInfo=0
+    // Position: info 0 (componentBits 0, extraInfo 0) selects 3 x f32
+    w.write_serialized_int(0, 128);
     w.write_f32(x);
     w.write_f32(y);
     w.write_f32(z);
 
-    // hasOptionalByte = false
-    w.write_bit(false);
+    w.write_bit(false); // hasOptionalByte
 
-    // 33-bit flag+packedAngles: flag48(1) + packedAngles(32)
-    w.write_bit(false); // flag48
-    w.write_u32(0); // packedAngles (pitch=0, yaw=0)
+    // 33-bit flag48(1) + packedAngles(32)
+    w.write_bit(false);
+    w.write_u32(0);
 
     if variant1 {
-        // variant1Flag + quantized velocity
+        // variant1Flag, then velocity (4, 5, 6) at scale 10: componentBits 10,
+        // extraInfo 1, components 40, 50, 60
         w.write_bit(true);
-        // QuantizedVector(scaleFactor=10): componentBits=10, extraInfo=1
-        let info = 10u32 | (1 << 6); // componentBits=10, extraInfo=1
+        let info = 10u32 | (1 << 6);
         w.write_serialized_int(info, 128);
-        // 3 signed components of 10 bits each = 30 bits total
-        // velocity = (4.0, 5.0, 6.0) -> scaled by 10 = (40, 50, 60)
         let vx = 40i64 as u64 & 0x3FF;
         let vy = 50i64 as u64 & 0x3FF;
         let vz = 60i64 as u64 & 0x3FF;
         let packed = vx | (vy << 10) | (vz << 20);
         w.write_bits_u64(packed, 30);
     } else {
-        // variant0: 33-bit flag+angles
-        w.write_bit(false); // hasExternalCharacterRef = false
-        w.write_u32(0); // variant0PackedAngles
+        // variant 0: hasExternalCharacterRef 0, then 32 bits of angles
+        w.write_bit(false);
+        w.write_u32(0);
     }
 
-    // errorSentinel = false
-    w.write_bit(false);
+    w.write_bit(false); // errorSentinel
 
     w
 }
@@ -159,24 +148,21 @@ fn build_move(variant1: bool, timestamp: u32, x: f32, y: f32, z: f32) -> BitWrit
 /// them; the value only has to be non-zero.
 const ENVELOPE_TRAILER_BITS: u32 = 24;
 
-/// Build a ComponentDataStream in the shape real replays use: a byte-wrapped
-/// envelope whose inner movementBitCount is 0, a section that ends in a `000`
-/// terminator plus non-zero bits, and a trailer after the envelope.
-///
-/// Counted with temporary counters over `vrfkit validate` on 02d4d478
-/// (13.01), 02eef9e2 (13.06) and one 11.06 replay, 6,167,472 streams: every
-/// one is byte-wrapped with inner movementBitCount 0, its last move is
-/// followed by 11 to 26 bits that start with `000` and are non-zero after it,
-/// and exactly 24 bits follow the envelope.
+/// Build a ComponentDataStream in the shape real replays use (crate docs,
+/// "Measured on real replays"): byte-wrapped, inner movementBitCount 0, a
+/// section ending in a `000` terminator plus non-zero bits, then a trailer.
+/// Counted independently with temporary counters over `vrfkit validate` on
+/// 02d4d478 (13.01), 02eef9e2 (13.06) and one 11.06 replay: all 6,167,472
+/// streams, with 11 to 26 bits after the last move (`000`, then non-zero)
+/// and 24 after the envelope.
 fn build_component_data_stream(moves: &[BitWriter]) -> BitWriter {
     byte_wrapped(&open_section_payload(moves), ENVELOPE_TRAILER_BITS)
 }
 
-/// The envelope's payload: the inner u16 movementBitCount 0, so the section
-/// runs to the end of the envelope, then the magic, `moves` under the usual
-/// marker sequence, a `000` terminator and 8 to 15 non-zero bits that end the
-/// payload on a byte boundary. After the last move 11 to 18 bits remain,
-/// inside the 31 the decoder stops at without reading another marker.
+/// The envelope's payload: inner movementBitCount 0 (the section runs to the
+/// envelope's end), the magic, `moves` under the marker sequence, a `000`
+/// terminator and 8 to 15 non-zero bits ending on a byte boundary. The 11 to
+/// 18 bits after the last move are within the 31 the decoder leaves unread.
 fn open_section_payload(moves: &[BitWriter]) -> BitWriter {
     assert!(
         !moves.is_empty(),
@@ -212,9 +198,8 @@ fn byte_wrapped(payload: &BitWriter, trailer_bits: u32) -> BitWriter {
     stream
 }
 
-/// Build a ComponentDataStream in the direct form: no envelope, and the u16
-/// is the section's own bit count. The decoder accepts it, as the C#
-/// reference does; none of the streams counted above uses it.
+/// Build a ComponentDataStream in the direct form: no envelope, the u16 being
+/// the section's own bit count. Accepted, as by the C#; never seen in replays.
 fn build_direct_component_data_stream(moves: &[BitWriter]) -> BitWriter {
     let mut movement = BitWriter::new();
     movement.write_u8(MOVEMENT_MAGIC);
@@ -227,13 +212,13 @@ fn build_direct_component_data_stream(moves: &[BitWriter]) -> BitWriter {
             marker = next_marker(marker);
         }
     }
-    // Terminal marker = 0 (only if we haven't hit padding)
+    // A 0 marker, 3 bits after the last move: the decoder stops before it.
     if !moves.is_empty() {
         movement.write_bits_u64(0, 3);
     }
 
     let mut payload = BitWriter::new();
-    payload.write_u16(movement.bit_count() as u16); // movementBitCount
+    payload.write_u16(movement.bit_count() as u16);
     payload.write_other(&movement);
     payload
 }
@@ -263,10 +248,10 @@ fn update_with_stream(shooter_guid: u32, stream: &BitWriter) -> BitWriter {
 /// An updates array that declares one update and holds `update` at index 0.
 fn single_update_array(update: &BitWriter) -> BitWriter {
     let mut array = BitWriter::new();
-    array.write_int_packed(1); // updateCount = 1
-    array.write_int_packed(1); // encodedIndex = 1 -> index 0
+    array.write_int_packed(1);
+    array.write_int_packed(1);
     array.write_other(update);
-    array.write_int_packed(0); // array terminator
+    array.write_int_packed(0);
     array
 }
 
@@ -274,11 +259,11 @@ fn single_update_array(update: &BitWriter) -> BitWriter {
 /// tests below deform the array itself and call this directly.
 fn wrap_updates_array(array: &BitWriter) -> BitWriter {
     let mut rpc = BitWriter::new();
-    rpc.write_bit(false); // first bit, consumed and discarded (C# TryReadBit(out _))
+    rpc.write_bit(false); // first bit, discarded
     rpc.write_int_packed(REMOTE_CHARACTER_UPDATES_HANDLE + 1);
     rpc.write_int_packed(array.bit_count());
     rpc.write_other(array);
-    rpc.write_int_packed(0); // terminator
+    rpc.write_int_packed(0);
     rpc
 }
 
@@ -298,15 +283,11 @@ fn decode(
 
 #[test]
 fn an_out_of_range_update_index_is_counted_not_discarded_in_silence() {
-    // updateCount is 1, so index 2 addresses an update the array never
-    // declared. The rest of the window cannot be located from there, so
-    // skipping it stays the right move -- but it used to be invisible:
-    // `Ok(update_count: 1, total_moves: 0, error_count: 0)` is exactly what a
-    // batch of empty-but-well-formed updates returns.
+    // Uncounted, the skipped window looks like well-formed empty updates.
     let mut array = BitWriter::new();
-    array.write_int_packed(1); // updateCount = 1
-    array.write_int_packed(3); // encodedIndex = 3 -> index 2, out of range
-    array.write_u8(0xAA); // whatever follows is discarded
+    array.write_int_packed(1); // updateCount
+    array.write_int_packed(3); // index 2, out of range
+    array.write_u8(0xAA);
 
     let (result, moves) = decode(&wrap_updates_array(&array));
 
@@ -321,15 +302,12 @@ fn an_out_of_range_update_index_is_counted_not_discarded_in_silence() {
 
 #[test]
 fn a_field_longer_than_the_update_window_is_counted() {
-    // A field declaring 128 payload bits with 8 left in the array means the
-    // framing no longer describes this payload. The decoder gives up on the
-    // window -- correctly, since it cannot find the next handle -- but used to
-    // report the give-up as a successful end-of-update, losing the second
-    // declared update with it.
+    // The framing no longer describes the payload, and the second declared
+    // update goes with the window.
     let mut array = BitWriter::new();
-    array.write_int_packed(2); // updateCount = 2
-    array.write_int_packed(1); // encodedIndex = 1 -> index 0
-    array.write_int_packed(6); // encodedHandle 6 -> handle 5, not decoded here
+    array.write_int_packed(2); // updateCount
+    array.write_int_packed(1); // index 0
+    array.write_int_packed(6); // handle 5, not decoded here
     array.write_int_packed(128); // ... declaring 128 bits
     array.write_u8(0); // ... with only 8 left
 
@@ -346,11 +324,8 @@ fn a_field_longer_than_the_update_window_is_counted() {
 
 #[test]
 fn an_undersized_shooter_guid_field_and_its_orphaned_stream_are_counted() {
-    // A 31-bit GUID field is one bit short of the u32 it must carry, so the
-    // GUID stays `None` -- and the component stream that follows is then
-    // consumed without being decoded, because there is no character to
-    // attribute its moves to. Two separate losses, previously neither counted
-    // nor visible: the update returned successfully with zero moves.
+    // A 31-bit GUID field leaves no GUID, so the stream after it is consumed
+    // undecoded: two losses.
     let stream = build_component_data_stream(&[build_move(false, 7, 1.0, 2.0, 3.0)]);
 
     let mut update = BitWriter::new();
@@ -374,10 +349,8 @@ fn an_undersized_shooter_guid_field_and_its_orphaned_stream_are_counted() {
 
 #[test]
 fn a_component_stream_ahead_of_its_guid_is_counted() {
-    // Same loss from the other ordering: handle 3 arrives before handle 2, so
-    // the stream is consumed with no GUID in hand. The decoder is single-pass
-    // and cannot rewind, so dropping the stream is the honest outcome --
-    // reporting it as a clean zero-move update was not.
+    // Handle 3 before handle 2: a single pass cannot rewind to the GUID, so
+    // the stream is dropped, and counted.
     let stream = build_component_data_stream(&[build_move(false, 7, 1.0, 2.0, 3.0)]);
 
     let mut update = BitWriter::new();
@@ -408,11 +381,8 @@ fn a_component_stream_shorter_than_its_u16_header_is_not_a_valid_empty_update() 
 
 #[test]
 fn a_stream_that_fails_to_decode_does_not_drop_the_updates_after_it() {
-    // The stream is a length-delimited field, and the decoder is past all of
-    // it before it reads the first bit, so a failure inside cannot misplace
-    // the next handle. The C# reference records the error and seeks to the
-    // field's end. This decoder gave up on the rest of the array instead, so
-    // one bad stream cost every update queued behind it.
+    // The decoder is past the whole length-delimited stream before reading
+    // it, so a failure inside costs only that stream, as in the C#.
     let mut bad_magic = BitWriter::new();
     bad_magic.write_u16(0);
     bad_magic.write_u8(0x00); // not MOVEMENT_MAGIC
@@ -423,7 +393,7 @@ fn a_stream_that_fails_to_decode_does_not_drop_the_updates_after_it() {
 
     for (name, bad) in [("bad magic", bad_magic), ("short header", short_header)] {
         let mut array = BitWriter::new();
-        array.write_int_packed(2); // updateCount = 2
+        array.write_int_packed(2); // updateCount
         array.write_int_packed(1); // index 0
         array.write_other(&update_with_stream(1111, &bad));
         array.write_int_packed(2); // index 1
@@ -442,13 +412,11 @@ fn a_stream_that_fails_to_decode_does_not_drop_the_updates_after_it() {
 
 #[test]
 fn a_malformed_trailing_padding_byte_is_counted() {
-    // After the array terminator exactly 8 bits remain, so the decoder spends
-    // them on an IntPacked. This one's continuation bit demands a sixth byte
-    // that the window does not have. The read's error was dropped with
-    // `let _ =`, so a payload whose tail does not parse reported success.
+    // 8 bits after the array terminator are read as an IntPacked, and this
+    // one's continuation bit asks for a byte that is not there.
     let mut array = BitWriter::new();
-    array.write_int_packed(0); // updateCount = 0
-    array.write_int_packed(0); // encodedIndex = 0 -> array terminator
+    array.write_int_packed(0); // updateCount
+    array.write_int_packed(0); // array terminator
     array.write_u8(0x01); // continuation set, nothing follows
 
     let (result, moves) = decode(&wrap_updates_array(&array));
@@ -511,9 +479,7 @@ fn decodes_two_moves_in_one_update() {
 
 #[test]
 fn decodes_the_direct_component_form() {
-    // The other round trips go through the byte-wrapped envelope. This is the
-    // one that pins the direct form, where the first u16 is the section's own
-    // bit count.
+    // The one round trip through the direct form.
     let stream = build_direct_component_data_stream(&[
         build_move(false, 42, 1.0, 2.0, 3.0),
         build_move(true, 84, 10.0, 11.0, 12.0),
@@ -532,7 +498,6 @@ fn decodes_the_direct_component_form() {
 
 #[test]
 fn empty_rpc_returns_zero() {
-    // Zero bits -> empty
     let (result, moves) = decode(&BitWriter::new());
     assert_eq!(result.total_moves, 0);
     assert!(moves.is_empty());
@@ -540,8 +505,7 @@ fn empty_rpc_returns_zero() {
 
 #[test]
 fn invalid_magic_returns_error() {
-    // A direct-form stream whose 8-bit section holds the wrong magic. The
-    // stream is counted as a loss inside the update, so the RPC itself is Ok.
+    // A lost stream inside the update: the RPC itself is Ok.
     let mut payload = BitWriter::new();
     payload.write_u16(8); // movementBitCount
     payload.write_u8(0x00); // wrong magic
@@ -570,9 +534,8 @@ fn section_with_zero_marker_and_tail(moves: usize, tail_bits: u32) -> BitWriter 
     section
 }
 
-/// Wrap `section` in a direct (not byte-wrapped) component stream. `sized`
-/// declares the section's own length as `movementBitCount`; otherwise the
-/// count is 0, which makes the section run to the end of the stream.
+/// Wrap `section` in a direct component stream. `sized` declares its length
+/// as `movementBitCount`; otherwise the count is 0 and the window is open.
 fn component_stream(section: &BitWriter, sized: bool) -> BitWriter {
     let mut payload = BitWriter::new();
     payload.write_u16(if sized { section.bit_count() as u16 } else { 0 });
@@ -592,11 +555,9 @@ fn tails(result: &crate::types::RpcDecodeResult) -> (u32, u64, u32, u64) {
 
 #[test]
 fn a_zero_marker_with_bits_left_in_a_sized_section_is_tallied() {
-    // After the move 43 bits remain, more than the 31 bits of padding the
-    // grammar allows, so the decoder reads another marker; it is 0 and the
-    // section ends with 40 bits unread. That returned Ok with nothing counted,
-    // the same shape `decode_movement_rpc` already counts one layer up. A
-    // tally, not an error: it must not change which batches keep raw bits.
+    // 43 bits after the move (more than 31), so another marker is read: 0,
+    // leaving 40. A tally, not an error: it must not change which batches
+    // keep raw bits.
     let stream = component_stream(&section_with_zero_marker_and_tail(1, 40), true);
     let (result, moves) = decode(&build_rpc_payload(77, &stream));
 
@@ -618,8 +579,7 @@ fn a_sized_section_that_ends_right_after_its_first_marker_is_tallied() {
 
 #[test]
 fn a_sized_window_too_short_for_the_magic_is_tallied() {
-    // Five bits cannot hold the 8-bit magic. The C# reference reports
-    // "Missing movement magic"; this decoder returned Ok with no trace.
+    // Five bits cannot hold the magic: the C#'s "Missing movement magic".
     let mut section = BitWriter::new();
     section.write_bits_u64(0b10110, 5);
     let (result, moves) = decode(&build_rpc_payload(77, &component_stream(&section, true)));
@@ -631,8 +591,7 @@ fn a_sized_window_too_short_for_the_magic_is_tallied() {
 
 #[test]
 fn a_window_too_short_for_the_first_marker_is_tallied() {
-    // The magic, then two bits: not enough for a 3-bit marker ("Missing first
-    // movement marker" in the C# reference).
+    // The magic, then two bits: the C#'s "Missing first movement marker".
     let mut section = BitWriter::new();
     section.write_u8(MOVEMENT_MAGIC);
     section.write_bits_u64(0b11, 2);
@@ -645,10 +604,8 @@ fn a_window_too_short_for_the_first_marker_is_tallied() {
 
 #[test]
 fn an_open_window_tail_is_tallied_apart_from_a_sized_one() {
-    // With movementBitCount 0 the section runs to the end of the component
-    // stream, so what follows a zero marker may be other component data
-    // rather than lost moves. Counted, but kept apart so the two readings
-    // are never summed into one number.
+    // In an open window what follows a zero marker may be other component
+    // data, so it is counted apart and never summed with the sized kind.
     let stream = component_stream(&section_with_zero_marker_and_tail(1, 40), false);
     let (result, moves) = decode(&build_rpc_payload(77, &stream));
 
@@ -659,9 +616,8 @@ fn an_open_window_tail_is_tallied_apart_from_a_sized_one() {
 
 #[test]
 fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
-    // The grammar's own end: at most 31 bits after a decoded move. The
-    // builder's `000` terminator and the bits after it are 11 to 18 of them
-    // and are never read.
+    // The section's end: the builder's terminator and 8 to 15 bits after it,
+    // within 31 of the last move and never read.
     let stream = build_component_data_stream(&[
         build_move(false, 42, 1.0, 2.0, 3.0),
         build_move(true, 84, 10.0, 11.0, 12.0),
@@ -670,9 +626,8 @@ fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
     assert_eq!(moves.len(), 2);
     assert_eq!(tails(&result), (0, 0, 0, 0));
 
-    // An open window with no bits at all leaves nothing unread. (The C#
-    // reference still reports "Missing movement magic" here; this tally
-    // measures unread bits, not missing fields.)
+    // An empty open window leaves nothing unread, although the C# reports
+    // "Missing movement magic": the tally counts unread bits.
     let mut empty = BitWriter::new();
     empty.write_u16(0);
     let (result, moves) = decode(&build_rpc_payload(9999, &empty));
@@ -680,9 +635,8 @@ fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
     assert_eq!(result.error_count, 0);
     assert_eq!(tails(&result), (0, 0, 0, 0));
 
-    // A section that ends exactly on its zero marker leaves nothing either,
-    // whether the marker follows a move (read as padding) or the magic (read
-    // and taken as the end).
+    // Nor does a section ending exactly on its zero marker, after a move
+    // (left unread at the end) or after the magic (read as the end).
     for moves_before in [1, 0] {
         let exact = component_stream(&section_with_zero_marker_and_tail(moves_before, 0), true);
         let (result, moves) = decode(&build_rpc_payload(9999, &exact));
@@ -694,8 +648,7 @@ fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
 
 // --- QuantizedVector component widths ---------------------------------------
 
-/// Build a QuantizedVector payload: the `SerializedInt(128)` header followed
-/// by three components of `component_bits` each.
+/// A QuantizedVector: the `SerializedInt(128)` header, then three components.
 fn quantized(component_bits: u32, extra_info: u64, comps: [u64; 3]) -> BitWriter {
     let mut w = BitWriter::new();
     // `read_serialized_int(128)` spends `128.ilog2() == 7` bits and never
@@ -709,12 +662,8 @@ fn quantized(component_bits: u32, extra_info: u64, comps: [u64; 3]) -> BitWriter
 
 #[test]
 fn component_bits_of_63_reads_all_189_declared_bits() {
-    // 63 is the largest value `info & 63` can produce, and every part of
-    // reading it is in range: `read_bits(63)` is legal and `sign_extend`'s
-    // sign bit lands at `1 << 62`. The old bound of 62 fabricated a
-    // world-origin `(0, 0, 0)` here *without consuming the 189 bits the
-    // header declared*, so the move still decoded, `error_count` stayed 0,
-    // and every field after it came from the wrong bit offset.
+    // The widest width the header can express. A bound of 62 once returned
+    // (0, 0, 0) here without consuming the 189 declared bits.
     let most_negative = 1u64 << 62; // -2^62 in 63-bit two's complement
     let minus_one = (1u64 << 63) - 1; // all 63 bits set
     let w = quantized(63, 0, [1, minus_one, most_negative]);
@@ -732,9 +681,8 @@ fn component_bits_of_63_reads_all_189_declared_bits() {
 
 #[test]
 fn component_bits_of_62_still_reads_its_186_bits() {
-    // Regression guard, not TDD credit: 62 already worked. It pins the
-    // boundary that used to separate "read" from "fabricated" so a future
-    // bound change has to break a test rather than a corpus.
+    // 62 always worked; this pins the old boundary so a bound change breaks
+    // a test, not a corpus.
     let w = quantized(62, 0, [7, (1u64 << 62) - 1, 1u64 << 61]);
     let bytes = w.to_bytes();
     let mut r = BitReader::with_bit_len(&bytes, u64::from(w.bit_count())).unwrap();
@@ -750,19 +698,8 @@ fn component_bits_of_62_still_reads_its_186_bits() {
 #[test]
 #[should_panic(expected = "component_bits must be 1..=63")]
 fn a_width_the_header_cannot_express_is_refused_even_without_debug_assertions() {
-    // Replacing the old `> 62` bound removed a *total* guard, and a
-    // `debug_assert` does not restore it: `[profile.release]` in the
-    // workspace manifest does not enable debug assertions, so the binary
-    // that exports the corpus compiles it away. Above 64 the arithmetic
-    // does not merely mis-answer, it goes out of range --
-    // `mask_u64(65)` is `u64::MAX >> (64 - 65)`, an over-wide shift that
-    // release masks into a nonsense mask rather than trapping.
-    //
-    // This is the call-site-bug shape `copy_bits_to` already treats as a
-    // hard assert rather than a recoverable error, for the same reason:
-    // the only caller masks the width to six bits, so reaching here means
-    // a programming error and not malformed input. Run this file with
-    // `-C debug-assertions=off` to see the guard actually hold.
+    // A real assert, so it holds in release, which has no debug assertions
+    // (run with `-C debug-assertions=off` to see it).
     let data = [0xFFu8; 32];
     let mut r = BitReader::with_bit_len(&data, 256).unwrap();
     let _ = read_signed_quantized_components(&mut r, 64);
@@ -770,8 +707,8 @@ fn a_width_the_header_cannot_express_is_refused_even_without_debug_assertions() 
 
 #[test]
 fn a_truncated_63_bit_vector_reports_eof_rather_than_a_zero_vector() {
-    // The other half of the same fix: refusing to fabricate means a short
-    // payload has to fail, not quietly return the origin.
+    // Refusing to fabricate: a short payload fails instead of returning the
+    // origin.
     let mut w = quantized(63, 0, [1, 1, 1]);
     w.bits.truncate(7 + 100);
     let bytes = w.to_bytes();
