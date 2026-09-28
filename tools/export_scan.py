@@ -25,14 +25,13 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-#: `publish.rs`'s text between destination and kind, and its kinds in the
-#: order of its `STAGING` and `PREVIOUS` constants.
+#: `publish.rs`'s infix, and its kinds in the order of STAGING and PREVIOUS.
 GENERATED_INFIX = ".vrfkit-"
 GENERATED_KINDS = ("staging", "previous")
 
-#: `.{destination}.vrfkit-{kind}-{pid}-{nonce}`. The destination may hold any
-#: character, dots and newlines included; pid and nonce are ASCII digits only
-#: (`\d` would also accept other scripts' digits, which Rust never writes).
+#: The names in the module docstring. The destination may hold any character,
+#: newlines included; pid and nonce are ASCII digits only: [0-9], since `\d`
+#: also accepts other scripts' digits, which Rust never writes.
 GENERATED_SIBLING = re.compile(
     r"\A\..+" + re.escape(GENERATED_INFIX)
     + "(?:" + "|".join(map(re.escape, GENERATED_KINDS)) + ")"

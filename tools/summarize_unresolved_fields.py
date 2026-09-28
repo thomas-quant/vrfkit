@@ -284,7 +284,6 @@ def _merge_shard(connection: sqlite3.Connection, path: Path, index: int) -> None
 
 
 def summarize(exports: list[Path], jobs: int = 1, top: int = 25) -> tuple[dict, list[dict]]:
-    """Scan Arrow batches in parallel into bounded SQLite shards, then merge deterministically."""
     if jobs < 1 or jobs > 16:
         raise InputError("jobs must be between 1 and 16")
     if top < 1:
