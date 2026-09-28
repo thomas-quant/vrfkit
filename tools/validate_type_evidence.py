@@ -464,27 +464,11 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
             raise ValueError("FString lacks its terminator")
         return raw[4:-unit].decode("utf-8" if length > 0 else "utf-16-le")
     if type_name == "ObjectNetGuid":
-        value = 0
-        consumed = 0
-        for index in range(5):
-            if consumed + 8 > bit_count:
-                raise ValueError("truncated IntPacked ObjectNetGuid")
-            byte = raw[consumed // 8]
-            consumed += 8
-            # Unreal's IntPacked stores continuation in the low bit; the upper
-            # seven bits are payload, unlike conventional high-bit varints.
-            chunk = byte >> 1
-            if index == 4:
-                if byte & 1:
-                    raise ValueError("runaway IntPacked ObjectNetGuid")
-                if chunk > 15:
-                    raise ValueError("overflowing IntPacked ObjectNetGuid")
-            value |= chunk << (index * 7)
-            if not byte & 1:
-                if consumed != bit_count:
-                    raise ValueError("ObjectNetGuid leaves residual bits")
-                return value
-        raise AssertionError("unreachable IntPacked loop end")
+        reader = _Bits(raw, bit_count)
+        value = reader.int_packed()
+        if reader.remaining():
+            raise ValueError("ObjectNetGuid leaves residual bits")
+        return value
     raise ValueError(f"unsupported evidence type {type_name!r}")
 
 
