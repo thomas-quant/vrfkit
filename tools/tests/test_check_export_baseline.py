@@ -620,6 +620,43 @@ class CncCounterTests(unittest.TestCase):
         self.assertIn("cnc_bruteforce_payloads_unwalked", " ".join(reasons))
 
 
+class RpcCounterTests(unittest.TestCase):
+    """`RPCs:` is a suffix of `Truncated RPCs:`, so an unanchored pattern read
+    whichever of the two lines came first."""
+
+    def test_the_rpc_count_is_not_read_off_the_truncated_rpcs_line(self):
+        pattern = guard.PATTERNS["rpcs"]
+        for summary in ("  RPCs:             529\n  Truncated RPCs:   7\n",
+                        "  Truncated RPCs:   7\n  RPCs:             529\n"):
+            with self.subTest(summary=summary):
+                self.assertEqual(pattern.search(summary).group(1), "529")
+        self.assertIsNone(pattern.search("  Truncated RPCs:   7\n"))
+
+
+class SummaryLabelTests(unittest.TestCase):
+    """Every counter pattern reads exactly one line summary.rs can print.
+
+    Each quoted `"  ..."` literal in the summary is rendered with its
+    placeholders filled in. A pattern matching two of them reads whichever
+    comes first -- `rpcs` read `Truncated RPCs:` that way -- and one matching
+    none reports a printed counter as missing on every run.
+    """
+
+    SUMMARY_RS = (Path(__file__).resolve().parents[2]
+                  / "crates" / "vrfkit" / "src" / "driver" / "summary.rs")
+
+    def test_every_counter_pattern_reads_exactly_one_summary_line(self):
+        source = self.SUMMARY_RS.read_text(encoding="utf-8")
+        literals = re.findall(r'"(  [^"\\]*(?:\\.[^"\\]*)*)"', source)
+        rendered = [re.sub(r"\{[^{}]*\}", "7", literal) for literal in literals]
+        self.assertGreater(len(rendered), 100, "summary.rs literals were not found")
+        patterns = {**guard.COUNTERS, **guard.CHECKPOINT_COUNTERS}
+        for key, pattern in patterns.items():
+            with self.subTest(counter=key):
+                hits = [line for line in rendered if re.search(pattern, line + "\n")]
+                self.assertEqual(len(hits), 1, hits)
+
+
 class MovementTailCounterTests(unittest.TestCase):
     """Each of the four numbers on each tails line reads its own position."""
 

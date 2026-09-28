@@ -90,7 +90,9 @@ COUNTERS = {
     "rep_layout_blocks": r"RepLayout blocks:\s+(\d+)",
     "class_net_cache_blocks": r"ClassNetCache:\s+(\d+)",
     "fields": r"Fields:\s+(\d+)",
-    "rpcs": r"RPCs:\s+(\d+)",
+    # Anchored: unanchored, it also read `Truncated RPCs:` whenever that line
+    # came first or this one went missing.
+    "rpcs": r"(?m)^\s*RPCs:\s+(\d+)\s*$",
     "actor_opens": r"Actor opens:\s+(\d+)",
     "actor_closes": r"Actor closes:\s+(\d+)",
     "bunches": r"Bunches:\s+(\d+)",
