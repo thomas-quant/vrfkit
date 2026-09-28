@@ -114,8 +114,7 @@ pub enum FTextTreeError {
 /// 4 and the observed 255 empty form. Raw u64 argument bits remain unsigned.
 pub fn decode_ftext_tree(data: &[u8], bit_count: u32) -> Result<FTextTree, FTextTreeError> {
     let mut r = BitReader::with_bit_len(data, u64::from(bit_count))?;
-    let mut nodes = 0;
-    let value = decode_tree(&mut r, 0, &mut nodes)?;
+    let value = decode_ftext_tree_from(&mut r)?;
     if r.bits_remaining() != 0 {
         return Err(FTextTreeError::TrailingBits {
             remaining: r.bits_remaining(),
@@ -349,45 +348,35 @@ fn read_string(r: &mut BitReader<'_>) -> Result<String, FTextTreeError> {
     if length == 0 {
         return Ok(String::new());
     };
+    // A positive length counts UTF-8 bytes, a negative one UTF-16 units.
+    let wide = length < 0;
     let units = u64::from(length.unsigned_abs());
-    let bytes = units.saturating_mul(if length < 0 { 2 } else { 1 });
+    let bytes = units.saturating_mul(if wide { 2 } else { 1 });
     if bytes > MAX_STRING_BYTES {
         return Err(FTextTreeError::StringTooLong {
             bytes,
             max_bytes: MAX_STRING_BYTES,
         });
     };
-    if length > 0 {
-        let mut v = Vec::with_capacity(units as usize);
-        for _ in 0..units {
-            v.push(r.read_bits(8)? as u8)
-        }
-        if v.last() != Some(&0) {
-            return Err(FTextTreeError::MissingStringTerminator);
-        };
-        v.pop();
-        String::from_utf8(v).map_err(|_| {
-            BitError::InvalidString {
-                position: r.position(),
-            }
-            .into()
-        })
-    } else {
-        let mut v = Vec::with_capacity(units as usize);
-        for _ in 0..units {
-            v.push(r.read_bits(16)? as u16)
-        }
-        if v.last() != Some(&0) {
-            return Err(FTextTreeError::MissingStringTerminator);
-        };
-        v.pop();
-        String::from_utf16(&v).map_err(|_| {
-            BitError::InvalidString {
-                position: r.position(),
-            }
-            .into()
-        })
+    let width = if wide { 16 } else { 8 };
+    let mut v = Vec::with_capacity(units as usize);
+    for _ in 0..units {
+        v.push(r.read_bits(width)? as u16);
     }
+    if v.pop() != Some(0) {
+        return Err(FTextTreeError::MissingStringTerminator);
+    };
+    let text = if wide {
+        String::from_utf16(&v).ok()
+    } else {
+        String::from_utf8(v.into_iter().map(|unit| unit as u8).collect()).ok()
+    };
+    text.ok_or_else(|| {
+        BitError::InvalidString {
+            position: r.position(),
+        }
+        .into()
+    })
 }
 fn json_string(s: &mut String, value: &str) -> fmt::Result {
     s.push('"');
