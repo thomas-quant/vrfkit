@@ -405,6 +405,9 @@ fn decode_object_ref_array_reader(
         // `elements_decoded`, not in `fields_emitted`); none occur in that
         // corpus either.
         let mut guid = None;
+        // Keyed on position, not on `guid`: a first field that fails to decode
+        // is still the first, and the next one must not stand in for it.
+        let mut first_field = true;
         let mut element_complete = false;
         for field_idx in 0..=MAX_FIELDS_PER_ELEMENT {
             if reader.at_end() {
@@ -450,7 +453,8 @@ fn decode_object_ref_array_reader(
                 stats.errors += 1;
                 break;
             };
-            if guid.is_none() {
+            if first_field {
+                first_field = false;
                 match sub.read_int_packed() {
                     Ok(v) if sub.at_end() => guid = Some(v),
                     Ok(_) | Err(_) => stats.errors += 1,
@@ -1353,6 +1357,32 @@ mod tests {
         assert_eq!(stats.unconsumed_nested_bits, 16, "{stats:?}");
         assert_eq!(stats.errors, 0, "{stats:?}");
         assert_eq!(stats.implicit_terminations, 0, "{stats:?}");
+    }
+
+    /// The first populated field is the item whether or not it decodes, so a
+    /// first field that fails yields no item: the field after it is one the
+    /// walker calls foreign, and must not be promoted into the item's place.
+    #[test]
+    fn an_object_ref_element_whose_first_field_fails_yields_no_item() {
+        let mut bits = Vec::new();
+        write_int_packed(&mut bits, 1); // elementCount
+        write_int_packed(&mut bits, 1); // encodedIndex -> index 0
+        write_int_packed(&mut bits, 3); // handle 2
+        write_int_packed(&mut bits, 16); // payloadBits
+        write_int_packed(&mut bits, 5); // NetGUID 5, leaving eight bits unread
+        bits.extend(std::iter::repeat_n(false, 8));
+        write_int_packed(&mut bits, 4); // handle 3: a field the type does not have
+        write_int_packed(&mut bits, 16); // payloadBits
+        write_int_packed(&mut bits, 777); // two IntPacked bytes
+        write_int_packed(&mut bits, 0); // element terminator
+        write_int_packed(&mut bits, 0); // array terminator
+        let data = bits_to_bytes(&bits);
+        let mut stats = ArrayDecodeStats::default();
+
+        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+
+        assert!(guids.is_empty(), "second field promoted: {guids:?}");
+        assert_eq!(anomalies(&stats), [1, 0, 0, 0, 16], "{stats:?}");
     }
 
     /// The counters above must stay silent on well-formed arrays, or they
