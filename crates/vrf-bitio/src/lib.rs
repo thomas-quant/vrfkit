@@ -472,39 +472,25 @@ impl<'a> BitReader<'a> {
     pub fn read_fstring(&mut self, max_bytes: i64) -> Result<String> {
         let start = self.pos;
         let raw = i64::from(self.read_i32()?);
+        let invalid = || BitError::InvalidLength {
+            position: start,
+            length: raw,
+        };
         if max_bytes < 0 {
-            return Err(BitError::InvalidLength {
-                position: start,
-                length: raw,
-            });
+            return Err(invalid());
         }
         if raw == 0 {
             return Ok(String::new());
         }
         let utf16 = raw < 0;
+        // An i32 length is at most 2^31 units, so neither product overflows.
         let units = raw.unsigned_abs();
-        let byte_len = if utf16 {
-            units.checked_mul(2).ok_or(BitError::InvalidLength {
-                position: start,
-                length: raw,
-            })?
-        } else {
-            units
-        };
-        if byte_len > max_bytes as u64
-            || byte_len
-                .checked_mul(8)
-                .is_none_or(|bits| bits > self.bits_remaining())
-        {
-            return Err(BitError::InvalidLength {
-                position: start,
-                length: raw,
-            });
+        let byte_len = if utf16 { units * 2 } else { units };
+        if byte_len > max_bytes as u64 || byte_len * 8 > self.bits_remaining() {
+            return Err(invalid());
         }
-        let byte_len = usize::try_from(byte_len).map_err(|_| BitError::InvalidLength {
-            position: start,
-            length: raw,
-        })?;
+        // Fits: the bytes lie inside the remaining window, which lies in `data`.
+        let byte_len = byte_len as usize;
 
         if utf16 {
             let mut units16 = Vec::with_capacity(byte_len / 2);
