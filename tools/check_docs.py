@@ -1,76 +1,46 @@
 """Assert that the prose docs still describe THIS repo.
 
-Documentation in this project goes stale in a specific, repeatable way: a
-number that was measured once gets quoted forever. The workspace test count
-alone has been wrong six times (238, 246, 249, 252, 257, 287 all outlived their
-truth), the overlay table size was quoted as 1,185 after it became 1,187, and
-README listed four 13.02 replays for weeks after the game deleted them.
+A number measured once gets quoted forever, and a stale sentence compiles and
+passes every test. So this reads the repo and the docs and compares:
 
-None of that is caught by any other check, because a stale sentence compiles
-and passes every test. So this reads the repo and the docs and compares:
-
-  1. every tools/*.py script is mentioned in USAGE -- an unmentioned tool is
-     an undiscoverable one, and 19 of them existed with no reference page
-  2. every script USAGE names actually exists
+  1. every tools/*.py script is mentioned in USAGE (an unmentioned tool is an
+     undiscoverable one)
+  2. every script USAGE names exists
   3. every crate has a row in the layer table
-  4. every relative link resolves
-  5. the overlay table sizes quoted are the live ones
+  4. every relative link in README and USAGE resolves
+  5. README and USAGE quote the live overlay table sizes
   6. no quoted table size in any of `ALL_DOCS` is stale, even beside a live
-     one -- presence alone was not enough, see `stale_table_size_claims`
+     one (`stale_table_size_claims`)
   7. no Rust doc comment or Cargo.toml quotes a stale one
-  8. the test counts quoted are the live ones, and no stale count sits beside
-     a live one -- presence alone was not enough, see `stale_test_counts`
-  9. no quoted `check_ascii` file count or correction count is stale, in any
-     of `ALL_DOCS` -- see `stale_measured_counts`, and a count that could not
-     be MEASURED is reported rather than skipped
- 10. every relative link resolves in `docs/DATA.md`, `CONTRIBUTING.md` and
-     `CLAUDE.md` too
+  8. README and USAGE quote the live test counts, and no stale count sits
+     beside a live one (`stale_test_counts`); `--fast` keeps only
+     `contradicting_test_counts`
+  9. no `MEASURED_RE` count in any of `ALL_DOCS` is stale, and a count that
+     could not be measured is reported rather than skipped
+ 10. every relative link in the other `ALL_DOCS` and in docs/*.md resolves
  11. generated-file inventories include every live target and generator
  12. README and USAGE export rows/bytes match the committed baseline JSON
- 13. the five overlay buckets in the committed baseline still partition
-     `overlay_rows_offered` exactly, and every counter the docs quote is still
-     present in it -- see `overlay_partition_problems`
- 14. no quoted overlay counter or `Typed` ratio in any of `ALL_DOCS` is stale,
-     against that same baseline -- see `stale_overlay_counters`
-  15. README still carries the overlay summary block at all, so (14) cannot be
-     satisfied by deleting it -- see `check_overlay_counters_present`
-  16. both build tables use the same verification method and measured clean/
-      checked counts, covering exactly the registered payload transforms
+ 13. the five overlay buckets in that baseline still partition
+     `overlay_rows_offered` exactly, and every counter the docs quote is
+     present (`overlay_partition_problems`)
+ 14. no quoted overlay counter or `Typed` ratio in any of `ALL_DOCS` is stale
+     against that baseline (`stale_overlay_counters`)
+ 15. README still carries the overlay summary block, so (14) cannot be
+     satisfied by deleting it
+ 16. both build tables use the same verification method and measured clean/
+     checked counts, covering exactly the registered payload transforms
+ 17. CONTRIBUTING's `cargo check` lines and ci.yml's `$matrix` are the same
+     cases in the same order
 
-(6) is (5) upgraded the way (8) was: (5) asks only whether the live number
-appears somewhere in README and USAGE, so a stale size could sit one line from
-the correct one and be excused by it -- exactly how `387 tests` and
-`355 passing` coexisted for twelve commits.
+A number is guarded when something in the repo can be *run* to produce it.
+docs/DATA.md's measurements ("377,487 elements", "1,021 windows") come from
+analysis runs, so a check would only be a second copy of the number. (12)-(15)
+read committed JSON, so none of them needs a `.vrf`.
 
-(13)-(15) are (12) extended to the same file's `counters`. (12) compared the
-parquet row/byte table against `tools/baselines/export_02d4d478.json` and stopped
-there, so README's overlay summary block -- `Decoded OK`, `Raw/Skip`, `Not in
-table`, `No field name`, `Typed` -- was an older snapshot of the same replay,
-partitioning the same 988,983 rows differently, contradicting the baseline this
-repo commits, with nothing reading it. All of it is derivable from that committed
-JSON, so none of these needs a `.vrf`.
-
-(9) and (10) exist because this file used to read exactly two documents. Every
-number in `docs/DATA.md` -- the most number-dense file in the repo -- and in
-`CONTRIBUTING.md` was unguarded, and two counts rotted *inside* the two files
-it did read: the ASCII sweep said 114 files against a live 115, and USAGE.md
-managed to say 85, 86 and 49 corrections at once. Reading a file is not the
-same as checking a number in it.
-
-What (9) deliberately does not do is guard `docs/DATA.md`'s measurements --
-"377,487 elements", "1,021 windows". Those come from analysis runs, not from
-anything this can execute, so a check would either be a second copy of the
-number or a day of work. The rule is narrower: a number is guarded here when
-something in the repo can be *run* to produce it.
-
-It runs the test suites to get (8), so it is not free -- roughly the cost of
-`cargo test` plus the tools suite. Run it when touching docs, or before
-calling a session finished.
-
-CI runs the full guard in the Windows MSRV job, where both Rust and Python
-are installed. The Python platform/version matrix also runs `--fast` for
-source/document consistency. Run the full guard locally before finishing a
-session; a consistent but stale count still needs actual suite measurement.
+(8) runs both suites, roughly `cargo test` plus the tools suite: run the full
+guard when touching docs or before finishing a session. CI runs it in the
+Windows MSRV job, where Rust and Python are both installed; the Python
+platform/version matrix runs `--fast` for source/document consistency.
 
 Usage:
     python tools/check_docs.py
@@ -233,12 +203,9 @@ def check_table_sizes(docs: dict[str, str]) -> list[str]:
 
 
 #: How prose states the two generated table sizes, narrow enough that a match
-#: is always that claim. `check_table_sizes` asks whether the live number
-#: appears SOMEWHERE in the file -- the membership test README defeated by
-#: carrying `387 tests` and `355 passing` at once. These ask the stronger
-#: question `stale_test_counts` already asks of the suite sizes: every number
-#: that claims to BE a table size must be the live one, so a stale figure
-#: cannot sit one line away from the correct one.
+#: is always that claim. Every such number must be the live one, so a stale
+#: figure cannot hide beside a correct one (`check_table_sizes` only asks
+#: whether the live number appears; see `stale_test_counts`).
 TABLE_CLAIM_RE = (
     ("overlay table", 0, re.compile(r"(\d[\d,]*)\s+entries\b")),
     ("handle table", 1, re.compile(r"(\d[\d,]*)\s+handles\b")),
@@ -260,18 +227,14 @@ def stale_table_size_claims(docs: dict[str, str], lengths) -> list[str]:
     ]
 
 
-#: The phrase Rust doc comments and Cargo.toml use for the table's size. Kept
-#: to this exact wording rather than any "N entries" -- narrow enough that a
-#: match is always a size claim, so the check has no judgement to make.
+#: The phrase Rust doc comments and Cargo.toml use for the table's size, kept
+#: this narrow (not any "N entries") so a match is always a size claim.
 ENTRY_PHRASE_RE = re.compile(r"([\d,]+)-entry (?:generated )?table")
 
 
 def stale_entry_phrases(text: str, live: set[str]) -> list[tuple[int, str]]:
-    """`(line number, quoted size)` for every table-size claim not in `live`.
-
-    Split out from the file walk so it can be tested on a string. `live` holds
-    both spellings of the same number -- 1188 and 1,188 are the same claim.
-    """
+    """`(line number, quoted size)` for every table-size claim not in `live`,
+    which holds both spellings (1188 and 1,188 are the same claim)."""
     return [(i, quoted)
             for i, line in enumerate(text.splitlines(), 1)
             for quoted in ENTRY_PHRASE_RE.findall(line)
@@ -279,13 +242,8 @@ def stale_entry_phrases(text: str, live: set[str]) -> list[tuple[int, str]]:
 
 
 def check_source_table_size() -> list[str]:
-    """Rust prose quotes the table size too, and nothing was reading it.
-
-    `check_table_sizes` covers README and USAGE. The same number is also written
-    into `vrf-decode`'s crate docs, its feature table and its Cargo.toml, and all
-    three still said 1,185 after the table reached 1,188 -- the exact rot this
-    file exists to catch, one directory over from where it was looking.
-    """
+    """The table size as quoted in Rust prose and Cargo.toml (`vrf-decode`'s
+    crate docs, its feature table and its manifest)."""
     lengths = table_lengths()
     if lengths is None:
         return []
@@ -300,19 +258,18 @@ def check_source_table_size() -> list[str]:
             for i, quoted in stale_entry_phrases(read(path), live)]
 
 
-#: The phrase the docs use to state a suite size. Narrow enough that a match is
-#: always a claim about one of the two suites, so the check has no judgement to
-#: make -- the same bargain `ENTRY_PHRASE_RE` strikes one check up.
+#: The phrase the docs use to state a suite size, narrow enough that a match
+#: is always a claim about one of the two suites.
 TEST_COUNT_RE = re.compile(r"(\d[\d,]*)\s+(?:tests|passing)\b")
 
 
 def stale_test_counts(text: str, live: set[str]) -> list[tuple[int, str]]:
     """`(line number, quoted count)` for every suite-size claim not in `live`.
 
-    Asking whether the live number appears *somewhere* is not enough: README
-    carried `387 tests` and `355 passing` at once and satisfied that check with
-    the first while the second rotted. `live` holds both suite counts in both
-    spellings, and every claim must be one of them.
+    Presence is not agreement: README carried `387 tests` and `355 passing` at
+    once for twelve commits, and a check asking whether the live number
+    appears somewhere passed on the first. `live` holds both suite counts in
+    both spellings, and every claim must be one of them.
     """
     return [(i, quoted)
             for i, line in enumerate(text.splitlines(), 1)
@@ -323,17 +280,10 @@ def stale_test_counts(text: str, live: set[str]) -> list[tuple[int, str]]:
 def contradicting_test_counts(docs: dict[str, str]) -> list[str]:
     """Suite-size claims that cannot all be true at once.
 
-    `stale_test_counts` needs the real numbers, so it only runs in the full
-    mode in the Windows MSRV job. This consistency check also survives
-    `--fast`, as used by the Python platform/version matrix.
-
-    It cannot know which number is right. It does not have to: the repo has
-    exactly two suites, so a third distinct value is a contradiction on its
-    face. That is the shape the real bug had -- 387 and 355 in one file, both
-    about `cargo test` -- and it went twelve commits unnoticed.
-
-    Blind to a count that is wrong in the same way everywhere; only the full
-    mode catches that.
+    `stale_test_counts` needs the real numbers, so it runs only in full mode;
+    this survives `--fast`. It cannot know which number is right and need not:
+    there are exactly two suites, so a third distinct value is a
+    contradiction. Blind to a count wrong the same way everywhere.
     """
     seen: list[tuple[str, int, str]] = [
         (name, i, quoted)
@@ -352,48 +302,26 @@ def contradicting_test_counts(docs: dict[str, str]) -> list[str]:
 
 
 #: Every doc this guard reads. README and USAGE must *quote* the live numbers;
-#: the rest only have to not contradict them. `docs/DATA.md` was outside this
-#: set entirely -- the most number-dense file in the repo, with no link check,
-#: no size check and no count check -- and `CONTRIBUTING.md` names the suites a
-#: contributor is told to run. `CLAUDE.md` carries a relative link nothing was
-#: checking; it quotes no counts by design ("counts are omitted on purpose"),
-#: so joining this tier -- not the quote-it tier -- imposes no new obligation.
+#: the rest only must not contradict them (CLAUDE.md quotes no counts by
+#: design, so this tier adds no obligation there).
 ALL_DOCS = ("README.md", "docs/USAGE.md", "docs/DATA.md", "CONTRIBUTING.md",
             "CLAUDE.md")
 
-#: Numbers that are quoted in prose *and* produced by something runnable, with
-#: the phrasing narrow enough that a match is always that claim. All three of
-#: these rotted while sitting in files this guard already read.
-#: `(count pattern, context, context window)`. The context is what keeps "files"
-#: from meaning the corpus: README says "all 215 files" about replays two lines
-#: apart from nothing to do with ASCII. A line must name the check to be read as
-#: claiming its count.
-#:
-#: The window is how many lines ABOVE the count the context may appear on, and 0
-#: -- same line only -- is the default every entry had when this was a pair. It
-#: exists because prose wraps: USAGE.md writes "The `ADDITIONS` pass ... There
-#: are" and then "currently 73 of them" on the next line, so a same-line context
-#: matched nothing and the count went unchecked while the guard still printed
-#: "OK: the docs still describe this repo". Widening the *pattern* instead would
-#: have been the other way to fix that, and the wrong one: "currently N of them"
-#: with no context is a generic English phrase that some future paragraph will
-#: use about something else.
+#: Numbers quoted in prose *and* produced by something runnable, as `(count
+#: pattern, context, context window)`, phrased narrowly enough that a match is
+#: always that claim. Where there is a context, a line must name its check to
+#: be read as claiming the count: README's "all 215 files" is about replays,
+#: not the ASCII sweep. The window is how many lines ABOVE the count the
+#: context may sit, because prose wraps: USAGE.md writes "The `ADDITIONS`
+#: pass ... There are" and "currently 73 of them" on the next line. Widening
+#: the pattern instead would read the generic "currently N of them" wherever
+#: a future paragraph uses it.
 MEASURED_RE = {
     "ascii": (re.compile(r"(\d+) files?\b"), re.compile(r"ascii", re.I), 0),
     "corrections": (re.compile(r"(\d+) corrections"), None, 0),
-    # `ADDITIONS` is the descriptor-silent subset of the corrections list, and
-    # it rotted exactly the way `corrections` did -- USAGE said 70 while the
-    # list held 73. `expectation_count` was guarded; this was not.
-    #
-    # The context is what makes the phrasing safe to read as this claim.
-    # "currently N of them" is not a sentence anything else in these docs
-    # writes, but it is generic on its own, so a line only counts when it also
-    # names ADDITIONS. That pairing is the same bargain the `ascii` row strikes
-    # to keep "all 215 files" from being read as the ASCII sweep's count.
+    # `ADDITIONS`, the descriptor-silent subset of the corrections list.
     "additions": (re.compile(r"currently (\d+) of them"),
                   re.compile(r"ADDITIONS"), 2),
-    # The feature matrix and the golden vectors both grew while README quoted
-    # their old sizes (25 -> 27 checks, 66 -> 77 vectors) for more than a week.
     # Each phrase below is specific enough to be that claim with no context.
     "matrix": (re.compile(r"(\d+) `cargo check`"), None, 0),
     "matrix_cases": (re.compile(r"the same (\d+) cases"), None, 0),
@@ -422,13 +350,8 @@ def feature_matrices(contributing: str, ci: str) -> tuple[list[tuple[str, str]],
 
 def check_feature_matrix(contributing: str, ci: str) -> list[str]:
     """CONTRIBUTING's `cargo check` lines and ci.yml's `$matrix` must be the
-    same cases in the same order.
-
-    README described the two as "same set, same order" and added that "nothing
-    checks that they agree" -- and by the time anyone looked, three cases were in
-    a different order and the count it quoted was two short. An empty or
-    unparseable side is a problem, never a vacuous match.
-    """
+    same cases in the same order. An empty or unparseable side is a problem,
+    never a vacuous match."""
     documented, ci_cases = feature_matrices(contributing, ci)
     if not documented:
         return ["CONTRIBUTING.md: no `cargo +1.86.0 check -p ... --no-default-features` lines found"]
@@ -470,15 +393,9 @@ def check_generated_inventory(docs: dict[str, str]) -> list[str]:
 
 
 def baseline_table_figures() -> dict[str, tuple[int, int]]:
-    """Rows and bytes promised by the committed reference export baselines.
-
-    The main tables come from the export baseline, because README and USAGE
-    quote the default main-only run. Every `checkpoint_*` table comes from the
-    checkpoint baseline -- all of them, not a named one: this read only
-    `checkpoint_fields` while both docs quoted six more checkpoint tables, so
-    a change that moved three of those files' bytes (the byte-budget row-group
-    fix) left six doc rows stale with this check still passing.
-    """
+    """Rows and bytes promised by the committed reference export baselines:
+    the main tables from the export baseline (the docs quote the default
+    main-only run), every `checkpoint_*` table from the checkpoint baseline."""
     export = json.loads(read(REPO / "tools" / "baselines" / "export_02d4d478.json"))
     checkpoint = json.loads(
         read(REPO / "tools" / "baselines" / "checkpoint_02d4d478.json")
@@ -527,32 +444,14 @@ def check_baseline_figures(
     return problems
 
 
-#: The overlay summary block README reprints, mapped to the baseline counter
-#: each line quotes. `vrfkit export` prints these; the committed baseline
-#: `tools/baselines/export_02d4d478.json` records them for the reference replay,
-#: so every one of them is checkable with no `.vrf` on disk -- which matters,
-#: because CI has none and neither does any machine without the private corpus.
+#: The overlay summary block README reprints, keyed by the label as printed and
+#: mapped to the baseline counter it quotes. `export_02d4d478.json` records
+#: them for the reference replay, so no `.vrf` is needed (CI has none).
 #:
-#: `check_baseline_figures` already compares the parquet row/byte table against
-#: this same file. It did not read these, and they drifted: the block was an
-#: older snapshot that partitioned the same 988,983 rows differently, taken
-#: before overlay entries moved rows out of `Not in table`. It contradicted the
-#: baseline this repo commits for the same replay and nothing said so.
-#:
-#: Keyed by the label as printed, so a match is always that counter.
-#:
-#: `Decode errors` is deliberately NOT here, though the same block prints it and
-#: the baseline records it. The string "Decode errors: 0" is used across this
-#: repo as the NAME of a failure mode rather than as a measurement of this
-#: replay -- CLAUDE.md twice ("means the decoder did not throw"), docs/DATA.md
-#: once, and docs/USAGE.md as an annotated illustration of what to watch. All
-#: four are correct English about the general case and none is a claim about
-#: `export_02d4d478.json`. Guarding it would fire on every one of them the first
-#: time the baseline records a nonzero value, which is a guard that gets deleted
-#: rather than fixed -- and the counter it would protect is the one the repo's
-#: own doctrine says proves the least ("Decode errors: 0 means the decoder did
-#: not throw. It does not mean the values are right."). The five it does guard
-#: are the ones that only ever appear as this replay's measured figures.
+#: `Decode errors` is deliberately absent: "Decode errors: 0" names a failure
+#: mode in CLAUDE.md (twice), docs/DATA.md and docs/USAGE.md rather than
+#: measuring this replay, so guarding it would fire on all four the first time
+#: the baseline recorded a nonzero value.
 OVERLAY_COUNTER_KEYS = {
     "Decoded OK": "overlay_decoded_ok",
     "Raw/Skip": "overlay_raw_skip",
@@ -561,26 +460,18 @@ OVERLAY_COUNTER_KEYS = {
     "Effect blobs": "effect_blobs_decoded",
 }
 
-#: The five buckets that partition every row offered to the overlay -- see
-#: `print_overlay` in crates/vrfkit/src/driver/summary.rs, which sums exactly
-#: these five (`decoded_ok + decoded_err + raw_or_skip + not_in_table +
-#: no_field_name`) to print `Rows offered`. `overlay_decode_errors` belongs
-#: here even though `OVERLAY_COUNTER_KEYS` above deliberately excludes it: that
-#: exclusion is about not flagging CLAUDE.md's generic "Decode errors: 0" text
-#: as stale, which has nothing to do with whether the five buckets actually
-#: sum to the total. Their sum is `overlay_rows_offered` exactly -- not
-#: approximately -- so the relationship is checkable arithmetic rather than
-#: six independent equalities. A future baseline that breaks it means either a
-#: bucket was added or one of these stopped counting, and both are worth a red
-#: build. Dropping `overlay_decode_errors` from this tuple made the check pass
-#: only because the pinned baseline's decode-error count happens to be 0.
+#: The five buckets `print_overlay` (crates/vrfkit/src/driver/summary.rs) sums
+#: to print `Rows offered`. Their sum is `overlay_rows_offered` exactly, so a
+#: break means a bucket was added or one stopped counting.
+#: `overlay_decode_errors` belongs here although `OVERLAY_COUNTER_KEYS` excludes
+#: it: that exclusion is about doc prose, not arithmetic, and without it the
+#: check would pass only while the pinned decode-error count is 0.
 OVERLAY_PARTITION = ("overlay_decoded_ok", "overlay_decode_errors",
                      "overlay_raw_skip", "overlay_not_in_table",
                      "overlay_no_field_name")
 
-#: `Typed` is not stored; it is `Decoded OK / Rows offered` as a percentage, and
-#: it is quoted in both README and USAGE. Derived rather than pinned, so it
-#: cannot drift away from the two counters it is a ratio of.
+#: `Typed` is not stored: it is `Decoded OK / Rows offered` as a percentage,
+#: derived rather than pinned so it cannot drift from the two counters.
 TYPED_RE = re.compile(r"Typed:\s*([\d.]+)%")
 
 
@@ -591,12 +482,9 @@ def baseline_overlay_counters() -> dict[str, int]:
 
 
 def overlay_partition_problems(counters: dict[str, int]) -> list[str]:
-    """The buckets must still add up, and the keys must still be there.
-
-    A missing key would otherwise make every quoted line unverifiable while
-    `stale_overlay_counters` skipped it and this file printed OK -- the same
-    hole `measured_counts` had for the ascii count.
-    """
+    """The buckets must still add up, and the keys must still be there: a
+    missing key would leave every line quoting it unchecked while
+    `stale_overlay_counters` skipped it and this printed OK."""
     problems = []
     needed = set(OVERLAY_PARTITION) | {"overlay_rows_offered"} | set(
         OVERLAY_COUNTER_KEYS.values())
@@ -622,10 +510,8 @@ def stale_overlay_counters(docs: dict[str, str],
                            counters: dict[str, int]) -> list[str]:
     """Every quoted overlay counter, in any doc, that is not the live one.
 
-    The stronger question `stale_measured_counts` asks, for the same reason: a
-    stale figure must not be excused by a correct one nearby. Scoped to the
-    printed `Label: N` form, so prose that merely names a bucket -- README's
-    "most of `Not in table` is RPC parameters" -- is not read as quoting it.
+    Scoped to the printed `Label: N` form, so prose that merely names a bucket
+    (README's "most of `Not in table` is RPC parameters") is not a quote.
     """
     problems = []
     for name, text in docs.items():
@@ -659,12 +545,8 @@ def stale_overlay_counters(docs: dict[str, str],
 
 def check_overlay_counters_present(readme: str,
                                    counters: dict[str, int]) -> list[str]:
-    """README must still carry the block, not merely not contradict it.
-
-    Without this, deleting the summary block would satisfy
-    `stale_overlay_counters` perfectly -- nothing quoted, nothing wrong -- and
-    the guard would go on reporting that it checked something.
-    """
+    """README must still carry the block, not merely not contradict it:
+    deleting it would satisfy `stale_overlay_counters` with nothing quoted."""
     return [f"README.md: overlay summary block is missing `{label}:`"
             for label, key in OVERLAY_COUNTER_KEYS.items()
             if key in counters
@@ -674,10 +556,9 @@ def check_overlay_counters_present(readme: str,
 def measured_counts(problems: list[str] | None = None) -> dict[str, int]:
     """The live values, read from the things that produce them.
 
-    A measurement that could not be taken is left out of the returned dict --
-    and `stale_measured_counts` skips any key it does not find, so an unmeasured
-    count silently checked nothing while the guard still printed "OK: the docs
-    still describe this repo". Pass `problems` to hear about that instead.
+    A measurement that could not be taken is left out, and
+    `stale_measured_counts` skips a missing key; pass `problems` so that is
+    reported instead of silently checking nothing.
     """
     counts = {}
     r = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", "*.rs"],
@@ -691,10 +572,9 @@ def measured_counts(problems: list[str] | None = None) -> dict[str, int]:
             f"{r.returncode} ({(r.stderr or '').strip()[:120]}); every quoted "
             f"count went unchecked")
 
-    # `tools/` on the path first: apply_type_corrections.py imports `atomic_io`
-    # from beside itself, and under `spec_from_file_location` that import is
-    # resolved against sys.path, not against the file's own directory. Without
-    # this the exec_module below raises ModuleNotFoundError.
+    # `tools/` on the path first: apply_type_corrections.py imports `atomic_io`,
+    # which under `spec_from_file_location` resolves against sys.path, not the
+    # file's own directory (ModuleNotFoundError otherwise).
     if str(REPO / "tools") not in sys.path:
         sys.path.insert(0, str(REPO / "tools"))
     spec = importlib.util.spec_from_file_location(
@@ -702,9 +582,7 @@ def measured_counts(problems: list[str] | None = None) -> dict[str, int]:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     counts["corrections"] = module.expectation_count(read(module.TABLE_RS))
-    # Measured by importing the module, not by counting source lines -- the
-    # list spans a commented block per entry, so any line-counting heuristic
-    # would be a second thing to keep in step with it.
+    # Imported, not line-counted: each entry spans a commented block.
     counts["additions"] = len(module.ADDITIONS)
 
     documented, _ = feature_matrices(read(REPO / "CONTRIBUTING.md"), "")
@@ -734,13 +612,9 @@ def measured_counts(problems: list[str] | None = None) -> dict[str, int]:
 def stale_measured_counts(docs: dict[str, str], live: dict[str, int]) -> list[str]:
     """Every quoted measured count that is not the live one.
 
-    Not "does the right number appear somewhere" -- that is the check that let
-    README hold 387 and 355 at once. Every match must be right, so a file
-    saying 85, 86 and 49 corrections reports two problems, not zero.
-
-    A count is only read as a claim when its context appears on the same line or
-    within `window` lines above it -- see `MEASURED_RE` for why a window exists
-    at all.
+    Every match must be right, so a file saying 85, 86 and 49 corrections
+    reports two problems. A count is a claim only when its context is on the
+    same line or within `window` lines above it (see `MEASURED_RE`).
     """
     problems = []
     for name, text in docs.items():
@@ -763,9 +637,8 @@ def stale_measured_counts(docs: dict[str, str], live: dict[str, int]) -> list[st
 
 def measure_tests() -> tuple[int, int, list[str]]:
     problems = []
-    # The same toolchain and lockfile the sweep and CI use. A bare `cargo test`
-    # ran whatever the local default toolchain was, so the count it measured
-    # could come from a compiler that accepts code 1.86 rejects.
+    # The sweep's and CI's toolchain and lockfile: a newer default toolchain
+    # could measure code that 1.86 rejects.
     r = subprocess.run(["cargo", "+1.86.0", "test", "--workspace", "--locked", "--quiet"],
                        cwd=REPO, capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=3600)
@@ -775,12 +648,8 @@ def measure_tests() -> tuple[int, int, list[str]]:
     if r.returncode != 0:
         problems.append("cargo test did not pass; doc counts not checked against it\n" + out[-4000:])
     elif not passed_matches:
-        # `measured_counts` above already carries this rule for the ASCII
-        # count: a parse failure defaulting to 0 is indistinguishable from a
-        # genuinely empty suite, and everything downstream (`live`, the
-        # stale-count report) then treats every doc-quoted number as wrong for
-        # the wrong reason. `cargo test` exiting 0 with no "N passed" line
-        # means its output format changed, not that nothing ran.
+        # Exit 0 with no "N passed" line means the output format changed, not
+        # that nothing ran; a defaulted 0 would fail every quoted count wrongly.
         problems.append(
             "cargo test exited 0 but printed no 'N passed' line; the rust "
             "test count (0) was not measured")
@@ -819,9 +688,8 @@ def main() -> int:
 
     readme, usage = read(README), read(USAGE)
     docs = {"README.md": readme, "USAGE.md": usage}
-    #: Every doc, for the checks that only ask a number not to be wrong.
-    #: `docs` stays README+USAGE for the ones that require a number to be
-    #: *present*: DATA.md has no reason to quote the suite sizes.
+    #: Every doc, for the checks that only ask a number not to be wrong; `docs`
+    #: (README+USAGE) for the ones that require a number to be *present*.
     every = {name: read(REPO / name) for name in ALL_DOCS}
     generated_docs = {
         name: read(REPO / name) for name in GENERATED_INVENTORY_DOCS
