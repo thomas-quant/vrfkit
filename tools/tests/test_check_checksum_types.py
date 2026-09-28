@@ -736,6 +736,40 @@ class MainTests(unittest.TestCase):
         (d / "checkpoint_export_fields.parquet").write_bytes(b"not a parquet file")
         self.assert_unreadable(d)
 
+    def test_a_malformed_checkpoint_declaration_exits_2(self):
+        """The checkpoint tables are held to the manifest's shape: each case
+        differs from the control in one column, on a row that joins its
+        group (an orphan never reaches the check)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        groups = pa.table({"checkpoint_index": pa.array([0], pa.uint32()),
+                           "ordinal": pa.array([0], pa.uint32()),
+                           "group_path": [INVENTORY]})
+
+        def export(name, handle=pa.array([30], pa.uint32()),
+                   checksum=pa.array([CORRECTION_INDEX], pa.uint32()),
+                   rendered_name=pa.array(["CorrectionIndex"])):
+            d = write_export(self.root, name, {})
+            pq.write_table(groups, d / "checkpoint_export_groups.parquet")
+            pq.write_table(pa.table({"checkpoint_index": pa.array([0], pa.uint32()),
+                                     "group_ordinal": pa.array([0], pa.uint32()),
+                                     "handle": handle, "compatible_checksum": checksum,
+                                     "rendered_name": rendered_name}),
+                           d / "checkpoint_export_fields.parquet")
+            return d
+
+        code, out, err = run_main("--export", str(export("control")))
+        self.assertEqual(code, 0, out + err)
+        cases = {
+            "a checksum past u32": dict(checksum=pa.array([1 << 32], pa.int64())),
+            "a handle past u32": dict(handle=pa.array([1 << 32], pa.int64())),
+            "a checksum as text": dict(checksum=pa.array([str(CORRECTION_INDEX)])),
+            "a null name": dict(rendered_name=pa.array([None], pa.string())),
+        }
+        for label, column in cases.items():
+            with self.subTest(label):
+                self.assert_unreadable(export(label.replace(" ", "_"), **column))
+
     def test_corpus_children_and_generated_siblings(self):
         write_export(self.root, "a", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
         write_export(self.root, ".a.vrfkit-staging-1-2", {INVENTORY: [(30, "CorrectionIndex", 5)]})
