@@ -484,266 +484,200 @@ fn push_frame_skips(out: &mut String, prefix: &str, skips: &FrameSkips) {
     }
 }
 
-fn push_net_stats(out: &mut String, s: &NetStats) {
-    let pairs: Vec<(&str, String)> = vec![
-        ("packets", s.packets.to_string()),
-        ("malformed_packets", s.malformed_packets.to_string()),
-        ("bunches", s.bunches.to_string()),
-        ("partial_errors", s.partial_errors.to_string()),
-        ("partial_bunches", s.partial_bunches.to_string()),
-        (
-            "partial_missing_initial",
-            s.partial_missing_initial.to_string(),
-        ),
-        (
-            "partial_missing_initial_final",
-            s.partial_missing_initial_final.to_string(),
-        ),
-        (
-            "partial_missing_initial_reliable",
-            s.partial_missing_initial_reliable.to_string(),
-        ),
-        (
-            "partial_missing_initial_bits",
-            s.partial_missing_initial_bits.to_string(),
-        ),
-        (
-            "partial_overlapping_initial",
-            s.partial_overlapping_initial.to_string(),
-        ),
-        (
-            "partial_mismatched_continuation",
-            s.partial_mismatched_continuation.to_string(),
-        ),
-        (
-            "partial_non_byte_aligned",
-            s.partial_non_byte_aligned.to_string(),
-        ),
-        ("partial_channel_close", s.partial_channel_close.to_string()),
-        (
-            "partial_unclassified_errors",
-            s.partial_unclassified_errors().to_string(),
-        ),
-        (
-            "partial_overclassified_errors",
-            s.partial_overclassified_errors().to_string(),
-        ),
-        ("partial_fragments", s.partial_fragments.to_string()),
-        ("partial_completed", s.partial_completed.to_string()),
-        ("unfinished_partials", s.unfinished_partials.to_string()),
-        (
-            "unfinished_partial_bits",
-            s.unfinished_partial_bits.to_string(),
-        ),
-        ("bunch_header_failures", s.bunch_header_failures.to_string()),
-        ("content_blocks", s.content_blocks.to_string()),
-        ("rep_layout_blocks", s.rep_layout_blocks.to_string()),
-        (
-            "class_net_cache_blocks",
-            s.class_net_cache_blocks.to_string(),
-        ),
-        ("deleted_blocks", s.deleted_blocks.to_string()),
-        ("fields", s.fields.to_string()),
-        ("rpcs", s.rpcs.to_string()),
-        ("skipped_bits", s.skipped_bits.to_string()),
-        (
-            "content_block_framing_failures",
-            s.content_block_framing_failures.to_string(),
-        ),
-        (
-            "malformed_content_blocks",
-            s.malformed_content_blocks.to_string(),
-        ),
-        ("transform_failures", s.transform_failures.to_string()),
-        ("field_stream_failures", s.field_stream_failures.to_string()),
-        ("rpc_stream_failures", s.rpc_stream_failures.to_string()),
-        (
-            "unresolved_rpc_payloads_preserved",
-            s.unresolved_rpc_payloads_preserved.to_string(),
-        ),
-        ("actor_opens", s.actor_opens.to_string()),
-        ("actor_closes", s.actor_closes.to_string()),
-        (
-            "channel_reopens_while_open",
-            s.channel_reopens_while_open.to_string(),
-        ),
-        (
-            "actor_opens_missing_spawn",
-            s.actor_opens_missing_spawn.to_string(),
-        ),
-        (
-            "failed_reopens_while_open",
-            s.failed_reopens_while_open.to_string(),
-        ),
-        (
-            "bunches_on_unopened_channel",
-            s.bunches_on_unopened_channel.to_string(),
-        ),
-        ("unopened_channel_bits", s.unopened_channel_bits.to_string()),
-        (
-            "channel_state_limit_failures",
-            s.channel_state_limit_failures.to_string(),
-        ),
-        (
-            "partial_resource_limit_failures",
-            s.partial_resource_limit_failures.to_string(),
-        ),
-        ("package_map_exports", s.package_map_exports.to_string()),
-        (
-            "rep_layout_export_bunches",
-            s.rep_layout_export_bunches.to_string(),
-        ),
-        ("exported_guids", s.exported_guids.to_string()),
-        ("must_be_mapped_guids", s.must_be_mapped_guids.to_string()),
-        ("content_blocks_lost", s.lost_content_blocks().to_string()),
-    ];
+/// `{`, one `"key": value` member per line, then `  }` -- the shape both
+/// counter objects share.
+fn push_members(out: &mut String, members: &[(&str, u64)]) {
     out.push_str("{\n");
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        out.push_str("    \"");
-        out.push_str(name);
-        out.push_str("\": ");
-        out.push_str(value);
-        if i + 1 < pairs.len() {
-            out.push(',');
-        }
-        out.push('\n');
+    for (i, (name, value)) in members.iter().enumerate() {
+        let comma = if i + 1 < members.len() { "," } else { "" };
+        out.push_str(&format!("    \"{name}\": {value}{comma}\n"));
     }
     out.push_str("  }");
+}
+
+fn push_net_stats(out: &mut String, s: &NetStats) {
+    push_members(
+        out,
+        &[
+            ("packets", s.packets),
+            ("malformed_packets", s.malformed_packets),
+            ("bunches", s.bunches),
+            ("partial_errors", s.partial_errors),
+            ("partial_bunches", s.partial_bunches),
+            ("partial_missing_initial", s.partial_missing_initial),
+            (
+                "partial_missing_initial_final",
+                s.partial_missing_initial_final,
+            ),
+            (
+                "partial_missing_initial_reliable",
+                s.partial_missing_initial_reliable,
+            ),
+            (
+                "partial_missing_initial_bits",
+                s.partial_missing_initial_bits,
+            ),
+            ("partial_overlapping_initial", s.partial_overlapping_initial),
+            (
+                "partial_mismatched_continuation",
+                s.partial_mismatched_continuation,
+            ),
+            ("partial_non_byte_aligned", s.partial_non_byte_aligned),
+            ("partial_channel_close", s.partial_channel_close),
+            (
+                "partial_unclassified_errors",
+                s.partial_unclassified_errors(),
+            ),
+            (
+                "partial_overclassified_errors",
+                s.partial_overclassified_errors(),
+            ),
+            ("partial_fragments", s.partial_fragments),
+            ("partial_completed", s.partial_completed),
+            ("unfinished_partials", s.unfinished_partials),
+            ("unfinished_partial_bits", s.unfinished_partial_bits),
+            ("bunch_header_failures", s.bunch_header_failures),
+            ("content_blocks", s.content_blocks),
+            ("rep_layout_blocks", s.rep_layout_blocks),
+            ("class_net_cache_blocks", s.class_net_cache_blocks),
+            ("deleted_blocks", s.deleted_blocks),
+            ("fields", s.fields),
+            ("rpcs", s.rpcs),
+            ("skipped_bits", s.skipped_bits),
+            (
+                "content_block_framing_failures",
+                s.content_block_framing_failures,
+            ),
+            ("malformed_content_blocks", s.malformed_content_blocks),
+            ("transform_failures", s.transform_failures),
+            ("field_stream_failures", s.field_stream_failures),
+            ("rpc_stream_failures", s.rpc_stream_failures),
+            (
+                "unresolved_rpc_payloads_preserved",
+                s.unresolved_rpc_payloads_preserved,
+            ),
+            ("actor_opens", s.actor_opens),
+            ("actor_closes", s.actor_closes),
+            ("channel_reopens_while_open", s.channel_reopens_while_open),
+            ("actor_opens_missing_spawn", s.actor_opens_missing_spawn),
+            ("failed_reopens_while_open", s.failed_reopens_while_open),
+            ("bunches_on_unopened_channel", s.bunches_on_unopened_channel),
+            ("unopened_channel_bits", s.unopened_channel_bits),
+            (
+                "channel_state_limit_failures",
+                s.channel_state_limit_failures,
+            ),
+            (
+                "partial_resource_limit_failures",
+                s.partial_resource_limit_failures,
+            ),
+            ("package_map_exports", s.package_map_exports),
+            ("rep_layout_export_bunches", s.rep_layout_export_bunches),
+            ("exported_guids", s.exported_guids),
+            ("must_be_mapped_guids", s.must_be_mapped_guids),
+            ("content_blocks_lost", s.lost_content_blocks()),
+        ],
+    );
 }
 
 fn push_sink_totals(out: &mut String, s: &SinkTotals) {
-    let pairs: Vec<(&str, String)> = vec![
-        ("fields_emitted", s.fields_emitted.to_string()),
-        ("rpcs_emitted", s.rpcs_emitted.to_string()),
-        ("actor_opens", s.actor_opens.to_string()),
-        ("actor_closes", s.actor_closes.to_string()),
-        ("content_blocks", s.content_blocks.to_string()),
-        ("overlay_decoded_ok", s.overlay.decoded_ok.to_string()),
-        ("overlay_decoded_err", s.overlay.decoded_err.to_string()),
-        ("overlay_raw_or_skip", s.overlay.raw_or_skip.to_string()),
-        ("overlay_not_in_table", s.overlay.not_in_table.to_string()),
-        ("overlay_no_field_name", s.overlay.no_field_name.to_string()),
-        (
-            "overlay_handle_conflicts_refused",
-            s.overlay.handle_conflicts_refused.to_string(),
-        ),
-        ("effect_blobs_decoded", s.effect_blobs_decoded.to_string()),
-        ("struct_blobs_decoded", s.struct_blobs_decoded.to_string()),
-        ("struct_blobs_failed", s.struct_blobs_failed.to_string()),
-        (
-            "multi_contents_items_emitted",
-            s.multi_contents_items_emitted.to_string(),
-        ),
-        ("movement_rpc_errors", s.movement_rpc_errors.to_string()),
-        (
-            "movement_sized_section_tails",
-            s.movement_sized_section_tails.to_string(),
-        ),
-        (
-            "movement_sized_section_tail_bits",
-            s.movement_sized_section_tail_bits.to_string(),
-        ),
-        (
-            "movement_open_section_tails",
-            s.movement_open_section_tails.to_string(),
-        ),
-        (
-            "movement_open_section_tail_bits",
-            s.movement_open_section_tail_bits.to_string(),
-        ),
-        (
-            "array_elements_decoded",
-            s.array.elements_decoded.to_string(),
-        ),
-        ("array_fields_emitted", s.array.fields_emitted.to_string()),
-        ("array_truncations", s.array.truncations.to_string()),
-        ("array_errors", s.array.errors.to_string()),
-        (
-            "array_unconsumed_nested_bits",
-            s.array.unconsumed_nested_bits.to_string(),
-        ),
-        (
-            "array_implicit_terminations",
-            s.array.implicit_terminations.to_string(),
-        ),
-        (
-            "array_unconsumed_root_bits",
-            s.array.unconsumed_root_bits.to_string(),
-        ),
-        (
-            "array_leaf_decode_errors",
-            s.array_leaf_decode_errors.to_string(),
-        ),
-        (
-            "targeting_world_locations_decoded",
-            s.targeting_world_locations_decoded.to_string(),
-        ),
-        (
-            "tracked_rewards_opaque_empty_variants",
-            s.tracked_rewards_opaque_empty_variants.to_string(),
-        ),
-        ("truncated_rpcs", s.truncated_rpcs.to_string()),
-        (
-            "rpc_suffix_bits_dropped",
-            s.rpc_suffix_bits_dropped.to_string(),
-        ),
-        ("cnc_rpcs_emitted", s.cnc_rpcs_emitted.to_string()),
-        (
-            "cnc_bruteforce_payloads_attempted",
-            s.cnc_bruteforce_payloads_attempted.to_string(),
-        ),
-        (
-            "cnc_bruteforce_payloads_unwalked",
-            s.cnc_bruteforce_payloads_unwalked.to_string(),
-        ),
-        (
-            "rep_layout_cnc_tails_decoded",
-            s.rep_layout_cnc_tails_decoded.to_string(),
-        ),
-        (
-            "rep_layout_cnc_tails_preserved",
-            s.rep_layout_cnc_tails_preserved.to_string(),
-        ),
-    ];
-    out.push_str("{\n");
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        out.push_str("    \"");
-        out.push_str(name);
-        out.push_str("\": ");
-        out.push_str(value);
-        if i + 1 < pairs.len() {
-            out.push(',');
-        }
-        out.push('\n');
-    }
-    out.push_str("  }");
+    push_members(
+        out,
+        &[
+            ("fields_emitted", s.fields_emitted),
+            ("rpcs_emitted", s.rpcs_emitted),
+            ("actor_opens", s.actor_opens),
+            ("actor_closes", s.actor_closes),
+            ("content_blocks", s.content_blocks),
+            ("overlay_decoded_ok", s.overlay.decoded_ok),
+            ("overlay_decoded_err", s.overlay.decoded_err),
+            ("overlay_raw_or_skip", s.overlay.raw_or_skip),
+            ("overlay_not_in_table", s.overlay.not_in_table),
+            ("overlay_no_field_name", s.overlay.no_field_name),
+            (
+                "overlay_handle_conflicts_refused",
+                s.overlay.handle_conflicts_refused,
+            ),
+            ("effect_blobs_decoded", s.effect_blobs_decoded),
+            ("struct_blobs_decoded", s.struct_blobs_decoded),
+            ("struct_blobs_failed", s.struct_blobs_failed),
+            (
+                "multi_contents_items_emitted",
+                s.multi_contents_items_emitted,
+            ),
+            ("movement_rpc_errors", s.movement_rpc_errors),
+            (
+                "movement_sized_section_tails",
+                s.movement_sized_section_tails,
+            ),
+            (
+                "movement_sized_section_tail_bits",
+                s.movement_sized_section_tail_bits,
+            ),
+            ("movement_open_section_tails", s.movement_open_section_tails),
+            (
+                "movement_open_section_tail_bits",
+                s.movement_open_section_tail_bits,
+            ),
+            ("array_elements_decoded", s.array.elements_decoded),
+            ("array_fields_emitted", s.array.fields_emitted),
+            ("array_truncations", s.array.truncations),
+            ("array_errors", s.array.errors),
+            (
+                "array_unconsumed_nested_bits",
+                s.array.unconsumed_nested_bits,
+            ),
+            ("array_implicit_terminations", s.array.implicit_terminations),
+            ("array_unconsumed_root_bits", s.array.unconsumed_root_bits),
+            ("array_leaf_decode_errors", s.array_leaf_decode_errors),
+            (
+                "targeting_world_locations_decoded",
+                s.targeting_world_locations_decoded,
+            ),
+            (
+                "tracked_rewards_opaque_empty_variants",
+                s.tracked_rewards_opaque_empty_variants,
+            ),
+            ("truncated_rpcs", s.truncated_rpcs),
+            ("rpc_suffix_bits_dropped", s.rpc_suffix_bits_dropped),
+            ("cnc_rpcs_emitted", s.cnc_rpcs_emitted),
+            (
+                "cnc_bruteforce_payloads_attempted",
+                s.cnc_bruteforce_payloads_attempted,
+            ),
+            (
+                "cnc_bruteforce_payloads_unwalked",
+                s.cnc_bruteforce_payloads_unwalked,
+            ),
+            (
+                "rep_layout_cnc_tails_decoded",
+                s.rep_layout_cnc_tails_decoded,
+            ),
+            (
+                "rep_layout_cnc_tails_preserved",
+                s.rep_layout_cnc_tails_preserved,
+            ),
+        ],
+    );
 }
 
 fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
-    out.push_str("{\"total_failures\": ");
-    out.push_str(&agg.total_failures().to_string());
-    out.push_str(", \"preserved_unresolved\": ");
-    out.push_str(&agg.preserved_unresolved().to_string());
-    out.push_str(", \"real_loss\": ");
-    out.push_str(&agg.real_loss().to_string());
-    out.push_str(", \"cell_limit\": ");
-    out.push_str(&FailureAggregate::cell_limit().to_string());
-    out.push_str(", \"overflow\": {\"count\": ");
-    out.push_str(&agg.overflow().count.to_string());
-    out.push_str(", \"bit_count_total\": ");
-    out.push_str(&agg.overflow().bit_count_total.to_string());
-    out.push_str(", \"consumed_bits_total\": ");
-    out.push_str(&agg.overflow().consumed_bits_total.to_string());
-    out.push_str(", \"abandoned_bits_total\": ");
-    out.push_str(&agg.overflow().abandoned_bits_total.to_string());
-    out.push('}');
-    out.push_str(", \"payloads_included\": ");
-    out.push_str(if agg.retains_payloads() {
-        "true"
-    } else {
-        "false"
-    });
-    out.push_str(", \"cells\": [");
+    let overflow = agg.overflow();
+    out.push_str(&format!(
+        "{{\"total_failures\": {}, \"preserved_unresolved\": {}, \"real_loss\": {}, \
+         \"cell_limit\": {}, \"overflow\": {{\"count\": {}, \"bit_count_total\": {}, \
+         \"consumed_bits_total\": {}, \"abandoned_bits_total\": {}}}, \"payloads_included\": {}, \
+         \"cells\": [",
+        agg.total_failures(),
+        agg.preserved_unresolved(),
+        agg.real_loss(),
+        FailureAggregate::cell_limit(),
+        overflow.count,
+        overflow.bit_count_total,
+        overflow.consumed_bits_total,
+        overflow.abandoned_bits_total,
+        agg.retains_payloads(),
+    ));
     for (i, (key, cell)) in agg.cells_sorted().iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
@@ -754,69 +688,50 @@ fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
         push_json_string(out, cause_name(key.cause));
         out.push_str(", \"group_path\": ");
         push_json_string(out, &key.group_path);
-        out.push_str(", \"function_count\": ");
-        out.push_str(&key.function_count.to_string());
-        out.push_str(", \"record_handle\": ");
-        match key.record_handle {
-            Some(handle) => out.push_str(&handle.to_string()),
-            None => out.push_str("null"),
-        }
-        out.push_str(", \"consumed_bits\": ");
-        out.push_str(&key.consumed_bits.to_string());
-        out.push_str(", \"payload_preserved\": ");
-        out.push_str(if key.payload_preserved {
-            "true"
-        } else {
-            "false"
-        });
-        out.push_str(", \"count\": ");
-        out.push_str(&cell.count.to_string());
-        out.push_str(", \"bit_count_total\": ");
-        out.push_str(&cell.bit_count_total.to_string());
-        out.push_str(", \"consumed_bits_total\": ");
-        out.push_str(&cell.consumed_bits_total.to_string());
-        out.push_str(", \"abandoned_bits_total\": ");
-        out.push_str(&cell.abandoned_bits_total.to_string());
-        out.push_str(", \"samples\": [");
+        out.push_str(&format!(
+            ", \"function_count\": {}, \"record_handle\": {}, \"consumed_bits\": {}, \
+             \"payload_preserved\": {}, \"count\": {}, \"bit_count_total\": {}, \
+             \"consumed_bits_total\": {}, \"abandoned_bits_total\": {}, \"samples\": [",
+            key.function_count,
+            json_number_or_null(key.record_handle),
+            key.consumed_bits,
+            key.payload_preserved,
+            cell.count,
+            cell.bit_count_total,
+            cell.consumed_bits_total,
+            cell.abandoned_bits_total,
+        ));
         for (j, sample) in cell.samples.iter().enumerate() {
             if j > 0 {
                 out.push_str(", ");
             }
-            out.push_str("{\"actor_net_guid\": ");
-            out.push_str(&sample.actor_net_guid.to_string());
-            out.push_str(", \"bit_count\": ");
-            out.push_str(&sample.bit_count.to_string());
-            out.push_str(", \"consumed_bits\": ");
-            out.push_str(&sample.consumed_bits.to_string());
-            out.push_str(", \"payload_preserved\": ");
-            out.push_str(if sample.payload_preserved {
-                "true"
-            } else {
-                "false"
-            });
-            out.push_str(", \"abandoned_bits\": ");
-            out.push_str(&sample.abandoned_bits.to_string());
-            out.push_str(", \"record_offset\": ");
-            match sample.record_offset {
-                Some(offset) => out.push_str(&offset.to_string()),
-                None => out.push_str("null"),
-            }
-            out.push_str(", \"payload_hex\": ");
+            out.push_str(&format!(
+                "{{\"actor_net_guid\": {}, \"bit_count\": {}, \"consumed_bits\": {}, \
+                 \"payload_preserved\": {}, \"abandoned_bits\": {}, \"record_offset\": {}, \
+                 \"payload_hex\": ",
+                sample.actor_net_guid,
+                sample.bit_count,
+                sample.consumed_bits,
+                sample.payload_preserved,
+                sample.abandoned_bits,
+                json_number_or_null(sample.record_offset),
+            ));
             match &sample.payload_hex {
                 Some(hex) => push_json_string(out, hex),
                 None => out.push_str("null"),
             }
-            out.push_str(", \"payload_truncated\": ");
-            out.push_str(if sample.payload_truncated {
-                "true"
-            } else {
-                "false"
-            });
-            out.push('}');
+            out.push_str(&format!(
+                ", \"payload_truncated\": {}}}",
+                sample.payload_truncated
+            ));
         }
         out.push_str("]}");
     }
     out.push_str("]}");
+}
+
+fn json_number_or_null<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| value.to_string())
 }
 
 fn kind_name(kind: vrf_net::pipeline::StreamKind) -> &'static str {
@@ -839,8 +754,8 @@ fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameSkips, build_label, push_frame_skips, push_json_string, push_net_stats,
-        push_sink_totals, reject_input_output_alias, write_json_file,
+        FrameSkips, build_label, json_number_or_null, push_frame_skips, push_json_string,
+        push_net_stats, push_sink_totals, reject_input_output_alias, write_json_file,
     };
     use crate::sink::SinkTotals;
     use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
@@ -909,6 +824,14 @@ mod tests {
         let mut out = String::new();
         push_json_string(&mut out, "x\u{1f600}y");
         assert_eq!(out, "\"x\\ud83d\\ude00y\"");
+    }
+
+    /// No replay has produced a failure cell with a record handle, so the
+    /// present branch is pinned here rather than by any real output.
+    #[test]
+    fn optional_numbers_render_as_the_number_or_null() {
+        assert_eq!(json_number_or_null(Some(7u32)), "7");
+        assert_eq!(json_number_or_null(None::<u64>), "null");
     }
 
     #[test]
