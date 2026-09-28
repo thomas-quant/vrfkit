@@ -34,16 +34,6 @@ const ABILITIES_AND_BUFFS_COMPONENT: &str = "AbilitiesAndBuffsComponent";
 const CHAINED_CNC_H1_FIELD_NAME: &str = "__vrfkit_chained_cnc_h1__";
 const UNPARSED_REP_LAYOUT_TAIL_FIELD_NAME: &str = "__vrfkit_unparsed_rep_layout_tail__";
 
-fn copy_exact_raw_bits(mut reader: BitReader<'_>, bit_count: u32) -> Option<SmallVec<[u8; 16]>> {
-    if bit_count == 0 {
-        return None;
-    }
-    let mut raw = SmallVec::with_capacity((bit_count as usize).div_ceil(8));
-    raw.resize((bit_count as usize).div_ceil(8), 0);
-    reader.copy_bits_to(&mut raw, u64::from(bit_count)).ok()?;
-    Some(raw)
-}
-
 impl ExportSink<'_> {
     fn record_checkpoint_block(
         &mut self,
@@ -435,17 +425,18 @@ impl ExportSink<'_> {
             // already validated that each payload fits, so the read cannot
             // fail on well-formed input; on a malformed tail the payload is
             // dropped (the preservation row still carries the full blob).
-            let raw_bits = (|| {
-                let mut reader = vrf_bitio::BitReader::with_bit_len(payload, total_len).ok()?;
-                reader.skip_bits(rpc.payload_offset).ok()?;
-                let byte_count = (rpc.payload_bits as usize).div_ceil(8);
-                let mut buf = SmallVec::with_capacity(byte_count);
-                buf.resize(byte_count, 0u8);
-                reader
-                    .copy_bits_to(&mut buf, u64::from(rpc.payload_bits))
-                    .ok()?;
-                Some(buf)
-            })();
+            // A zero-bit RPC keeps an empty blob here, where `copy_raw_bits`
+            // gives null. None has been observed; switching changes output.
+            let raw_bits =
+                BitReader::with_bit_len(payload, total_len)
+                    .ok()
+                    .and_then(|mut reader| {
+                        reader.skip_bits(rpc.payload_offset).ok()?;
+                        if rpc.payload_bits == 0 {
+                            return Some(SmallVec::new());
+                        }
+                        copy_raw_bits(reader, rpc.payload_bits)
+                    });
 
             let field_name = self.channel_state.names.intern_fmt(|out| {
                 put(out, format_args!("_cnc_h{}", rpc.handle));
@@ -674,7 +665,7 @@ impl ReplicationSink for ExportSink<'_> {
         bit_count: u32,
         reader: BitReader<'_>,
     ) -> RepLayoutTailOutcome {
-        let Some(raw_tail) = copy_exact_raw_bits(reader, bit_count) else {
+        let Some(raw_tail) = copy_raw_bits(reader, bit_count) else {
             return RepLayoutTailOutcome::Unpreserved {
                 cause: StreamFailureCause::ReadError,
             };
@@ -699,7 +690,7 @@ impl ReplicationSink for ExportSink<'_> {
                         if !flag.read_bit().ok()? {
                             return None;
                         }
-                        copy_exact_raw_bits(body, rpc.payload_bits)
+                        copy_raw_bits(body, rpc.payload_bits)
                     })();
                     if let Some(raw_body) = raw_body {
                         let field_name = self.channel_state.names.intern(CHAINED_CNC_H1_FIELD_NAME);
@@ -742,7 +733,7 @@ impl ReplicationSink for ExportSink<'_> {
         failure: StreamFailure,
         reader: BitReader<'_>,
     ) {
-        let Some(raw) = copy_exact_raw_bits(reader, failure.bit_count) else {
+        let Some(raw) = copy_raw_bits(reader, failure.bit_count) else {
             return;
         };
         if let Some(failures) = self.channel_state.failures.as_mut() {
