@@ -490,21 +490,26 @@ fn the_alias_does_not_invent_a_type() {
     );
 }
 
+/// The generators' contract: both tables strictly sorted by their key, so no
+/// key appears twice. The binary searches the index tests compare against
+/// depend on it, and a duplicated key could resolve differently in the hash
+/// index and in the search.
 #[test]
 fn table_is_sorted() {
-    let table = &OVERLAY_TABLE;
-    for window in table.windows(2) {
-        let cmp = window[0]
-            .group_path
-            .cmp(window[1].group_path)
-            .then_with(|| window[0].field_name.cmp(window[1].field_name));
-        assert!(
-            cmp.is_lt() || cmp.is_eq(),
-            "table not sorted at {:?} vs {:?}",
-            (window[0].group_path, window[0].field_name),
-            (window[1].group_path, window[1].field_name)
-        );
-    }
+    let unsorted = OVERLAY_TABLE
+        .windows(2)
+        .position(|w| (w[0].group_path, w[0].field_name) >= (w[1].group_path, w[1].field_name));
+    assert_eq!(
+        unsorted, None,
+        "OVERLAY_TABLE not strictly sorted at that index"
+    );
+    let unsorted = OVERLAY_HANDLE_TABLE
+        .windows(2)
+        .position(|w| (w[0].group_path, w[0].handle) >= (w[1].group_path, w[1].handle));
+    assert_eq!(
+        unsorted, None,
+        "OVERLAY_HANDLE_TABLE not strictly sorted at that index"
+    );
 }
 
 /// Live per-player economy is replicated under `MoneyManagementComponent` on
