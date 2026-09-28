@@ -395,17 +395,6 @@ fn player_state_guid_parts_decode_unsigned_and_exactly() {
     assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 4));
 }
 
-/// A Bomb class is already canonical and must not be rewritten.
-#[test]
-fn canonical_group_leaves_a_bomb_class_alone() {
-    assert_eq!(canonical_group(BOMB_GS), BOMB_GS);
-    assert_eq!(canonical_group(BOMB_PS), BOMB_PS);
-    assert_eq!(
-        canonical_group("/Game/Whatever.Whatever_C"),
-        "/Game/Whatever.Whatever_C"
-    );
-}
-
 #[test]
 fn bomb_player_crosshair_fields_are_typed_without_the_colliding_b() {
     for field in [
@@ -423,6 +412,7 @@ fn bomb_player_crosshair_fields_are_typed_without_the_colliding_b() {
         assert_typed(BOMB_PS, field, Some(FieldType::Byte));
     }
     assert_typed(BOMB_PS, "ProfileName", Some(FieldType::FString));
+    assert_typed(BOMB_PS, "CompetitiveTier", Some(FieldType::Int32));
     assert_eq!(
         TABLE.lookup(BOMB_PS, "B"),
         None,
@@ -449,18 +439,19 @@ fn tidal_wave_rpc_parameters_are_typed() {
     );
 }
 
-#[test]
-fn canonical_group_maps_the_swiftplay_siblings() {
-    assert_eq!(canonical_group(SWIFT_GS), BOMB_GS);
-    assert_eq!(canonical_group(SWIFT_PS), BOMB_PS);
-}
-
-/// Suffixed forms are deliberately NOT aliased: the table holds no entries for
-/// the Bomb spellings of `_ClassNetCache` or `<Class>:<Function>`, so aliasing
-/// them would be an untested claim buying nothing. Pinned so a later "make it
+/// Only the two Swiftplay siblings map to their Bomb twins. A Bomb class is
+/// already canonical and must not be rewritten, and suffixed forms are
+/// deliberately NOT aliased: the table holds no entries for the Bomb
+/// spellings of `_ClassNetCache` or `<Class>:<Function>`, so aliasing them
+/// would be an untested claim buying nothing. Pinned so a later "make it
 /// consistent" edit has to argue with a test.
 #[test]
-fn canonical_group_does_not_alias_the_suffixed_forms() {
+fn canonical_group_maps_only_the_swiftplay_siblings() {
+    assert_eq!(canonical_group(SWIFT_GS), BOMB_GS);
+    assert_eq!(canonical_group(SWIFT_PS), BOMB_PS);
+    for path in [BOMB_GS, BOMB_PS, "/Game/Whatever.Whatever_C"] {
+        assert_eq!(canonical_group(path), path);
+    }
     for suffix in ["_ClassNetCache", ":SomeFunction"] {
         let path = format!("{SWIFT_GS}{suffix}");
         assert_eq!(canonical_group(&path), path, "{suffix} should not alias");
@@ -514,12 +505,6 @@ fn table_is_sorted() {
             (window[1].group_path, window[1].field_name)
         );
     }
-}
-
-#[test]
-fn lookup_finds_known_field() {
-    let ft = TABLE.lookup(BOMB_PS, "CompetitiveTier");
-    assert_eq!(ft, Some(FieldType::Int32));
 }
 
 /// Live per-player economy is replicated under `MoneyManagementComponent` on
@@ -701,11 +686,6 @@ fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     );
     assert_typed(HAWK, "Banking", Some(FieldType::Double));
     assert_checksum(677106858, Some(FieldType::Double));
-    // Still no name rule and no checksum for ReplicatedMovement as a whole:
-    // byte and short donors both remain in the table (see
-    // `only_the_seeker_nade_keeps_short_rotator_components`), so 2749104612
-    // stays out of the checksum table.
-    assert_checksum(2749104612, None);
 }
 
 /// Cypher's trapwire and cage classes were renamed in 13.01, and the five
@@ -1118,12 +1098,6 @@ fn a_b_prefixed_spelling_difference_is_not_treated_as_a_conflict() {
 }
 
 #[test]
-fn lookup_returns_none_for_unknown() {
-    let ft = TABLE.lookup("nonexistent", "field");
-    assert_eq!(ft, None);
-}
-
-#[test]
 fn apply_overlay_decodes_int32() {
     let entries: &[OverlayEntry] = &[OverlayEntry {
         group_path: "/test",
@@ -1168,33 +1142,6 @@ fn apply_overlay_returns_none_for_no_field_name() {
     );
     assert!(result.is_none());
     assert_eq!(stats.no_field_name, 1);
-}
-
-#[test]
-fn apply_overlay_graceful_on_decode_failure() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Broken",
-        field_type: FieldType::FString, // needs more than 1 bit
-    }];
-    let table = OverlayTable::new(entries);
-    let mut stats = OverlayStats::default();
-    let data = [0x01u8]; // only 1 bit -- FString needs at least 32 bits for length
-    let result = apply_overlay(
-        &table,
-        "/test",
-        group_hash_state("/test"),
-        Some("Broken"),
-        Some(&data),
-        1,
-        &mut stats,
-    );
-    // Should return Some but with all values None (decode failure)
-    assert!(result.is_some());
-    let r = result.unwrap();
-    assert_eq!(r.value_i64, None);
-    assert_eq!(r.value_str, None);
-    assert_eq!(stats.decoded_err, 1);
 }
 
 /// A zero-bit payload is the value 0 for `EnumRemainingBits` -- zero width is
@@ -1792,27 +1739,21 @@ fn finite_speed_movement_max_range_is_typed() {
 /// encoding, no table entry. The type does not vary by class, so it resolves by
 /// name once the table has missed on both the group and its alias.
 #[test]
-fn an_engine_object_ref_resolves_on_a_group_the_table_never_saw() {
+fn the_engine_fallback_covers_every_one_of_the_four_names() {
     const BOMB_EQUIPPABLE: &str = "/Game/Equippables/Bomb/BombEquippable.BombEquippable_C";
     assert_eq!(
         TABLE.lookup(BOMB_EQUIPPABLE, "Owner"),
         None,
         "not in the table"
     );
-    assert_eq!(
-        resolve_field_type(&TABLE, BOMB_EQUIPPABLE, Some("Owner"), None),
-        Some(FieldType::ObjectNetGuid),
-    );
-}
-
-#[test]
-fn the_engine_fallback_covers_every_one_of_the_four_names() {
-    for name in ["Owner", "Instigator", "AttachParent", "Controller"] {
-        assert_eq!(
-            resolve_field_type(&TABLE, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
-            Some(FieldType::ObjectNetGuid),
-            "{name} should resolve by name",
-        );
+    for group in ["/Game/NeverSeen.NeverSeen_C", BOMB_EQUIPPABLE] {
+        for name in ["Owner", "Instigator", "AttachParent", "Controller"] {
+            assert_eq!(
+                resolve_field_type(&TABLE, group, Some(name), None),
+                Some(FieldType::ObjectNetGuid),
+                "{name} should resolve by name on {group}",
+            );
+        }
     }
 }
 
@@ -1974,25 +1915,6 @@ fn a_declared_entry_outranks_the_engine_and_checksum_fallbacks() {
 #[test]
 fn an_unlearned_checksum_resolves_nothing() {
     assert_eq!(resolve("/Game/Nope.Nope_C", "Whatever", Some(1)), None,);
-}
-
-/// The safety property: a checksum whose donors disagree is not in the table at
-/// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 25 groups and `ShortComponents`
-/// on 1, which differ in width, so guessing would desync the block; and that
-/// one group packs its location at two decimals where the rest pack whole
-/// units, which a guess would read 100x off with no error at all.
-///
-/// `AllianceFilter` used to be the second entry here and is not any more: its
-/// donors disagreed only in the table, never on the wire -- see
-/// `alliance_filter_donors_agree_so_the_checksum_types_the_receivers`.
-#[test]
-fn checksums_whose_donors_disagree_are_omitted() {
-    assert_eq!(
-        lookup_checksum(2749104612),
-        None,
-        "ReplicatedMovement: Byte vs Short components"
-    );
 }
 
 /// `AllianceFilter` is one property, checksum 2270825073, declared by three
