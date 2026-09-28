@@ -125,7 +125,9 @@ pub struct ArrayDecodeStats {
     /// first. See the increment site in `decode_struct_fields` for why this is
     /// a tally, not an error.
     pub unconsumed_nested_bits: u64,
-    /// Bits left after the root array's explicit terminator or an early stop.
+    /// Bits left after the root array's explicit terminator or an early stop
+    /// of the array loop itself. An element that fails has already moved its
+    /// own counter; the bits after it are abandoned, not counted here again.
     ///
     /// The caller retains the whole parent payload, so these bits remain
     /// recoverable. This counter distinguishes that raw fallback from a fully
@@ -545,19 +547,30 @@ fn decode_array_level(
         stats.elements_decoded += 1;
         let prefix_len = walk.path.len();
         let _ = write!(walk.path, "[{index}]");
-        decode_struct_fields(reader, walk, schema, depth, stats);
+        let closed = decode_struct_fields(reader, walk, schema, depth, stats);
         walk.path.truncate(prefix_len);
+        // An element that did not close on its zero handle has already tallied
+        // why. Reading on would count the same bits again -- as a second EOF,
+        // a second failed read or residual -- so, as in the object-reference
+        // walker, the rest of the stream is abandoned: one anomaly, one counter.
+        if !closed {
+            reader.skip_remaining();
+            break;
+        }
     }
 }
 
 /// Decode the struct fields of one array element (handle/payloadBits loop).
+///
+/// Returns whether the element closed on its zero handle. Every other exit
+/// has moved a counter first, and the caller stops the array on it.
 fn decode_struct_fields(
     reader: &mut BitReader<'_>,
     walk: &mut Walk<'_, '_>,
     schema: Option<&ArrayFieldSchema>,
     depth: u32,
     stats: &mut ArrayDecodeStats,
-) {
+) -> bool {
     for field_idx in 0..=MAX_FIELDS_PER_ELEMENT {
         if reader.at_end() {
             // An element ends on a zero handle. Reaching EOF instead means the
@@ -565,34 +578,37 @@ fn decode_struct_fields(
             // is nothing after it, but indistinguishable from a complete
             // element without this tally.
             stats.implicit_terminations += 1;
-            return;
+            return false;
         }
 
         if field_idx == MAX_FIELDS_PER_ELEMENT {
             let mut probe = reader.clone();
             match probe.read_int_packed() {
-                Ok(0) => *reader = probe,
+                Ok(0) => {
+                    *reader = probe;
+                    return true;
+                }
                 Ok(_) => {
                     stats.truncations += 1;
                     emit_remaining_raw(reader, walk, stats);
                 }
                 Err(_) => stats.errors += 1,
             }
-            return;
+            return false;
         }
 
         let Ok(encoded_handle) = reader.read_int_packed() else {
             stats.errors += 1;
-            return;
+            return false;
         };
         if encoded_handle == 0 {
-            return;
+            return true;
         }
         let handle = encoded_handle - 1;
 
         let Ok(payload_bits) = reader.read_int_packed() else {
             stats.errors += 1;
-            return;
+            return false;
         };
         if payload_bits == 0 {
             continue;
@@ -603,7 +619,7 @@ fn decode_struct_fields(
             // visible, never a silent empty Vec.
             stats.errors += 1;
             reader.skip_remaining();
-            return;
+            return false;
         }
 
         match schema.and_then(|s| s.sub_array(handle)) {
@@ -614,7 +630,7 @@ fn decode_struct_fields(
                     // Counted anyway, so that "unreachable" stays a claim the
                     // stats can contradict rather than an assumption.
                     stats.errors += 1;
-                    return;
+                    return false;
                 };
                 let prefix_len = walk.path.len();
                 walk.path.push('.');
@@ -638,7 +654,9 @@ fn decode_struct_fields(
             Some(_) => {
                 stats.truncations += 1;
                 let Some(raw) = copy_payload(reader, payload_bits) else {
-                    return;
+                    // Unreachable for the same reason; counted the same way.
+                    stats.errors += 1;
+                    return false;
                 };
                 emit(walk, stats, handle, payload_bits, raw, |path| {
                     push_field_label(path, schema, handle);
@@ -647,7 +665,9 @@ fn decode_struct_fields(
             // Leaf field -- emit as-is.
             None => {
                 let Some(raw) = copy_payload(reader, payload_bits) else {
-                    return;
+                    // Unreachable for the same reason; counted the same way.
+                    stats.errors += 1;
+                    return false;
                 };
                 let declared = walk.declared;
                 emit(walk, stats, handle, payload_bits, raw, |path| {
@@ -656,6 +676,9 @@ fn decode_struct_fields(
             }
         }
     }
+    // Unreachable: the last iteration (`field_idx == MAX_FIELDS_PER_ELEMENT`)
+    // always returns. Not closed, should that ever change.
+    false
 }
 
 /// Consume the format's optional one-IntPacked trailer -- a ZERO one only.
@@ -1138,11 +1161,9 @@ mod tests {
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
-        assert!(
-            stats.errors >= 1,
-            "truncated array must count errors, got {}",
-            stats.errors
-        );
+        // One overrun, one counter: not also an implicit termination from the
+        // array loop meeting the EOF the element already reported.
+        assert_eq!(anomalies(&stats), [1, 0, 0, 0, 0], "{stats:?}");
         // No complete leaf was emitted; the caller still emits the parent row
         // from its own raw_bits, independent of this Vec.
         assert!(fields.is_empty());
@@ -1380,11 +1401,9 @@ mod tests {
         let mut stats = ArrayDecodeStats::default();
         let _fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
-        assert!(
-            stats.errors >= 1,
-            "mid-stream read failure must count errors, got {}",
-            stats.errors
-        );
+        // One failed read, one counter: the array loop must not read the same
+        // three bits as an index and fail again, nor leave them as residual.
+        assert_eq!(anomalies(&stats), [1, 0, 0, 0, 0], "{stats:?}");
     }
 
     /// A nested array that leaves bits inside its own window must say so.
@@ -1465,10 +1484,8 @@ mod tests {
 
         // The field itself is complete and is still emitted.
         assert_eq!(fields.len(), 1);
-        assert!(
-            stats.implicit_terminations >= 1,
-            "EOF stood in for a terminator and nothing counted it: {stats:?}"
-        );
+        // One EOF, counted once: by the element, not again by the array loop.
+        assert_eq!(anomalies(&stats), [0, 0, 1, 0, 0], "{stats:?}");
     }
 
     /// The counter must NOT fire on a well-formed array that closes with both
