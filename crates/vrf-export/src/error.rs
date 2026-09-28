@@ -1,25 +1,17 @@
 //! Crate-wide error type.
-//!
-//! All public fallible operations return [`ExportError`]. The surface is
-//! deliberately small -- IO and Parquet are the two failure domains, plus a
-//! caller-misuse variant.
-//!
-//! It is `#[non_exhaustive]` because one of those variants is feature-gated:
-//! the same `match` has to compile whether or not the build has a Parquet
-//! writer in it, so a caller needs a wildcard arm and the type has to say so.
 
 use thiserror::Error;
 
 /// Errors that can occur while writing export files.
+///
+/// `#[non_exhaustive]` because the `Parquet` variant exists only with the
+/// `parquet` feature: a caller's `match` has to compile either way, so it needs
+/// a wildcard arm.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ExportError {
     /// The underlying Parquet writer encountered a codec, schema, or IO error.
-    ///
-    /// Only present with the `parquet` feature: without it the crate has no
-    /// writers, and naming the variant would drag the dependency back in.
-    /// `#[non_exhaustive]` above is what keeps a caller's `match` compiling
-    /// across that boundary.
+    /// Only with `parquet`: naming the type would drag the dependency back in.
     #[cfg(feature = "parquet")]
     #[error("parquet write failed: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
