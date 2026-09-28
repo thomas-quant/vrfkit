@@ -20,6 +20,24 @@ the presentation side, in the Python adapter, where turning
 rule. See docs/archive/PROJECT_STATUS.md section 8 and
 docs/archive/NEXT_STEPS_FINDINGS.md.
 
+The names are the C# table's, not the game's, and one of them differs.
+Compared with the installed 13.06 game's own display names (string tables
+read statically, 2026-09-28): 21 of the 25 match, "Spike" and "Tour de Force"
+differ only in case ("SPIKE", "Tour De Force"), Equippable_Unarmed has no
+equippable data asset, and CompactPistol_C is "Bandit" (string-table key
+CompactPistol_DisplayName), not "Compact Pistol". The table is deliberately
+not overridden here:
+
+- A hand edit of the output fails --check, and editing the vendored resolver
+  breaks its byte-for-byte provenance (third_party/vrp/README.md).
+- The only consumer here, tools/to_valplay_bundle.py, emits the name as
+  shot.equippable.name to match the C# parser's bundle, and valplay prices
+  weapons by that name. valplay leaves "Compact Pistol" unpriced on purpose
+  and lists "Bandit" at 600 as unverified, so emitting "Bandit" would give
+  the gun that price there. valplay's tests pin the literal strings, not
+  this table, so they would stay green. Renaming it is valplay's decision,
+  made together with the price.
+
 Usage:
     python tools/extract_equippables.py [--csharp-root <path>] [--check]
 
