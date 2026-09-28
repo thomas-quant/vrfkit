@@ -500,6 +500,9 @@ impl ReplicationReader {
             {
                 stage.stats.channel_state_limit_failures += 1;
                 if header.b_partial {
+                    // Attempted, then refused: counted here because this
+                    // return skips `process_bunch`, which counts the rest.
+                    stage.stats.partial_bunches += 1;
                     let bit_count = payload.bits_remaining() as usize;
                     let byte_count = stage_fragment(payload.clone(), fragment_stage);
                     sink.on_rejected_partial(RejectedPartialFragment {
@@ -3776,7 +3779,10 @@ mod tests {
     }
 
     /// A partial bunch refused because per-channel state is exhausted keeps its
-    /// own reason; it is not a missing initial.
+    /// own reason; it is not a missing initial. It is still a partial bunch
+    /// attempted: `partial_bunches` is documented as including rejected ones,
+    /// and this refusal returns before `process_bunch`, where the other
+    /// partials are counted.
     #[test]
     fn a_partial_refused_for_channel_state_keeps_that_reason() {
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
@@ -3789,6 +3795,11 @@ mod tests {
         );
 
         assert_eq!(reader.stats().channel_state_limit_failures, 1);
+        assert_eq!(
+            reader.stats().partial_bunches,
+            1,
+            "a partial refused at the channel-state guard was still attempted"
+        );
         assert_eq!(
             rejected_rows(&sink),
             vec![(
