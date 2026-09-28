@@ -10,7 +10,6 @@ What the checker does instead works on any export: for each remap pair, ask
 whether the native group it targets carries rows. If it does not, and the bare
 leaf still does, the remap stopped matching.
 """
-import collections
 import contextlib
 import io
 import subprocess
@@ -28,6 +27,20 @@ SCRIPT = Path(__file__).resolve().parents[1] / "check_component_remaps.py"
 
 PAIRS = [("ZoomStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent")]
 KINDS = {"ZoomStateMachine": "RepLayout"}
+CNC_PAYLOAD = "__vrfkit_unresolved_class_net_cache_payload__"
+
+
+def write_fields(directory, rows) -> Path:
+    """A fields.parquet of `(group_path, field_name)` rows, both columns
+    dictionary-encoded as the exporter writes them."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    table = pa.table({
+        "group_path": pa.array([g for g, _ in rows], pa.string()).dictionary_encode(),
+        "field_name": pa.array([f for _, f in rows], pa.string()).dictionary_encode(),
+    })
+    pq.write_table(table, Path(directory) / "fields.parquet")
+    return Path(directory)
 
 
 class VerdictTests(unittest.TestCase):
@@ -65,13 +78,11 @@ class VerdictTests(unittest.TestCase):
         unresolved-payload row. Counting those would report the healthy case as
         broken, which it did before this was split out.
         """
-        counts = guard.bare_counts({
-            "AbilitiesAndBuffsComponent": collections.Counter({
-                "_cnc_h1": 4683,
-                "__vrfkit_unresolved_class_net_cache_payload__": 4683,
-            }),
-            "ZoomStateMachine": collections.Counter({"CurrentState": 70}),
-        })
+        with tempfile.TemporaryDirectory() as directory:
+            counts, _ = guard.row_counts(write_fields(
+                directory, [("AbilitiesAndBuffsComponent", "_cnc_h1")] * 4683
+                + [("AbilitiesAndBuffsComponent", CNC_PAYLOAD)] * 4683
+                + [("ZoomStateMachine", "CurrentState")] * 70))
         self.assertEqual(counts["AbilitiesAndBuffsComponent"], 0)
         self.assertEqual(counts["ZoomStateMachine"], 70)
 
@@ -199,14 +210,16 @@ class ClassNetCachePairTests(unittest.TestCase):
         self.assertIn("2 RepLayout rows under the leaf", v.detail)
 
     def test_the_two_bare_counts_split_every_row_of_a_bare_group(self):
-        names = {"DamageHandlerComponent": collections.Counter({
-            "__vrfkit_unresolved_class_net_cache_payload__": 4563, None: 1}),
-            "AbilitiesAndBuffsComponent": collections.Counter({
-                "_cnc_h1": 4683, "Status": 3})}
-        rep_layout = guard.bare_counts(names)
-        cnc = guard.cnc_bare_counts(names)
+        """A native group counts every row, ClassNetCache ones included."""
+        with tempfile.TemporaryDirectory() as directory:
+            rep_layout, cnc = guard.row_counts(write_fields(
+                directory, [("DamageHandlerComponent", CNC_PAYLOAD)] * 4563
+                + [("DamageHandlerComponent", None)]
+                + [("AbilitiesAndBuffsComponent", "_cnc_h1")] * 4683
+                + [("AbilitiesAndBuffsComponent", "Status")] * 3
+                + [(self.ROUTED, "_cnc_h2")] * 2))
         self.assertEqual(rep_layout, {"DamageHandlerComponent": 1,
-                                      "AbilitiesAndBuffsComponent": 3})
+                                      "AbilitiesAndBuffsComponent": 3, self.ROUTED: 2})
         self.assertEqual(cnc, {"DamageHandlerComponent": 4563,
                                "AbilitiesAndBuffsComponent": 4683})
 
@@ -265,7 +278,7 @@ class RenameSignalTests(unittest.TestCase):
 
         `AbilitiesAndBuffsComponent` is RepLayout-only by design, so its whole
         RPC stream stays bare on a healthy export. It reaches this function
-        with a 0 because `bare_counts` dropped the `_cnc_h*` rows, and a
+        with a 0 because `row_counts` dropped the `_cnc_h*` rows, and a
         rename suspect list that reported it would be pure noise.
         """
         self.assertEqual(
@@ -297,14 +310,7 @@ class MainTests(unittest.TestCase):
     """The vacuity lives in `main`, so it is exercised there."""
 
     def _export(self, directory, rows):
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-        table = pa.table({
-            "group_path": [g for g, _ in rows],
-            "field_name": [f for _, f in rows],
-        })
-        pq.write_table(table, Path(directory) / "fields.parquet")
-        return Path(directory)
+        return write_fields(directory, rows)
 
     def _run(self, directory):
         result = subprocess.run(
