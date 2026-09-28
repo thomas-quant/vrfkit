@@ -15,7 +15,10 @@ exports raw tables; analytical joins live here so the parser stays focused.
 Position note: `spawn_x/y/z` are the actor's spawn transform, which for a
 placed effect (smoke, wall segment, trap) is its world location. For the few
 effects that relocate, `fields.parquet` carries the live `ReplicatedMovement`
-(quantized x100) or `MulticastAddSmokeScreenPoint.Translation`.
+location or `MulticastAddSmokeScreenPoint.Translation`, both in the same world
+units as the spawn. (Exports made before 2026-09-28 wrote that location 100x
+too small on every class but one; see docs/DATA.md, "`ReplicatedMovement.location`
+is world units, at a per-class level".)
 
 Usage:
     python tools/extract_active_effects.py --export <out_dir> --out active_effects.parquet

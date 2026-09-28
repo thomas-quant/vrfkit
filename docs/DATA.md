@@ -218,7 +218,7 @@ with 100.
 | GAS attribute values | `AresAttributeSet.{BaseValue,CurrentValue}` per handle | ◐ **checkpoints only.** The live stream sends each attribute once when the channel opens and never updates it; `CurrentValue` does move (Reyna's ultimate puts handles at 1.1/0.9) but only checkpoint snapshots show it, and those are written at round transitions, so transient debuffs are gone by then |
 | Persistent effect position (smoke/wall/molly/slow/trap) | `actors.parquet` class_path + spawn xyz | ✅ every spawned effect actor |
 | Persistent effect lifetime | `actors.time_ms` paired across `event` `open`/`close` (non-fuel; a `dormant` event does not end the instance); `CurrentFuelLevel`+`WallActivated` (Viper) | ✅ |
-| Smoke live position | `ReplicatedMovement` (x100) / `MulticastAddSmokeScreenPoint.Translation` | ✅ |
+| Smoke live position | `ReplicatedMovement.location` (world units, [per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)) / `MulticastAddSmokeScreenPoint.Translation` | ✅ |
 | Interaction progress (plant/defuse/orb pickup) | `UsableComponent.HighestProgress` (Float 0..1) / `bIsActive` | ✅ |
 
 ### `CastTime` is not measured from `roundStarted`
@@ -406,6 +406,7 @@ crouch speed is ~190 cm/s.
 | Time (128 Hz tick, resets per round) / global | movement `timestamp` / `time_ms` | ✅ — `timestamp` is a **tick counter**, not milliseconds |
 | Posture (crouch) | `fields.bCrouchHeld` (not movement_state) | ✅ |
 | Trajectory | movement time series per character | ✅ |
+| Ability projectile, smoke, pawn and dropped-weapon position | `fields.ReplicatedMovement` `location` / `linear_velocity` (JSON in `value_str`) | ✅ world units on the 25 classes the table types -- [see below](#replicatedmovementlocation-is-world-units-at-a-per-class-level) |
 
 ### The tick is 128 Hz by a 3:13 pattern, not by alternating
 
@@ -462,6 +463,112 @@ Two things to handle first:
 
 Containment was measured over 12 maps on 69 replays, 121,672,885 live movement
 rows, on build 13.02.
+
+### `ReplicatedMovement.location` is world units, at a per-class level
+
+Non-player actors -- ability projectiles, smokes, walls, pawns, dropped weapons --
+report their position in `fields.parquet` rows named `ReplicatedMovement`, whose
+`value_str` is a JSON object. Its `location` is in the same world units as
+`actors.spawn_x/y/z` and `movement.pos_*`; `linear_velocity` is units per
+second.
+
+**Exports made before 2026-09-28 are 100x too small on almost every class.** The
+reader divided every location by 100, the C# reference's `VectorNetQuantize100`.
+The wire packs `round(world * scale)` and sets one bit saying "scaled", never the
+scale, and on all but one class the scale is 1 -- so `location` came out as
+world/100, a plausible point near the map origin, while every decode counter
+read clean (bit consumption does not depend on the divisor). This table used to
+list the field as "`ReplicatedMovement` (x100) ✅". To repair an old export,
+multiply `location` by 100 on every class except `Pawn_Aggrobot_SeekerNade_C`,
+whose values were already right.
+
+The scale is Unreal's `LocationQuantizationLevel`, a per-class choice the wire
+does not carry, so every `RepMovement` entry in the overlay table now states it
+(`FieldType::RepMovement { rotation, location }`), the way it already stated
+the rotator width.
+
+**Method.** Measured 2026-09-28 over the 1,018 replays audited at `259ed10`
+(24 builds; the three one-replay public fixtures, 12.10, 12.11 and 13.00, carry
+no `ReplicatedMovement` rows). An independent Python reader of the raw bits,
+which agrees with the Rust decoder on all 8,250,603 typed rows, supplies the
+packed integers. Two checks per class:
+
+- *Spawn join.* Each `open` row in `actors.parquet`, joined to the same actor's
+  first `ReplicatedMovement` row at the same `time_ms` on the same channel, spawn
+  position at least 50 units from the origin: `|packed integer| / |spawn xyz|` is
+  the scale. Its median on every class and every build lands within 0.01% of 1
+  or of 100, and the 1st-99th percentiles within 0.03%. Read at its level, the
+  location is within 0.5 units of the spawn on every axis of every join (0.0502
+  on SeekerNade) -- the rounding its level allows.
+- *Speed.* Consecutive rows of one actor with `0 < dt <= 0.2 s` and
+  `|velocity| >= 200`: `(|location step| / dt) / |velocity|` with the location at
+  its measured scale. Near 1 means the velocity is whole units too.
+
+| Class | Rotator | Location | Spawn joins | Builds | Ratio p1-p99 | Speed check (median, pairs) |
+|---|---|---|---:|---:|---|---|
+| `Pawn_Aggrobot_SeekerNade_C` | Short | **two decimals** | 932 | 15 | 99.9984-100.0014 | no moving rows |
+| `EquippablePickupProjectile_C` | Byte | whole units | 288,644 | 21 | 0.9997-1.0002 | 1.01 (1,950,150) |
+| `GameObject_Smonk_NewSmoke_C` | Short | whole units | 27,667 | 21 | 0.9999-1.0001 | no moving rows |
+| `Projectile_Wraith_4_Smoke_C` | Byte | whole units | 14,935 | 17 | 0.9998-1.0002 | 1.00 (144,774) |
+| `Zone_Wraith_4_Smoke_C` | Short | whole units | 14,902 | 17 | 0.9999-1.0001 | no moving rows |
+| `Projectile_Vampire_4_NearsightAoE_C` | Byte | whole units | 13,892 | 21 | 0.9998-1.0002 | 0.97 (67,202) |
+| `Projectile_Hunter_Q_RevealBolt_C` | Byte | whole units | 12,032 | 14 | 0.9998-1.0002 | 1.00 (170,773) |
+| `Projectile_Wushu_4_Smoke_C` | Byte | whole units | 11,976 | 20 | 0.9999-1.0002 | 0.98 (530,104) |
+| `Projectile_E_BountyHunter_Divebomb_C` | Byte | whole units | 5,715 | 14 | 0.9999-1.0001 | 0.99 (120,908) |
+| `Projectile_Hunter_4_ExplosiveBolt_C` | Byte | whole units | 5,280 | 5 | 0.9999-1.0001 | 1.00 (55,390) |
+| `Projectile_Wraith_Q_NearsightMissile_C` | Byte | whole units | 4,062 | 17 | 0.9998-1.0001 | 1.00 (53,124) |
+| `Projectile_Smonk_DecayNade_C` | Byte | whole units | 3,505 | 21 | 0.9999-1.0001 | 1.00 (46,775) |
+| `GameObject_Smonk_Q_DecayExplosion_C` | Short | whole units | 3,490 | 21 | 0.9999-1.0001 | no moving rows |
+| `GameObject_Smonk_NewSmoke_PDS_C` | Short | whole units | 3,320 | 21 | 0.9998-1.0002 | no moving rows |
+| `Projectile_Neon_C_Tunnel_C` | Byte | whole units | 3,269 | 12 | 0.9998-1.0001 | 0.98 (54,749) |
+| `Projectile_Phoenix_Q_FlameWall_ThroughWall_C` | Byte | whole units | 2,765 | 18 | 0.9999-1.0001 | 0.98 (179,899) |
+| `Projectile_E_Aggrobot_DiscTurret_PowerWave_C` | Byte | whole units | 1,819 | 15 | 0.9998-1.0002 | 1.00 (30,501) |
+| `Projectile_E_Aggrobot_OrbSpawner_C` | Byte | whole units | 1,812 | 15 | 0.9999-1.0002 | 1.06 (13,139) |
+| `GameObject_Mage_E_WorldSmoke_C` | Short | whole units | 1,046 | 5 | 0.9999-1.0001 | no moving rows |
+| `Projectile_Terra_C_TimeSlowGrenade_C` | Byte | whole units | 1,033 | 11 | 0.9999-1.0002 | 1.00 (10,280) |
+| `GameObject_Terra_C_TimeSlowGrenade_Explosion_C` | Byte | whole units | 1,029 | 11 | 0.9998-1.0001 | no moving rows |
+| `Projectile_Aggrobot_Zamboni_Rocket_C` | Byte | whole units | 1,007 | 15 | 0.9998-1.0002 | 1.00 (1,112) |
+| `Projectile_Pandemic_E_SmokeScreen_NoCollision_C` | Byte | whole units | 703 | 8 | 0.9998-1.0001 | 1.00 (8,930) |
+| `Projectile_Aggrobot_C_ExplodeyPatch_C` | Byte | whole units | 647 | 15 | 0.9999-1.0001 | 1.00 (9,052) |
+| `Projectile_Mage_Q_Wall_C` | Byte | whole units | 596 | 5 | 0.9998-1.0002 | 0.98 (131,617) |
+
+Every class the table types was observed, so no entry rests on the default
+alone. The two-decimal class is also visible in the raw widths: its packed
+components are 17-22 bits wide (median 21), against a median of 14 on every
+whole-unit class.
+
+What the evidence does **not** cover:
+
+- **SeekerNade's velocity level.** All 932 of its velocities are the zero vector,
+  which reads the same at any divisor, so its speed check has nothing to measure.
+  The reader uses whole units for every velocity.
+- **Checkpoints.** No checkpoint table in the 1,018 exports holds a single
+  `ReplicatedMovement` row, so every figure above is main-stream only.
+- **Classes the table does not type yet.** The same checks on the 67 untyped
+  classes that carry the field split cleanly: all ten `Pawn_*`/`AIPawn_*`
+  classes pack two decimals (for example `Pawn_Clay_E_Boomba_C`,
+  `Pawn_Killjoy_E_Turret_C`) and all 57 others pack whole units, among them
+  `Projectile_Guide_E_HawkFlash_C` (8,265 joins over 15 builds, ratio
+  0.9998-1.0001, speed check 0.99 over 1,013,091 pairs). That is a pattern for
+  whoever adds one of them, not a reason to skip measuring it.
+
+**New entries.** The generator (`extract_descriptors.py`,
+`REP_MOVEMENT_LOCATION`) gives every entry whole units -- Unreal's own
+`FRepMovement` default and the level of 24 of the 25 classes above -- and
+`apply_type_corrections.py` pins SeekerNade to two decimals. A default is a
+prior, not a measurement, so `tests::overlay` lists every `RepMovement` entry
+with its measured level and fails on an entry it does not list: a new class
+cannot ship on the default without somebody running the spawn join first.
+
+**This member now differs from the C# reference on purpose.** The reference
+still emits location/100 for every class. The 2026-08-02 decision to keep that
+reading (archived as 13-J in
+[PROJECT_STATUS.md](archive/PROJECT_STATUS.md#13-j-the-ability-pawns-and-projectiles-got-descriptors-done-2026-08-02))
+rested on member-for-member parity with the reference (13-B) and on "no metric
+section consumes the field"; the second reason stopped being true when this
+document began listing the field as a position source, and a position that is
+100x wrong is not a parity worth keeping. That parity join was a one-off, so no
+committed check had to be changed or excluded.
 
 ## Weapons & loadout
 
@@ -841,10 +948,15 @@ table rather than only the ones this replay spawned, is **none**, and the reason
 is worth keeping.
 
 `Owner` was safe because its *encoding* is fixed, not because its name is
-standard. `ReplicatedMovement` is just as standard a name and is declared three
-different ways in the table -- `RepMovement{ByteComponents}` on 18 groups,
-`RepMovement{ShortComponents}` on 6, `Skip` on 1. Those differ in width, so a
-name rule there would not read a wrong value quietly; it would desync the block.
+standard. `ReplicatedMovement` is just as standard a name and is declared four
+different ways in the table -- `RepMovement` with byte rotators on 19 groups,
+with short rotators on 6, `Skip` on 1, and one of the short ones packs its
+location at two decimals where the rest pack whole units. The two rotator
+widths consume different numbers of bits, so a name rule there would desync
+the block; the location level consumes the same bits either way, so a name
+rule would read a value 100x off without a single error -- the failure the
+[per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)
+exists to prevent.
 `RelativeScale3D` and `CosmeticRandomSeed` split the same way, and only on
 groups this replay never spawned -- measuring against the wire alone would have
 called both of them clean.

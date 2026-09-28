@@ -150,8 +150,15 @@ VECTOR_PROPERTIES = frozenset({
 #
 # Listed by name rather than sniffed with `value.startswith("{")`: a string
 # that merely looks like JSON is not evidence that it is a movement struct.
-# ReplicatedMovement is the only field with FieldType::RepMovement in the
-# generated table (7 entries, all this name).
+# ReplicatedMovement is the only field name with FieldType::RepMovement in the
+# generated table; every such entry carries this name.
+#
+# The JSON is passed through untouched, units included: `location` is world
+# units on every class the table types (the reader divides by each class's
+# own quantization level; docs/DATA.md has the per-class evidence), so the
+# adapter applies no scale of its own. Exports from before 2026-09-28 carry
+# location/100 on all classes but one and should be regenerated, not
+# rescaled here.
 JSON_OBJECT_PROPERTIES = frozenset({
     "ReplicatedMovement",
 })
