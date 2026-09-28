@@ -1,12 +1,9 @@
 """Guards for the per-build entry survival report.
 
-The report exists because a game patch that moves or renames a declared group
-breaks no key loudly: the rows arrive untyped and every counter stays at zero.
-So the classes it separates are the point, and each test here builds the
-declarations for one of them -- declared, field-missing, not observed, moved
--- and asserts the class and the exit code. A test that asserted only the
-exit code would pass with the move detection deleted, since a vanished group
-exits 0 too; they assert the category as well.
+Each test builds the declarations for one class -- declared, field-missing,
+not observed, moved -- and asserts the category as well as the exit code: a
+vanished group exits 0 too, so an exit code alone would pass with the move
+detection deleted.
 """
 import contextlib
 import io
@@ -478,8 +475,8 @@ class LoadTests(unittest.TestCase):
             encoding="utf-8")
 
     def test_a_field_without_a_name_or_checksum_is_counted_not_declared(self):
-        """It was recorded under None with no tally, and a None name at a
-        mapped handle resolves through the handle: a guess."""
+        """Kept under None with no tally, a nameless field at a mapped handle
+        would resolve through the handle alone: a guess."""
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "e"
             self.write_incomplete(d, "13.01")
@@ -561,8 +558,8 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(sum(f["fails"] for f in data["findings"]), 0)
 
     def test_failures_name_the_expected_list_that_was_read(self):
-        """Both FAILED lines named the default list even when --expected
-        pointed elsewhere, sending the reader to the wrong file."""
+        """FAILED lines name the list --expected read, not the default, or they
+        send the reader to the wrong file."""
         stale = {"entry": f"table|{STATE}|bArmed", "build": "13.02",
                  "finding": "field-missing", "reason": "r", "evidence": "e"}
         with tempfile.TemporaryDirectory() as tmp:
@@ -584,10 +581,9 @@ class LoadTests(unittest.TestCase):
         """Drop either committed item and its finding fails the run by name --
         the list honours HasStopped only while the item is there."""
         items = json.loads(guard.EXPECTED_JSON.read_text(encoding="utf-8"))["expected"]
-        # Not a pin on the fixture's size: `write_committed_findings` must
-        # reproduce every committed item, or the end-to-end test above reads
-        # the new one STALE. This names the two it reproduces, so an item
-        # added to the list fails here saying what to add there.
+        # Not a size pin: `write_committed_findings` must reproduce every
+        # committed item, so an item added to the list fails here naming what
+        # to add there, rather than reading STALE in the end-to-end test.
         self.assertEqual(sorted(i["entry"].rsplit("|", 1)[1] for i in items),
                          ["HasStopped", "TeamEconomy"])
         with tempfile.TemporaryDirectory() as tmp:

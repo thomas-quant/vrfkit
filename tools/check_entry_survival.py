@@ -6,16 +6,14 @@ Why this exists
 Almost every typed value vrfkit emits is keyed on something the replay
 declares: `table.rs` on (group path, field name), `scoped_types.rs` on (field
 name, group path, compatible checksum), `checksum_table.rs` on the checksum
-alone, and a few hand-written maps on exact group paths. A game patch that
-moves a Blueprint to another folder, renames it or stops replicating a
-property breaks none of them loudly. The key simply stops matching, the rows
-arrive untyped and `Decode errors: 0` holds -- the "name resolution failed ->
-Raw" shape in CLAUDE.md. Cypher's tripwire is the case that prompted this: its
-assets moved from `.../Gumshoe/S0/Ability_E/` to `.../Ability_4/`, the old
-`table.rs` keys stopped matching and `Deployed` went untyped with every
-counter at zero. On the 1,018-replay declaration corpus (2026-09-28) that move
-happened between 13.00 and 13.01: the new groups are declared from 13.01 on
-(70 of 215 replays), the old ones last in 13.00 and earlier.
+alone, and a few hand-written maps on exact group paths. A patch that moves,
+renames or stops replicating something breaks none of them loudly: the key
+stops matching, the rows arrive untyped and `Decode errors: 0` holds. Cypher's
+tripwire assets moved from `.../Gumshoe/S0/Ability_E/` to `.../Ability_4/`
+and `Deployed` went untyped with every counter at zero. On the 1,018-replay
+declaration corpus (2026-09-28) that move happened between 13.00 and 13.01:
+the new groups are declared from 13.01 on (70 of 215 replays), the old ones
+last in 13.00 and earlier.
 
 Only declarations are read -- the main stream's `net_field_export_groups` in
 `manifest.json` and, when the export has them, every checkpoint's
@@ -52,15 +50,10 @@ vrf-decode/src/effect.rs. A rename there is still silent to this tool.
 
 When an entry counts as declared
 --------------------------------
-`table` entries are matched the way `resolve_entry` in overlay.rs matches them:
-the declared name, then its `b`-prefixed spelling, then the explicit handle
-(only for a bare-decimal FName name, which says nothing about the property),
-each retried against the `GROUP_ALIASES` target of a Swiftplay group. So
-`Role` / `RemoteRole`, which every current replay declares as `215` / `216`,
-are reached only where a handle entry maps them; otherwise they land in "never
-declared", which is what they are to the overlay. A `handle` entry counts
-where its (group, handle) carries a bare-decimal name, the descriptor's own
-name, or a spelling the name lookups resolve to that same property; a real
+`table` entries are matched in `resolve_entry`'s order (overlay.rs, mirrored
+by overlay_mirror; see `Overlay`), so `Role` / `RemoteRole`, which every
+current replay declares as `215` / `216`, are reached only where a handle
+entry maps them. A `handle` entry counts per `Overlay.handle_state`; a real
 name the table does not know is the refusal overlay.rs counts, tallied here as
 a handle conflict per build. `scoped`, `route` and `checksum` entries count
 where their exact key is declared, `remap` and `alias` entries where their
@@ -167,11 +160,9 @@ than two builds.
 Running it on a new build
 -------------------------
 Export the new build's replays with `--checkpoints` into the same root as the
-earlier builds' exports and run with `--root`. The previous build must be in
-the root too: survival is a comparison, and a build is judged only against
-the builds before it. Anything the new build lacks is judged only once it has
-`MIN_CONTEXT` replays declaring the group (for a move: `MIN_CONTEXT` replays
-at all); below that every finding prints as weak.
+earlier builds' exports and run with `--root`: a build is judged only against
+the builds before it, so the previous build must be there too, and until the
+new build has `MIN_CONTEXT` replays every finding in it prints as weak.
 
 Usage:
     python tools/check_entry_survival.py --root <exports-root> [--root ...]
@@ -278,10 +269,6 @@ class Entry:
         extra = f" ({self.checksum})" if self.kind in ("scoped", "route") else ""
         return f"{self.kind} {self.group} . {self.name}{tail}{extra}"
 
-
-# --------------------------------------------------------------------------
-# Parsing the Rust sources
-# --------------------------------------------------------------------------
 
 def parse_overlay_table(src: str) -> list[Entry]:
     return [Entry("table", g, n, ftype=normalize_type(t))
@@ -402,10 +389,6 @@ def load_catalog(sources: Sources) -> Catalog:
     return Catalog(entries, aliases, mirror.engine_object_refs(sources.overlay))
 
 
-# --------------------------------------------------------------------------
-# The resolution order, mirrored
-# --------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class Resolution:
     step: str               # table | alias | scoped | engine | checksum
@@ -477,10 +460,6 @@ class Overlay:
         return None, ""
 
 
-# --------------------------------------------------------------------------
-# Declarations
-# --------------------------------------------------------------------------
-
 @dataclass
 class LoadStats:
     exports: int = 0
@@ -505,11 +484,8 @@ class Replay:
 
 def discover(roots: list[Path], exports: list[Path], stats: LoadStats) -> list[Path]:
     """Children of each root holding `manifest.json`, then the named exports.
-
-    Staging and backup directories an interrupted `vrfkit export` leaves are
-    skipped and listed (see export_scan.py); a directory named explicitly is
-    always read.
-    """
+    Staging and backup siblings are skipped and listed (export_scan.py); a
+    directory named explicitly is always read."""
     found: list[Path] = []
     for root in roots:
         if not root.is_dir():
@@ -605,10 +581,6 @@ def short(build: str) -> str:
     major, minor = build_version(build)
     return f"{major}.{minor:02d}"
 
-
-# --------------------------------------------------------------------------
-# Per-build tallies
-# --------------------------------------------------------------------------
 
 @dataclass
 class Tally:
@@ -722,10 +694,6 @@ def tally(replays: list[Replay], catalog: Catalog, overlay: Overlay) -> Tally:
                  group_replays, declarations)
 
 
-# --------------------------------------------------------------------------
-# Judgement
-# --------------------------------------------------------------------------
-
 def p_absent(total: int, hits: int, drawn: int) -> float:
     """Chance that `drawn` of `total` replays, `hits` of which declare the
     entry, all miss it: C(total - hits, drawn) / C(total, drawn)."""
@@ -798,15 +766,9 @@ def _rule_rank(rule: str) -> int:
 
 
 def find_successors(tally_: Tally, group: str, build: str, window: list[str]) -> list[Successor]:
-    """Groups that took over from `group`, which `build` no longer declares.
-
-    A candidate is declared in `build`, in no build of the reference window,
-    and is of the same kind. It is a successor when its class name matches
-    (`leaf_rule`) or when it declares one of `group`'s RARE reference pairs.
-    Rarity is what keeps a generic pair out: `Owner` / `Instigator` sit on
-    hundreds of groups and every build introduces some, so without it any
-    class that stopped being used would acquire a "successor".
-    """
+    """Groups that took over from `group`, which `build` no longer declares:
+    the successor rule of the module docstring's `moved` state (`leaf_rule`,
+    or one of `group`'s RARE reference pairs)."""
     in_window = set()
     for b in window:
         in_window.update(tally_.group_replays[b])
@@ -873,13 +835,10 @@ UNTYPED = frozenset({normalize_type("FieldType::Raw"), normalize_type("FieldType
 
 def coverage(overlay: Overlay, tally_: Tally, finding: Finding) -> tuple[str, str]:
     """Whether the successor's own declaration of the field still gets the
-    entry's type, and how.
-
-    `covered` when it resolves to the same type, or when the entry is `Raw` /
-    `Skip` and the successor's field is untyped too: no typed row was there to
-    lose. Anything else is `lost`, including a successor that does not declare
-    the field under the same checksum -- whether the property went away or
-    changed type, nothing here types it now.
+    entry's type, and how: `covered` when it resolves to the same type, or
+    when a `Raw` / `Skip` entry's successor field is untyped too (no typed row
+    to lose); anything else is `lost`, including a successor that does not
+    declare the field under the same checksum.
     """
     entry, succ = finding.entry, finding.successors[0].group
     if entry.kind in GROUP_ONLY:
@@ -952,13 +911,11 @@ def judge(tally_: Tally, catalog: Catalog, overlay: Overlay) -> Judgement:
             if k:
                 counts["survived"] += 1
                 if entry.kind in ("table", "handle"):
-                    # Drift is read only off a name the reference carried under
-                    # ONE checksum. Flattened struct members (`G`, `R` on
-                    # BombPlayerState, `CurrentValue` on AresAttributeSet)
-                    # carry several at once by design, and would list every
-                    # build. A new checksum `checksum_table.rs` already types
-                    # the same way is a second property of that name, not a
-                    # changed one.
+                    # One reference checksum only: flattened struct members
+                    # (`G`, `R` on BombPlayerState, `CurrentValue` on
+                    # AresAttributeSet) carry several by design and would list
+                    # every build. A new checksum `checksum_table.rs` types the
+                    # same way is a second property of that name.
                     seen = set().union(*(tally_.identities[entry].get(b, set()) for b in window))
                     old = {cs for _, cs in seen}
                     new = {(n, cs) for n, cs in tally_.identities[entry].get(build, set())
@@ -999,10 +956,6 @@ def judge(tally_: Tally, catalog: Catalog, overlay: Overlay) -> Judgement:
     return Judgement(findings, per_build, drift, windows)
 
 
-# --------------------------------------------------------------------------
-# The expected list
-# --------------------------------------------------------------------------
-
 EXPECTED_KEYS = {"entry", "build", "finding", "reason", "evidence"}
 
 
@@ -1040,10 +993,6 @@ def apply_expected(findings: list, items: list[dict]) -> list[dict]:
             f.expected = item
     return stale
 
-
-# --------------------------------------------------------------------------
-# Report
-# --------------------------------------------------------------------------
 
 def _span(builds: list[str]) -> str:
     if not builds:
@@ -1220,10 +1169,6 @@ def to_json(tally_: Tally, catalog: Catalog, judgement: Judgement, stale: list) 
         "stale_expected": stale,
     }
 
-
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
 
 def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: LoadStats,
         verbose: bool = False, show: str | None = None,
