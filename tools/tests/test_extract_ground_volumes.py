@@ -572,8 +572,7 @@ class CliTests(unittest.TestCase):
                 gv.extract(source, source / "forbidden")
 
     def test_the_receipt_is_written_with_lf_line_endings(self):
-        """Text mode wrote receipt.json with CRLF on Windows, while the two
-        ndjson files were LF on every platform."""
+        """LF on every platform, like the two ndjson files (not CRLF on Windows)."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gv.extract(make_export(root, [window_row()]), root / "result")

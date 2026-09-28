@@ -159,10 +159,9 @@ class Tests(unittest.TestCase):
         return td, p
 
     def test_a_non_ascii_manifest_is_read_as_utf8(self):
-        """vrfkit writes manifest.json as UTF-8 and copies the replay path into
-        source_file verbatim. Decoded with the locale codec, a Hangul path made
-        this tool exit 1 on cp949 Windows. The fixture must hold raw UTF-8:
-        json.dumps escapes non-ASCII by default, which would hide the bug."""
+        """manifest.json is UTF-8 with the replay path verbatim (a Hangul path
+        failed the locale codec on cp949 Windows). The fixture holds raw
+        UTF-8: json.dumps' default escaping would hide the bug."""
         td, p = self.make()
         self.addCleanup(td.cleanup)
         data = manifest()
@@ -413,8 +412,8 @@ class Tests(unittest.TestCase):
                 self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_an_invalid_edge_is_counted_not_just_labelled(self):
-        # A malformed reference window keeps the amount and marks the edge
-        # invalid. That used to move no counter at all; it must reach counts.
+        # A malformed reference window keeps the amount, marks the edge
+        # invalid, and reaches the counts.
         rows = fixture()
         target = next(
             r for r in rows if r["field_name"] == "MulticastNotifyHeal.EventInstigator"
