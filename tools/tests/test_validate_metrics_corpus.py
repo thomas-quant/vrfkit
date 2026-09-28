@@ -16,7 +16,6 @@ exporter has stopped writing sitting there with last run's contents".
 import contextlib
 import io
 import json
-import stat
 import sys
 import tempfile
 import unittest
@@ -33,7 +32,6 @@ OK = {"id": "a", "stage": "ok", "elapsed_s": 1.0, "sections": {"combat": "EXACT"
 
 class FreshDirTests(unittest.TestCase):
     def test_a_stale_file_does_not_survive_into_the_next_run(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as parent:
             target = Path(parent) / "xval" / "some-id"
             target.mkdir(parents=True)
@@ -47,7 +45,6 @@ class FreshDirTests(unittest.TestCase):
             self.assertFalse(stale.exists())
 
     def test_a_directory_that_does_not_exist_yet_is_created(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as parent:
             target = Path(parent) / "never" / "existed"
             guard.fresh_dir(target)
@@ -185,35 +182,11 @@ class MainWiringTests(unittest.TestCase):
         vrf_dir.mkdir()
         exports.mkdir()
 
-        vrfkit = root / "vrfkit_stub.py"
-        vrfkit.write_text(
-            "#!/usr/bin/env python3\n"
-            "import sys\n"
-            "from pathlib import Path\n"
-            "out = Path(sys.argv[sys.argv.index('--out') + 1])\n"
-            "out.mkdir(parents=True, exist_ok=True)\n",
-            encoding="utf-8",
-        )
-        vrfkit.chmod(vrfkit.stat().st_mode | stat.S_IEXEC)
-
-        adapter = root / "adapter_stub.py"
-        adapter.write_text(
-            "import sys\n"
-            "from pathlib import Path\n"
-            "out = Path(sys.argv[sys.argv.index('-o') + 1])\n"
-            "out.mkdir(parents=True, exist_ok=True)\n",
-            encoding="utf-8",
-        )
-
-        compute = root / "compute_stub.py"
-        compute.write_text(
-            "import json, sys\n"
-            "from pathlib import Path\n"
-            "bundle = Path(sys.argv[1])\n"
-            "(bundle / 'metrics.json').write_text(json.dumps({}), "
-            "encoding='utf-8')\n",
-            encoding="utf-8",
-        )
+        # `run` is patched below, so these are never executed; main() only
+        # requires VRFKIT to exist.
+        vrfkit, adapter, compute = (root / "vrfkit_stub.py", root / "adapter_stub.py",
+                                    root / "compute_stub.py")
+        vrfkit.touch()
 
         # `a` gets a source replay and a reference bundle -- the stub pipeline
         # completes it. `b` gets neither, so `process()` dies at the "input"

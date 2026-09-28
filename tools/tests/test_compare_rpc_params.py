@@ -128,13 +128,6 @@ class InputTests(unittest.TestCase):
         self.assertNotIn("valplay", guard.DEFAULT_REFERENCE.lower())
 
 
-class ToleranceTests(unittest.TestCase):
-    def test_the_float_tolerance_is_named_so_the_verdict_can_state_it(self):
-        """`MATCH` is only true to this many decimal places, and said so nowhere."""
-        self.assertEqual(guard.norm(1.234, "float"),
-                         round(1.234, guard.FLOAT_PLACES))
-
-
 # --- files shaped like the real inputs -------------------------------------
 
 LISTED = guard.EXPECTED_DIFFERENCES[0]

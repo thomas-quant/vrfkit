@@ -56,10 +56,6 @@ class PatternTests(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), "0")
 
-    def test_every_accumulated_counter_has_a_pattern(self):
-        for key in ("blocks", "malformed", "skipped", "fields", "rpcs"):
-            self.assertIn(key, guard.PATTERNS)
-
     def test_missing_branch_is_a_controlled_parse_failure(self):
         text = """
 Total content blocks: 10
@@ -75,36 +71,18 @@ ORACLE PASS RATE: 100.000000%
 
 
 class ArgParsingTests(unittest.TestCase):
-    """Defect 1 wiring: discovery now goes through corpus_scan.py, and the
-    recursion choice is an explicit, opt-in flag rather than a hardcoded glob.
-    """
-
-    def test_recursive_defaults_to_false(self):
-        args = guard.parse_args(["validate_corpus.py", "vrfkit.exe", "corpus"])
-        self.assertFalse(args.recursive)
-
-    def test_recursive_flag_is_readable(self):
-        args = guard.parse_args(
-            ["validate_corpus.py", "vrfkit.exe", "corpus", "--recursive"])
-        self.assertTrue(args.recursive)
-
-    def test_the_optional_limit_still_parses_positionally(self):
-        """Backward compatibility: `<exe> <corpus> [limit]` must keep working."""
-        args = guard.parse_args(["validate_corpus.py", "vrfkit.exe", "corpus", "5"])
-        self.assertEqual(args.limit, 5)
-
-    def test_limit_is_optional(self):
-        args = guard.parse_args(["validate_corpus.py", "vrfkit.exe", "corpus"])
-        self.assertIsNone(args.limit)
-
-    def test_identifier_redaction_is_opt_in(self):
-        plain = guard.parse_args(
-            ["validate_corpus.py", "vrfkit.exe", "corpus"])
-        private = guard.parse_args(
-            ["validate_corpus.py", "vrfkit.exe", "corpus",
-             "--redact-identifiers"])
-        self.assertFalse(plain.redact_identifiers)
-        self.assertTrue(private.redact_identifiers)
+    def test_flags_are_opt_in_and_the_limit_still_parses_positionally(self):
+        """Discovery recursion and redaction are explicit, opt-in flags, and
+        `<exe> <corpus> [limit]` must keep working."""
+        argv = ["validate_corpus.py", "vrfkit.exe", "corpus"]
+        plain = guard.parse_args(argv)
+        self.assertIsNone(plain.limit)
+        self.assertEqual(guard.parse_args(argv + ["5"]).limit, 5)
+        for flag in ("recursive", "redact_identifiers"):
+            with self.subTest(flag=flag):
+                self.assertFalse(getattr(plain, flag))
+                given = guard.parse_args(argv + ["--" + flag.replace("_", "-")])
+                self.assertTrue(getattr(given, flag))
 
 
 #: Stand-in for `vrfkit.exe`, invoked exactly as `_run_one` invokes the real

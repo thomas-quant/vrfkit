@@ -179,16 +179,14 @@ class UpdateScopeTests(unittest.TestCase):
 
 class WiringTests(unittest.TestCase):
     def test_pipeline_uses_separate_export_and_bundle_trees(self):
-        self.assertTrue(hasattr(guard, "pipeline_paths"))
         export_dir, bundle_dir, metrics_path = guard.pipeline_paths(Path("scratch"))
         self.assertEqual(export_dir, Path("scratch/export"))
         self.assertEqual(bundle_dir, Path("scratch/bundle"))
         self.assertEqual(metrics_path, Path("scratch/metrics.json"))
 
-    def test_every_build_has_a_replay_path(self):
-        self.assertEqual(sorted(guard.REPLAYS),
-                         ["12.10", "12.11", "13.00", "13.01", "13.02", "13.04", "13.05",
-                          "13.06"])
+    def test_every_build_has_the_replay_the_baseline_pins(self):
+        pinned = json.loads(guard.DEFAULT_BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(guard.REPLAYS, pinned["replays"])
 
     def test_no_build_points_at_the_directory_the_game_rotates(self):
         """Saved\\Demos is owned by VALORANT and lost four pinned replays once."""

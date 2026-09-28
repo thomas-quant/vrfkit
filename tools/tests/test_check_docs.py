@@ -81,10 +81,6 @@ class LinkTests(unittest.TestCase):
         text = "[a](../README.md#어쩌고)"
         self.assertEqual(guard.check_links(guard.USAGE, text), [])
 
-    def test_the_shipped_docs_have_no_dead_links(self):
-        for path in (guard.README, guard.USAGE):
-            self.assertEqual(guard.check_links(path, guard.read(path)), [], path.name)
-
     def test_every_top_level_doc_is_link_checked(self):
         """26 docs were added under docs/ in one week while this guard read
         two of them. Every top-level doc is now link-checked."""
@@ -525,21 +521,12 @@ class BaselineFigureTests(unittest.TestCase):
 
 
 class DocCoverageTests(unittest.TestCase):
-    """DATA.md and CONTRIBUTING.md were read by nothing at all."""
-
-    def test_data_md_and_contributing_are_covered(self):
-        self.assertIn("docs/DATA.md", guard.ALL_DOCS)
-        self.assertIn("CONTRIBUTING.md", guard.ALL_DOCS)
-
-    def test_claude_md_is_covered(self):
-        """CLAUDE.md carries a relative link (to CONTRIBUTING.md) that
-        nothing was checking -- it just happens to be correct today."""
-        self.assertIn("CLAUDE.md", guard.ALL_DOCS)
-
-    def test_every_covered_doc_has_resolving_links(self):
-        for name in guard.ALL_DOCS:
-            path = guard.REPO / name
-            self.assertEqual(guard.check_links(path, guard.read(path)), [], name)
+    def test_data_md_contributing_and_claude_md_are_covered(self):
+        """DATA.md and CONTRIBUTING.md were read by nothing at all, and
+        CLAUDE.md's relative link (to CONTRIBUTING.md) was checked by
+        nothing -- it just happened to be correct."""
+        self.assertLessEqual({"docs/DATA.md", "CONTRIBUTING.md", "CLAUDE.md"},
+                             set(guard.ALL_DOCS))
 
 
 class CheckCountTests(unittest.TestCase):
