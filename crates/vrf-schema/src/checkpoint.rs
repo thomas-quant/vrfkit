@@ -69,6 +69,7 @@ use crate::cache::NetGuidCache;
 use crate::error::{Result, SchemaError};
 use crate::export::{NetFieldExport, NetFieldExportGroup, render_fname};
 use crate::guid::NetworkGuid;
+use crate::reader::{MAX_FIELDS_PER_GROUP, MAX_FSTRING_BYTES};
 
 /// Streaming observer for checkpoint schema records. Borrowed strings are valid
 /// only for the callback; the cache receives its own owned copy afterwards.
@@ -122,9 +123,6 @@ pub enum CheckpointReadError<E> {
     Sink(E),
 }
 
-/// Maximum string size for a checkpoint path or name.
-const MAX_FSTRING_BYTES: i64 = 1024 * 1024;
-
 /// Sanity bound on the guid-cache entry count. The largest corpus checkpoint
 /// carries roughly 12,000; a million would mean a mis-read length.
 const MAX_GUID_ENTRIES: u32 = 1_000_000;
@@ -132,9 +130,6 @@ const MAX_GUID_ENTRIES: u32 = 1_000_000;
 /// Sanity bound on the export-group count. The largest corpus checkpoint
 /// declares 543.
 const MAX_GROUPS: u32 = 100_000;
-
-/// Sanity bound on a single group's declared field-slot count.
-const MAX_FIELDS_PER_GROUP: u32 = 65_536;
 
 /// What [`read_checkpoint_tables`] consumed, for the caller to report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

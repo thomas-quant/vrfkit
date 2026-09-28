@@ -44,7 +44,7 @@ use crate::guid::{ExportFlags, NetworkGuid};
 
 /// Maximum string size allowed when reading path names (guard against corrupt
 /// length prefixes allocating unbounded memory).
-const MAX_FSTRING_BYTES: i64 = 1024 * 1024; // 1 MiB
+pub(crate) const MAX_FSTRING_BYTES: i64 = 1024 * 1024; // 1 MiB
 
 /// Maximum recursion depth for nested NetGUID objects.
 const MAX_NET_GUID_RECURSION: u32 = 16;
@@ -53,7 +53,7 @@ const MAX_NET_GUID_RECURSION: u32 = 16;
 /// `NumNetFieldExports` concept and are already bounded at 65,536; no corpus
 /// group reaches that ceiling. Keeping both wire forms at the same limit stops
 /// a five-byte IntPacked count from becoming an attacker-sized allocation.
-const MAX_FIELDS_PER_GROUP: u32 = 65_536;
+pub(crate) const MAX_FIELDS_PER_GROUP: u32 = 65_536;
 
 /// Read an FName from a **byte-aligned** archive.
 ///
