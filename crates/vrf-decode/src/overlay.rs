@@ -676,19 +676,11 @@ fn apply_overlay_inner(
 
     let data = match raw_bits {
         Some(d) if bit_count > 0 => d,
+        // Zero bits is this type's value 0, not a missing value. The decoder
+        // gives that answer and argues it (`scalar::decode_enum_remaining_bits`),
+        // so the decision is taken in one place.
+        _ if bit_count == 0 && field_type == FieldType::EnumRemainingBits => &[],
         _ => {
-            // Zero-bit field with a typed decoder -- unusual but not an error.
-            // Why zero is the VALUE here and not a fabrication is argued once,
-            // in `scalar::decode_enum_remaining_bits`; this arm is the same
-            // decision taken before the decoder is reached, so it must not
-            // drift from it.
-            if bit_count == 0 && field_type == FieldType::EnumRemainingBits {
-                stats.decoded_ok += 1;
-                return Some(OverlayResult {
-                    value_i64: Some(0),
-                    ..OverlayResult::NONE
-                });
-            }
             stats.decoded_err += 1;
             stats.error_report.record(
                 group_path,
