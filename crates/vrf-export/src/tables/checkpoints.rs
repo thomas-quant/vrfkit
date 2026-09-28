@@ -385,7 +385,9 @@ mod tests {
     use super::*;
     use crate::record::{ActorRecord, CheckpointIdentity, FieldRecord, NetGuidRecord};
     use crate::schema::fields_schema;
-    use arrow_array::{Array, BinaryArray, Int64Array};
+    use arrow_array::Array;
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{Int64Type, UInt8Type, UInt32Type, UInt64Type};
     use smallvec::smallvec;
 
     fn identities() -> [CheckpointIdentity; 2] {
@@ -399,6 +401,17 @@ mod tests {
                 checkpoint_id: Arc::from("same"),
             },
         ]
+    }
+
+    /// The column named `name`.
+    fn col<'a>(batch: &'a RecordBatch, name: &str) -> &'a ArrayRef {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("no column named {name}"))
+    }
+
+    fn u32s<'a>(batch: &'a RecordBatch, name: &str) -> &'a [u32] {
+        col(batch, name).as_primitive::<UInt32Type>().values()
     }
 
     #[test]
@@ -426,39 +439,15 @@ mod tests {
         };
         let batch =
             CheckpointFieldsTable::build_batch(&[field(a.clone()), field(b.clone())]).unwrap();
+        assert_eq!(u32s(&batch, "checkpoint_index"), &[3, 4]);
         assert_eq!(
-            batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .values(),
-            &[3, 4]
-        );
-        assert_eq!(
-            batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(0),
+            col(&batch, "checkpoint_id").as_string::<i32>().value(0),
             "same"
         );
+        assert_eq!(col(&batch, "raw_bits").as_binary::<i32>().value(1), &[0x15]);
         assert_eq!(
-            batch
-                .column(12)
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap()
-                .value(1),
-            &[0x15]
-        );
-        assert_eq!(
-            batch
-                .column(13)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
+            col(&batch, "value_i64")
+                .as_primitive::<Int64Type>()
                 .value(0),
             42
         );
@@ -488,24 +477,8 @@ mod tests {
         };
         let actors =
             CheckpointActorsTable::build_batch(&[actor(a.clone()), actor(b.clone())]).unwrap();
-        assert_eq!(
-            actors
-                .column(0)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .values(),
-            &[3, 4]
-        );
-        assert_eq!(
-            actors
-                .column(3)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .values(),
-            &[0, 0]
-        );
+        assert_eq!(u32s(&actors, "checkpoint_index"), &[3, 4]);
+        assert_eq!(u32s(&actors, "packet_id"), &[0, 0]);
 
         let guid = |checkpoint| CheckpointNetGuidRecord {
             checkpoint,
@@ -516,24 +489,8 @@ mod tests {
             },
         };
         let guids = CheckpointNetGuidsTable::build_batch(&[guid(a), guid(b)]).unwrap();
-        assert_eq!(
-            guids
-                .column(0)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .values(),
-            &[3, 4]
-        );
-        assert_eq!(
-            guids
-                .column(2)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .values(),
-            &[9, 9]
-        );
+        assert_eq!(u32s(&guids, "checkpoint_index"), &[3, 4]);
+        assert_eq!(u32s(&guids, "net_guid"), &[9, 9]);
 
         let [a, b] = identities();
         let block = |checkpoint| CheckpointBlockRecord {
@@ -567,30 +524,11 @@ mod tests {
             field_row_count: 2,
         };
         let blocks = CheckpointBlocksTable::build_batch(&[block(a), block(b)]).unwrap();
+        assert_eq!(u32s(&blocks, "checkpoint_index"), &[3, 4]);
+        assert_eq!(u32s(&blocks, "class_net_guid"), &[0, 0]);
         assert_eq!(
-            blocks
-                .column(0)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .values(),
-            &[3, 4]
-        );
-        assert_eq!(
-            blocks
-                .column(8)
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .values(),
-            &[0, 0]
-        );
-        assert_eq!(
-            blocks
-                .column(27)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap()
+            col(&blocks, "field_row_start")
+                .as_primitive::<UInt64Type>()
                 .values(),
             &[12, 12]
         );
@@ -622,24 +560,9 @@ mod tests {
             },
         ];
         let guids = CheckpointGuidEntriesTable::build_batch(&guid_rows).unwrap();
-        let path_is_string = guids
-            .column_by_name("path_is_string")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap();
-        let name_index = guids
-            .column_by_name("name_index")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .unwrap();
-        let flags = guids
-            .column_by_name("flags")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt8Array>()
-            .unwrap();
+        let path_is_string = col(&guids, "path_is_string").as_boolean();
+        let name_index = col(&guids, "name_index").as_primitive::<UInt32Type>();
+        let flags = col(&guids, "flags").as_primitive::<UInt8Type>();
         assert_eq!(
             [path_is_string.value(0), path_is_string.value(1)],
             [true, false]
@@ -656,16 +579,7 @@ mod tests {
             declared_slots: 0,
         }])
         .unwrap();
-        assert_eq!(
-            groups
-                .column_by_name("declared_slots")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .value(0),
-            0
-        );
+        assert_eq!(u32s(&groups, "declared_slots"), &[0]);
 
         let fields = CheckpointExportFieldsTable::build_batch(&[CheckpointExportFieldRecord {
             checkpoint,
@@ -682,33 +596,16 @@ mod tests {
             fname_number: None,
         }])
         .unwrap();
+        assert_eq!(u32s(&fields, "slot"), &[6]);
         assert_eq!(
-            fields
-                .column_by_name("slot")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .value(0),
-            6
-        );
-        assert_eq!(
-            fields
-                .column_by_name("exported_flag")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt8Array>()
-                .unwrap()
+            col(&fields, "exported_flag")
+                .as_primitive::<UInt8Type>()
                 .value(0),
             2
         );
         assert_eq!(
-            fields
-                .column_by_name("fname_index")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
+            col(&fields, "fname_index")
+                .as_primitive::<UInt32Type>()
                 .value(0),
             44
         );
