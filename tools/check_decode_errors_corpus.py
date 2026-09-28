@@ -110,8 +110,9 @@ array walker that was never reached passed as "0 array failures". Every
 failure gate is now either paired in `MUST_MOVE` / `CHECKPOINT_MUST_MOVE`
 with the work counter whose movement makes its zero mean something, or listed
 in `UNBACKED` / `CHECKPOINT_UNBACKED` with the reason none exists -- the
-truncated-RPC gate on both passes and the checkpoint movement gate -- and
-those are printed as unbacked on every run rather than quoted as evidence.
+truncated-RPC and unwalked-CNC gates on both passes, the main pass's sized
+movement-tail gate and the checkpoint movement gates -- and those are
+printed as unbacked on every run rather than quoted as evidence.
 test_check_decode_errors_corpus.py pins that every gate is one or the other.
 
 The process exit status is read for the same reason. `vrfkit export` prints
@@ -346,8 +347,7 @@ MUST_MOVE = (
      ("array_errors", "array_truncations", "array_root_bits",
       "array_nested_bits", "array_implicit_ends")),
     ("array_fields", "Array decode ... fields", ("array_leaf_errors",)),
-    ("movement_rows", "Movement rows",
-     ("movement_errors", "movement_sized_tails", "movement_open_tails")),
+    ("movement_rows", "Movement rows", ("movement_errors", "movement_open_tails")),
 )
 
 #: `(failure counter, why no work counter backs it)`: the `FAILURES` whose zero
@@ -364,11 +364,20 @@ MUST_MOVE = (
 #: exactly as it counts one it walked: `try_parse_rpc_params` returns before
 #: the walk begins, the raw fallback row is written, the RPC tally still
 #: moves. Backing this gate needs a walk counter on the Rust side.
+#:
+#: `movement_sized_tails` is counted only in a window `movementBitCount` sized
+#: (`parse_movement_with_bit_count`, vrf-movement's rpc.rs), and no measured
+#: replay has one: `vrfkit validate`, instrumented to count windows, found
+#: none in 156,407,150 sections of 80 replays covering 11.06-13.06
+#: (2026-09-28). `Movement rows` moves in open windows only, so it vouches
+#: for the open-tail gate and not for this one.
 UNBACKED = (
     ("truncated_rpcs", "summary.rs prints no count of RPC parameter walks"),
     ("cnc_bruteforce_unwalked",
      "`CNC brute force: N attempted` is legitimately 0 on some builds -- the "
      "12.10 and 12.11 public fixtures -- so it cannot be a must-move counter"),
+    ("movement_sized_tails",
+     "only a sized movement window can count one, and no measured replay has one"),
 )
 
 # --- Checkpoint counters, parsed only when --checkpoints was passed --------

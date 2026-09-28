@@ -1304,10 +1304,13 @@ class MainWiringTests(unittest.TestCase):
         self.make_replay("a.vrf")
         code, output = self.run_main(["--checkpoints"])
         self.assertEqual(code, 0, output)
+        # `Movement rows` cannot vouch for the sized tails: only a sized
+        # window counts one, and no measured replay has a sized window.
         self.assertRegex(
             output,
             r"(?m)^unbacked gates    : Truncated RPCs \(summary\.rs prints no "
-            r"count of RPC parameter walks\); CNC brute force unwalked \(.+\)$")
+            r"count of RPC parameter walks\); CNC brute force unwalked \(.+\); "
+            r"Movement tails sized \(.+\)$")
         self.assertRegex(
             output,
             r"(?m)^checkpoint unbacked gates: Checkpoint fails movement \(.+\); "
@@ -1317,10 +1320,10 @@ class MainWiringTests(unittest.TestCase):
         ok = [line for line in output.splitlines() if line.startswith("OK:")]
         self.assertEqual(len(ok), 1, output)
         self.assertIn(
-            "11 backed by work that moved (Decoded OK 90, Struct blobs ... "
+            "10 backed by work that moved (Decoded OK 90, Struct blobs ... "
             "decoded 5, Array decode ... elements 10, Array decode ... fields "
-            "40, Movement rows 100), 2 with no work counter (Truncated RPCs, "
-            "CNC brute force unwalked)",
+            "40, Movement rows 100), 3 with no work counter (Truncated RPCs, "
+            "CNC brute force unwalked, Movement tails sized)",
             ok[0])
         self.assertIn(
             "8 backed by work that moved (Overlay ... decoded (checkpoint) 500, "
