@@ -295,14 +295,16 @@ class _Tally(dict):
     """Every row this conversion dropped and every value it invented.
 
     WHY a counter rather than a raise or a silent skip: each of these is a
-    rare shape the adapter can keep going past, and going past it quietly is
-    precisely what made them invisible. This file is the last hop before the
-    data is consumed, so a row it drops is invisible to every upstream check
-    -- the bundle still comes out as valid JSON, the counts still look
-    plausible, and the run still prints "Conversion complete". Rejecting the
-    whole replay over 1,996 unnamed rows would be worse; saying nothing is
-    what we had. A count that reaches the summary is the third option and the
-    one the rest of this project already uses.
+    shape the adapter can keep going past (most are rare; property key
+    collisions are structural and number in the tens of thousands per replay),
+    and going past it quietly is precisely what made them invisible. This file
+    is the last hop before the data is consumed, so a row it drops is
+    invisible to every upstream check -- the bundle still comes out as valid
+    JSON, the counts still look plausible, and the run still prints
+    "Conversion complete". Rejecting the whole replay over 1,996 unnamed rows
+    would be worse; saying nothing is what we had. A count that reaches the
+    summary is the third option and the one the rest of this project already
+    uses.
 
     A dict with a fixed key set: `bump` on a name that is not one of them
     raises KeyError rather than inventing a counter nothing ever prints.
@@ -318,6 +320,8 @@ class _Tally(dict):
             "RPC invocations dropped whole (no row supplied a name)",
         "rpc_param_collisions":
             "RPC parameters overwritten inside one invocation group",
+        "property_key_collisions":
+            "property values overwritten by a same-named row in one event",
         "unparsable_path_segments":
             "field-path segments kept as literal object keys",
         "payload_shape_conflicts":
@@ -1480,12 +1484,18 @@ def _set_nested(root: dict, parts: list, value, tally=None):
 
     Two rows can disagree about a key's SHAPE -- 'Foo' carrying a scalar and
     'Foo.Bar' carrying a nested one. Whichever arrives second wins and the
-    other row's value is gone, in either order, with valid JSON and a full row
-    count either way. Every such destruction is counted; the four sites below
-    are all of them. Growing an array with `{}`/`None` fillers is NOT one:
-    there the placeholder is ours and holds nothing to lose.
+    other row's value is gone, with valid JSON and a full row count. The five
+    `payload_shape_conflicts` sites below count it when this function does the
+    replacing; 'Foo' after 'Foo.Bar' is a one-segment path, which
+    `_build_property_events` assigns itself and counts as
+    `property_key_collisions`. A leaf replaced by a same-named row is counted
+    here under that name too. Growing an array with `{}`/`None` fillers and
+    injecting `Index` are NOT losses: those placeholders are ours and hold
+    nothing to lose, so a real `Index` row that replaces the injected one
+    (TeamEconomy[i].Index on 13.01) is not counted.
     """
     obj = root
+    element = None  # the subscript `obj` sits at, when it is an array element
     for i, (name, idx) in enumerate(parts):
         is_last = (i == len(parts) - 1)
         # Ensure current level has the key as a dict or list
@@ -1506,6 +1516,9 @@ def _set_nested(root: dict, parts: list, value, tally=None):
                 if isinstance(arr[idx], (dict, list)) and arr[idx]:
                     # A populated element replaced by a scalar.
                     _bump(tally, "payload_shape_conflicts")
+                elif arr[idx] is not None and not isinstance(arr[idx], (dict, list)):
+                    # A value replaced by a same-named row.
+                    _bump(tally, "property_key_collisions")
                 arr[idx] = value
             else:
                 if arr[idx] is None or not isinstance(arr[idx], dict):
@@ -1517,11 +1530,18 @@ def _set_nested(root: dict, parts: list, value, tally=None):
                 if "Index" not in arr[idx]:
                     arr[idx]["Index"] = idx
                 obj = arr[idx]
+                element = idx
         else:
             if is_last:
-                if isinstance(obj.get(name), (dict, list)) and obj[name]:
+                previous = obj.get(name)
+                if isinstance(previous, (dict, list)) and previous:
                     # A populated subtree replaced by a scalar.
                     _bump(tally, "payload_shape_conflicts")
+                elif (name in obj and not isinstance(previous, (dict, list))
+                      and not (name == "Index" and previous == element)):
+                    # A value replaced by a same-named row. An Index equal to
+                    # the element's subscript is the one injected above.
+                    _bump(tally, "property_key_collisions")
                 obj[name] = value
             else:
                 if name not in obj:
@@ -1533,6 +1553,7 @@ def _set_nested(root: dict, parts: list, value, tally=None):
                     obj[name] = {}
                     next_obj = obj[name]
                 obj = next_obj
+                element = None
 
 
 def _drop_padding_elements(node):
@@ -2624,6 +2645,10 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
             )
             type_name = RAW_BLOB_PREFERRED.get(fn)
             if type_name is not None:
+                # A second row of this name replaces the first one's blob or
+                # stand-in below, or is dropped behind its blob.
+                if fn in payload:
+                    tally.bump("property_key_collisions")
                 # The container row of a field whose consumer decodes the
                 # blob: built from raw_bits whether or not the row is also
                 # typed (see RAW_BLOB_PREFERRED). `_get_value` still ran above,
@@ -2676,13 +2701,18 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 # Skipped whether raw OR typed. This used to test `is_raw`, and
                 # stream.rs writes a flattened array's element rows first and
                 # the container row after them, so a typed container reached
-                # the assignment below -- which no conflict counter watches --
-                # and replaced the decoded list with its own value. No such
+                # the assignment below -- which no conflict counter watched then
+                # -- and replaced the decoded list with its own value. No such
                 # typed container occurs on the 1,018-export corpus
                 # (2026-09-28); typing one upstream must not change the bundle.
                 bare_name = parts[0][0]
                 if bare_name in indexed_names:
                     continue
+                # The parser flattens struct members and static-array elements
+                # under one name only `handle` tells apart, so a repeat here is
+                # a different property, not a newer copy: 24,060 on 02d4d478.
+                if bare_name in payload:
+                    tally.bump("property_key_collisions")
                 payload[bare_name] = value
             elif parts[0][0] in RAW_BLOB_PREFERRED:
                 # A decoded member of a raw-blob field. The blob carries it, so

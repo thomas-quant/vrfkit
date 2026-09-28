@@ -1233,6 +1233,75 @@ class RpcCollisionTallyTests(TallyTestCase):
         self.assertEqual(tally["rpc_param_collisions"], 0)
 
 
+class PropertyKeyCollisionTallyTests(TallyTestCase):
+    """Two rows with one field name in one property event: the last one wins.
+
+    The parser flattens struct members and static-array elements under one
+    field_name that only `handle` tells apart (the crosshair profile's
+    LineLength at handles 63/75/110). The payload is keyed by name, so every
+    value but the last is destroyed: 24,060 times on 02d4d478, with no
+    counter moving. The mirror of `rpc_param_collisions`.
+    """
+
+    GROUP = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
+
+    def row(self, name, handle, value, column="value_f64", **extra):
+        return {"time_ms": 25, "packet_id": 25, "actor": 7, "group_path": self.GROUP,
+                "handle": handle, "field_name": name, "bit_count": 32,
+                column: value, **extra}
+
+    def test_a_repeated_name_in_one_event_is_counted(self):
+        rows = [self.row("LineLength", 63, 10.0), self.row("LineLength", 75, 2.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            tally = self.tally_of(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        # Still last-wins: the count is what makes the loss visible.
+        self.assertEqual(event["payload"], {"LineLength": 2.0})
+        self.assertEqual(tally["property_key_collisions"], 1)
+        self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_distinct_names_and_separate_events_are_not_counted(self):
+        rows = [self.row("LineLength", 63, 10.0), self.row("Opacity", 70, 0.5),
+                self.row("LineLength", 63, 2.0, packet_id=26, time_ms=26)]
+        with tempfile.TemporaryDirectory() as tmp:
+            tally = self.tally_of(tmp, rows)
+        self.assertEqual(tally["property_key_collisions"], 0)
+
+    def test_a_top_level_row_replacing_a_nested_value_is_counted(self):
+        """'Foo' after 'Foo.Bar' is assigned directly, never by `_set_nested`."""
+        rows = [self.row("Foo.Bar", 1, 2.0), self.row("Foo", 2, 1.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            tally = self.tally_of(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        self.assertEqual(event["payload"], {"Foo": 1.0})
+        self.assertEqual(tally["property_key_collisions"], 1)
+
+    def test_a_repeated_nested_leaf_is_counted(self):
+        rows = [self.row("Foo.Bar", 1, 1.0), self.row("Foo.Bar", 2, 2.0),
+                self.row("Arr[0]", 3, 3.0), self.row("Arr[0]", 4, 4.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            tally = self.tally_of(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        self.assertEqual(event["payload"], {"Foo": {"Bar": 2.0}, "Arr": [4.0]})
+        self.assertEqual(tally["property_key_collisions"], 2)
+        self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_a_real_index_member_replacing_the_injected_one_is_not_counted(self):
+        """`_set_nested` gives every array element an Index of its own. A real
+        `TeamEconomy[0].Index` row (13.01, 12.05 and 11.06 exports carry them)
+        replaces that placeholder, which held nothing of the export's."""
+        rows = [self.row("TeamEconomy[0].Index", 1, 0, "value_i64"),
+                self.row("TeamEconomy[0].Money", 2, 800, "value_i64"),
+                self.row("TeamEconomy[1].Money", 3, 900, "value_i64"),
+                self.row("TeamEconomy[1].Index", 4, 1, "value_i64")]
+        with tempfile.TemporaryDirectory() as tmp:
+            tally = self.tally_of(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        self.assertEqual(event["payload"], {"TeamEconomy": [
+            {"Index": 0, "Money": 800}, {"Index": 1, "Money": 900}]})
+        self.assertEqual(tally["property_key_collisions"], 0)
+
+
 class FlatPathTallyTests(unittest.TestCase):
     """A path segment the parser cannot read becomes a literal key, silently.
 
@@ -1301,6 +1370,7 @@ class FlatPathTallyTests(unittest.TestCase):
             bundle._set_nested(payload, bundle._parse_field_path(path), value, tally)
         self.assertEqual(tally["payload_shape_conflicts"], 0)
         self.assertEqual(tally["unparsable_path_segments"], 0)
+        self.assertEqual(tally["property_key_collisions"], 0)
 
     def test_life_change_child_rows_are_still_dropped(self):
         # Guard, not a new claim: these children arrive spelled with '[0]'
@@ -1443,6 +1513,18 @@ class RawSourcedFieldTests(TallyTestCase):
             payload = self.property_payload(tmp)
         self.assertEqual(payload, {"RoundInfos": self.RI_BLOB})
         self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+        self.assertEqual(summary["tally"]["property_key_collisions"], 0)
+
+    def test_a_repeated_roundinfos_row_in_one_event_is_counted(self):
+        """Two RoundInfos rows in one event: only the last blob survives."""
+        second = bytes.fromhex("0a0b0c0d0e")
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [
+                self.roundinfos(), self.roundinfos(raw_bits=second)])
+            payload = self.property_payload(tmp)
+        self.assertEqual(payload["RoundInfos"]["Data"],
+                         base64.b64encode(second).decode("ascii"))
+        self.assertEqual(summary["tally"]["property_key_collisions"], 1)
 
     def test_a_typed_roundinfos_row_still_publishes_its_raw_blob(self):
         """The defect: a value_str beside raw_bits made the payload `{}`."""
@@ -1593,7 +1675,7 @@ class RawGateHardeningTests(TallyTestCase):
         """stream.rs emits a flattened array's element rows first and the
         container row below. The container was skipped only when raw, so a
         typed one landed through the direct top-level assignment -- which no
-        conflict counter sees -- and replaced the decoded list."""
+        conflict counter saw then -- and replaced the decoded list."""
         common = {"time_ms": 10, "packet_id": 1, "actor": 5,
                   "group_path": "/Game/Test/Holder.Holder_C"}
         rows = [
@@ -2250,6 +2332,7 @@ class AdapterAccountingTests(SeamTestCase):
                 "unnamed_rpc_rows",
                 "unnamed_rpc_invocations",
                 "rpc_param_collisions",
+                "property_key_collisions",
                 "unparsable_path_segments",
                 "payload_shape_conflicts",
                 "multi_typed_rows",
