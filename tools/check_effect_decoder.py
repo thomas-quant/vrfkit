@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Self-check the live shot-effect decoder against pinned wire examples.
 
-The first nine cases are every executable example currently in
-``crates/vrf-decode/src/effect.rs``: six non-empty hex blobs and the three
-one-byte empty arrays.  The Rust module is a format specification only; this
-script deliberately calls the Python decoder that produces the valplay bundle.
+The first nine cases are every executable example in the Rust decoder's tests,
+``crates/vrf-decode/src/effect/tests.rs``: six non-empty hex blobs and the
+three one-byte empty arrays.  This script deliberately checks the Python
+decoder that produces the valplay bundle against them.
 
 The two ``reference_*`` cases come from the C# reference bundle's
 ``events.ndjson`` for replay 02d4d478:
@@ -61,12 +61,12 @@ RUST_FLOAT_SHERIFF = _hex("""
 
 
 CASES = (
-    # Rust effect.rs: packet 4368, Sheriff FloatValues.
+    # Rust effect/tests.rs: packet 4368, Sheriff FloatValues.
     Case(
         "rust_float_sheriff_basic", RUST_FLOAT_SHERIFF, 400, bundle._EFFECT_FLOATS,
         ((284, 1.0), (263, 5.0), (286, 1.0), (285, -1509722752.0)),
     ),
-    # Rust effect.rs: packet 17421, Classic FloatValues with YawSwitch.
+    # Rust effect/tests.rs: packet 17421, Classic FloatValues with YawSwitch.
     Case(
         "rust_float_yaw_switch",
         _hex("""
@@ -79,7 +79,7 @@ CASES = (
         ((284, 1.0), (263, 7.0), (286, 1.0),
          (285, _reference_f32(-68573580.0)), (287, 16.0)),
     ),
-    # Rust effect.rs: packet 30968, Judge FloatValues without TracerOption.
+    # Rust effect/tests.rs: packet 30968, Judge FloatValues without TracerOption.
     Case(
         "rust_float_shotgun",
         _hex("""
@@ -90,7 +90,7 @@ CASES = (
         bundle._EFFECT_FLOATS,
         ((284, 12.0), (263, 4.0), (285, 480247136.0)),
     ),
-    # Rust effect.rs: packet 4368 ObjectValues.
+    # Rust effect/tests.rs: packet 4368 ObjectValues.
     Case(
         "rust_object_basic",
         _hex("""
@@ -101,7 +101,7 @@ CASES = (
         bundle._EFFECT_OBJECTS,
         ((283, 3086), (282, 268), (65535, 2731), (306, 1466)),
     ),
-    # Rust effect.rs: packet 4368, one Sheriff attack vector.
+    # Rust effect/tests.rs: packet 4368, one Sheriff attack vector.
     Case(
         "rust_vector_single",
         _hex("""
@@ -112,7 +112,7 @@ CASES = (
         bundle._EFFECT_VECTORS,
         ((265, (-0.7793076561609785, 0.6228944653768754, -0.06842559500463913)),),
     ),
-    # Rust effect.rs: packet 30968, twelve Judge attack vectors.
+    # Rust effect/tests.rs: packet 30968, twelve Judge attack vectors.
     Case(
         "rust_vector_shotgun_12",
         _hex("""
@@ -150,7 +150,7 @@ CASES = (
             (268, (-0.6034491419288359, 0.796167975209223, -0.04433608413693601)),
         ),
     ),
-    # Rust effect.rs: the three one-byte IntPacked-zero arrays.
+    # Rust effect/tests.rs: the three one-byte IntPacked-zero arrays.
     Case("rust_empty_float", b"\x00", 8, bundle._EFFECT_FLOATS, ()),
     Case("rust_empty_object", b"\x00", 8, bundle._EFFECT_OBJECTS, ()),
     Case("rust_empty_vector", b"\x00", 8, bundle._EFFECT_VECTORS, ()),

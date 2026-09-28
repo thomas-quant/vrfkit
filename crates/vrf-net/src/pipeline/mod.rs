@@ -267,9 +267,10 @@ struct ChannelSlot {
 /// Channel index -> channel row, looked up once or twice per bunch.
 type ChannelTable = HashMap<u32, ChannelSlot>;
 
-/// Bytes the scratch buffer starts at: above any block the wire can declare (a
-/// bunch payload is capped at `MAX_PACKET_SIZE_BITS`, 2,048 bytes), so the
-/// decode path's `resize` is a safety net, not a growth strategy.
+/// Bytes the scratch buffer starts at: above any block one bunch can carry (a
+/// bunch payload is capped at `MAX_PACKET_SIZE_BITS`, 2,048 bytes). A block
+/// inside a reassembled partial bunch can be larger; the decode path's
+/// `resize` covers those, so it is a safety net, not the common path.
 const SCRATCH_INITIAL_BYTES: usize = 4096;
 
 /// The mutable state one bunch's processing needs: a borrow split of

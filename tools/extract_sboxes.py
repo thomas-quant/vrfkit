@@ -4,7 +4,8 @@ source and emit them as a Rust module.
 The tables are 256-byte permutation tables spliced across several C# string
 literals inside `Convert.FromHexString(...)`. Copying them by hand (or via a
 console round-trip) risks silent corruption, and a single wrong byte would make
-the 13.00/13.02/13.06 transforms produce garbage that still *looks* plausible. So this
+every transform with an S-box stage produce garbage that still *looks*
+plausible. So this
 reads the literals directly, concatenates them, and refuses to emit anything
 unless each table is exactly 512 hex chars / 256 unique byte values.
 
