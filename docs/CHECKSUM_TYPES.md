@@ -169,44 +169,50 @@ because one of the two tiers would then be wrong about that member.
 ## Corpus result (1,018 replays, 24 builds)
 
 `python tools/check_checksum_types.py --corpus <declaration corpus>`, where each
-child holds one export's `manifest.json` and checkpoint declaration tables:
+child holds one export's `manifest.json` and checkpoint declaration tables.
+Measured on the integration tree (`auto/integration-20260928`, with
+`game-evidence-typing-fixes` merged), 2026-09-28:
 
 | | identities |
 |---|---:|
 | declared (group, name, handle, checksum) | 12,937 |
 | ClassNetCache function slots | 1,084 |
-| not typed by vrfkit (no resolution / Raw / Skip) | 6,631 / 172 / 4 |
-| **typed (group, name, checksum, FieldType)** | **4,242** |
-| match (top level 1,658, parent chain 282, sibling seed 388) | 2,328 |
-| mismatch (all under a parent chain) | 17 |
+| not typed by vrfkit (no resolution / Raw / Skip) | 6,626 / 172 / 4 |
+| **typed (group, name, checksum, FieldType)** | **4,247** |
+| match (top level 1,662, parent chain 292, sibling seed 388) | 2,342 |
+| mismatch (all under a parent chain) | 8 |
 | untestable | 1,897 |
 
-Matches by rule: 742 exact spellings, 106 `Bool` as `uint8`, 1,480 object
+Matches by rule: 754 exact spellings, 106 `Bool` as `uint8`, 1,482 object
 references with their class. Untestable by reason: 1,597 enum-capable types,
 236 object references whose class is not among the candidates (or nested
 without a seed), 64 with no known parent seed. Tier 2 examined 792 groups:
-124 candidate agreements, 124 established, 0 refused, from 47,604 implied-parent
-comparisons (0.0000 chance agreements expected). `checksum_table.rs`: 458
-checksums -- 344 match, 6 mismatch, 108 untestable, 0 without a carrier.
+124 candidate agreements, 124 established, 0 refused, from 47,638 implied-parent
+comparisons (0.0000 chance agreements expected). `checksum_table.rs`: 459
+checksums -- 349 match, 2 mismatch, 108 untestable, 0 without a carrier.
 
 **The mismatches** -- each on every build that declares it:
 
 | identity | vrfkit | the checksum says | listed as expected |
 |---|---|---|---|
 | `249` in the effect RPCs, `TransformTransitionContext`, `TransitionContext_Sequoia_X_TeleportInfo_C`, `StateContext_ActorTrailTargetingResult_C` (747197698), `MulticastResetForRespawn` (1874998526) | `VectorDouble` | `FQuat`: the X, Y, Z of `FTransform.Rotation`, not a vector or a rotator | yes: 8 identities |
-| `EffectID` in the effect RPCs and `EffectManagerComponent` (2340855891, 2251343646, 1129645208) | `UInt64` | `int64` | no: 7 identities |
-| `HandleNumber` in `NetMulticast{Apply,Remove}ForceModule` (3336285386) | `Int32` | `uint32` | no: 2 identities |
 
-The same three show up as the 6 `checksum_table.rs` entries (747197698,
-1874998526, 1129645208, 2251343646, 2340855891, 3336285386). None changes a
-decoded bit today: the quaternion's components are the three doubles already
-decoded, and the integers are in range either way. What differs is the label a
-consumer reads them by. For `249` the difference is kept on purpose and listed
-as expected (next section); `EffectID` and `HandleNumber` are labels to
-correct, and are not listed. So with the tables at `9f92756` **the tool exits 1
-on the corpus**: 9 identities and 4 `checksum_table.rs` carriers mismatch
-unexpectedly, beside the 8 identities and 2 carriers the list expects (both of
-its items matched, none STALE).
+The same property shows up as the 2 `checksum_table.rs` entries 747197698 and
+1874998526. It changes no decoded bit: the quaternion's components are the three
+doubles already decoded. What differs is the label a consumer reads them by, and
+for `249` the difference is kept on purpose and listed as expected (next
+section). So **the tool exits 0 on the corpus**: 0 identities and 0
+`checksum_table.rs` carriers mismatch unexpectedly, beside the 8 identities and
+2 carriers the list expects (both of its items matched, none STALE).
+
+Retyped since the first run. At `9f92756` the corpus also had 9 unexpected
+identities and 4 carriers: `EffectID` in the effect RPCs and
+`EffectManagerComponent` (2340855891, 2251343646, 1129645208) was `UInt64`
+where the checksum says `int64`, and `HandleNumber` in
+`NetMulticast{Apply,Remove}ForceModule` (3336285386) was `Int32` where it says
+`uint32`; the tool exited 1. `game-evidence-typing-fixes` retyped both (a new
+`FieldType::Int64`, and `UInt32`), and they now match. No decoded bit moved:
+the values are in range either way.
 
 ## Expected mismatches
 
