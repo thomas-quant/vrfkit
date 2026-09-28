@@ -18,9 +18,9 @@ use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     CheckpointActorRecord, CheckpointActorWriter, CheckpointBlockWriter,
     CheckpointExportFieldRecord, CheckpointExportFieldWriter, CheckpointExportGroupRecord,
-    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointFieldWriter,
-    CheckpointGuidEntryRecord, CheckpointGuidEntryWriter, CheckpointIdentity,
-    CheckpointNetGuidRecord, CheckpointNetGuidWriter, NetGuidRecord, PartialWriter,
+    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointGuidEntryRecord,
+    CheckpointGuidEntryWriter, CheckpointIdentity, CheckpointNetGuidRecord,
+    CheckpointNetGuidWriter, NetGuidRecord, PartialWriter,
 };
 use vrf_frame::{FrameSkips, walk_demo_frames};
 use vrf_net::stats::NetStats;
@@ -28,6 +28,7 @@ use vrf_schema::{
     CheckpointReadError, CheckpointTableSink, NetGuidCache, read_checkpoint_tables_with_sink,
 };
 
+use super::writers::WriterThread;
 use crate::error::{CliError, replication_reader};
 use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 
@@ -103,7 +104,7 @@ impl CheckpointStats {
 }
 
 pub(super) struct CheckpointWriters<W: Write + Send> {
-    pub fields: CheckpointFieldWriter<W>,
+    pub fields: WriterThread<CheckpointFieldRecord>,
     pub actors: CheckpointActorWriter<W>,
     pub net_guids: CheckpointNetGuidWriter<W>,
     pub blocks: CheckpointBlockWriter<W>,
@@ -288,6 +289,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     let mut buffers = RecordBuffers::default();
     let mut packet_count = 0u64;
     let mut block_count = 0u32;
+    let mut field_records = Vec::new();
     let mut packet_error = None;
     let walk = walk_demo_frames(frame, ctx.flags, &mut cache, |pkt, packet_cache| {
         if packet_error.is_some() {
@@ -312,12 +314,11 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
                 .push_batch(buffers.checkpoint_blocks.drain(..))?;
             block_count += packet_blocks;
             stats.field_rows += buffers.fields.len() as u64;
-            writers
-                .fields
-                .push_batch(buffers.fields.drain(..).map(|field| CheckpointFieldRecord {
-                    checkpoint: checkpoint.clone(),
-                    field,
-                }))?;
+            field_records.extend(buffers.fields.drain(..).map(|field| CheckpointFieldRecord {
+                checkpoint: checkpoint.clone(),
+                field,
+            }));
+            writers.fields.append(&mut field_records)?;
             stats.actor_rows_written += buffers.actors.len() as u64;
             writers
                 .actors

@@ -32,9 +32,9 @@ use vrf_container::{
 use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     ActorWriter, CheckpointActorWriter, CheckpointBlockWriter, CheckpointExportFieldWriter,
-    CheckpointExportGroupWriter, CheckpointFieldWriter, CheckpointGuidEntryWriter,
-    CheckpointNetGuidWriter, EventRecord, EventWriter, FieldRecord, FieldWriter, MovementRecord,
-    MovementWriter, NetGuidRecord, NetGuidWriter,
+    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointFieldWriter,
+    CheckpointGuidEntryWriter, CheckpointNetGuidWriter, EventRecord, EventWriter, FieldRecord,
+    FieldWriter, MovementRecord, MovementWriter, NetGuidRecord, NetGuidWriter,
 };
 use vrf_frame::walk_demo_frames;
 use vrf_schema::NetGuidCache;
@@ -111,8 +111,16 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     let mut event_writer = EventWriter::new(create("events.parquet")?)?;
     let mut partial_writer = vrf_export::PartialWriter::new(create("partials.parquet")?)?;
     let mut checkpoint_writer = if with_checkpoints {
+        let mut cp_fields = CheckpointFieldWriter::new(create("checkpoint_fields.parquet")?)?;
         Some(checkpoints::CheckpointWriters {
-            fields: CheckpointFieldWriter::new(create("checkpoint_fields.parquet")?)?,
+            // The one checkpoint table large enough to take off the decode
+            // thread, for the reason `writers` gives for fields and movement.
+            fields: WriterThread::<CheckpointFieldRecord>::spawn("checkpoint_fields", move |rx| {
+                for batch in rx {
+                    cp_fields.push_batch(batch)?;
+                }
+                cp_fields.finish()
+            }),
             actors: CheckpointActorWriter::new(create("checkpoint_actors.parquet")?)?,
             net_guids: CheckpointNetGuidWriter::new(create("checkpoint_net_guids.parquet")?)?,
             blocks: CheckpointBlockWriter::new(create("checkpoint_blocks.parquet")?)?,
