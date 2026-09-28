@@ -87,7 +87,8 @@ class MatchObservationAuditTests(unittest.TestCase):
         can open a transition. The counter this replaces,
         left_censored_magazine_streams, counted the streams that did have a
         determinate sample -- every stream but this kind -- so it equalled
-        magazine_streams on every export measured."""
+        magazine_streams on every export measured. Streams 10 and 12 are
+        determinate, so that counter would read 2 here, not 1."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_export(root, [
@@ -97,14 +98,16 @@ class MatchObservationAuditTests(unittest.TestCase):
                 (100, 10, 20, 11, self.ammo_group, audit.AMMO_FIELD, 25),
                 (130, 13, 20, 11, self.ammo_group, audit.AMMO_FIELD, 24),
                 (130, 13, 20, 11, self.ammo_group, audit.AMMO_FIELD, 23),
+                (110, 11, 20, 12, self.ammo_group, audit.AMMO_FIELD, 20),
+                (140, 14, 20, 12, self.ammo_group, audit.AMMO_FIELD, 19),
             ])
             pq.write_table(pa.table({
-                "net_guid": [10, 11, 20],
-                "path": ["MagazineAmmo", "MagazineAmmo",
+                "net_guid": [10, 11, 12, 20],
+                "path": ["MagazineAmmo", "MagazineAmmo", "MagazineAmmo",
                          "/Game/Equippables/Guns/Rifles/Test.Test_C"],
-                "outer_net_guid": [20, 20, None]}), root / "net_guids.parquet")
+                "outer_net_guid": [20, 20, 20, None]}), root / "net_guids.parquet")
             counts = audit.audit_export(root)["counts"]
-        self.assertEqual(counts["magazine_streams"], 2)
+        self.assertEqual(counts["magazine_streams"], 3)
         self.assertEqual(counts["all_ambiguous_magazine_streams"], 1)
         self.assertEqual(counts["ambiguous_ammo_packets"], 2)
         self.assertNotIn("left_censored_magazine_streams", counts)
