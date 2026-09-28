@@ -62,10 +62,11 @@ HEADER = """\
 //! this identifies a property the way a name cannot: a parameter no descriptor
 //! declares can take the type of a declared field sharing its checksum.
 //!
-//! Content-addressed and therefore build-stable -- the same property carries
-//! the same checksum on 12.10 through 13.02. Checksums whose donors disagree on
-//! the type are omitted, which is what keeps the mechanism from asserting the
-//! cases it cannot settle.
+//! Content-addressed and therefore build-stable: the checksum follows the
+//! property, not the build (`Scale3D` is 2983776962 on each of the five builds
+//! checked, 12.10, 12.11, 13.00, 13.01 and 13.02). Checksums whose donors
+//! disagree on the type are omitted, which is what keeps the mechanism from
+//! asserting the cases it cannot settle.
 
 {imports}
 /// Sorted by checksum; binary-searched by `lookup_checksum`.
