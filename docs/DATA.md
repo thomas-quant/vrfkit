@@ -389,27 +389,66 @@ The multiplier sits outside falloff,
 so a Vandal headshot reads 320 = 40 x 4 x 2. Use `DamageDealt`, not
 `DamageTaken` -- the latter is clamped to remaining life.
 
-### Callout regions name half the maps
+### Callout regions: the export names the actor, not the callout
 
-`CalloutRegionTrackingComponent.CurrentRegion` resolves through `net_guids` to a
-region asset, which gives a player's position as a map callout rather than as
-centimetres. Measured over 64 demo replays covering 12 maps, the asset names are
-only useful on half of them:
+`CalloutRegionTrackingComponent.CurrentRegion` resolves through `net_guids` to
+the region actor a player stands in, which gives a position as a map callout
+rather than as centimetres. What the export carries is correct: the actor's
+object name, `CalloutRegion_A_Short`, whose outer chain ends at the map's
+callout level, `/Game/Maps/Triad/Triad_Callout_Volumes`. That name is a level
+designer's label, not the callout. The game's name for the region is the
+actor's `RegionName`, a string-table text stored in that level; the replay
+does not carry it, and nothing in this repository reads it.
 
-| named | numbered |
+Actor names come in two forms. The split was first measured over 64 demo
+replays covering 12 maps; the 13.06 game files confirm it for all 13, Bind
+included (160 region actors on the first seven maps, 140 on the other six):
+
+| letters left after the prefix | numbered |
 |---|---|
-| Ascent, Bonsai (Split), Infinity (Abyss), Port (Icebox), Rook (Corrode), Triad (Haven) | Canyon (Fracture), Foxtrot (Breeze), Jam (Lotus), Juliett (Sunset), Pitt (Pearl), Plummet (Summit) |
+| Ascent, Bonsai (Split), Duality (Bind), Infinity (Abyss), Port (Icebox), Rook (Corrode), Triad (Haven) | Canyon (Fracture), Foxtrot (Breeze), Jam (Lotus), Juliett (Sunset), Pitt (Pearl), Plummet (Summit) |
 
-On the first group the leaf reads `CalloutRegion_ASite`, `BP_CalloutRegion_A_Lobby`,
-`InfinityCallout_ABridge` and so on. On the second it is `BP_CalloutRegion10`,
-`BP_CalloutRegion_C_0` -- an index with no name behind it. The prefix varies
-independently of this (`BP_`, `InfinityCallout`, bare), so match on whether
-letters survive after stripping it, not on the prefix.
+The prefix varies independently (`BP_`, `InfinityCallout`, bare), so the
+form is whether letters survive after stripping it. A numbered name
+(`BP_CalloutRegion10`, `BP_CalloutRegion_C_0`) has nothing behind it. A
+lettered name is not a label either: on 9 of the 160 lettered actors the
+game's `RegionName` is another word.
 
-The regions are still usable where they are numbered -- the id is stable within
-a map and the spatial extent can be recovered by pooling player positions per
-region -- but a consumer that wants to *label* the area has to supply its own
-names for six of the twelve maps.
+| map | actor | `RegionName` |
+|---|---|---|
+| Ascent | `CalloutRegion_A_Link` | Tree |
+| Ascent | `CalloutRegion_Back_B` | Boat House |
+| Split | `BP_CalloutRegion_B_Main` | Garage |
+| Haven | `CalloutRegion_A_Short` | Sewer |
+| Haven | `CalloutRegion_C_Short` | Garage |
+| Icebox | `BP_Callout_B_Angled_Container` | Yellow |
+| Bind | `CalloutRegion_B_Lobby` | Fountain |
+| Ascent, Haven | `CalloutRegion_Mid` | Courtyard |
+
+Another word is not necessarily another place -- some may be synonyms -- but a
+label read off the actor name is not the game's. Take names from `RegionName`
+on every map; the two forms only say where the actor name is legible.
+valorant-api.com lists the same names -- its callouts matched the game's
+`RegionName` and super-region on all 300 regions of the 13 maps in 13.06 --
+but keyed by a point location, not by the actor.
+
+Method and provenance: the callout levels of the installed 13.06 game were
+read statically on 2026-09-28 and each region actor's `RegionName` resolved
+through the map's string table; no game file or extract is in this
+repository. Lettered means letters remain after stripping `BP_CalloutRegion`,
+`CalloutRegion`, `BP_Callout`, `InfinityCallout` or `BP_`; another word means
+neither name contains the other once the site letter and non-letters are
+dropped (`AttackerSpawn` against "Spawn" counts as the same).
+
+Spike sites have the same trap: a `BombDestination` actor's name does not
+give its site. In Icebox's bomb-mode level, `BombDestination_A_0` has
+`BombSite` B and `BombDestination_B2` has A. Use `TimedBomb.PlantedAtSite`,
+which agreed with the game's plant volumes on all 50 plants of nine 13.06
+replays.
+
+The regions are still usable without names -- the id is stable within a map
+and the spatial extent can be recovered by pooling player positions per
+region.
 
 ### Slows are visible in the movement data itself
 
