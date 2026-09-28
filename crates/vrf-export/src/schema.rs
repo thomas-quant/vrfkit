@@ -52,6 +52,12 @@ schema_refs! {
     partials_schema_ref => partials_schema,
 }
 
+/// `Dictionary<Int32, Utf8>`, the Arrow type of every dictionary string column.
+fn dict_utf8() -> DataType {
+    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+}
+
+/// `base` with the two checkpoint identity columns in front of its own.
 fn checkpoint_schema(base: Schema) -> Schema {
     let mut fields = Vec::with_capacity(base.fields().len() + 2);
     fields.push(Field::new("checkpoint_index", DataType::UInt32, false));
@@ -73,9 +79,7 @@ pub fn checkpoint_net_guids_schema() -> Schema {
 }
 
 pub fn checkpoint_blocks_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("checkpoint_index", DataType::UInt32, false),
-        Field::new("checkpoint_id", DataType::Utf8, false),
+    checkpoint_schema(Schema::new(vec![
         Field::new("block_index", DataType::UInt32, false),
         Field::new("time_ms", DataType::UInt32, false),
         Field::new("packet_id", DataType::UInt32, false),
@@ -103,13 +107,11 @@ pub fn checkpoint_blocks_schema() -> Schema {
         Field::new("object_outer_path", DataType::Utf8, true),
         Field::new("field_row_start", DataType::UInt64, false),
         Field::new("field_row_count", DataType::UInt32, false),
-    ])
+    ]))
 }
 
 pub fn checkpoint_guid_entries_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("checkpoint_index", DataType::UInt32, false),
-        Field::new("checkpoint_id", DataType::Utf8, false),
+    checkpoint_schema(Schema::new(vec![
         Field::new("ordinal", DataType::UInt32, false),
         Field::new("net_guid", DataType::UInt32, false),
         Field::new("outer_net_guid", DataType::UInt32, false),
@@ -117,22 +119,20 @@ pub fn checkpoint_guid_entries_schema() -> Schema {
         Field::new("literal_path", DataType::Utf8, true),
         Field::new("name_index", DataType::UInt32, true),
         Field::new("flags", DataType::UInt8, false),
-    ])
+    ]))
 }
+
 pub fn checkpoint_export_groups_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("checkpoint_index", DataType::UInt32, false),
-        Field::new("checkpoint_id", DataType::Utf8, false),
+    checkpoint_schema(Schema::new(vec![
         Field::new("ordinal", DataType::UInt32, false),
         Field::new("path_name_index", DataType::UInt32, false),
         Field::new("group_path", DataType::Utf8, false),
         Field::new("declared_slots", DataType::UInt32, false),
-    ])
+    ]))
 }
+
 pub fn checkpoint_export_fields_schema() -> Schema {
-    Schema::new(vec![
-        Field::new("checkpoint_index", DataType::UInt32, false),
-        Field::new("checkpoint_id", DataType::Utf8, false),
+    checkpoint_schema(Schema::new(vec![
         Field::new("group_ordinal", DataType::UInt32, false),
         Field::new("path_name_index", DataType::UInt32, false),
         Field::new("slot", DataType::UInt32, false),
@@ -144,8 +144,9 @@ pub fn checkpoint_export_fields_schema() -> Schema {
         Field::new("fname_base", DataType::Utf8, true),
         Field::new("fname_index", DataType::UInt32, true),
         Field::new("fname_number", DataType::Int32, true),
-    ])
+    ]))
 }
+
 /// Schema for the `fields` table (long format).
 ///
 /// Most rows represent one decoded field. A whole ClassNetCache block whose
@@ -167,18 +168,10 @@ pub fn fields_schema() -> Schema {
         // distinguishable from 0 (the engine's invalid-GUID sentinel).
         Field::new("object_net_guid", DataType::UInt32, true),
         // Dictionary<Int32, Utf8>: ~300 distinct group paths over 780k rows.
-        Field::new(
-            "group_path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            false,
-        ),
+        Field::new("group_path", dict_utf8(), false),
         Field::new("handle", DataType::UInt32, false),
         // Nullable because the field name may be unknown (unmapped export index).
-        Field::new(
-            "field_name",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
+        Field::new("field_name", dict_utf8(), true),
         // The replay's own `compatible_checksum` for this handle. Nullable, and
         // the null is information: it means the replay declares no checksum
         // here (array leaves and struct blobs are addressed inside a payload,
@@ -195,11 +188,7 @@ pub fn fields_schema() -> Schema {
         // Dictionary<Int32, Utf8>: the decoded values repeat heavily (enum
         // strings, JSON blobs), so a dictionary shrinks the column even though
         // it is the highest-cardinality of the three string columns.
-        Field::new(
-            "value_str",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
+        Field::new("value_str", dict_utf8(), true),
     ])
 }
 
@@ -271,17 +260,9 @@ pub fn actors_schema() -> Schema {
         // `ActorsTable::DICTIONARY_COLUMNS`.
         Field::new("event", DataType::Utf8, false),
         // Nullable: class path may be unresolvable for some actors.
-        Field::new(
-            "class_path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
+        Field::new("class_path", dict_utf8(), true),
         // Nullable: archetype path may be absent (static actors).
-        Field::new(
-            "archetype_path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            true,
-        ),
+        Field::new("archetype_path", dict_utf8(), true),
         // Spawn location (nullable -- only present for dynamic actor opens).
         Field::new("spawn_x", DataType::Float32, true),
         Field::new("spawn_y", DataType::Float32, true),
@@ -308,11 +289,7 @@ pub fn net_guids_schema() -> Schema {
     Schema::new(vec![
         Field::new("net_guid", DataType::UInt32, false),
         // Paths repeat heavily (175 GUIDs share "FiringState" in one match).
-        Field::new(
-            "path",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            false,
-        ),
+        Field::new("path", dict_utf8(), false),
         Field::new("outer_net_guid", DataType::UInt32, true),
     ])
 }
@@ -338,11 +315,7 @@ pub fn events_schema() -> Schema {
     Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
         // ~7 distinct groups over the whole file; dictionary is nearly free.
-        Field::new(
-            "group",
-            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
-            false,
-        ),
+        Field::new("group", dict_utf8(), false),
         Field::new("metadata", DataType::Utf8, false),
         Field::new("time1", DataType::UInt32, false),
         Field::new("time2", DataType::UInt32, false),
