@@ -48,14 +48,8 @@ class PhysicalCoverageTests(unittest.TestCase):
         self.assertEqual((cp["exports_with_table"], cp["rows"], cp["typed_rows"]), (1, 5, 4))
 
     def test_export_leftovers_beside_an_export_are_not_counted(self):
-        """`vrfkit export` siblings are not exports, and the report says so.
-
-        A `previous` sibling is a complete export. Measured at 259ed10 with
-        only that sibling beside `pub2`, the `*/fields.parquet` glob here
-        reported export_count 2, rows 10 instead of 5, complete, exit 0 -- a
-        plausible number. The staging sibling of a killed export holds a
-        footerless table, which at least failed the run.
-        """
+        """`vrfkit export` siblings are not exports, and the report says so
+        (the 259ed10 measurements are export_scan.py's)."""
         self.write(self.root / "pub2")
         self.write(self.root / ".pub2.vrfkit-previous-4242-7")
         staging = self.root / ".pub2.vrfkit-staging-55396-0"

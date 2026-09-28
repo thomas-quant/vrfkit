@@ -3,72 +3,18 @@ from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import extract_healing_observations as tool
-
-SCHEMA = pa.schema(
-    [
-        (n, t)
-        for n, t in [
-            ("time_ms", pa.uint32()),
-            ("packet_id", pa.uint32()),
-            ("channel_index", pa.uint32()),
-            ("actor_net_guid", pa.uint32()),
-            ("object_net_guid", pa.uint32()),
-            ("group_path", pa.string()),
-            ("handle", pa.uint32()),
-            ("field_name", pa.string()),
-            ("compatible_checksum", pa.uint32()),
-            ("bit_count", pa.uint32()),
-            ("raw_bits", pa.binary()),
-            ("value_i64", pa.int64()),
-            ("value_f64", pa.float64()),
-            ("value_bool", pa.bool_()),
-            ("value_str", pa.string()),
-        ]
-    ]
+from tools.tests.wire_fixtures import (
+    CHECKPOINT_FIELD_SCHEMA as CHECKPOINT_SCHEMA,
+    FIELD_SCHEMA as SCHEMA,
+    array,
+    packed,
 )
-CHECKPOINT_SCHEMA = pa.schema(
-    [("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()), *SCHEMA]
-)
-
-
-def ip(v):
-    out = []
-    while True:
-        q = v & 127
-        v >>= 7
-        out.append((q << 1) | (1 if v else 0))
-        if not v:
-            return out
 
 
 def ref(v):
-    return bytes(ip(v)), 8 * len(ip(v))
-
-
-def arr(fields):
-    bits = []
-
-    def byte(x):
-        bits.extend((x >> i) & 1 for i in range(8))
-
-    def raw(x, w):
-        bits.extend((x[i // 8] >> (i % 8)) & 1 for i in range(w))
-
-    byte(2)
-    byte(2)
-    for h, w, x in fields:
-        for z in ip(h + 1):
-            byte(z)
-        for z in ip(w):
-            byte(z)
-        raw(x, w)
-    byte(0)
-    byte(0)
-    b = bytearray((len(bits) + 7) // 8)
-    for i, x in enumerate(bits):
-        b[i // 8] |= x << (i % 8)
-    return bytes(b), len(bits)
+    return packed(v), 8 * len(packed(v))
 
 
 def row(name, crc=None, raw=b"", bits=0, **kw):
@@ -97,7 +43,7 @@ def fixture(value=-0.0, causer=True):
     f = struct.pack("<f", value)
     cr, cw = ref(60)
     fields = [(2, cw, cr), (3, 32, f), (4, 32, f), (5, 1, b"\1")]
-    parent, pw = arr(fields)
+    parent, pw = array([(0, fields)])
     rows = [
         row("MulticastNotifyHeal.HealTaken", 1894010429, f, 32, value_f64=value),
         row(
@@ -178,7 +124,7 @@ class Tests(unittest.TestCase):
     def make(self, rows=None, actors=None, checkpoint=None):
         td = tempfile.TemporaryDirectory()
         p = Path(td.name)
-        (p / "manifest.json").write_text(json.dumps(manifest()))
+        (p / "manifest.json").write_text(json.dumps(manifest()), encoding="utf-8")
         pq.write_table(
             pa.Table.from_pylist(rows or fixture(), schema=SCHEMA), p / "fields.parquet"
         )
@@ -212,6 +158,19 @@ class Tests(unittest.TestCase):
             p / "net_guids.parquet",
         )
         return td, p
+
+    def test_a_non_ascii_manifest_is_read_as_utf8(self):
+        """manifest.json is UTF-8 with the replay path verbatim (a Hangul path
+        failed the locale codec on cp949 Windows). The fixture holds raw
+        UTF-8: json.dumps' default escaping would hide the bug."""
+        td, p = self.make()
+        self.addCleanup(td.cleanup)
+        data = manifest()
+        data["source_file"] = "D:\\\ub9ac\ud50c\ub808\uc774\\\uacbd\uae30.vrf"
+        (p / "manifest.json").write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+        self.assertEqual(tool.extract(p)["counts"]["amount_validated"], 1)
 
     def test_signed_zero_missing_causer_keeps_valid_amount_and_edges(self):
         td, p = self.make(fixture(causer=False))
@@ -277,9 +236,9 @@ class Tests(unittest.TestCase):
         td, p = self.make(rows)
         self.addCleanup(td.cleanup)
         out = p / "out.json"
-        out.write_text("old")
+        out.write_text("old", encoding="utf-8")
         self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-        self.assertEqual(out.read_text(), "old")
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_checkpoint_rows_are_preserved_separately(self):
         first = {
@@ -312,7 +271,7 @@ class Tests(unittest.TestCase):
         data["net_field_export_groups"][1]["fields"] = [
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] <= 5
         ]
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         result = tool.extract(p)
         self.assertEqual(result["counts"]["amount_validated"], 1)
         self.assertEqual(
@@ -326,14 +285,14 @@ class Tests(unittest.TestCase):
         data["net_field_export_groups"][1]["fields"] = [
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] != 9
         ]
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(tool.IntegrityError, "lacks its declaration"):
             tool.extract(p)
         data = manifest()
         next(
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] == 7
         )["compatible_checksum"] = 1
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(tool.InputError, "optional heal parameter"):
             tool.extract(p)
 
@@ -415,9 +374,9 @@ class Tests(unittest.TestCase):
         td, p = self.make(rows)
         self.addCleanup(td.cleanup)
         out = p / "out.json"
-        out.write_text("old")
+        out.write_text("old", encoding="utf-8")
         self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-        self.assertEqual(out.read_text(), "old")
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_typed_instigator_edges_are_present_and_raw_checked(self):
         td, p = self.make()
@@ -449,13 +408,13 @@ class Tests(unittest.TestCase):
                 td, p = self.make(rows)
                 self.addCleanup(td.cleanup)
                 out = p / "out.json"
-                out.write_text("old")
+                out.write_text("old", encoding="utf-8")
                 self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-                self.assertEqual(out.read_text(), "old")
+                self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_an_invalid_edge_is_counted_not_just_labelled(self):
-        # A malformed reference window keeps the amount and marks the edge
-        # invalid. That used to move no counter at all; it must reach counts.
+        # A malformed reference window keeps the amount, marks the edge
+        # invalid, and reaches the counts.
         rows = fixture()
         target = next(
             r for r in rows if r["field_name"] == "MulticastNotifyHeal.EventInstigator"
@@ -546,7 +505,7 @@ class EarlierPawnTests(unittest.TestCase):
             {"actor_net_guid": 7, "subject": "recipient", "character_net_guid": 45},
             {"actor_net_guid": 8, "subject": "source", "character_net_guid": 50},
         ]
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         d = tool.extract(p)
         recipient = d["observations"][0]["recipient_corroboration"]
         self.assertTrue(recipient["static_manifest_character"])

@@ -162,38 +162,22 @@ build.
 
 ## Measured field expansion
 
-The full 714-replay path-resolution experiment, compared with the
-preservation-only output at `740688d`, produced:
+Against the preservation-only output at `740688d`, the full 714-replay run
+resolved 14,403,610 indexed GUID path entries and changed the group path or
+resolution source of 9,441,882 blocks. Checkpoint fields grew from 205,866,627
+to 212,099,080 rows (+6,232,453, exactly the new indexed array children), with
+11,975,340 more rows typed and 20,113,218 more named -- overlapping counts,
+since existing rows can gain names and types without a new row. Typed presence
+was then 70.6364% main (713,488,311 of 1,010,086,119 rows), 81.3258%
+checkpoint (172,491,241) and 72.4914% combined, before the
+[structured-array expansion](STRUCTURED_ARRAY_EXPANSION.md); neither the share
+of bytes decoded nor of meaning understood.
 
-| Observation | Increase or resolved count |
-|---|---:|
-| Indexed GUID path entries resolved | 14,403,610 |
-| Blocks with a changed group path or resolution source | 9,441,882 |
-| Physical checkpoint field rows | +6,232,453 |
-| Rows with at least one typed value | +11,975,340 |
-| Rows with a field name | +20,113,218 |
-| Previously preserved tails split into a CNC header and raw body | 117,135 |
-
-These are overlapping counts. Existing rows can acquire names and types
-without adding a row. The physical row increase equals the increase in
-indexed array-child rows; children are additional views of their parent bits.
-
-Checkpoint fields increased from 205,866,627 to 212,099,080 rows, of which
-172,491,241 have a non-null value in at least one of the four typed columns.
-Main fields remain at 1,010,086,119 rows with 713,488,311 typed rows. Thus typed
-presence is 70.6364% main, 81.3258% checkpoint, and 72.4914% combined. This is
-neither the fraction of file bytes decoded nor the fraction of gameplay
-meaning understood; an earlier semantic classification has not been
-reapplied to all expanded output. These coverage figures predate the later
-structured-array candidate; see [STRUCTURED_ARRAY_EXPANSION.md](STRUCTURED_ARRAY_EXPANSION.md)
-for its measured physical ratios and completed 714-file comparison.
-
-Of 198,461,491 previous raw checkpoint field rows, 198,344,356 retained the
-same handle, bit count and raw bytes within the same block. The remaining
-117,135 tails were independently partitioned into 2,576,970 header bits and
-47,352,050 body bits; each body exactly matched the candidate output. Those
-`__vrfkit_chained_cnc_h1__` bodies remain raw. The measured compatible capacity
-34 is not a uniquely established declared function count or a body decoder.
+Of 198,461,491 previous raw checkpoint rows, 198,344,356 kept their handle, bit
+count and raw bytes within the same block. The other 117,135 tails split into
+2,576,970 header and 47,352,050 body bits, each body matching the candidate
+output; those `__vrfkit_chained_cnc_h1__` bodies stay raw, and the compatible
+capacity 34 is not an established function count or body decoder.
 
 For the 7,809,654 blocks with unchanged group paths and resolution sources,
 all 189,991,214 field rows matched across every column, comparing valid

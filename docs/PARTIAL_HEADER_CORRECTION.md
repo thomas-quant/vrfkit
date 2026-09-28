@@ -84,11 +84,9 @@ raw/identity columns and byte-identical non-field Parquets. These effects-only
 checks are separate from the expanded reassembly population. Typed JSON does
 not by itself establish the semantic meaning of every tag.
 
-The corrected candidate passed 633 Rust tests, 641 Python tests, MSRV feature
-checks, strict clippy/rustdoc, generated-file guards, full documentation
-validation and reviewed baseline rechecks. Both full 714-input corpus guards
-also passed. Actual packet-header fixtures reject the old flag order, and
-deliberate corruptions confirm that the raw and JSON comparators can fail.
+Both full 714-input corpus guards passed. Real packet-header fixtures reject the
+old flag order, and deliberate corruptions confirm that the raw and JSON
+comparators can fail.
 
 ## Superseded conclusions
 

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -140,11 +141,9 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
             self.assertEqual((after_head, after_status), (before_head, before_status))
 
     def test_git_revision_input_does_not_depend_on_the_tar_on_path(self):
-        """A revision is unpacked in-process. It used to shell out to the first
-        `tar` on PATH, which on Windows is GNU tar under Git Bash (it refuses a
-        `C:\\` destination) and bsdtar elsewhere, so the same command passed or
-        failed by shell. A tar that always fails, placed first on PATH, must not
-        matter."""
+        """A revision is unpacked in-process, so a tar that always fails,
+        placed first on PATH, must not matter (Git Bash's GNU tar refuses a
+        `C:\\` destination)."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = root / "repo"
@@ -167,6 +166,55 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
                 text=True, encoding="utf-8", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(output.exists())
+
+    def test_a_localized_git_failure_keeps_its_message(self):
+        """git on a Korean-locale Windows writes cp949; a failing call must
+        surface git's message, not a UnicodeDecodeError naming a byte."""
+        localized = "fatal: \uc798\ubabb\ub41c \uac1c\uccb4 \uc774\ub984".encode("cp949")
+        real_run = subprocess.run
+
+        def fake_git(failing):
+            def run(cmd, *args, **kwargs):
+                # A real process, so the tool's own text/encoding/errors
+                # arguments do the decoding.
+                if failing in cmd:
+                    stub = f"import sys; sys.stderr.buffer.write({localized!r}); sys.exit(128)"
+                else:
+                    stub = "print('0' * 40)"
+                return real_run([sys.executable, "-c", stub], *args, **kwargs)
+            return run
+
+        with tempfile.TemporaryDirectory() as temp:
+            for failing, message in (("rev-parse", "git rev-parse"),
+                                      ("archive", "git archive failed")):
+                with self.subTest(failing=failing), \
+                        mock.patch.object(audit.subprocess, "run", fake_git(failing)):
+                    with self.assertRaises(ValueError) as caught:
+                        audit.source_from_spec(f"{temp}::HEAD", Path(temp))
+                    self.assertNotIsInstance(caught.exception, UnicodeDecodeError)
+                    self.assertIn(message, str(caught.exception))
+                    self.assertIn("fatal:", str(caught.exception))
+
+    def test_a_localized_extractor_failure_keeps_its_message(self):
+        """extract_descriptors.py is a Python child: on a Korean-locale Windows
+        without PYTHONUTF8 its piped stderr is cp949. A failing extraction must
+        surface that message, not a UnicodeDecodeError naming a byte."""
+        localized = "ERROR: \uc798\ubabb\ub41c \uc124\uba85\uc790".encode("cp949")
+        real_run = subprocess.run
+
+        def fake_extractor(cmd, *args, **kwargs):
+            # A real process, so the tool's own text/encoding/errors arguments
+            # do the decoding.
+            stub = f"import sys; sys.stderr.buffer.write({localized!r}); sys.exit(1)"
+            return real_run([sys.executable, "-c", stub], *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(audit.subprocess, "run", fake_extractor):
+            with self.assertRaises(ValueError) as caught:
+                audit.extract_table(Path(temp), Path(temp) / "table.rs")
+        self.assertNotIsInstance(caught.exception, UnicodeDecodeError)
+        self.assertIn("descriptor extraction failed", str(caught.exception))
+        self.assertIn("ERROR:", str(caught.exception))
 
     def test_invalid_source_fails_without_writing_output(self):
         with tempfile.TemporaryDirectory() as temp:

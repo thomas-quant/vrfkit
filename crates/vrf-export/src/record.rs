@@ -1,57 +1,37 @@
-//! The input structs the writers consume.
+//! The input structs the writers consume. They carry no Arrow or Parquet
+//! types, so they compile with `parquet` off and a consumer such as `vrfkit
+//! validate` gets records without arrow, parquet or zstd in its build.
 //!
-//! These carry no Arrow or Parquet types, so they compile with the `parquet`
-//! feature off. That is what lets a consumer -- `vrfkit validate` is one --
-//! drive the decode pipeline and receive records without pulling arrow,
-//! parquet, zstd and their transitive graph into the build.
-//!
-//! # Why the string columns are `Arc<str>`
-//!
-//! Row/allocation counts behind `Arc<str>` (shared with vrfkit::sink::intern): docs/PERFORMANCE_NOTES.md#name-interning.
-//!
-//! There are only 475 distinct `group_path` values in the whole replay and a
-//! few thousand distinct field names, so an `Arc<str>` the producer interns
-//! once and clones per row replaces the allocation with a refcount increment.
-//!
-//! Arrow is unaffected: the dictionary builders are fed `&str` either way (see
-//! `tables::fields`), so the value sequence handed to the encoder -- and
-//! therefore the bytes on disk -- is identical. All 11 Parquet outputs of the
-//! reference replay are byte-for-byte what they were before interning.
+//! The two name columns are `Arc<str>`, interned once by the producer and
+//! cloned per row: 475 distinct `group_path` values and a few thousand field
+//! names cover a whole replay, so a row costs a refcount, not an allocation.
+//! The dictionary builders are fed `&str` either way, so the bytes on disk are
+//! unchanged. Counts: docs/PERFORMANCE_NOTES.md#name-interning.
 
 use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Reserved `field_name` for a whole ClassNetCache block whose function table
-/// was unresolved.
-///
-/// Such a row is not a field or RPC. Consumers distinguish it with the single
-/// predicate `field_name == UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME`.
-/// The handle is not a discriminator because ordinary array-truncation rows
-/// may also use `u32::MAX`.
+/// was unresolved; such a row is not a field or RPC. Tell it apart with
+/// `field_name == UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME` alone: the
+/// handle is no discriminator, since array-truncation rows may use `u32::MAX`.
 pub const UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME: &str =
     "__vrfkit_unresolved_class_net_cache_payload__";
 
-/// A single fields-table record ready for export.
-///
-/// Most records represent one decoded field. The reserved whole-block record
-/// represents an unresolved ClassNetCache payload and carries no typed value.
-///
-/// The caller constructs these from the decoded replay stream. All "address"
-/// fields are non-optional; the value overlay fields are `Option` because a
-/// field may carry only raw bits (unknown type) or may carry a typed value.
+/// A single fields-table record ready for export: one decoded field, or the
+/// reserved whole-block record of an unresolved ClassNetCache payload, which
+/// carries no typed value. The address fields are never optional; the value
+/// overlay is, because a field of unknown type carries only raw bits.
 #[derive(Debug, Clone)]
 pub struct FieldRecord {
     pub time_ms: u32,
     pub packet_id: u32,
     pub channel_index: u32,
     pub actor_net_guid: u32,
-    /// Subobject this block described, when it was not the actor itself.
-    ///
-    /// `None` means the block described the actor. Kept distinct from `Some(0)`
-    /// because 0 is the engine's invalid-GUID sentinel, and distinct from
-    /// `actor_net_guid` because a character replicates several subobjects
-    /// (inventory item slots being the case that matters) whose state must not
-    /// be merged.
+    /// Subobject this block described; `None` means the actor itself. Distinct
+    /// from `Some(0)`, the engine's invalid-GUID sentinel, and from
+    /// `actor_net_guid`, because a character's subobjects (inventory item
+    /// slots, notably) must not be merged.
     pub object_net_guid: Option<u32>,
     /// Interned: see the module docs.
     pub group_path: Arc<str>,
@@ -59,38 +39,23 @@ pub struct FieldRecord {
     /// `None` when the field name is unknown (unmapped export index).
     /// Interned when present: see the module docs.
     pub field_name: Option<Arc<str>>,
-    /// The `compatible_checksum` the replay declares for this handle.
-    ///
-    /// Unreal hashes a property's *type* into it alongside its name, which
-    /// makes it a build-stable content address for the property -- the same
-    /// value on 12.10 through 13.02. The overlay already uses it as its
-    /// last-resort type lookup; exporting it lets a reader do the same
-    /// reasoning offline.
-    ///
-    /// See docs/USAGE.md "fields.parquet" for the three-bucket breakdown this
-    /// column enables and the Phoenix smoke-wall example that motivated it.
-    ///
-    /// **`None` means the replay declares no checksum for this handle**, not
-    /// that the value was unavailable here. Rows reach this table by several
-    /// paths and only the ones resolved through a `NetFieldExportGroup` carry
-    /// one; array leaves and struct blobs are addressed inside a payload rather
-    /// than by a declared handle, so they have no checksum to carry.
+    /// The `compatible_checksum` the replay declares for this handle. Unreal
+    /// hashes the property's *type* into it with its name, so it is a
+    /// build-stable address (equal on every build compared when this column
+    /// was added, 12.10 to 13.02) and the overlay's last-resort type lookup.
+    /// **`None` means the replay declares none**: only rows resolved through
+    /// a `NetFieldExportGroup` carry one, and array leaves and struct blobs
+    /// are addressed inside a payload, not by a declared handle.
+    /// docs/USAGE.md "fields.parquet" has the three-bucket breakdown and the
+    /// Phoenix smoke-wall case behind it.
     pub compatible_checksum: Option<u32>,
     pub bit_count: u32,
-    /// Raw bit payload; `None` for zero-bit fields.
-    ///
-    /// Allocation counts behind the SmallVec<16> choice and validate's writer-path memory bound: docs/PERFORMANCE_NOTES.md#raw_bits-smallvec-and-the-rejected-arena.
-    ///
-    /// Larger payloads spill to the heap transparently -- SmallVec derefs to
-    /// `&[u8]`, so the Arrow `BinaryArray` sees an identical byte sequence
-    /// either way and the Parquet output is byte-for-byte unchanged.
-    ///
-    /// Not interned, and not an arena. Interning is the wrong shape: these are
-    /// payload bytes rather than names, so the pool would approach one entry
-    /// per row and buy nothing. An arena -- one shared buffer with per-row
-    /// offsets -- would be sound, but it has to travel with the rows across the
-    /// channel to the writer thread, which turns the batch type from
-    /// `Vec<FieldRecord>` into a struct carrying a blob.
+    /// Raw bit payload; `None` for zero-bit fields. `SmallVec` derefs to
+    /// `&[u8]`, so Arrow sees the same bytes whether or not it spilled. Not
+    /// interned (payloads, not names: one pool entry per row) and not an arena,
+    /// which would have to cross the channel to the writer thread with the
+    /// rows. Allocation counts and the memory bound:
+    /// docs/PERFORMANCE_NOTES.md#raw_bits-smallvec-and-the-rejected-arena.
     pub raw_bits: Option<SmallVec<[u8; 16]>>,
     pub value_i64: Option<i64>,
     pub value_f64: Option<f64>,
@@ -98,18 +63,12 @@ pub struct FieldRecord {
     pub value_str: Option<String>,
 }
 
-/// A single movement sample ready for export.
-///
-/// All fields are non-optional (the replication channel always provides the
-/// full state vector; partial updates are merged upstream before reaching us).
-///
-/// Field order mirrors `movement_schema()` exactly, including the three
-/// trailing columns that were appended rather than interleaved.
-///
-/// `vrf_movement::MovementMove` also carries a `mode_flags` byte, which is not
-/// mirrored here: its only construction site assigns it from the same local as
-/// `movement_state`, so the two can never disagree and a `mode_flags` column
-/// would be a byte-identical copy of `movement_state`.
+/// A single movement sample ready for export: one decoded move, nothing
+/// merged. Every field is set; a variant-0 move carries no velocity and gets
+/// 0.0 (no variant-0 move in the 157,457,629 measured, `vrf_movement` crate
+/// docs). Field order is `movement_schema()`'s, the three trailing columns
+/// appended rather than interleaved. Why there is no `mode_flags`:
+/// docs/USAGE.md "movement.parquet".
 #[derive(Debug, Clone, Copy)]
 pub struct MovementRecord {
     pub time_ms: u32,
@@ -125,32 +84,26 @@ pub struct MovementRecord {
     pub vel_z: f32,
     /// Server-assigned tick decoded from the move header.
     pub timestamp: u32,
-    /// Move-header byte at bits [9..17]. See docs/USAGE.md "movement.parquet"
-    /// for why it is exported despite reading 0 on every corpus row. Posture
-    /// is `bCrouchHeld` on the character actor, or the ~19 cm step in
-    /// `pos_z`.
+    /// Move-header byte at bits [9..17], 0 on every corpus row and exported
+    /// anyway (docs/USAGE.md "movement.parquet"). Posture is `bCrouchHeld` on
+    /// the character actor, or the ~19 cm step in `pos_z`.
     pub movement_state: u8,
-    /// See docs/USAGE.md "movement.parquet" for the variant-0/variant-1
-    /// meaning and the corpus measurement backing it.
+    /// 0 = variant 0, 1 = variant 1 (docs/USAGE.md "movement.parquet").
     pub move_type: u8,
 }
 
-/// A single actor lifecycle record ready for export.
-///
-/// The two path columns stay `Option<String>`: this table is ~3,800 rows on a
-/// full match, so interning them would save under a tenth of a megabyte and
-/// add a pool the producer would have to thread through two more call sites.
+/// A single actor lifecycle record ready for export. The path columns stay
+/// `Option<String>`: ~3,800 rows a match, so interning would save under a
+/// tenth of a megabyte for a pool threaded through two more call sites.
 #[derive(Debug, Clone)]
 pub struct ActorRecord {
     pub time_ms: u32,
     pub packet_id: u32,
     pub channel_index: u32,
     pub actor_net_guid: u32,
-    /// "open", "close", or "dormant". Dormancy is not destruction: only
-    /// "close" is a despawn, and treating "dormant" as one truncates the
-    /// lifetime of anything that goes dormant instead of closing (e.g. a
-    /// persistent ability) and double-counts its later re-open as a second
-    /// spawn.
+    /// "open", "close", or "dormant". Only "close" is a despawn: read as one,
+    /// dormancy cuts short a persistent ability's life and double-counts its
+    /// re-open as a second spawn.
     pub event: &'static str,
     /// Resolved class path; `None` when the GUID cache lacks the mapping.
     pub class_path: Option<String>,
@@ -169,7 +122,6 @@ pub struct ActorRecord {
 /// A single NetGUID registration ready for export.
 #[derive(Debug, Clone)]
 pub struct NetGuidRecord {
-    /// The GUID itself.
     pub net_guid: u32,
     /// Object path as the replay declared it.
     pub path: String,
@@ -178,10 +130,9 @@ pub struct NetGuidRecord {
     pub outer_net_guid: Option<u32>,
 }
 
-/// Identity shared by rows decoded from one checkpoint chunk.
-///
-/// The wire checkpoint id is not required to be unique, so consumers must use
-/// it together with the zero-based chunk index when joining checkpoint tables.
+/// Identity shared by rows decoded from one checkpoint chunk. The wire id need
+/// not be unique: join checkpoint tables on it together with the zero-based
+/// chunk index.
 #[derive(Debug, Clone)]
 pub struct CheckpointIdentity {
     pub checkpoint_index: u32,
@@ -296,10 +247,9 @@ pub struct EventRecord {
     pub payload_size: i32,
     /// The payload verbatim. Undecoded on purpose.
     pub raw_payload: Vec<u8>,
-    /// First payload word (after the u32 group tag), for groups that carry
-    /// any. `None` when the group carries none (spike events), is unknown, or
-    /// the payload is too short. See `vrf_container::EventChunk` for the
-    /// payload layout.
+    /// First payload word (after the u32 group tag). `None` when the group
+    /// carries none (spike events), is unknown, or the payload is too short.
+    /// Layout: `vrf_container::EventChunk`.
     pub word0: Option<u32>,
     /// Second payload word. `None` unless the group carries two
     /// (characterDeath: killer then killed NetGUID).

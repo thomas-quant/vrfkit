@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """Extract blind updates and continuous-effect observations by target identity.
 
-Port of ValorantReplayParser 2b66c65's player-body distinction. Only a
-SpawnedCharacter value proves a player target: the manifest's character_net_guid
-(the last one) or an earlier value from the same field's history, the pawn a
-player had before reconnecting (see player_identity.py). PossessedCharacter,
-Owner, Instigator and a pawn's own PlayerState can identify a controlled device,
-not an affected body. All observations remain in the output, including blinds
-on non-player actors.
-These are replicated updates / RPC observations, not deduplicated hit counts,
-cast attribution or inferred effect intervals. Checkpoint snapshots are excluded.
+Port of ValorantReplayParser 2b66c65's player-body distinction: only a
+SpawnedCharacter value proves a player target (player_identity.py). Every
+observation is kept, blinds on non-player actors included. These are
+replicated updates and RPC observations, not hit counts, cast attribution or
+effect intervals; checkpoint snapshots are excluded.
 """
 
 from __future__ import annotations
@@ -145,7 +141,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         document = build(args.export)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(args.out, json.dumps(document, indent=2, ensure_ascii=True,
                                                allow_nan=False) + "\n")
     except (OSError, ValueError) as exc:

@@ -7,7 +7,7 @@ pools, death, or player credit.
 """
 from __future__ import annotations
 
-import argparse, collections, hashlib, json, math, os, re, struct, sys
+import argparse, collections, json, math, re, struct, sys
 from pathlib import Path
 
 import pyarrow as pa
@@ -15,10 +15,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text, sha256_file
+    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
     from .extract_kill_observations import InputError, exact_ref, parse_array
 else:
-    from atomic_io import atomic_write_text, sha256_file
+    from atomic_io import aliases, atomic_write_text, sha256_file as sha
     from extract_kill_observations import InputError, exact_ref, parse_array
 
 SCHEMA_VERSION = 1
@@ -44,24 +44,12 @@ COORDINATE_COLUMNS = ("time_ms", "packet_id", "channel_index", "actor_net_guid",
 FIELDS = ["time_ms", "packet_id", "channel_index", "actor_net_guid", "object_net_guid", "group_path", "handle", "field_name", "compatible_checksum", "bit_count", "raw_bits", "value_i64", "value_f64", "value_bool", "value_str"]
 CP_FIELDS = ["checkpoint_index", "checkpoint_id", *FIELDS]
 HEALTH_SECTION_PATH = "HealthDamageSection"
+INPUT_NAMES = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "net_guids.parquet")
+HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py")
 
 
 class IntegrityError(InputError):
     pass
-
-
-sha = sha256_file
-
-def aliases(path, protected):
-    for item in protected:
-        try:
-            if path.exists() and item.exists() and path.samefile(item):
-                return True
-        except OSError:
-            pass
-        if path.resolve() == item.resolve():
-            return True
-    return False
 
 
 def raw(r, ordinal, population):
@@ -132,13 +120,11 @@ def declarations(manifest):
         outer[h] = (x.get("name"), x.get("compatible_checksum"))
     result = {}
     for route, (handle, crc, parent, parent_handle, scalar, scalar_handle, members, relation) in ROUTES.items():
-        # A route can be absent from an export entirely.  It becomes an error
-        # only if a selected row claims an absent or different outer entry.
+        # A route, or its parameter group, can be absent from an export: an
+        # error only if a selected row claims it or a different outer entry.
         outer_entry = outer.get(handle)
         path = "/Script/ShooterGame.DamageableComponent:" + route
         if len(groups[path]) > 1: raise InputError("duplicate route declaration group: " + route)
-        # Parameter groups are not universal across the measured exports.  An
-        # absent group is valid only when no row later claims this route.
         fields = None if not groups[path] else {}
         if fields is not None:
             for x in groups[path][0].get("fields", []):
@@ -153,6 +139,7 @@ def parse_group(route, key, rows, paths, segments, declared):
     handle, crc, parent_name, parent_handle, scalar_name, scalar_handle, members, relation = ROUTES[route]
     expected_parent = route + "." + parent_name
     child_rx = re.compile("^" + re.escape(expected_parent) + r"\[(\d+)\]\.([A-Za-z0-9_]+)$")
+    name_to_handle = {v: h for h, v in members.items()}
     by = collections.defaultdict(list); errors = []
     for ordinal, r in rows:
         name = r.get("field_name") or ""
@@ -170,7 +157,7 @@ def parse_group(route, key, rows, paths, segments, declared):
             child = child_rx.match(name)
             if child:
                 child_name = child.group(2)
-                member_handle = {v: h for h, v in members.items()}.get(child_name)
+                member_handle = name_to_handle.get(child_name)
                 if member_handle is None:
                     errors.append({"source_row": ordinal, "error": "unknown section child name"})
                 elif fields.get(member_handle) != (child_name, VALUE_CHECKSUMS[route][member_handle]):
@@ -186,9 +173,7 @@ def parse_group(route, key, rows, paths, segments, declared):
             if r.get("compatible_checksum") is None: errors.append({"source_row": ordinal, "error": "top-level checksum absent"})
         elif child_rx.match(name):
             if r.get("compatible_checksum") is not None: errors.append({"source_row": ordinal, "error": "flattened child has checksum"})
-        # Other declared top-level parameters and nested arrays are retained
-        # raw. They are not section-state members, but neither are they schema
-        # errors merely because this extractor does not interpret them.
+        # Other declared parameters and nested arrays are kept raw, not errors.
         by[name].append((ordinal, r))
     reasons = []
     if segments > 1: reasons.append("disjoint_physical_segments")
@@ -222,7 +207,6 @@ def parse_group(route, key, rows, paths, segments, declared):
             m = child_rx.match(name)
             if m:
                 if len(q) != 1: raise InputError("duplicate emitted child")
-                name_to_handle = {v: h for h, v in members.items()}
                 if m.group(2) not in name_to_handle:
                     raise InputError("unknown section child name")
                 emitted[(int(m.group(1)), name_to_handle[m.group(2)])] = q[0]
@@ -233,7 +217,7 @@ def parse_group(route, key, rows, paths, segments, declared):
         order = []
         for _, r in sorted(rows):
             m = child_rx.match(r.get("field_name") or "")
-            if m: order.append((int(m.group(1)), {v:h for h,v in members.items()}[m.group(2)]))
+            if m: order.append((int(m.group(1)), name_to_handle[m.group(2)]))
         if order != [(i,h) for i,h,_,_ in leaves]: raise InputError("child physical order differs from parent wire order")
         grouped = collections.defaultdict(dict)
         for (index, h), (width, payload) in parsed.items():
@@ -252,9 +236,8 @@ def parse_group(route, key, rows, paths, segments, declared):
             q = by.get(route + "." + scalar_name, [])
             if len(q) != 1: raise InputError("missing or duplicate scalar")
             scalar = f32(q[0][1])
-            # Keep both arithmetic methods visible.  The f64 accumulation is
-            # rounded once; iterative f32 is reported separately, never used
-            # to silently choose a universal wire rule.
+            # Both methods reported: f64 accumulated then rounded once, and
+            # iterative f32, never silently chosen as the wire rule.
             values = [s["delta_life"] for s in sections]
             f64_sum = values[0] if values else 0.0
             for value in values[1:]: f64_sum += value
@@ -284,19 +267,19 @@ def result(route, key, rows, errors, reasons, report):
 
 
 def extract(export):
-    inputs = [export / n for n in ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "net_guids.parquet")]
+    inputs = [export / n for n in INPUT_NAMES]
     before = {p.name: sha(p) for p in inputs}
-    source_files = [Path(__file__).resolve(), Path(__file__).with_name("extract_kill_observations.py"), Path(__file__).with_name("atomic_io.py")]
+    source_files = [Path(__file__).resolve(), *(Path(__file__).with_name(n) for n in HELPER_NAMES)]
     impl_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     decl = declarations(manifest)
     path_sets = collections.defaultdict(set)
     for r in pq.read_table(export / "net_guids.parquet", columns=["net_guid","path"], use_threads=False).to_pylist(): path_sets[r["net_guid"]].add(r["path"])
     paths = {guid: next(iter(values)) if len(values) == 1 else None for guid, values in path_sets.items()}
-    groups = collections.OrderedDict(); segments = collections.Counter(); selected = []; last = None; last_o = None
+    groups = {}; segments = collections.Counter(); selected = []; last = None; last_o = None
     for o, r in selected_rows(export / "fields.parquet", FIELDS):
+        # selected_rows yields only rows named `<route>.`, so this is a route.
         route = route_name(r.get("field_name"))
-        if route not in ROUTES: last = None; continue
         key = (r["time_ms"],r["packet_id"],r["channel_index"],r["actor_net_guid"],r["object_net_guid"],r["group_path"],r["handle"])
         groups.setdefault((route,key), []).append((o,r)); selected.append((o,r))
         if (route,key) != last or last_o is None or o != last_o + 1: segments[(route,key)] += 1
@@ -309,17 +292,20 @@ def extract(export):
     if before != after: raise IntegrityError("input changed during extraction")
     if impl_before != impl_after: raise IntegrityError("implementation changed during extraction")
     public_decl={k:{n:v for n,v in x.items() if n != "_fields"} for k,x in decl.items()}
+    def tally(obs, ambiguous_key):
+        status = collections.Counter(x["section_state"]["status"] for x in obs)
+        return {"validated_arrays": status["validated_array"], "invalid_arrays": status["invalid"], "parentless_rpcs": status["parentless_rpc"], "schema_invalid": sum(bool(x["schema_errors"]) for x in obs), ambiguous_key: sum(bool(x["ambiguity_reasons"]) for x in obs), "relation_mismatch": sum("scalar_delta_relation_mismatch" in x["ambiguity_reasons"] for x in obs)}
     by_route = {}
     for route in ROUTES:
         route_rows = [x for x in observations if x["route"] == route]
-        by_route[route] = {"coordinate_groups": len(route_rows), "selected_rows": sum(len(x["source_rows"]) for x in route_rows), "validated_arrays": sum(x["section_state"]["status"] == "validated_array" for x in route_rows), "parentless_rpcs": sum(x["section_state"]["status"] == "parentless_rpc" for x in route_rows), "invalid_arrays": sum(x["section_state"]["status"] == "invalid" for x in route_rows), "schema_invalid": sum(bool(x["schema_errors"]) for x in route_rows), "ambiguous": sum(bool(x["ambiguity_reasons"]) for x in route_rows), "relation_mismatch": sum("scalar_delta_relation_mismatch" in x["ambiguity_reasons"] for x in route_rows)}
-    counts={"main_coordinate_groups":len(observations),"main_selected_rows":len(selected),"checkpoint_selected_rows":len(checkpoint),"validated_arrays":sum(x["section_state"]["status"]=="validated_array" for x in observations),"invalid_arrays":sum(x["section_state"]["status"]=="invalid" for x in observations),"parentless_rpcs":sum(x["section_state"]["status"]=="parentless_rpc" for x in observations),"schema_invalid":sum(bool(x["schema_errors"]) for x in observations),"ambiguous_groups":sum(bool(x["ambiguity_reasons"]) for x in observations),"relation_mismatch":sum("scalar_delta_relation_mismatch" in x["ambiguity_reasons"] for x in observations),"by_route":by_route}
+        by_route[route] = {"coordinate_groups": len(route_rows), "selected_rows": sum(len(x["source_rows"]) for x in route_rows), **tally(route_rows, "ambiguous")}
+    counts = {"main_coordinate_groups": len(observations), "main_selected_rows": len(selected), "checkpoint_selected_rows": len(checkpoint), **tally(observations, "ambiguous_groups"), "by_route": by_route}
     return {"schema_version":SCHEMA_VERSION,"kind":"vrfkit_section_observations","export_id":export.name,"source":str(export.resolve()),"route_declarations":public_decl,"provenance":{"replay_build":manifest.get("replay_build"),"input_sha256_before":before,"input_sha256_after":after,"implementation_sha256_before":impl_before,"implementation_sha256_after":impl_after},"observations":observations,"checkpoint_observations":checkpoint,"counts":counts}
 
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__); p.add_argument("--export",required=True,type=Path); p.add_argument("--out",required=True,type=Path); a=p.parse_args(argv)
-    protected=[a.export/n for n in ("manifest.json","fields.parquet","checkpoint_fields.parquet","net_guids.parquet")]+[Path(__file__),Path(__file__).with_name("extract_kill_observations.py"),Path(__file__).with_name("atomic_io.py")]
+    protected=[a.export/n for n in INPUT_NAMES]+[Path(__file__),*(Path(__file__).with_name(n) for n in HELPER_NAMES)]
     try:
         if a.export.is_dir():
             protected.extend(p for p in a.export.iterdir() if p.is_file())

@@ -1,31 +1,12 @@
 # Current raw-data inventory and investigation priorities
 
-Measured 2026-09-09 on the 714 accepted exports from parser commit `fc50bfe`.
-The later derived-observation tools through `14e58e5` do not change these
-Parquet field counts. See [current status](CURRENT_STATUS.md) for the completed
-work and [DATA](DATA.md) for the available values.
-
-Follow-up: [numeric FastArray extraction](GAS_AND_PATCHVOLUME_INVESTIGATION.md)
-now fully consumes all 2,882,152 AbilitiesAndBuffs inner windows. The public
-standalone extractor retains numeric headers, deletion/change IDs, raw property
-boundaries, and the original bits. This output is separate from Parquet typed
-values, so the inventory below remains the measured starting point. The
-remaining GAS task is item-schema and value interpretation.
-
-Follow-up, 2026-09-28: the extractor's build scope was re-measured on 1,018
-exports made by parser `259ed10`. All 3,999,493 `_cnc_h1` inner windows
-across 22 builds close exactly, and the extractor accepts those builds on that
-route. The 12.10 and 12.11 exports have no `_cnc_h1` rows. See
-[the build-scope entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#build-scope-re-measured-2026-09-28).
-The AbilitiesAndBuffs bodies filed under
-`/Script/ShooterGame.AresAbilitySystemComponent` were at first outside the
-extractor's selection. They became a second route the same day: 250,053 main
-and 181,108 checkpoint windows, all exact, on all 24 builds. The inventory
-below is still the 2026-09-09 measurement, and the open GAS task is unchanged.
-
-Private evidence also validates a numeric FastArray walk over all 26,303
-selected PatchVolume whole/tail windows. PatchVolume still lacks a public
-extraction route and an established class/item/property schema.
+Measured 2026-09-09 on the 714 accepted exports from parser commit `fc50bfe`;
+the derived-observation tools through `14e58e5` do not change these Parquet
+field counts. See [current status](CURRENT_STATUS.md) for the completed work
+and [DATA](DATA.md) for the available values. The numeric FastArray walk over
+the AbilitiesAndBuffs windows, and its 2026-09-28 build scope and second route,
+are in the [GAS investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md): it adds
+no Parquet values, and the open GAS task is still item schema and meaning.
 
 ## What the inventory counts
 
@@ -93,11 +74,9 @@ population; it has not independently revalidated tag frequencies or the
 historical grammar on all 42,545,425 rows. Historical upstream C# byte-array
 storage does not establish the wire grammar or action labels.
 
-PatchVolume now has a public extraction route and a schema taken from the
-replays' own declarations, checked by a second reader and against the owning
-actor's spawn geometry: [ground-area volumes](GROUND_VOLUMES.md). The decoder
-retains the exact original windows; the meanings of `Status` and `bIsActive`
-remain unestablished.
+PatchVolume's schema and public route are in
+[ground-area volumes](GROUND_VOLUMES.md); the meanings of `Status` and
+`bIsActive` remain unestablished.
 
 ## Existing containers are not new decoder opportunities
 

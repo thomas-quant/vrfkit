@@ -1,21 +1,16 @@
-"""Guards for the component-remap check.
+"""Guards for the component-remap check: the strict verdict for each pair
+kind, the rename signal, and a run that checked nothing.
 
-The remap table in `sink/paths.rs` was read out of a shipped build, and a later
-build can rename a component without anything in the repo noticing: the replay
-never named it either, so there is no test that can fail. The export baseline
-pins `overlay_no_field_name` and would catch it -- but only on the one replay
-that has a baseline.
-
-What the checker does instead works on any export: for each remap pair, ask
-whether the native group it targets carries rows. If it does not, and the bare
-leaf still does, the remap stopped matching.
+Fixture row counts are measured shapes from real exports, named per test.
 """
-import collections
+import contextlib
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,119 +19,99 @@ import check_component_remaps as guard  # noqa: E402
 SCRIPT = Path(__file__).resolve().parents[1] / "check_component_remaps.py"
 
 PAIRS = [("ZoomStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent")]
+KINDS = {"ZoomStateMachine": "RepLayout"}
+CNC_PAYLOAD = "__vrfkit_unresolved_class_net_cache_payload__"
+
+
+def write_fields(directory, rows) -> Path:
+    """A fields.parquet of `(group_path, field_name)` rows, both columns
+    dictionary-encoded as the exporter writes them."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    table = pa.table({
+        "group_path": pa.array([g for g, _ in rows], pa.string()).dictionary_encode(),
+        "field_name": pa.array([f for _, f in rows], pa.string()).dictionary_encode(),
+    })
+    pq.write_table(table, Path(directory) / "fields.parquet")
+    return Path(directory)
 
 
 class VerdictTests(unittest.TestCase):
     def test_rows_on_the_native_group_mean_the_remap_works(self):
-        v = guard.verdicts(PAIRS, {"/Script/ShooterGame.EquippableStateMachineComponent": 8112})
+        v = guard.verdicts(
+            PAIRS, {"/Script/ShooterGame.EquippableStateMachineComponent": 8112}, KINDS)
         self.assertEqual([x.state for x in v], ["ok"])
 
     def test_a_dead_remap_with_the_leaf_still_present_fails(self):
         """The rename signature: nothing on the target, everything still bare."""
-        v = guard.verdicts(PAIRS, {"ZoomStateMachine": 8112})
+        v = guard.verdicts(PAIRS, {"ZoomStateMachine": 8112}, KINDS)
         self.assertEqual([x.state for x in v], ["broken"])
         self.assertIn("8112", v[0].detail)
 
     def test_neither_present_is_absent_not_broken(self):
         """A replay without that component is not evidence of anything."""
-        v = guard.verdicts(PAIRS, {"/Script/Other.Thing": 5})
+        v = guard.verdicts(PAIRS, {"/Script/Other.Thing": 5}, KINDS)
         self.assertEqual([x.state for x in v], ["absent"])
 
-    def test_a_leaf_lingering_beside_a_working_target_is_still_ok(self):
-        """The ratio path, which only a pair with no RepLayout kind still takes.
-
-        On the reference replay `ZoomStateMachine` drops from 8,112 rows to 70
-        rather than to zero -- 0.12% of 60,101. Those 70 turned out to be
-        ClassNetCache rows, which `bare_counts` now drops, so a RepLayout pair
-        no longer needs this tolerance; see `StrictRepLayoutTests`.
-        """
-        v = guard.verdicts(PAIRS, {
-            "/Script/ShooterGame.EquippableStateMachineComponent": 60101,
-            "ZoomStateMachine": 70,
-        })
-        self.assertEqual([x.state for x in v], ["ok"])
-
-    def test_a_dead_leaf_sharing_a_live_target_is_caught(self):
-        """The case that a target-only check misses.
-
-        Many leaves map to `EquippableStateMachineComponent` (nine when this
-        was written, 26 now). If one stops resolving, the others keep the target
-        busy, so "does the target have rows" says everything is fine while that
-        component's blocks are all bare again. Measured by simulating the
-        rename: the leaf goes to 15.58% of the target's rows, against 0.12% when
-        it is healthy -- which the ratio catches; see `StrictRepLayoutTests`
-        for the smaller shares it did not.
-        """
-        v = guard.verdicts(PAIRS, {
-            "/Script/ShooterGame.EquippableStateMachineComponent": 52059,
-            "ZoomStateMachine": 8112,
-        })
-        self.assertEqual([x.state for x in v], ["broken"])
+    def test_a_pair_whose_kind_has_no_rule_is_refused(self):
+        """A `GroupKind` paths.rs adds must not fall through to a lenient rule."""
+        rows = {"/Script/ShooterGame.EquippableStateMachineComponent": 1}
+        for kinds in ({}, {"ZoomStateMachine": "Future"}):
+            with self.subTest(kinds=kinds), self.assertRaises(ValueError):
+                guard.verdicts(PAIRS, rows, kinds)
 
     def test_class_net_cache_rows_do_not_count_as_bare(self):
         """The RepLayout-only remaps leave their RPC stream bare on purpose.
 
-        `AbilitiesAndBuffsComponent` is mapped for RepLayout blocks and
-        deliberately not for ClassNetCache ones -- the AbilitySystem `_cnc`
-        group declares an incomplete function table, so remapping the RPC stream
-        would mis-parse it. On the reference replay that leaves 9,366 bare rows
-        against 652 on the native group, every one of them a `_cnc_h*` or
-        unresolved-payload row. Counting those would report the healthy case as
-        broken, which it did before this was split out.
+        `AbilitiesAndBuffsComponent` is not mapped for ClassNetCache blocks:
+        the AbilitySystem `_cnc` group declares an incomplete function table,
+        so remapping the RPC stream would mis-parse it. On the reference
+        replay that leaves 9,366 bare rows against 652 on the native group,
+        every one a `_cnc_h*` or unresolved-payload row.
         """
-        counts = guard.bare_counts({
-            "AbilitiesAndBuffsComponent": collections.Counter({
-                "_cnc_h1": 4683,
-                "__vrfkit_unresolved_class_net_cache_payload__": 4683,
-            }),
-            "ZoomStateMachine": collections.Counter({"CurrentState": 70}),
-        })
+        with tempfile.TemporaryDirectory() as directory:
+            counts, _ = guard.row_counts(write_fields(
+                directory, [("AbilitiesAndBuffsComponent", "_cnc_h1")] * 4683
+                + [("AbilitiesAndBuffsComponent", CNC_PAYLOAD)] * 4683
+                + [("ZoomStateMachine", "CurrentState")] * 70))
         self.assertEqual(counts["AbilitiesAndBuffsComponent"], 0)
         self.assertEqual(counts["ZoomStateMachine"], 70)
 
     def test_exit_code_is_nonzero_only_when_something_is_broken(self):
-        ok = guard.verdicts(PAIRS, {"/Script/ShooterGame.EquippableStateMachineComponent": 1})
-        broken = guard.verdicts(PAIRS, {"ZoomStateMachine": 1})
-        absent = guard.verdicts(PAIRS, {})
+        ok = guard.verdicts(
+            PAIRS, {"/Script/ShooterGame.EquippableStateMachineComponent": 1}, KINDS)
+        broken = guard.verdicts(PAIRS, {"ZoomStateMachine": 1}, KINDS)
+        absent = guard.verdicts(PAIRS, {}, KINDS)
         self.assertEqual(guard.exit_code(ok), 0)
         self.assertEqual(guard.exit_code(absent), 0)
         self.assertEqual(guard.exit_code(broken), 1)
 
 
 class StrictRepLayoutTests(unittest.TestCase):
-    """A RepLayout pair is broken by any RepLayout row left bare.
-
-    Healthy is exactly zero -- 92 exports, 48 RepLayout pairs, not one row --
-    and the ratio could not see a dead leaf behind a busy shared target.
-    """
+    """A RepLayout pair is broken by any RepLayout row left bare: healthy is
+    exactly zero (92 exports, 48 RepLayout pairs, not one row)."""
 
     NATIVE = "/Script/ShooterGame.EquippableStateMachineComponent"
-    KINDS = {"ZoomStateMachine": "RepLayout"}
 
     def test_nothing_bare_is_ok(self):
-        v = guard.verdicts(PAIRS, {self.NATIVE: 60101}, self.KINDS)
+        v = guard.verdicts(PAIRS, {self.NATIVE: 60101}, KINDS)
         self.assertEqual([x.state for x in v], ["ok"])
 
     def test_one_bare_row_is_broken(self):
-        v = guard.verdicts(PAIRS, {self.NATIVE: 60101, "ZoomStateMachine": 1}, self.KINDS)
+        v = guard.verdicts(PAIRS, {self.NATIVE: 60101, "ZoomStateMachine": 1}, KINDS)
         self.assertEqual([x.state for x in v], ["broken"])
 
     def test_a_dead_leaf_behind_a_busy_shared_target_is_caught(self):
-        """The case the ratio missed: 2,495 bare rows against 62,000 is 4%.
-
-        Measured shape, from a 13.06 export made before `Resume_StateMachine`
-        was mapped: every one of its RepLayout rows was bare, and the ratio
-        called it `ok` because 25 other leaves keep the target busy.
-        """
+        """Measured shape, from a 13.06 export made before `Resume_StateMachine`
+        was mapped: all 2,495 of its RepLayout rows bare, beside 62,000 on a
+        target 25 other leaves keep busy."""
         rows = {self.NATIVE: 62000, "ZoomStateMachine": 2495}
-        self.assertEqual([x.state for x in guard.verdicts(PAIRS, rows)], ["ok"])
         self.assertEqual(
-            [x.state for x in guard.verdicts(PAIRS, rows, self.KINDS)], ["broken"])
+            [x.state for x in guard.verdicts(PAIRS, rows, KINDS)], ["broken"])
 
     def test_a_class_net_cache_pair_is_not_judged_on_rep_layout_rows(self):
-        """The shape the ratio used to call `ok`: 70 bare RepLayout rows beside
-        a busy RepLayout target. Neither is what a ClassNetCache pair routes,
-        so with no ClassNetCache row either side there is nothing to judge."""
+        """70 bare RepLayout rows beside a busy RepLayout target: neither is
+        what a ClassNetCache pair routes, so there is nothing to judge."""
         rows = {self.NATIVE: 60101, "ZoomStateMachine": 70}
         v = guard.verdicts(PAIRS, rows, {"ZoomStateMachine": "ClassNetCache"})
         self.assertEqual([x.state for x in v], ["absent"])
@@ -151,18 +126,9 @@ class StrictRepLayoutTests(unittest.TestCase):
 
 
 class ClassNetCachePairTests(unittest.TestCase):
-    """A ClassNetCache pair is judged on the rows it routes, strictly.
-
-    The four C# reference pairs kept the 5% ratio over RepLayout rows -- the
-    leaf's against the class's RepLayout group -- and neither is what they
-    remap. Over the 1,018 exports of the 2026-09-28 audit that read
-    `DamageHandlerComponent` `broken` on 10 healthy exports (one or two stray
-    RepLayout rows, 0 on `DamageableComponent`) and `absent` on the other
-    1,008, although `DamageableComponent_ClassNetCache` held rows on all
-    1,018 (72.2M in all); and a scratch build with the pair's target renamed
-    printed byte-identical output.
-    The row counts below are those exports'.
-    """
+    """A ClassNetCache pair is judged on the rows it routes, strictly. The row
+    counts below are from the 1,018 exports of the 2026-09-28 build audit and
+    a scratch build with the damage handler's target renamed."""
 
     PAIR = [("DamageHandlerComponent", "/Script/ShooterGame.DamageableComponent")]
     KINDS = {"DamageHandlerComponent": "ClassNetCache"}
@@ -177,8 +143,8 @@ class ClassNetCachePairTests(unittest.TestCase):
         self.assertIn("89843 rows on the _ClassNetCache group", v.detail)
 
     def test_a_stray_rep_layout_row_under_the_leaf_is_reported_not_broken(self):
-        """The healthy 13.05 export the ratio failed: one 1-bit RepLayout row
-        under the leaf, 0 on the RepLayout group, 89,843 routed."""
+        """A healthy 13.05 export: one 1-bit RepLayout row under the leaf, 0 on
+        the RepLayout group, 89,843 routed."""
         rows = {"DamageHandlerComponent": 1, self.ROUTED: 89843}
         v = self.verdict(rows)
         self.assertEqual(v.state, "ok")
@@ -207,21 +173,9 @@ class ClassNetCachePairTests(unittest.TestCase):
         v = self.verdict({self.ROUTED: 89843}, {"DamageHandlerComponent": 1})
         self.assertEqual(v.state, "broken")
 
-    def test_the_healthy_and_the_broken_export_now_read_differently(self):
-        """What the old verdict could not do. It saw only RepLayout rows, which
-        are the same on both exports, so it returned one state for both."""
-        healthy_rows = {"DamageHandlerComponent": 1, self.ROUTED: 89843}
-        broken_rows = {"DamageHandlerComponent": 1}
-        old = [guard.verdicts(self.PAIR, rows)[0].state
-               for rows in (healthy_rows, broken_rows)]
-        self.assertEqual(old, ["broken", "broken"])
-        new = [self.verdict(healthy_rows).state,
-               self.verdict(broken_rows, {"DamageHandlerComponent": 4563}).state]
-        self.assertEqual(new, ["ok", "broken"])
-
     def test_the_rep_layout_target_group_says_nothing(self):
-        """`EffectManager` read `ok` on every export because its RepLayout group
-        happens to carry rows -- not rows this pair routes."""
+        """`EffectManager`'s RepLayout group carries rows on every export, but
+        not rows this pair routes."""
         v = self.verdict({"/Script/ShooterGame.DamageableComponent": 5000})
         self.assertEqual(v.state, "absent")
 
@@ -231,14 +185,16 @@ class ClassNetCachePairTests(unittest.TestCase):
         self.assertIn("2 RepLayout rows under the leaf", v.detail)
 
     def test_the_two_bare_counts_split_every_row_of_a_bare_group(self):
-        names = {"DamageHandlerComponent": collections.Counter({
-            "__vrfkit_unresolved_class_net_cache_payload__": 4563, None: 1}),
-            "AbilitiesAndBuffsComponent": collections.Counter({
-                "_cnc_h1": 4683, "Status": 3})}
-        rep_layout = guard.bare_counts(names)
-        cnc = guard.cnc_bare_counts(names)
+        """A native group counts every row, ClassNetCache ones included."""
+        with tempfile.TemporaryDirectory() as directory:
+            rep_layout, cnc = guard.row_counts(write_fields(
+                directory, [("DamageHandlerComponent", CNC_PAYLOAD)] * 4563
+                + [("DamageHandlerComponent", None)]
+                + [("AbilitiesAndBuffsComponent", "_cnc_h1")] * 4683
+                + [("AbilitiesAndBuffsComponent", "Status")] * 3
+                + [(self.ROUTED, "_cnc_h2")] * 2))
         self.assertEqual(rep_layout, {"DamageHandlerComponent": 1,
-                                      "AbilitiesAndBuffsComponent": 3})
+                                      "AbilitiesAndBuffsComponent": 3, self.ROUTED: 2})
         self.assertEqual(cnc, {"DamageHandlerComponent": 4563,
                                "AbilitiesAndBuffsComponent": 4683})
 
@@ -251,26 +207,17 @@ class ClassNetCachePairTests(unittest.TestCase):
 
 
 class RenameSignalTests(unittest.TestCase):
-    """What the ratio verdicts cannot see, and where it does show up.
+    """A rename never reads `broken`: the old leaf stops being declared, so the
+    pair reads `ok` (another leaf keeps the target busy) or `absent`. The
+    component arrives as a bare group under its NEW name, which no pair
+    claims; that is the signal."""
 
-    The FAILED text told the reader "the likely cause is a game build renaming
-    the component". A rename cannot produce that verdict. When a build renames
-    `ZoomStateMachine` to something else the replay stops declaring the old
-    leaf at all, so `bare_rows` is 0 -- under the strict rule and the ratio
-    alike -- and the pair reads `ok` whenever another leaf keeps the target
-    group busy, or `absent` when none does. Never `broken`.
-
-    The renamed component does not vanish from the export, though. It arrives
-    as a bare group under its NEW name, which no pair in the table claims. That
-    is the signal, and nothing was looking at it.
-    """
-
-    def test_a_renamed_leaf_is_not_broken_by_the_ratio_check(self):
+    def test_a_renamed_leaf_is_not_broken(self):
         """States the gap the suspects list exists to cover."""
         v = guard.verdicts(PAIRS, {
             "/Script/ShooterGame.EquippableStateMachineComponent": 52059,
             "ZoomStateMachineV2": 8112,
-        })
+        }, KINDS)
         self.assertEqual([x.state for x in v], ["ok"])
         self.assertEqual(guard.exit_code(v), 0)
 
@@ -293,13 +240,8 @@ class RenameSignalTests(unittest.TestCase):
             [])
 
     def test_a_class_net_cache_only_group_is_not_a_suspect(self):
-        """`row_counts` already zeroes those; a zero must not read as a rename.
-
-        `AbilitiesAndBuffsComponent` is RepLayout-only by design, so its whole
-        RPC stream stays bare on a healthy export. It reaches this function
-        with a 0 because `bare_counts` dropped the `_cnc_h*` rows, and a
-        rename suspect list that reported it would be pure noise.
-        """
+        """`row_counts` already zeroes a RepLayout-only leaf such as
+        `AbilitiesAndBuffsComponent`; its 0 must not read as a rename."""
         self.assertEqual(
             guard.unmapped_bare_groups({"AbilitiesAndBuffsComponent": 0}, PAIRS), [])
 
@@ -313,30 +255,23 @@ class NothingCheckedTests(unittest.TestCase):
     """A run in which no pair appeared verified nothing, and must not say OK."""
 
     def test_every_pair_absent_means_nothing_was_checked(self):
-        self.assertTrue(guard.nothing_checked(guard.verdicts(PAIRS, {})))
+        self.assertTrue(guard.nothing_checked(guard.verdicts(PAIRS, {}, KINDS)))
 
     def test_one_working_pair_is_enough_to_have_checked_something(self):
         v = guard.verdicts(PAIRS, {
-            "/Script/ShooterGame.EquippableStateMachineComponent": 1})
+            "/Script/ShooterGame.EquippableStateMachineComponent": 1}, KINDS)
         self.assertFalse(guard.nothing_checked(v))
 
     def test_a_broken_pair_also_counts_as_having_checked_something(self):
         self.assertFalse(guard.nothing_checked(
-            guard.verdicts(PAIRS, {"ZoomStateMachine": 1})))
+            guard.verdicts(PAIRS, {"ZoomStateMachine": 1}, KINDS)))
 
 
 class MainTests(unittest.TestCase):
     """The vacuity lives in `main`, so it is exercised there."""
 
     def _export(self, directory, rows):
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-        table = pa.table({
-            "group_path": [g for g, _ in rows],
-            "field_name": [f for _, f in rows],
-        })
-        pq.write_table(table, Path(directory) / "fields.parquet")
-        return Path(directory)
+        return write_fields(directory, rows)
 
     def _run(self, directory):
         result = subprocess.run(
@@ -365,7 +300,7 @@ class MainTests(unittest.TestCase):
                       "pairs", result.stdout)
 
     def test_main_reads_a_stray_rep_layout_row_under_a_class_net_cache_leaf_as_ok(self):
-        """The 10 healthy audit exports the old ratio failed, in miniature."""
+        """The 10 healthy audit exports with a stray RepLayout row, in miniature."""
         with tempfile.TemporaryDirectory() as directory:
             routed = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
             self._export(directory,
@@ -392,11 +327,8 @@ class MainTests(unittest.TestCase):
         self.assertIn("50 ClassNetCache rows still bare", result.stdout)
 
     def test_main_judges_a_rep_layout_pair_strictly(self):
-        """`main` must hand the table's kinds to `verdicts`.
-
-        One bare RepLayout row against 100 on the target is 1% -- `ok` by the
-        ratio, `broken` by the rule a RepLayout pair is held to.
-        """
+        """`main` must hand the table's kinds to `verdicts`: one bare RepLayout
+        row against 100 on the target is `broken`."""
         with tempfile.TemporaryDirectory() as directory:
             native = "/Script/ShooterGame.EquippableStateMachineComponent"
             self._export(directory, [(native, "CurrentState")] * 100
@@ -404,6 +336,23 @@ class MainTests(unittest.TestCase):
             result = self._run(directory)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("broken  ZoomStateMachine", result.stdout)
+
+    def test_main_fails_a_pair_whose_kind_has_no_rule(self):
+        """In process, with the table's kinds replaced: paths.rs has only the
+        two kinds today, so a subprocess run cannot reach this."""
+        with tempfile.TemporaryDirectory() as directory:
+            native = "/Script/ShooterGame.EquippableStateMachineComponent"
+            self._export(directory, [(native, "CurrentState")] * 100)
+            future = {leaf: "Future" for leaf, _ in guard.remap_pairs()}
+            argv = ["check_component_remaps.py", "--export", directory]
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(guard, "remap_kinds", return_value=future), \
+                    mock.patch.object(sys, "argv", argv), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = guard.main()
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn("GroupKind 'Future'", err.getvalue())
+        self.assertNotIn("OK:", out.getvalue())
 
     def test_the_failure_text_no_longer_blames_a_rename(self):
         """A `broken` verdict cannot be produced by a rename; see the class above."""
@@ -434,7 +383,7 @@ class PairParsingTests(unittest.TestCase):
             self.assertIn(".", target, f"{leaf} -> {target}")
 
     def test_a_blueprint_class_target_is_read(self):
-        """The shape the `/Script/`-only pattern silently skipped."""
+        """A `/Game/..._C` target, which a `/Script/`-only pattern would skip."""
         table = """const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     (
         "ZoomStateMachine",

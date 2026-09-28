@@ -61,7 +61,7 @@ existing `table.rs` byte for byte.
 ```powershell
 python -W error tools/compare_descriptor_sources.py `
   --baseline third_party/vrp `
-  --candidate "$env:LOCALAPPDATA/vrfkit/upstream-vrp::d23c13e12262fb1da9fc005d1cd0ef9f8d0d36fd" `
+  --candidate "<upstream clone>::d23c13e12262fb1da9fc005d1cd0ef9f8d0d36fd" `
   --downstream-table crates/vrf-decode/src/table.rs --output descriptor-audit.json
 ```
 
@@ -159,10 +159,8 @@ new ability-array routes. Detailed per-identity evidence is in
 
 ## Reproduction and checks
 
-Replay files remain private. The preserved inputs live below
-`$env:LOCALAPPDATA/vrfkit/baseline-corpora`; validation artifacts live below
-`$env:LOCALAPPDATA/vrfkit/upstream-implementation-20260923`. Pass equivalent
-local paths when reproducing elsewhere.
+Replay inputs and run artifacts remain private and outside the repository;
+pass local paths when reproducing.
 
 ```powershell
 cargo +1.86.0 build --release -p vrfkit --locked
@@ -197,12 +195,7 @@ These differences remain recorded rather than being called parity; the
 before/after Rust comparison checks that this update did not change the
 existing movement output.
 
-The MSRV 1.86 development sweep passed: formatting, workspace clippy with
-warnings denied, all-target/all-feature checks, rustdoc with warnings denied,
-the offset probe, Rust/Python Parquet interoperability, 27 advertised feature
-configurations, ASCII and generated-file checks, baseline schema checks and
-the full documentation guard. The final suites contain 701 passing Rust tests
-and 836 passing Python tests. Eleven 13.06 golden vectors are included in the
-88-vector transform test. After the last failure-accounting fix, the final
-binary again passed the twelve-replay checkpoint decode guard and the private
-13.06 export hash baseline.
+Eleven 13.06 golden vectors are included in the 88-vector transform test.
+After the last failure-accounting fix, the final binary again passed the
+twelve-replay checkpoint decode guard and the private 13.06 export hash
+baseline.

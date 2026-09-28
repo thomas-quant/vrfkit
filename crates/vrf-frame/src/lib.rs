@@ -1,13 +1,8 @@
 //! DemoFrame iteration: decompressed replay-data chunk -> `(time_ms, packet)` sequence.
 //!
-//! # Why a separate crate
-//!
-//! The DemoFrame layer sits between the **container** (which hands us Oodle-
-//! decompressed byte slices) and the **replication reader** (which processes
-//! individual network packets). It is a distinct parsing stage with its own
-//! error modes: a valid container can produce an invalid frame stream, and
-//! framing bugs must not crash the container parser. Isolating it keeps both
-//! sides testable independently.
+//! A stage between the container (decompressed chunks) and the replication
+//! reader (packets), with its own error modes: a valid container can hold an
+//! invalid frame stream.
 //!
 //! # DemoFrame wire layout
 //!
@@ -68,24 +63,12 @@
 //! The reference replay sets only `HasStreamingFixes` (header flags `0x0002`),
 //! so its game-specific section is absent on every one of its 226,190 frames.
 //! So does every header of the 45-replay, 24-build sample measured on
-//! 2026-09-28 (docs/PERFORMANCE_NOTES.md, "Frame walking"), which also carried
-//! no ExternalData. [`FrameSkips`] is what moves if a build changes either.
+//! 2026-09-28 (docs/PERFORMANCE_NOTES.md#measured-shape-on-real-replays), which
+//! also carried no ExternalData. [`FrameSkips`] is what moves if a build
+//! changes either.
 //!
-//! # Module map
-//!
-//! | Module | Responsibility |
-//! |--------|----------------|
-//! | `lib` | [`iter_demo_frames`], the frame header and the packet loop |
-//! | `sections` | The four fixed sections that precede the packet loop |
-//! | `error` | [`FrameError`] |
-//!
-//! # Cargo features
-//!
-//! None. Every part of this crate is on the single path from a decompressed
-//! chunk to a packet: the four sections are not optional stages a consumer may
-//! decline, they are byte ranges that must be consumed in order for the frame
-//! cursor to stay aligned. A flag over any of them would only produce a build
-//! that mis-parses.
+//! No Cargo features: every section must be consumed, in order, for the frame
+//! cursor to stay aligned.
 
 #![forbid(unsafe_code)]
 
@@ -101,28 +84,15 @@ use sections::{
     read_export_data, read_external_data, read_game_specific_frame_data, read_streaming_level_fixes,
 };
 
-/// Replay header flags that control DemoFrame parsing.
-///
-/// Source: `Replay.Models/Replay/ReplayHeaderFlags.cs`
-/// ```csharp
-/// HasStreamingFixes = 1 << 1,   // 0x02
-/// GameSpecificFrameData = 1 << 3, // 0x08
-/// ```
+/// Replay header flags that control DemoFrame parsing (`ReplayHeaderFlags.cs`).
 pub const FLAG_HAS_STREAMING_FIXES: u32 = 1 << 1;
 pub const FLAG_GAME_SPECIFIC_FRAME_DATA: u32 = 1 << 3;
 
-/// Maximum packet size (bytes). Unreal's `MAX_PACKET_SIZE` = 2 KiB.
-/// Source: `Constants.cs` -- `public const int MaxPacketSizeInBits = 16384`.
-const MAX_PACKET_SIZE_BYTES: i32 = 16384 / 8; // 2048
+/// Unreal's `MaxPacketSizeInBits` (`Constants.cs`), in bytes.
+const MAX_PACKET_SIZE_BYTES: i32 = 16384 / 8;
 
-/// A single packet extracted from the DemoFrame stream.
-///
-/// `time_ms` is derived from the frame's `timeSeconds` field: scaled by 1000
-/// in f64, rounded half away from zero, and 0 when `timeSeconds` is not
-/// finite. All three match the C# reference; see the conversion comment in
-/// `iter_demo_frames` below for the full derivation, including why a value
-/// that does not fit becomes [`FrameError::TimeOutOfRange`] instead of a
-/// saturated 0 or `u32::MAX`.
+/// A packet from the DemoFrame stream. See [`walk_demo_frames`] for how
+/// `time_ms` is derived from the frame's `timeSeconds`.
 #[derive(Debug, Clone)]
 pub struct DemoPacket<'a> {
     /// Time of the enclosing DemoFrame, in milliseconds.
@@ -135,21 +105,17 @@ pub struct DemoPacket<'a> {
 
 /// Section bytes a DemoFrame walk stepped over without decoding them.
 ///
-/// ExternalData and GameSpecificFrameData are skipped -- as the reference
-/// skips them -- by lengths the wire declares, so the frame stays aligned and
-/// no read fails however much they carry. That also means nothing else moves
-/// when a build starts sending them: until these were counted, the only
-/// evidence the sections were empty was one replay's measurement. Each field
-/// is a plain total; zero is a measurement, not a default.
-///
-/// `#[non_exhaustive]` so a further tally is not a breaking change.
+/// ExternalData and GameSpecificFrameData are skipped, as the reference skips
+/// them, by their declared lengths, so nothing else moves when a build starts
+/// sending them. Zero is a measurement, not a default. `#[non_exhaustive]` so a
+/// further tally is not a breaking change.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FrameSkips {
     /// ExternalData blobs stepped over: one per non-zero `numBits`.
     pub external_data_blobs: u64,
-    /// Bytes those blobs occupied, `ceil(numBits / 8)` each. Their net GUIDs
-    /// are read and dropped, and are not counted here.
+    /// Their bytes, `ceil(numBits / 8)` each; the net GUIDs read between them
+    /// are not counted.
     pub external_data_bytes: u64,
     /// Bytes skipped by GameSpecificFrameData's `skipExternalOffset`, counted
     /// only in frames whose header flag enables the section.
@@ -165,40 +131,26 @@ impl FrameSkips {
     }
 }
 
-/// What one [`walk_demo_frames`] call walked.
-///
-/// `#[non_exhaustive]` for the same reason as [`FrameSkips`].
+/// What one [`walk_demo_frames`] call walked; `#[non_exhaustive]` like
+/// [`FrameSkips`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FrameWalk {
     /// Packets yielded to the callback.
     pub packets: u32,
-    /// DemoFrames walked. Not derivable from `packets` -- a frame can carry
-    /// zero, one, or many packets -- and a caller that assumes "one frame per
-    /// chunk" (as `driver::checkpoints` used to) has no way to notice that
-    /// assumption break without it.
+    /// DemoFrames walked; not derivable from `packets`, since a frame carries
+    /// any number of packets.
     pub frames: u32,
     /// Section bytes stepped over without being decoded.
     pub skipped: FrameSkips,
+    /// Frames whose `timeSeconds` was NaN or infinite. Their packets carry
+    /// 0 ms, as in the reference: a plausible wrong time, so it is counted.
+    pub non_finite_times: u32,
 }
 
-/// Iterate all DemoFrames in a decompressed ReplayData chunk, emitting packets.
-///
-/// `data` is the full decompressed chunk. `flags` is `ReplayHeader.flags`.
-/// `cache` receives schema updates (net-field exports and export GUIDs)
-/// that arrive in the ExportData section of each frame.
-///
-/// The callback `on_packet` is invoked for every packet in the stream, with
-/// the frame's time, the packet's raw bytes, and the cache state at that exact
-/// wire position. Packet-side cache mutations made through that reference are
-/// visible to the next packet before a later frame's ExportData is applied.
-/// This is allocation-free for the packet data (slices into `data`).
-///
-/// Returns `(total packets yielded, total DemoFrames walked)` -- the first two
-/// fields of [`FrameWalk`]. It is kept, with that signature, for callers of
-/// the published function; it drops [`FrameSkips`], so a caller that should
-/// see skipped section bytes uses [`walk_demo_frames`], as every caller in
-/// this workspace does.
+/// [`walk_demo_frames`] returning only `(packets, frames)`, kept for callers
+/// of the published function; it drops [`FrameSkips`] and the non-finite
+/// time count.
 pub fn iter_demo_frames(
     data: &[u8],
     flags: u32,
@@ -209,11 +161,13 @@ pub fn iter_demo_frames(
     Ok((walk.packets, walk.frames))
 }
 
-/// [`iter_demo_frames`], returning everything the walk counted.
+/// Walk every DemoFrame in a decompressed ReplayData chunk (`data`), calling
+/// `on_packet` for each packet. `flags` is `ReplayHeader.flags`.
 ///
-/// Same arguments, same callback contract, same errors; the result adds the
-/// [`FrameSkips`] tally of ExternalData and GameSpecificFrameData bytes the
-/// walk stepped over.
+/// Each frame's ExportData is applied to `cache` before its packets.
+/// `on_packet` gets the frame's time, the packet's bytes (a slice of `data`)
+/// and the cache as of that packet's wire position; a mutation it makes is
+/// visible to the next packet before a later frame's ExportData.
 pub fn walk_demo_frames(
     data: &[u8],
     flags: u32,
@@ -227,42 +181,26 @@ pub fn walk_demo_frames(
     let mut packet_index: u32 = 0;
     let mut frame_count: u32 = 0;
     let mut skipped = FrameSkips::default();
+    let mut non_finite_times: u32 = 0;
 
     while !reader.at_end() {
         frame_count += 1;
-        // -- Frame header --------------------------------------------------
         let _current_level_index = reader.read_i32()?;
         let time_seconds = reader.read_f32()?;
-        // Mirror the reference exactly (ReplayEventJsonWriter.cs:194):
+        // The reference (ReplayEventJsonWriter.cs:194):
         //   float.IsFinite(seconds)
         //     ? (long)Math.Round(seconds * 1000d, MidpointRounding.AwayFromZero)
         //     : 0
-        // All three parts matter. Promoting to f64 before scaling avoids
-        // rounding the product to the nearest f32 first, and rounding rather
-        // than truncating is what keeps timestamps aligned -- truncation put
-        // every frame whose fractional millisecond was >= 0.5 one millisecond
-        // early. Rust's f64::round is already half-away-from-zero.
-        //
-        // The finiteness test has to be written out. `as u32` saturates, which
-        // happens to give 0 for NaN and -inf but gives u32::MAX for +inf --
-        // the opposite end of the range from what the reference produces. That
-        // is reachable: `time_seconds` is a raw read_f32 over replay bytes with
-        // no validation, so any bit pattern can arrive here.
-        //
-        // Finiteness is not the whole guard, though, because `as u32` also
-        // saturates in *both* directions on finite values. A frame time of
-        // -1.0 s is finite, scales to -1000 ms, and lands on 0 -- the
-        // timestamp of the replay's own first frame -- so every packet in that
-        // frame is exported at a plausible wrong time and nothing anywhere
-        // reports it. A large finite value collapses onto u32::MAX the same
-        // way. The reference keeps a signed `long` and can carry both; a `u32`
-        // cannot, so the value is refused instead of folded onto whichever end
-        // of the range happens to be nearer.
-        //
-        // The comparison reads the *rounded* value, not the input. `-0.0004 s`
-        // rounds to `-0.0`, which is not less than `0.0`, so near-zero
-        // negatives stay a legitimate 0 ms rather than becoming the first
-        // rejection a real replay hands us.
+        // Scale in f64, then round half away from zero (`f64::round`);
+        // truncating put every frame with a fractional ms >= 0.5 one ms early.
+        // `is_finite` is explicit because `as u32` saturates +inf to u32::MAX
+        // where the reference gives 0, and any bit pattern can arrive here.
+        // A finite value outside u32 ms is refused, not saturated: -1.0 s
+        // would land on 0 ms, the replay's first frame, a plausible wrong time
+        // nothing reports. A non-finite time still becomes 0 ms, as in the
+        // reference, but is counted (`FrameWalk::non_finite_times`), so that
+        // same wrong time is reported. The range check reads the rounded
+        // value, so -0.0004 s stays 0 ms.
         let time_ms = if time_seconds.is_finite() {
             let ms = (f64::from(time_seconds) * 1000.0).round();
             if ms < 0.0 || ms > f64::from(u32::MAX) {
@@ -272,25 +210,21 @@ pub fn walk_demo_frames(
             }
             ms as u32
         } else {
+            non_finite_times += 1;
             0
         };
 
-        // -- ExportData ----------------------------------------------------
         read_export_data(&mut reader, cache)?;
 
-        // -- StreamingLevelFixes -------------------------------------------
         read_streaming_level_fixes(&mut reader, has_streaming_fixes)?;
 
-        // -- ExternalData --------------------------------------------------
         let (blobs, bytes) = read_external_data(&mut reader)?;
         skipped.external_data_blobs += blobs;
         skipped.external_data_bytes += bytes;
 
-        // -- GameSpecificFrameData -----------------------------------------
         skipped.game_specific_bytes +=
             read_game_specific_frame_data(&mut reader, has_game_specific)?;
 
-        // -- Packet loop ---------------------------------------------------
         loop {
             if has_streaming_fixes {
                 let _seen_level_index = reader.read_int_packed()?;
@@ -320,9 +254,9 @@ pub fn walk_demo_frames(
                 });
             }
 
-            // Extract packet bytes as a slice into the original data buffer.
-            // Position in the data array: start_bit is always 0 for our reader,
-            // so absolute bit position = reader.position().
+            // `reader` starts at bit 0 of `data` and every frame read, vrf-schema's
+            // ExportData included, is whole bytes, so `position() / 8` is the
+            // packet's exact byte offset in `data`.
             let byte_offset = (reader.position() / 8) as usize;
             let packet_data = &data[byte_offset..byte_offset + packet_size_usize];
             reader.skip_bits(bit_count)?;
@@ -343,58 +277,13 @@ pub fn walk_demo_frames(
         packets: packet_index,
         frames: frame_count,
         skipped,
+        non_finite_times,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Build a minimal DemoFrame with one packet.
-    fn build_minimal_frame(time_secs: f32, packet: &[u8], flags: u32) -> Vec<u8> {
-        let mut data = Vec::new();
-        // currentLevelIndex: i32
-        data.extend_from_slice(&0i32.to_le_bytes());
-        // timeSeconds: f32
-        data.extend_from_slice(&time_secs.to_le_bytes());
-        // ExportData: numLayoutCmdExports = 0
-        data.push(0); // IntPacked(0) = single byte 0x00
-        // ExportData: numExportGuids = 0
-        data.push(0);
-        // StreamingLevelFixes (with HasStreamingFixes set):
-        if flags & FLAG_HAS_STREAMING_FIXES != 0 {
-            // numLevels = 0
-            data.push(0);
-            // externalOffset = 0
-            data.extend_from_slice(&0u64.to_le_bytes());
-        } else {
-            // numLevels = 0
-            data.push(0);
-        }
-        // ExternalData: numBits = 0 (terminator)
-        data.push(0);
-        // GameSpecificFrameData (with flag set):
-        if flags & FLAG_GAME_SPECIFIC_FRAME_DATA != 0 {
-            // skipExternalOffset = 0
-            data.extend_from_slice(&0u64.to_le_bytes());
-        }
-        // Packet loop:
-        if flags & FLAG_HAS_STREAMING_FIXES != 0 {
-            // seenLevelIndex (IntPacked)
-            data.push(0);
-        }
-        // packetSize
-        let pkt_size = packet.len() as i32;
-        data.extend_from_slice(&pkt_size.to_le_bytes());
-        // packet data
-        data.extend_from_slice(packet);
-        // End of frame: seenLevelIndex + size=0
-        if flags & FLAG_HAS_STREAMING_FIXES != 0 {
-            data.push(0);
-        }
-        data.extend_from_slice(&0i32.to_le_bytes());
-        data
-    }
 
     fn push_int_packed(data: &mut Vec<u8>, mut value: u32) {
         loop {
@@ -410,10 +299,51 @@ mod tests {
         }
     }
 
-    fn build_frame_with_group(time_secs: f32, packet: u8, field_count: u32) -> Vec<u8> {
+    /// One DemoFrame: `exports` is the whole ExportData section, then no
+    /// streaming levels, the ExternalData blobs `(numBits, netGuid, payload)`,
+    /// `game_specific` when `flags` enables that section, and `packets`.
+    fn build_frame(
+        flags: u32,
+        time_secs: f32,
+        exports: &[u8],
+        external: &[(u32, u32, &[u8])],
+        game_specific: &[u8],
+        packets: &[&[u8]],
+    ) -> Vec<u8> {
+        let streaming = flags & FLAG_HAS_STREAMING_FIXES != 0;
         let mut data = Vec::new();
-        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes()); // currentLevelIndex
         data.extend_from_slice(&time_secs.to_le_bytes());
+        data.extend_from_slice(exports);
+        data.push(0); // numLevels
+        if streaming {
+            data.extend_from_slice(&0u64.to_le_bytes()); // externalOffset
+        }
+        for &(num_bits, net_guid, payload) in external {
+            push_int_packed(&mut data, num_bits);
+            push_int_packed(&mut data, net_guid);
+            data.extend_from_slice(payload);
+        }
+        data.push(0); // ExternalData terminator
+        if flags & FLAG_GAME_SPECIFIC_FRAME_DATA != 0 {
+            data.extend_from_slice(&(game_specific.len() as u64).to_le_bytes());
+            data.extend_from_slice(game_specific);
+        }
+        // The empty packet is the frame terminator: packetSize 0.
+        for packet in packets.iter().chain([&[][..]].iter()) {
+            if streaming {
+                data.push(0); // seenLevelIndex
+            }
+            data.extend_from_slice(&(packet.len() as i32).to_le_bytes());
+            data.extend_from_slice(packet);
+        }
+        data
+    }
+
+    /// An ExportData section declaring `/Script/G.Thing` at index 7 with
+    /// `field_count` slots, no field and no export GUIDs.
+    fn group_export(field_count: u32) -> Vec<u8> {
+        let mut data = Vec::new();
         push_int_packed(&mut data, 1); // one layout export
         push_int_packed(&mut data, 7); // path-name index
         push_int_packed(&mut data, 1); // path is exported
@@ -424,69 +354,28 @@ mod tests {
         push_int_packed(&mut data, field_count);
         data.push(0); // no field exported
         push_int_packed(&mut data, 0); // no export GUIDs
-        push_int_packed(&mut data, 0); // no streaming levels
-        data.extend_from_slice(&0u64.to_le_bytes());
-        push_int_packed(&mut data, 0); // no external data
-        push_int_packed(&mut data, 0); // seen level
-        data.extend_from_slice(&1i32.to_le_bytes());
-        data.push(packet);
-        push_int_packed(&mut data, 0); // seen level before frame terminator
-        data.extend_from_slice(&0i32.to_le_bytes());
         data
     }
 
-    /// One frame with HasStreamingFixes: no exports and no streaming levels,
-    /// then the given ExternalData blobs `(numBits, netGuid, payload)`, a
-    /// GameSpecificFrameData block when `game_specific` is given (the caller
-    /// sets that flag), and one packet.
-    fn build_frame_with_sections(
-        external: &[(u32, u32, &[u8])],
-        game_specific: Option<&[u8]>,
-        packet: &[u8],
-    ) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&0i32.to_le_bytes()); // currentLevelIndex
-        data.extend_from_slice(&1.0f32.to_le_bytes()); // timeSeconds
-        push_int_packed(&mut data, 0); // no layout exports
-        push_int_packed(&mut data, 0); // no export GUIDs
-        push_int_packed(&mut data, 0); // no streaming levels
-        data.extend_from_slice(&0u64.to_le_bytes()); // externalOffset
-        for &(num_bits, net_guid, payload) in external {
-            push_int_packed(&mut data, num_bits);
-            push_int_packed(&mut data, net_guid);
-            data.extend_from_slice(payload);
-        }
-        push_int_packed(&mut data, 0); // ExternalData terminator
-        if let Some(bytes) = game_specific {
-            data.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-            data.extend_from_slice(bytes);
-        }
-        push_int_packed(&mut data, 0); // seenLevelIndex
-        data.extend_from_slice(&(packet.len() as i32).to_le_bytes());
-        data.extend_from_slice(packet);
-        push_int_packed(&mut data, 0); // seenLevelIndex before the terminator
-        data.extend_from_slice(&0i32.to_le_bytes());
-        data
-    }
-
-    /// ExternalData blobs are skipped by their declared length, so the frame
-    /// stays aligned and nothing fails -- which is exactly why they must be
-    /// counted: a build that starts sending them moves no other number. Two
-    /// frames, so the tally is shown to add across frames rather than keep
-    /// the last one.
+    /// Two frames, so the tally must add across frames, not keep the last.
     #[test]
     fn external_data_blobs_are_counted_and_the_packets_still_arrive() {
         // 12 bits -> 2 bytes, 17 bits -> 3 bytes; then 1 bit -> 1 byte.
-        let mut data = build_frame_with_sections(
-            &[(12, 6, &[0xAA, 0xBB]), (17, 9, &[1, 2, 3])],
-            None,
-            &[0xDE, 0xAD],
-        );
-        data.extend(build_frame_with_sections(&[(1, 4, &[0x01])], None, &[0xBE]));
+        let flags = FLAG_HAS_STREAMING_FIXES;
+        let external: &[(u32, u32, &[u8])] = &[(12, 6, &[0xAA, 0xBB]), (17, 9, &[1, 2, 3])];
+        let mut data = build_frame(flags, 1.0, &[0, 0], external, &[], &[&[0xDE, 0xAD]]);
+        data.extend(build_frame(
+            flags,
+            1.0,
+            &[0, 0],
+            &[(1, 4, &[0x01])],
+            &[],
+            &[&[0xBE]],
+        ));
         let mut cache = NetGuidCache::new();
         let mut received = Vec::new();
 
-        let walk = walk_demo_frames(&data, FLAG_HAS_STREAMING_FIXES, &mut cache, |pkt, _| {
+        let walk = walk_demo_frames(&data, flags, &mut cache, |pkt, _| {
             received.push(pkt.data.to_vec());
         })
         .unwrap();
@@ -503,12 +392,11 @@ mod tests {
         assert_eq!(received, [vec![0xDE, 0xAD], vec![0xBE]]);
     }
 
-    /// The GameSpecificFrameData skip is counted in bytes, and only when the
-    /// header flag enables the section.
+    /// Counted in bytes, and only when the header flag enables the section.
     #[test]
     fn game_specific_bytes_are_counted_and_the_packet_still_arrives() {
         let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
-        let data = build_frame_with_sections(&[], Some(&[1, 2, 3, 4, 5]), &[0x7F]);
+        let data = build_frame(flags, 1.0, &[0, 0], &[], &[1, 2, 3, 4, 5], &[&[0x7F]]);
         let mut cache = NetGuidCache::new();
         let mut received = Vec::new();
 
@@ -528,179 +416,127 @@ mod tests {
         assert_eq!(received, [vec![0x7F]]);
     }
 
-    /// Empty sections read as zero, and the published tuple function reports
-    /// the same packets and frames as the walk it wraps.
+    /// Empty sections read as zero, the packet keeps its bytes and frame time,
+    /// and `iter_demo_frames` reports the walk's packets and frames.
     #[test]
     fn a_frame_with_empty_sections_skips_nothing() {
         let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
-        let data = build_minimal_frame(1.0, &[0x00], flags);
+        let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+        let data = build_frame(flags, 12.5, &[0, 0], &[], &[], &[&payload]);
+        let mut received = Vec::new();
 
-        let walk = walk_demo_frames(&data, flags, &mut NetGuidCache::new(), |_, _| {}).unwrap();
+        let walk = walk_demo_frames(&data, flags, &mut NetGuidCache::new(), |pkt, _| {
+            received.push((pkt.time_ms, pkt.data.to_vec()));
+        })
+        .unwrap();
         assert_eq!(walk.skipped, FrameSkips::default());
+        assert_eq!((walk.packets, walk.frames), (1, 1));
+        assert_eq!(received, [(12500, payload.to_vec())]);
         assert_eq!(
             iter_demo_frames(&data, flags, &mut NetGuidCache::new(), |_, _| {}).unwrap(),
             (walk.packets, walk.frames)
         );
-        assert_eq!((walk.packets, walk.frames), (1, 1));
     }
 
     #[test]
     fn each_packet_observes_only_schema_exports_that_precede_it() {
-        let mut data = build_frame_with_group(1.0, 1, 1);
-        data.extend(build_frame_with_group(2.0, 2, 2));
+        let flags = FLAG_HAS_STREAMING_FIXES;
+        let mut data = build_frame(flags, 1.0, &group_export(1), &[], &[], &[&[1]]);
+        data.extend(build_frame(flags, 2.0, &group_export(2), &[], &[], &[&[2]]));
         let mut cache = NetGuidCache::new();
         let mut seen = Vec::new();
 
-        iter_demo_frames(
-            &data,
-            FLAG_HAS_STREAMING_FIXES,
-            &mut cache,
-            |packet, packet_cache| {
-                seen.push((
-                    packet.data[0],
-                    packet_cache.get_group_by_index(7).unwrap().len(),
-                ));
-            },
-        )
+        iter_demo_frames(&data, flags, &mut cache, |packet, packet_cache| {
+            seen.push((
+                packet.data[0],
+                packet_cache.get_group_by_index(7).unwrap().len(),
+            ));
+        })
         .unwrap();
 
         assert_eq!(seen, [(1, 1), (2, 2)]);
     }
 
-    #[test]
-    fn minimal_frame_yields_one_packet() {
+    /// One frame at `time_secs`: its packet's `time_ms`, or the walk's error.
+    fn frame_time(time_secs: f32) -> Result<u32, FrameError> {
         let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
-        let packet_payload = &[0xDE, 0xAD, 0xBE, 0xEF];
-        let data = build_minimal_frame(12.5, packet_payload, flags);
-        let mut cache = NetGuidCache::new();
-        let mut received = Vec::new();
+        let data = build_frame(flags, time_secs, &[0, 0], &[], &[], &[&[0x00]]);
+        let mut time_ms = None;
+        walk_demo_frames(&data, flags, &mut NetGuidCache::new(), |pkt, _| {
+            time_ms = Some(pkt.time_ms);
+        })?;
+        Ok(time_ms.expect("the frame carries one packet"))
+    }
 
-        let (count, frame_count) = iter_demo_frames(&data, flags, &mut cache, |pkt, _| {
-            received.push((pkt.time_ms, pkt.data.to_vec()));
+    /// Non-finite times are read as 0 ms, as the reference reads them, and
+    /// counted per frame; a finite time, -0.0 s and a refused one are not.
+    #[test]
+    fn non_finite_frame_times_are_counted_not_refused() {
+        let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
+        let mut data = Vec::new();
+        for secs in [f32::NAN, 1.5, f32::INFINITY, -0.0, f32::NEG_INFINITY] {
+            data.extend(build_frame(flags, secs, &[0, 0], &[], &[], &[&[0x00]]));
+        }
+        let mut times = Vec::new();
+        let walk = walk_demo_frames(&data, flags, &mut NetGuidCache::new(), |pkt, _| {
+            times.push(pkt.time_ms);
         })
         .unwrap();
+        assert_eq!(walk.non_finite_times, 3);
+        assert_eq!((walk.frames, walk.packets), (5, 5));
+        assert_eq!(times, [0, 1_500, 0, 0, 0]);
 
-        assert_eq!(count, 1);
-        assert_eq!(frame_count, 1);
-        assert_eq!(received.len(), 1);
-        assert_eq!(received[0].0, 12500);
-        assert_eq!(received[0].1, packet_payload);
+        let finite = build_frame(flags, 2.0, &[0, 0], &[], &[], &[&[0x00]]);
+        let walk = walk_demo_frames(&finite, flags, &mut NetGuidCache::new(), |_, _| {}).unwrap();
+        assert_eq!(walk.non_finite_times, 0);
     }
 
-    /// Run one frame and return the packet's `time_ms`.
-    fn time_ms_of(time_secs: f32) -> u32 {
-        let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
-        let data = build_minimal_frame(time_secs, &[0x00], flags);
-        let mut cache = NetGuidCache::new();
-        let mut out = 0;
-        iter_demo_frames(&data, flags, &mut cache, |pkt, _| out = pkt.time_ms).unwrap();
-        out
-    }
-
+    /// The named cases of the conversion in [`walk_demo_frames`].
     #[test]
-    fn time_ms_rounds_half_away_from_zero_like_the_reference() {
-        // ReplayEventJsonWriter.cs:194 --
-        //   (long)Math.Round(seconds * 1000d, MidpointRounding.AwayFromZero)
-        //
-        // Truncating instead put roughly half of all timestamps 1 ms early,
-        // which is the entire "systematic -1ms offset" this project had
-        // recorded as a bunch-boundary choice. It is neither systematic nor
-        // about boundaries: it only shows up when the fractional millisecond
-        // is >= 0.5.
-        assert_eq!(time_ms_of(12.5), 12500, "exact value must be unchanged");
-        assert_eq!(time_ms_of(0.0004), 0, "below half a ms rounds down");
-        assert_eq!(time_ms_of(0.0005), 1, "exactly half rounds away from zero");
-        assert_eq!(time_ms_of(0.0006), 1, "above half rounds up");
-        assert_eq!(time_ms_of(1.9999), 2000, "carries into the next second");
-    }
-
-    #[test]
-    fn time_ms_matches_the_reference_formula_across_a_match() {
-        // Sweep realistic frame timestamps -- a competitive match runs to
-        // roughly 2,300 s -- against the reference expression, computed in
-        // double precision exactly as ReplayEventJsonWriter.cs does. This
-        // catches both the rounding rule and any f32-vs-f64 drift in the
-        // multiply, which a handful of named cases would not.
-        // No `checked` counter: it was incremented unconditionally inside a
-        // `0..2000` loop and then asserted to equal 2000, which no input could
-        // make false. The loop bound already states the sample count.
-        for step in 0..2000 {
-            let secs = (step as f32) * 1.1597; // ~0 to ~2319 s, uneven fractions
-            let expected = (f64::from(secs) * 1000.0).round() as u32;
-            assert_eq!(time_ms_of(secs), expected, "at {secs} s");
+    fn time_ms_rounds_like_the_reference() {
+        for (secs, ms) in [
+            (12.5, 12_500),
+            (0.0004, 0),
+            (0.0005, 1), // exactly half rounds away from zero
+            (0.0006, 1),
+            (1.9999, 2_000), // carries into the next second
+            // `as u32` alone would give +inf u32::MAX.
+            (f32::NAN, 0),
+            (f32::NEG_INFINITY, 0),
+            (f32::INFINITY, 0),
+            // -0.0004 s rounds to -0.0, which the range check accepts.
+            (-0.0004, 0),
+            (-0.0, 0),
+            (0.0, 0),
+            // Exact in f32 and just under u32::MAX ms: no off-by-one rejection.
+            (4_294_967.0, 4_294_967_000),
+        ] {
+            assert_eq!(frame_time(secs).unwrap(), ms, "{secs} s");
         }
     }
 
     #[test]
-    fn non_finite_time_seconds_yields_zero_like_the_reference() {
-        // ReplayEventJsonWriter.cs:194 guards the conversion explicitly:
-        //   float.IsFinite(seconds)
-        //     ? (long)Math.Round(seconds * 1000d, MidpointRounding.AwayFromZero)
-        //     : 0
-        //
-        // `time_seconds` is a raw read_f32 with no validation, so every bit
-        // pattern -- including the quiet-NaN and infinity encodings -- is
-        // representable in a replay. Relying on the `as u32` cast to stand in
-        // for that guard only works for two of the three: the cast saturates,
-        // so +inf lands on u32::MAX rather than 0.
-        assert_eq!(time_ms_of(f32::NAN), 0, "NaN");
-        assert_eq!(time_ms_of(f32::NEG_INFINITY), 0, "-inf");
-        assert_eq!(time_ms_of(f32::INFINITY), 0, "+inf");
+    fn time_ms_matches_the_reference_formula_across_a_match() {
+        // A match's span of uneven timestamps against the reference expression
+        // in f64: catches the rounding rule and f32-vs-f64 drift in the
+        // multiply, which named cases would not.
+        for step in 0..2000 {
+            let secs = (step as f32) * 1.1597; // ~0 to ~2319 s, uneven fractions
+            let expected = (f64::from(secs) * 1000.0).round() as u32;
+            assert_eq!(frame_time(secs).unwrap(), expected, "at {secs} s");
+        }
     }
 
-    /// Run one frame and return the whole result, so a rejection is inspectable.
-    fn run_frame(time_secs: f32) -> Result<(u32, u32), FrameError> {
-        let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
-        let data = build_minimal_frame(time_secs, &[0x00], flags);
-        let mut cache = NetGuidCache::new();
-        iter_demo_frames(&data, flags, &mut cache, |_, _| {})
-    }
-
+    /// Refused, not saturated: -1.0 s to 0 ms, 5e6 s to u32::MAX ms (49.7 days).
     #[test]
-    fn a_negative_frame_time_is_rejected_rather_than_folded_onto_zero() {
-        // `-1.0` is finite, so the guard above lets it through; the signed
-        // millisecond value is -1000 and `as u32` saturates that to 0 -- the
-        // timestamp of the replay's own first frame. Every packet in the frame
-        // is then exported at a plausible wrong time with nothing to show for
-        // it. The reference computes a signed `long` and can carry the value;
-        // `time_ms` cannot, and refusing beats inventing.
-        let err = run_frame(-1.0).unwrap_err();
-        assert!(
-            matches!(err, FrameError::TimeOutOfRange { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn a_frame_time_past_the_u32_millisecond_range_is_rejected_rather_than_saturated() {
-        // The other end of the same cast: 5e6 s is 5e9 ms, past u32::MAX, and
-        // saturating lands every packet on 49.7 days.
-        let err = run_frame(5.0e6).unwrap_err();
-        assert!(
-            matches!(err, FrameError::TimeOutOfRange { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn a_negative_time_that_rounds_to_zero_milliseconds_is_still_accepted() {
-        // Regression guard, and the reason the check reads the *rounded* value
-        // rather than the input: `-0.0004` rounds to `-0.0`, which is not less
-        // than `0.0`, so it stays a legitimate 0 ms instead of becoming the
-        // first rejection a real replay hands us.
-        assert_eq!(time_ms_of(-0.0004), 0);
-        assert_eq!(time_ms_of(-0.0), 0);
-        assert_eq!(time_ms_of(0.0), 0);
-    }
-
-    #[test]
-    fn a_frame_time_just_inside_the_u32_range_is_accepted() {
-        // Regression guard on the boundary itself, so the check cannot become
-        // an off-by-one that rejects representable times. 4_294_967 s is exact
-        // in f32 (it needs 23 mantissa bits) and scales to 4_294_967_000 ms,
-        // just under u32::MAX. A competitive match runs to about 2,300 s, so
-        // this is already three orders of magnitude past anything real.
-        assert_eq!(time_ms_of(4_294_967.0), 4_294_967_000);
+    fn a_frame_time_outside_the_u32_millisecond_range_is_rejected() {
+        for secs in [-1.0, 5.0e6] {
+            let err = frame_time(secs).unwrap_err();
+            assert!(
+                matches!(err, FrameError::TimeOutOfRange { .. }),
+                "{secs} s: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -720,17 +556,10 @@ mod tests {
     #[test]
     fn negative_packet_size_is_error() {
         let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
-        let mut data = Vec::new();
-        data.extend_from_slice(&0i32.to_le_bytes()); // levelIndex
-        data.extend_from_slice(&1.0f32.to_le_bytes()); // time
-        data.push(0); // export data count
-        data.push(0); // export guid count
-        data.push(0); // numLevels
-        data.extend_from_slice(&0u64.to_le_bytes()); // externalOffset
-        data.push(0); // external data terminator
-        data.extend_from_slice(&0u64.to_le_bytes()); // game specific
-        data.push(0); // seenLevelIndex
-        data.extend_from_slice(&(-1i32).to_le_bytes()); // negative size!
+        let mut data = build_frame(flags, 1.0, &[0, 0], &[], &[], &[]);
+        // The frame ends in the terminator's packetSize; make it negative.
+        data.truncate(data.len() - 4);
+        data.extend_from_slice(&(-1i32).to_le_bytes());
 
         let mut cache = NetGuidCache::new();
         let err = iter_demo_frames(&data, flags, &mut cache, |_, _| {}).unwrap_err();

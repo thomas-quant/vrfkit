@@ -2,11 +2,7 @@
 
 use super::*;
 
-// ===============================================================================
-// Test helpers -- synthetic byte builders mirroring the C# test patterns
-// ===============================================================================
-
-mod helpers {
+pub(crate) mod helpers {
     pub fn add_u16(buf: &mut Vec<u8>, v: u16) {
         buf.extend_from_slice(&v.to_le_bytes());
     }
@@ -35,10 +31,7 @@ mod helpers {
 
     /// Serialise an FString in its UTF-16 form: a negative length counting
     /// code units (terminator included), then little-endian UTF-16.
-    ///
-    /// Only the Event chunk tests need this form, so it is unused when the
-    /// `event` feature is off rather than genuinely dead.
-    #[cfg_attr(not(feature = "event"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "event", feature = "checkpoint")), allow(dead_code))]
     pub fn add_fstring_utf16(buf: &mut Vec<u8>, s: &str) {
         let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0u16)).collect();
         add_i32(buf, -(units.len() as i32));
@@ -47,79 +40,58 @@ mod helpers {
         }
     }
 
-    pub fn add_guid(buf: &mut Vec<u8>, a: u32, b: u32, c: u32, d: u32) {
-        add_u32(buf, a);
-        add_u32(buf, b);
-        add_u32(buf, c);
-        add_u32(buf, d);
+    pub fn add_guid(buf: &mut Vec<u8>, guid: [u32; 4]) {
+        for word in guid {
+            add_u32(buf, word);
+        }
     }
 
-    pub fn add_byte_array(buf: &mut Vec<u8>, data: &[u8]) {
-        add_i32(buf, data.len() as i32);
-        buf.extend_from_slice(data);
+    /// The `LocalFileReplay` custom-version GUID, the one the info parser pins.
+    pub const LOCAL_REPLAY: [u32; 4] = [0x95A4_F03E, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9];
+
+    /// The replay info fields a test varies. [`replay_info`] fixes the rest:
+    /// file version 7, 60000 ms, network version 19, changelist 1234, not
+    /// live, uncompressed, no encryption key.
+    pub struct Info {
+        pub magic: u32,
+        pub custom_versions: Vec<([u32; 4], i32)>,
+        pub friendly_name: &'static str,
+        pub timestamp: i64,
+        pub encrypted: bool,
     }
 
-    /// Build a minimal replay info section with the standard custom version.
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_replay_info(
-        magic: u32,
-        file_version: u32,
-        include_custom_version: bool,
-        custom_version_value: i32,
-        length_in_ms: i32,
-        network_version: u32,
-        changelist: u32,
-        friendly_name: &str,
-        is_live: bool,
-        timestamp: i64,
-        compressed: bool,
-        encrypted: bool,
-        encryption_key: &[u8],
-    ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32(&mut buf, magic);
-        add_u32(&mut buf, file_version);
-
-        if file_version >= 7 {
-            if include_custom_version {
-                add_i32(&mut buf, 1);
-                add_guid(&mut buf, 0x95A4_F03E, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9);
-                add_i32(&mut buf, custom_version_value);
-            } else {
-                add_i32(&mut buf, 0);
+    /// A valid replay info: the file magic and `LocalFileReplay` version 7.
+    impl Default for Info {
+        fn default() -> Self {
+            Info {
+                magic: 0x43F4_EFDD,
+                custom_versions: vec![(LOCAL_REPLAY, 7)],
+                friendly_name: "Match",
+                timestamp: 42,
+                encrypted: false,
             }
         }
-
-        add_i32(&mut buf, length_in_ms);
-        add_u32(&mut buf, network_version);
-        add_u32(&mut buf, changelist);
-        add_fstring(&mut buf, friendly_name);
-        add_u32(&mut buf, if is_live { 1 } else { 0 });
-        add_i64(&mut buf, timestamp);
-        add_u32(&mut buf, if compressed { 1 } else { 0 });
-        add_u32(&mut buf, if encrypted { 1 } else { 0 });
-        add_byte_array(&mut buf, encryption_key);
-
-        buf
     }
 
-    /// Default replay info: valid, uncompressed, unencrypted.
-    pub fn default_replay_info() -> Vec<u8> {
-        build_replay_info(
-            0x43F4_EFDD,
-            7,
-            true,
-            7,
-            60000,
-            19,
-            1234,
-            "Match",
-            false,
-            42,
-            false,
-            false,
-            &[],
-        )
+    pub fn replay_info(info: &Info) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, info.magic);
+        add_u32(&mut buf, 7); // file version
+        add_i32(&mut buf, info.custom_versions.len() as i32);
+        for &(guid, version) in &info.custom_versions {
+            add_guid(&mut buf, guid);
+            add_i32(&mut buf, version);
+        }
+        add_i32(&mut buf, 60000); // length_in_ms
+        add_u32(&mut buf, 19); // network version
+        add_u32(&mut buf, 1234); // changelist
+        add_fstring(&mut buf, info.friendly_name);
+        add_u32(&mut buf, 0); // is_live
+        add_i64(&mut buf, info.timestamp);
+        add_u32(&mut buf, 0); // compressed
+        add_u32(&mut buf, u32::from(info.encrypted));
+        add_i32(&mut buf, 0); // encryption key length
+        buf
     }
 
     /// Build a raw chunk (type + size + payload).
@@ -131,17 +103,8 @@ mod helpers {
         buf
     }
 
-    /// Build a valid header chunk payload.
     pub fn build_header_payload() -> Vec<u8> {
-        build_header_payload_custom(0, &[3, 0, 0, 0, 49, 56, 0])
-    }
-
-    pub fn build_header_payload_custom(custom_version_count: i32, valorant_skip: &[u8]) -> Vec<u8> {
-        build_header_payload_for_branch(
-            "++Ares-Core+release-12.10",
-            custom_version_count,
-            valorant_skip,
-        )
+        build_header_payload_for_branch("++Ares-Core+release-12.10", 0, &[3, 0, 0, 0, 49, 56, 0])
     }
 
     pub fn build_header_payload_for_branch(
@@ -160,9 +123,11 @@ mod helpers {
         add_u32(&mut buf, 0x1122_3344); // NetworkChecksum
         add_u32(&mut buf, 32); // EngineNetworkProtocolVersion
         add_u32(&mut buf, 0x5566_7788); // GameNetworkProtocolVersion
-        add_guid(&mut buf, 0x0011_2233, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF);
+        add_guid(
+            &mut buf,
+            [0x0011_2233, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF],
+        );
 
-        // ReplayVersion
         add_u16(&mut buf, 12); // Major
         add_u16(&mut buf, 10); // Minor
         add_u16(&mut buf, 1); // Patch
@@ -172,7 +137,6 @@ mod helpers {
         // ValorantSkipByteCount + skip bytes
         buf.extend_from_slice(valorant_skip);
 
-        // UE versions
         add_u32(&mut buf, 1001); // UE4Version
         add_u32(&mut buf, 1002); // UE5Version
         add_u32(&mut buf, 1003); // PackageVersionLicense
@@ -182,8 +146,7 @@ mod helpers {
         add_fstring(&mut buf, "Ascent");
         add_u32(&mut buf, 42);
 
-        // Flags
-        add_u32(&mut buf, 0b1010); // HasStreamingFixes | GameSpecificFrameData
+        add_u32(&mut buf, 0b1010); // Flags: HasStreamingFixes | GameSpecificFrameData
 
         // GameSpecificData: 2 entries
         add_i32(&mut buf, 2);
@@ -205,14 +168,9 @@ mod helpers {
     }
 }
 
-// ===============================================================================
-// ReplayInfo tests
-// ===============================================================================
-
 #[test]
 fn info_empty_input_rejected() {
     let result = info::parse_replay_info(&[]);
-    assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
         ContainerError::Truncated { .. }
@@ -221,21 +179,10 @@ fn info_empty_input_rejected() {
 
 #[test]
 fn info_bad_magic_rejected() {
-    let data = helpers::build_replay_info(
-        0xDEAD_BEEF,
-        7,
-        true,
-        7,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        magic: 0xDEAD_BEEF,
+        ..Default::default()
+    });
     let result = info::parse_replay_info(&data);
     assert!(matches!(
         result.unwrap_err(),
@@ -250,8 +197,6 @@ fn info_bad_file_version_rejected() {
     let mut data = Vec::new();
     helpers::add_u32(&mut data, 0x43F4_EFDD);
     helpers::add_u32(&mut data, 6); // wrong version
-    // Don't need more -- should fail at version check
-    // Add enough bytes for the parse to reach the check
     data.extend_from_slice(&[0u8; 100]);
     let result = info::parse_replay_info(&data);
     assert!(matches!(
@@ -262,21 +207,10 @@ fn info_bad_file_version_rejected() {
 
 #[test]
 fn info_missing_custom_version_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        false,
-        7,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        custom_versions: Vec::new(),
+        ..Default::default()
+    });
     let result = info::parse_replay_info(&data);
     assert!(matches!(
         result.unwrap_err(),
@@ -285,107 +219,43 @@ fn info_missing_custom_version_rejected() {
 }
 
 #[test]
-fn info_newer_custom_version_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        8,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
-    let result = info::parse_replay_info(&data);
-    assert!(matches!(
-        result.unwrap_err(),
-        ContainerError::UnsupportedLocalReplayVersion { actual: 8 }
-    ));
+fn info_newer_or_older_custom_version_rejected() {
+    for version in [8, 6] {
+        let data = helpers::replay_info(&helpers::Info {
+            custom_versions: vec![(helpers::LOCAL_REPLAY, version)],
+            ..Default::default()
+        });
+        let result = info::parse_replay_info(&data);
+        assert!(matches!(
+            result.unwrap_err(),
+            ContainerError::UnsupportedLocalReplayVersion { actual } if actual == version
+        ));
+    }
 }
 
-#[test]
-fn info_older_custom_version_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        6,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
-    let result = info::parse_replay_info(&data);
-    assert!(matches!(
-        result.unwrap_err(),
-        ContainerError::UnsupportedLocalReplayVersion { actual: 6 }
-    ));
-}
-
-/// A custom-version list carrying a GUID the parser does not recognise must
-/// not make the replay unreadable. Unreal readers iterate the list and pick out
-/// the GUIDs they care about, ignoring the rest; a future engine bump that adds
-/// an engine/game custom-version entry would otherwise break every replay.
-///
-/// This builds a list with an unknown GUID (carrying a version the parser must
-/// NOT validate) followed by the required `LocalFileReplay` GUID at version 7,
-/// and asserts the info still parses.
+/// An unknown custom-version GUID, whose version must not be validated, leaves
+/// the replay readable; the reason is on the custom-version loop in `info.rs`.
 #[test]
 fn info_accepts_unknown_custom_version_guids() {
-    let mut buf = Vec::new();
-    helpers::add_u32(&mut buf, 0x43F4_EFDD); // magic
-    helpers::add_u32(&mut buf, 7); // file version
-    // Two custom versions: an unknown one, then LOCAL_REPLAY.
-    helpers::add_i32(&mut buf, 2);
-    // Unknown GUID with an arbitrary version that must be ignored.
-    helpers::add_guid(&mut buf, 0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444);
-    helpers::add_i32(&mut buf, 999);
-    // The required LocalFileReplay GUID at its required version.
-    helpers::add_guid(&mut buf, 0x95A4_F03E, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9);
-    helpers::add_i32(&mut buf, 7);
-    // Summary fields.
-    helpers::add_i32(&mut buf, 60000); // length_in_ms
-    helpers::add_u32(&mut buf, 19); // network version
-    helpers::add_u32(&mut buf, 1234); // changelist
-    helpers::add_fstring(&mut buf, "Match");
-    helpers::add_u32(&mut buf, 0); // is_live
-    helpers::add_i64(&mut buf, 42); // timestamp
-    helpers::add_u32(&mut buf, 0); // compressed
-    helpers::add_u32(&mut buf, 0); // encrypted
-    helpers::add_byte_array(&mut buf, &[]); // encryption key
-
-    let (info, _offset) = info::parse_replay_info(&buf).unwrap();
+    let data = helpers::replay_info(&helpers::Info {
+        custom_versions: vec![
+            ([0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444], 999),
+            (helpers::LOCAL_REPLAY, 7),
+        ],
+        ..Default::default()
+    });
+    let (info, _offset) = info::parse_replay_info(&data).unwrap();
     assert_eq!(info.length_in_ms, 60000);
     assert_eq!(info.friendly_name, "Match");
 }
 
 #[test]
 fn info_valid_parses_summary() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        7,
-        60000,
-        19,
-        1234,
-        "Match  ",
-        false,
-        123456789,
-        false,
-        false,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        friendly_name: "Match  ",
+        timestamp: 123456789,
+        ..Default::default()
+    });
     let (info, _offset) = info::parse_replay_info(&data).unwrap();
     assert_eq!(info.length_in_ms, 60000);
     assert_eq!(info.network_version, 19);
@@ -400,21 +270,10 @@ fn info_valid_parses_summary() {
 
 #[test]
 fn info_completed_encrypted_without_key_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        7,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        true,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        encrypted: true,
+        ..Default::default()
+    });
     let result = info::parse_replay_info(&data);
     assert!(matches!(
         result.unwrap_err(),
@@ -424,15 +283,17 @@ fn info_completed_encrypted_without_key_rejected() {
 
 #[test]
 fn info_truncated_input_rejected() {
-    // Just the magic, then cut off
     let data = 0x43F4_EFDDu32.to_le_bytes();
     let result = info::parse_replay_info(&data);
-    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        ContainerError::Truncated {
+            context: "file version",
+            needed: 4,
+            available: 0
+        }
+    ));
 }
-
-// ===============================================================================
-// ReplayHeader tests
-// ===============================================================================
 
 #[test]
 fn header_valid_parses_all_fields() {
@@ -471,6 +332,8 @@ fn header_valid_parses_all_fields() {
     assert_eq!(header.platform, "Windows");
     assert_eq!(header.build_config, 7);
     assert_eq!(header.build_target_type, 3);
+    // Ends exactly where the layout does, so no residual is reported.
+    assert_eq!(header.trailing_bytes, 0);
 }
 
 /// See `ReplayHeader::trailing_bytes`'s own doc for why a header extension is
@@ -481,24 +344,6 @@ fn header_trailing_bytes_are_reported_not_discarded() {
     payload.extend_from_slice(&[0xAA; 5]);
     let header = header::parse_replay_header(&payload).unwrap();
     assert_eq!(header.trailing_bytes, 5);
-}
-
-/// A header that ends exactly where the layout does reports zero, so the
-/// residual cannot be mistaken for normal framing slack.
-#[test]
-fn header_exact_payload_reports_no_trailing_bytes() {
-    let payload = helpers::build_header_payload();
-    let header = header::parse_replay_header(&payload).unwrap();
-    assert_eq!(header.trailing_bytes, 0);
-}
-
-#[test]
-fn header_alternate_valorant_skip_bytes() {
-    // 12.11 style: [2, 0, 0, 0, 57, 0]
-    let payload = helpers::build_header_payload_custom(0, &[2, 0, 0, 0, 57, 0]);
-    let header = header::parse_replay_header(&payload).unwrap();
-    assert_eq!(header.replay_version.branch, "++Ares-Core+release-12.10");
-    assert_eq!(header.ue4_version, 1001);
 }
 
 #[test]
@@ -528,7 +373,12 @@ fn header_legacy_builds_have_no_valorant_skip_field() {
 fn header_skip_field_starts_at_12_06() {
     for build in ["12.06", "12.07", "12.08", "12.09", "12.10", "13.06"] {
         let branch = format!("++Ares-Core+release-{build}");
-        for skip in [&[0, 0, 0, 0][..], &[3, 0, 0, 0, 49, 56, 0][..]] {
+        // The middle shape is the one measured on 12.11.
+        for skip in [
+            &[0, 0, 0, 0][..],
+            &[2, 0, 0, 0, 57, 0][..],
+            &[3, 0, 0, 0, 49, 56, 0][..],
+        ] {
             let payload = helpers::build_header_payload_for_branch(&branch, 3, skip);
             let header = header::parse_replay_header(&payload).unwrap();
             assert_eq!(header.ue4_version, 1001, "{build}");
@@ -543,7 +393,6 @@ fn header_skip_field_starts_at_12_06() {
 #[test]
 fn header_bad_network_magic_rejected() {
     let mut payload = helpers::build_header_payload();
-    // Overwrite first 4 bytes (network magic)
     payload[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
     let result = header::parse_replay_header(&payload);
     assert!(matches!(
@@ -557,7 +406,6 @@ fn header_bad_network_magic_rejected() {
 #[test]
 fn header_negative_custom_version_count_rejected() {
     let mut payload = helpers::build_header_payload();
-    // Overwrite custom version count at bytes 8..12
     payload[8..12].copy_from_slice(&(-1i32).to_le_bytes());
     let result = header::parse_replay_header(&payload);
     assert!(matches!(
@@ -569,28 +417,19 @@ fn header_negative_custom_version_count_rejected() {
 #[test]
 fn header_truncated_rejected() {
     let result = header::parse_replay_header(&[0x3D, 0xA1, 0xF5, 0x2C]);
-    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        ContainerError::Truncated {
+            context: "network version",
+            needed: 4,
+            available: 0
+        }
+    ));
 }
-
-// ===============================================================================
-// ChunkIterator tests
-// ===============================================================================
 
 #[test]
 fn chunk_iter_empty_returns_none() {
     let mut iter = ChunkIterator::new(&[], 0);
-    assert!(iter.next_chunk().unwrap().is_none());
-}
-
-#[test]
-fn chunk_iter_single_chunk() {
-    let payload = [0xAAu8, 0xBB];
-    let chunk_data = helpers::build_chunk(1, &payload); // ReplayData
-    let mut iter = ChunkIterator::new(&chunk_data, 0);
-    let chunk = iter.next_chunk().unwrap().unwrap();
-    assert_eq!(chunk.chunk_type, ChunkType::ReplayData);
-    assert_eq!(chunk.size_in_bytes, 2);
-    assert_eq!(chunk.data_offset, 8);
     assert!(iter.next_chunk().unwrap().is_none());
 }
 
@@ -606,14 +445,17 @@ fn chunk_iter_multiple_chunks() {
     let c0 = iter.next_chunk().unwrap().unwrap();
     assert_eq!(c0.chunk_type, ChunkType::Header);
     assert_eq!(c0.size_in_bytes, 1);
+    assert_eq!(c0.data_offset, 8);
 
     let c1 = iter.next_chunk().unwrap().unwrap();
     assert_eq!(c1.chunk_type, ChunkType::ReplayData);
     assert_eq!(c1.size_in_bytes, 2);
+    assert_eq!(c1.data_offset, 17);
 
     let c2 = iter.next_chunk().unwrap().unwrap();
     assert_eq!(c2.chunk_type, ChunkType::Event);
     assert_eq!(c2.size_in_bytes, 0);
+    assert_eq!(c2.data_offset, 27);
 
     assert!(iter.next_chunk().unwrap().is_none());
 }
@@ -669,16 +511,12 @@ fn chunk_type_unknown_preserved() {
     assert_eq!(chunk.chunk_type, ChunkType::Unknown(0xFFFF_FFFF));
 }
 
-// ===============================================================================
-// Preamble tests
-// ===============================================================================
-
 #[test]
 fn preamble_valid_file() {
-    let mut data = helpers::default_replay_info();
+    let mut data = helpers::replay_info(&helpers::Info::default());
     let header_payload = helpers::build_header_payload();
     data.extend_from_slice(&helpers::build_chunk(0, &header_payload));
-    // Add a ReplayData chunk after
+    let after_header = data.len();
     data.extend_from_slice(&helpers::build_chunk(1, &[0xDE; 16]));
 
     let preamble = parse_preamble(&data).unwrap();
@@ -687,12 +525,12 @@ fn preamble_valid_file() {
         preamble.header.replay_version.branch,
         "++Ares-Core+release-12.10"
     );
-    assert!(preamble.remaining_offset > 0);
+    assert_eq!(preamble.remaining_offset, after_header);
 }
 
 #[test]
 fn preamble_unknown_chunk_before_header_rejected() {
-    let mut data = helpers::default_replay_info();
+    let mut data = helpers::replay_info(&helpers::Info::default());
     let unknown = ChunkType::Unknown(0xFFFF_FFFF);
     data.extend_from_slice(&helpers::build_chunk(unknown.to_raw(), &[0x01, 0x02]));
     let header_payload = helpers::build_header_payload();
@@ -706,8 +544,7 @@ fn preamble_unknown_chunk_before_header_rejected() {
 
 #[test]
 fn preamble_data_before_header_rejected() {
-    let mut data = helpers::default_replay_info();
-    // ReplayData chunk before Header
+    let mut data = helpers::replay_info(&helpers::Info::default());
     data.extend_from_slice(&helpers::build_chunk(1, &[0xDE; 16]));
 
     let result = parse_preamble(&data);
@@ -720,7 +557,7 @@ fn preamble_data_before_header_rejected() {
 #[test]
 fn preamble_recognized_non_header_chunks_are_not_silently_skipped() {
     for chunk_type in [ChunkType::Checkpoint, ChunkType::Event] {
-        let mut data = helpers::default_replay_info();
+        let mut data = helpers::replay_info(&helpers::Info::default());
         data.extend_from_slice(&helpers::build_chunk(chunk_type.to_raw(), &[0xAB]));
         data.extend_from_slice(&helpers::build_chunk(
             ChunkType::Header.to_raw(),
@@ -737,7 +574,7 @@ fn preamble_recognized_non_header_chunks_are_not_silently_skipped() {
 
 #[test]
 fn fstring_length_and_encoding_errors_keep_their_typed_source() {
-    let valid = helpers::default_replay_info();
+    let valid = helpers::replay_info(&helpers::Info::default());
     let name_offset = valid
         .windows(b"Match\0".len())
         .position(|window| window == b"Match\0")
@@ -767,26 +604,51 @@ fn fstring_length_and_encoding_errors_keep_their_typed_source() {
     ));
 }
 
+/// A compressed ReplayData chunk whose archive declares 64 bytes of output
+/// and carries four bytes that are not a codec stream.
+fn compressed_replay_data_needing_64_bytes() -> Vec<u8> {
+    let mut payload = Vec::new();
+    helpers::add_u32(&mut payload, 0); // Time1
+    helpers::add_u32(&mut payload, 0); // Time2
+    helpers::add_i32(&mut payload, 12); // SizeInBytes
+    helpers::add_i32(&mut payload, 64); // MemorySizeInBytes
+    helpers::add_i32(&mut payload, 64); // archive decompressed_size
+    helpers::add_i32(&mut payload, 4); // archive compressed_size
+    payload.extend_from_slice(&[0; 4]);
+    payload
+}
+
+/// Without the decoder a compressed archive is refused by name, not emptied.
+#[cfg(not(feature = "oodle"))]
 #[test]
-fn oodle_unsupported_error_is_available_in_every_feature_build() {
-    let error = ContainerError::OodleUnsupported { needed: 17 };
-    assert!(error.to_string().contains("17"));
+fn a_compressed_archive_without_the_decoder_is_refused() {
+    let payload = compressed_replay_data_needing_64_bytes();
+    assert!(matches!(
+        decompress_replay_data(&payload, true, false),
+        Err(ContainerError::OodleUnsupported { needed: 64 })
+    ));
+}
+
+/// With the decoder the same archive reaches the codec, which rejects it.
+#[cfg(feature = "oodle")]
+#[test]
+fn a_compressed_archive_with_the_decoder_reaches_the_codec() {
+    let payload = compressed_replay_data_needing_64_bytes();
+    assert!(matches!(
+        decompress_replay_data(&payload, true, false),
+        Err(ContainerError::OodleDecompression(_))
+    ));
 }
 
 #[test]
 fn preamble_no_header_chunk_rejected() {
-    let data = helpers::default_replay_info();
-    // No chunks at all after info
+    let data = helpers::replay_info(&helpers::Info::default());
     let result = parse_preamble(&data);
     assert!(matches!(
         result.unwrap_err(),
         ContainerError::MissingHeaderChunk
     ));
 }
-
-// ===============================================================================
-// ReplayData meta parsing tests
-// ===============================================================================
 
 #[test]
 fn replay_data_meta_valid() {
@@ -857,12 +719,8 @@ fn decompress_uncompressed_size_mismatch_rejected() {
     ));
 }
 
-/// A ReplayData chunk payload longer than its own `SizeInBytes` accounts for
-/// carries bytes this framing never looks at. They used to be sliced away in
-/// silence: `data_bytes[..size]` on the uncompressed path and
-/// `compressed_data[..compressed_size]` on the Oodle path both cut to the
-/// declared length and dropped the rest, with no error and no residual count,
-/// so replay data could go missing while every check reported success.
+/// Payload bytes past `SizeInBytes` are counted, not cut away with the slice:
+/// the uncompressed path here, the Oodle path in the codec-unread test below.
 #[test]
 fn replay_data_trailing_bytes_are_reported_not_discarded() {
     let mut payload = Vec::new();
@@ -915,6 +773,60 @@ fn replay_data_short_payload_reports_no_trailing_bytes() {
     ));
 }
 
+/// An Oodle archive around one uncompressed Kraken block holding `plain`, then
+/// `unread` bytes inside the declared `compressed_size` that no block reads.
+/// Per oozextract 0.5.4's block-header parse, `0x4C` is header nibble `0xC`
+/// with the uncompressed bit set and `0x06` is Kraken without checksums.
+#[cfg(feature = "oodle")]
+fn archive_with_unread_input(plain: &[u8], unread: usize) -> Vec<u8> {
+    let mut archive = Vec::new();
+    helpers::add_i32(&mut archive, plain.len() as i32); // decompressed_size
+    helpers::add_i32(&mut archive, (2 + plain.len() + unread) as i32); // compressed_size
+    archive.extend_from_slice(&[0x4C, 0x06]);
+    archive.extend_from_slice(plain);
+    archive.extend(std::iter::repeat_n(0xAB, unread));
+    archive
+}
+
+/// Archive bytes no block reads are counted together with the framing residual
+/// past `SizeInBytes`, and an archive read to the end reports zero.
+#[cfg(feature = "oodle")]
+#[test]
+fn replay_data_input_the_codec_never_reads_is_counted() {
+    for (unread, past_archive) in [(7, 0), (0, 0), (7, 3)] {
+        let archive = archive_with_unread_input(&[1, 2, 3, 4, 5], unread);
+        let mut payload = Vec::new();
+        helpers::add_u32(&mut payload, 0); // Time1
+        helpers::add_u32(&mut payload, 0); // Time2
+        helpers::add_i32(&mut payload, archive.len() as i32); // SizeInBytes
+        helpers::add_i32(&mut payload, 5); // MemorySizeInBytes
+        payload.extend_from_slice(&archive);
+        payload.extend(std::iter::repeat_n(0xCD, past_archive));
+
+        let (plain, count) = decompress_replay_data_with_trailing(&payload, true, false).unwrap();
+        assert_eq!(plain, [1, 2, 3, 4, 5]);
+        assert_eq!(
+            count,
+            unread + past_archive,
+            "every payload byte no reader consumed must be counted"
+        );
+    }
+}
+
+/// The same residual in a checkpoint archive, which has no framing residual
+/// of its own: the archive slice is exactly its declared size.
+#[cfg(all(feature = "oodle", feature = "checkpoint"))]
+#[test]
+fn checkpoint_input_the_codec_never_reads_is_counted() {
+    for unread in [7, 0] {
+        let archive = archive_with_unread_input(&[1, 2, 3, 4, 5], unread);
+        let (plain, count) = decompress_checkpoint_with_trailing(&archive, true, false).unwrap();
+        assert_eq!(plain, [1, 2, 3, 4, 5]);
+        assert_eq!(count, unread, "input the codec never read must be counted");
+        assert_eq!(decompress_checkpoint(&archive, true, false).unwrap(), plain);
+    }
+}
+
 #[test]
 fn decompress_encrypted_rejected() {
     let payload = [0u8; 32];
@@ -925,22 +837,13 @@ fn decompress_encrypted_rejected() {
     ));
 }
 
-// ===============================================================================
-// Event chunk parsing tests
-// ===============================================================================
-
-// Gated with the parser they exercise, so `--no-default-features` still
-// compiles this file rather than dropping the whole suite.
+// Gated with the parser it exercises, so a build without `event` still compiles.
 #[cfg(feature = "event")]
 mod event_chunks {
     use super::*;
 
-    /// The inner payload of the first `roundStarted` event in the reference replay
-    /// `02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf`, copied byte for byte.
-    ///
-    /// Using real bytes rather than a synthetic blob keeps the test honest about
-    /// what the parser must survive: a 46-byte payload the parser deliberately does
-    /// not interpret, whose length must still be respected exactly.
+    /// The inner payload of the first `roundStarted` event in 02d4d478, byte for
+    /// byte: real bytes, whose 46-byte length the parser must respect exactly.
     const REFERENCE_ROUND_START_PAYLOAD: [u8; 46] = [
         0x02, 0x00, 0x00, 0x00, // group tag (RoundStart)
         0x00, 0x00, 0x00, 0x00, // one group-dependent word
@@ -1054,10 +957,9 @@ mod event_chunks {
         assert!(parse_known_event_payload("roundStarted", &retagged).is_none());
     }
 
-    /// The accessors are lookups into `KNOWN_EVENT_GROUPS`; every entry must
-    /// come back out of all three, and a group listed twice would make the
-    /// second entry unreachable. The explicit pins above stay: the table must
-    /// not be the only thing asserting its own values.
+    /// Every entry must come back out of all three accessors, and a group listed
+    /// twice would leave the second unreachable. The explicit pins above stay:
+    /// the table must not be the only thing asserting its own values.
     #[test]
     fn every_known_event_group_round_trips_through_its_accessors() {
         let mut seen = std::collections::BTreeSet::new();
@@ -1076,7 +978,7 @@ mod event_chunks {
     }
 
     /// The const lookup compares bytes by hand; a prefix, an extension or a
-    /// case change must not match, exactly as the `match` it replaced.
+    /// case change must not match.
     #[test]
     fn known_event_lookup_matches_only_the_whole_group_name() {
         for near_miss in [
@@ -1105,8 +1007,7 @@ mod event_chunks {
 
     #[test]
     fn event_chunk_empty_metadata_is_empty_not_missing() {
-        // `characterDeath` carries no metadata. An empty FString is a real value;
-        // the parser must not turn it into anything else.
+        // An empty FString, as `characterDeath` metadata is, is a real value.
         let payload = build_event_chunk("id", "characterDeath", "", 50402, 50402, &[0xAA, 0xBB]);
         let event = parse_event_chunk(&payload).unwrap();
         assert_eq!(event.metadata, "");
@@ -1124,9 +1025,8 @@ mod event_chunks {
 
     #[test]
     fn event_chunk_utf16_strings_decoded() {
-        // FString allows a UTF-16 encoding via a negative length. No corpus file
-        // uses it for these fields, but the format permits it and a parser that
-        // silently mis-read one would produce a wrong group name, not an error.
+        // Legal though no corpus event uses it; misread, it would give a wrong
+        // group name rather than an error.
         let mut payload = Vec::new();
         helpers::add_fstring_utf16(&mut payload, "utf16id");
         helpers::add_fstring_utf16(&mut payload, "roundStarted");
@@ -1161,8 +1061,8 @@ mod event_chunks {
 
     #[test]
     fn event_chunk_payload_shorter_than_declared_rejected() {
-        // Declares 64 bytes, supplies 4. Reading the short slice as if it were the
-        // whole payload is the silent-truncation failure this must not do.
+        // Reading the short slice as the whole payload is the silent truncation
+        // this must not do.
         let mut payload = build_event_chunk("id", "group", "", 1, 1, &[0u8; 64]);
         payload.truncate(payload.len() - 60);
 
@@ -1196,8 +1096,6 @@ mod event_chunks {
 
     #[test]
     fn event_chunk_trailing_bytes_are_counted_not_dropped() {
-        // Bytes past the declared payload are what a format change would look like.
-        // They must be reported, not quietly ignored.
         let mut payload = build_event_chunk("id", "group", "", 1, 1, &[0x01, 0x02]);
         payload.extend_from_slice(&[0xFF; 3]);
 
@@ -1208,8 +1106,8 @@ mod event_chunks {
 
     #[test]
     fn event_chunk_found_by_the_chunk_iterator() {
-        // End to end through the iterator: an Event chunk sitting between two
-        // others must be located by type and its payload sliced correctly.
+        // End to end: an Event chunk after a Checkpoint chunk is found by type
+        // and its payload sliced correctly.
         let body = [0xDE, 0xAD, 0xBE, 0xEF];
         let event_payload = build_event_chunk("id", "spikePlanted", "", 69118, 69118, &body);
 
@@ -1237,3 +1135,59 @@ mod event_chunks {
         assert_eq!(found, 1);
     }
 } // mod event_chunks
+
+// Layouts `event_chunks` does not cover, moved here from the vrfkit driver,
+// whose test-only wrapper only forwarded to `parse_event_payload`.
+#[cfg(feature = "event")]
+mod event_payload_layouts {
+    use super::*;
+
+    /// `[u32 tag][words][FString name][f32 seconds]`, seconds fixed at 1.5.
+    fn event_payload(tag: u32, words: &[u32], name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        helpers::add_u32(&mut out, tag);
+        for &word in words {
+            helpers::add_u32(&mut out, word);
+        }
+        helpers::add_fstring(&mut out, name);
+        helpers::add_f32(&mut out, 1.5);
+        out
+    }
+
+    /// A measured zero-word group is still checked through its tag, FString
+    /// and trailing f32: zero is an established arity, not an absent claim.
+    #[test]
+    fn event_payload_accepts_a_zero_word_layout_that_consumes_exactly() {
+        let payload = event_payload(4, &[], "EReplayEventGroup::SpikePlanted");
+        let parsed = parse_event_payload(&payload, 0).expect("zero-word layout");
+        assert_eq!(parsed.tag, 4);
+        assert!(parsed.words.is_empty());
+        assert_eq!(parsed.name, "EReplayEventGroup::SpikePlanted");
+        assert_eq!(parsed.seconds, 1.5);
+    }
+
+    /// characterDeath is the only multi-word group. The one-word reference's
+    /// word is 0, so only distinct nonzero words show a word swapped, dropped
+    /// or zeroed on its way to `events.parquet`'s word0 and word1.
+    #[test]
+    fn event_payload_yields_multi_word_values_in_order() {
+        let payload = event_payload(
+            8,
+            &[0x1111_1111, 0x2222_2222],
+            "EReplayEventGroup::CharacterDeath",
+        );
+        let parsed = parse_event_payload(&payload, 2).expect("two-word layout");
+        assert_eq!(parsed.tag, 8);
+        assert_eq!(parsed.words, [0x1111_1111, 0x2222_2222]);
+        assert_eq!(parsed.name, "EReplayEventGroup::CharacterDeath");
+        assert_eq!(parsed.seconds, 1.5);
+    }
+
+    /// A payload shorter than the layout's fixed parts cannot be verified, so
+    /// it yields nothing rather than whatever a partial read returns.
+    #[test]
+    fn event_payload_refuses_a_payload_shorter_than_its_fixed_parts() {
+        assert!(parse_event_payload(&[0xAB; 3], 0).is_none());
+        assert!(parse_event_payload(&[0u8; 6], 1).is_none());
+    }
+}

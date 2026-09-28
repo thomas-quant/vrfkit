@@ -4,24 +4,15 @@ import argparse,hashlib,json,sys
 from pathlib import Path
 import pyarrow as pa
 if __package__:
- from .atomic_io import atomic_write_text, sha256_file
+ from .atomic_io import aliases, atomic_write_text, sha256_file as sha
  from . import extract_section_timeline,section_packet_timeline
 else:
- from atomic_io import atomic_write_text, sha256_file
+ from atomic_io import aliases, atomic_write_text, sha256_file as sha
  import extract_section_timeline,section_packet_timeline
-
-sha = sha256_file
 
 def helpers():
  names=[Path(__file__),Path(section_packet_timeline.__file__),Path(extract_section_timeline.__file__),Path(extract_section_timeline.section_timeline.__file__),Path(extract_section_timeline.extract_section_observations.__file__),Path(extract_section_timeline.__file__).with_name("atomic_io.py"),Path(extract_section_timeline.__file__).with_name("extract_kill_observations.py")]
  return [p.resolve() for p in names]
-def aliases(path,protected):
- for item in protected:
-  try:
-   if path.exists() and item.exists() and path.samefile(item):return True
-  except OSError:pass
-  if path.resolve()==item.resolve():return True
- return False
 def extract(export):
  pa.set_cpu_count(1);pa.set_io_thread_count(1)
  inputs=[export/n for n in ("manifest.json","fields.parquet","checkpoint_fields.parquet","net_guids.parquet","actors.parquet")];impl=helpers();before={str(p.resolve()):sha(p) for p in inputs};ib={str(p):sha(p) for p in impl}

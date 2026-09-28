@@ -1,10 +1,7 @@
-//! Counters and the per-field breakdown an overlay pass accumulates.
-//!
-//! These are the export summary's only view of what the overlay did, and the
-//! error report is what tells an operator *which* field to look at rather than
-//! just how many failed. The reference replay currently records zero decode
-//! errors, so everything here except the plain counters is a cold path; it is
-//! written for clarity, not for speed.
+//! Counters and the per-field breakdown an overlay pass accumulates: the export
+//! summary's only view of the overlay, with the report saying *which* field
+//! failed. The reference replay records zero decode errors, so all but the
+//! plain counters is a cold path, written for clarity.
 
 use std::collections::HashMap;
 
@@ -12,17 +9,12 @@ use vrf_bitio::BitError;
 
 use crate::decode::FieldType;
 
-/// Categorisation of a decode failure -- distinguishes root cause so the
-/// operator knows whether to fix the overlay type, the bit-count expectation,
-/// or something structural.
-///
-/// This is the only per-cause column the error report prints -- `field_name`
-/// says which field, this says why -- so each failure maps to the kind of its
-/// own cause, by exhaustive matches with no wildcard: a new error variant has
-/// to be classified before it compiles. Three kinds used to carry every
-/// failure, which printed an invalid string that consumed its payload exactly
-/// as `EOF`, and a byte-array length over the table's cap as `Residual`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Why a decode failed, so the operator knows whether to fix the overlay type,
+/// the bit-count expectation or something structural. It is the report's only
+/// per-cause column (`field_name` says which field), so every failure maps to
+/// its own cause through exhaustive matches with no wildcard: a new error
+/// variant has to be classified before it compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DecodeErrorKind {
     /// BitReader reached EOF before the decoder finished consuming: the type
     /// needs more bits than the field carries.
@@ -62,25 +54,10 @@ impl std::fmt::Display for DecodeErrorKind {
 }
 
 impl DecodeErrorKind {
-    const fn sort_key(self) -> u8 {
-        match self {
-            Self::Eof => 0,
-            Self::Residual => 1,
-            Self::ZeroBits => 2,
-            Self::Malformed => 3,
-            Self::Rejected => 4,
-        }
-    }
-
-    /// The kind a bit-level read failure belongs to.
-    ///
-    /// Shared by every decoder that reports into [`OverlayErrorReport`], so the
-    /// same `BitError` prints the same label wherever it came from. Only
-    /// [`BitError::Eof`] is an EOF.
-    ///
-    /// [`BitError::InvalidSerializedIntMax`] is `Rejected`, not `Malformed`: it
-    /// means the maximum the table supplied is zero, and no bit of the payload
-    /// is at fault -- the same case as a zero quantization scale.
+    /// The kind of a bit-level read failure, shared by every decoder that
+    /// reports into [`OverlayErrorReport`]. Only [`BitError::Eof`] is an EOF.
+    /// [`BitError::InvalidSerializedIntMax`] is `Rejected`, not `Malformed`:
+    /// the table's maximum is zero and no payload bit is at fault.
     pub fn from_bit_error(err: &BitError) -> Self {
         match err {
             BitError::Eof { .. } => Self::Eof,
@@ -94,11 +71,9 @@ impl DecodeErrorKind {
     }
 }
 
-/// Accumulates per-(group, field, type, bit_count, error_kind) counts so the
-/// operator can identify the dominant decode-error sources after an export run.
-///
-/// Designed for long-lived use: call [`Self::record`] on every failure, then
-/// [`Self::top_n`] to get the sorted report.
+/// Per-(group, field, type, bit_count, error_kind) failure counts: call
+/// [`Self::record`] on every failure, then [`Self::top_n`] for the dominant
+/// sources.
 #[derive(Debug, Clone, Default)]
 pub struct OverlayErrorReport {
     /// Key: (group_path, field_name, field_type_tag, bit_count, error_kind).
@@ -158,10 +133,8 @@ impl OverlayErrorReport {
                 error_kind: *ek,
             })
             .collect();
-        // Deterministic ordering: descending count, then by the row's identity
-        // fields so equal-count buckets have a stable order run-to-run. A plain
-        // `Reverse(count)` left ties in HashMap iteration order, which varied
-        // per run and made the printed error report non-reproducible.
+        // Descending count, then the row's identity: ties left in HashMap
+        // order varied run to run and made the report non-reproducible.
         rows.sort_by(|a, b| {
             b.count.cmp(&a.count).then_with(|| {
                 a.group_path
@@ -169,7 +142,7 @@ impl OverlayErrorReport {
                     .then_with(|| a.field_name.cmp(&b.field_name))
                     .then_with(|| a.declared_type.cmp(&b.declared_type))
                     .then_with(|| a.bit_count.cmp(&b.bit_count))
-                    .then_with(|| a.error_kind.sort_key().cmp(&b.error_kind.sort_key()))
+                    .then_with(|| a.error_kind.cmp(&b.error_kind))
             })
         });
         rows.truncate(n);
@@ -201,27 +174,20 @@ pub struct OverlayStats {
     /// Fields where field_name was None (unmapped handle).
     pub no_field_name: u64,
     /// Handle fallbacks refused because the replay declared a DIFFERENT,
-    /// unresolved field name at that handle -- see
-    /// docs/OVERLAY_RESOLUTION.md "Fail-closed on a handle conflict" for the
-    /// fail-closed rationale and the 1065353216 misdecode example.
-    ///
-    /// It is deliberately NOT routed through `decoded_err`: nothing failed to
-    /// decode, the overlay declined to claim a type.
+    /// unresolved field name at that handle (docs/OVERLAY_RESOLUTION.md
+    /// "Fail-closed on a handle conflict"). Not a `decoded_err`: nothing failed
+    /// to decode, the overlay declined to claim a type.
     pub handle_conflicts_refused: u64,
-    /// Detailed per-field error breakdown (populated only when reporting is on).
+    /// Per-field breakdown of the failures, recorded on every failure.
     pub error_report: OverlayErrorReport,
 }
 
 impl OverlayStats {
-    /// Add the six counters of `other` into `self`.
-    ///
-    /// `error_report` is deliberately not merged: callers fold it into one
-    /// report shared by every pass (see `OverlayErrorReport::merge_from`), so
-    /// a checkpoint-only failure is still in the breakdown the summary prints.
-    /// The destructure has no `..`, so a counter added to this struct does not
-    /// compile until it is summed here -- the export and `diag` totals both go
-    /// through this method, and a hand-written copy of the sum is how a new
-    /// counter used to reach one of them and not the other.
+    /// Add the six counters of `other` into `self`. `error_report` is not
+    /// merged: callers fold it into one report shared by every pass, so a
+    /// checkpoint-only failure still reaches the summary. The destructure has
+    /// no `..`, so a new counter does not compile until it is summed here,
+    /// where both the export and `diag` totals come from.
     pub fn merge_counts_from(&mut self, other: &Self) {
         let Self {
             decoded_ok,
@@ -287,21 +253,6 @@ mod tests {
                 ("GroupD", "delta"),
             ]
         );
-    }
-
-    #[test]
-    fn top_n_is_identical_across_independently_built_reports() {
-        // Each report owns a HashMap with its own RandomState, so tied buckets
-        // iterate in a different order per instance. Sorting on count alone let
-        // that leak into the printed report; two runs disagreed.
-        let first = tied_report().top_n(TIED.len());
-        let second = tied_report().top_n(TIED.len());
-        let key = |rows: &[OverlayErrorRow]| -> Vec<(String, String)> {
-            rows.iter()
-                .map(|r| (r.group_path.clone(), r.field_name.clone()))
-                .collect()
-        };
-        assert_eq!(key(&first), key(&second));
     }
 
     #[test]
@@ -399,9 +350,8 @@ mod tests {
         }
     }
 
-    /// The report prints the kind in a padded column. `write_str` ignores a
-    /// format width, so a label written that way never lined the table up --
-    /// the `{:<6}` it was printed with did nothing for any kind.
+    /// The report prints the kind in a padded column, which a label written
+    /// with `write_str` ignores.
     #[test]
     fn kind_labels_honour_the_report_column_width() {
         for kind in [

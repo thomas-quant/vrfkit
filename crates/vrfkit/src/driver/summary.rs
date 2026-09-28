@@ -1,14 +1,11 @@
 //! The export summary printed to stderr.
 //!
-//! `tools/check_export_baseline.py` reads counters back out of this text: it
-//! pins every line its `COUNTERS` and `CHECKPOINT_COUNTERS` tables name, and
-//! cross-checks some of them against the row counts of the files they name.
-//! Not every line here is in those tables -- they are the list, not this
-//! file. `tools/verify_build_corpus.py` requires the same labels, and
-//! `tools/check_decode_errors_corpus.py` parses this text too. Adding,
-//! removing or renaming a line can break those harnesses; do it deliberately
-//! or not at all. A new label must not contain an existing one: some of those
-//! patterns are unanchored (`Frames:\s+(\d+)` among them).
+//! `tools/check_export_baseline.py` pins the lines its `COUNTERS` and
+//! `CHECKPOINT_COUNTERS` tables name (those tables are the list, not this
+//! file), `tools/verify_build_corpus.py` requires the same labels, and
+//! `tools/check_decode_errors_corpus.py` parses this text too: change a line
+//! deliberately or not at all. A new label must not contain an existing one,
+//! because some patterns are unanchored (`Frames:\s+(\d+)` among them).
 
 use std::fs;
 use std::path::Path;
@@ -19,32 +16,27 @@ use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 
 use super::checkpoints::CheckpointStats;
+use super::{CHECKPOINT_TABLES, MAIN_TABLES};
+use crate::report;
 use crate::sink::SinkTotals;
 
-/// Everything the run counted that is not in [`NetStats`].
-pub(super) struct RunTotals {
+/// Everything the run counted that is not in [`NetStats`]. The manifest reads
+/// the same struct, so it and this summary cannot report different values.
+#[derive(Default)]
+pub(crate) struct RunTotals {
     pub chunks_processed: u32,
-    /// DemoFrames walked in the ReplayData stream.
-    ///
-    /// `iter_demo_frames` returns `(packets, frames)` and the main pass
-    /// discarded both, so until now the only `Frames:` in this report was the
-    /// checkpoint one. That is the shape this repo refuses: packets are counted
-    /// inside the frame callback, so a frame that ends before its packet loop
-    /// moves no counter at all, and "the walk covered everything" reads exactly
-    /// like "the walk stopped early".
-    ///
-    /// Printed as `ReplayData frames:`, NOT `Frames:`. The checkpoint pattern in
-    /// `tools/check_export_baseline.py` is the unanchored `Frames:\s+(\d+)`,
-    /// so a second line spelled that way earlier in the output would silently
-    /// feed this number to the `cp_frames` check.
+    /// DemoFrames walked in the ReplayData stream. Packets are counted inside
+    /// the frame callback, so a frame that ends before its packet loop moves
+    /// only this. Printed as `ReplayData frames:`, not `Frames:`, which the
+    /// baseline tool's unanchored `Frames:\s+(\d+)` would read as `cp_frames`.
     pub frames: u32,
     /// ExternalData and GameSpecificFrameData bytes those frames stepped over.
-    ///
-    /// Printed as `Frame skips:`, which contains neither `Frames:` nor any
-    /// other label `tools/check_export_baseline.py` searches for unanchored.
-    /// The skip is length-prefixed, so a build that starts sending these
-    /// sections moves no other number here.
+    /// Length-prefixed, so no other number moves when a build starts sending
+    /// them; `Frame skips:` contains no label read unanchored.
     pub frame_skips: FrameSkips,
+    /// Those frames whose time was NaN or infinite, read as 0 ms
+    /// (`vrf_frame::FrameWalk::non_finite_times`); printed as `Frame times:`.
+    pub non_finite_frame_times: u64,
     pub total_packets: u32,
     pub export_groups: usize,
     pub movement_rows: u64,
@@ -60,8 +52,7 @@ pub(super) struct RunTotals {
     pub elapsed: Duration,
     /// Known Event payloads whose arity, tag, enum name, exact consumption or
     /// time relation failed, so no structural overlay was exported for them.
-    /// Printed unconditionally, zero included; a non-zero value means an Event
-    /// group changed shape.
+    /// Non-zero means an Event group changed shape.
     pub event_layout_mismatches: u64,
     /// The first such mismatch verbatim, so the summary can name the group.
     pub event_first_layout_mismatch: Option<String>,
@@ -71,18 +62,8 @@ pub(super) struct RunTotals {
     /// Event groups outside the measured public vocabulary. Their raw payload
     /// remains preserved and no structural columns are populated.
     pub event_payload_unknown_groups: u64,
-    /// Everything the per-packet sinks counted. One struct rather than a dozen
-    /// loose fields, because the failure this guards against is a counter that
-    /// exists on `ExportStats` and reaches no summary line. See
-    /// [`SinkTotals`].
     pub sink: SinkTotals,
-    /// [`stale_checkpoint_note`], computed by the caller against the
-    /// PRE-publish destination -- the directory `OutputTransaction::publish`
-    /// is about to atomically replace -- before that swap happens. `print` is
-    /// only ever called after publish, by which point the old directory (and
-    /// any table it held that this run did not rewrite) is gone; checking
-    /// `out_path` at that point can never see a file this run did not itself
-    /// just write.
+    /// [`stale_checkpoint_note`] of the destination before publication.
     pub stale_checkpoint_note: Option<String>,
 }
 
@@ -101,10 +82,12 @@ pub(super) fn print(
     eprintln!("  Chunks:           {}", totals.chunks_processed);
     eprintln!("  ReplayData frames: {}", totals.frames);
     eprintln!(
-        "  Frame skips:      {} external blobs / {} external bytes / {} game-specific bytes",
-        totals.frame_skips.external_data_blobs,
-        totals.frame_skips.external_data_bytes,
-        totals.frame_skips.game_specific_bytes
+        "  Frame skips:      {}",
+        report::frame_skips(&totals.frame_skips)
+    );
+    eprintln!(
+        "  Frame times:      {} non-finite",
+        totals.non_finite_frame_times
     );
     eprintln!("  Packets:          {}", totals.total_packets);
     eprintln!("  Export groups:    {}", totals.export_groups);
@@ -119,14 +102,11 @@ pub(super) fn print(
         "  Partial raw rows: {} ({} bits)",
         totals.partial_rows, totals.partial_bits
     );
-    // The sink's own tally beside vrf-net's. The RPC, open, close and
-    // content-block terms must equal `RPCs:`, `Actor opens:`, `Actor closes:`
-    // and `Content blocks:` above: vrf-net makes each sink callback right
-    // beside its own increment, so a difference means the sink's bookkeeping
-    // is broken, not that framing desynchronized. The manifest publishes the
-    // four and tools/verify_build_corpus.py fails a replay where they differ.
-    // The `fields` term is a count of emitted rows, not of framed properties,
-    // and is NOT comparable with `Fields:` (see `SinkTotals::fields_emitted`).
+    // The RPC, open, close and content-block terms must equal `RPCs:`, `Actor
+    // opens:`, `Actor closes:` and `Content blocks:`: vrf-net calls the sink
+    // beside each of its own increments, so a difference is broken sink
+    // bookkeeping (tools/verify_build_corpus.py checks it via the manifest).
+    // `fields` counts emitted rows and is not comparable with `Fields:`.
     eprintln!(
         "  Sink tally:       {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
         totals.sink.fields_emitted,
@@ -137,53 +117,25 @@ pub(super) fn print(
     );
     eprintln!("  Bunches:          {}", net_stats.bunches);
     eprintln!("  Malformed pkts:   {}", net_stats.malformed_packets);
-    eprintln!(
-        "  Partial bunches:  {} attempted / {} errors / {} accepted fragments / {} completed",
-        net_stats.partial_bunches,
-        net_stats.partial_errors,
-        net_stats.partial_fragments,
-        net_stats.partial_completed
-    );
-    eprintln!(
-        "  Partial causes:   {} missing initial / {} overlapping initial / {} mismatched continuation / {} unaligned / {} channel close / {} resource limit / {} unclassified / {} overclassified",
-        net_stats.partial_missing_initial,
-        net_stats.partial_overlapping_initial,
-        net_stats.partial_mismatched_continuation,
-        net_stats.partial_non_byte_aligned,
-        net_stats.partial_channel_close,
-        net_stats.partial_resource_limit_failures,
-        net_stats.partial_unclassified_errors(),
-        net_stats.partial_overclassified_errors()
-    );
+    eprintln!("  Partial bunches:  {}", report::partial_bunches(net_stats));
+    eprintln!("  Partial causes:   {}", report::partial_causes(net_stats));
     eprintln!("  Bunch header fails: {}", net_stats.bunch_header_failures);
     eprintln!(
         "  Content failures: {} malformed / {} transform / {} field / {} RPC loss / {} unresolved RPC raw",
         net_stats.malformed_content_blocks,
         net_stats.transform_failures,
         net_stats.field_stream_failures,
-        net_stats
-            .rpc_stream_failures
-            .saturating_sub(net_stats.unresolved_rpc_payloads_preserved),
+        net_stats.rpc_payloads_lost(),
         net_stats.unresolved_rpc_payloads_preserved
     );
-    // A separate line, not folded into "Content failures" above: that line's
-    // exact format is read by `tools/check_export_baseline.py`. This counts
-    // content blocks whose header or `content_bits` field could not even be
-    // read -- the failure depths that ran before any of the four above could
-    // apply, and before this counter existed, zero on every counter here
-    // (including `lost_content_blocks` and the oracle verdict) regardless of
-    // how many of these happened.
+    // Blocks whose header or `content_bits` could not be read, a depth before
+    // the four above; its own line because `Content failures`' format is parsed.
     eprintln!(
         "  Content framing fails: {}",
         net_stats.content_block_framing_failures
     );
     eprintln!("  Skipped bits:     {}", net_stats.skipped_bits);
-    // Unconditional, zeros included, for the reason spelled out on the struct
-    // blob line below: a line that only appears when non-zero cannot tell
-    // "nothing was lost" apart from "the code that counts stopped running".
-    // Every line down to `RepLayout exports` reads 0 on a healthy replay, which
-    // is exactly why a 0 that is present is worth more than a line that is
-    // absent.
+    // Every line down to `RepLayout exports` is 0 on a healthy replay.
     eprintln!(
         "  Unfinished partials: {} ({} bits)",
         net_stats.unfinished_partials, net_stats.unfinished_partial_bits
@@ -197,9 +149,7 @@ pub(super) fn print(
         net_stats.actor_opens_missing_spawn
     );
     // A failed open that took a live actor off its channel, and the bunches
-    // dropped afterwards for want of an open channel. Before these existed the
-    // drop moved nothing but `Bunches`, and the stale actor it replaced went on
-    // absorbing blocks that were not its own.
+    // dropped afterwards for want of an open channel.
     eprintln!(
         "  Failed reopens:   {}",
         net_stats.failed_reopens_while_open
@@ -236,9 +186,8 @@ pub(super) fn print(
         "  Event unread:     {} payload bytes",
         totals.event_trailing_bytes
     );
-    // Printed unconditionally, including the zero. A conditional line cannot
-    // distinguish "no failures" from "this build stopped reaching the decoder
-    // at all", and that second case is exactly what went unnoticed on 13.02.
+    // Zero included: 13.02 moving RoundResults from handle 93 to 81 went
+    // unnoticed without it (see `ExportStats::struct_blobs_failed`).
     eprintln!(
         "  Struct blobs:     {} decoded / {} failed",
         totals.sink.struct_blobs_decoded, totals.sink.struct_blobs_failed
@@ -250,11 +199,10 @@ pub(super) fn print(
     if let Some(err) = &totals.sink.movement_first_error {
         eprintln!("  Movement err:     {err}");
     }
-    // Movement sections that stopped with bits of their window unread, other
-    // than the padding the grammar allows. Printed unconditionally, zeros
-    // included: this is a tally being measured, not an error, and a line that
-    // appeared only when nonzero could not say it had been looked for. Sized
-    // and open windows stay apart; see `RpcDecodeResult::sized_section_tails`.
+    // Sections that stopped with bits unread before their measured end (a
+    // `000` terminator and 8 to 23 bits after the last move): a tally, not an
+    // error. Sized and open windows stay apart; see
+    // `RpcDecodeResult::sized_section_tails` and `open_section_tails`.
     eprintln!(
         "  Movement tails:   {} sized ({} bits) / {} open ({} bits)",
         totals.sink.movement_sized_section_tails,
@@ -262,11 +210,13 @@ pub(super) fn print(
         totals.sink.movement_open_section_tails,
         totals.sink.movement_open_section_tail_bits
     );
-    // Printed unconditionally, zeros included, for the reason the `Struct blobs`
-    // line above gives: a line that appears only when non-zero cannot tell
-    // "the array walker found nothing wrong" from "the array walker was never
-    // reached". A non-zero value means it abandoned bits mid-element and
-    // flattened leaves were lost.
+    // Every byte-wrapped movement stream and the bits after its envelope,
+    // which nothing reads: 24 per stream on every measured replay.
+    eprintln!(
+        "  Envelope trailers: {} streams / {} bits",
+        totals.sink.movement_envelope_trailers, totals.sink.movement_envelope_trailer_bits
+    );
+    // Non-zero errors or truncations: bits abandoned mid-element, leaves lost.
     eprintln!(
         "  Array decode:     {} elements / {} fields / {} errors / {} truncations",
         totals.sink.array.elements_decoded,
@@ -292,6 +242,11 @@ pub(super) fn print(
         "  Reward opaque:    {} empty variants",
         totals.sink.tracked_rewards_opaque_empty_variants
     );
+    // Its sibling tolerance: empty deltas whose trailing zero byte was spared.
+    eprintln!(
+        "  ActiveBlinds trailers: {} empty deltas",
+        totals.sink.active_blinds_empty_trailers
+    );
     eprintln!("  Truncated RPCs:   {}", totals.sink.truncated_rpcs);
     eprintln!(
         "  RPC suffix bits:  {}",
@@ -309,17 +264,12 @@ pub(super) fn print(
         "  MultiContents items: {}",
         totals.sink.multi_contents_items_emitted
     );
-    // Printed unconditionally, including the zero, for the same reason
-    // `Struct blobs` is: this is the only counter that moves when the
-    // AbilitiesAndBuffs brute-force decodes anything, so a build that stopped
-    // reaching it would otherwise leave every line on this summary unchanged.
+    // The only counter that moves when the AbilitiesAndBuffs brute force
+    // decodes anything.
     eprintln!("  CNC RPC rows:     {}", totals.sink.cnc_rpcs_emitted);
-    // The failure side of the line above, zeros included. `CNC RPC rows`
-    // counts successes (and RepLayout-tail decodes), so a build that stopped
-    // fitting the fc=34 walk would only make it smaller; `unwalked` is the
-    // count that says the walk was tried and failed, `attempted` its
-    // denominator. The label must not share a prefix with the checkpoint
-    // block's, which check_export_baseline.py anchors on.
+    // Its failure side: `unwalked` says the fc=34 walk was tried and failed,
+    // `attempted` is its denominator. The label must not share a prefix with
+    // the checkpoint block's, which check_export_baseline.py anchors on.
     eprintln!(
         "  CNC brute force:  {} attempted / {} unwalked",
         totals.sink.cnc_bruteforce_payloads_attempted, totals.sink.cnc_bruteforce_payloads_unwalked
@@ -345,10 +295,6 @@ pub(super) fn print(
 }
 
 fn print_checkpoints(cp: &CheckpointStats) {
-    let rpc_payloads_lost = cp
-        .net
-        .rpc_stream_failures
-        .saturating_sub(cp.net.unresolved_rpc_payloads_preserved);
     eprintln!();
     eprintln!("=== Checkpoints ===");
     eprintln!("  Checkpoints:      {}", cp.chunks);
@@ -367,10 +313,12 @@ fn print_checkpoints(cp: &CheckpointStats) {
     eprintln!("  Frames:           {}", cp.frames);
     eprintln!("  Frame packets:    {}", cp.packets);
     eprintln!(
-        "  Checkpoint frame skips: {} external blobs / {} external bytes / {} game-specific bytes",
-        cp.frame_skips.external_data_blobs,
-        cp.frame_skips.external_data_bytes,
-        cp.frame_skips.game_specific_bytes
+        "  Checkpoint frame skips: {}",
+        report::frame_skips(&cp.frame_skips)
+    );
+    eprintln!(
+        "  Checkpoint frame times: {} non-finite",
+        cp.non_finite_frame_times
     );
     eprintln!("  Checkpoint rows:  {}", cp.field_rows);
     eprintln!("  Checkpoint actors:{} rows", cp.actor_rows_written);
@@ -392,24 +340,8 @@ fn print_checkpoints(cp: &CheckpointStats) {
         "  Checkpoint net:   {} bunches / {} blocks / {} fields / {} RPCs",
         cp.net.bunches, cp.net.content_blocks, cp.net.fields, cp.net.rpcs
     );
-    eprintln!(
-        "  Checkpoint partial:{} attempted / {} errors / {} accepted fragments / {} completed",
-        cp.net.partial_bunches,
-        cp.net.partial_errors,
-        cp.net.partial_fragments,
-        cp.net.partial_completed
-    );
-    eprintln!(
-        "  Checkpoint causes: {} missing initial / {} overlapping initial / {} mismatched continuation / {} unaligned / {} channel close / {} resource limit / {} unclassified / {} overclassified",
-        cp.net.partial_missing_initial,
-        cp.net.partial_overlapping_initial,
-        cp.net.partial_mismatched_continuation,
-        cp.net.partial_non_byte_aligned,
-        cp.net.partial_channel_close,
-        cp.net.partial_resource_limit_failures,
-        cp.net.partial_unclassified_errors(),
-        cp.net.partial_overclassified_errors()
-    );
+    eprintln!("  Checkpoint partial:{}", report::partial_bunches(&cp.net));
+    eprintln!("  Checkpoint causes: {}", report::partial_causes(&cp.net));
     eprintln!(
         "  Checkpoint loss:  {} malformed packets / {} bunch headers / {} malformed blocks / {} transform / {} field / {} RPC / {} unfinished partials ({} bits) / {} skipped bits",
         cp.net.malformed_packets,
@@ -417,7 +349,7 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.net.malformed_content_blocks,
         cp.net.transform_failures,
         cp.net.field_stream_failures,
-        rpc_payloads_lost,
+        cp.net.rpc_payloads_lost(),
         cp.net.unfinished_partials,
         cp.net.unfinished_partial_bits,
         cp.net.skipped_bits
@@ -438,8 +370,8 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.net.channel_reopens_while_open,
         cp.net.actor_opens_missing_spawn
     );
-    // Its own line, not appended to `Checkpoint life:`, so that line's format
-    // is unchanged for anything already reading it.
+    // Not appended to `Checkpoint life:`, whose format stays as its readers
+    // expect.
     eprintln!(
         "  Checkpoint unopened: {} bunches / {} bits / {} failed reopens",
         cp.net.bunches_on_unopened_channel,
@@ -462,9 +394,8 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.net.diagnostics.len(),
         cp.net.diagnostics_dropped
     );
-    // Movement remains a replayed snapshot sample rather than timeline data.
-    // Actor rows have a checkpoint-scoped destination; its dropped count must
-    // remain visible and zero.
+    // Movement is a snapshot sample, not timeline data, and is not written;
+    // actor rows have a table, so their dropped count should stay 0.
     eprintln!(
         "  Dropped:          {} actor / {} movement rows (checkpoint snapshot)",
         cp.actor_rows_dropped, cp.movement_rows_dropped
@@ -479,18 +410,15 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.overlay.handle_conflicts_refused,
         cp.sink.effect_blobs_decoded
     );
-    // NOT "Struct blobs", which the main block already uses: every label here
-    // is a regex anchor for check_export_baseline.py, and two blocks sharing
-    // one label would leave the harness matching whichever came first.
+    // Not `Struct blobs`: labels are check_export_baseline.py's regex anchors,
+    // and a label shared with the main block matches whichever comes first.
     eprintln!(
         "  Checkpoint blobs: {} decoded / {} failed",
         cp.sink.struct_blobs_decoded, cp.sink.struct_blobs_failed
     );
-    // The checkpoint twin of "Sink tally". Its RPC, open, close and
-    // content-block terms must equal the `Checkpoint net` RPCs and blocks and
-    // the `Checkpoint life` opens and closes, for the reason given on the main
-    // line; tools/verify_build_corpus.py checks them through the manifest.
-    // The `fields` term counts emitted rows and matches nothing above.
+    // `Sink tally`'s twin, checked the same way: its RPC, open, close and block
+    // terms must equal `Checkpoint net`'s RPCs and blocks and `Checkpoint
+    // life`'s opens and closes; `fields` matches nothing.
     eprintln!(
         "  Checkpoint sink:  {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
         cp.sink.fields_emitted,
@@ -502,10 +430,6 @@ fn print_checkpoints(cp: &CheckpointStats) {
     if let Some(error) = &cp.sink.struct_blob_first_error {
         eprintln!("  Checkpoint blob error: {error}");
     }
-    // The three failure counters the checkpoint pass used to drop on the floor.
-    // Printed unconditionally, zero included: a conditional line here could not
-    // tell "the checkpoint decoders ran clean" from "the checkpoint decoders
-    // were never reached", which is the whole reason they are counted.
     eprintln!(
         "  Checkpoint fails: {} array / {} truncated RPC / {} movement",
         cp.sink.array.errors, cp.sink.truncated_rpcs, cp.sink.movement_rpc_errors
@@ -532,6 +456,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.tracked_rewards_opaque_empty_variants
     );
     eprintln!(
+        "  Checkpoint ActiveBlinds trailers: {} empty deltas",
+        cp.sink.active_blinds_empty_trailers
+    );
+    eprintln!(
         "  Checkpoint movement: {} failures",
         cp.sink.movement_rpc_errors
     );
@@ -544,6 +472,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.movement_sized_section_tail_bits,
         cp.sink.movement_open_section_tails,
         cp.sink.movement_open_section_tail_bits
+    );
+    eprintln!(
+        "  Checkpoint envelope trailers: {} streams / {} bits",
+        cp.sink.movement_envelope_trailers, cp.sink.movement_envelope_trailer_bits
     );
     eprintln!(
         "  Checkpoint suffix:{} RPC bits",
@@ -564,35 +496,11 @@ fn print_checkpoints(cp: &CheckpointStats) {
     );
 }
 
-/// Tables written only when `--checkpoints` is given.
-const CHECKPOINT_TABLES: [&str; 7] = [
-    "checkpoint_fields.parquet",
-    "checkpoint_actors.parquet",
-    "checkpoint_net_guids.parquet",
-    "checkpoint_blocks.parquet",
-    "checkpoint_guid_entries.parquet",
-    "checkpoint_export_groups.parquet",
-    "checkpoint_export_fields.parquet",
-];
-
-/// A warning line when this run drops a checkpoint table an earlier run at
-/// this destination had.
-///
-/// The five main tables and the manifest are recreated on every export, but
-/// [`CHECKPOINT_TABLES`] are only opened when the flag asks for them. Export
-/// replay A with checkpoints and replay B without, into the same directory,
-/// and `OutputTransaction::publish` atomically replaces the whole
-/// destination with B's staging -- A's checkpoint table is not merged in and
-/// not left behind mixed with B's other six files; it is gone, along with
-/// the rest of A's directory, the same way any file `--checkpoints` did not
-/// ask this run to write would be. That silent loss, not a leftover file
-/// surviving to confuse a later reader, is what this reports.
-///
-/// `out_path` must be checked BEFORE `OutputTransaction::publish` runs, on
-/// the directory about to be replaced. By the time `print` -- the only
-/// caller in production -- runs, that directory is already gone; checking
-/// `out_path` at that point sees only what this run just published, which
-/// can never contain a table this run did not write.
+/// A warning when this run, without `--checkpoints`, drops the
+/// [`CHECKPOINT_TABLES`] an earlier export left at `out_path`: publication
+/// replaces the whole directory, so they are gone, not merged or left behind.
+/// Call it on the destination before `OutputTransaction::publish`; afterwards
+/// the directory holds only what this run wrote.
 pub(super) fn stale_checkpoint_note(out_path: &Path, with_checkpoints: bool) -> Option<String> {
     if with_checkpoints {
         return None;
@@ -622,19 +530,12 @@ fn print_file_sizes(
     manifest_path: &Path,
     stale_checkpoint_note: Option<&str>,
 ) {
-    let size = |name: &str| {
-        fs::metadata(out_path.join(name))
-            .map(|m| m.len())
-            .unwrap_or(0)
-    };
+    let size = |name: &str| file_size(&out_path.join(name));
 
     eprintln!();
-    eprintln!("  fields.parquet:   {} bytes", size("fields.parquet"));
-    eprintln!("  movement.parquet: {} bytes", size("movement.parquet"));
-    eprintln!("  actors.parquet:   {} bytes", size("actors.parquet"));
-    eprintln!("  net_guids.parquet:{} bytes", size("net_guids.parquet"));
-    eprintln!("  events.parquet:   {} bytes", size("events.parquet"));
-    eprintln!("  partials.parquet: {} bytes", size("partials.parquet"));
+    for table in MAIN_TABLES {
+        eprintln!("  {:<18}{} bytes", format!("{table}:"), size(table));
+    }
     if with_checkpoints {
         for table in CHECKPOINT_TABLES {
             eprintln!("  {table}: {} bytes", size(table));
@@ -646,23 +547,21 @@ fn print_file_sizes(
     }
 }
 
-/// The denominator is every row the overlay was offered, which since RPC
-/// parameter expansion means replicated properties *and* RPC parameters. The
-/// two populations have very different type coverage -- the descriptor set grew
-/// up around properties -- so labelling the ratio "of all fields" would read as
-/// a regression when parameters were added. Name the denominator instead of
-/// leaving it implicit.
+/// A file's size in bytes, or `?` when it cannot be read: a missing table
+/// must not print as a plausible empty one.
+fn file_size(path: &Path) -> String {
+    fs::metadata(path).map_or_else(|_| "?".to_owned(), |m| m.len().to_string())
+}
+
+/// The typed ratio's denominator is every row offered: replicated properties
+/// and RPC parameters, whose type coverage differs widely, so the label names
+/// it rather than reading as "of all fields".
 fn print_overlay(overlay: &OverlayStats, effect_blobs_decoded: u64) {
     let total = overlay.decoded_ok
         + overlay.decoded_err
         + overlay.raw_or_skip
         + overlay.not_in_table
         + overlay.no_field_name;
-    let pct = if total > 0 {
-        (overlay.decoded_ok as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
     eprintln!();
     eprintln!("=== Type overlay ===");
     eprintln!("  Decoded OK:       {}", overlay.decoded_ok);
@@ -671,36 +570,37 @@ fn print_overlay(overlay: &OverlayStats, effect_blobs_decoded: u64) {
     eprintln!("  Not in table:     {}", overlay.not_in_table);
     eprintln!("  No field name:    {}", overlay.no_field_name);
     eprintln!("  Rows offered:     {total}");
-    eprintln!("  Typed:            {pct:.1}% (properties + RPC parameters)");
-    // Unconditional, zero included. These are rows the handle fallback WOULD
-    // have typed, refused because the replay declared a different, non-numeric
-    // name at that handle -- the stale-mapping case that used to read a float
-    // as an int and report `decoded_ok`. They land in `Not in table` instead,
-    // so without this line the refusal is indistinguishable from the field
-    // never having been in the table at all, and a rule that started refusing
-    // everything would look exactly like a quiet build.
+    eprintln!(
+        "  Typed:            {} (properties + RPC parameters)",
+        typed_share(overlay.decoded_ok, total)
+    );
+    // Rows the handle fallback would have typed, refused because the replay
+    // declared a different, non-numeric name at that handle. They land in
+    // `Not in table`; only this line tells the two apart.
     eprintln!(
         "  Handle conflicts: {} refused",
         overlay.handle_conflicts_refused
     );
-    // Reported separately because it is NOT part of the ratio above. The
-    // overlay buckets are decided before the effect pass runs, so these rows
-    // are already counted as `Not in table` and stay there; adding them to
-    // `Decoded OK` would double-count them and move a figure the baseline
-    // pins for a different reason. The two numbers answer different questions:
-    // how much the static table covers, and how much this decoder recovered
-    // from what the table does not.
+    // Outside the ratio: the buckets are decided before the effect pass, so
+    // these rows already count as `Not in table`; adding them to `Decoded OK`
+    // would double-count them and move a figure the baseline pins.
     eprintln!("  Effect blobs:     {effect_blobs_decoded}");
 }
 
-/// Top-15 decode error breakdown. Always shown when there are any -- this is a
-/// permanent diagnostic for schema-drift detection across game builds.
+/// `decoded_ok` as a share of the `total` rows offered, or `?` when none
+/// were: no share at all, not a typed share of zero.
+fn typed_share(decoded_ok: u64, total: u64) -> String {
+    if total == 0 {
+        return "?".to_owned();
+    }
+    format!("{:.1}%", (decoded_ok as f64 / total as f64) * 100.0)
+}
+
+/// Top-15 decode error breakdown, shown whenever there are any: the permanent
+/// schema-drift diagnostic across game builds.
 fn print_decode_errors(error_report: &OverlayErrorReport) {
-    // Gated on the report itself, not `overlay.decoded_err` -- that counter is
-    // the ReplayData pass alone, while `error_report` is ReplayData and
-    // checkpoints merged (see `process_chunk`'s doc). A checkpoint-only error
-    // burst with a clean ReplayData pass used to suppress this whole section,
-    // hiding exactly the breakdown an operator needs to find it.
+    // Gated on the report, which merges ReplayData and checkpoints, not on
+    // `overlay.decoded_err`, which is ReplayData alone.
     if error_report.total_errors() == 0 {
         return;
     }
@@ -716,7 +616,6 @@ fn print_decode_errors(error_report: &OverlayErrorReport) {
         "count", "kind", "bits", "type", "field_name"
     );
     for row in &error_report.top_n(15) {
-        // Truncate group_path for display (show last 60 chars).
         let gp_display = display_tail(&row.group_path, 60);
         eprintln!(
             "  {:>7}  {:<9}  {:>5}  {:<20}  {:<30}  {}",
@@ -725,9 +624,8 @@ fn print_decode_errors(error_report: &OverlayErrorReport) {
     }
 }
 
-/// Keep the last `width - 3` Unicode scalar values and prefix an ellipsis.
-/// Byte slicing could panic when a player-authored/path string crossed the
-/// boundary inside a multi-byte UTF-8 character.
+/// The last `width - 3` chars after an ellipsis. Chars, not bytes: byte
+/// slicing panicked when the cut fell inside a multi-byte character.
 fn display_tail(value: &str, width: usize) -> String {
     let count = value.chars().count();
     if count <= width {
@@ -740,7 +638,7 @@ fn display_tail(value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHECKPOINT_TABLES, display_tail, stale_checkpoint_note};
+    use super::{CHECKPOINT_TABLES, display_tail, file_size, stale_checkpoint_note, typed_share};
     use std::fs;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -750,10 +648,6 @@ mod tests {
         dir
     }
 
-    /// This is a check of `stale_checkpoint_note` in isolation, against a
-    /// plain directory -- see its own doc for why the real call site checks
-    /// the pre-publish destination, not this test's `dir`, which is never
-    /// touched by `OutputTransaction::publish` at all.
     #[test]
     fn a_leftover_checkpoint_table_is_named_when_this_run_did_not_write_one() {
         let dir = temp_dir("stale_cp");
@@ -773,6 +667,24 @@ mod tests {
         // With the flag, the file is this run's own output and says nothing.
         assert_eq!(stale_checkpoint_note(&dir, true), None);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Two exports to one destination are supported, and the other's
+    /// publication can swap the directory before this run's summary.
+    #[test]
+    fn an_unreadable_file_size_is_a_visible_absence() {
+        let dir = temp_dir("sizes");
+        fs::write(dir.join("five.parquet"), b"12345").expect("write");
+        assert_eq!(file_size(&dir.join("five.parquet")), "5");
+        assert_eq!(file_size(&dir.join("missing.parquet")), "?");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_typed_share_of_no_rows_is_unknown_not_zero() {
+        assert_eq!(typed_share(0, 0), "?");
+        assert_eq!(typed_share(1, 8), "12.5%");
+        assert_eq!(typed_share(0, 5), "0.0%");
     }
 
     #[test]

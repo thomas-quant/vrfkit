@@ -79,7 +79,7 @@ property keeps its checksum across all of them -- `249` in the effect RPCs is
 
 Every recomputation is a 1-in-2^32 chance of an accidental reproduction, so the
 tool counts them and prints `trials / 2^32`, the number of chance reproductions
-to expect. On the corpus that is 0.0032 (13,685,166 recomputations).
+to expect (0.0034 on the corpus run below).
 
 It checks `checksum_table.rs` too. The table maps a checksum to a type with no
 name, so each entry is recomputed under every name that declares its checksum.
@@ -211,14 +211,10 @@ section). So **the tool exits 0 on the corpus**: 0 identities and 0
 `checksum_table.rs` carriers mismatch unexpectedly, beside the 8 identities and
 2 carriers the list expects (both of its items matched, none STALE).
 
-Retyped since the first run. At `9f92756` the corpus also had 9 unexpected
-identities and 4 carriers: `EffectID` in the effect RPCs and
-`EffectManagerComponent` (2340855891, 2251343646, 1129645208) was `UInt64`
-where the checksum says `int64`, and `HandleNumber` in
-`NetMulticast{Apply,Remove}ForceModule` (3336285386) was `Int32` where it says
-`uint32`; the tool exited 1. `game-evidence-typing-fixes` retyped both (a new
-`FieldType::Int64`, and `UInt32`), and they now match. No decoded bit moved:
-the values are in range either way.
+At `9f92756` the tool exited 1 on 9 more identities and 4 carriers: `EffectID`
+(2340855891, 2251343646, 1129645208) typed `UInt64` against `int64`, and
+`HandleNumber` (3336285386) `Int32` against `uint32`; both were retyped
+(`Int64`, `UInt32`) without moving a decoded bit.
 
 ## Expected mismatches
 

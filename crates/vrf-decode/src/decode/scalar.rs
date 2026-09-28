@@ -1,8 +1,6 @@
 //! Scalar field readers: everything Unreal writes as a single primitive.
-//!
-//! Each function consumes exactly the field's payload and returns the value in
-//! the slot the overlay writes it to. `decode_field` is what checks that the
-//! payload was fully consumed, so nothing here needs to.
+//! `decode_field` checks that the payload was fully consumed, so none of
+//! these needs to.
 
 use vrf_bitio::{BitError, BitReader};
 
@@ -12,24 +10,13 @@ pub(super) fn decode_bool(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeE
     Ok(DecodedValue::Bool(r.read_bit()?))
 }
 
-/// Decode a byte-width enum or `uint8` property.
-///
-/// The width is taken from what the field payload actually carries rather than
-/// fixed at 8 bits. Unreal writes only the significant bits for byte-sized
-/// properties nested inside replicated arrays, so a 5-bit payload is normal and a
-/// hard 8-bit read fails on it. The reference implementation does the same thing:
-///
-/// ```csharp
-/// private static byte ReadByte(FBitArchive archive) =>
-///     checked((byte)archive.ReadBitsToUInt64(checked((int)archive.BitsRemaining)));
-/// ```
-///
-/// Concretely this is what makes `CombatReport` `AssistType` (5 bits) decode; a
-/// fixed-width read left all 364 of its rows untyped.
-///
-/// Payloads wider than 8 bits are rejected rather than truncated: that means the
-/// field is not really byte-sized and silently keeping the low byte would emit a
-/// plausible wrong number.
+/// A byte-width enum or `uint8`, as wide as the payload rather than a fixed 8
+/// bits: Unreal writes only the significant bits of byte properties nested in
+/// replicated arrays, and the reference reads the same way
+/// (`ReadBitsToUInt64(BitsRemaining)` in its `ReadByte`). `CombatReport`
+/// `AssistType` is 5 bits; a fixed 8-bit read left all 364 of its rows
+/// untyped. Wider than 8 bits is refused, not truncated: the field is not
+/// byte-sized, and its low byte would be a plausible wrong number.
 pub(super) fn decode_byte(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     let width = r.bits_remaining();
     if width == 0 || width > 8 {
@@ -55,13 +42,9 @@ pub(super) fn decode_i64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeEr
 }
 
 pub(super) fn decode_u64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    // The overlay stores integers as i64. A u64 with its high bit set cannot
-    // be represented without a silent sign flip, so reject it loudly rather
-    // than emit a plausible wrong (negative) number. The C# descriptors
-    // declare the effect IDs UInt64, but the property is an `int64`
-    // (FEffectID::EffectID; its compatible_checksum reproduces only with that
-    // type), so apply_type_corrections.py retypes them Int64 and no shipped
-    // entry reads UInt64 any more. This stays a defensive loud failure.
+    // Refused past i64::MAX (`UnsignedOverflow`). No shipped entry reads
+    // UInt64 since the effect IDs became Int64 (`FieldType::Int64`); this
+    // stays a defensive loud failure.
     let value = r.read_u64()?;
     if value > i64::MAX as u64 {
         return Err(DecodeError::UnsignedOverflow { value });
@@ -81,17 +64,13 @@ pub(super) fn decode_fstring(r: &mut BitReader<'_>) -> Result<DecodedValue, Deco
     Ok(DecodedValue::Str(r.read_fstring(64 * 1024)?))
 }
 
-/// Legacy FText string-table reader, returning only the key for existing
-/// `FieldType::FText` consumers such as `LocalizedStat`.
-///
-/// Its historical 33+8 split yields selector 5. The measured full layout is
-/// 32 flag bits, history byte 11, then one inline-FName selector bit followed
-/// by FString table name, i32 instance number, and FString key. Therefore 5
-/// is a shifted selector, not the history enum value. Keeping this reader
-/// preserves the existing key-string output and error behavior.
-///
-/// [`crate::decode_ftext_tree`] separately decodes strict complete trees,
-/// including the measured formatted reward histories and their arguments.
+/// Legacy FText string-table reader, returning only the key for
+/// `FieldType::FText` consumers such as `LocalizedStat` (kept so their output
+/// and errors stay as they are). The measured layout is 32 flag bits, history
+/// byte 11, an inline-FName selector bit, then FString table name, i32
+/// instance number and FString key; this reads it as a 33+8 split, so its
+/// accepted selector 5 is a shifted view, not a history value. Complete trees
+/// are [`crate::decode_ftext_tree`]'s.
 pub(super) fn decode_ftext(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     r.read_bits(33)?;
     let history_type = r.read_bits(8)? as u8;
@@ -103,30 +82,31 @@ pub(super) fn decode_ftext(r: &mut BitReader<'_>) -> Result<DecodedValue, Decode
     Ok(DecodedValue::Str(r.read_fstring(64 * 1024)?))
 }
 
-/// FName on the wire: 1 bit `isHardcoded`, then one of two shapes.
-///
-/// Mirrors `FArchive.ReadFNameCore` in the reference. When the bit is set the
-/// name is an index into the engine's hardcoded name table, sent as a single
-/// IntPacked and rendered as its decimal value; there is no string. When it is
-/// clear the name is inline: FString plus an i32 instance number, where 0
-/// renders the bare name and `N != 0` renders `Name_{N-1}`. See docs/DATA.md
-/// "FName instance numbers are part of the name" for the corpus-measured
-/// collapse dropping that number used to cause.
-///
-/// The comment here used to assert "isHardcoded=false for replays" and the
-/// code read the bit and discarded it, always taking the inline path. That is
-/// false: 177 of the 581 `DamagedBone` payloads on 02d4d478 are 9 bits, which
-/// is exactly the hardcoded shape (1 flag + one IntPacked byte). Reading them
-/// as an FString ran off the end of the payload and produced mojibake, which
-/// is why the field had to be forced to Raw in the type-correction pass.
+/// FName, as the reference's `FArchive.ReadFNameCore` reads it: an
+/// `isHardcoded` bit, then either one IntPacked index into the engine's
+/// hardcoded name table (rendered as its decimal) or an inline FString plus an
+/// i32 instance number (0 renders the bare name, `N` renders `Name_{N-1}`; see
+/// docs/DATA.md "FName instance numbers are part of the name"). Replays do send
+/// the hardcoded shape: 177 of the 581 `DamagedBone` payloads on 02d4d478 are
+/// 9 bits (flag + one IntPacked byte), which an always-inline read turned into
+/// mojibake.
 pub(super) fn decode_fname(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+    read_fname(r, 64 * 1024).map(DecodedValue::Str)
+}
+
+/// [`decode_fname`]'s reader, generic over the error type so the struct blobs
+/// keep their `StructBlobError` variants. `max_bytes` caps the inline string
+/// (64 KiB here, 1024 there); one reader spells a name the same in both.
+pub(crate) fn read_fname<E: From<BitError> + From<DecodeError>>(
+    r: &mut BitReader<'_>,
+    max_bytes: i64,
+) -> Result<String, E> {
     if r.read_bit()? {
-        let index = r.read_int_packed()?;
-        return Ok(DecodedValue::Str(index.to_string()));
+        return Ok(r.read_int_packed()?.to_string());
     }
-    let name = r.read_fstring(64 * 1024)?;
+    let name = r.read_fstring(max_bytes)?;
     let number = r.read_i32()?;
-    render_fname(name, number).map(DecodedValue::Str)
+    Ok(render_fname(name, number)?)
 }
 
 /// Apply an `FName`'s instance number to its string, Unreal's way.
@@ -134,7 +114,7 @@ pub(super) fn decode_fname(r: &mut BitReader<'_>) -> Result<DecodedValue, Decode
 /// `number == 0` is the bare name; otherwise the displayed suffix is
 /// `number - 1`. A negative number has no valid display form and is rejected;
 /// in particular, `i32::MIN - 1` must not wrap into a plausible positive name.
-pub(crate) fn render_fname(name: String, number: i32) -> Result<String, DecodeError> {
+fn render_fname(name: String, number: i32) -> Result<String, DecodeError> {
     if number < 0 {
         return Err(DecodeError::InvalidFNameNumber { number });
     }
@@ -145,13 +125,9 @@ pub(crate) fn render_fname(name: String, number: i32) -> Result<String, DecodeEr
 }
 
 /// Both an object NetGUID and a gameplay tag are wire IntPacked values;
-/// only the name at the call site says which wire concept they are.
-fn decode_int_packed(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+/// only the declared type says which wire concept they are.
+pub(super) fn decode_int_packed(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     Ok(DecodedValue::I64(i64::from(r.read_int_packed()?)))
-}
-
-pub(super) fn decode_object_net_guid(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    decode_int_packed(r)
 }
 
 /// 128-bit GUID: 4 x u32 LE -> formatted as standard hex GUID.
@@ -182,37 +158,19 @@ pub(super) fn decode_serialized_int(
     Ok(DecodedValue::I64(i64::from(r.read_serialized_int(max)?)))
 }
 
-/// A byte enum that occupies whatever width the field payload carries.
+/// A byte enum as wide as its payload (at most 32 bits are read).
 ///
-/// # A zero-width payload really is zero, and is not fabricated
-///
-/// The zero-width arms return `I64(0)` without reading a bit, which looks like
-/// a value invented out of nothing. It is not, and the reason is worth writing
-/// down because the surrounding code refuses exactly this shape elsewhere
-/// (`UnsignedOverflow`, `UnsupportedTextHistory`, and the no-exemption rule in
-/// [`super::decode_field`]).
-///
-/// Unreal serialises this enum in `ceil(log2(variant_count))` bits, and the
-/// number of bits needed to distinguish ONE possible variant is zero. A
-/// zero-width payload is therefore not a truncated value: it is the complete
-/// encoding of an enum whose only variant is the first, and reading it as 0 is
-/// the encoding's own answer, not a guess at a missing one. That is different
-/// in kind from a `NaN` component or an over-wide payload, where the bits are
-/// present and say something the type cannot represent.
-///
-/// The corpus agrees: `overlay::apply_overlay_inner` already answers a zero-bit
-/// `EnumRemainingBits` with `value_i64 = 0` and counts it `decoded_ok`, and the
-/// 215-replay export reports zero decode errors under that behaviour. Turning
-/// zero-width into an error or a null would move those rows to failures for a
-/// value the format defines.
+/// A zero-width payload is `I64(0)`, not a fabricated value: Unreal writes
+/// `ceil(log2(variant_count))` bits, so zero bits is the complete encoding of a
+/// one-variant enum -- unlike a `NaN` or an over-wide payload, whose bits say
+/// something the type cannot hold. The overlay counts it `decoded_ok`; the
+/// 215-replay export reports zero decode errors under that rule.
 pub(super) fn decode_enum_remaining_bits(
     r: &mut BitReader<'_>,
     bit_count: u32,
 ) -> Result<DecodedValue, DecodeError> {
-    // The single call site (`dispatch_decode`) hands us a reader freshly built
-    // from exactly `bit_count` bits, before anything has been read from it, so
-    // `bit_count == 0` and `r.bits_remaining() == 0` are the same condition
-    // here. Testing `bit_count` once covers both.
+    // `dispatch_decode` builds the reader from exactly `bit_count` bits, so
+    // this is `r.bits_remaining() == 0`.
     if bit_count == 0 {
         return Ok(DecodedValue::I64(0));
     }
@@ -223,25 +181,14 @@ pub(super) fn decode_enum_remaining_bits(
     )))
 }
 
-pub(super) fn decode_gameplay_tag(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    decode_int_packed(r)
-}
-
 /// Lowercase hex digits, indexed by nibble.
 const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-/// Length-prefixed byte blob, rendered as lowercase hex into `value_str`.
-///
-/// The bytes are hex-encoded as they are read rather than collected first: the
-/// previous shape ran `format!("{b:02x}")` per byte, which is one heap
-/// allocation and one formatting machine per byte of payload.
-///
-/// A count the payload cannot hold is refused before a byte is read, the way
-/// `read_fstring` refuses a string's: the prefix is what is wrong, so it is
-/// `InvalidLength` and the error report prints `Malformed`. The byte loop
-/// used to find out by running into `Eof`, which printed `EOF` for the cause
-/// an FString's prefix prints as `Malformed`. The table's cap is checked
-/// first and keeps its own variant.
+/// Length-prefixed byte blob, hex-encoded into `value_str` as it is read (no
+/// per-byte `format!`). The table's cap is checked first and keeps its own
+/// variant; then a count the payload cannot hold is refused before a byte is
+/// read, as `read_fstring` refuses a string's: the prefix is at fault, so it is
+/// `InvalidLength` (`Malformed` in the error report), not `Eof`.
 pub(super) fn decode_byte_array(
     r: &mut BitReader<'_>,
     max_bytes: u32,

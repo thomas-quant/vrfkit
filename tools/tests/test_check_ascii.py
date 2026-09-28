@@ -23,14 +23,8 @@ class CheckAsciiTests(unittest.TestCase):
 
     def test_default_check_uses_full_repository_from_nested_directory(self):
         """Run from a nested crate, the checker must still scan the whole repo.
-
-        The count is derived from `git ls-files`, not written here. It used to
-        be the literal 61, which meant the test failed the moment a Rust file
-        was added -- and it did, silently, for the four files two sessions
-        added, because nothing ran this suite until it was put in QUICK START.
-        A test that has to be edited whenever the codebase grows is a test that
-        will be edited without being read.
-        """
+        The count is derived from `git ls-files`, not a literal: a test edited
+        whenever the codebase grows is edited without being read."""
         tracked = subprocess.run(
             ["git", "-C", str(REPOSITORY_ROOT), "ls-files", "*.rs"],
             capture_output=True, text=True, check=True,
@@ -63,14 +57,8 @@ class CheckAsciiTests(unittest.TestCase):
         )
 
     def test_an_empty_tracked_list_is_a_broken_measurement_not_a_clean_sweep(self):
-        """`git ls-files` succeeding with no output scanned nothing.
-
-        It printed "OK: 0 tracked Rust file(s), ASCII only" and exited 0, which
-        is the vacuous-success shape this repo keeps finding: the sweep that
-        covers nothing reads exactly like the sweep that found nothing wrong.
-        This repo always has Rust files, so an empty enumeration means the
-        measurement failed -- wrong directory, wrong pathspec, no git.
-        """
+        """`git ls-files` succeeding with no output scanned nothing: a sweep
+        that covers nothing must not read like one that found nothing wrong."""
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
             (repository / "tools").mkdir()

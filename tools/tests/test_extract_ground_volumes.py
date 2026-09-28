@@ -18,6 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tools import extract_ground_volumes as gv
+from tools.tests.wire_fixtures import BitWriter
 
 CNC_IDENTITY = ("FragmentInfo", 2225407835)
 #: 13.02-shaped declaration: handle -> (name, compatible_checksum).
@@ -104,38 +105,6 @@ READ_AS = {"int32": gv.Scalar("int32", 32), "bool": gv.Scalar("bool", 1),
 B1306, B1305 = "++Ares-Core+release-13.06", "++Ares-Core+release-13.05"
 STATUS = ("Status", 2380676387)
 STATUS_COUNTERS = ("status_named", "status_unnamed_declaration", "status_unnamed_value")
-
-
-class BitWriter:
-    """LSB-first bit sink producing (bytes, bit_count) like an exported row."""
-
-    def __init__(self):
-        self.bits = []
-
-    def __len__(self):
-        return len(self.bits)
-
-    def write(self, value, width):
-        self.bits.extend((value >> i) & 1 for i in range(width))
-        return self
-
-    def packed(self, value):
-        while True:
-            rest = value >> 7
-            self.write(((value & 127) << 1) | bool(rest), 8)
-            if not rest:
-                return self
-            value = rest
-
-    def extend(self, other):
-        self.bits.extend(other.bits)
-        return self
-
-    def to_bytes(self):
-        out = bytearray((len(self.bits) + 7) // 8)
-        for i, bit in enumerate(self.bits):
-            out[i // 8] |= bit << (i % 8)
-        return bytes(out), len(self.bits)
 
 
 def scalar_bits(name, value, kind=None):
@@ -601,6 +570,15 @@ class CliTests(unittest.TestCase):
                 gv.extract(source, out)
             with self.assertRaisesRegex(ValueError, "outside"):
                 gv.extract(source, source / "forbidden")
+
+    def test_the_receipt_is_written_with_lf_line_endings(self):
+        """LF on every platform, like the two ndjson files (not CRLF on Windows)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gv.extract(make_export(root, [window_row()]), root / "result")
+            data = (root / "result" / "receipt.json").read_bytes()
+        self.assertIn(b"\n", data)
+        self.assertNotIn(b"\r\n", data)
 
     def test_status_name_is_written_and_counted_per_declaration(self):
         cases = (("13.06", {}, (), "PartiallyOutside", "status_named"),

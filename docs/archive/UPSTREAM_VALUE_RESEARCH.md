@@ -1,4 +1,4 @@
-# Upstream value declaration recheck
+# Upstream value declaration recheck [ARCHIVED -- HISTORICAL]
 
 Checked 2026-09-09 against vrfkit `14e58e52e8f412927c6bde1909abd89e38f5d2b6`.
 Only source owned by `michel-giehl/ValorantReplayParser` and that repository's

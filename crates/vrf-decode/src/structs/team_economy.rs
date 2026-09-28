@@ -2,11 +2,11 @@
 
 use vrf_bitio::BitReader;
 
-use super::framing::{
-    MAX_FIELDS_PER_ELEMENT, ensure_consumed, ensure_member_consumed, member_name, read_array_count,
-    read_element_index, read_field_header,
-};
+use super::framing::{decode_elements, member_name};
 use super::{Result, StructBlobError};
+
+/// Names this blob in error messages.
+const CONTEXT: &str = "TeamEconomy";
 
 /// A single team economy update.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,22 +21,10 @@ pub struct TeamEconomyUpdate {
     pub average_loadout_value: Option<i32>,
 }
 
-/// Decode a `BombGameState.TeamEconomy` blob.
-///
-/// # Wire layout
-///
-/// Standard UE RepLayout dynamic-array framing (see module docs).
-/// Field handles: 56=ReplicationId(IntPacked), 57=LoadoutValue(Int32),
-/// 58=AverageLoadoutValue(Int32).
-///
-/// This compatibility entry point retains the 12.06--13.01 handle layout.
-/// Replay parsers should use [`decode_team_economy_declared`] to follow the
-/// enclosing group's declaration, including the older 53..=55 layout.
-///
-/// # Arguments
-///
-/// * `reader` - A `BitReader` positioned at the start of the blob, with
-///   `len_bits()` equal to the declared bit count.
+/// Decode a `BombGameState.TeamEconomy` blob under the fixed 12.06-13.01
+/// handles: 56 ReplicationId (IntPacked), 57 LoadoutValue and 58
+/// AverageLoadoutValue (Int32). Replay parsers should use
+/// [`decode_team_economy_declared`], which also reads the older 53..=55 layout.
 pub fn decode_team_economy(reader: &mut BitReader<'_>) -> Result<Vec<TeamEconomyUpdate>> {
     decode_members(reader, |handle| match handle {
         56 => Ok("241"),
@@ -44,84 +32,55 @@ pub fn decode_team_economy(reader: &mut BitReader<'_>) -> Result<Vec<TeamEconomy
         58 => Ok("AverageLoadoutValue"),
         _ => Err(StructBlobError::UnsupportedHandle {
             handle,
-            context: "TeamEconomy",
+            context: CONTEXT,
         }),
     })
 }
 
-/// Decode TeamEconomy using the replay's enclosing-group handle declarations.
-///
-/// The replication ID is declared as hardcoded FName index `241`; it retains
-/// its existing IntPacked interpretation. Loadout members are named Int32s.
-/// Unknown or missing declarations are errors, never a numeric-handle fallback.
+/// Decode TeamEconomy under the enclosing group's declarations. The
+/// replication ID is declared as hardcoded FName index `241` (read as
+/// IntPacked); unknown or missing declarations are errors, never a fallback.
 pub fn decode_team_economy_declared(
     reader: &mut BitReader<'_>,
     declared: &[Option<&str>],
 ) -> Result<Vec<TeamEconomyUpdate>> {
-    decode_members(reader, |handle| {
-        member_name(declared, handle, "TeamEconomy")
-    })
+    decode_members(reader, |handle| member_name(declared, handle, CONTEXT))
 }
 
 fn decode_members<'a>(
     reader: &mut BitReader<'_>,
-    mut name_for: impl FnMut(u32) -> Result<&'a str>,
+    name_for: impl FnMut(u32) -> Result<&'a str>,
 ) -> Result<Vec<TeamEconomyUpdate>> {
-    let count = read_array_count(reader)?;
-    let mut results = Vec::new();
-
-    while let Some(index) = read_element_index(reader, count)? {
-        let mut replication_id: Option<u32> = None;
-        let mut loadout_value: Option<i32> = None;
-        let mut average_loadout_value: Option<i32> = None;
-
-        for field_idx in 0..=MAX_FIELDS_PER_ELEMENT {
-            let Some((handle, bit_count)) = read_field_header(reader)? else {
-                break;
-            };
-            if field_idx == MAX_FIELDS_PER_ELEMENT {
-                return Err(StructBlobError::TooManyFields {
-                    context: "TeamEconomy",
-                });
-            }
-
-            let mut sub = reader.sub_reader(u64::from(bit_count))?;
-            let member = match name_for(handle)? {
+    decode_elements(
+        reader,
+        CONTEXT,
+        name_for,
+        |index| TeamEconomyUpdate {
+            index,
+            replication_id: None,
+            loadout_value: None,
+            average_loadout_value: None,
+        },
+        // Each member owes its whole window; the IntPacked one, declared as
+        // `241`, is reported as `ReplicationId`.
+        |row, name, sub| {
+            Ok(Some(match name {
                 "241" => {
-                    replication_id = Some(sub.read_int_packed()?);
+                    row.replication_id = Some(sub.read_int_packed()?);
                     "ReplicationId"
                 }
                 "LoadoutValue" => {
-                    loadout_value = Some(sub.read_i32()?);
+                    row.loadout_value = Some(sub.read_i32()?);
                     "LoadoutValue"
                 }
                 "AverageLoadoutValue" => {
-                    average_loadout_value = Some(sub.read_i32()?);
+                    row.average_loadout_value = Some(sub.read_i32()?);
                     "AverageLoadoutValue"
                 }
-                name => {
-                    return Err(StructBlobError::UnsupportedMember {
-                        name: name.to_owned(),
-                        handle,
-                        context: "TeamEconomy",
-                    });
-                }
-            };
-            // Two Int32s and one IntPacked, all self-delimiting or fixed, so
-            // each owes its whole window. See `ensure_member_consumed`.
-            ensure_member_consumed(&sub, member, handle, bit_count, "TeamEconomy")?;
-        }
-
-        results.push(TeamEconomyUpdate {
-            index,
-            replication_id,
-            loadout_value,
-            average_loadout_value,
-        });
-    }
-
-    ensure_consumed(reader)?;
-    Ok(results)
+                _ => return Ok(None),
+            }))
+        },
+    )
 }
 
 #[cfg(test)]

@@ -1,34 +1,20 @@
-//! The `events` table: one row per Event chunk.
-//!
-//! Event chunks are the server's own labelled game timeline. Round starts,
-//! character deaths, spike plants and defuses arrive here already named, with a
-//! millisecond timestamp, instead of having to be inferred from replicated
-//! properties and RPCs.
-//!
-//! The bytes it wraps contain a group-dependent word list with no count on the
-//! wire (see `vrf_container::EventChunk`). Groups with an established count
-//! expose the structural tag, FString and trailing f32 alongside neutral word
-//! columns; `raw_payload` keeps every byte either way.
+//! The `events` table: one row per Event chunk, the server's own labelled
+//! timeline (round starts, deaths, plants, defuses; see `schema::events_schema`).
 
 use std::sync::Arc;
 
-use arrow_array::builder::StringDictionaryBuilder;
-use arrow_array::types::Int32Type;
 use arrow_array::{
     ArrayRef, BinaryArray, Float32Array, Int32Array, RecordBatch, StringArray, UInt32Array,
 };
 use arrow_schema::Schema;
 
+use super::columns::{batch, dict};
 use crate::error::ExportError;
 use crate::record::EventRecord;
 use crate::schema::events_schema_ref;
 use crate::writer::{Table, TableWriter};
 
-/// Default row group size for the events table.
-///
-/// A full competitive match yields a couple of hundred rows, so this holds the
-/// whole table in one row group while keeping the streaming shape the other
-/// writers use.
+/// Rows per row group by default; a match's couple of hundred rows fit in one.
 pub const DEFAULT_EVENT_ROW_GROUP_SIZE: usize = 131_072;
 
 /// Table marker for `events`. See [`EventWriter`].
@@ -42,15 +28,13 @@ impl Table for EventsTable {
 
     const DEFAULT_ROW_GROUP_SIZE: usize = DEFAULT_EVENT_ROW_GROUP_SIZE;
 
-    // Dictionary/plain bytes over the 45-replay sample (see
-    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule: payload_name 0.51,
-    // group 0.60. `id` 1.07 and `metadata` 1.49 are near-unique per row and
-    // measured larger under a dictionary on all 45 replays; they stay listed
-    // for the every-string-column rule (the table is ~200 rows per match).
-    // Their Arrow type is plain Utf8 either way; that is the schema, not the
-    // page encoding. Numbers listed: word1 0.74, payload_size 0.89, word0
-    // 0.89, payload_tag 0.91. Not listed, smaller PLAIN on all 45: time1 1.32,
-    // time2 1.32, payload_seconds 1.29, raw_payload 1.14.
+    // Dictionary/plain bytes over the 45-replay sample of
+    // `Table::DICTIONARY_COLUMNS`. Strings, listed by rule: payload_name 0.51,
+    // group 0.60, and id 1.07 and metadata 1.49, near-unique per row and larger
+    // as a dictionary on all 45 (a table of ~200 rows a match). Numbers listed:
+    // word1 0.74, payload_size 0.89, word0 0.89, payload_tag 0.91. Not listed,
+    // smaller PLAIN on all 45: time1 1.32, time2 1.32, payload_seconds 1.29,
+    // raw_payload 1.14.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &[
         "id",
         "group",
@@ -72,57 +56,39 @@ impl Table for EventsTable {
 
     fn build_batch(rows: &[EventRecord]) -> Result<RecordBatch, ExportError> {
         let len = rows.len();
-
-        let id: ArrayRef = Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|r| r.id.as_str()),
-        ));
-
-        let mut group_builder =
-            StringDictionaryBuilder::<Int32Type>::with_capacity(len, 16, len * 24);
-        for r in rows {
-            group_builder.append_value(&r.group);
-        }
-        let group: ArrayRef = Arc::new(group_builder.finish());
-
-        let metadata: ArrayRef = Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|r| r.metadata.as_str()),
-        ));
-        let time1: ArrayRef = Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time1)));
-        let time2: ArrayRef = Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time2)));
-        let payload_size: ArrayRef = Arc::new(Int32Array::from_iter_values(
-            rows.iter().map(|r| r.payload_size),
-        ));
-        let raw_payload: ArrayRef = Arc::new(BinaryArray::from_iter_values(
-            rows.iter().map(|r| r.raw_payload.as_slice()),
-        ));
-        let word0: ArrayRef = Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word0)));
-        let word1: ArrayRef = Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word1)));
-        let payload_tag: ArrayRef =
-            Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.payload_tag)));
-        let payload_name: ArrayRef = Arc::new(StringArray::from_iter(
-            rows.iter().map(|r| r.payload_name.as_deref()),
-        ));
-        let payload_seconds: ArrayRef = Arc::new(Float32Array::from_iter(
-            rows.iter().map(|r| r.payload_seconds),
-        ));
-
-        RecordBatch::try_new(
+        batch(
             events_schema_ref(),
             vec![
-                id,
-                group,
-                metadata,
-                time1,
-                time2,
-                payload_size,
-                raw_payload,
-                word0,
-                word1,
-                payload_tag,
-                payload_name,
-                payload_seconds,
+                Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|r| r.id.as_str()),
+                )) as ArrayRef,
+                dict(
+                    len,
+                    16,
+                    len * 24,
+                    rows.iter().map(|r| Some(r.group.as_str())),
+                ),
+                Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|r| r.metadata.as_str()),
+                )),
+                Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time1))),
+                Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time2))),
+                Arc::new(Int32Array::from_iter_values(
+                    rows.iter().map(|r| r.payload_size),
+                )),
+                Arc::new(BinaryArray::from_iter_values(
+                    rows.iter().map(|r| r.raw_payload.as_slice()),
+                )),
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word0))),
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word1))),
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.payload_tag))),
+                Arc::new(StringArray::from_iter(
+                    rows.iter().map(|r| r.payload_name.as_deref()),
+                )),
+                Arc::new(Float32Array::from_iter(
+                    rows.iter().map(|r| r.payload_seconds),
+                )),
             ],
         )
-        .map_err(|e| ExportError::Parquet(e.into()))
     }
 }

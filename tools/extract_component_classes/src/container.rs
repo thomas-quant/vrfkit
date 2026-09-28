@@ -1,14 +1,8 @@
 //! One IoStore container: its `.utoc` parsed, its `.ucas` read on demand.
-//!
-//! Read-only by construction. Files are opened with `File::open`, which asks
-//! for read access and, on Windows, shares read, write and delete with every
-//! other handle -- the game (or its patcher) is never locked out.
-//!
-//! A chunk is a byte range of the container's uncompressed stream, which is cut
-//! into fixed-size compression blocks; block `i` covers
-//! `[i * block_size, (i + 1) * block_size)`. Reading part of a chunk means
-//! decompressing only the blocks that part touches, which is what keeps a scan
-//! of every package's header to a fraction of the 30 GB of `.ucas`.
+//! Read-only: `File::open` asks for read access and, on Windows, shares read,
+//! write and delete, so the game or its patcher is never locked out. Reading
+//! part of a chunk decompresses only the blocks it touches, which keeps a scan
+//! of every package header to a fraction of the 30 GB of `.ucas`.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -44,8 +38,7 @@ impl Container {
         File::open(&self.ucas_path).map_err(|e| Error(format!("{}: {e}", self.ucas_path.display())))
     }
 
-    /// The first `limit` bytes of chunk `entry` (all of it when the chunk is
-    /// shorter), decompressing only the blocks that range touches.
+    /// The first `limit` bytes of chunk `entry`, or all of a shorter chunk.
     pub fn read_chunk(
         &self,
         ucas: &mut (impl Read + Seek),
@@ -59,7 +52,7 @@ impl Container {
         if want == 0 {
             return Ok(Vec::new());
         }
-        let block_size = u64::from(self.toc.header.compression_block_size);
+        let block_size = u64::from(self.toc.block_size);
         let first = chunk.offset / block_size;
         let last = (chunk.offset + want - 1) / block_size;
         let mut out = Vec::with_capacity(((last - first + 1) * block_size) as usize);
@@ -112,16 +105,26 @@ impl Container {
                 let size = block.uncompressed_size as usize;
                 let start = out.len();
                 out.resize(start + size, 0);
-                // A fresh extractor per block: `Extractor` keeps decoder state
-                // across calls, and a block is an independent stream -- see the
-                // same choice, and why, in crates/vrf-container/src/oodle.rs.
+                // A fresh extractor per block (it keeps decoder state across
+                // calls), and `read` over a slice so what the codec left unread
+                // shows: both for the reasons on `inflate` in
+                // crates/vrf-container/src/oodle.rs.
+                let mut unread: &[u8] = &raw;
                 let n = oozextract::Extractor::new()
-                    .read_from_slice(&raw, &mut out[start..])
+                    .read(&mut unread, &mut out[start..])
                     .map_err(|e| Error(format!("{}: block {index}: Oodle: {e:?}", self.name)))?;
                 if n != size {
                     return fail(format!(
                         "{}: block {index} decompressed to {n} bytes, declares {size}",
                         self.name
+                    ));
+                }
+                if !unread.is_empty() {
+                    return fail(format!(
+                        "{}: block {index}: Oodle left {} of {} compressed bytes unread",
+                        self.name,
+                        unread.len(),
+                        raw.len()
                     ));
                 }
             }
@@ -155,7 +158,6 @@ mod tests {
             chunks: vec![(
                 ChunkId {
                     id: 1,
-                    index: 0,
                     chunk_type: 1,
                 },
                 OffsetLength {
@@ -209,5 +211,60 @@ mod tests {
         c.toc.blocks[1].uncompressed_size = 9;
         let mut f = IoCursor::new(ucas);
         assert!(c.read_chunk(&mut f, 0, u64::MAX).is_err());
+    }
+
+    /// One Oodle block: an eight-byte uncompressed Kraken block (header
+    /// `0x4C 0x06`, decoded on vrf-container's `archive_with_unread_input`),
+    /// then `unread` bytes inside the compressed size the codec never reaches.
+    fn oodle(unread: usize) -> (Container, Vec<u8>) {
+        let mut ucas = vec![0x4C, 0x06];
+        ucas.extend(0u8..8);
+        ucas.extend(std::iter::repeat_n(0xAB, unread));
+        let spec = TocSpec {
+            flags: crate::toc::FLAG_INDEXED,
+            block_size: 8,
+            methods: vec!["Oodle"],
+            chunks: vec![(
+                ChunkId {
+                    id: 1,
+                    chunk_type: 1,
+                },
+                OffsetLength {
+                    offset: 0,
+                    length: 8,
+                },
+            )],
+            blocks: vec![CompressedBlock {
+                offset: 0,
+                compressed_size: ucas.len() as u32,
+                uncompressed_size: 8,
+                method: 1,
+            }],
+            ..TocSpec::default()
+        };
+        let toc = parse_toc(&build_toc(&spec)).unwrap();
+        (
+            Container {
+                name: "t".to_owned(),
+                ucas_path: PathBuf::new(),
+                toc,
+            },
+            ucas,
+        )
+    }
+
+    #[test]
+    fn an_oodle_block_the_codec_does_not_read_to_the_end_is_an_error() {
+        let (c, ucas) = oodle(0);
+        let mut f = IoCursor::new(ucas);
+        assert_eq!(
+            c.read_chunk(&mut f, 0, u64::MAX).unwrap(),
+            (0u8..8).collect::<Vec<_>>()
+        );
+
+        let (c, ucas) = oodle(5);
+        let mut f = IoCursor::new(ucas);
+        let err = c.read_chunk(&mut f, 0, u64::MAX).unwrap_err();
+        assert!(err.0.contains("5 of 15"), "{err}");
     }
 }

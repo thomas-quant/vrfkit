@@ -1,24 +1,34 @@
 """Guards for the checksum-table generator.
 
-`--check` demanded byte equality with a fresh render, which a content-addressed
-table cannot deliver: a checksum is a property of the property, so a different
-set of replays teaches a different *subset*, not a different answer. One export
-learned 415 entries, seventy-one learned 442, and the committed file holds 417.
-The check therefore failed for everyone, always, and a guard that cannot pass
-is not a guard -- it reads as a broken generator and gets ignored.
-
-What is worth catching is disagreement: a checksum both the file and the
-manifests know, mapped to two different types. That is portable, because it
-only ever compares the overlap.
+A different set of replays teaches a different subset of the same
+content-addressed table, so byte equality with a fresh render can never hold.
+`--check` catches disagreement instead -- a checksum both the file and the
+manifests know, mapped two ways -- which is portable: it compares only the
+overlap.
 """
+import json
 import sys
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_checksum_types as gen  # noqa: E402
+
+#: The one multi-field braced type, in the one-line spelling `render` writes.
+BYTE_WHOLE = ("FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+              "location: VectorQuantization::RoundWholeNumber }")
+
+
+def read_with(attribute: str, text: str, reader):
+    """`reader()` with the module's `attribute` path pointing at `text`."""
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "table.rs"
+        path.write_text(text, encoding="utf-8")
+        with mock.patch.object(gen, attribute, path):
+            return reader()
 
 
 class ReconcileTests(unittest.TestCase):
@@ -71,13 +81,9 @@ class MergeTests(unittest.TestCase):
 
 
 class RetypeTests(unittest.TestCase):
-    """`--retype`: the one deliberate way to change a committed type.
-
-    A correction that retypes a donor (the `EffectID`s, UInt64 -> Int64) makes
-    the manifests teach a type the file already contradicts, and `merge`
-    refuses that. Without a named exception the table could only be fixed by
-    hand, which is what it must never be.
-    """
+    """`--retype`, the one deliberate way to change a committed type: a
+    retyped donor (the `EffectID`s, UInt64 -> Int64) teaches a type `merge`
+    refuses, and the table must never be fixed by hand."""
 
     def test_a_named_disagreement_takes_the_learned_type(self):
         merged = gen.merge(
@@ -126,16 +132,9 @@ class RetypeTests(unittest.TestCase):
 
 
 class ConflictTests(unittest.TestCase):
-    """A dropped conflict never reached the verdict.
-
-    `learn()` splits its findings into `resolved` and `conflicts`, and only
-    `resolved` was reconciled against the committed file. `conflicts` was
-    printed and counted and nothing else -- so when the manifests found a
-    checksum whose donors RULE OUT the type the file commits, `--check` passed
-    and `merge()` quietly kept the committed answer. Dropping a conflict is the
-    right thing to do with NEW evidence; it is not a reason to stop looking at
-    what is already written down.
-    """
+    """`learn()`'s `conflicts` reach the verdict too: dropping a conflict is
+    right for NEW evidence, but a committed type its donors now rule out, or
+    no longer settle, must fail `--check` and leave the table on write."""
 
     def test_a_committed_type_the_evidence_rules_out_is_caught(self):
         verdict = gen.reconcile(
@@ -184,6 +183,86 @@ class ParseTests(unittest.TestCase):
         for checksum, ftype in committed.items():
             self.assertIsInstance(checksum, int)
             self.assertTrue(ftype.startswith("FieldType::"), ftype)
+
+    def test_the_overlay_table_is_read_in_one_spelling_for_both_layouts(self):
+        """cargo fmt breaks a braced type over lines with a trailing comma;
+        read verbatim, a braced donor would disagree with its own one-line
+        committed spelling. A key holding an escape is refused: the shared
+        parser does not unescape."""
+        table = (
+            "pub static OVERLAY_TABLE: [OverlayEntry; 2] = [\n"
+            "    OverlayEntry {\n"
+            '        group_path: "/Game/A.A_C",\n'
+            '        field_name: "ReplicatedMovement",\n'
+            "        field_type: FieldType::RepMovement {\n"
+            "            rotation: RotatorQuantization::ByteComponents,\n"
+            "            location: VectorQuantization::RoundWholeNumber,\n"
+            "        },\n"
+            "    },\n"
+            '    OverlayEntry { group_path: "/Game/B.B_C", field_name: "Origin", '
+            "field_type: FieldType::VectorNetQuantize { scale: 100 } },\n"
+            "];\n"
+        )
+        self.assertEqual(read_with("TABLE_RS", table, gen.load_overlay_table), {
+            ("/Game/A.A_C", "ReplicatedMovement"): BYTE_WHOLE,
+            ("/Game/B.B_C", "Origin"): "FieldType::VectorNetQuantize { scale: 100 }",
+        })
+        escaped = table.replace('"/Game/B.B_C"', '"/Game/B\\"B_C"')
+        with self.assertRaises(SystemExit):
+            read_with("TABLE_RS", escaped, gen.load_overlay_table)
+
+    def test_every_committed_row_is_read_or_reading_fails(self):
+        """A row cargo fmt broke over lines must still be read, or --check
+        would skip it and the next write drop it; every read must reach the
+        declared slice length."""
+        head = gen.render({}).split("pub static")[0]
+        rows = (
+            "    (5, FieldType::Float),\n"
+            "    (\n"
+            "        6,\n"
+            "        FieldType::RepMovement {\n"
+            "            rotation: RotatorQuantization::ByteComponents,\n"
+            "            location: VectorQuantization::RoundWholeNumber,\n"
+            "        },\n"
+            "    ),\n"
+            "];\n"
+        )
+        table = f"{head}pub static CHECKSUM_TYPES: [(u32, FieldType); 2] = [\n{rows}"
+        self.assertEqual(read_with("OUT_RS", table, gen.load_committed),
+                         {5: "FieldType::Float", 6: BYTE_WHOLE})
+        with self.assertRaises(SystemExit):
+            read_with("OUT_RS", table.replace("; 2]", "; 3]"), gen.load_committed)
+
+
+class RenderTests(unittest.TestCase):
+    def test_a_quantized_type_brings_its_import(self):
+        """RepMovement names RotatorQuantization and VectorQuantization, so it
+        needs their import -- only then: an unused `use` fails clippy -D
+        warnings."""
+        self.assertIn(
+            "use crate::types::{RotatorQuantization, VectorQuantization};",
+            gen.render({1: "FieldType::Int32", 2: BYTE_WHOLE}))
+        self.assertNotIn("crate::types", gen.render({1: "FieldType::Int32"}))
+
+
+class LearnTests(unittest.TestCase):
+    def test_only_raw_and_skip_teach_nothing(self):
+        """Raw and Skip carry no decode, so they are not donors; a type whose
+        name merely contains one of them still is."""
+        with tempfile.TemporaryDirectory() as temp:
+            manifest = Path(temp) / "manifest.json"
+            manifest.write_text(json.dumps({"net_field_export_groups": [
+                {"path": "/g", "fields": [
+                    {"name": name, "compatible_checksum": checksum}
+                    for checksum, name in enumerate(("raw", "skip", "raw_like"), 1)
+                ]},
+            ]}), encoding="utf-8")
+            resolved, conflicts = gen.learn([manifest], {
+                ("/g", "raw"): "FieldType::Raw",
+                ("/g", "skip"): "FieldType::Skip",
+                ("/g", "raw_like"): "FieldType::RawBits",
+            })
+        self.assertEqual((resolved, conflicts), ({3: "FieldType::RawBits"}, {}))
 
 
 class CliGuardTests(unittest.TestCase):

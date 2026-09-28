@@ -1,27 +1,17 @@
 """Build a compact, conservative section timeline directly from an export."""
 from __future__ import annotations
-import argparse, hashlib, json, sys
+import argparse, json, sys
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text, sha256_file
+    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
     from . import extract_section_observations, section_timeline
 else:
-    from atomic_io import atomic_write_text, sha256_file
+    from atomic_io import aliases, atomic_write_text, sha256_file as sha
     import extract_section_observations, section_timeline
-
-sha = sha256_file
-
-def aliases(path, protected):
-    for item in protected:
-        try:
-            if path.exists() and item.exists() and path.samefile(item): return True
-        except OSError: pass
-        if path.resolve() == item.resolve(): return True
-    return False
 
 def actor_rows(path):
     ordinal=0

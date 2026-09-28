@@ -6,16 +6,14 @@ Why this exists
 Almost every typed value vrfkit emits is keyed on something the replay
 declares: `table.rs` on (group path, field name), `scoped_types.rs` on (field
 name, group path, compatible checksum), `checksum_table.rs` on the checksum
-alone, and a few hand-written maps on exact group paths. A game patch that
-moves a Blueprint to another folder, renames it or stops replicating a
-property breaks none of them loudly. The key simply stops matching, the rows
-arrive untyped and `Decode errors: 0` holds -- the "name resolution failed ->
-Raw" shape in CLAUDE.md. Cypher's tripwire is the case that prompted this: its
-assets moved from `.../Gumshoe/S0/Ability_E/` to `.../Ability_4/`, the old
-`table.rs` keys stopped matching and `Deployed` went untyped with every
-counter at zero. On the 1,018-replay declaration corpus (2026-09-28) that move
-happened between 13.00 and 13.01: the new groups are declared from 13.01 on
-(70 of 215 replays), the old ones last in 13.00 and earlier.
+alone, and a few hand-written maps on exact group paths. A patch that moves,
+renames or stops replicating something breaks none of them loudly: the key
+stops matching, the rows arrive untyped and `Decode errors: 0` holds. Cypher's
+tripwire assets moved from `.../Gumshoe/S0/Ability_E/` to `.../Ability_4/`
+and `Deployed` went untyped with every counter at zero. On the 1,018-replay
+declaration corpus (2026-09-28) that move happened between 13.00 and 13.01:
+the new groups are declared from 13.01 on (70 of 215 replays), the old ones
+last in 13.00 and earlier.
 
 Only declarations are read -- the main stream's `net_field_export_groups` in
 `manifest.json` and, when the export has them, every checkpoint's
@@ -52,15 +50,10 @@ vrf-decode/src/effect.rs. A rename there is still silent to this tool.
 
 When an entry counts as declared
 --------------------------------
-`table` entries are matched the way `resolve_entry` in overlay.rs matches them:
-the declared name, then its `b`-prefixed spelling, then the explicit handle
-(only for a bare-decimal FName name, which says nothing about the property),
-each retried against the `GROUP_ALIASES` target of a Swiftplay group. So
-`Role` / `RemoteRole`, which every current replay declares as `215` / `216`,
-are reached only where a handle entry maps them; otherwise they land in "never
-declared", which is what they are to the overlay. A `handle` entry counts
-where its (group, handle) carries a bare-decimal name, the descriptor's own
-name, or a spelling the name lookups resolve to that same property; a real
+`table` entries are matched in `resolve_entry`'s order (overlay.rs, mirrored
+by overlay_mirror; see `Overlay`), so `Role` / `RemoteRole`, which every
+current replay declares as `215` / `216`, are reached only where a handle
+entry maps them. A `handle` entry counts per `Overlay.handle_state`; a real
 name the table does not know is the refusal overlay.rs counts, tallied here as
 a handle conflict per build. `scoped`, `route` and `checksum` entries count
 where their exact key is declared, `remap` and `alias` entries where their
@@ -154,9 +147,10 @@ What fails
 Exit 1 for an evidenced field-missing finding and for an evidenced move that
 is `lost`, unless it is listed in `tools/fixtures/entry_survival_expected.json`
 with a reason and the evidence for it; also for a listed item that matches no
-such finding (`STALE`), a checkpoint field row that joins no group, and a Rust
-table that does not parse completely. A covered move, a vanished group and
-every weak finding are printed and never fail. Every kind of entry is judged,
+such finding (`STALE`), a checkpoint field row that joins no group, a
+main-stream field declaration without a name or checksum, and a Rust table
+that does not parse completely. A covered move, a vanished group and every
+weak finding are printed and never fail. Every kind of entry is judged,
 `Raw` and `Skip` included: `TeamEconomy` is `Raw` in the table, and its loss
 at 13.02 silenced the struct-blob decoder keyed on that name.
 
@@ -167,11 +161,9 @@ than two builds.
 Running it on a new build
 -------------------------
 Export the new build's replays with `--checkpoints` into the same root as the
-earlier builds' exports and run with `--root`. The previous build must be in
-the root too: survival is a comparison, and a build is judged only against
-the builds before it. Anything the new build lacks is judged only once it has
-`MIN_CONTEXT` replays declaring the group (for a move: `MIN_CONTEXT` replays
-at all); below that every finding prints as weak.
+earlier builds' exports and run with `--root`: a build is judged only against
+the builds before it, so the previous build must be there too, and until the
+new build has `MIN_CONTEXT` replays every finding in it prints as weak.
 
 Usage:
     python tools/check_entry_survival.py --root <exports-root> [--root ...]
@@ -191,9 +183,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 if __package__:
+    from . import overlay_mirror as mirror
     from .check_component_remaps import remap_entries, table_source, unparsed_entries
     from .export_scan import is_generated_sibling
 else:  # direct script execution
+    import overlay_mirror as mirror
     from check_component_remaps import remap_entries, table_source, unparsed_entries
     from export_scan import is_generated_sibling
 
@@ -227,28 +221,13 @@ KINDS = ("table", "handle", "scoped", "checksum", "route", "remap", "alias")
 GROUP_ONLY = ("remap", "alias")
 
 BUILD_RE = re.compile(r"release-(\d+)\.(\d+)\Z")
-#: A Rust string literal's body. `\\.` also takes a backslash-newline
-#: continuation, which `unescape` then removes.
-STR = r'"((?:[^"\\]|\\.)*)"'
-FIELD_TYPE = r"(FieldType::\w+(?:\s*\{[^}]*\})?)"
-
-
-class EntryParseError(ValueError):
-    """A Rust table did not parse completely: fail rather than check fewer."""
+STR, unescape, is_fname_index = mirror.STR, mirror.unescape, mirror.is_fname_index
+#: A Rust table did not parse completely: fail rather than check fewer.
+EntryParseError = mirror.ParseError
 
 
 class InputError(ValueError):
     """An export that cannot be judged, or no export at all."""
-
-
-def unescape(raw: str) -> str:
-    """The value of a Rust string literal body.
-
-    A backslash before a newline drops the newline and the next line's leading
-    whitespace -- `GROUP_ALIASES` splits its paths that way.
-    """
-    raw = re.sub(r"\\\n\s*", "", raw)
-    return raw.replace('\\"', '"').replace("\\\\", "\\")
 
 
 def normalize_type(text: str) -> str:
@@ -292,105 +271,12 @@ class Entry:
         return f"{self.kind} {self.group} . {self.name}{tail}{extra}"
 
 
-# --------------------------------------------------------------------------
-# Parsing the Rust sources
-# --------------------------------------------------------------------------
-
-def _array_body(src: str, header: str, what: str) -> tuple[int, str]:
-    """`(declared length, body)` of a `[T; N] = [ ... ];` array literal."""
-    m = re.search(header, src)
-    if m is None:
-        raise EntryParseError(f"{what}: array header not found")
-    end = src.find("\n];", m.end())
-    if end < 0:
-        raise EntryParseError(f"{what}: array end not found")
-    return int(m.group(1)), src[m.end():end]
-
-
-def _check_count(what: str, declared: int, literal: int, parsed: int) -> None:
-    if not declared == literal == parsed:
-        raise EntryParseError(
-            f"{what}: the source declares {declared} entries and holds {literal} "
-            f"literals, but {parsed} parsed -- the rest would go unchecked")
-
-
 def parse_overlay_table(src: str) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"pub static OVERLAY_TABLE: \[OverlayEntry; (\d+)\] = \[", "OVERLAY_TABLE")
-    pattern = re.compile(
-        r"OverlayEntry \{\s*group_path: " + STR + r",\s*field_name: " + STR
-        + r",\s*field_type: " + FIELD_TYPE + r",?\s*\}", re.S)
-    entries = [Entry("table", unescape(g), unescape(n), ftype=normalize_type(t))
-               for g, n, t in pattern.findall(body)]
-    _check_count("OVERLAY_TABLE", declared, body.count("OverlayEntry {"), len(entries))
-    return entries
+    return [Entry("table", g, n, ftype=normalize_type(t))
+            for g, n, t in mirror.overlay_entries(src)]
 
 
-def parse_handle_table(src: str, table: list[Entry]) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"pub static OVERLAY_HANDLE_TABLE: \[OverlayHandleEntry; (\d+)\] = \[",
-        "OVERLAY_HANDLE_TABLE")
-    pattern = re.compile(
-        r"OverlayHandleEntry \{\s*group_path: " + STR + r",\s*handle: (\d+),\s*"
-        r"field_name: " + STR + r",?\s*\}", re.S)
-    types = {(e.group, e.name): e.ftype for e in table}
-    entries = []
-    for g, h, n in pattern.findall(body):
-        group, name = unescape(g), unescape(n)
-        entries.append(Entry("handle", group, name, handle=int(h),
-                             ftype=types.get((group, name))))
-    _check_count("OVERLAY_HANDLE_TABLE", declared, body.count("OverlayHandleEntry {"),
-                 len(entries))
-    return entries
-
-
-def parse_scoped_types(src: str) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"static SCOPED_TYPES: \[\(&str, &str, u32, FieldType\); (\d+)\] = \[",
-        "SCOPED_TYPES")
-    pattern = re.compile(
-        r"\(\s*" + STR + r",\s*" + STR + r",\s*(\d+),\s*" + FIELD_TYPE + r",?\s*\)", re.S)
-    entries = [Entry("scoped", unescape(g), unescape(n), int(c), ftype=normalize_type(t))
-               for n, g, c, t in pattern.findall(body)]
-    _check_count("SCOPED_TYPES", declared, body.count("FieldType::"), len(entries))
-    return entries
-
-
-def parse_checksum_types(src: str) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"pub static CHECKSUM_TYPES: \[\(u32, FieldType\); (\d+)\] = \[",
-        "CHECKSUM_TYPES")
-    pattern = re.compile(r"\(\s*(\d+),\s*" + FIELD_TYPE + r",?\s*\)", re.S)
-    entries = [Entry("checksum", checksum=int(c), ftype=normalize_type(t))
-               for c, t in pattern.findall(body)]
-    _check_count("CHECKSUM_TYPES", declared, body.count("FieldType::"), len(entries))
-    return entries
-
-
-def parse_group_aliases(src: str) -> list[tuple[str, str]]:
-    start = src.find("const GROUP_ALIASES: &[(&str, &str)] = &[")
-    if start < 0:
-        raise EntryParseError("GROUP_ALIASES: not found")
-    end = src.find("\n];", start)
-    body = src[start:end]
-    body = body[body.index("= &[") + 4:]
-    pairs = [(unescape(a), unescape(b)) for a, b in re.findall(
-        r"\(\s*" + STR + r",\s*" + STR + r",?\s*\)", body, re.S)]
-    literals = len(re.findall(STR, body, re.S))
-    _check_count("GROUP_ALIASES", len(pairs), literals // 2 if literals % 2 == 0 else -1,
-                 len(pairs))
-    if not pairs:
-        raise EntryParseError("GROUP_ALIASES: parsed no pair")
-    return pairs
-
-
-def parse_engine_object_refs(src: str) -> list[str]:
-    m = re.search(r"const ENGINE_OBJECT_REFS: \[&str; (\d+)\] = \[([^\]]*)\];", src)
-    if m is None:
-        raise EntryParseError("ENGINE_OBJECT_REFS: not found")
-    names = [unescape(n) for n in re.findall(STR, m.group(2))]
-    _check_count("ENGINE_OBJECT_REFS", int(m.group(1)), len(names), len(names))
-    return names
+parse_group_aliases = mirror.group_aliases
 
 
 def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
@@ -404,7 +290,8 @@ def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
     if m is None:
         raise EntryParseError("MeasuredArrayRoute::ALL: not found")
     variants = re.findall(r"Self::(\w+)", m.group(2))
-    _check_count("MeasuredArrayRoute::ALL", int(m.group(1)), len(variants), len(set(variants)))
+    mirror.check_count("MeasuredArrayRoute::ALL", int(m.group(1)), len(variants),
+                       len(set(variants)))
 
     start = blobs.find("fn measured_array_route(")
     end = blobs.find("\n}\n", start)
@@ -414,8 +301,8 @@ def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
     arms = re.findall(
         r"\(\s*" + STR + r",\s*" + STR + r",\s*Some\(([\d_]+)\),?\s*\)\s*=>\s*\{?\s*"
         r"MeasuredArrayRoute::(\w+)", body, re.S)
-    _check_count("measured_array_route", body.count("MeasuredArrayRoute::"),
-                 body.count("MeasuredArrayRoute::"), len(arms))
+    mirror.check_count("measured_array_route", body.count("MeasuredArrayRoute::"),
+                       body.count("MeasuredArrayRoute::"), len(arms))
     found = {v: Entry("route", unescape(g), unescape(n), int(c.replace("_", "")))
              for g, n, c, v in arms}
 
@@ -484,9 +371,15 @@ class Catalog:
 
 def load_catalog(sources: Sources) -> Catalog:
     table = parse_overlay_table(sources.table)
+    types = {(e.group, e.name): e.ftype for e in table}
     aliases = parse_group_aliases(sources.overlay)
-    entries = (table + parse_handle_table(sources.table, table)
-               + parse_scoped_types(sources.scoped) + parse_checksum_types(sources.checksum)
+    entries = (table
+               + [Entry("handle", g, n, handle=h, ftype=types.get((g, n)))
+                  for g, h, n in mirror.handle_entries(sources.table)]
+               + [Entry("scoped", g, n, c, ftype=normalize_type(t))
+                  for n, g, c, t in mirror.scoped_entries(sources.scoped)]
+               + [Entry("checksum", checksum=c, ftype=normalize_type(t))
+                  for c, t in mirror.checksum_entries(sources.checksum)]
                + parse_routes(sources.blobs, sources.rpc, sources.routes)
                + parse_remap_targets(sources.paths)
                + [Entry("alias", src) for src, _ in aliases])
@@ -494,16 +387,7 @@ def load_catalog(sources: Sources) -> Catalog:
     dupes = [k for k, n in seen.items() if n > 1]
     if dupes:
         raise EntryParseError(f"{len(dupes)} duplicate entry key(s), e.g. {dupes[0]}")
-    return Catalog(entries, aliases, parse_engine_object_refs(sources.overlay))
-
-
-# --------------------------------------------------------------------------
-# The resolution order, mirrored
-# --------------------------------------------------------------------------
-
-def is_fname_index(name: str | None) -> bool:
-    """`is_unresolved_fname_index` in overlay.rs: a non-empty ASCII-digit name."""
-    return bool(name) and all("0" <= ch <= "9" for ch in name)
+    return Catalog(entries, aliases, mirror.engine_object_refs(sources.overlay))
 
 
 @dataclass(frozen=True)
@@ -514,14 +398,17 @@ class Resolution:
     ftype: str
 
 
+#: overlay_mirror's resolution steps, as the kinds this report counts.
+STEP_KINDS = {"name": "table", "b-prefix": "table", "handle": "table", "scoped": "scoped",
+              "checksum table": "checksum"}
+
+
 class Overlay:
-    """`resolve_entry` in overlay.rs, over the parsed entries."""
+    """`resolve_entry` in overlay.rs (overlay_mirror.Resolver), over the parsed entries."""
 
     def __init__(self, catalog: Catalog):
         kinds = catalog.by_kind()
         self.table = {(e.group, e.name): e for e in kinds["table"]}
-        self.stripped = {(e.group, e.name[1:]): e for e in kinds["table"]
-                         if e.name.startswith("b")}
         self.handles = {(e.group, e.handle): e for e in kinds["handle"]}
         self.aliases = dict(catalog.aliases)
         self.scoped = {(e.name, e.group, e.checksum): e for e in kinds["scoped"]}
@@ -530,43 +417,21 @@ class Overlay:
         self.remaps = {e.group: e for e in kinds["remap"]}
         self.alias_entries = {e.group: e for e in kinds["alias"]}
         self.engine_refs = frozenset(catalog.engine_refs)
-
-    def in_group(self, group, name, handle) -> tuple[Entry | None, Entry | None, bool]:
-        """`(table entry, handle entry used, refused)` for one group."""
-        if name is not None:
-            hit = self.table.get((group, name)) or self.stripped.get((group, name))
-            if hit is not None:
-                return hit, None, False
-        if handle is None:
-            return None, None, False
-        via = self.handles.get((group, handle))
-        if via is None:
-            return None, None, False
-        if name is not None and name != via.name and not is_fname_index(name):
-            return None, None, True
-        hit = self.table.get((group, via.name))
-        return hit, (via if hit is not None else None), False
+        self.mirror = mirror.Resolver(
+            self.table, {key: e.name for key, e in self.handles.items()}, self.scoped,
+            self.checksums, self.aliases, self.engine_refs)
 
     def resolve(self, group, name, checksum, handle) -> Resolution | None:
-        hit, via, _ = self.in_group(group, name, handle)
-        if hit is not None:
-            return Resolution("table", hit, via, hit.ftype)
-        target = self.aliases.get(group)
-        if target is not None:
-            hit, via, _ = self.in_group(target, name, handle)
-            if hit is not None:
-                return Resolution("alias", hit, via, hit.ftype)
-        if name is None:
+        hit, step = self.mirror.resolve(group, name, handle, checksum)
+        if step is None:
             return None
-        if checksum is not None and (name, group, checksum) in self.scoped:
-            scoped = self.scoped[(name, group, checksum)]
-            return Resolution("scoped", scoped, None, scoped.ftype)
-        if name in self.engine_refs:
+        if step == "engine reference":
             return Resolution("engine", None, None, OBJECT_NET_GUID)
-        if checksum is not None and checksum in self.checksums:
-            learned = self.checksums[checksum]
-            return Resolution("checksum", learned, None, learned.ftype)
-        return None
+        aliased = step.startswith("alias ")
+        via = None
+        if step.endswith("handle"):
+            via = self.handles[(self.aliases[group] if aliased else group, handle)]
+        return Resolution("alias" if aliased else STEP_KINDS[step], hit, via, hit.ftype)
 
     def handle_state(self, group, name, handle) -> tuple[Entry | None, str]:
         """`(handle entry, state)` for a declaration at an explicit handle.
@@ -589,22 +454,19 @@ class Overlay:
                 continue
             if name is None or is_fname_index(name) or name == via.name:
                 return via, "hit"
-            direct = self.table.get((g, name)) or self.stripped.get((g, name))
+            direct = self.mirror.in_group(g, name, None)[0]
             if direct is None:
                 return via, "conflict"
             return via, "hit" if direct.name == via.name else "other"
         return None, ""
 
 
-# --------------------------------------------------------------------------
-# Declarations
-# --------------------------------------------------------------------------
-
 @dataclass
 class LoadStats:
     exports: int = 0
     main_groups: int = 0
     main_fields: int = 0
+    fields_without_identity: int = 0
     exports_with_checkpoints: int = 0
     checkpoint_groups: int = 0
     checkpoint_fields: int = 0
@@ -623,11 +485,8 @@ class Replay:
 
 def discover(roots: list[Path], exports: list[Path], stats: LoadStats) -> list[Path]:
     """Children of each root holding `manifest.json`, then the named exports.
-
-    Staging and backup directories an interrupted `vrfkit export` leaves are
-    skipped and listed (see export_scan.py); a directory named explicitly is
-    always read.
-    """
+    Staging and backup siblings are skipped and listed (export_scan.py); a
+    directory named explicitly is always read."""
     found: list[Path] = []
     for root in roots:
         if not root.is_dir():
@@ -667,9 +526,15 @@ def load_export(directory: Path, stats: LoadStats) -> Replay:
         groups.add(path)
         stats.main_groups += 1
         for f in group.get("fields") or []:
-            fields.add((path, _intern(f.get("name")), f.get("compatible_checksum"),
-                        f.get("handle")))
             stats.main_fields += 1
+            name, checksum = f.get("name"), f.get("compatible_checksum")
+            if not isinstance(name, str) or type(checksum) is not int:
+                # Counted and failed like an orphaned checkpoint field. Kept
+                # under None, a nameless field at a mapped handle resolved
+                # through the handle alone.
+                stats.fields_without_identity += 1
+                continue
+            fields.add((path, _intern(name), checksum, f.get("handle")))
 
     group_file = directory / "checkpoint_export_groups.parquet"
     field_file = directory / "checkpoint_export_fields.parquet"
@@ -717,10 +582,6 @@ def short(build: str) -> str:
     major, minor = build_version(build)
     return f"{major}.{minor:02d}"
 
-
-# --------------------------------------------------------------------------
-# Per-build tallies
-# --------------------------------------------------------------------------
 
 @dataclass
 class Tally:
@@ -834,10 +695,6 @@ def tally(replays: list[Replay], catalog: Catalog, overlay: Overlay) -> Tally:
                  group_replays, declarations)
 
 
-# --------------------------------------------------------------------------
-# Judgement
-# --------------------------------------------------------------------------
-
 def p_absent(total: int, hits: int, drawn: int) -> float:
     """Chance that `drawn` of `total` replays, `hits` of which declare the
     entry, all miss it: C(total - hits, drawn) / C(total, drawn)."""
@@ -910,15 +767,9 @@ def _rule_rank(rule: str) -> int:
 
 
 def find_successors(tally_: Tally, group: str, build: str, window: list[str]) -> list[Successor]:
-    """Groups that took over from `group`, which `build` no longer declares.
-
-    A candidate is declared in `build`, in no build of the reference window,
-    and is of the same kind. It is a successor when its class name matches
-    (`leaf_rule`) or when it declares one of `group`'s RARE reference pairs.
-    Rarity is what keeps a generic pair out: `Owner` / `Instigator` sit on
-    hundreds of groups and every build introduces some, so without it any
-    class that stopped being used would acquire a "successor".
-    """
+    """Groups that took over from `group`, which `build` no longer declares:
+    the successor rule of the module docstring's `moved` state (`leaf_rule`,
+    or one of `group`'s RARE reference pairs)."""
     in_window = set()
     for b in window:
         in_window.update(tally_.group_replays[b])
@@ -985,13 +836,10 @@ UNTYPED = frozenset({normalize_type("FieldType::Raw"), normalize_type("FieldType
 
 def coverage(overlay: Overlay, tally_: Tally, finding: Finding) -> tuple[str, str]:
     """Whether the successor's own declaration of the field still gets the
-    entry's type, and how.
-
-    `covered` when it resolves to the same type, or when the entry is `Raw` /
-    `Skip` and the successor's field is untyped too: no typed row was there to
-    lose. Anything else is `lost`, including a successor that does not declare
-    the field under the same checksum -- whether the property went away or
-    changed type, nothing here types it now.
+    entry's type, and how: `covered` when it resolves to the same type, or
+    when a `Raw` / `Skip` entry's successor field is untyped too (no typed row
+    to lose); anything else is `lost`, including a successor that does not
+    declare the field under the same checksum.
     """
     entry, succ = finding.entry, finding.successors[0].group
     if entry.kind in GROUP_ONLY:
@@ -1064,13 +912,11 @@ def judge(tally_: Tally, catalog: Catalog, overlay: Overlay) -> Judgement:
             if k:
                 counts["survived"] += 1
                 if entry.kind in ("table", "handle"):
-                    # Drift is read only off a name the reference carried under
-                    # ONE checksum. Flattened struct members (`G`, `R` on
-                    # BombPlayerState, `CurrentValue` on AresAttributeSet)
-                    # carry several at once by design, and would list every
-                    # build. A new checksum `checksum_table.rs` already types
-                    # the same way is a second property of that name, not a
-                    # changed one.
+                    # One reference checksum only: flattened struct members
+                    # (`G`, `R` on BombPlayerState, `CurrentValue` on
+                    # AresAttributeSet) carry several by design and would list
+                    # every build. A new checksum `checksum_table.rs` types the
+                    # same way is a second property of that name.
                     seen = set().union(*(tally_.identities[entry].get(b, set()) for b in window))
                     old = {cs for _, cs in seen}
                     new = {(n, cs) for n, cs in tally_.identities[entry].get(build, set())
@@ -1111,10 +957,6 @@ def judge(tally_: Tally, catalog: Catalog, overlay: Overlay) -> Judgement:
     return Judgement(findings, per_build, drift, windows)
 
 
-# --------------------------------------------------------------------------
-# The expected list
-# --------------------------------------------------------------------------
-
 EXPECTED_KEYS = {"entry", "build", "finding", "reason", "evidence"}
 
 
@@ -1152,10 +994,6 @@ def apply_expected(findings: list, items: list[dict]) -> list[dict]:
             f.expected = item
     return stale
 
-
-# --------------------------------------------------------------------------
-# Report
-# --------------------------------------------------------------------------
 
 def _span(builds: list[str]) -> str:
     if not builds:
@@ -1333,13 +1171,9 @@ def to_json(tally_: Tally, catalog: Catalog, judgement: Judgement, stale: list) 
     }
 
 
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
-
 def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: LoadStats,
         verbose: bool = False, show: str | None = None,
-        json_path: Path | None = None) -> int:
+        json_path: Path | None = None, expected_name: str = EXPECTED_JSON.name) -> int:
     overlay = Overlay(catalog)
     t = tally(replays, catalog, overlay)
     if len(t.builds) < 2:
@@ -1356,7 +1190,8 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
     print("entries: " + ", ".join(f"{len(kinds[k])} {k}" for k in KINDS)
           + f" = {len(catalog.entries)}")
     print(f"declarations: {stats.main_groups} main-stream group(s) with {stats.main_fields} "
-          f"field(s); {stats.exports_with_checkpoints} export(s) with checkpoint tables, "
+          f"field(s) ({stats.fields_without_identity} without a name or checksum); "
+          f"{stats.exports_with_checkpoints} export(s) with checkpoint tables, "
           f"{stats.checkpoint_groups} group row(s), {stats.checkpoint_fields} field row(s); "
           f"{stats.orphan_checkpoint_fields} field row(s) joining no group, "
           f"{stats.path_index_mismatches} path-index mismatch(es)")
@@ -1390,14 +1225,17 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
     if failing:
         problems.append(f"{len(failing)} entr(y/ies) declared in their reference window lost "
                         f"their declaration with evidence (field-missing, or moved with the "
-                        f"typing lost) and are not in {EXPECTED_JSON.name}")
+                        f"typing lost) and are not in {expected_name}")
     if stale:
-        problems.append(f"{len(stale)} item(s) of {EXPECTED_JSON.name} match no failing "
+        problems.append(f"{len(stale)} item(s) of {expected_name} match no failing "
                         f"finding (STALE): " + "; ".join(
                             f"{i['entry']} {i['build']} {i['finding']}" for i in stale))
     if stats.orphan_checkpoint_fields or stats.path_index_mismatches:
         problems.append("checkpoint field declarations that join no group -- the input is "
                         "inconsistent, so what it declares is not known")
+    if stats.fields_without_identity:
+        problems.append("main-stream field declarations without a name or checksum -- the "
+                        "input is inconsistent, so what it declares is not known")
     if problems:
         print()
         for p in problems:
@@ -1449,7 +1287,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2
     try:
-        return run(replays, catalog, expected, stats, args.verbose, args.show, args.json)
+        return run(replays, catalog, expected, stats, args.verbose, args.show, args.json,
+                   expected_name=args.expected.name)
     except InputError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2

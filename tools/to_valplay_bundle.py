@@ -1,34 +1,19 @@
-"""Convert vrfkit Parquet export into a valplay-compatible NDJSON bundle.
+"""Convert a vrfkit Parquet export into a valplay-compatible NDJSON bundle.
 
-WHY: valplay's compute_metrics.py consumes events.ndjson + movement.ndjson +
-manifest.json. This adapter proves the vrfkit Rust parser can replace the C#
-parser by converting vrfkit's flat Parquet rows back into the nested JSON
-events that compute_metrics.py already understands. No metrics code is
-reimplemented -- only the serialization format is bridged.
+Writes the events.ndjson, movement.ndjson and manifest.json that valplay's
+compute_metrics.py consumes; only the serialization is bridged, no metric is
+reimplemented. Whole unresolved ClassNetCache block rows are excluded first.
+Replicated properties group by (packet_id, actor, object, group_path) into
+export_group_received events; RPCs (group_path contains '_ClassNetCache')
+group by (packet_id, actor, group_path, handle) into rpc_received events.
 
-The Parquet schema stores one row per decoded field, plus explicitly marked
-whole-block payload rows for unresolved ClassNetCache groups. Those block rows
-are excluded before grouping. Replicated properties are grouped by (packet_id,
-actor_net_guid, group_path) into export_group_received events. RPCs (group_path
-contains '_ClassNetCache') are grouped by (packet_id, actor_net_guid,
-group_path, handle) into rpc_received events.
-
-Shot data: ReplayPlayContinuousEffectAtLocation RPCs carry FloatValues,
-ObjectValues, VectorValues blobs. These are decoded in Python using the
-gameplay tag table from the manifest, and emitted as valorant_shot_received
-events matching the C# parser's output format.
-
-Weapon identity: the shot blob does not name the gun. It carries a FiringState
-subobject GUID, whose *outer* is the equippable actor. net_guids.parquet
-supplies that containment chain and actors.parquet supplies the class path,
-which equippable_table.py maps to a display name. This mirrors the C# parser's
-second resolution tier (ValorantShotEventEnricher.ResolveFromFiringState); its
-first tier, an equippable GUID inside the effect blob, is never populated in
-practice (0 of 2,647 shots in the 02d4d478 reference).
-
-Layout: constants, then leaf helpers (vectors, blob decoding, path parsing,
-RPC normalization), then one function per conversion phase, then `convert`
-which wires the phases together.
+Shots: ReplayPlayContinuousEffectAtLocation's FloatValues, ObjectValues and
+VectorValues blobs are decoded here with the manifest's gameplay-tag table
+into valorant_shot_received events. The gun is the FiringState subobject's
+outer (net_guids.parquet), named from its class path (actors.parquet,
+equippable_table.py): the C# parser's second tier,
+ValorantShotEventEnricher.ResolveFromFiringState. Its first tier, an
+equippable GUID in the blob, is never populated (0 of 2,647 shots, 02d4d478).
 
 Usage:
     python tools/to_valplay_bundle.py <vrfkit_export_dir> [-o <output_dir>]
@@ -70,33 +55,25 @@ from atomic_io import remove_tree, require_descendant  # noqa: E402
 # Constants and lookup tables
 # ---------------------------------------------------------------------------
 
-# Unreal's own cap in FNetGUIDCache traversal; the C# resolver uses the same
-# value. Real chains observed in 02d4d478 are one hop, but a bounded loop is
-# what keeps a malformed self-referential chain from hanging the adapter.
+# UE's FNetGUIDCache traversal cap, as in the C# resolver. Real chains on
+# 02d4d478 are one hop; the bound keeps a self-referential chain from hanging.
 MAX_OUTER_DEPTH = 16
 
-# A whole unresolved ClassNetCache block is preservation data, not a field or
-# RPC. This exact reserved field name is the production discriminator shared
-# with vrf-export. Exclude it before actor lifetime tracking as well as event
-# grouping, because unresolved paths do not necessarily carry a CNC suffix.
+# vrf-export's reserved field name for a whole unresolved ClassNetCache block:
+# preservation data, not a field or RPC. Excluded before lifetime tracking and
+# grouping, because an unresolved path need not carry the CNC suffix.
 UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME = (
     "__vrfkit_unresolved_class_net_cache_payload__"
 )
 
-# The group-path suffix that separates an RPC group from a replicated property
-# group. Shared with vrf-schema's CLASS_NET_CACHE_SUFFIX; the two are pinned
-# together by crates/vrfkit/tests/adapter_contract.rs, because a drift here
-# reclassifies every RPC as a property and yields a bundle that looks complete
-# and contains no kills, damage or abilities.
+# Separates an RPC group from a property group. Both constants are pinned to
+# vrf-export/vrf-schema by crates/vrfkit/tests/adapter_contract.rs: a drift
+# reclassifies every RPC as a property (no kills, damage or abilities).
 CLASS_NET_CACHE_SUFFIX = "_ClassNetCache"
 
-# Substrings that mark a firing state as the weapon's secondary fire cycle.
-# Copied from ValorantShotFireModeResolver.AlternateMarkers; matched
-# case-insensitively against every object path on the FiringState outer chain.
-#
-# The distinction matters because spray_control drops alternate-fire shots
-# outright: ADS and burst cycles have a different recoil pattern, so mixing
-# them into a spray would compare shots that were never part of one.
+# ValorantShotFireModeResolver.AlternateMarkers, matched case-insensitively on
+# every path of the FiringState outer chain. spray_control drops alternate
+# fire outright (ADS and burst recoil differ).
 ALTERNATE_FIRE_MARKERS = (
     "altfire",
     "zoomedfire",
@@ -106,99 +83,23 @@ ALTERNATE_FIRE_MARKERS = (
     "burstmode",
 )
 
-# Array fields whose *undecoded* blob is what downstream expects, mapped to the
-# TypeName the reference labels them with.
+# Array fields whose consumer decodes the undecoded blob itself, by wire name,
+# mapped to the TypeName the reference labels the blob with. vrfkit emits both
+# the container blob and the decoded elements; the general rule keeps the
+# elements (CombatReport's `Rounds` needs them), these keep the blob.
 #
-# vrfkit emits both forms for these: the bare container blob and the decoded
-# per-element sub-fields. The general rule below prefers the decoded form,
-# because that is what CombatReport's `Rounds` needs. RoundInfos is the
-# opposite case -- valplay's _roundinfo.collect_round_infos does its own
-# bit-level decode and requires {Data, BitCount}, skipping anything that is not
-# a dict, so handing it our decoded list silently produced
-# events_with_roundinfos: 0 and left every credits_actual figure null.
+# The raw-blob rule, for these and `_RAW_SOURCED_RPC_PARAMS`: the blob is built
+# from raw_bits whenever the row has them, typed or not, because raw_bits rides
+# beside a typed value by design and `_get_value` reports raw only when every
+# typed column is null.
 #
-# Our raw bits for RoundInfos are byte-identical to the reference's, so passing
-# them through is exact rather than approximate.
-#
-# The blob is built from raw_bits DIRECTLY, whether or not the overlay also
-# typed the row. It used to be taken only when `_get_value` reported the row
-# raw -- which it does only when every typed column is null, though raw_bits
-# travels beside a typed value by design -- so a typed RoundInfos row dropped
-# its blob and, with it, every decoded child, with no counter moving. Keyed by
-# the wire's own field name. See `_RAW_SOURCED_RPC_PARAMS` for the RPC side.
+# RoundInfos: valplay's _roundinfo.collect_round_infos bit-decodes
+# {Data, BitCount} and skips any non-dict, so our decoded list gave
+# events_with_roundinfos 0 and a null credits_actual. Our RoundInfos bits are
+# byte-identical to the reference's.
 RAW_BLOB_PREFERRED = {
     "RoundInfos": "TArray<FAresPlayerRoundInfo>",
 }
-
-# RPC parameters whose consumer decodes the raw wire blob itself, by function.
-# Built from raw_bits whenever the row has them, typed or not -- the same rule
-# as RAW_BLOB_PREFERRED -- so typing a parameter upstream can neither drop the
-# blob nor swap it for a value its consumer cannot read.
-#
-# * The shot effect arrays feed this file's own effect decoder
-#   (`_decode_effect_elements`), which needs the exact payload window.
-# * A damage RPC's LifeChangeEvents feeds valplay's `_decode_remaining_hp`
-#   (weapon_stats.py), which reads the bits of the blob and nothing else.
-# * A damage RPC's death-montage pair (DEATH_MONTAGE_BLOB_PARAMS below) is
-#   typed ObjectNetGuid in fields.parquet, but the reference bundle carries
-#   each as a labelled blob and rpc_received keeps that shape.
-#
-# valplay's resource_budget.RETAINED_RAW_BLOB_KEYS lists every blob its metrics
-# decode: these, RoundInfos, and AggregateKills/Deaths/Assists and Score. The
-# last four take the generic path here -- no branch of this file depends on
-# whether they are raw -- and valplay reads either shape of them.
-_RAW_SOURCED_RPC_PARAMS = {
-    "ReplayPlayContinuousEffectAtLocation":
-        frozenset({"FloatValues", "ObjectValues", "VectorValues"}),
-    "MulticastNotifyDamage_Point": frozenset({
-        "LifeChangeEvents",
-        "DeathMontageEffectOverride", "DeathMontageEffectOverrideContext",
-    }),
-    "MulticastNotifyDamage_Base": frozenset({
-        "LifeChangeEvents",
-        "DeathMontageEffectOverride", "DeathMontageEffectOverrideContext",
-    }),
-}
-
-
-# Replicated PROPERTIES whose decoded value is a vector. The parser renders a
-# decoded vector as the compact "(x,y,z)" string, which is what lands in
-# value_str; the reference emits {x, y, z}. The RPC path already converts its
-# vectors (DAMAGE_VECTOR_PARAMS below) but the property path never did, so
-# these shipped as strings.
-#
-# Measured on 02d4d478: this is the complete set -- a scan for fields the
-# reference emits as {x,y,z} while we emit "(x,y,z)" finds only this one,
-# 9 occurrences. Add to it rather than matching the string shape generally:
-# a value that merely LOOKS like a vector is not evidence that it is one.
-VECTOR_PROPERTIES = frozenset({
-    "ReplicatedGravityDirection",
-})
-
-
-# Replicated PROPERTIES the parser renders as a JSON object in value_str.
-#
-# Every other decoded type fits a scalar or the compact "(x,y,z)" string, but
-# FRepMovement is an eight-member struct with nowhere to live in a single
-# column, so vrf-decode writes it as JSON (types.rs, FRepMovement's Display).
-# The reference emits the same eight members as a real object
-# (ReplayJsonNormalizer.cs:255), so the adapter's job is just to parse it back.
-#
-# Listed by name rather than sniffed with `value.startswith("{")`: a string
-# that merely looks like JSON is not evidence that it is a movement struct.
-# ReplicatedMovement is the only field name with FieldType::RepMovement in the
-# generated table (26 entries, all this name).
-#
-# The JSON is passed through untouched, units included: `location` is world
-# units on every class the table types (the reader divides by each class's
-# own quantization level; docs/DATA.md has the per-class evidence), so the
-# adapter applies no scale of its own. Exports from before 2026-09-28 carry
-# location/100 on all classes but one and should be regenerated, not
-# rescaled here.
-JSON_OBJECT_PROPERTIES = frozenset({
-    "ReplicatedMovement",
-})
-
 
 # The two damage RPCs, by the function name `_split_rpc_field` returns.
 DAMAGE_RPC_NAMES = frozenset({
@@ -213,10 +114,50 @@ DEATH_MONTAGE_BLOB_PARAMS = frozenset({
     "DeathMontageEffectOverrideContext",
 })
 
+# RPC parameters, by function, built from raw_bits by the RAW_BLOB_PREFERRED
+# rule, so typing one upstream can neither drop its blob nor swap it for a
+# value its consumer cannot read:
+# * the shot effect arrays feed this file's effect decoder
+#   (`_decode_effect_elements`), which needs the exact payload window;
+# * a damage RPC's LifeChangeEvents feeds valplay's `_decode_remaining_hp`
+#   (weapon_stats.py), which reads only the blob's bits;
+# * the death-montage pair is typed ObjectNetGuid in fields.parquet, but the
+#   reference carries each as a labelled blob and rpc_received keeps that.
+# The rest of valplay's RETAINED_RAW_BLOB_KEYS (AggregateKills/Deaths/Assists,
+# Score) take the generic path; valplay reads either shape of them.
+_RAW_SOURCED_RPC_PARAMS = {
+    "ReplayPlayContinuousEffectAtLocation":
+        frozenset({"FloatValues", "ObjectValues", "VectorValues"}),
+    **dict.fromkeys(DAMAGE_RPC_NAMES,
+                    DEATH_MONTAGE_BLOB_PARAMS | {"LifeChangeEvents"}),
+}
 
-# Damage RPC parameters that carry an FVector_NetQuantize* payload. The C#
-# call sites are DamageParameters.cs:50 and
-# MulticastNotifyDamagePointParameters.cs:40-46.
+
+# Replicated properties whose value_str is the parser's compact "(x,y,z)"
+# vector, which the reference emits as {x, y, z}. The complete set on 02d4d478:
+# a scan for fields the reference emits as {x,y,z} where we emit "(x,y,z)"
+# finds only this one, 9 occurrences. Listed by name, never sniffed: a value
+# that merely LOOKS like a vector is not evidence that it is one.
+VECTOR_PROPERTIES = frozenset({
+    "ReplicatedGravityDirection",
+})
+
+
+# Replicated properties the parser writes as a JSON object in value_str:
+# FRepMovement's eight members fit no single column (types.rs, its Display),
+# and the reference emits them as an object (ReplayJsonNormalizer.cs:255).
+# Listed by name, not sniffed with startswith("{"). ReplicatedMovement is the
+# only FieldType::RepMovement name in the generated table (26 entries).
+# Passed through untouched: `location` is world units on every class the table
+# types (docs/DATA.md has the per-class evidence). Exports from before
+# 2026-09-28 carry location/100 on all classes but one: regenerate, not rescale.
+JSON_OBJECT_PROPERTIES = frozenset({
+    "ReplicatedMovement",
+})
+
+
+# Damage RPC parameters carrying an FVector_NetQuantize* payload (C# call
+# sites: DamageParameters.cs:50, MulticastNotifyDamagePointParameters.cs:40-46).
 DAMAGE_VECTOR_PARAMS = frozenset({
     "DamageOrigin",
     "DamageImpactLocation",
@@ -226,22 +167,12 @@ DAMAGE_VECTOR_PARAMS = frozenset({
 })
 
 
-# RegionalDamage enum mapping: vrfkit stores as int, valplay expects string.
+# Enum ordinal (int in fields.parquet) -> the reference's string, from the C#
+# enums verbatim; an unmapped ordinal becomes a loud *_unknown_{n}.
 #
-# EAresAlliance.cs. Verbatim from the enum, not inferred:
-#
-#   AllianceAlly = 0, AllianceEnemy = 1, AllianceNeutral = 2,
-#   AllianceAny = 3, AllianceCount = 4, AllianceMax = 5
-#
-# This map previously read {0: "alliance_self", 1: "alliance_ally",
-# 2: "alliance_enemy", 3: "alliance_any", 4: "alliance_any"} -- shifted by
-# one, with an "alliance_self" that is not in the enum at all. Ordinal 1
-# occurs 30 times on 02d4d478 and was reported as "ally" where the reference
-# says "enemy"; ordinal 3 was right only by coincidence.
-#
-# This is the same defect as the RegionalDamage swap fixed in e7414d9, in the
-# same file, and it was not checked at the time. When one enum map turns out
-# to be shifted, check the others.
+# EAresAlliance.cs: AllianceAlly = 0, AllianceEnemy = 1, AllianceNeutral = 2,
+# AllianceAny = 3, AllianceCount = 4, AllianceMax = 5. On 02d4d478 ordinal 1
+# occurs 30 times, and the reference says alliance_enemy.
 ALLIANCE_MAP = {
     0: "alliance_ally",
     1: "alliance_enemy",
@@ -251,27 +182,12 @@ ALLIANCE_MAP = {
     5: "alliance_max",
 }
 
-# EAresRegionalDamage.cs. The ordinals are the C# enum's, not an invention:
-#
-#   RegionalDamage_Normal         = 0
-#   RegionalDamage_Headshot       = 1
-#   RegionalDamage_Legshot        = 2
-#   RegionalDamage_RegionCount    = 3
-#   RegionalDamage_Invalid_Radial = 4
-#   RegionalDamage_Invalid        = 5
-#   RegionalDamage_CountPlusOne   = 6
-#
-# This map previously had 0 and 1 swapped and put invalid at 3, so every
-# body shot was reported as a headshot and vice versa (Vandal: 109 head /
-# 35 body instead of 35 / 109), and the 18 genuine "no hit region" damage
-# events at ordinal 5 fell through to unknown_5.
-#
-# The four strings that appear on the wire are verified against 02d4d478's
-# reference bundle. The remaining three are derived with the same
-# name-to-string rule (insert "_" before each capital, lowercase) which that
-# verification confirms on 4 of 4 cases; they are sentinels and have not been
-# observed, so an unexpected ordinal still falls through to a loud
-# unknown_{n} rather than being silently absorbed.
+# EAresRegionalDamage.cs: RegionalDamage_Normal = 0, _Headshot = 1,
+# _Legshot = 2, _RegionCount = 3, _Invalid_Radial = 4, _Invalid = 5,
+# _CountPlusOne = 6. The four strings seen on the wire are verified against
+# 02d4d478's reference bundle (counts inline); the three unobserved sentinels
+# follow the name-to-string rule those four confirm (insert "_" before each
+# capital, lowercase).
 REGIONAL_DAMAGE_MAP = {
     0: "regional_damage__normal",           # verified: 446 occurrences
     1: "regional_damage__headshot",         # verified: 83
@@ -294,18 +210,11 @@ _PATH_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)\])?')
 class _Tally(dict):
     """Every row this conversion dropped and every value it invented.
 
-    WHY a counter rather than a raise or a silent skip: each of these is a
-    rare shape the adapter can keep going past, and going past it quietly is
-    precisely what made them invisible. This file is the last hop before the
-    data is consumed, so a row it drops is invisible to every upstream check
-    -- the bundle still comes out as valid JSON, the counts still look
-    plausible, and the run still prints "Conversion complete". Rejecting the
-    whole replay over 1,996 unnamed rows would be worse; saying nothing is
-    what we had. A count that reaches the summary is the third option and the
-    one the rest of this project already uses.
-
-    A dict with a fixed key set: `bump` on a name that is not one of them
-    raises KeyError rather than inventing a counter nothing ever prints.
+    Counted, neither raised nor skipped: each shape is one the adapter can go
+    past (property key collisions are structural, tens of thousands per
+    replay), and this is the last hop before consumption, so an uncounted drop
+    is invisible to every upstream check while the bundle still looks complete.
+    The key set is fixed: `bump` on an unknown name raises KeyError.
     """
 
     #: counter -> the wording its summary line uses.
@@ -318,6 +227,8 @@ class _Tally(dict):
             "RPC invocations dropped whole (no row supplied a name)",
         "rpc_param_collisions":
             "RPC parameters overwritten inside one invocation group",
+        "property_key_collisions":
+            "property values overwritten by a same-named row in one event",
         "unparsable_path_segments":
             "field-path segments kept as literal object keys",
         "payload_shape_conflicts":
@@ -369,54 +280,40 @@ class _Tally(dict):
         return sum(self.values())
 
     def lines(self) -> list[str]:
-        """One line per counter that fired, in REASONS order.
-
-        Silent counters are omitted: a summary listing ten zeroes trains the
-        reader to skip the block, which is the failure mode this replaces.
-        """
+        """One line per counter that fired, in REASONS order. Zeros stay off
+        the console on purpose, despite CLAUDE.md's print-zeros rule: a block
+        of zeros trains the reader to skip it. The manifest's `losses` carries
+        every counter, zeros included (docs/USAGE.md)."""
         return [f"  {name}: {self[name]:,} -- {reason}"
                 for name, reason in self.REASONS.items() if self[name]]
 
 
 def _bump(tally, name: str, n: int = 1) -> None:
-    """Increment a counter if one is being kept; a `None` tally is a no-op.
-
-    The leaf helpers take an optional tally so they stay callable -- and
-    testable -- on their own. The conversion phases always pass a real one.
-    """
+    """Increment a counter; a `None` tally is a no-op, so the leaf helpers stay
+    callable and testable alone. The conversion phases always pass one."""
     if tally is not None:
         tally.bump(name, n)
 
 
 # ---------------------------------------------------------------------------
-# Scalar and vector formatting
-#
-# Three distinct rounding/precision policies live here and the differences are
-# load-bearing; the names say which is which.
+# Scalar and vector formatting: three load-bearing precision policies, each
+# named by its function.
 # ---------------------------------------------------------------------------
 def _f32_shortest(value):
     """Shortest decimal that round-trips through float32.
 
-    actors.parquet stores spawn coordinates as Float32. Widening one to a
-    Python float exposes the binary artefact -- 2382.2f becomes
-    2382.199951171875 -- while the C# reference serializes the float itself,
-    which System.Text.Json writes with float (not double) round-trip
-    precision: "2382.2".
-
-    Reproducing that means finding the fewest significant digits that still
-    round-trip as a float32, which is exactly what a shortest-round-trip
-    float formatter does.
+    What System.Text.Json writes for a float: the Float32 spawn coordinate
+    2382.2f is "2382.2", where widening it to a Python float prints
+    2382.199951171875.
     """
     if value is None:
         return None
     packed = _struct.unpack("f", _struct.pack("f", value))[0]
     for digits in range(1, 10):
         candidate = float(f"{packed:.{digits}g}")
-        # Rounding up can carry a candidate past the float32 range: FLT_MAX at
-        # four digits is 3.403e+38. Such a candidate cannot round-trip, so it
-        # is not the answer. Python 3.12 packs it as inf and the comparison
-        # below rejects it; Python 3.13 raises OverflowError instead, which
-        # must mean the same thing here rather than abort the conversion.
+        # Rounding can carry a candidate past FLT_MAX (3.403e+38 at four
+        # digits), which cannot round-trip: Python 3.12 packs it as inf and
+        # the comparison rejects it, 3.13 raises OverflowError; both mean no.
         try:
             back = _struct.unpack("f", _struct.pack("f", candidate))[0]
         except OverflowError:
@@ -426,18 +323,14 @@ def _f32_shortest(value):
     return int(packed) if float(packed).is_integer() else packed
 
 
-#: One encoder, reused. `json.dumps` with non-default kwargs cannot use the
-#: module's cached encoder and CONSTRUCTS A NEW JSONEncoder on every call --
-#: 2.4 million of them here, 1.8 s of pure setup. `.encode()` on a single
-#: instance is the same code path with the same output.
+#: One encoder, reused: `json.dumps` with non-default kwargs builds a new
+#: JSONEncoder per call (2.4 million here, 1.8 s of setup); same output.
 _JSON = json.JSONEncoder(separators=(',', ':'), ensure_ascii=True)
 
-#: The movement record, as a template with one `%s` per slot. Key order is the
-#: order the record dict used, which is what `json.dumps` emitted; every slot
-#: is filled with text `_JSON.encode` produced for that value, so the line is
-#: byte-for-byte what encoding the dict would have written. `_write_movement`
-#: splits it on `%s` into the literal fragments it interleaves with the slot
-#: texts, so this stays the one place the line is spelled.
+#: The movement record, one `%s` per slot, in the key order the record dict
+#: had, each slot filled with `_JSON.encode`'s text: byte-for-byte what encoding
+#: the dict wrote. The only place the line is spelled; `_write_movement` splits
+#: it on `%s` into the literal fragments.
 _MOVEMENT_LINE = (
     '{"time_ms":%s,"shooter_character_net_guid":%s,'
     '"position":{"x":%s,"y":%s,"z":%s},'
@@ -445,128 +338,84 @@ _MOVEMENT_LINE = (
     '"yaw":%s,"pitch":%s}\n'
 )
 
-#: Rows per block of movement.ndjson assembled in Arrow and written at once.
-#: Bounds the text held at any moment to one block's worth -- ~48 MB at the
-#: ~184 bytes a line measures on the reference exports -- instead of the
-#: whole file's. Measured on f73d4475's writer alone, 3 runs each: 2**16 and
-#: 2**18 are equal within noise (~3.4 s, ~665 MB peak, which the per-column
-#: dedup sets, not the block), 2**14 is ~4% slower, 2**20 adds 50-80 MB.
+#: Rows per movement.ndjson block assembled in Arrow and written at once: holds
+#: one block's text (~48 MB at ~184 bytes a line), not the file's. f73d4475's
+#: writer alone, 3 runs each: 2**16 and 2**18 equal within noise (~3.4 s,
+#: ~665 MB peak, set by the per-column dedup), 2**14 ~4% slower, 2**20 +50-80 MB.
 _MOVEMENT_BLOCK_ROWS = 1 << 18
 
 
-#: Below this magnitude every integer is exactly representable in float32, so
-#: the shortest round-trip text of an integral float32 IS its integer text.
-#: From here up the two part ways: 123456792.0 round-trips as 123456790.
+#: Below this magnitude every integer is exact in float32, so an integral
+#: float32's shortest round-trip text IS its integer text. Above, they part:
+#: 123456792.0 round-trips as 123456790.
 _F32_EXACT_INT_LIMIT = 2 ** 24
 
 #: numpy's float32 text is positional only for 1e-4 <= |v| < 1e6, judged on
-#: the binary value; Python's float repr -- where the per-value rule ends --
-#: is positional from 1e-4 to 1e16, judged on the decimal. Outside the
-#: narrower band they disagree: 1234567.5 is '1.2345675e+06' to numpy, and
-#: float32(1e-4), which is 9.99999975e-05, is '1e-04' to numpy and '0.0001'
-#: to repr. Compared in float64, because 1e-4 is not a float32.
+#: the binary value; Python's repr (the per-value rule) is positional from 1e-4
+#: to 1e16, judged on the decimal. Outside this band they disagree: 1234567.5
+#: is '1.2345675e+06' to numpy, and float32(1e-4) (9.99999975e-05) is '1e-04'
+#: to numpy but '0.0001' to repr. Compared in float64: 1e-4 is not a float32.
 _F32_POSITIONAL_BAND = (1e-4, 1e6)
 
 
 def _json_scalar_column(arr, *, shorten=False):
-    """The JSON TEXT of each value, computed once per distinct value.
+    """The JSON text of a 1-D numpy float array, once per distinct value.
 
-    `arr` is a 1-D numpy float array. Returns ``(texts, inverse)``: `texts`
-    is a pa.string() array with the text of each distinct value, `inverse` a
-    pa.int32() array mapping every row of `arr` to its entry, so
-    `texts.take(inverse)` is the column's text row by row. `numpy.unique`
-    collapses the column in C and the caller fans the text back out with
-    Arrow's `take`, one write block at a time -- there is no per-row Python
-    loop anywhere, which is what lets `_write_movement` skip building 1.8
-    million dicts and calling the encoder 1.8 million times. The fan-out is
-    the caller's; the text rule is here, and only here.
+    Returns ``(texts, inverse)``: `texts` is a pa.string() array of each
+    distinct value's text, `inverse` a pa.int32() array mapping every row to
+    its entry, so `texts.take(inverse)` is the column's text row by row.
+    numpy.unique collapses the column in C and the caller fans the texts back
+    out with Arrow's take, one write block at a time, so no Python object is
+    made per row. The fan-out is the caller's; the text rule lives here only.
 
-    The contract is per value, and it is checked, not assumed: every row's
-    text is what the per-element version this replaced wrote for that row's
-    own value -- `_JSON.encode(_f32_shortest(v))` for `shorten=True`,
-    `_JSON.encode(v)` for `shorten=False` (`MovementTextRuleTests`).
+    The contract is per value, and checked (`MovementTextRuleTests`): each
+    row's text is `_JSON.encode(_f32_shortest(v))` with `shorten=True`, else
+    `_JSON.encode(v)` -- `Infinity`/`NaN` included, which an f-string would
+    spell as invalid JSON.
 
-    Distinct BIT PATTERNS, not distinct values. -0.0 == 0.0, so a value-level
-    unique merged the two zeros into one entry and wrote whichever sign the
-    sort put first for every zero in the column -- a genuine `0.0` yaw could
-    come out `-0.0`. Unique over the raw bits keeps them apart, and gives
-    each NaN payload its own entry (all spelled `NaN`). No movement column on
-    the corpus holds a -0.0 (0 in 1,973,922,078 rows x 8 columns, 1,018
-    exports, 2026-09-28), so this moved no line: it closes the case instead
-    of depending on its absence.
+    Unique over BIT PATTERNS, not values: -0.0 == 0.0 would merge the zeros
+    under whichever sign sorted first. No movement column holds a -0.0 (0 of
+    1,973,922,078 rows x 8 columns, 1,018 exports, 2026-09-28).
 
-    `shorten=False` encodes each distinct value, `Infinity` and `NaN`
-    included -- an f-string would spell those `inf` and `nan`, invalid JSON.
+    `shorten=True` vectorises only where proven equal to the per-value rule:
+    an integral value below `_F32_EXACT_INT_LIMIT` is its int text, and a
+    non-integral one inside `_F32_POSITIONAL_BAND` is numpy's astype(str),
+    the same Dragon4 shortest round-trip in positional notation. Both checked
+    exhaustively, not sampled: all 556,160,338 non-integral float32 in the
+    band (278,080,169 per sign) and all 33,554,430 integral ones with
+    0 < |v| < 2**24, 0 mismatches (numpy 2.5.2, 2026-09-28); just outside,
+    float32(+/-1e-4) and every non-integral value in 1e6 <= |v| < 2**20
+    differ. Every other value takes the per-value encoder: applied to all,
+    the shortcut wrote +/-inf as -9223372036854775808 and NaN as `nan`.
+    Finiteness is not guaranteed upstream (vrf-movement reads raw f32/f64
+    unchecked; stream.rs narrows f64 with a bare `as f32`), although the
+    corpus holds 0 non-finite values, 0 with |v| >= 2**24 and 0 non-integral
+    ones outside the band in any shortened column. `_write_movement` says how
+    a non-finite value reaches the consumer.
 
-    `shorten=True` takes a vectorised shortcut only where it is proven equal
-    to the per-value rule, and the per-value encoder everywhere else:
-
-    * an integral value below `_F32_EXACT_INT_LIMIT` is written as its int,
-      the way `_f32_shortest` returns an `int` for it;
-    * a non-integral value inside `_F32_POSITIONAL_BAND` is numpy's
-      `astype(str)` -- the same Dragon4 shortest round-trip, in the same
-      positional notation.
-
-    Both are checked EXHAUSTIVELY against the per-value rule, not sampled:
-    all 556,160,338 non-integral float32 inside the band (278,080,169 of each
-    sign) and all 33,554,430 integral ones with 0 < |v| < 2**24, 0
-    mismatches (numpy 2.5.2, 2026-09-28). The same run shows the edges are
-    real: just outside the band, float32(+/-1e-4) and every non-integral
-    value in 1e6 <= |v| < 2**20 differ.
-
-    The shortcut used to be applied to every value, and outside that domain
-    it is wrong:
-
-    * +/-inf pass `v == trunc(v)` and went through the int64 cast, which
-      wrote -9223372036854775808 -- valid JSON, a plausible number, the wrong
-      sign -- with a numpy RuntimeWarning on stderr as the only signal;
-    * NaN fell through to `astype(str)` and was written `nan`, which no JSON
-      parser accepts;
-    * an integral value at or above 2**24 was written as its exact integer
-      rather than its shortest round-trip (123456792 for 123456790), and one
-      at or above 2**63 (1e20) overflowed the cast the same way inf did;
-    * a non-integral value outside the band got numpy's scientific notation
-      where the rule writes positional (see `_F32_POSITIONAL_BAND`).
-
-    Those distinct values now take the per-value encoder. The old docstring
-    excused the first two as "not produced by the decoder"; nothing enforces
-    that -- vrf-movement reads raw f32/f64 components with no finiteness
-    check and stream.rs narrows f64 with a bare `as f32`. None of the four
-    occurs on the corpus (0 non-finite and 0 with |v| >= 2**24 in the scan
-    above; 0 distinct non-integral values outside the band in any shortened
-    column of any export), so this moved no line either. How a non-finite
-    value reaches the consumer, and why it is counted, is `_write_movement`'s
-    to say.
-
-    Worth doing per-distinct because these columns are quantized on the wire
-    and repeat heavily. Measured on 02d4d478's 1,837,220 kept movement rows:
-
-        pos_x 691,850 distinct    pos_z  70,260    vel_y 17,248
-        pos_y 696,435             vel_x  17,358    vel_z  6,071
-
-    so the six shortened columns format 1,499,222 values total instead of
-    11,023,320 -- 7.4x fewer. yaw and pitch dedup too (65,491 and 16,943
-    distinct) but are NOT shortened; see `_write_movement`.
+    Worth it because the columns are quantized and repeat: on 02d4d478's
+    1,837,220 kept rows the six shortened columns format 1,499,222 distinct
+    values instead of 11,023,320 (pos_x 691,850, pos_y 696,435, pos_z 70,260,
+    vel_x 17,358, vel_y 17,248, vel_z 6,071). yaw and pitch dedup (65,491 and
+    16,943 distinct) but are not shortened; see `_write_movement`.
     """
     if arr.dtype.kind != "f" or arr.dtype.itemsize not in (4, 8):
-        # The bit-pattern view below needs a same-width unsigned type, and a
-        # silent mis-view would print plausible numbers. Refuse instead.
+        # The bit-pattern view needs a same-width unsigned type; a silent
+        # mis-view would print plausible numbers.
         raise TypeError(f"_json_scalar_column wants float32/float64, got {arr.dtype}")
     if arr.shape[0] > numpy.iinfo(numpy.int32).max:
-        # The int32 inverse below would wrap and point rows at wrong texts.
+        # The int32 inverse would wrap and point rows at wrong texts.
         raise ValueError(f"{arr.shape[0]:,} rows is more than an int32 index can address")
     ubits, inverse = numpy.unique(
         arr.view(numpy.dtype(f"u{arr.dtype.itemsize}")), return_inverse=True
     )
-    # int32 halves what the caller holds per column until the write, and the
-    # int64 original is dropped at once: peak memory is the acceptance bar
-    # for this function as much as speed is.
+    # int32 halves what the caller holds per column until the write: peak
+    # memory is this function's acceptance bar as much as speed.
     inverse = pa.array(inverse.astype(numpy.int32))
     uniq = ubits.view(arr.dtype)
     if shorten:
-        # The two shortcut domains, then the per-value encoder for the rest.
-        # An object array holds the texts so a wide int can never truncate
-        # against the float column's narrower `<U` width.
+        # An object array, so a wide int text cannot truncate to the float
+        # column's narrower `<U` width.
         magnitude = numpy.abs(uniq.astype(numpy.float64))
         finite = numpy.isfinite(uniq)
         integral = finite & (uniq == numpy.trunc(uniq))
@@ -590,12 +439,8 @@ def _json_scalar_column(arr, *, shorten=False):
 
 
 def _vec3(x, y, z) -> dict:
-    """Build an {x, y, z} dict, emitting integral components as ints.
-
-    Matches how the C# reference serializes a double: System.Text.Json writes
-    0.0 as `0`, so keeping Python floats here would put `0.0` where the
-    reference has `0`.
-    """
+    """Build an {x, y, z} dict with integral components as ints, as
+    System.Text.Json writes a double (0.0 as `0`)."""
     return {
         axis: (int(n) if float(n).is_integer() else n)
         for axis, n in zip(("x", "y", "z"), (x, y, z))
@@ -603,20 +448,11 @@ def _vec3(x, y, z) -> dict:
 
 
 def _parse_vector_or_none(val):
-    """Parse a "(x,y,z)" vector without losing precision; None if unparseable.
+    """Parse a "(x,y,z)" vector at full precision; None if unparseable.
 
-    Full precision matters: the damage direction is a unit vector the reference
-    emits at full float precision (0.055482650227362894). This function used to
-    be contrasted with a _parse_location that rounded to 2 decimals -- that
-    rounding is gone from both, and the only remaining difference is the
-    failure mode, which is what the two names now say.
-
-    Returning None rather than a zero vector is the point of this variant: for
-    damage geometry a zero vector would be a silent wrong value rather than a
-    visible absence.
-
-    Integral components come back as ints so the output matches the C#
-    reference exactly -- it emits {"x": 0, "y": 1, "z": 0}, not 0.0/1.0/0.0.
+    Full precision: the reference emits the damage direction's unit vector as
+    0.055482650227362894. None, not a zero vector: for damage geometry a zero
+    vector would be a silent wrong value. Integral components become ints.
     """
     if isinstance(val, dict):
         return val
@@ -633,32 +469,16 @@ def _parse_vector_or_none(val):
 
 
 def _parse_vector_or_zero(val, tally=None) -> dict:
-    """Parse a Location value into {x, y, z}, preserving full precision.
+    """Parse a shot Location into {x, y, z} at full precision.
 
-    This used to round to 2 decimals, which was the last thing keeping
-    shot_rays.sample_rays from matching the reference -- it emits the raw
-    double (559.962145690918).
-
-    Callers expect a dict, so an unparseable value still yields a zero vector
-    rather than None. That is a fabricated value, tallied as
-    `fabricated_shot_locations` -- `_parse_rotation` below does the same for
-    the paired Rotation parameter, under `fabricated_shot_rotations`.
-
-    It used to be justified by "the shot filter upstream already guarantees a
-    location is present, so it should be unreachable". There is no such
-    filter. `_build_rpc_events` emits a shot for EVERY
-    ReplayPlayContinuousEffectAtLocation invocation and says so in its own
-    comment ("No blob guard"), deliberately, so that effects carrying only
-    scalar params reach the "unknown" bucket instead of being dropped. A
-    fabricated origin is therefore reachable, and an origin is a plausible
-    coordinate -- nothing downstream can tell it from a real one. So it is
-    counted. The value still ships, because a null would break the callers
-    that index into it; what changes is that the run no longer claims it
-    invented nothing.
+    The reference emits the raw double (559.962145690918), and
+    shot_rays.sample_rays matches it only unrounded. An absent or unparseable
+    value still yields the world origin, because callers index into it, and
+    is counted as `fabricated_shot_locations`: every effect RPC emits a shot
+    ("No blob guard" in `_build_rpc_events`), so this is reachable, and an
+    origin is indistinguishable from a real coordinate downstream.
     """
-    if isinstance(val, dict):
-        return val
-    parsed = _parse_vector_or_none(val) if val is not None else None
+    parsed = _parse_vector_or_none(val)
     if parsed is None:
         _bump(tally, "fabricated_shot_locations")
         return {"x": 0, "y": 0, "z": 0}
@@ -666,15 +486,9 @@ def _parse_vector_or_zero(val, tally=None) -> dict:
 
 
 def _parse_rotation(val, tally=None) -> dict:
-    """Parse a Rotation value into {pitch, yaw, roll}.
-
-    Mirrors `_parse_vector_or_zero`: an absent or unparseable Rotation still
-    yields {pitch:0, yaw:0, roll:0} rather than None, because callers (and
-    valplay's spray_control, which reads `shot.rotation` as the real aim
-    direction) expect a dict. That is a fabricated value indistinguishable
-    from a genuine (0,0,0) aim, so both fallback paths below tally it as
-    `fabricated_shot_rotations` rather than shipping it uncounted.
-    """
+    """Parse a Rotation into {pitch, yaw, roll}. As in `_parse_vector_or_zero`,
+    the (0,0,0) fallback is counted, as `fabricated_shot_rotations`: valplay's
+    spray_control reads `shot.rotation` as the real aim."""
     if val is None:
         _bump(tally, "fabricated_shot_rotations")
         return {"pitch": 0, "yaw": 0, "roll": 0}
@@ -690,10 +504,8 @@ def _parse_rotation(val, tally=None) -> dict:
         parts = s.split(",")
         if len(parts) == 3:
             try:
-                # Rust's compact rotator strings are shortest-round-trip f32
-                # decimals. Widen each parsed component back from f32 so the
-                # typed representation matches the legacy raw-wire decoder and
-                # the C# JSON numbers exactly.
+                # Rust writes shortest-round-trip f32 decimals; widening each
+                # back through f32 matches the raw-wire decoder and C# exactly.
                 components = [
                     _struct.unpack("<f", _struct.pack("<f", float(part)))[0]
                     for part in parts
@@ -718,19 +530,14 @@ def _has_alternate_marker(value) -> bool:
 
 
 def _resolve_fire_mode(firing_state_guid, source_id, guid_outer, guid_path):
-    """Classify a shot as primary / alternate fire.
+    """Classify a shot as primary / alternate fire: ``(fire_mode, evidence)``,
+    mirroring ValorantShotFireModeResolver.
 
-    Returns ``(fire_mode, evidence)``, mirroring ValorantShotFireModeResolver.
-
-    The signal is the *name* of the firing-state subobject: a gun replicates
-    "FiringState" for its primary cycle and "ZoomedFiringState",
-    "FiringStateBurst" etc. for its secondary one. Neither the ammo counters
-    nor burst_shot_number carry this -- burst_shot_number just indexes shots
-    within any spray, so treating a non-zero value as "alternate" (as this
-    adapter previously did) misclassified 1,462 of 2,475 shots on 02d4d478.
-
-    "unknown" when no path resolves: those are effects with no firing state at
-    all, not shots whose mode we failed to determine.
+    The signal is the NAME of the firing-state subobject: "FiringState" for
+    the primary cycle, "ZoomedFiringState", "FiringStateBurst", ... for the
+    secondary. burst_shot_number only indexes shots within a spray: reading a
+    non-zero one as alternate misclassified 1,462 of 2,475 shots on 02d4d478.
+    "unknown" means no path resolved: an effect with no firing state at all.
     """
     if _has_alternate_marker(source_id):
         return "alternate", f"source:{source_id}"
@@ -758,15 +565,13 @@ def _resolve_fire_mode(firing_state_guid, source_id, guid_outer, guid_path):
 
 
 def _resolve_equippable(net_guid, guid_outer, guid_path, guid_class):
-    """Walk a GUID's outer chain to the equippable actor that contains it.
+    """Walk a GUID's outer chain to the equippable actor containing it:
+    ``(owner_net_guid, name, category, class_path)`` or ``None``.
 
-    Returns ``(owner_net_guid, name, category, class_path)`` or ``None``.
-
-    Two lookups per hop, because the two tables cover different populations:
-    ``guid_class`` comes from actors.parquet (channel opens, carrying the spawn
-    class path) while ``guid_path`` comes from net_guids.parquet (every GUID the
-    replay registered, including subobjects that never opened a channel).
-    A weapon appears in the first; its FiringState only in the second.
+    Two lookups per hop: ``guid_class`` (actors.parquet: channel opens, with
+    the spawn class path) and ``guid_path`` (net_guids.parquet: every
+    registered GUID, subobjects included). A weapon appears in the first, its
+    FiringState only in the second.
     """
     current = net_guid
     for _ in range(MAX_OUTER_DEPTH):
@@ -789,11 +594,10 @@ def _resolve_equippable(net_guid, guid_outer, guid_path, guid_class):
 def _load_net_guids(export_dir):
     """Read net_guids.parquet into (guid -> outer, guid -> path, row count).
 
-    Returns empty dicts and a `None` row count when the file is absent, so
-    bundles produced by an older vrfkit still convert -- weapon identity is
-    simply left unresolved rather than the run failing. `None` rather than 0
-    because "there was no table" and "the table was empty" are different
-    facts, and only the second one can be compared with a declared count.
+    An absent file gives empty dicts and a `None` row count: older exports
+    still convert, with weapon identity unresolved, and None is not 0 because
+    only an empty table can be compared with a declared count. The row count
+    is the table's height, not either dict's size: both drop rows.
     """
     path = export_dir / "net_guids.parquet"
     if not path.exists():
@@ -804,9 +608,6 @@ def _load_net_guids(export_dir):
     outers = table.column("outer_net_guid").to_pylist()
     guid_outer = {g: o for g, o in zip(guids, outers) if o is not None}
     guid_path = {g: p for g, p in zip(guids, paths) if p}
-    # The row count is returned separately from the two dicts: both drop rows
-    # (a null outer, an empty path), so `len(guid_path)` is NOT the table's
-    # height and cannot be compared with what the export manifest declared.
     return guid_outer, guid_path, len(table)
 
 
@@ -831,18 +632,25 @@ class _BitReader:
         return self._pos
 
     def read_bit(self) -> int:
-        if self._pos >= self._bit_len:
-            raise EOFError
-        byte_idx = self._pos >> 3
-        bit_idx = self._pos & 7
-        self._pos += 1
-        return (self._data[byte_idx] >> bit_idx) & 1
+        return self.read_bits(1)
 
     def read_bits(self, n: int) -> int:
-        val = 0
-        for i in range(n):
-            val |= self.read_bit() << i
-        return val
+        """Read `n` bits LSB first from one slice (a per-bit loop made 2.8M
+        calls on one replay's shot blobs), with that loop's contract: a short
+        read leaves the position at the end and raises EOFError, and a declared
+        length past the buffer raises IndexError, aborting the conversion,
+        where a slice alone would silently pad with zeros.
+        """
+        start = self._pos
+        stop = min(start + n, self._bit_len)
+        if stop > start and stop > len(self._data) * 8:
+            raise IndexError("index out of range")
+        if start + n > self._bit_len:
+            self._pos = self._bit_len
+            raise EOFError
+        self._pos = start + n
+        chunk = self._data[start >> 3:(start + n + 7) >> 3]
+        return (int.from_bytes(chunk, "little") >> (start & 7)) & ((1 << n) - 1)
 
     def read_int_packed(self) -> int:
         """Read a UE4 IntPacked value (7-bit variable-length, LSB first)."""
@@ -866,84 +674,62 @@ class _BitReader:
         return _struct.unpack('<f', _struct.pack('<I', bits))[0]
 
     def read_f64(self) -> float:
-        lo = self.read_bits(32)
-        hi = self.read_bits(32)
-        raw = lo | (hi << 32)
-        return _struct.unpack('<d', _struct.pack('<Q', raw))[0]
+        return _struct.unpack('<d', _struct.pack('<Q', self.read_bits(64)))[0]
 
     def skip_bits(self, n: int):
-        self._pos += n
-        if self._pos > self._bit_len:
-            self._pos = self._bit_len
-
-
-def _read_effect_float(r: _BitReader):
-    return r.read_f32()
-
-
-def _read_effect_object(r: _BitReader):
-    return r.read_int_packed()
+        self._pos = min(self._pos + n, self._bit_len)
 
 
 def _read_effect_vector(r: _BitReader):
-    # Evaluated left to right, so a short read on y or z leaves the reader in
-    # exactly the position the three-statement version left it in.
+    # Left to right: a short read on y or z stops where sequential reads would.
     return (r.read_f64(), r.read_f64(), r.read_f64())
 
 
 class _EffectArraySpec(NamedTuple):
-    """How to read one of the three effect value arrays.
-
-    The arrays share their whole wire shape and differ only in which two
-    property handles carry the gameplay-tag index and the value, and in how the
-    value itself is read. The handle numbers are the containing struct's own,
-    which is why they are not contiguous across the three.
-    """
+    """How to read one of the three effect value arrays: same wire shape,
+    different tag/value handles (the containing struct's own, hence not
+    contiguous) and value reader."""
 
     tag_handle: int
     value_handle: int
     read_value: object
 
 
-_EFFECT_FLOATS = _EffectArraySpec(7, 8, _read_effect_float)
+_EFFECT_FLOATS = _EffectArraySpec(7, 8, _BitReader.read_f32)
 _EFFECT_VECTORS = _EffectArraySpec(11, 12, _read_effect_vector)
-_EFFECT_OBJECTS = _EffectArraySpec(15, 16, _read_effect_object)
+_EFFECT_OBJECTS = _EffectArraySpec(15, 16, _BitReader.read_int_packed)
 
 
 def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
                             tally=None):
     """Decode one effect value array -> list of (tag_index, value) tuples.
 
-    ``spec.read_value`` must raise on a short read rather than return a
-    sentinel: a failed read has to leave whatever value a previous element
-    handle already stored untouched, and the reader's position is still
-    advanced by however much the partial read consumed. Both are relied on by
-    the ``consumed``/``skip_bits`` resynchronisation below.
+    ``spec.read_value`` must raise on a short read, not return a sentinel: the
+    ``consumed``/``skip_bits`` resync relies on a failed read leaving the
+    element's earlier value untouched and the position advanced by what it
+    consumed.
 
-    This decodes the preserved raw shot blobs independently of the additive
-    JSON written by crates/vrf-decode/src/effect.rs. The adapter keeps the raw
-    source even when a typed value is present.
-    Where the Rust decoder rejects a blob outright on a shape it names
-    (`PayloadUnderread`, `PayloadOverread`, `ResidualBits`, ...), this port
-    keeps going and returns what it already decoded -- correct for a shot
-    stream that must not go missing whole, but only if the two shapes that
-    correspond to fabricated *downstream* values are counted rather than
-    absorbed: a (tag, value) pair where one half's read failed (dropped
-    silently by `_decode_effect_blob`, same as a missing `FiringState
-    .AttackVector.N` -- see `spray_control.py`), and bits left over after the
-    element loop ends that are too many to be sub-byte padding (Rust's own
-    `ResidualBits` threshold: more than a byte means the framing did not end
-    where this parse thinks it did).
+    Decodes the preserved raw blob, independently of effect.rs's additive
+    JSON. Where effect.rs rejects a blob outright (`PayloadUnderread`,
+    `PayloadOverread`, `ResidualBits`, ...), this port keeps what it decoded,
+    so a shot is not lost whole, and counts the two shapes that fabricate
+    downstream values: a pair with one half unreadable (dropped by
+    `_decode_effect_blob`, like a missing `FiringState.AttackVector.N`; see
+    spray_control.py), and more than 7 bits left after the element loop
+    (Rust's `ResidualBits` threshold: the framing did not end where this
+    parse expected).
     """
     r = _BitReader(data, bit_count)
     try:
         count = r.read_int_packed()
     except (EOFError, ValueError):
-        return []
-    if count > 256 or count == 0:
-        return []
-    elements = [(None, None)] * count
-    while not r.at_end():
+        count = None
+    # No readable count, or one past Rust's MAX_ARRAY_COUNT (256): framing
+    # broke at the first IntPacked, but the window still reaches the residual
+    # check. Count 0 enters the loop, which consumes the terminator Rust accepts.
+    framed = count is not None and count <= 256
+    elements = [(None, None)] * count if framed else []
+    while framed and not r.at_end():
         try:
             enc_idx = r.read_int_packed()
         except (EOFError, ValueError):
@@ -989,20 +775,13 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
             if consumed < payload_bits:
                 r.skip_bits(payload_bits - consumed)
         elements[idx] = (tag, val)
-    # Every declared slot with one or both halves still missing -- whether an
-    # index the array never got around to visiting before truncating, or one
-    # that was reached but lost its tag or value mid-read -- is a pair
-    # `_decode_effect_blob` drops silently below. Tallied once, by count, in
-    # one place, rather than re-deriving the same "one half missing" test
-    # (and risking a second, disagreeing count) at every call site.
+    # A declared slot missing either half, never visited or lost mid-read, is
+    # a pair `_decode_effect_blob` drops.
     half_read = sum(1 for tag, val in elements if tag is None or val is None)
     if half_read:
         _bump(tally, "effect_half_read_pairs", half_read)
-    # Rust's `ResidualBits`: more than a byte of unconsumed window after the
-    # element loop ends -- by a clean terminator, an index/handle out of
-    # range, or simply running out of bits -- means this blob's framing did
-    # not end where this parse thinks it did. Sub-byte padding is normal and
-    # not counted, matching the Rust guard's own tolerance.
+    # However the loop ended, more than 7 bits left is Rust's `ResidualBits`;
+    # sub-byte padding is normal, as the Rust guard also tolerates.
     if r.bits_remaining() > 7:
         _bump(tally, "effect_array_residual_bits")
     return elements
@@ -1010,22 +789,10 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
 
 def _decode_effect_blob(blob: _EffectBlob | None, spec: _EffectArraySpec,
                         tag_table: dict, tally=None) -> dict:
-    """Decode one effect blob into {tag_name: value}, dropping half-read pairs.
+    """Decode one effect blob into {tag_name: value}; an absent blob is {}.
 
-    An absent blob and a blob that decodes to nothing are the same thing to
-    every caller: an empty mapping. A half-read pair and residual framing bits
-    are NOT the same thing to every caller -- see `_decode_effect_elements`,
-    which tallies both -- so this still drops them from the returned mapping
-    (a `FiringState.AttackVector.N` a caller cannot find is exactly how
-    `_build_shot_event` is meant to notice one is missing) but no longer
-    without a count reaching the summary.
-
-    The bit length comes from the parser's `bit_count` column, not from
-    `len(data) * 8`. Those two agree on every effect blob measured -- 692,840
-    across the 11 cross-validated replays, zero disagreements -- so this is a
-    no-op on today's data. It is not a no-op on the contract: a payload whose
-    declared length is not a whole number of bytes would otherwise have its
-    padding bits decoded as data, and nothing downstream would report it.
+    Half-read pairs are dropped, counted by `_decode_effect_elements`: a
+    missing `FiringState.AttackVector.N` is how `_build_shot_event` notices.
     """
     if blob is None:
         return {}
@@ -1071,13 +838,12 @@ def _decode_rotation_short(data: bytes, bit_count: int) -> dict:
 # Shot events
 # ---------------------------------------------------------------------------
 class _EffectBlob(NamedTuple):
-    """One undecoded value array, with the bit length the parser declared.
+    """One undecoded value array with the bit length the parser declared.
 
-    The two are carried together because `data` alone is not enough. Parquet
-    stores whole bytes, so a payload of N bits arrives as ceil(N/8) bytes with
-    up to 7 padding bits in the last one. Deriving the length as
-    `len(data) * 8` hands those padding bits to the decoder as if they were
-    data.
+    Parquet stores whole bytes, so N bits arrive as ceil(N/8) bytes; taking
+    the length as len(data) * 8 would decode up to 7 padding bits as data.
+    The two agree on all 692,840 effect blobs of the 11 cross-validated
+    replays, so only a test tells the readings apart.
     """
 
     data: bytes
@@ -1093,12 +859,9 @@ class _EffectBlobs(NamedTuple):
 
 
 class _ShotContext(NamedTuple):
-    """Per-replay lookups every shot event needs, resolved once per conversion.
-
-    The two lookups default to None so a caller that has neither still produces
-    an event -- with a null equippable and fire_mode "unknown", which is what
-    the reference emits for a server-world effect anyway.
-    """
+    """Per-replay lookups every shot event needs. Without the two lookups an
+    event still comes out, with a null equippable and fire_mode "unknown", as
+    the reference emits a server-world effect."""
 
     tag_table: dict
     equippable_lookup: object = None
@@ -1112,37 +875,24 @@ def _build_shot_event(
 ) -> dict:
     """Build a valorant_shot_received event from decoded RPC params.
 
-    Always returns an event. Effects with no firing state -- server-world
-    effects rather than weapon shots -- come back with a null equippable and
-    fire_mode "unknown", which is how the reference emits them and what
-    valplay's "unknown" weapon bucket exists to receive.
+    Always returns one. 172 of 02d4d478's 2,647 effect RPCs are server-world
+    effects (source_id DedicatedServerWorldSourceID) with no firing state,
+    attack vectors or weapon. They come back with a null equippable and
+    fire_mode "unknown", as the reference emits them, for valplay's "unknown"
+    weapon bucket and shots_without_equippable diagnostic; every section they
+    would distort already guards on firing_player_state or attack_vectors.
     """
-    # Decode blobs: tag_name -> value
     tag_table = ctx.tag_table
     floats = _decode_effect_blob(blobs.floats, _EFFECT_FLOATS, tag_table, tally)
     objects = _decode_effect_blob(blobs.objects, _EFFECT_OBJECTS, tag_table, tally)
     vectors = _decode_effect_blob(blobs.vectors, _EFFECT_VECTORS, tag_table, tally)
 
-    # Events with no firing state are emitted too, not filtered out.
-    #
-    # 172 of 02d4d478's 2,647 effect RPCs carry no FiringPlayerState, no
-    # attack vectors and no weapon -- they are server-world effects
-    # (source_id = DedicatedServerWorldSourceID), not weapon shots. Dropping
-    # them looked cleaner and was the wrong call: valplay's weapons section
-    # has an "unknown" bucket and weapon_stats has a
-    # shots_without_equippable diagnostic, both built precisely to surface
-    # these. Filtering them here hid information the consumer was designed to
-    # report, which is the same silent-drop mistake the parser invariants
-    # exist to prevent.
-    #
-    # Every downstream section that would be distorted by them already guards
-    # on firing_player_state or attack_vectors, so they land in the buckets
-    # meant for them rather than polluting any metric.
-
-    # Extract scalar params from the RPC payload
     location = scalar_params.get("Location")
     rotation = scalar_params.get("Rotation")
-    # Fallback: Location/Rotation may arrive as unnamed params "248"/"249"
+    # Location/Rotation arrive under their bare handles "248"/"249", the only
+    # spelling observed (typed on 2,647 of 2,647 shots on 02d4d478). A
+    # {BitCount, Data} blob there means the overlay failed to type it: the
+    # dict branches and _decode_rotation_short decode the wire. Keep them.
     if location is None:
         raw248 = scalar_params.get("248")
         if isinstance(raw248, dict) and "Data" in raw248:
@@ -1151,9 +901,6 @@ def _build_shot_event(
                 x = _struct.unpack_from('<d', raw_bytes, 0)[0]
                 y = _struct.unpack_from('<d', raw_bytes, 8)[0]
                 z = _struct.unpack_from('<d', raw_bytes, 16)[0]
-                # Full precision: the reference emits the raw double
-                # (559.962145690918), and rounding here was the only thing
-                # keeping shot_rays.sample_rays from matching.
                 location = _vec3(x, y, z)
         elif raw248 is not None:
             location = raw248
@@ -1173,22 +920,16 @@ def _build_shot_event(
     wait_on = scalar_params.get("WaitOnReplicationActor")
     alliance = scalar_params.get("AllianceFilter")
 
-    # Parse location/rotation from value_str compact format if needed
     loc_obj = _parse_vector_or_zero(location, tally)
     rot_obj = _parse_rotation(rotation, tally)
 
-    # Build attack vectors
-    attack_vectors = []
-    for i in range(1, 16):
-        key = f"FiringState.AttackVector.{i}"
-        if key in vectors:
-            x, y, z = vectors[key]
-            attack_vectors.append({"x": x, "y": y, "z": z})
+    attack_keys = (f"FiringState.AttackVector.{i}" for i in range(1, 16))
+    attack_vectors = [{"x": x, "y": y, "z": z} for x, y, z in
+                      (vectors[key] for key in attack_keys if key in vectors)]
 
     burst = floats.get("FiringState.BurstShotNumber")
     yaw_switch = floats.get("FiringState.YawSwitch")
 
-    # Ammo
     ammo = floats.get("FiringState.AmmoRemaining")
     if ammo is not None:
         ammo = int(ammo)
@@ -1205,9 +946,8 @@ def _build_shot_event(
     firing_player = objects.get("FiringState.FiringPlayerState")
     firing_state = objects.get("FiringState.FiringState")
 
-    # Weapon identity: FiringState is a subobject of the gun, so its outer is
-    # the equippable actor. Null when the chain does not reach a known
-    # equippable -- never guessed.
+    # FiringState's outer is the gun; null, never guessed, when the chain does
+    # not reach a known equippable.
     equippable = None
     if ctx.equippable_lookup is not None and firing_state:
         hit = ctx.equippable_lookup(firing_state)
@@ -1226,35 +966,31 @@ def _build_shot_event(
     else:
         fire_mode, fire_mode_evidence = "unknown", None
 
-    # Alliance filter string
-    alliance_str = None
-    if alliance is not None:
-        if isinstance(alliance, int):
-            alliance_str = ALLIANCE_MAP.get(alliance, f"alliance_unknown_{alliance}")
-        else:
-            alliance_str = str(alliance)
+    # Only an int is an enum ordinal; anything else (the {BitCount, Data} blob
+    # of an untyped field) passes through unchanged, like every shot param.
+    alliance_str = alliance
+    if isinstance(alliance, int):
+        alliance_str = ALLIANCE_MAP.get(alliance, f"alliance_unknown_{alliance}")
 
     shot = {
         "effect_id": effect_id,
-        # Float32 on the wire; the reference prints its shortest round-trip
-        # (12.780108) rather than the widened value. Same treatment as the
-        # spawn and position coordinates -- it was simply missed there.
+        # Float32 (as is random_seed): the reference prints the shortest
+        # round-trip (12.780108), not the widened value.
         "start_movement_time": _f32_shortest(start_time)
         if isinstance(start_time, float) else start_time,
         "source_id": source_id,
-        "is_local_effect": bool(is_local) if is_local is not None else False,
+        "is_local_effect": bool(is_local),
         "is_transient": bool(is_transient) if is_transient is not None else True,
         "wait_on_replication_actor": wait_on or 0,
-        # Absent means absent. The reference emits null on 101 of 02d4d478's
-        # 2,647 effects; defaulting to "alliance_any" collapsed two distinct
-        # input states into one output.
+        # Null when absent, as the reference on 101 of 02d4d478's 2,647
+        # effects; a default would merge two input states.
         "alliance_filter": alliance_str,
         "location": loc_obj,
         "rotation": rot_obj,
         "ammo_remaining": ammo,
-        # Absent means absent. The reference emits null on 172 of 2,647
-        # shots; defaulting to 1 also rewrote a genuine 0, and one consumer
-        # (compute_metrics.py:1560) reads the field without its own default.
+        # Null when absent, as the reference on 172 of 2,647 shots: a default
+        # of 1 rewrote a genuine 0, and compute_metrics.py:1560 reads it
+        # without a default of its own.
         "num_projectiles": num_proj,
         "random_seed": _f32_shortest(random_seed)
         if isinstance(random_seed, float) else random_seed,
@@ -1263,7 +999,7 @@ def _build_shot_event(
         "yaw_switch": yaw_switch,
         "firing_player_state": firing_player,
         "firing_state": firing_state,
-        "attack_vectors": attack_vectors if attack_vectors else [],
+        "attack_vectors": attack_vectors,
         # The C# parser's tier-1 source; never populated in any observed replay.
         "effect_equippable": None,
         "equippable": equippable,
@@ -1276,10 +1012,8 @@ def _build_shot_event(
         "time_ms": time_ms,
         "packet_id": packet_id,
         "actor_net_guid": actor_net_guid,
-        # Both were previously substitutes: object_net_guid repeated the actor
-        # guid and channel was hardcoded 0. fields.parquet carries the real
-        # values on every shot row, and the reference disagrees with both
-        # substitutes on all 2,647 events (object 22 vs actor 2, channel 1).
+        # fields.parquet's real values, as the reference has them on all 2,647
+        # events (object 22 where the actor is 2, channel 1).
         "object_net_guid": object_net_guid,
         "channel": channel_index,
         "shot": shot,
@@ -1289,44 +1023,30 @@ def _build_shot_event(
 # ---------------------------------------------------------------------------
 # Combat report leaf labels
 #
-# The parser labels each flattened array leaf with the name the REPLAY declares
-# for that handle, which is the wire's own statement and the right thing for
-# fields.parquet to archive. It is NOT the right thing for this bundle, for two
-# independent reasons, and both are load-bearing.
+# The parser labels each flattened array leaf with the name the replay
+# declares: right for fields.parquet, wrong for this bundle twice over.
 #
-# 1. compute_metrics.py is read-only and reads these keys by name: Subject,
-#    Team, DidKill, Died, AssistType, DamageDealt, DamageReceived, HitsDealt,
-#    HitsReceived, DealtInteractions[].Regions[].{Region,Hits,IsWallPen}. The
-#    wire spells six of those differently -- `bDidKill`, `bDied`, `bIsWallPen`,
-#    `ParticipantSubject`, and Riot's own typos `DamageRecieved` and
-#    `HitsRecieved`. Passing those through silently zeroes every metric that
-#    reads them.
+# 1. compute_metrics.py reads the reference's names (Subject, Team, DidKill,
+#    Died, AssistType, DamageDealt, DamageReceived, HitsDealt, HitsReceived,
+#    DealtInteractions[].Regions[].{Region,Hits,IsWallPen}), and the wire
+#    spells six differently: bDidKill, bDied, bIsWallPen, ParticipantSubject,
+#    and Riot's typos DamageRecieved and HitsRecieved.
+# 2. Declared names are not unique within one flattened element: the
+#    HUDConfig/StateRemainingTime/GameTime/GamePhase struct is flattened at
+#    eight positions (handles 6, 99 and 105 all declare HUDConfig at the
+#    Reports level; 27/31 and 62/66 one level down). Keyed by name, 3,405 of
+#    20,298 distinct payload paths on 02d4d478 would merge, uncounted.
 #
-# 2. The declared names are NOT unique within one flattened element. UE flattens
-#    the same four-member struct (HUDConfig / StateRemainingTime / GameTime /
-#    GamePhase) at eight nesting positions, so handles 6, 99 and 105 all declare
-#    `HUDConfig` at the Reports level, and 27/31, 62/66 pair up one level down.
-#    A payload is a JSON object built by last-wins assignment, so under the
-#    declared names those keys merge: measured on 02d4d478, 3,405 of 20,298
-#    distinct payload paths would collapse and their values would be destroyed
-#    with no counter moving. fields.parquet keeps the `handle` column and loses
-#    nothing; this projection has no such escape hatch.
-#
-# So the bundle keys on the handle, not on the emitted name: the reference's
-# member name where the C# parser has one, `_h{handle}` -- the label this bundle
-# already carried -- where it does not. That keeps events.ndjson byte-identical
-# across this change, which is what makes the metrics comparison meaningful.
-#
-# This is the "no hardcoded names in the parser" invariant working as intended:
-# the Rust side emits what the wire says, and the table that renames it for a
-# downstream consumer lives here, where labelling is a presentation concern.
+# So the bundle keys on the handle: the reference's member name where the C#
+# parser has one, else `_h{handle}`, the label this bundle already carried
+# (events.ndjson stayed byte-identical). The parser emits what the wire says;
+# relabelling for a consumer is this adapter's presentation concern.
 # ---------------------------------------------------------------------------
 COMBAT_REPORT_GROUP = "CombatReportComponent"
 
-# handle -> the member name the C# reference emits for it. Leaf handles only;
-# the container handles (4 Reports, 10 Interactions, 26 DealtInteractions,
-# 61 ReceivedInteractions, 44/79 Regions) are path segments the parser takes
-# from its own schema and never renames.
+# handle -> the member name the C# reference emits. Leaf handles only: the
+# containers (4 Reports, 10 Interactions, 26 DealtInteractions,
+# 61 ReceivedInteractions, 44/79 Regions) keep the parser's schema names.
 COMBAT_REPORT_REFERENCE_NAMES = {
     3: "RoundNumber",              # wire: RoundNum
     5: "RoundNumber",
@@ -1359,25 +1079,18 @@ COMBAT_REPORT_REFERENCE_NAMES = {
 }
 
 
-# Handles the parser treats as sub-array containers, not leaves. A row carrying
-# one of these is a container the walker gave its schema name to, so it is
-# already the reference's spelling and must be left alone.
+# Sub-array container handles: such a row already carries the walker's schema
+# name, the reference's spelling, and is left alone.
 COMBAT_REPORT_CONTAINER_HANDLES = frozenset({4, 10, 26, 44, 61, 79})
 
 
 def _combat_report_leaf_name(group_path: str, field_name: str, handle) -> str:
-    """Relabel one combat-report array leaf for the bundle.
+    """Relabel the LAST segment of one combat-report array leaf for the bundle.
 
-    Only the LAST path segment is touched: everything before it is a container
-    segment the parser names from its own schema, so it already matches.
-
-    Two rows the walker SYNTHESISES rather than reads are excluded, because for
-    them the parser's own label is already right and rewriting it would be a
-    regression: `emit_remaining_raw`'s `..._raw` row (handle u32::MAX, which
-    would otherwise become `_h4294967295`), and the depth-limit row that carries
-    a container handle. Neither occurs on the corpus -- MAX_ELEMENTS is 4096
-    against a real peak near 50, and MAX_RECURSION_DEPTH is 12 against a real
-    depth of 5 -- so this is an unreachable edge being closed, not a fix.
+    Two synthesised rows keep the parser's label: `emit_remaining_raw`'s
+    `..._raw` (handle u32::MAX, else `_h4294967295`) and the depth-limit row
+    carrying a container handle. Neither occurs on the corpus (MAX_ELEMENTS
+    4096 against a peak near 50; MAX_RECURSION_DEPTH 12 against a depth of 5).
     """
     if not group_path or COMBAT_REPORT_GROUP not in group_path:
         return field_name
@@ -1390,9 +1103,6 @@ def _combat_report_leaf_name(group_path: str, field_name: str, handle) -> str:
         return field_name
     name = COMBAT_REPORT_REFERENCE_NAMES.get(handle)
     if name is None:
-        # No reference name for this handle: keep the handle-derived label the
-        # bundle has always used. Its uniqueness is the whole point -- the
-        # declared name is not unique at this nesting level.
         name = f"_h{handle}"
     return head + dot + name
 
@@ -1401,13 +1111,8 @@ def _combat_report_leaf_name(group_path: str, field_name: str, handle) -> str:
 # Field rows -> nested payloads
 # ---------------------------------------------------------------------------
 def _normalize_prop_field_name(field_name: str, is_bool: bool) -> str:
-    """Normalize a replicated property field name to match C# parser output.
-
-    WHY: The C# parser strips the 'b' prefix from UE4 boolean property names
-    (e.g. 'bUltimateActive' -> 'UltimateActive', 'bLoadoutFinalized' ->
-    'LoadoutFinalized'). vrfkit preserves the raw UE4 names. We normalize
-    to match compute_metrics.py's expectations.
-    """
+    """Strip the 'b' of a boolean property name ('bUltimateActive' ->
+    'UltimateActive'), as the C# parser does and compute_metrics.py expects."""
     if is_bool and field_name.startswith('b') and len(field_name) > 1 and field_name[1].isupper():
         return field_name[1:]
     return field_name
@@ -1415,17 +1120,9 @@ def _normalize_prop_field_name(field_name: str, is_bool: bool) -> str:
 
 @lru_cache(maxsize=None)
 def _parse_field_path_cached(path: str):
-    """Parse one path. Returns `(parts, unparsable_segment_count)`.
-
-    Split out from `_parse_field_path` so the regex work can be memoised.
-    Field paths come from a dictionary-encoded Parquet column, so a replay's
-    ~520k parses cover only a few thousand distinct strings.
-
-    The tally is deliberately NOT bumped here. Doing so would make the counter
-    depend on cache hits: the first "Rounds[0][1]" would count and every later
-    one would not, silently under-reporting a fault the caller is meant to see.
-    The count is returned instead and the caller bumps on every call.
-    """
+    """Parse one path: `(parts, unparsable_segment_count)`, memoised (a
+    replay's ~520k parses cover a few thousand distinct paths). The caller
+    bumps the tally on every call, so cache hits cannot under-count."""
     parts = []
     unparsable = 0
     for seg in path.split('.'):
@@ -1435,23 +1132,11 @@ def _parse_field_path_cached(path: str):
             idx = int(m.group(2)) if m.group(2) is not None else None
             parts.append((name, idx))
         else:
-            # Unresolved handle names like "_h27" match the pattern above.
-            # Two kinds of segment land here instead, and only one is a fault.
-            #
-            # NOT a fault: a leaf whose name is simply not an identifier --
-            # bare numbers like "248" (the documented spelling of an unnamed
-            # handle) and Blueprint display names with spaces in them. A
-            # literal key is the correct representation of a leaf. Measured on
-            # out/baseline: 449 rows, 41 distinct spellings, every one of them
-            # a name like "Victim FXC" or "Set skeletal Collision" and not one
-            # containing a bracket. Counting those would put a three-figure
-            # number in every clean summary and teach the reader to skip it.
-            #
-            # A fault: a segment carrying subscripts this parser could not
-            # read. "Rounds[0][1]" becomes the literal object key
-            # "Rounds[0][1]" -- valid JSON, reads like a name, and nests
-            # nothing, so the two levels of structure it describes are gone
-            # with no other trace. A bracket is what tells the two apart.
+            # A literal key is right for a leaf that is not an identifier: a
+            # bare handle number ("248") or a Blueprint name with spaces (449
+            # rows, 41 spellings on out/baseline, none with a bracket). A
+            # bracket means unread subscripts: "Rounds[0][1]" flattens two
+            # levels into one key, so it is counted.
             if '[' in seg or ']' in seg:
                 unparsable += 1
             parts.append((seg, None))
@@ -1467,91 +1152,75 @@ def _parse_field_path(path: str, tally=None):
 
 
 def _set_nested(root: dict, parts: list, value, tally=None):
-    """Set a value deep in a nested dict/list structure using parsed path parts.
+    """Set `value` at `parts` (a parsed flat path such as
+    'Rounds[0].Reports[0].DamageDealt') in a nested dict/list payload.
 
-    WHY: vrfkit stores each field as a flat row with full path like
-    'Rounds[0].Reports[0].Interactions[0].DamageDealt = 30'. We need to
-    reconstruct the nested JSON object that compute_metrics.py expects.
-    Array elements are auto-extended with None/empty dicts as needed.
+    Arrays grow with None/{} fillers, and each array element gets an 'Index'
+    equal to its subscript, as the C# parser writes (compute_metrics dedups
+    on inter.get("Index")).
 
-    Array elements get an 'Index' field set to their subscript position,
-    matching the C# parser's behavior (compute_metrics uses inter.get("Index")
-    for deduplication).
-
-    Two rows can disagree about a key's SHAPE -- 'Foo' carrying a scalar and
-    'Foo.Bar' carrying a nested one. Whichever arrives second wins and the
-    other row's value is gone, in either order, with valid JSON and a full row
-    count either way. Every such destruction is counted; the four sites below
-    are all of them. Growing an array with `{}`/`None` fillers is NOT one:
-    there the placeholder is ours and holds nothing to lose.
+    Two rows can disagree about a key's shape ('Foo' scalar, 'Foo.Bar'
+    nested): the second wins and the first's value is gone. The five
+    `payload_shape_conflicts` bumps below count it when this function
+    replaces; 'Foo' after 'Foo.Bar' is a one-segment path that
+    `_build_property_events` assigns and counts as `property_key_collisions`.
+    A leaf replaced by a same-named row is counted here under that name too.
+    Fillers and the injected Index hold nothing of the export's, so a real
+    `Index` row replacing the injected one (TeamEconomy[i].Index on 13.01) is
+    not counted.
     """
     obj = root
+    element = None  # the subscript `obj` sits at, when it is an array element
+    last = len(parts) - 1
     for i, (name, idx) in enumerate(parts):
-        is_last = (i == len(parts) - 1)
-        # Ensure current level has the key as a dict or list
+        is_last = i == last
         if idx is not None:
-            # This level is an array
-            if name not in obj:
-                obj[name] = []
-            arr = obj[name]
+            arr = obj.setdefault(name, [])
             if not isinstance(arr, list):
-                # Conflict: was set as a non-list value, override
                 _bump(tally, "payload_shape_conflicts")
-                obj[name] = []
-                arr = obj[name]
-            # Extend array to have at least idx+1 elements
+                arr = obj[name] = []
             while len(arr) <= idx:
-                arr.append({} if not is_last else None)
+                arr.append(None if is_last else {})
             if is_last:
                 if isinstance(arr[idx], (dict, list)) and arr[idx]:
-                    # A populated element replaced by a scalar.
                     _bump(tally, "payload_shape_conflicts")
+                elif arr[idx] is not None and not isinstance(arr[idx], (dict, list)):
+                    _bump(tally, "property_key_collisions")
                 arr[idx] = value
             else:
-                if arr[idx] is None or not isinstance(arr[idx], dict):
+                if not isinstance(arr[idx], dict):
                     if arr[idx] is not None:
-                        # A scalar element descended into as a container.
                         _bump(tally, "payload_shape_conflicts")
                     arr[idx] = {}
-                # Set the Index field on array elements to match C# output
-                if "Index" not in arr[idx]:
-                    arr[idx]["Index"] = idx
+                arr[idx].setdefault("Index", idx)
                 obj = arr[idx]
+                element = idx
+        elif is_last:
+            previous = obj.get(name)
+            if isinstance(previous, (dict, list)) and previous:
+                _bump(tally, "payload_shape_conflicts")
+            elif (name in obj and not isinstance(previous, (dict, list))
+                  and not (name == "Index" and previous == element)):
+                # An Index equal to the element's subscript is the injected one.
+                _bump(tally, "property_key_collisions")
+            obj[name] = value
         else:
-            if is_last:
-                if isinstance(obj.get(name), (dict, list)) and obj[name]:
-                    # A populated subtree replaced by a scalar.
-                    _bump(tally, "payload_shape_conflicts")
-                obj[name] = value
-            else:
-                if name not in obj:
-                    obj[name] = {}
-                next_obj = obj[name]
-                if not isinstance(next_obj, dict):
-                    # Conflict: overwrite non-dict with dict
-                    _bump(tally, "payload_shape_conflicts")
-                    obj[name] = {}
-                    next_obj = obj[name]
-                obj = next_obj
+            nxt = obj.setdefault(name, {})
+            if not isinstance(nxt, dict):
+                _bump(tally, "payload_shape_conflicts")
+                nxt = obj[name] = {}
+            obj = nxt
+            element = None
 
 
 def _drop_padding_elements(node):
-    """Remove `{}` placeholders that array extension left behind.
+    """Remove the `{}` fillers `_set_nested` appends to reach a sparse index.
 
-    Replication is sparse: a packet can carry element [1] of an array without
-    resending [0]. `_set_nested` has to extend the list to reach index 1, and
-    the filler it appends is a bare `{}`.
-
-    The reference emits only the elements actually present, so those fillers
-    are ours alone -- and they are not harmless. compute_metrics builds
-    `{t["Index"]: t for t in teams}` and then sorts the keys; a filler has no
-    Index, so the None key made sorting raise TypeError and the whole replay
-    failed to produce metrics.
-
-    Only fully empty dicts are dropped. Every genuine element carries at least
-    the `Index` that `_set_nested` injects, so nothing real matches. `None`
-    fillers in scalar arrays are left alone: there the position IS the index,
-    and removing one would silently renumber the rest.
+    The reference emits only elements present, and a filler is harmful:
+    compute_metrics sorts `{t["Index"]: t for t in teams}`, and a filler's
+    None key raised TypeError, so the replay produced no metrics. Every
+    genuine element carries at least its injected `Index`, so only fillers
+    match. `None` fillers in scalar arrays stay: the position IS the index.
     """
     if isinstance(node, dict):
         for value in node.values():
@@ -1565,29 +1234,21 @@ def _drop_padding_elements(node):
 
 def _get_value(row_i64, row_f64, row_bool, row_str, row_raw, row_bits,
                tally=None):
-    """Extract the typed value from a fields.parquet row.
+    """A fields.parquet row's typed value, else its raw_bits blob:
+    ``(value, is_raw)``.
 
-    Exactly one of the typed columns is non-null when decoded, otherwise the
-    raw_bits blob is the value. Returns (value, is_raw).
-
-    That "exactly one" is an assumption about the writer, and the priority
-    chain below cannot tell a satisfied assumption from a violated one: with
-    value_i64 = 1 and value_bool = False both set, this returns the integer 1,
-    discards the boolean, and the row looks entirely ordinary downstream. So
-    the violation is counted where it can still be seen. raw_bits is excluded
-    -- it travels alongside decoded values by design and is only consulted
-    when every typed column is null.
+    Exactly one typed column should be set. With more (value_i64 = 1 beside
+    value_bool = False) the priority chain keeps the first and the row looks
+    ordinary downstream, so it is counted as `multi_typed_rows`. raw_bits is
+    not a typed column: it rides beside decoded values by design.
     """
-    # Summed as bools rather than `sum(v is not None for v in ...)`: this runs
-    # once per field row (1.4 M on a full replay) and the generator plus the
-    # `sum` call dominated the check itself. Same arithmetic, same counter.
+    # Bools summed, not a generator: this runs per row (1.4 M on a replay).
     if ((row_i64 is not None) + (row_f64 is not None)
             + (row_bool is not None) + (row_str is not None)) > 1:
         _bump(tally, "multi_typed_rows")
     if row_i64 is not None:
         return row_i64, False
     if row_f64 is not None:
-        # Truncate float to reasonable precision to match C# output
         return row_f64, False
     if row_bool is not None:
         return row_bool, False
@@ -1599,12 +1260,9 @@ def _get_value(row_i64, row_f64, row_bool, row_str, row_raw, row_bits,
 
 
 def _raw_blob(row_raw, row_bits) -> dict:
-    """The {BitCount, Data} blob of one row's raw bits, as the C# output has it.
-
-    One builder for every site that publishes raw bits -- `_get_value` and the
-    raw-sourced fields -- so the key order, which is part of the bytes, has
-    one source. A caller that labels the blob adds `TypeName` after these two.
-    """
+    """The {BitCount, Data} blob of one row's raw bits, as the C# output has
+    it. The one builder, so the key order (part of the bytes) has one source;
+    a caller that labels the blob adds `TypeName` after these two."""
     return {"BitCount": row_bits,
             "Data": base64.b64encode(row_raw).decode('ascii')}
 
@@ -1612,10 +1270,9 @@ def _raw_blob(row_raw, row_bits) -> dict:
 def _count_unbuilt_blobs(blob_state, tally) -> None:
     """Count the raw-sourced fields one event needed and did not get.
 
-    `blob_state` maps each raw-sourced field the event touched -- by its
-    container row or by a decoded member -- to whether its blob was built;
-    `None` when it touched none. Counted per event and field, not per row, so
-    a blob whose members all arrived without it counts once.
+    `blob_state` maps each raw-sourced field the event touched (container row
+    or decoded member) to whether its blob was built, or is `None`. Counted
+    per event and field, so members arriving without their blob count once.
     """
     if blob_state:
         unbuilt = sum(1 for built in blob_state.values() if not built)
@@ -1624,55 +1281,31 @@ def _count_unbuilt_blobs(blob_state, tally) -> None:
 
 
 def _split_rpc_field(field_name: str):
-    """Split an RPC field_name into (rpc_name, param_name).
-
-    "MulticastNotifyDamage_Point.DamageTaken" -> ("MulticastNotifyDamage_Point",
-    "DamageTaken"). For zero-param RPCs, the field_name IS the RPC name with no
-    dot.
-    """
-    if field_name is None:
-        return None, None
-    dot = field_name.find('.')
-    if dot == -1:
-        return field_name, None
-    return field_name[:dot], field_name[dot+1:]
+    """Split "Rpc.Param" into (rpc_name, param_name); param_name is None when
+    the field_name is the function itself (no dot)."""
+    name, dot, param = field_name.partition('.')
+    return name, (param if dot else None)
 
 
 # ---------------------------------------------------------------------------
 # Actor class inference: map group_path to replication_class_path
 # ---------------------------------------------------------------------------
 def _group_path_to_class(gp: str) -> str:
-    """Convert a group_path to an approximate replication_class_path.
-
-    WHY: vrfkit does not export explicit actor_spawned events. We infer the
-    class from the first group_path seen for each actor. The group_path for
-    replicated properties IS the class path (e.g.
-    '/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C').
-    For ClassNetCache RPCs, strip the _ClassNetCache suffix to get the class.
-    """
-    if CLASS_NET_CACHE_SUFFIX in gp:
-        # e.g. '/Script/ShooterGame.DamageableComponent_ClassNetCache'
-        # -> '/Script/ShooterGame.DamageableComponent'
-        return gp.replace(CLASS_NET_CACHE_SUFFIX, '')
-    return gp
+    """An actor's class from its first group_path, for the legacy fallback
+    without actors.parquet: a property group_path IS the class path, and an
+    RPC group's is the class plus the _ClassNetCache suffix."""
+    return gp.replace(CLASS_NET_CACHE_SUFFIX, '')
 
 
 def _to_package_path(class_path: str) -> str:
     """Drop the `.ClassName_C` suffix, leaving the UE package path.
 
-    actors.parquet carries the full object path
-    ("/Game/Characters/Hunter/Hunter_PC.Hunter_PC_C") but the C# reference
-    emits actor_spawned.replication_class_path as the package path alone
-    ("/Game/Characters/Hunter/Hunter_PC"), and valplay's own docstrings
-    document that as the spawn shape.
-
-    The distinction is invisible to consumers that split on "." -- which is
-    why weapon_stats was already correct -- but ability_usage.top_classes and
-    ability_detail.by_ability take `path.split("/")[-1]` verbatim, so with the
-    suffix attached every ability key read as "Foo.Foo_C" instead of "Foo".
-
-    Verified against the reference on 02d4d478: after stripping, every shared
-    path matches with zero count mismatches.
+    actors.parquet has ".../Hunter_PC.Hunter_PC_C"; the reference's
+    actor_spawned.replication_class_path is ".../Hunter_PC". Splitting on "."
+    hides the difference, but ability_usage.top_classes and
+    ability_detail.by_ability key on `path.split("/")[-1]` ("Foo.Foo_C" vs
+    "Foo"). After stripping, every path shared with the reference on 02d4d478
+    matches, with zero count mismatches.
     """
     slash = class_path.rfind("/")
     tail = class_path[slash + 1:]
@@ -1682,9 +1315,7 @@ def _to_package_path(class_path: str) -> str:
 
 
 def _group_path_to_archetype(gp: str) -> str:
-    """Derive a Default__X_PC_C archetype path from the group_path."""
-    # e.g. '/Game/Characters/Wushu/Wushu_PC.Wushu_PC_C'
-    # archetype = 'Default__Wushu_PC_C'
+    """'.../Wushu_PC.Wushu_PC_C' -> 'Default__Wushu_PC_C' (legacy fallback)."""
     if '.' in gp:
         leaf = gp.rsplit('.', 1)[-1]
         return f"Default__{leaf}"
@@ -1692,252 +1323,117 @@ def _group_path_to_archetype(gp: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# RPC name normalization
-# ---------------------------------------------------------------------------
-def _normalize_rpc_name(name: str) -> str:
-    """Map vrfkit's RPC field_name prefix to the C# parser's function_name.
-
-    WHY: vrfkit uses the exact ClassNetCache field name as the RPC name prefix
-    in field_name (e.g. 'MulticastNotifyDamage_Point'). The C# parser emits
-    the same names, but some zero-param RPCs may differ in casing or prefix.
-    """
-    # Most are identical. Known mappings:
-    return name
-
-
-# ---------------------------------------------------------------------------
 # RPC parameter normalization
 # ---------------------------------------------------------------------------
+#: Damage RPC booleans the C# reference spells without vrfkit's 'b' prefix.
+_DAMAGE_PARAM_RENAMES = {
+    "bDamageKilledTarget": "DamageKilledTarget",
+    "bAliveAfterDamage": "AliveAfterDamage",
+    "bIsWallPenetration": "IsWallPenetration",
+    "bEquippableUsedZoomed": "EquippableUsedZoomed",
+    "bEquippableUsedInFocusMode": "EquippableUsedInFocusMode",
+}
+
+
 def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
                          tally=None) -> dict | None:
-    """Normalize an RPC parameter name and value to match C# parser output.
+    """Rename/reshape one RPC parameter to the C# output; None drops it.
 
-    WHY: vrfkit uses prefixed 'b' for booleans (e.g. 'bDamageKilledTarget')
-    while C# emits 'DamageKilledTarget'. Also, RegionalDamage is stored as
-    int enum in vrfkit but as string in C# output.
-
-    Members of a life-change array are dropped. vrfkit now emits one row per
-    member of `LifeChangeEvents[]`/`LifeChangeBySection[]` alongside the parent
-    blob row, and those rows arrive here spelled `LifeChangeEvents[0].LifeResult`
-    -- which no branch below matches, so they fell through to the generic
-    assignment and put flat keys like that straight into the event payload.
-    Confirmed by injecting two such rows and reading them back out of
-    `events.ndjson`, not inferred. The parent blob row still carries the same
-    information in the shape this adapter expects, so skipping the children
-    loses nothing here -- as long as the parent is there. On the damage RPCs,
-    whose blob valplay decodes, a member that arrives without it is counted
-    (`raw_blobs_unavailable`, see `_build_rpc_events`).
-
-    `tally` is optional so the function stays callable on its own; the
-    conversion passes the real one for `damaged_bone_undecoded`.
+    Only the damage RPCs are reshaped ('b' booleans, RegionalDamage ordinals,
+    vectors, EquippableUsed, blobs, DamagedBone); every other RPC's
+    parameters pass through. Members of `LifeChangeEvents[]` and
+    `LifeChangeBySection[]` (`LifeChangeEvents[0].LifeResult`, ...) are
+    dropped: the parent blob row carries them in the expected shape, and on
+    the damage RPCs a member arriving without it is counted
+    (`raw_blobs_unavailable`, `_build_rpc_events`).
     """
     if "[" in param and param.split("[", 1)[0] in (
         "LifeChangeEvents",
         "LifeChangeBySection",
     ):
         return None
+    if rpc_name not in DAMAGE_RPC_NAMES:
+        return {param: value}
 
-    result = {}
-
-    if rpc_name in ("MulticastNotifyDamage_Point", "MulticastNotifyDamage_Base"):
-        # Parameter name mapping for damage RPCs
-        param_map = {
-            "bDamageKilledTarget": "DamageKilledTarget",
-            "bAliveAfterDamage": "AliveAfterDamage",
-            "bIsWallPenetration": "IsWallPenetration",
-            "bEquippableUsedZoomed": "EquippableUsedZoomed",
-            "bEquippableUsedInFocusMode": "EquippableUsedInFocusMode",
-        }
-        out_name = param_map.get(param, param)
-
-        # RegionalDamage: int -> string
-        if param == "RegionalDamage" and not is_raw:
-            value = REGIONAL_DAMAGE_MAP.get(value, f"regional_damage__unknown_{value}")
-
-        # Damage geometry: the parser now decodes these as quantized vectors
-        # (previously raw blobs, because the C# custom decoder hid the type).
-        # They arrive as the compact "(x,y,z)" string and the reference emits
-        # {x, y, z}. Left as the raw payload if a value ever fails to parse --
-        # visibly absent beats a fabricated zero vector.
-        if param in DAMAGE_VECTOR_PARAMS:
-            parsed = _parse_vector_or_none(value)
-            result[out_name] = parsed if parsed is not None else value
-            return result
-
-        # EquippableUsed: net GUID -> the C# ValorantEquippable shape.
-        #
-        # Name/ClassPath stay null and Category stays "unknown" because that is
-        # what the C# parser emits: its resolver looks the GUID up in the
-        # NetGuidCache path table, and weapon instances are dynamic actors that
-        # never register a path there. valplay resolves the gun downstream from
-        # actor_spawned instead (_actorindex.build_actor_class_index), so
-        # filling these in here would diverge from the reference for no gain.
-        #
-        # This used to read the raw bits as a fixed little-endian uint16, which
-        # was wrong twice over: the field is IntPacked (8/16/24 bits wide
-        # depending on the value), and the low bit of the first byte is
-        # IntPacked's continuation flag, so every multi-byte value came out odd
-        # and could never be a valid dynamic NetGUID. The overlay now types the
-        # field as ObjectNetGuid, so the parser hands us the decoded integer.
-        if param == "EquippableUsed":
-            if isinstance(value, int) and not is_raw:
-                result[out_name] = {
-                    "NetGuid": value,
-                    "Name": None,
-                    "ClassPath": None,
-                    "Category": "unknown",
-                }
-            else:
-                # Undecodable: pass the bits through rather than guessing.
-                result[out_name] = value
-            return result
-
-        # LifeChangeEvents: keep as blob. `_build_rpc_events` builds it from
-        # raw_bits whenever the row has them, typed or not (see
-        # `_RAW_SOURCED_RPC_PARAMS`), so `is_raw` here means "the blob exists".
-        if param == "LifeChangeEvents" and is_raw:
-            # Pass through as {BitCount, Data, TypeName} matching C# format
-            if isinstance(value, dict):
-                value["TypeName"] = "LifeChangeEvents"
-            result[out_name] = value
-            return result
-
-        # DamagedBone is an FName the overlay decodes into value_str: all
-        # 632,906 MulticastNotifyDamage_Point rows on the 1,018-export corpus
-        # are typed (2026-09-28; _Base carries none). A raw one is a decode
-        # the parser could not do -- it counts that on its side -- and it is
-        # published as null and counted, not guessed at.
-        #
-        # This branch used to ASCII-decode the wire bytes with
-        # errors='replace' inside a bare `except`, so it could not fail: the
-        # FName "Head" came out as '\n\x00\x00\x00' plus replacement
-        # characters, the same mojibake apply_type_corrections.py records
-        # shipping for all 581 payloads when the field was forced to Raw.
-        # Null rather than the raw blob because valplay's `_bone_region`
-        # files None under "other", and would raise TypeError on a dict
-        # (`bone in HEAD_BONES`, a frozenset).
-        if param == "DamagedBone" and is_raw:
-            _bump(tally, "damaged_bone_undecoded")
-            result[out_name] = None
-            return result
-
-        # DeathMontageEffectOverride and ...Context: the reference labels them
-        # blobs with exactly these TypeNames. The parser now types both as
-        # ObjectNetGuid -- an FXC_* effect class and a pawn actor reference --
-        # and the RPC loop hands their wire bits back here as the blob, so the
-        # event keeps the reference's shape while fields.parquet carries the
-        # GUID. A startswith match also swallowed
-        # DeathMontageEffectOverrideIsQueued, which is a 1-bit bool: 632 events
-        # shipped it as a blob with an invented TypeName where the reference
-        # emits plain false.
-        if param in DEATH_MONTAGE_BLOB_PARAMS and is_raw:
-            if isinstance(value, dict):
-                value["TypeName"] = param
-            result[out_name] = value
-            return result
-
-        result[out_name] = value
-        return result
-
-    elif rpc_name == "MulticastNotifyKilledEnemy":
-        # Parameters: KillerCharacter, KilledCharacter, MultikillLevel
-        result[param] = value
-        return result
-
-    elif rpc_name in ("MulticastEndRound", "ClientRoundStart"):
-        # NewRoundNumber
-        result[param] = value
-        return result
-
-    elif rpc_name == "MulticastSetPhase":
-        result[param] = value
-        return result
-
-    elif rpc_name == "MulticastReceivePlayerResurrectEvent":
-        result[param] = value
-        return result
-
-    else:
-        # Generic: pass through all params
+    out_name = _DAMAGE_PARAM_RENAMES.get(param, param)
+    if param == "RegionalDamage" and not is_raw:
+        value = REGIONAL_DAMAGE_MAP.get(value, f"regional_damage__unknown_{value}")
+    elif param in DAMAGE_VECTOR_PARAMS:
+        # Quantized vectors as "(x,y,z)"; the reference emits {x, y, z}. An
+        # unparseable one stays as it came: visibly absent beats a zero vector.
+        parsed = _parse_vector_or_none(value)
+        if parsed is not None:
+            value = parsed
+    elif param == "EquippableUsed":
+        # The decoded ObjectNetGuid -> the C# ValorantEquippable shape; an
+        # undecoded value passes its bits through, never a guess. Name and
+        # ClassPath null and Category "unknown", as C# emits them: weapon
+        # instances are dynamic actors with no NetGuidCache path, and valplay
+        # resolves the gun from actor_spawned (_actorindex).
+        if isinstance(value, int) and not is_raw:
+            value = {
+                "NetGuid": value,
+                "Name": None,
+                "ClassPath": None,
+                "Category": "unknown",
+            }
+    elif param == "LifeChangeEvents" or param in DEATH_MONTAGE_BLOB_PARAMS:
+        # The reference's labelled blob {BitCount, Data, TypeName}; the RPC
+        # loop builds it from raw_bits typed or not, so `is_raw` means "the
+        # blob exists". The death-montage pair is typed ObjectNetGuid (an FXC_*
+        # effect class, a pawn) in fields.parquet, and the loop hands its wire
+        # bits back so the event keeps the reference's shape. Exact names: a
+        # startswith also caught the 1-bit ...IsQueued bool in 632 events.
         if is_raw and isinstance(value, dict):
-            # Keep blob format
-            pass
-        result[param] = value
-        return result
+            value["TypeName"] = param
+    elif param == "DamagedBone" and is_raw:
+        # An FName the overlay decodes: all 632,906 MulticastNotifyDamage_Point
+        # rows on the 1,018-export corpus are typed (2026-09-28; _Base carries
+        # none). A raw one is published as null and counted, never rendered
+        # from the bytes (that shipped mojibake once): valplay's `_bone_region`
+        # files None under "other" but raises TypeError on a dict.
+        _bump(tally, "damaged_bone_undecoded")
+        value = None
+    return {out_name: value}
 
 
 # ---------------------------------------------------------------------------
 # Conversion phases
 #
-# Every phase that appends to `events` is order-sensitive: `events.sort` at the
-# end is stable, so events that tie on (packet_id, time_ms) come out in the
-# order the phases produced them. Keep the phase order (actors, properties,
-# RPCs, server timeline) and the append order inside each phase.
+# `events.sort` at the end is stable, so events tying on (packet_id, time_ms)
+# keep the order the phases appended them in: keep the phase order (actors,
+# properties, RPCs, server timeline) and the append order inside each phase.
 # ---------------------------------------------------------------------------
-#: Bump when the bundle manifest's shape changes in a way a consumer must
-#: notice. valplay's resume marker records it, so an older bundle is rebuilt
-#: instead of being read under the newer contract.
+#: The bundle manifest's shape version; valplay's resume marker records it and
+#: rebuilds an older bundle. valplay's gate is an equality check
+#: (`scripts/parse_replays.py` ADAPTER_SCHEMA_VERSION;
+#: `valplay/tests/ci-stack-smoke.mjs` pins its worker image's constant to it),
+#: so a bump refuses every existing bundle until valplay re-pins `VRFKIT_REF`.
+#: Bump only when a bundle would be MISREAD by a consumer that ignores the
+#: change.
 #:
-#: 1 -> 2: `quality`, `net_field_export_groups` and `adapter` were added. A
-#: bundle at 1 carries no upstream accounting at all, so a consumer cannot
-#: distinguish "the export was complete" from "nobody counted".
+#: 1 -> 2 added `quality`, `net_field_export_groups` and `adapter`: a bundle
+#: at 1 cannot tell "the export was complete" from "nobody counted".
 #:
-#: NOT bumped for `actor_dormant`, deliberately. The version gate in valplay
-#: (`scripts/parse_replays.py`, `ADAPTER_SCHEMA_VERSION`) is an equality check
-#: that REFUSES any bundle whose version it does not match, and
-#: `valplay/tests/ci-stack-smoke.mjs` asserts the built worker image's adapter
-#: constant equals it -- so a bump breaks valplay's CI and refuses every
-#: existing bundle until that repo re-pins `VRFKIT_REF` and rebuilds its worker
-#: image. The version exists to force a rebuild when a bundle would otherwise
-#: be MISREAD, and that is not the case here:
-#:
-#: * `actor_dormant` is an ADDITIVE type. valplay filters events by exact
-#:   `type` equality and keeps no event-type allowlist, so a consumer that does
-#:   not know it simply does not match it -- no crash, no misread.
-#: * Every field on `actor_closed` is unchanged; `actor_event` is added
-#:   alongside them, and an unknown key is ignored by every reader here.
-#: * The change makes existing consumers MORE correct with no edit on their
-#:   side: `actor_closed` stops carrying dormancies, so a spawn/close pairing
-#:   that used to truncate a settled ability's lifetime now leaves that
-#:   instance unpaired instead of wrongly ended.
-#:
-#: What DOES change for valplay is which instances it measures, and this was
-#: MEASURED against its real `compute_ability_detail`, not assumed. On 8 Sage
-#: walls where 6 are destroyed at 3,000ms and 2 settle dormant at 40,000ms:
-#:
-#:   before: instances 8, cap 40,000ms, destroyed 6 (75.0%)
-#:   after : instances 6, cap  3,000ms, destroyed 0 (0.0%)
-#:
-#: Valplay now consumes `actor_dormant` as a right-censored lifetime: a later
-#: real close remains an exact end, while a dormant actor with no close carries
-#: only the observed lower bound and never counts as destroyed. That preserves
-#: this adapter's wire-faithful distinction all the way into the metric instead
-#: of choosing either of the two imperfect measurements above.
-#:
-#: A version bump could not have communicated any of that -- it would only have
-#: refused the bundle outright. Bump this when a bundle would be MISREAD by a
-#: consumer that ignores the change, which is the opposite of this case.
-#:
-#: ``level_names_and_times`` is likewise additive. An older consumer ignores
-#: it and retains its existing event-path fallback; a newer consumer treats an
-#: absent value as unavailable and uses that same fallback. Neither generation
-#: can misread the other one's bundle, so this addition does not justify
-#: refusing every schema-2 bundle already on disk.
-#:
-#: ``server_timeline_event`` is additive for the same reason: older consumers
-#: match exact event types and ignore it, while newer consumers can use the
-#: server-labelled timeline as independent corroboration.  No existing event's
-#: shape or meaning changes.
+#: Additive, not bumped (valplay matches exact event types, keeps no type
+#: allowlist and ignores unknown keys, so neither generation misreads the
+#: other's bundle):
+#: * `actor_dormant`, and `actor_event` beside `actor_closed`'s unchanged
+#:   fields. Existing consumers become more correct: `actor_closed` no longer
+#:   carries dormancies. Measured with valplay's `compute_ability_detail` on 8
+#:   Sage walls (6 destroyed at 3,000 ms, 2 dormant at 40,000 ms): before, 8
+#:   instances, cap 40,000 ms, 6 destroyed (75.0%); after, 6, cap 3,000 ms,
+#:   0 (0.0%). valplay now reads `actor_dormant` as a right-censored lifetime.
+#: * `level_names_and_times`: both generations fall back to the event path
+#:   when it is absent.
+#: * `server_timeline_event`: independent, server-labelled corroboration.
 BUNDLE_SCHEMA_VERSION = 2
 
 
 def _upstream_row_check(declared, observed) -> dict:
-    """One declared-vs-observed row count, and whether it can be judged.
-
-    `agrees` is `None`, not `True`, when the export declared nothing. An
-    absent declaration is a fact about the export, and reporting it as
-    agreement would let a manifest with no accounting in it certify itself.
-    """
+    """One declared-vs-observed row count. `agrees` is `None`, not `True`,
+    when nothing was declared: a manifest without accounting must not
+    certify itself."""
     return {
         "declared": declared,
         "observed": observed,
@@ -1946,13 +1442,9 @@ def _upstream_row_check(declared, observed) -> dict:
 
 
 def _public_level_names(value):
-    """Copy only the public, typed portion of replay level metadata.
-
-    The neighbouring ``game_specific_data`` header can contain account
-    subjects and loadout data, so forwarding the whole header is not an
-    option.  Level roots are independently useful (they are the map URL), but
-    even those cross the adapter seam as an explicit two-field allowlist.
-    """
+    """The level roots (the map URL) through a two-field allowlist: the
+    neighbouring ``game_specific_data`` header can hold account subjects and
+    loadouts, so nothing else of the header crosses."""
     if not isinstance(value, list):
         return None
     levels = []
@@ -1974,48 +1466,27 @@ def _public_level_names(value):
 def _write_manifest(manifest: dict, output_dir: Path, adapter: dict):
     """Write the bundle manifest, forwarding vrfkit's own accounting.
 
-    Three things cross this seam that used to stop here:
-
-    * ``quality`` -- vrfkit's complete loss/fallback accounting, copied
-      through VERBATIM. Not re-derived, not summarised, not defaulted: the
-      point of forwarding it is that the consumer reads the producer's own
-      numbers, and a value this adapter invented would be the opposite of
-      that. Absent upstream, it is written as ``null`` -- a visible absence,
-      never a plausible zero.
-    * ``net_field_export_groups`` -- the replay's handle -> field-name
-      dictionary, also verbatim. It is the only thing in the export that can
-      turn a wire handle back into a name, and valplay's `_roundinfo` decoder
-      has been naming handles 41-45 from a hardcoded list while citing this
-      table as its source. With the table present the naming becomes a check
-      instead of an assumption.
-    * ``level_names_and_times`` -- the public level roots and their times,
-      copied through a strict two-field allowlist. The first root is the
-      replay's authoritative map URL; unlike event-path inference it is
-      present even when no map actor path reaches the converted event stream.
-    * ``adapter`` -- what THIS process measured, kept in its own object so it
-      can never be mistaken for an upstream figure. It carries the exact
-      identities a consumer can re-verify (line counts) and the declared-vs-
-      observed comparisons this adapter was able to make.
-
-    ``players`` is deliberately NOT forwarded; see the note in `_convert_into`.
+    Four things cross this seam (docs/USAGE.md, "What the bundle manifest
+    carries", which also says why `players` does not): `quality` and
+    `net_field_export_groups`, VERBATIM and null when absent, never a
+    plausible zero (the handle table turns valplay's hardcoded `_roundinfo`
+    names for handles 41-45 into a check); the public `level_names_and_times`,
+    whose first root is the authoritative map URL; and `adapter`, this
+    process's own measurements, kept apart so they cannot pass for upstream
+    figures.
     """
     quality = manifest.get("quality")
     groups = manifest.get("net_field_export_groups")
     levels = _public_level_names(manifest.get("level_names_and_times"))
     out_manifest = {
         "replay_version": manifest.get("replay_version", "unknown"),
-        # No default: an absent duration_ms is a visible null, not a
-        # fabricated 0 ms match -- see `source_size_bytes` below and the
-        # `quality` note above for the same rule. valplay's
-        # pipeline/metrics/compute_metrics.py reads `duration_ms` with no
-        # default of its own, so a 0 here would ship as a real, plausible
-        # match length instead of surfacing as missing.
+        # No default: compute_metrics.py reads it without one, so a 0 would
+        # pass for a real match length.
         "duration_ms": manifest.get("duration_ms"),
         "replay_build": manifest.get("replay_build", ""),
         "replay_changelist": manifest.get("replay_changelist", 0),
         "source_file": manifest.get("source_file", ""),
         "source_size_bytes": manifest.get("source_size_bytes"),
-        # Mark as vrfkit-converted
         "converter": "vrfkit/tools/to_valplay_bundle.py",
         "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
         "quality": quality if isinstance(quality, dict) else None,
@@ -2029,15 +1500,12 @@ def _write_manifest(manifest: dict, output_dir: Path, adapter: dict):
 
 
 def _dict_column_to_pylist(column):
-    """A dictionary-encoded column as a list that SHARES its string objects.
+    """A dictionary-encoded column as a list SHARING its string objects
+    (`to_pylist` for any other column).
 
-    `column.cast('string').to_pylist()` builds one Python str per ROW. On
-    02d4d478's fields.parquet that is 1,246,812 objects for `group_path`'s 443
-    distinct values and 1,207,778 for `field_name`'s 3,954 -- a hundred-odd MB
-    of duplicates, and 2.3x slower than reading the dictionary and indexing it.
-
-    Falls back to `to_pylist` for a column that is not dictionary-encoded, so
-    the caller does not have to care which it got.
+    `cast('string').to_pylist()` makes one str per row: on 02d4d478's
+    fields.parquet 1,246,812 for `group_path`'s 443 values and 1,207,778 for
+    `field_name`'s 3,954, a hundred-odd MB of duplicates, 2.3x slower.
     """
     arr = column.combine_chunks()
     if not pa.types.is_dictionary(arr.type):
@@ -2048,16 +1516,10 @@ def _dict_column_to_pylist(column):
 
 
 def _numeric_column_to_pylist(column):
-    """A non-nullable numeric column as a Python list, via numpy.
-
-    `to_pylist()` boxes one Python int per row through pyarrow's per-element
-    type dispatch; `to_numpy()` hands over the raw buffer and `.tolist()`
-    re-boxes it in C. On 02d4d478's 1,246,812-row fields.parquet that is ~14x
-    faster for the uint32 columns (250 ms -> 16 ms each).
-
-    Only safe on a column with NO nulls: numpy has no integer NaN, so a nullable
-    integer column would be widened to float64 with NaN where the holes were.
-    Use `_nullable_numeric_to_pylist` for those.
+    """A numeric column with NO nulls as a Python list, via numpy: ~14x
+    faster than `to_pylist` on 02d4d478's 1,246,812-row uint32 columns
+    (250 ms -> 16 ms each). numpy has no integer NaN and would widen a
+    nullable column to float64; use `_nullable_numeric_to_pylist` for those.
     """
     return column.to_numpy(zero_copy_only=False).tolist()
 
@@ -2065,11 +1527,9 @@ def _numeric_column_to_pylist(column):
 def _nullable_numeric_to_pylist(column):
     """A nullable numeric column as a list of (value | None), via numpy.
 
-    Reads the validity bitmap and the primitive buffer separately. The nulls are
-    filled with a type-matched sentinel only so the buffer survives `to_numpy`
-    without being widened to float64; the mask then punches None back in, so the
-    result matches `to_pylist` element-for-element (same value AND same Python
-    type) while being ~3x faster.
+    Nulls are filled with a type-matched sentinel so `to_numpy` does not widen
+    to float64, then the validity mask puts None back: equal to `to_pylist`
+    in value and Python type, ~3x faster.
     """
     arr = column.combine_chunks()
     n = len(arr)
@@ -2088,11 +1548,7 @@ def _nullable_numeric_to_pylist(column):
 
 
 class _FieldColumns(NamedTuple):
-    """fields.parquet held column-wise.
-
-    pyarrow iteration row-by-row is slow; batch-extracting each column to a
-    Python list once and indexing it is much faster.
-    """
+    """fields.parquet as one Python list per column (row iteration is slow)."""
 
     n_rows: int
     time_ms: list
@@ -2155,30 +1611,19 @@ def _load_field_columns(fields_path: Path, verbose: bool) -> _FieldColumns:
 
 
 def _group_rows(cols: _FieldColumns):
-    """Classify every field row: RPC vs replicated property, plus actor lifetimes.
+    """Group field rows into property and RPC groups (row indices by key),
+    plus each actor's first/last appearance.
 
-    RPCs are the rows whose group_path contains '_ClassNetCache'; properties are
-    everything else.
-
-    One pass, not two: `prop_groups` and `rpc_groups` are dicts, so they iterate
-    in insertion order, and that order decides how events tying on
-    (packet_id, time_ms) are ordered in the written bundle. Splitting this loop
-    would reshuffle them.
+    RPC rows are those whose group_path contains '_ClassNetCache'. One pass:
+    the dicts' insertion order decides how events tying on (packet_id,
+    time_ms) are written, and splitting the loop would reshuffle them.
     """
-    # Track actor first/last appearance for actor_spawned/actor_closed
-    # (fallback when actors.parquet is absent).
+    # First/last appearance: the lifetime fallback without actors.parquet.
     actor_first = {}  # actor_net_guid -> (time_ms, packet_id, group_path)
     actor_last = {}   # actor_net_guid -> (time_ms, packet_id)
-
-    # Group key -> list of row indices
-    # For properties: (packet_id, actor_net_guid, object_net_guid, group_path)
-    # For RPCs: (packet_id, actor_net_guid, group_path, handle)
     prop_groups = defaultdict(list)
     rpc_groups = defaultdict(list)
-    # Counted, not merely skipped. vrfkit reports the same quantity as
-    # `quality.net.unresolved_rpc_payloads_preserved`; recording this
-    # adapter's own count of the rows it actually saw makes the two
-    # comparable instead of leaving the skip invisible.
+    # Counted, to compare with quality.net.unresolved_rpc_payloads_preserved.
     unresolved_cnc_rows = 0
 
     col_time = cols.time_ms
@@ -2199,7 +1644,6 @@ def _group_rows(cols: _FieldColumns):
         pid = col_pid[i]
         ms = col_time[i]
 
-        # Track actor lifecycle
         if actor not in actor_first:
             actor_first[actor] = (ms, pid, gp)
         actor_last[actor] = (ms, pid)
@@ -2209,33 +1653,29 @@ def _group_rows(cols: _FieldColumns):
             handle = col_handle[i]
             rpc_groups[(pid, actor, gp, handle)].append(i)
         else:
-            # Keyed by subobject too: a character replicates several
-            # ItemSlot subobjects, and merging them into one event makes
-            # the inventory look like a single slot.
+            # Keyed by subobject too: a character's several ItemSlot
+            # subobjects would otherwise merge into one slot.
             prop_groups[(pid, actor, col_obj[i], gp)].append(i)
 
     return actor_first, actor_last, prop_groups, rpc_groups, unresolved_cnc_rows
 
 
-#: `actors.event` -> the bundle event type it publishes as. THREE values, not
-#: two: `dormant` is the server suspending replication of an actor that is
-#: still alive, so it is NOT a despawn and must not share a type with one. See
-#: CLAUDE.md ("Dormancy is not destruction; only `close` is a despawn") and
-#: `tools/extract_active_effects.py`, which pairs the same column.
-#:
-#: A value absent from this map is published as `actor_lifecycle_unknown` and
-#: counted, never folded into the nearest known type.
+#: `actors.event` -> the bundle event type (`open` is actor_spawned). THREE
+#: values: `dormant` is the server suspending replication of a live actor, NOT
+#: a despawn (CLAUDE.md; extract_active_effects.py pairs the same column), and
+#: valplay's ability_detail.py pairs spawn/close into a lifetime, so a dormant
+#: settled smoke or wall published as a close read as destroyed. A type of its
+#: own, not a flag on actor_closed, so consumers that do not know it ignore
+#: it. An unmapped value becomes `actor_lifecycle_unknown`, counted.
 _ACTOR_EVENT_TYPES = {
     "close": "actor_closed",
     "dormant": "actor_dormant",
 }
 
 
-# Event-chunk payload words are NOT self-describing.  This is the same closed
-# vocabulary used by ``crates/vrfkit/src/driver/mod.rs`` after its residual-zero
-# layout check: only these groups have a structurally established word count.
-# An unknown future group still crosses as a labelled timestamp, but none of
-# its payload words are assigned a meaning here.
+# Event-chunk payload words are not self-describing: the closed vocabulary of
+# crates/vrfkit/src/driver/mod.rs's residual-zero layout check. An unknown
+# group still crosses as a labelled timestamp, with no words.
 _SERVER_TIMELINE_WORD_COUNTS = {
     "characterDeath": 2,
     "characterUltimateUsed": 1,
@@ -2246,12 +1686,10 @@ _SERVER_TIMELINE_WORD_COUNTS = {
     "spikeExploded": 0,
 }
 
-# Structural Event-payload values measured over all 109,126 Event chunks in
-# the 527-replay, three-build corpus. These are public Unreal enum constants,
-# not replay-provided identities. The adapter rechecks them rather than trusting
-# an arbitrary Parquet string before allowing `payload_name` across the privacy
-# seam. Tag and seconds travel only when the whole tuple agrees; partial or
-# third-party rows fall back to the already-public group/times/words.
+# Structural payload values measured over all 109,126 Event chunks of the
+# 527-replay, three-build corpus: public Unreal enum constants, rechecked here
+# before `payload_name` may cross. Tag, name and seconds cross only as a whole
+# agreeing tuple; other rows keep the public group/times/words.
 _SERVER_TIMELINE_PAYLOAD_TAGS = {
     "characterDeath": 8,
     "characterUltimateUsed": 11,
@@ -2274,19 +1712,10 @@ EVENT_PAYLOAD_TIME_TOLERANCE_MS = 1.001
 
 
 class _PacketTimeIndex:
-    """Place packet-less Event chunks among packet-addressed replication rows.
-
-    Event chunks carry authoritative replay-relative times but no packet id;
-    the rest of ``events.ndjson`` is sorted in packet order because that is the
-    wire order.  For each event time we therefore use the largest packet id
-    observed at or before that time.  The prefix maximum keeps the derived key
-    monotone even if one malformed frame made a later packet report an earlier
-    timestamp -- the existing regression counter remains responsible for
-    surfacing that damaged time axis.
-
-    This key is ordering metadata only.  It is never published as if the Event
-    chunk itself declared a packet association.
-    """
+    """Order packet-less Event chunks among packet-ordered rows: an event time
+    maps to the largest packet id seen at or before it. The prefix maximum
+    stays monotone even when a bad frame gives a later packet an earlier time
+    (the regression counter reports that). Ordering only, never published."""
 
     def __init__(self, cols: "_FieldColumns"):
         max_packet_at_time = {}
@@ -2310,16 +1739,12 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
                                   verbose: bool) -> tuple[list, int | None]:
     """Publish the Event-chunk timeline through a privacy-safe allowlist.
 
-    ``events.parquet`` also holds a replay-scoped id, free-form metadata and
-    the original payload bytes. Any of those may contain account or match
-    identifiers, so none crosses this adapter seam. The structural payload
-    FString crosses only when it equals the fixed public enum constant for the
-    group and its tag/time tuple also matches the measured layout. Older
-    Parquet schemas simply omit those additive columns.
-
-    Returns ``(events, rows_read)``.  ``None`` means the table was absent;
-    zero means it was present and empty.  That distinction is needed for the
-    producer-declared row-count reconciliation in the bundle manifest.
+    events.parquet also holds a replay-scoped id, free-form metadata and raw
+    payload bytes, any of which may identify an account or match, so none
+    crosses. The payload FString crosses only when it equals the group's
+    public enum constant and the tag/time tuple matches the measured layout;
+    older exports lack those columns. Returns ``(events, rows_read)``,
+    rows_read None when the table is absent (not 0: it is reconciled).
     """
     path = export_dir / "events.parquet"
     if not path.exists():
@@ -2331,19 +1756,15 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
     time2 = _numeric_column_to_pylist(table.column("time2"))
     word0 = _nullable_numeric_to_pylist(table.column("word0"))
     word1 = _nullable_numeric_to_pylist(table.column("word1"))
-    row_count = len(table)
-    payload_tag = (
-        _nullable_numeric_to_pylist(table.column("payload_tag"))
-        if "payload_tag" in table.column_names else [None] * row_count
-    )
-    payload_name = (
-        table.column("payload_name").to_pylist()
-        if "payload_name" in table.column_names else [None] * row_count
-    )
-    payload_seconds = (
-        _nullable_numeric_to_pylist(table.column("payload_seconds"))
-        if "payload_seconds" in table.column_names else [None] * row_count
-    )
+
+    def optional(name, read):  # an additive column an older export lacks
+        if name in table.column_names:
+            return read(table.column(name))
+        return [None] * len(table)
+
+    payload_tag = optional("payload_tag", _nullable_numeric_to_pylist)
+    payload_name = optional("payload_name", pa.ChunkedArray.to_pylist)
+    payload_seconds = optional("payload_seconds", _nullable_numeric_to_pylist)
     packet_index = _PacketTimeIndex(cols)
     events = []
 
@@ -2391,19 +1812,15 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                         verbose: bool, tally: "_Tally"):
     """Build actor_spawned / actor_closed / actor_dormant events.
 
-    Returns ``(events, guid_class)``. `guid_class` maps an actor GUID to its
-    spawn class path and is filled from the same pass, because the shot events
-    built later need it for weapon identity.
-
-    `tally` is required, not optional: the unknown-lifecycle-value counter is
-    the only thing that distinguishes "this export used the three values this
-    adapter knows" from "a fourth appeared and was published as an unknown".
+    Returns ``(events, guid_class)``; `guid_class` (actor GUID -> spawn class
+    path) is filled in the same pass for the shots' weapon identity. `tally`
+    is required: only its unknown-value counter says a fourth value appeared.
     """
     events = []
     guid_class = {}  # actor net guid -> spawn class path
     actor_event_counts = Counter()
 
-    # actors.parquet is authoritative: it carries class/archetype/location from
+    # actors.parquet is authoritative: class, archetype and location come from
     # the spawn data itself.
     actors_path = export_dir / "actors.parquet"
     if actors_path.exists():
@@ -2424,28 +1841,20 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
 
         for i in range(len(actors_table)):
             if a_event[i] == 'open':
-                # Spawn coordinates are Float32 on the wire and in the Parquet
-                # column; widening them to Python floats would print the binary
-                # artefact instead of the value the reference shows.
-                #
-                # A missing coordinate stays missing. Only static actors reach
-                # here with no spawn data at all -- 27 opens on 02d4d478 --
-                # because the parser now writes the wire's (0,0,0) default for
-                # a dynamic actor whose location bit is clear rather than
-                # dropping it (pipeline.rs, read_optional_quantized_vector).
-                # Substituting {0,0,0} here would put those 27 back among the
-                # 66 that really do spawn at the origin.
+                # Float32 spawn coordinates, written shortest. A missing one
+                # stays null: only static actors lack spawn data (27 opens on
+                # 02d4d478; for a dynamic actor with its location bit clear the
+                # parser writes the wire's (0,0,0) default, pipeline.rs
+                # read_optional_quantized_vector), and {0,0,0} would mix them
+                # with the 66 that really spawn at the origin.
                 has_loc = a_sx[i] is not None or a_sy[i] is not None or a_sz[i] is not None
                 location = _vec3(
                     _f32_shortest(a_sx[i]) if a_sx[i] is not None else 0,
                     _f32_shortest(a_sy[i]) if a_sy[i] is not None else 0,
                     _f32_shortest(a_sz[i]) if a_sz[i] is not None else 0,
                 ) if has_loc else None
-                # Spawn rotation is independent of spawn location: a static
-                # actor can omit both, while a dynamic projectile may carry a
-                # direction even when its position is the origin.  Preserve
-                # that distinction and never fabricate a zero rotation for a
-                # row whose three nullable wire columns are all absent.
+                # Rotation is independent of location (a projectile at the
+                # origin may carry a direction); null when all three are null.
                 has_rotation = (
                     a_spitch[i] is not None
                     or a_syaw[i] is not None
@@ -2461,18 +1870,14 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                 } if has_rotation else None
                 class_path = a_class[i]
                 if class_path:
-                    # First open wins: a GUID can be reused after a close, but
-                    # the shot events that reference it belong to its first life.
+                    # First open wins: a GUID reused after a close still
+                    # belongs, for the shots, to its first life.
                     guid_class.setdefault(a_guid[i], class_path)
-                # A static actor has no archetype and no class, and the
-                # reference emits null for both. Deriving "Default__" + the leaf
-                # of an empty class path produced the literal string
-                # "Default__" for all 27 of them -- a value that looks like an
-                # archetype and identifies nothing.
+                # Null for a static actor, as in the reference; never a bare
+                # "Default__".
                 archetype = a_arch[i]
-                # guid_class above keeps the full object path (weapon lookup
-                # matches on it); the event carries the package path the
-                # reference emits.
+                # guid_class keeps the full object path the weapon lookup
+                # matches; the event carries the reference's package path.
                 event = {
                     "type": "actor_spawned",
                     "time_ms": a_time[i],
@@ -2485,37 +1890,13 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                 }
                 events.append((a_pid[i], a_time[i], event))
             else:
-                # `actors.event` has THREE values -- open / close / dormant --
-                # and this was an `else`, so every dormant row published as
-                # `actor_closed`. Dormancy is the server stopping replication
-                # of an actor that is STILL ALIVE, which for a settled smoke,
-                # wall or trap is its normal steady state; valplay reads
-                # `actor_closed` as a despawn (pipeline/metrics/
-                # ability_detail.py pairs spawn/close into a lifetime), so a
-                # settled ability read as destroyed with its lifetime
-                # truncated to the moment it stopped moving.
-                #
-                # `tools/extract_active_effects.py` in this same directory
-                # already gets this right and says why. This is that reasoning
-                # applied one hop later, at the last seam before the data is
-                # consumed.
-                #
-                # WHY a distinct type rather than a flag on `actor_closed`:
-                # valplay filters events by exact `type` equality and has no
-                # event-type allowlist, so a new type is ignored by consumers
-                # that do not know it while `actor_closed` immediately stops
-                # over-reporting despawns. A flag would leave every existing
-                # consumer reading dormancy as destruction until valplay
-                # changed in lockstep. See BUNDLE_SCHEMA_VERSION for why this
-                # is not a version bump.
+                # close, dormant, or a value this adapter does not know: see
+                # _ACTOR_EVENT_TYPES, and BUNDLE_SCHEMA_VERSION for the bump.
                 raw_event = a_event[i]
                 event_type = _ACTOR_EVENT_TYPES.get(raw_event)
                 if event_type is None:
-                    # A fourth value the parser learned and this adapter has
-                    # not. Defaulting it to a despawn is the bug above; it is
-                    # published under its own type carrying the raw value, and
-                    # counted, so it is a visible unknown rather than a
-                    # plausible close.
+                    # Its own type with the raw value, and counted: a visible
+                    # unknown, never a plausible close.
                     tally.bump("unknown_actor_lifecycle_events")
                     event_type = "actor_lifecycle_unknown"
                 actor_event_counts[event_type] += 1
@@ -2524,9 +1905,7 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                     "time_ms": a_time[i],
                     "actor_net_guid": a_guid[i],
                     "channel": a_chan[i],
-                    # The wire's own value, forwarded so a consumer can audit
-                    # the mapping above instead of trusting this adapter's
-                    # choice of type name.
+                    # The wire's value, so a consumer can audit the mapping.
                     "actor_event": raw_event,
                 }
                 events.append((a_pid[i], a_time[i], event))
@@ -2536,7 +1915,7 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
             for name, count in sorted(actor_event_counts.items()):
                 print(f"    {name}: {count:,}")
     else:
-        # Fallback: infer from first/last field appearance (legacy behavior)
+        # Legacy fallback: lifetimes from the first/last field row.
         for actor, (ms, pid, gp) in actor_first.items():
             class_path = _group_path_to_class(gp)
             archetype = _group_path_to_archetype(gp)
@@ -2550,13 +1929,8 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
             }
             events.append((pid, ms, event))
 
-        # This branch infers lifetimes from the first and last field row for
-        # each actor because actors.parquet is absent, so there is no `event`
-        # column and no dormancy information AT ALL -- the last field row is
-        # the last time the actor was seen, whatever the reason. `actor_event`
-        # is therefore null rather than "close": this path cannot tell a
-        # despawn from a dormancy, and claiming either would be inventing the
-        # distinction the actors.parquet branch above exists to preserve.
+        # No `event` column here: the last field row cannot tell a despawn
+        # from dormancy, so `actor_event` is null, not "close".
         for actor, (ms, pid) in actor_last.items():
             event = {
                 "type": "actor_closed",
@@ -2565,7 +1939,6 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                 "actor_event": None,
             }
             events.append((pid + 1, ms, event))
-            actor_event_counts["actor_closed"] += 1
 
     return events, guid_class
 
@@ -2573,12 +1946,9 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
 def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally):
     """Build export_group_received events from the replicated-property groups.
 
-    A row the parser could not name carries a value this bundle has no key to
-    put it under, so it is dropped -- 1,996 of them on the documented
-    reference export. The group still emits an event, which is right (the
-    other rows in it are real), but a group whose rows were ALL unnamed then
-    emits an event with an empty payload that is indistinguishable from a
-    genuine existence signal. `tally` is what tells the two apart.
+    A row with no field name has no key to go under: dropped and counted. A
+    group whose rows were all unnamed still emits an event, whose empty
+    payload only the tally tells apart from a genuine existence signal.
     """
     col_time = cols.time_ms
     col_fn = cols.field_name
@@ -2594,24 +1964,18 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
     for (pid, actor, obj, gp), row_indices in prop_groups.items():
         ms = col_time[row_indices[0]]
 
-        # Build nested payload from field paths.
-        # WHY two passes: vrfkit emits BOTH a bare array-container blob (e.g.
-        # field_name="Rounds", raw_bits=the whole serialized array) AND the
-        # individually-decoded sub-fields (e.g. "Rounds[0].Reports[0]...").
-        # If we naively set the bare blob first, it clobbers the list that
-        # _set_nested needs. Solution: first pass collects names that have
-        # indexed versions (contain '['), second pass skips bare blobs for
-        # those names.
+        # Two passes: vrfkit emits both the container row ("Rounds", the whole
+        # array) and its decoded sub-fields ("Rounds[0].Reports[0]..."), the
+        # elements first (stream.rs). Collect the names that have indexed
+        # sub-fields, so the second pass skips their containers.
         indexed_names = set()
         for ri in row_indices:
             fn = col_fn[ri]
             if fn and '[' in fn:
-                # Top-level array name = everything before first '['
                 indexed_names.add(fn[:fn.index('[')])
 
         payload = {}
-        # {RAW_BLOB_PREFERRED name: blob built?} for this event; created only
-        # for an event that carries such a field.
+        # {RAW_BLOB_PREFERRED name: blob built?}, only once one is touched.
         blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
@@ -2624,10 +1988,12 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
             )
             type_name = RAW_BLOB_PREFERRED.get(fn)
             if type_name is not None:
-                # The container row of a field whose consumer decodes the
-                # blob: built from raw_bits whether or not the row is also
-                # typed (see RAW_BLOB_PREFERRED). `_get_value` still ran above,
-                # so its multi-typed counter keeps seeing this row.
+                # A second row of this name replaces the first one's blob or
+                # stand-in below, or is dropped behind its blob.
+                if fn in payload:
+                    tally.bump("property_key_collisions")
+                # The RAW_BLOB_PREFERRED rule; `_get_value` ran above, so
+                # multi_typed_rows still sees the row.
                 if blob_state is None:
                     blob_state = {}
                 raw = col_raw[ri]
@@ -2637,10 +2003,9 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                     payload[fn] = blob
                     blob_state[fn] = True
                 else:
-                    # No bits, no blob: counted once the event is complete.
-                    # A typed value is published in the blob's place rather
-                    # than dropped -- the consumer skips a non-blob, visibly --
-                    # unless this event already built the blob.
+                    # No bits, no blob: counted when the event is complete.
+                    # A typed value goes in the blob's place (the consumer
+                    # skips a non-blob, visibly) unless a blob was built.
                     blob_state.setdefault(fn, False)
                     if value is not None and not blob_state[fn]:
                         payload[fn] = value
@@ -2648,12 +2013,9 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
             if value is None and not is_raw:
                 continue
 
-            # Combat report array leaves are labelled from the wire; the bundle
-            # wants the reference's member names. Keyed on the handle because
-            # the declared names are not unique within one element.
+            # See "Combat report leaf labels".
             fn = _combat_report_leaf_name(gp, fn, col_handle[ri])
 
-            # Normalize boolean field names (strip 'b' prefix)
             is_bool = col_bool[ri] is not None
             fn = _normalize_prop_field_name(fn, is_bool)
 
@@ -2662,32 +2024,28 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 if parsed_vec is not None:
                     value = parsed_vec
             elif fn in JSON_OBJECT_PROPERTIES and isinstance(value, str):
-                # No try/except: the parser writes this column, so a value that
-                # will not parse is a parser bug and must stop the run rather
-                # than quietly ship the raw string downstream.
+                # No try/except: the parser writes this column, so a value
+                # that will not parse is a parser bug and stops the run.
                 value = json.loads(value)
 
-            # Parse the field path and set in nested structure
             parts = _parse_field_path(fn, tally)
             if len(parts) == 1 and parts[0][1] is None:
-                # Simple top-level field. Skip it when it is the container of
-                # indexed sub-fields: the sub-fields carry the decoded data.
-                #
-                # Skipped whether raw OR typed. This used to test `is_raw`, and
-                # stream.rs writes a flattened array's element rows first and
-                # the container row after them, so a typed container reached
-                # the assignment below -- which no conflict counter watches --
-                # and replaced the decoded list with its own value. No such
-                # typed container occurs on the 1,018-export corpus
-                # (2026-09-28); typing one upstream must not change the bundle.
+                # A container of indexed sub-fields is skipped, raw OR typed:
+                # its elements carry the data. No typed container occurs on
+                # the 1,018-export corpus (2026-09-28); typing one upstream
+                # must not change the bundle.
                 bare_name = parts[0][0]
                 if bare_name in indexed_names:
                     continue
+                # The parser flattens struct members and static-array elements
+                # under one name only `handle` tells apart, so a repeat here is
+                # a different property, not a newer copy: 24,060 on 02d4d478.
+                if bare_name in payload:
+                    tally.bump("property_key_collisions")
                 payload[bare_name] = value
             elif parts[0][0] in RAW_BLOB_PREFERRED:
-                # A decoded member of a raw-blob field. The blob carries it, so
-                # the member is not published -- which makes a member whose
-                # event built no blob a loss, counted below.
+                # A decoded member of a raw-blob field is not published (the
+                # blob carries it), so one whose event built no blob is a loss.
                 if blob_state is None:
                     blob_state = {}
                 blob_state.setdefault(parts[0][0], False)
@@ -2697,7 +2055,7 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
         _count_unbuilt_blobs(blob_state, tally)
         _drop_padding_elements(payload)
 
-        # Emit even if payload is empty (some events are just existence signals)
+        # Emitted even when empty: some events are existence signals.
         event = {
             "type": "export_group_received",
             "time_ms": ms,
@@ -2716,23 +2074,15 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
     """Build rpc_received events, plus a valorant_shot_received for each shot RPC.
 
     Returns ``(events, shot_count, resolved_weapon_count)``. A shot RPC emits
-    both events, the shot first -- they tie on (packet_id, time_ms) and the
-    stable sort preserves that order.
+    both, the shot first; the stable sort keeps that order on their tie.
 
-    Two losses are counted rather than fixed, because the export cannot tell
-    us how to fix them:
-
-    * A group is keyed (packet_id, actor, group_path, handle), so one actor
-      invoking the same function TWICE in one packet produces one group. The
-      second call's parameters overwrite the first's and one rpc_received
-      comes out where two calls happened. Nothing in fields.parquet marks
-      where one invocation ends and the next begins -- inventing a boundary
-      (row contiguity, first repeated parameter) would split legitimate single
-      invocations in two, which is the same silent corruption pointed the
-      other way. So the collision is reported, not guessed at.
-    * A row with no field name cannot name its parameter, and a group whose
-      rows are ALL unnamed cannot even name its function, so it is dropped
-      whole. The count is the only trace either leaves.
+    Two losses are counted, not fixed, because the export cannot say how:
+    * one actor invoking a function TWICE in one packet makes one group (the
+      key is packet_id, actor, group_path, handle), the second call's
+      parameters overwriting the first's. Nothing marks where an invocation
+      ends, and a guessed boundary would split real single invocations;
+    * an unnamed row cannot name its parameter, and a group of only unnamed
+      rows cannot name its function, so it is dropped whole.
     """
     col_time = cols.time_ms
     col_fn = cols.field_name
@@ -2750,15 +2100,10 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
     for (pid, actor, gp, handle), row_indices in rpc_groups.items():
         ms = col_time[row_indices[0]]
 
-        # Determine RPC name from first field_name
         rpc_name = None
         payload = {}
-        # Collect raw blobs for effect decoding
-        float_blob = None
-        object_blob = None
-        vector_blob = None
-        # {raw-sourced parameter: blob built?} for this invocation; created
-        # only when it carries one. See `_RAW_SOURCED_RPC_PARAMS`.
+        effect_blobs = {}  # shot array parameter -> _EffectBlob
+        # {raw-sourced parameter: blob built?}, only once one is touched.
         blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
@@ -2769,21 +2114,13 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
             if rpc_name is None:
                 rpc_name = name
             if param is None:
-                # The row is the function itself, not one of its parameters.
-                # Usually that means a zero-parameter RPC and there is nothing
-                # to carry -- but 608 rows on 02d4d478 arrive with the whole
-                # parameter block as undecoded bits, because the descriptor
-                # bound no property handles for that function. Dropping them
-                # made "payload: null" mean two different things: no parameters
-                # at all, and parameters we could not read.
-                #
-                # Keyed under the function's own name. The reference emits none
-                # of these functions (they sit in its 241 unbound groups), so
-                # there is no key to match -- this is a vrfkit-only convention.
-                #
-                # A typed row is carried as well. This tested `is_raw`, so a
-                # function row the overlay typed was dropped with no counter;
-                # none is typed on the 1,018-export corpus (2026-09-28).
+                # The row is the function itself: usually a zero-parameter RPC,
+                # but 608 rows on 02d4d478 carry the whole parameter block as
+                # undecoded bits (the descriptor bound no handles). Carried,
+                # raw or typed (none is typed on the 1,018-export corpus,
+                # 2026-09-28), so "payload: null" means only "no parameters".
+                # Keyed under the function's name, a vrfkit-only convention:
+                # the reference emits none of these (its 241 unbound groups).
                 value, is_raw = _get_value(
                     col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                     col_raw[ri], col_bits[ri], tally
@@ -2797,11 +2134,8 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                 col_raw[ri], col_bits[ri], tally
             )
-            # A raw-sourced parameter keeps the preserved wire blob as its
-            # source whether or not the overlay typed it: a value_str overlay
-            # must neither replace the shot decoder's raw input nor change a
-            # consumer's blob contract. `_get_value` still ran above, so its
-            # multi-typed counter keeps seeing these rows.
+            # The RAW_BLOB_PREFERRED rule for `_RAW_SOURCED_RPC_PARAMS`;
+            # `_get_value` ran above, so multi_typed_rows still sees the row.
             sourced = _RAW_SOURCED_RPC_PARAMS.get(name)
             if sourced is not None:
                 if param in sourced:
@@ -2811,34 +2145,24 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                     if raw is not None:
                         bits = col_bits[ri]
                         if name == "ReplayPlayContinuousEffectAtLocation":
-                            # bit_count travels with the bytes. Recomputing it
-                            # downstream as len(data) * 8 would feed the last
-                            # byte's padding bits to the decoder as data.
-                            captured = _EffectBlob(bytes(raw), bits)
-                            if param == "FloatValues":
-                                float_blob = captured
-                            elif param == "ObjectValues":
-                                object_blob = captured
-                            else:
-                                vector_blob = captured
+                            effect_blobs[param] = _EffectBlob(bytes(raw), bits)
                         value = _raw_blob(raw, bits)
                         is_raw = True
                         blob_state[param] = True
                     else:
-                        # Counted once the invocation is complete; whatever
-                        # typed value the row has still goes out below.
+                        # Counted when the invocation is complete; any typed
+                        # value still goes out below.
                         blob_state.setdefault(param, False)
                 elif "[" in param:
                     member_of = param.split("[", 1)[0]
                     if member_of in sourced:
-                        # A decoded member (dropped by `_normalize_rpc_param`
-                        # because the blob carries it): the blob is expected.
+                        # A decoded member, dropped by `_normalize_rpc_param`
+                        # because the blob carries it: the blob is expected.
                         if blob_state is None:
                             blob_state = {}
                         blob_state.setdefault(member_of, False)
             if value is None and not is_raw:
                 continue
-            # Map parameter names to match C# parser output
             param_out = _normalize_rpc_param(rpc_name, param, value, is_raw, tally)
             if param_out is not None:
                 for k, v in param_out.items():
@@ -2852,34 +2176,28 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
             tally.bump("unnamed_rpc_invocations")
             continue
 
-        # Build valorant_shot_received for shot RPCs
         if rpc_name == "ReplayPlayContinuousEffectAtLocation":
             # No blob guard: 7 of 02d4d478's 2,647 invocations carry only
-            # scalar params and an undecoded EffectContainer. They are still
-            # effect events the reference emits, and requiring a blob dropped
-            # them entirely rather than letting them reach the "unknown"
-            # bucket built for exactly this case.
+            # scalar params and an undecoded EffectContainer, effect events
+            # the reference emits and valplay's "unknown" bucket expects.
             first = row_indices[0]
             shot_event = _build_shot_event(
                 shot_ctx, ms, pid, actor,
                 cols.obj[first] if cols.obj[first] is not None else actor,
                 cols.channel[first], payload,
-                _EffectBlobs(float_blob, object_blob, vector_blob),
+                _EffectBlobs(*map(effect_blobs.get, (
+                    "FloatValues", "ObjectValues", "VectorValues"))),
                 tally=tally,
             )
             events.append((pid, ms, shot_event))
             shot_count += 1
             if shot_event["shot"]["equippable"] is not None:
                 resolved_weapon_count += 1
-            # Still emit as rpc_received too (some downstream might need it)
-
-        # Normalize the RPC function name to match C# parser output
-        function_name = _normalize_rpc_name(rpc_name)
 
         event = {
             "type": "rpc_received",
             "time_ms": ms,
-            "function_name": function_name,
+            "function_name": rpc_name,
             "actor_net_guid": actor,
             "payload": payload if payload else None,
         }
@@ -2889,35 +2207,16 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
 
 
 def _write_events(events: list, output_dir: Path, verbose: bool) -> tuple[int, int]:
-    """Sort by (packet_id, time_ms) and write events.ndjson.
+    """Stable-sort on (packet_id, time_ms) and write events.ndjson.
 
-    Returns ``(events_written, time_ms_regressions)``.
-
-    # The ordering contract this file owns
-
-    `packet_id` is the replay's own global packet counter and is the only
-    total order the wire actually provides: vrfkit stamps it from a
-    monotonically increasing driver counter (`driver/mod.rs`, `total_packets`)
-    and never sorts, so append order IS packet order. Sorting on it here is
-    therefore a re-assertion, not a reordering, and the sort is stable, so
-    events tying on `(packet_id, time_ms)` keep the order the phases appended
-    them in -- actors, then properties, then RPCs, and inside each phase the
-    insertion order of the grouping dicts, which is the row order of
-    fields.parquet, which is wire order.
-
-    `time_ms` is NOT part of that guarantee and must not be treated as one.
-    It is derived per demo frame from a raw `read_f32` with no validation
-    (`vrf-frame/src/lib.rs`), and a frame whose time is not finite yields
-    `time_ms = 0`. A single such frame mid-replay makes `time_ms`
-    non-monotonic in file order.
-
-    That matters downstream: valplay orders same-millisecond events by
-    `(time_ms, line_index)`, which is a sound total order only while `time_ms`
-    is non-decreasing in file order. So the regression is COUNTED here rather
-    than repaired -- repairing it would mean reordering away from packet
-    order, i.e. away from the wire -- and the count is published in the bundle
-    manifest so the consumer can see that its tie-break is standing on sand
-    instead of assuming it is not.
+    Returns ``(events_written, time_ms_regressions)``. packet_id is the wire's
+    only total order (driver/mod.rs `total_packets`, never sorted), so the
+    sort re-asserts it and ties keep the phase order ("Conversion phases").
+    time_ms is not guaranteed monotonic: vrf-frame reads it with a bare
+    `read_f32` and a non-finite frame gives 0. valplay's (time_ms, line)
+    tie-break needs it non-decreasing, so a regression is counted and
+    published, never repaired away from packet order (docs/USAGE.md, "What
+    the bundle manifest carries").
     """
     t0 = time.time()
     if verbose:
@@ -2953,17 +2252,13 @@ _MOVEMENT_COLUMNS = ("time_ms", "packet_id", "character_net_guid",
 
 
 def _join_movement_block(pieces) -> memoryview:
-    """Concatenate one block's line pieces row by row; return the text's bytes.
+    """Join one block's pieces (literal fragments and slot text arrays) row by
+    row and return the lines' bytes, back to back in the data buffer.
 
-    `pieces` alternate literal fragments (scalars) and slot texts (arrays of
-    one block's length). The joined lines sit back to back in the result's
-    data buffer, so the block is written as that buffer's used span.
-
-    A NULL line is refused, not written. `binary_join_element_wise` emits
-    NULL for a row with any null input, and a null contributes no bytes to
-    the data buffer: the line would vanish from the file while
-    `movement_rows_written` still counted it. `_write_movement` refuses null
-    input columns before it gets here, so this is the second line of defence.
+    A NULL line is refused: `binary_join_element_wise` makes one for any null
+    input, and it adds no bytes, so the line would vanish while still counted
+    as written. `_write_movement` refuses null columns first; this is the
+    second line of defence.
     """
     lines = pc.binary_join_element_wise(*pieces, "")
     if lines.null_count:
@@ -2974,12 +2269,9 @@ def _join_movement_block(pieces) -> memoryview:
 
 
 def _string_bytes(arr) -> memoryview:
-    """The values of a pa.string() array as one span of bytes, back to back.
-
-    That is the data buffer between the array's first and last offsets --
-    not the whole buffer, which for a slice starts before the array's first
-    value, and which Arrow may allocate larger than it fills.
-    """
+    """A pa.string() array's values as one span of bytes: the data buffer
+    between its first and last offsets, not the whole buffer (a slice starts
+    earlier, and Arrow may allocate more than it fills)."""
     if arr.type != pa.string():
         raise RuntimeError(f"expected a string array, got {arr.type}")
     offsets = numpy.frombuffer(arr.buffers()[1], dtype=numpy.int32,
@@ -2990,33 +2282,18 @@ def _string_bytes(arr) -> memoryview:
 def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tuple:
     """Write movement.ndjson, keeping the last sub-move per (packet, character).
 
-    Returns ``(rows_read, rows_written, non_finite_rows)``. The first two
-    differ by the intra-packet sub-move collapse below, so only `rows_read`
-    can be compared with what the export manifest declared; publishing
-    `rows_written` against `quality.movement_rows` would report every healthy
-    replay as lossy. `rows_read` is `None` when the table is absent, which is
-    a different fact from an empty one.
-
-    `non_finite_rows` counts WRITTEN rows with at least one non-finite float
-    (position, velocity, yaw or pitch); a collapsed sub-move is not in the
-    bundle and is not counted. Such a value is written the way the encoder
-    spells a non-finite float everywhere else in this bundle -- `Infinity`,
-    `-Infinity`, `NaN` (see `_json_scalar_column`) -- not as `null` and not as
-    a number. Python's json reads those tokens; a strict parser rejects the
-    line. valplay parses with orjson when it is installed, skips a line it
-    cannot parse, and then recounts fewer movement rows than
-    `adapter.movement_rows_written` declares, which stops the bundle from
-    publishing -- a refusal, not a quietly shorter track. The count is what
-    names the cause.
+    Returns ``(rows_read, rows_written, non_finite_rows)``. Only rows_read
+    (None when the table is absent) compares with the export's declared
+    count; rows_written is short by the intended collapse. non_finite_rows
+    counts WRITTEN rows with a non-finite value, spelled Infinity/-Infinity/
+    NaN as everywhere in this bundle: Python's json reads them, a strict
+    parser rejects the line, and valplay (orjson when installed) then
+    recounts fewer rows than `adapter.movement_rows_written` and refuses to
+    publish. The count names the cause.
     """
     if not movement_path.exists():
-        # Truncate rather than return. `convert` reuses an existing output
-        # directory, so converting a replay with no movement table over an
-        # earlier bundle left the EARLIER replay's movement.ndjson sitting
-        # beside the new events -- a whole replay's positions attributed to
-        # the wrong match, under a run that printed "Conversion complete".
-        # An empty file says "this replay has no movement"; a missing one is
-        # indistinguishable from a stale one.
+        # Written empty, not skipped: `convert` requires movement.ndjson, and
+        # an empty file says "this replay has no movement".
         (output_dir / "movement.ndjson").write_text("", encoding='utf-8')
         if verbose:
             print("  movement.parquet not found, movement.ndjson written empty")
@@ -3028,22 +2305,16 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     mv_table = pq.read_table(movement_path, columns=list(_MOVEMENT_COLUMNS))
     n_mv = len(mv_table)
 
-    # Every movement column is declared non-null, and that is load-bearing:
-    # `to_numpy` turns a uint32 column with a null into float64 with NaN, and
-    # every line of it would then carry `1000.0`-style times, or `nan`. It
-    # used to be assumed. A null is now refused here, naming the column.
+    # Declared non-null, and load-bearing: `to_numpy` turns a uint32 column
+    # with a null into float64 NaN, so every line would carry `1000.0`-style
+    # times or `nan`. Refused, naming the column.
     for name in _MOVEMENT_COLUMNS:
         nulls = mv_table.column(name).null_count
         if nulls:
             raise ValueError(f"movement.parquet column {name!r} carries "
                              f"{nulls:,} nulls; the export declares it non-null")
 
-    # Batch-extract every column to a numpy array. `to_numpy` hands over the
-    # raw buffer; `to_pylist` boxes one Python float/int per row through
-    # pyarrow's per-element type dispatch (~14x slower on these 1.84M-row
-    # columns, the same win the fields path gets via _numeric_column_to_pylist).
-    # With no nulls, zero_copy_only=False never widens ints to float64 --
-    # uint32 stays uint32, float32 stays float32.
+    # numpy arrays, as in _numeric_column_to_pylist; no nulls, so dtypes stay.
     mv_time = mv_table.column('time_ms').to_numpy(zero_copy_only=False)
     mv_pid = mv_table.column('packet_id').to_numpy(zero_copy_only=False)
     mv_char = mv_table.column('character_net_guid').to_numpy(zero_copy_only=False)
@@ -3056,74 +2327,41 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     mv_vy = mv_table.column('vel_y').to_numpy(zero_copy_only=False)
     mv_vz = mv_table.column('vel_z').to_numpy(zero_copy_only=False)
 
-    # Keep only the last sub-move per (packet_id, character).
+    # Keep only the last sub-move per (packet_id, character). The decoder
+    # emits every sub-move of a packet's move chain, all at one time_ms: 1,687
+    # of 02d4d478's 2,387 extra rows carry distinct positions, none of the
+    # reference's rows is missing, and movement.parquet keeps them all. The
+    # bundle cannot: valplay's posture.py skips a dt=0 leg but still advances
+    # last_sample, so distance_m came out 3.1-5.2 m LOW for every player. The
+    # reference keeps the final move per packet; so does this, matching its
+    # movement_detail on 60/60 values with no rounding.
     #
-    # Our decoder walks the marker-chained move sequence inside a
-    # replication packet and emits every sub-move, so a packet can produce
-    # several rows sharing one time_ms. That is genuinely more data --
-    # 1,687 of the 2,387 extra rows on 02d4d478 carry distinct positions,
-    # and none of the reference's rows are missing from ours -- and
-    # movement.parquet keeps all of it.
+    # Keyed on the PACKET, never the millisecond: stream.rs
+    # (decode_movement_rpc) hoists time_ms and packet_id before walking the
+    # chain, so both collapse the same sub-moves, but the millisecond also
+    # merges two packets landing in one ms, whose earlier final move is a
+    # real sample. packet_id is therefore required (vrf-export's movement
+    # table always had it): an export without it raises, never silently
+    # falls back to the millisecond.
     #
-    # The bundle cannot. valplay's posture.py requires 0 < dt before adding
-    # a distance step but updates last_sample unconditionally, so for two
-    # sub-moves A then B at the same ms it adds |A-prev|, skips the A->B
-    # leg, and continues from B. The result is a distance_m that is *lower*
-    # than the reference for every player (3.1-5.2 m on 02d4d478) -- an
-    # impossible direction for finer sampling, and simply wrong.
-    #
-    # The reference retains only the final move per packet, and dropping
-    # exactly these rows reproduces its movement_detail on 60/60 values
-    # with no rounding. So this is not an approximation: it is the shape
-    # the consumer was written against.
-    #
-    # The key is the PACKET, not the millisecond. Both readings collapse the
-    # same sub-moves -- vrfkit/src/sink/stream.rs, decode_movement_rpc,
-    # hoists time_ms and packet_id out of the sink BEFORE walking the move
-    # chain, so every sub-move of one packet carries both identically -- but
-    # keying on the millisecond ALSO merges two different packets that land
-    # in the same millisecond, and there the earlier packet's final move is a
-    # distinct sample, not a sub-move. It was being dropped and counted as an
-    # intra-packet collapse, so the message said the loss was the intended
-    # one. Keying on the packet is what the rationale above always said.
-    #
-    # This makes packet_id a REQUIRED movement column. It has been one for as
-    # long as the table has existed (vrf-export/src/tables/movement.rs), and
-    # an export old enough to lack it raises here rather than converting. That
-    # is the intended trade: falling back to the millisecond key would restore
-    # the silent loss this fixes, and restore it invisibly.
-    #
-    # Vectorised: pack the two uint32 keys into one uint64, and the FIRST
-    # index of each key in the reversed array is the LAST index in the
-    # original -- exactly what the per-row dict overwrite computed. `np.sort`
-    # restores row order. Both keys are uint32 so the shift cannot collide.
+    # Vectorised: the first index of each packed (packet << 32 | char) uint64
+    # in the reversed array is its last in the original; np.sort restores row
+    # order. Both keys are uint32, so the pack cannot collide.
     key64 = (mv_pid.astype(numpy.uint64) << numpy.uint64(32)) | mv_char.astype(numpy.uint64)
     first_in_rev = numpy.unique(key64[::-1], return_index=True)[1]
     keep = numpy.sort((n_mv - 1) - first_in_rev)
     del key64, first_in_rev
     movement_collapsed = n_mv - len(keep)
 
-    # Every position and velocity component is Float32 on the wire and in
-    # Parquet; widening to a Python float prints the binary artefact
-    # (349.989990234375 for what the reference shows as 349.99).
-    # position_bbox is min/max of the raw values, so it surfaced there even
-    # though the derived distances agreed either way.
-    #
-    # yaw and pitch are NOT shortened. The reference serializes those two
-    # through a different path from position/velocity and writes the widened
-    # float32 (253.289794921875), not its shortest round-trip. Measured over
-    # 4,000 reference rows: yaw and pitch are exactly float32-representable
-    # 4000/4000, position.x only 25/4000 -- the discriminating signal.
-    # Applying _f32_shortest here was a regression introduced in 3d37c68
-    # alongside the position fix, and it moved 1,821,648 yaw and 1,699,418
-    # pitch rows away from the reference. It changed no metric, which is
-    # exactly why it survived.
-    #
-    # Select the kept rows once per column via numpy fancy indexing (C-level)
-    # and turn each kept float column into its JSON TEXT once per distinct
-    # value (see _json_scalar_column). One float column at a time, in
-    # `_MOVEMENT_LINE`'s slot order, so only one kept copy is alive at once;
-    # holding all eight cost +35-83 MB of peak working set across 11 exports.
+    # Positions and velocities are float32: widening prints the binary
+    # artefact (349.989990234375 where the reference shows 349.99; it
+    # surfaced in position_bbox). yaw and pitch are NOT shortened: the
+    # reference writes them widened (253.289794921875); over 4,000 reference
+    # rows yaw and pitch are float32-exact 4000/4000, position.x 25/4000.
+    # Shortening them (3d37c68) moved 1,821,648 yaw and 1,699,418 pitch rows
+    # and changed no metric. One float column alive at a time, in
+    # _MOVEMENT_LINE's slot order: all eight cost +35-83 MB of peak working
+    # set across 11 exports.
     non_finite = numpy.zeros(len(keep), dtype=bool)
     float_texts = []
     for column, shorten in ((mv_px, True), (mv_py, True), (mv_pz, True),
@@ -3135,28 +2373,19 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
         del kept
     non_finite_rows = int(numpy.count_nonzero(non_finite))
     movement_written = len(keep)
-    # time_ms and character_net_guid are uint32 and nearly all distinct, so
-    # they are not deduplicated: Arrow's integer-to-string cast writes the
-    # plain decimal digits, the same text `int.__repr__` -- and so the JSON
-    # encoder -- gives an int.
+    # The uint32 time_ms and character_net_guid are nearly all distinct, so
+    # not deduplicated: Arrow's integer-to-string cast writes the same digits
+    # the JSON encoder gives an int.
     int_slots = (pa.array(mv_time[keep]), pa.array(mv_char[keep]))
-    # The table and its column views are no longer needed; what the write
-    # loop reads is above. Dropping them now keeps them out of its peak.
+    # Dropped now, to stay out of the write loop's peak.
     del (mv_table, mv_time, mv_pid, mv_char, mv_px, mv_py, mv_pz,
          mv_vx, mv_vy, mv_vz, mv_yaw, mv_pitch, keep, non_finite)
 
-    # The lines are assembled in Arrow's C++, one block at a time: each slot's
-    # texts are taken for the block's rows (`take` for the deduplicated
-    # floats, a cast for the ints) and `binary_join_element_wise` interleaves
-    # them with `_MOVEMENT_LINE`'s literal fragments, so no Python object is
-    # made per row -- only per distinct value. The text of every slot is
-    # what the per-row `_MOVEMENT_LINE % (...)` join put there, so the bytes
-    # are too (`MovementLineAssemblyTests`; sha256-identical on 11 exports).
-    #
-    # The file is written in binary mode, so the line ending is spelled
-    # here: it was opened in text mode, which turns '\n' into os.linesep --
-    # CRLF on Windows -- and the fragments carry that same os.linesep so each
-    # platform keeps the bytes it had.
+    # Lines are assembled in Arrow one block at a time (per-slot texts
+    # joined with _MOVEMENT_LINE's fragments; see _json_scalar_column), byte
+    # for byte what the per-row join wrote (MovementLineAssemblyTests;
+    # sha256-identical on 11 exports). Written in binary mode, with the line
+    # ending the text-mode file had: os.linesep, deliberately.
     fragments = [pa.scalar(text, type=pa.string()) for text in
                  _MOVEMENT_LINE.replace("\n", os.linesep).split("%s")]
     if len(fragments) != 2 + len(float_texts) + 1:
@@ -3191,44 +2420,25 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     movement_path = export_dir / "movement.parquet"
     manifest_path = export_dir / "manifest.json"
 
-    if not fields_path.exists():
-        sys.exit(f"fields.parquet not found in {export_dir}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
     tally = _Tally()
 
-    # ---- Load manifest ----
-    #
-    # An absent manifest is survivable but never harmless, and the bundle it
-    # produces does not look damaged: `_write_manifest` fills every field with
-    # a plausible default ("unknown", 0, "") and the gameplay-tag table comes
-    # out empty, so every effect blob is keyed by its numeric tag index and
-    # every shot reports null ammo, firing state, player and attack vectors.
-    # None of that is visible in the output, so it is counted here and again
-    # below, where we know whether any shot actually paid the price.
+    # An absent manifest leaves a bundle that does not look damaged: plausible
+    # header defaults ("unknown", 0, "") and an empty tag table, so every
+    # shot reports null ammo, firing state, player and attack vectors. So it
+    # is counted, here and below once it is known whether any shot paid.
     manifest = {}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     else:
         tally.bump("missing_manifest")
-    # The bundle manifest is written LAST, once the counts it has to carry
-    # exist. It used to be written here, before a single row had been read,
-    # which is why it could only ever carry header scalars.
     upstream_quality = manifest.get("quality")
     if not isinstance(upstream_quality, dict):
-        # An export with no quality accounting is not a lossy conversion --
-        # older vrfkit builds emitted none and this run dropped nothing -- so
-        # it is deliberately NOT counted in the tally. It is still visible: the
-        # manifest publishes `"quality": null`, which says "nobody counted"
-        # rather than the plausible zero that would say "nothing was lost".
+        # Not a loss (older vrfkit emitted none), so not counted; published
+        # as `"quality": null`, "nobody counted", never a plausible zero.
         upstream_quality = None
 
-    # ---- Load fields.parquet ----
     cols = _load_field_columns(fields_path, verbose)
 
-    # ---- Classify rows: RPC vs replicated property ----
-    # We need to group and emit events in packet_id order (time order).
-    # Strategy: build a list of events keyed by packet_id, then sort and write.
     t0 = time.time()
     if verbose:
         print("Grouping rows into events...")
@@ -3238,24 +2448,21 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         print(f"  {len(prop_groups):,} property events, {len(rpc_groups):,} RPC invocations")
         print(f"  Grouped in {time.time()-t0:.1f}s")
 
-    # ---- Build events list ----
     t0 = time.time()
     if verbose:
         print("Building event records...")
 
-    # Containment chain for weapon identity. Loaded before the actor pass so
-    # guid_class can be filled from the same loop that emits actor_spawned.
+    # The containment chain for weapon identity, before the actor pass so
+    # guid_class fills in the loop that emits actor_spawned. The phases run
+    # in "Conversion phases" order: actors, properties, RPCs, timeline.
     guid_outer, guid_path, net_guid_rows_read = _load_net_guids(export_dir)
 
-    # 1 & 2. actor_spawned and actor_closed
     events, guid_class = _build_actor_events(
         export_dir, actor_first, actor_last, verbose, tally
     )
 
-    # 3. export_group_received events (replicated properties)
     events += _build_property_events(cols, prop_groups, tally)
 
-    # 4. rpc_received events, and valorant_shot_received for the effect RPCs
     def equippable_lookup(firing_state_guid):
         return _resolve_equippable(firing_state_guid, guid_outer, guid_path, guid_class)
 
@@ -3263,7 +2470,6 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         return _resolve_fire_mode(firing_state_guid, source_id, guid_outer, guid_path)
 
     shot_ctx = _ShotContext(
-        # Gameplay tag table for effect blob decoding.
         _build_tag_table(manifest), equippable_lookup, fire_mode_lookup,
     )
     rpc_events, shot_count, resolved_weapon_count = _build_rpc_events(
@@ -3271,19 +2477,12 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     )
     events += rpc_events
 
-    # 5. The server's own labelled Event-chunk timeline.  Its rows have no
-    # packet id, so _build_server_timeline_events derives a private sort key
-    # from the replication time index and publishes only group/time plus the
-    # fixed-layout words Rust already validated.  Event id, metadata and raw
-    # payload never cross the adapter seam.
     timeline_events, server_timeline_rows_read = _build_server_timeline_events(
         export_dir, cols, verbose
     )
     events += timeline_events
 
-    # Only now is it known whether the empty tag table cost anything: a replay
-    # with no shots loses nothing by having no tag names, and counting it
-    # there would cry wolf.
+    # An empty tag table costs only a replay with shots.
     if shot_count and not shot_ctx.tag_table:
         tally.bump("empty_gameplay_tag_table")
 
@@ -3293,34 +2492,23 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         pct = 100 * resolved_weapon_count / shot_count if shot_count else 0
         print(f"  {resolved_weapon_count:,} with a resolved weapon ({pct:.2f}%)")
 
-    # ---- Sort by (packet_id, time_ms) and write ----
     events_written, time_ms_regressions = _write_events(events, output_dir, verbose)
     if time_ms_regressions:
-        # Not a conversion loss -- every event is still written -- but it
-        # invalidates the (time_ms, line index) tie-break the consumer uses,
-        # so it is surfaced with the losses rather than buried in the manifest.
+        # Not a loss (every event is written), but it breaks the consumer's
+        # (time_ms, line index) tie-break, so it is surfaced with the losses.
         tally.bump("events_time_ms_regressions", time_ms_regressions)
 
-    # ---- Convert movement.parquet ----
     movement_rows_read, movement_written, non_finite_movement_rows = _write_movement(
         movement_path, output_dir, verbose
     )
-    # Every row is still written, so this is not a loss; it is surfaced with
-    # the losses because a strict parser rejects the line it is on.
+    # Not a loss either, but a strict parser rejects the line.
     tally.bump("non_finite_movement_rows", non_finite_movement_rows)
 
-    # ---- Cross-check what vrfkit declared against what was actually read ----
-    #
-    # Only exact table-height identities are judged. `quality.movement_rows`,
-    # `quality.net_guid_rows` and `quality.event_rows` are the row counts of the
-    # tables vrfkit wrote, so they must equal the heights this adapter reads
-    # back. `quality.net.fields`
-    # is NOT such an identity -- fields.parquet carries flattened array leaves,
-    # struct sub-fields and preservation rows on top of the wire fields
-    # (1,277,658 rows against 429,637 fields on the 02d4d478 reference) -- so it
-    # is recorded, never compared. Asserting an equality that does not hold
-    # would put a permanent false alarm in front of every run, and a false alarm
-    # is how a real one stops being read.
+    # Declared vs read back: only exact table-height identities are judged
+    # (movement_rows, net_guid_rows, event_rows). `quality.net.fields` is not
+    # one: fields.parquet adds array leaves, struct sub-fields and
+    # preservation rows (1,277,658 rows against 429,637 fields on 02d4d478),
+    # and a permanent false alarm is how a real one stops being read.
     declared = upstream_quality or {}
     upstream_row_counts = {
         "movement_rows": _upstream_row_check(
@@ -3337,11 +2525,8 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         1 for check in upstream_row_counts.values() if check["agrees"] is False
     )
     if disagreements:
-        # The export's own manifest does not describe the tables sitting next
-        # to it. Which of the two is wrong is not knowable here, so nothing is
-        # repaired and nothing is refused: the disagreement is counted, and the
-        # consumer decides what a bundle whose producer contradicts itself is
-        # allowed to publish.
+        # Which side is wrong is not knowable here: counted, never repaired
+        # or refused; the consumer decides what such a bundle may publish.
         tally.bump("upstream_row_count_disagreement", disagreements)
 
     adapter_accounting = {
@@ -3356,35 +2541,32 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         "field_rows_read": cols.n_rows,
         "field_rows_unresolved_class_net_cache": unresolved_cnc_rows,
         "upstream_row_counts": upstream_row_counts,
-        # Every conversion loss this run recorded, printed below as well.
-        # Written even when empty: `{}` says the counters ran and found
-        # nothing, where an absent key would not distinguish that from a run
-        # that never counted.
+        # Every counter, zeros included: an absent key could not tell a clean
+        # run from one that never counted.
         "losses": dict(tally),
     }
     _write_manifest(manifest, output_dir, adapter_accounting)
-
-    # ---- Summary ----
-    #
-    # "complete" is a claim, so it is only made when it is true. A run that
-    # dropped rows or invented values says how many and of what; the counters
-    # that did not fire are not printed, because a block of ten zeroes is a
-    # block readers learn to skip.
-    if tally.total:
-        print(f"\nConversion finished WITH LOSSES: {output_dir}")
-    else:
-        print(f"\nConversion complete: {output_dir}")
-    print(f"  events.ndjson:   {events_written:,} lines")
-    print(f"  movement.ndjson: {movement_written:,} lines")
-    print(f"  manifest.json:   written")
-    for line in tally.lines():
-        print(line)
 
     return {
         "events_written": events_written,
         "movement_written": movement_written,
         "tally": tally,
     }
+
+
+def _print_summary(output_dir: Path, result: dict) -> None:
+    """The console summary, from `convert` after the publish commit, so it
+    names the final path; "complete" only when nothing was lost."""
+    tally = result["tally"]
+    if tally.total:
+        print(f"\nConversion finished WITH LOSSES: {output_dir}")
+    else:
+        print(f"\nConversion complete: {output_dir}")
+    print(f"  events.ndjson:   {result['events_written']:,} lines")
+    print(f"  movement.ndjson: {result['movement_written']:,} lines")
+    print("  manifest.json:   written")
+    for line in tally.lines():
+        print(line)
 
 
 def _validate_separate_trees(export_dir: Path, output_dir: Path) -> tuple[Path, Path]:
@@ -3424,10 +2606,9 @@ def _publish_bundle(staging: Path, output_dir: Path) -> None:
         try:
             remove_tree(backup, parent)
         except OSError as exc:
-            # os.replace(staging, output_dir) is the commit point.  Cleanup is
-            # best-effort after that: reporting conversion failure here would
-            # be false (and callers might retry over the newly published
-            # bundle).  Leave the uniquely named old bundle recoverable.
+            # Past the commit point, os.replace(staging, output_dir), failure
+            # would be false and invite a retry over the new bundle; the old
+            # one is left recoverable.
             print(
                 f"warning: published {output_dir}, but could not remove old "
                 f"backup {backup}: {exc}",
@@ -3455,27 +2636,22 @@ def convert(export_dir: Path, output_dir: Path, *, verbose: bool = False):
             if not (staging / required).is_file():
                 raise ValueError(f"generated bundle is missing {required}")
         _publish_bundle(staging, output_dir)
-        return result
     except BaseException:
         if staging.exists():
             remove_tree(staging, parent)
         raise
+    _print_summary(output_dir, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
-    # One replay builds ~680k event dicts and holds them all until they are
-    # sorted and written, so the cyclic collector rescans an ever-growing set
-    # of container objects it will never find a cycle in. Measured on a 53 MB
-    # replay: 6.58s -> 5.43s wall, 17.5% faster, with peak RSS unchanged at
-    # 2.2 GB -- no cycles were being reclaimed, only looked for. Reference
-    # counting still frees everything acyclic, and the process is short-lived
-    # and exits after one conversion.
-    #
-    # Deliberately here and not at import time: the tools test suite imports
-    # this module, and a library import must not change the caller's GC.
+    # ~680k event dicts live until the sort, and the cyclic collector rescans
+    # them for cycles that do not exist: disabled, a 53 MB replay went from
+    # 6.58 s to 5.43 s, peak RSS unchanged at 2.2 GB. Here, not at import:
+    # the test suite imports this module.
     gc.disable()
 
     parser = argparse.ArgumentParser(
@@ -3493,7 +2669,6 @@ def main():
     if args.output:
         output_dir = args.output.resolve()
     else:
-        # Derive stem from source_file in manifest or directory name
         manifest_path = export_dir / "manifest.json"
         if manifest_path.exists():
             m = json.loads(manifest_path.read_text(encoding='utf-8'))

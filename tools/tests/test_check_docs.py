@@ -1,11 +1,13 @@
-"""Guards for the doc guard.
-
-check_docs.py catches stale documentation, which nothing else can: a wrong
-number in prose compiles and passes every test. Its own detection logic is
-therefore the thing that must not rot into something that passes everything.
-"""
+"""Guards for the doc guard: nothing else catches a wrong number in prose, so
+its detection logic must not rot into something that passes everything."""
+import ast
+import contextlib
+import inspect
+import io
 import json
+import re
 import sys
+import textwrap
 import unittest
 from unittest.mock import patch
 from subprocess import CompletedProcess
@@ -75,13 +77,7 @@ class LinkTests(unittest.TestCase):
         text = "[a](../README.md#어쩌고)"
         self.assertEqual(guard.check_links(guard.USAGE, text), [])
 
-    def test_the_shipped_docs_have_no_dead_links(self):
-        for path in (guard.README, guard.USAGE):
-            self.assertEqual(guard.check_links(path, guard.read(path)), [], path.name)
-
     def test_every_top_level_doc_is_link_checked(self):
-        """26 docs were added under docs/ in one week while this guard read
-        two of them. Every top-level doc is now link-checked."""
         names = {p.name for p in guard.link_checked_docs()}
         on_disk = {p.name for p in (guard.REPO / "docs").glob("*.md")}
         self.assertEqual(names & on_disk, on_disk)
@@ -89,11 +85,127 @@ class LinkTests(unittest.TestCase):
             self.assertEqual(guard.check_links(path, guard.read(path)), [], path.name)
 
 
-class FeatureMatrixTests(unittest.TestCase):
-    """README used to say CONTRIBUTING and ci.yml list "the same 25 cases" and
-    that "nothing checks that they agree". By 2026-09-13 both held 27 and three
-    were in a different order, and the sentence still said 25."""
+class AnchorTests(unittest.TestCase):
+    """`check_links` checks only that a linked file exists, so a heading
+    renamed under a link, or a slug guessed wrong, went unreported:
+    USAGE.md's table of contents linked `#downstream-conversion` for a heading
+    whose anchor is `#downstream-conversion-tools`."""
 
+    TARGET = guard.REPO / "docs" / "TARGET.md"
+    SOURCE = guard.REPO / "docs" / "SOURCE.md"
+
+    def lookup(self, text):
+        anchors = frozenset(guard.heading_anchors(text))
+        return lambda path: anchors if path == self.TARGET.resolve() else None
+
+    def test_slugs_follow_githubs_rules(self):
+        for heading, slug in (
+                ("Regression guards -- after non-trivial changes",
+                 "regression-guards----after-non-trivial-changes"),
+                ("`fields.parquet`", "fieldsparquet"),
+                ("Comparison with the C# reference parser",
+                 "comparison-with-the-c-reference-parser"),
+                ("`raw_bits`: SmallVec, and the rejected arena",
+                 "raw_bits-smallvec-and-the-rejected-arena"),
+                ("Generated files — never hand-edit", "generated-files--never-hand-edit"),
+                ("5. `tools/` reference", "5-tools-reference"),
+                ("See [the table](other.md#x) here", "see-the-table-here"),
+                ("참조 저장소 및 PR 조사", "참조-저장소-및-pr-조사")):
+            with self.subTest(heading=heading):
+                self.assertEqual(guard.github_slug(heading), slug)
+
+    def test_a_repeated_heading_gets_a_numbered_anchor(self):
+        self.assertEqual(guard.heading_anchors("# A\n## A\n### A b\n#### A"),
+                         {"a", "a-1", "a-b", "a-2"})
+
+    def test_a_hash_line_in_fenced_code_is_not_a_heading(self):
+        text = ("```bash\n# not a heading\n```python\n# still code\n```\n"
+                "~~~\n## nor this\n~~~\n## Real ##\n#hashtag\n")
+        self.assertEqual(guard.heading_anchors(text), {"real"})
+
+    def test_a_broken_same_file_anchor_is_reported(self):
+        text = "## Downstream conversion tools\n\n[x](#downstream-conversion)\n"
+        problems = guard.broken_markdown_anchors(
+            self.SOURCE, text, lambda path: frozenset(guard.heading_anchors(text)))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("SOURCE.md:3", problems[0])
+        self.assertIn("#downstream-conversion", problems[0])
+        fixed = text.replace("(#downstream-conversion)", "(#downstream-conversion-tools)")
+        self.assertEqual(guard.broken_markdown_anchors(
+            self.SOURCE, fixed, lambda path: frozenset(guard.heading_anchors(fixed))), [])
+
+    def test_a_broken_cross_file_anchor_is_reported(self):
+        lookup = self.lookup("# Title\n## Name interning\n")
+        good = "[a](TARGET.md#name-interning)"
+        bad = "[a](TARGET.md#name-intern)"
+        self.assertEqual(guard.broken_markdown_anchors(self.SOURCE, good, lookup), [])
+        problems = guard.broken_markdown_anchors(self.SOURCE, bad, lookup)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("#name-intern", problems[0])
+
+    def test_a_percent_encoded_anchor_is_decoded(self):
+        lookup = self.lookup("## 어쩌고\n")
+        for link in ("[a](TARGET.md#%EC%96%B4%EC%A9%8C%EA%B3%A0)", "[a](TARGET.md#어쩌고)"):
+            with self.subTest(link=link):
+                self.assertEqual(guard.broken_markdown_anchors(self.SOURCE, link, lookup), [])
+
+    def test_links_in_fenced_code_and_line_anchors_are_not_heading_links(self):
+        lookup = self.lookup("## Only\n")
+        text = ("```\n[a](TARGET.md#nothing)\n```\n"
+                "[b](../tools/check_docs.py#L10)\n[c](https://example.com/x.md#y)\n")
+        checked = []
+        self.assertEqual(
+            guard.broken_markdown_anchors(self.SOURCE, text, lookup, checked), [])
+        self.assertEqual(checked, [])
+
+    def test_a_code_reference_to_a_missing_heading_or_doc_is_reported(self):
+        # Two literals, so the repository scan does not read this file as
+        # citing the headings it tests.
+        lookup = self.lookup("## Name interning\n")
+        target = "docs/TARGET" ".md"
+        text = (f"//! {target}#name-interning.\n"
+                f"// ({target}#name-intern)\n"
+                f"# see docs/GONE" ".md#anything\n")
+        checked = []
+        problems = guard.broken_code_anchors("x.rs", text, lookup, checked)
+        self.assertEqual(len(checked), 3, checked)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn("x.rs:2", problems[0])
+        self.assertIn("#name-intern", problems[0])
+        self.assertIn("does not exist", problems[1])
+
+    def test_the_archive_is_a_target_but_not_a_source(self):
+        sources = {p.relative_to(guard.REPO).as_posix() for p in guard.link_checked_docs()}
+        self.assertFalse(any(name.startswith("docs/archive/") for name in sources))
+        archived = guard.REPO / "docs" / "archive" / "PROJECT_STATUS.md"
+        slug = sorted(guard.anchors_of(archived.resolve()))[0]
+        text = f"[a](archive/PROJECT_STATUS.md#{slug}) [b](archive/PROJECT_STATUS.md#no-{slug})"
+        problems = guard.broken_markdown_anchors(guard.REPO / "docs" / "X.md", text)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(f"#no-{slug}", problems[0])
+
+    def test_the_shipped_docs_and_sources_have_no_broken_anchor(self):
+        checked = {}
+        self.assertEqual(guard.anchor_problems(checked), [])
+        # A guard that read nothing would pass the line above.
+        self.assertGreater(len(checked["docs"]), 0)
+        self.assertGreater(len(checked["code"]), 0)
+
+    def test_an_unlistable_source_tree_is_reported_not_passed(self):
+        import subprocess as sp
+        real = guard.subprocess.run
+
+        def failing(cmd, *a, **kw):
+            if cmd[:2] == ["git", "-C"]:
+                return sp.CompletedProcess(cmd, 128, stdout="", stderr="fatal")
+            return real(cmd, *a, **kw)
+
+        with patch.object(guard.subprocess, "run", side_effect=failing):
+            problems = guard.anchor_problems()
+        self.assertTrue(any("went unchecked" in p for p in problems), problems)
+
+
+class FeatureMatrixTests(unittest.TestCase):
     CONTRIBUTING = (
         "cargo +1.86.0 check -p vrf-a --no-default-features --locked\n"
         "cargo +1.86.0 check -p vrf-a --no-default-features --features x --locked\n"
@@ -140,7 +252,6 @@ class TableSizeTests(unittest.TestCase):
         self.assertEqual(guard.check_table_sizes(docs), [])
 
     def test_both_comma_and_plain_forms_are_accepted(self):
-        """1187 and 1,187 are the same claim; neither should fail."""
         table = guard.read(guard.REPO / "crates" / "vrf-decode" / "src" / "table.rs")
         import re
         n = re.search(r"OVERLAY_TABLE: \[OverlayEntry; (\d+)\]", table).group(1)
@@ -153,12 +264,7 @@ class TableSizeTests(unittest.TestCase):
 
 
 class SourceTableSizeTests(unittest.TestCase):
-    """The sixth check: Rust prose and Cargo.toml quote the size too.
-
-    Three places said 1,185 after the table reached 1,188 and nothing read
-    them, which is the whole argument for check_docs.py happening one directory
-    outside its reach.
-    """
+    """Rust prose and Cargo.toml quote the table size too."""
 
     LIVE = {"1188", "1,188"}
 
@@ -177,12 +283,8 @@ class SourceTableSizeTests(unittest.TestCase):
                              [(1, "999")], phrase)
 
     def test_a_bare_entry_count_is_not_a_size_claim(self):
-        """Scoped to the exact phrasing so the check has no judgement to make.
-
-        Dated measurements elsewhere legitimately say things like "1,054
-        entries" about a table that no longer exists; only "N-entry table" is
-        read as a claim about the live one.
-        """
+        """Dated measurements legitimately say "1,054 entries" about a table
+        that no longer exists; only "N-entry table" claims the live size."""
         self.assertEqual(
             guard.stale_entry_phrases("measured over 1,054 entries", self.LIVE), [])
 
@@ -227,12 +329,7 @@ class SuiteMeasurementTests(unittest.TestCase):
 
 
 class TestCountTests(unittest.TestCase):
-    """The seventh check: a doc may not carry a stale suite size beside a live one.
-
-    The count check used to ask only whether the live number appeared somewhere
-    in the file, so a README saying 387 in one place and 355 in another passed
-    it -- and did, for twelve commits. Presence is not agreement.
-    """
+    """A doc may not carry a stale suite size beside a live one."""
 
     LIVE = {"387", "120"}
 
@@ -248,25 +345,33 @@ class TestCountTests(unittest.TestCase):
         self.assertEqual(guard.stale_test_counts("387 passing\n120 tests", self.LIVE), [])
 
     def test_a_number_that_is_not_a_count_claim_is_ignored(self):
-        """Only "N tests" / "N passing" is read as a claim about the suites.
-
-        Prose legitimately quotes unrelated figures -- README recovers "2,387
-        intermediate moves", which is how the old presence check was satisfied
-        by accident.
-        """
+        """Only "N tests" / "N passing" is a claim about the suites; README's
+        "2,387 intermediate moves" is not."""
         self.assertEqual(
             guard.stale_test_counts("we recover 2,387 intermediate moves", self.LIVE), [])
 
+    def test_a_count_that_names_its_suite_is_read(self):
+        """README's highlight puts the suite between the number and the noun;
+        it went stale twice while only "N tests" was read."""
+        text = "- **355 Rust tests** plus a layered validation suite"
+        self.assertEqual(guard.stale_test_counts(text, self.LIVE), [(1, "355")])
+        self.assertEqual(guard.stale_test_counts("**387 Rust tests**", self.LIVE), [])
+
+    def test_a_count_that_names_its_suite_must_be_that_suites(self):
+        by_suite = {"Rust": {"387"}, "Python": {"120"}}
+        self.assertEqual(guard.stale_test_counts(
+            "**120 Rust tests**\n**387 Python tests**\n387 passing\n120 tests",
+            self.LIVE, by_suite), [(1, "120"), (2, "387")])
+
+    def test_the_shipped_readme_highlight_is_read(self):
+        claims = [suite for line in guard.read(guard.README).splitlines()
+                  for _count, suite in guard.TEST_COUNT_RE.findall(line)]
+        self.assertIn("Rust", claims)
+
 
 class TableSizeClaimTests(unittest.TestCase):
-    """The eighth check, and the same upgrade `stale_test_counts` already made.
-
-    `check_table_sizes` asks whether the live size appears SOMEWHERE in the
-    file. That is the exact check README defeated by carrying `387 tests` and
-    `355 passing` at once: a stale size can sit one line from the correct one
-    and satisfy a membership test with the correct one. Here every number that
-    claims to BE the table size has to be the live one.
-    """
+    """Every number that claims to BE a table size must be the live one, even
+    one line from the correct one."""
 
     LENGTHS = ("1255", "84")
 
@@ -299,14 +404,8 @@ class TableSizeClaimTests(unittest.TestCase):
 
 
 class MeasurementFailureTests(unittest.TestCase):
-    """A measurement that could not be taken must not silently skip its claim.
-
-    `measured_counts` omitted the `ascii` key entirely when `git ls-files`
-    returned nonzero, and `stale_measured_counts` skips any key not in `live`.
-    So on a machine where git failed, every quoted ASCII file count went
-    unchecked and the guard still printed "OK: the docs still describe this
-    repo".
-    """
+    """A measurement that could not be taken (git failing) is reported, not
+    left to skip every claim that depends on it."""
 
     def test_a_working_measurement_reports_no_problem(self):
         problems = []
@@ -335,13 +434,8 @@ class MeasurementFailureTests(unittest.TestCase):
 
 
 class ContradictingCountTests(unittest.TestCase):
-    """The half of the count check that survives `--fast`, and so the half CI runs.
-
-    Without running the suites there is no way to know which number is right.
-    But the repo has exactly two of them, so a third distinct value is a
-    contradiction on its face -- which is precisely the shape the real bug had:
-    387 and 355 sitting in one file, both about `cargo test`.
-    """
+    """The half of the count check that survives `--fast`: with exactly two
+    suites, a third distinct value is a contradiction."""
 
     def test_a_third_distinct_count_is_reported(self):
         docs = {"README.md": "- **394 tests**\nverified: **355 passing**",
@@ -359,6 +453,11 @@ class ContradictingCountTests(unittest.TestCase):
         docs = {"README.md": "394 tests", "USAGE.md": "394 passing"}
         self.assertEqual(guard.contradicting_test_counts(docs), [])
 
+    def test_a_stale_highlight_is_a_third_count(self):
+        docs = {"README.md": "- **390 Rust tests** plus\n394 passing",
+                "USAGE.md": "# 133 passing"}
+        self.assertIn("390", " ".join(guard.contradicting_test_counts(docs)))
+
     def test_the_report_names_every_site_so_the_stale_one_can_be_found(self):
         docs = {"README.md": "394 tests\n355 passing", "USAGE.md": "133 passing"}
         joined = " ".join(guard.contradicting_test_counts(docs))
@@ -372,13 +471,7 @@ class ContradictingCountTests(unittest.TestCase):
 
 
 class MeasuredCountTests(unittest.TestCase):
-    """Counts that live somewhere runnable, quoted in prose that rots.
-
-    `check_ascii`'s file count and `apply_type_corrections`'s correction count
-    were both quoted in README and USAGE -- files this guard already read --
-    and both went stale anyway, because nothing here knew those two numbers
-    existed. USAGE said 85, 86 and 49 corrections in one file.
-    """
+    """Counts produced by something runnable, quoted in prose that rots."""
 
     def test_a_stale_ascii_count_is_caught(self):
         problems = guard.stale_measured_counts(
@@ -397,7 +490,6 @@ class MeasuredCountTests(unittest.TestCase):
         self.assertEqual(len(problems), 2, problems)
 
     def test_a_stale_golden_vector_count_is_caught(self):
-        """README said 66 for a week after 13.05 took the file to 77."""
         text = "66 mechanically extracted upstream golden vectors (11 staging"
         problems = guard.stale_measured_counts({"x.md": text}, {"golden": 77})
         self.assertEqual(len(problems), 1, problems)
@@ -436,18 +528,8 @@ class MeasuredCountTests(unittest.TestCase):
 
     def test_live_correction_count_includes_dynamic_weapon_entries(self):
         # expectation_count() includes the generated table's dynamic weapon
-        # entries. Keep this pin explicit: verified new typing changes the
-        # count, and the test must make that intentional change visible.
-        # 187 -> 204: the September 2026 table typing -- 12 ADDITIONS plus the
-        # AllianceFilter and four DeathMontage corrections (OriginalBuyerTeam
-        # changed type but not count). 204 -> 205: the SeekerNade location-level
-        # correction (repmovement-location-scale); HawkFlash's level rides on its
-        # existing ADDITIONS entry, so it adds none. 205 -> 210: the five
-        # AGameObject smoke/zone classes read byte rotator components
-        # (game-evidence-typing-fixes). 210 -> 214: the four EffectID entries
-        # retyped UInt64 -> Int64 (HandleNumber's Int32 -> UInt32 is an
-        # ADDITIONS type change, so it adds none). 214 -> 219: five ADDITIONS
-        # for Cypher's trapwire and cage fields at their 13.01 paths.
+        # entries. Pinned on purpose: a verified typing change must change this
+        # number visibly.
         self.assertEqual(guard.measured_counts()["corrections"], 219)
 
 
@@ -478,11 +560,9 @@ class BaselineFigureTests(unittest.TestCase):
         tables = guard.baseline_table_figures()
         live = f"{tables['fields.parquet'][0]:,}"
         stale = f"{tables['fields.parquet'][0] + 1:,}"
-        docs = {
-            "README.md": guard.format_baseline_table(tables).replace(
-                live, stale, 1
-            )
-        }
+        rows = "\n".join(f"| `{name}` | {n:,} | {size:,} |"
+                         for name, (n, size) in tables.items())
+        docs = {"README.md": rows.replace(live, stale, 1)}
         problems = guard.check_baseline_figures(docs, tables)
         self.assertTrue(any("fields.parquet" in p for p in problems), problems)
 
@@ -494,9 +574,6 @@ class BaselineFigureTests(unittest.TestCase):
         self.assertEqual(len(problems), len(tables), problems)
 
     def test_every_checkpoint_table_is_checked_against_its_own_baseline(self):
-        # Only checkpoint_fields used to be read. The docs quote every
-        # checkpoint table, and three of those rows went stale with this
-        # check still passing when their files' bytes moved.
         checkpoint = json.loads(guard.read(
             guard.REPO / "tools" / "baselines" / "checkpoint_02d4d478.json"))
         expected = {
@@ -519,21 +596,46 @@ class BaselineFigureTests(unittest.TestCase):
 
 
 class DocCoverageTests(unittest.TestCase):
-    """DATA.md and CONTRIBUTING.md were read by nothing at all."""
+    def test_data_md_contributing_and_claude_md_are_covered(self):
+        self.assertLessEqual({"docs/DATA.md", "CONTRIBUTING.md", "CLAUDE.md"},
+                             set(guard.ALL_DOCS))
 
-    def test_data_md_and_contributing_are_covered(self):
-        self.assertIn("docs/DATA.md", guard.ALL_DOCS)
-        self.assertIn("CONTRIBUTING.md", guard.ALL_DOCS)
 
-    def test_claude_md_is_covered(self):
-        """CLAUDE.md carries a relative link (to CONTRIBUTING.md) that
-        nothing was checking -- it just happens to be correct today."""
-        self.assertIn("CLAUDE.md", guard.ALL_DOCS)
+class CheckCountTests(unittest.TestCase):
+    """The printed `N checks` is the number of results main() combines, read
+    from its source: the elements of the `checks` list plus each
+    `checks.append` (the suite measurement)."""
 
-    def test_every_covered_doc_has_resolving_links(self):
-        for name in guard.ALL_DOCS:
-            path = guard.REPO / name
-            self.assertEqual(guard.check_links(path, guard.read(path)), [], name)
+    def checks_in_main(self) -> tuple[int, int]:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(guard.main)))
+        listed = [node.value for node in ast.walk(tree)
+                  if isinstance(node, ast.Assign)
+                  and [getattr(t, "id", None) for t in node.targets] == ["checks"]
+                  and isinstance(node.value, ast.List)]
+        self.assertEqual(len(listed), 1, "main() must combine its checks in one "
+                         "`checks` list, or its printed count is not derived from them")
+        appended = sum(1 for node in ast.walk(tree)
+                       if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute)
+                       and node.func.attr == "append"
+                       and getattr(node.func.value, "id", None) == "checks")
+        return len(listed[0].elts), appended
+
+    def printed_count(self, *argv: str) -> int:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["check_docs.py", *argv]), \
+                patch.object(guard, "measure_tests", return_value=(1, 1, [])), \
+                contextlib.redirect_stdout(output), \
+                contextlib.redirect_stderr(io.StringIO()):
+            guard.main()
+        found = re.search(r"(\d+) checks$", output.getvalue(), re.M)
+        self.assertIsNotNone(found, output.getvalue())
+        return int(found.group(1))
+
+    def test_the_printed_count_is_the_number_of_checks_combined(self):
+        listed, appended = self.checks_in_main()
+        self.assertEqual(self.printed_count("--fast"), listed)
+        self.assertEqual(self.printed_count(), listed + appended)
 
 
 if __name__ == "__main__":

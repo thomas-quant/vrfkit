@@ -1,35 +1,22 @@
 //! Top-level replication reader that drives the full pipeline.
 //!
-//! This module connects packets -> bunches -> content blocks -> fields into a
-//! single pass. The caller provides:
-//!
-//! - A [`ReplicationSink`] to receive decoded events (fields, RPCs, actor
-//!   lifecycle, etc.)
-//! - A replay branch string for payload transform selection
+//! One pass connects packets -> bunches -> content blocks -> fields. The
+//! caller provides a [`ReplicationSink`] for the decoded events (fields, RPCs,
+//! actor lifecycle) and the replay branch that selects the payload transform.
 //!
 //! Layout: channel (open/close, GUID preambles), spawn (dynamic-actor spawn block), framing (content blocks, fields, RPCs) -- measured rates in docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
 //!
-//! The public surface (this file) is deliberately thin: the sink trait, the
-//! types it exchanges, and the packet-level driver. The three stages below it
-//! live in their own modules so each can be read against the wire format it
-//! implements.
+//! This file is deliberately thin -- the sink trait, the types it exchanges
+//! and the packet-level driver -- so each stage module can be read against the
+//! wire format it implements.
 //!
-//! Channel-table growth rate on the reference replay: docs/PERFORMANCE_NOTES.md#allocation-strategy.
-//!
-//! The steady state of this reader allocates nothing per packet, per bunch or
-//! per content block. Three buffers are owned by the reader and reused for the
-//! whole replay:
-//!
-//! - `scratch` holds one decoded content-block payload;
-//! - `fragment_stage` holds one partial-bunch fragment, byte-aligned;
-//! - the channel table grows once per distinct channel index and never per
-//!   bunch.
-//!
-//! Bunch payloads are *views* into the caller's packet bytes:
-//! `RawPacketReader` hands the framing loop a sub-reader, and content blocks
-//! and fields are sub-readers of that. An earlier version copied every bunch
-//! payload into a fresh `Vec<u8>` before processing it, to satisfy a borrow
-//! that a field split solves instead; see [`ReplicationReader::process_packet`].
+//! The steady state allocates nothing per packet, bunch or content block
+//! (channel-table growth: docs/PERFORMANCE_NOTES.md#allocation-strategy). The
+//! reader owns and reuses `scratch` (one decoded content-block payload),
+//! `fragment_stage` (one partial-bunch fragment, byte-aligned) and the channel
+//! table (a row per channel index in use, never per bunch). Bunch payloads are
+//! views into the caller's packet bytes: framing gets a sub-reader, and content
+//! blocks and fields are sub-readers of that.
 
 mod channel;
 mod framing;
@@ -38,9 +25,11 @@ mod spawn;
 use vrf_bitio::BitReader;
 use vrf_transform::TransformVersion;
 
-use crate::bunch::{PartialBunchAccumulator, RawBunchHeader};
+use crate::bunch::{
+    PartialBunchAccumulator, PartialDiscardCause, PartialResourceLimit, RawBunchHeader,
+};
 use crate::content::ContentBlockHeader;
-use crate::error::Result;
+use crate::error::{PartialSequenceKind, Result};
 use crate::field::FieldSink;
 use crate::net_guid::GuidPathSink;
 use crate::packet::RawPacketReader;
@@ -55,23 +44,15 @@ use framing::BunchContext;
 /// Per-channel actor state tracked during replication.
 #[derive(Debug, Clone)]
 pub struct ActorChannelState {
-    /// Channel index.
     pub channel_index: u32,
-    /// Whether the channel is currently open.
     pub is_open: bool,
-    /// Whether the channel is dormant (closed but actor alive).
-    /// Set on open and on close, and deliberately part of the public snapshot
-    /// even though this crate's own sink reads `header.b_dormant` directly at
-    /// the close callback instead. Dormancy is not destruction -- only a
-    /// non-dormant close is a despawn -- so a consumer reconstructing actor
-    /// lifetimes from `ActorChannelState` needs it without re-deriving it from
-    /// the bunch header.
+    /// Whether the channel is dormant (closed, actor alive). Public so a
+    /// consumer rebuilding actor lifetimes needs no bunch header: dormancy is
+    /// not destruction, and only a non-dormant close is a despawn.
     pub is_dormant: bool,
-    /// Actor's network GUID.
     pub actor_net_guid: NetworkGuid,
     /// Archetype GUID (for dynamic actors).
     pub archetype_net_guid: NetworkGuid,
-    /// Level GUID.
     pub level_guid: NetworkGuid,
     /// Spawn location (if dynamic and present).
     pub spawn_location: Option<crate::types::FVector>,
@@ -96,38 +77,30 @@ pub enum StreamKind {
 
 /// Where inside the walk a stream failure happened.
 ///
-/// Purely diagnostic: nothing on a decode, success or verdict path reads it.
-/// It exists so an aggregate keyed on group path can also separate the distinct
-/// shapes that all land in the same `field_stream_failures` /
-/// `rpc_stream_failures` counters today -- in particular an unresolved
-/// ClassNetCache group (whose payload the sink preserves whole) from a stream
-/// that genuinely lost structure, which `NetStats::lost_content_blocks`
-/// already distinguishes for the totals but no per-group view could before.
+/// Purely diagnostic (no decode or verdict path reads it): it lets a per-group
+/// aggregate separate shapes that share the stream-failure counters, above all
+/// an unresolved group (payload preserved whole) from a stream that lost
+/// structure, which `NetStats::lost_content_blocks` separates only in total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StreamFailureCause {
-    /// The walk returned `Ok` but abandoned bits mid-block: a record declared
-    /// more payload than the block had left, or an RPC record was too short to
-    /// carry its length. Records emitted before the break are good; only the
-    /// abandoned tail is lost.
+    /// The walk returned `Ok` but abandoned bits mid-block (a record overran,
+    /// or an RPC record was too short for its length); records before the
+    /// break are good.
     AbandonedTail,
     /// The walk returned `Err` -- a read inside the block ran off the end (or
     /// otherwise failed) and the rest of the block is unframeable.
     ReadError,
-    /// The ClassNetCache function count was 0: the group could not be resolved,
-    /// so the handle width is unknown. The sink received the whole decoded
-    /// payload through `on_unresolved_class_net_cache_payload`, so this shape
-    /// is preserved, not lost.
+    /// The ClassNetCache function count was 0 (an unresolved group, handle
+    /// width unknown). The whole decoded payload went to
+    /// `on_unresolved_class_net_cache_payload`: preserved, not lost.
     UnresolvedFunctionCount,
-    /// A valid post-RepLayout bit window was retained whole because its source
-    /// provenance or strict ClassNetCache shape was not verified. This names
-    /// uncertainty rather than asserting that a read failed or a descriptor
-    /// count was unavailable.
+    /// A valid post-RepLayout window retained whole because its provenance or
+    /// strict ClassNetCache shape was not verified: uncertainty, not a failed
+    /// read or a missing count.
     UnverifiedRepLayoutTail,
-    /// The decoded payload could not be opened as a bit window at all. The
-    /// scratch buffer is sized by the same bit count, so this has never been
-    /// observed; it is named rather than folded into [`StreamFailureCause::ReadError`]
-    /// so that a future grammar change that does trigger it is countable on
-    /// its own.
+    /// The decoded payload could not be opened as a bit window. Never observed
+    /// (the scratch is sized by the same bit count); named so a future trigger
+    /// is countable on its own.
     WindowOpenFailed,
 }
 
@@ -143,12 +116,9 @@ pub enum RepLayoutTailOutcome {
 }
 
 /// Context for a content block that framed and decoded but whose inner stream
-/// could not be walked.
-///
-/// Reported to the sink rather than only counted because the layer that knows
-/// *names* is the sink: it resolved the group path and the function count. A
-/// bare counter says "one block failed"; this says which class, which is what a
-/// new game build's investigation actually needs.
+/// could not be walked. Reported to the sink because it holds the names (group
+/// path, function count) a new build's investigation needs; a counter only
+/// says that one block failed.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamFailure {
     /// Which grammar was being parsed.
@@ -157,12 +127,9 @@ pub struct StreamFailure {
     pub actor_net_guid: NetworkGuid,
     /// Declared payload length of the block.
     pub bit_count: u32,
-    /// Function count used for the handle read (`Rpc` only; 0 for `RepLayout`).
-    ///
-    /// Worth reporting because a wrong non-zero value can select the wrong
-    /// serialized-int width and desynchronise the stream. The RPC parser clamps
-    /// counts to at least 2, so declared counts 1 and 2 use the same wire width;
-    /// zero remains the explicit unresolved-group sentinel.
+    /// Function count used for the handle read (`Rpc` only; 0 for `RepLayout`,
+    /// and the unresolved-group sentinel). A wrong non-zero count selects the
+    /// wrong handle width.
     pub function_count: u32,
     /// Bits consumed before the failure.
     pub consumed_bits: u64,
@@ -170,10 +137,9 @@ pub struct StreamFailure {
     pub remaining_bits: u64,
     /// Which stage of the walk failed. See [`StreamFailureCause`].
     pub cause: StreamFailureCause,
-    /// Handle of the non-terminator record the walk was inside, when its handle
-    /// read succeeded. `None` for a failed handle read and for an early zero
-    /// terminator, so the previous successful field is never misidentified as
-    /// the failure. `record_offset` is exact in every case.
+    /// Handle of the non-terminator record the walk was inside, once its
+    /// handle read succeeded; `None` for a failed handle read or an early zero
+    /// terminator, so the previous field is never blamed.
     pub record_handle: Option<u32>,
     /// Bit offset inside the block where the failing record begins, when the
     /// parser tracked one.
@@ -205,10 +171,8 @@ pub struct RejectedPartialFragment<'a> {
     pub rejection_packet_id: Option<i32>,
 }
 
-/// Trait for receiving all replication events.
-///
-/// The caller implements this to process fields, RPCs, and actor lifecycle
-/// without any data being silently discarded.
+/// Trait for receiving all replication events: fields, RPCs and actor
+/// lifecycle, with nothing discarded silently.
 pub trait ReplicationSink: GuidPathSink + FieldSink {
     fn on_rejected_partial(&mut self, _partial: RejectedPartialFragment<'_>) {}
     /// Whether the sink wants per-record failure positions and decoded-payload
@@ -262,47 +226,33 @@ pub trait ReplicationSink: GuidPathSink + FieldSink {
     );
 
     /// A block framed and decoded, but its inner stream could not be walked.
-    ///
-    /// Defaulted to a no-op so a sink that does not care about failure context
-    /// need not implement it; the counters in [`NetStats`] are maintained either
-    /// way. Override it to attach the names the sink holds -- the resolved group
-    /// path in particular, which the replication layer does not know.
+    /// Default no-op (the [`NetStats`] counters move either way); override to
+    /// attach names the sink holds, the resolved group path in particular.
     fn on_stream_failure(&mut self, _failure: StreamFailure) {}
 
-    /// The decoded payload of a block whose inner stream could not be walked.
-    ///
-    /// Follows [`Self::on_stream_failure`] for the same block whenever the
-    /// decoded bytes exist -- not for a window that failed to open, and not
-    /// for unresolved ClassNetCache blocks, which deliver theirs through
-    /// [`Self::on_unresolved_class_net_cache_payload`] instead. Diagnostics
-    /// only, failure paths only, so a sink may keep a bounded sample of the
-    /// bytes that actually failed to walk; default no-op.
+    /// The decoded payload of a block whose inner stream could not be walked,
+    /// after [`Self::on_stream_failure`] whenever the decoded bytes exist --
+    /// not for a window that failed to open, nor for unresolved ClassNetCache
+    /// blocks ([`Self::on_unresolved_class_net_cache_payload`]). Diagnostics
+    /// only; default no-op.
     fn on_stream_failure_payload(&mut self, _failure: StreamFailure, _payload: &[u8]) {}
 
     /// Preserve one whole decoded ClassNetCache payload whose function table
-    /// could not be resolved.
-    ///
-    /// This is a block-level data event, not a fabricated RPC. `payload` has
-    /// exactly `ceil(failure.bit_count / 8)` bytes, with unused high bits in
-    /// the final byte cleared. The parser has consumed no payload bits.
+    /// could not be resolved: a block-level data event, not a fabricated RPC.
+    /// `payload` is exactly `ceil(failure.bit_count / 8)` bytes, the final
+    /// byte's unused high bits cleared; the parser consumed none of it.
     fn on_unresolved_class_net_cache_payload(&mut self, _failure: StreamFailure, _payload: &[u8]) {}
 }
 
-/// Leaf asset name of the VALORANT replay controller.
-///
-/// This is the only `PlayerController`-kind actor in VALORANT replays, and the
-/// reference parser keys the net-player-index byte off it (see
-/// `channel::is_player_controller_path`, which normalises the four spellings
-/// the same asset arrives under).
+/// Leaf asset name of the VALORANT replay controller, the only
+/// PlayerController-kind actor in these replays; the reference keys the
+/// net-player-index byte off it (`channel::is_player_controller_path`
+/// normalises its four spellings).
 pub const PLAYER_CONTROLLER_LEAF: &str = "BaseReplayController";
 
-/// One channel's row in the table.
-///
-/// The bunch counter used to live in a second `HashMap<u32, u64>` keyed by the
-/// same channel index, so every bunch hashed that index twice. It cannot simply
-/// move into [`ActorChannelState`]: a channel is counted from its first bunch,
-/// which may be a close or a bunch for a channel that never opened, while only
-/// an *open* bunch produces an `ActorChannelState`. Hence the `Option`.
+/// One channel's row. A channel is counted from its first bunch, which may be
+/// a close or a bunch for a channel that never opened, while only an open
+/// produces an [`ActorChannelState`]: hence the `Option`.
 #[derive(Default)]
 struct ChannelSlot {
     /// How many bunches this channel has carried, 1-based. Reported in
@@ -314,22 +264,18 @@ struct ChannelSlot {
     state: Option<ActorChannelState>,
 }
 
-/// Channel index -> channel row. 232 entries on the reference replay, looked up
-/// once or twice per bunch.
+/// Channel index -> channel row, looked up once or twice per bunch.
 type ChannelTable = HashMap<u32, ChannelSlot>;
 
-/// Bytes the scratch buffer starts at. A bunch payload is capped at
-/// `MAX_PACKET_SIZE_BITS` (16 384 bits = 2 048 bytes) and a content block
-/// cannot exceed its bunch, so this is already above any block the wire can
-/// declare; the `resize` in the decode path is a safety net, not a growth
-/// strategy.
+/// Bytes the scratch buffer starts at: above any block one bunch can carry (a
+/// bunch payload is capped at `MAX_PACKET_SIZE_BITS`, 2,048 bytes). A block
+/// inside a reassembled partial bunch can be larger; the decode path's
+/// `resize` covers those, so it is a safety net, not the common path.
 const SCRATCH_INITIAL_BYTES: usize = 4096;
 
-/// The mutable state one bunch's worth of processing needs, gathered so the
-/// stage functions take a handful of arguments instead of a dozen.
-///
-/// This is a borrow split of [`ReplicationReader`], made once per packet so the
-/// bunch callback can drive the whole downstream pipeline inline.
+/// The mutable state one bunch's processing needs: a borrow split of
+/// [`ReplicationReader`], made once per packet so the bunch callback can drive
+/// the pipeline inline.
 struct Stage<'a> {
     stats: &'a mut NetStats,
     channels: &'a mut ChannelTable,
@@ -337,13 +283,9 @@ struct Stage<'a> {
     scratch: &'a mut Vec<u8>,
 }
 
-/// Where a bunch sits in the stream. Copied rather than borrowed because all
-/// three fields are scalars the caller already holds.
-///
-/// Every field exists to be written into a `DiagnosticEvent`, so without that
-/// feature the whole struct is carried and never read. It is still threaded
-/// through, rather than `cfg`-ed out of the signatures, so the hot path reads
-/// the same in both builds; the values are dead and the optimiser drops them.
+/// Where a bunch sits in the stream. Every field feeds a `DiagnosticEvent`, so
+/// without that feature they are never read; they are threaded through anyway
+/// so the hot path reads the same in both builds (the optimiser drops them).
 #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct BunchIds {
@@ -361,12 +303,8 @@ pub struct ReplicationReader {
     stats: NetStats,
     /// Reusable scratch buffer for payload transforms.
     scratch: Vec<u8>,
-    /// Reusable byte-aligned staging buffer for partial-bunch fragments.
-    ///
-    /// A bunch payload arrives as a bit window at an arbitrary offset inside
-    /// the packet, but [`PartialBunchAccumulator::add_fragment`] concatenates
-    /// byte slices, so a fragment has to be realigned before it can be
-    /// appended. That copy is unavoidable; allocating for it is not.
+    /// Reusable byte-aligned staging buffer for partial-bunch fragments; see
+    /// `stage_fragment`.
     fragment_stage: Vec<u8>,
     /// Global bunch counter (0-based, monotonically increasing).
     global_bunch_index: u64,
@@ -394,37 +332,39 @@ impl ReplicationReader {
         &self.stats
     }
 
-    /// Account for reassembly state the replay ended in the middle of.
+    /// Account for reassembly state the replay ended in the middle of, and
+    /// preserve it through `sink`.
     ///
-    /// Call this once after the last packet. A partial bunch whose continuation
-    /// never arrives sits in the accumulator until the reader is dropped, and
-    /// until the stream stops there is nothing to distinguish it from a bunch
-    /// still being reassembled -- so this is the only point at which the loss
-    /// can be named. It lands in [`NetStats::unfinished_partials`] and
-    /// [`NetStats::unfinished_partial_bits`]; `partial_errors` deliberately does
-    /// not move, because nothing was out of sequence.
-    ///
-    /// Idempotent: the accumulator is drained, so a second call counts nothing.
+    /// Call once after the last packet: until the stream stops, an unfinished
+    /// partial cannot be told from one in progress. It lands in
+    /// [`NetStats::unfinished_partials`] and [`NetStats::unfinished_partial_bits`],
+    /// not `partial_errors` (nothing was out of sequence). Idempotent: the
+    /// accumulator is drained, so a second call counts nothing.
     pub fn finish_with_sink(&mut self, sink: &mut dyn ReplicationSink) {
-        for partial in self.accumulator.drain_unfinished() {
-            self.stats.unfinished_partials += 1;
-            self.stats.unfinished_partial_bits += partial.bit_count as u64;
-            sink.on_rejected_partial(RejectedPartialFragment {
-                header: &partial.header,
-                payload_kind: "accumulated_payload",
-                reason: PartialPayloadReason::EndOfStream,
-                bit_count: partial.bit_count,
-                payload: &partial.buffer,
-                rejection_packet_id: None,
-            });
-        }
+        self.finish_partials(Some(sink));
     }
 
     /// Account for unfinished partials without a preservation consumer.
     pub fn finish(&mut self) {
+        self.finish_partials(None);
+    }
+
+    /// Count every assembly still in flight and, given a sink, preserve it
+    /// there as [`PartialPayloadReason::EndOfStream`].
+    fn finish_partials(&mut self, mut sink: Option<&mut dyn ReplicationSink>) {
         for partial in self.accumulator.drain_unfinished() {
             self.stats.unfinished_partials += 1;
             self.stats.unfinished_partial_bits += partial.bit_count as u64;
+            if let Some(sink) = sink.as_deref_mut() {
+                sink.on_rejected_partial(RejectedPartialFragment {
+                    header: &partial.header,
+                    payload_kind: "accumulated_payload",
+                    reason: PartialPayloadReason::EndOfStream,
+                    bit_count: partial.bit_count,
+                    payload: &partial.buffer,
+                    rejection_packet_id: None,
+                });
+            }
         }
     }
 
@@ -437,36 +377,14 @@ impl ReplicationReader {
     ) {
         self.stats.packets += 1;
 
-        if packet_data.is_empty() {
-            return;
-        }
-
-        if packet_data[packet_data.len() - 1] == 0 {
-            self.stats.malformed_packets += 1;
-            return;
-        }
-
         // Why inline beat two phases, and what the old copies cost on the reference replay: docs/PERFORMANCE_NOTES.md#packet-processing-is-interleaved.
         //
         // Bunches are processed inline, inside the packet reader's callback.
-        //
-        // This used to be two phases: parse every bunch header, copying each
-        // payload into a fresh `Vec<u8>`, and only then walk the copies. The
-        // stated reason was that "the callback borrows self". It does not have
-        // to. Destructuring `self` here gives the callback `&mut` handles to
-        // the fields it needs while `packet_reader` stays borrowed by
-        // `read_packet`, which the borrow checker accepts because the fields
-        // are disjoint.
-        //
-        // Interleaving is safe because the two phases touch disjoint state:
-        // header parsing mutates only `packet_reader` (partial tracking and the
-        // reliable sequence), while payload processing mutates only the fields
-        // below. `malformed_packets` is bumped between the phases but summed
-        // after the loop -- a u64 nothing reads mid-stream, so its total is
-        // unchanged. (`partial_errors` is owned by the reassembly accumulator's
-        // `validate_sequence` in `process_bunch`; the reader's parallel partial
-        // tracker no longer adds its count here -- doing both counted every
-        // error twice.)
+        // Destructuring `self` hands the callback `&mut` to the fields below
+        // while `read_packet` borrows `packet_reader`; the borrows are
+        // disjoint, and so is the state: header parsing mutates only
+        // `packet_reader` (partial tracking, reliable sequence), payload
+        // processing only the rest.
         let Self {
             packet_reader,
             accumulator,
@@ -489,9 +407,9 @@ impl ReplicationReader {
         let result = packet_reader.read_packet(packet_data, packet_id, |header, payload| {
             stage.stats.bunches += 1;
 
-            // The global index is the value *before* the increment and the
-            // per-channel one the value *after*; both feed `DiagnosticEvent`
-            // and the asymmetry is what the fields have always meant.
+            // The global index is the value *before* the increment, the
+            // per-channel one the value *after*: what those fields have always
+            // meant in `DiagnosticEvent`.
             let global_index = *global_bunch_index;
             *global_bunch_index += 1;
             if header.has_channel_limit_error
@@ -500,6 +418,9 @@ impl ReplicationReader {
             {
                 stage.stats.channel_state_limit_failures += 1;
                 if header.b_partial {
+                    // Attempted, then refused: counted here because this
+                    // return skips `process_bunch`, which counts the rest.
+                    stage.stats.partial_bunches += 1;
                     let bit_count = payload.bits_remaining() as usize;
                     let byte_count = stage_fragment(payload.clone(), fragment_stage);
                     sink.on_rejected_partial(RejectedPartialFragment {
@@ -512,9 +433,8 @@ impl ReplicationReader {
                     });
                 }
                 Self::abandon_bunch(&mut payload.clone(), &mut stage);
-                // A refused open is an open that did not complete. Retired
-                // before the close, so an open+close bunch closes nothing it
-                // did not open.
+                // A refused open did not complete. Retired before the close, so
+                // an open+close bunch closes nothing it did not open.
                 Self::retire_after_failed_open(header, &mut stage);
                 if header.b_close {
                     Self::close_channel(header, &mut stage, accumulator, sink);
@@ -545,9 +465,7 @@ impl ReplicationReader {
         if result.is_malformed {
             stage.stats.malformed_packets += 1;
         }
-        // `partial_errors` is counted by `validate_sequence` in `process_bunch`
-        // (the reassembly authority). The reader's own `partial_error_count` is
-        // NOT summed here -- doing both counted every partial error twice.
+        // `result.partial_error_count` is advisory; see `RawPacketReader`.
     }
 
     /// Route one bunch: reassemble it if partial, otherwise frame it directly.
@@ -567,18 +485,10 @@ impl ReplicationReader {
             stage.stats.partial_bunches += 1;
             let byte_count = stage_fragment(payload, fragment_stage);
 
-            // The accumulator is the one reassembly authority. The packet
-            // reader's own tracker can disagree with it -- it keeps an assembly
-            // the accumulator has already refused (an unaligned or over-budget
-            // fragment), and it used to keep one for every initial that was also
-            // final -- and its verdict rode in on `has_partial_error`. That flag
-            // then vetoed a valid completion and wrote a "rejected" row for bits
-            // that were reassembled anyway, while `partial_errors`, which only
-            // the accumulator counts, stayed at zero: a complete bunch dropped
-            // with every cause counter reading 0. The accumulator gets a header
-            // carrying none of the reader's partial verdicts. The tracker itself
-            // stays, as published API for direct `read_packet` callers (see
-            // `RawPacketReader`'s doc); this strip is what keeps it advisory.
+            // The accumulator is the one reassembly authority, so it sees none
+            // of the packet reader's partial verdicts (see `RawPacketReader`):
+            // the tracker can disagree with it, and its flag would veto valid
+            // completions with every cause counter at 0.
             let mut fragment_header = header.clone();
             fragment_header.has_partial_error = false;
             fragment_header.partial_error_kind = None;
@@ -597,33 +507,24 @@ impl ReplicationReader {
 
             let reason = result
                 .error_kind
-                .map(reason_for_sequence_kind)
-                .or_else(|| result.resource_limit.map(reason_for_resource_limit));
+                .map(PartialDiscardCause::Sequence)
+                .or_else(|| result.resource_limit.map(PartialDiscardCause::Resource))
+                .map(partial_payload_reason);
             for (displaced, discard_cause) in &result.displaced {
-                let displaced_reason = match discard_cause {
-                    crate::bunch::PartialDiscardCause::Sequence(kind) => {
-                        reason_for_sequence_kind(*kind)
-                    }
-                    crate::bunch::PartialDiscardCause::Resource(limit) => {
-                        reason_for_resource_limit(*limit)
-                    }
-                };
                 sink.on_rejected_partial(RejectedPartialFragment {
                     header: &displaced.header,
                     payload_kind: "accumulated_payload",
-                    reason: displaced_reason,
+                    reason: partial_payload_reason(*discard_cause),
                     bit_count: displaced.bit_count,
                     payload: &displaced.buffer,
                     rejection_packet_id: Some(header.packet_id),
                 });
             }
-            // A current-fragment row is written only for a fragment the
-            // accumulator refused, under the cause it named. An overlapping
-            // initial is not refused: it replaced the old assembly (preserved
-            // above as a displaced payload) and is itself buffered, so it writes
-            // no row here. There is deliberately no fallback cause -- a row
-            // labelled with a cause no counter recorded is how the same bits
-            // used to reach the table twice.
+            // A current-fragment row only for a fragment the accumulator
+            // refused, under the cause it named. An overlapping initial is not
+            // refused (it is buffered; the assembly it replaced is preserved
+            // above). No fallback cause: a row under a cause no counter
+            // recorded would put the same bits in the table twice.
             if let Some(reason) = reason.filter(|reason| {
                 !result.should_process && *reason != PartialPayloadReason::OverlappingInitial
             }) {
@@ -641,7 +542,7 @@ impl ReplicationReader {
                 stage.stats.partial_overlapping_initial += 1;
             }
             match result.error_kind {
-                Some(crate::error::PartialSequenceKind::MissingInitial) => {
+                Some(PartialSequenceKind::MissingInitial) => {
                     stage.stats.partial_missing_initial += 1;
                     stage.stats.partial_missing_initial_bits += bit_count;
                     if header.b_partial_final {
@@ -651,11 +552,11 @@ impl ReplicationReader {
                         stage.stats.partial_missing_initial_reliable += 1;
                     }
                 }
-                Some(crate::error::PartialSequenceKind::OverlappingInitial) => {}
-                Some(crate::error::PartialSequenceKind::MismatchedContinuation) => {
+                Some(PartialSequenceKind::OverlappingInitial) => {}
+                Some(PartialSequenceKind::MismatchedContinuation) => {
                     stage.stats.partial_mismatched_continuation += 1;
                 }
-                Some(crate::error::PartialSequenceKind::NonByteAlignedFragment) => {
+                Some(PartialSequenceKind::NonByteAlignedFragment) => {
                     stage.stats.partial_non_byte_aligned += 1;
                 }
                 None => {}
@@ -666,67 +567,43 @@ impl ReplicationReader {
                 stage.stats.partial_resource_limit_failures += 1;
             }
 
-            if !result.should_process {
-                if header.b_close {
-                    Self::close_channel(header, stage, accumulator, sink);
+            if result.should_process {
+                if let Some((buf, total_bits, stored_header)) = accumulator.take_completed(ch_index)
+                {
+                    let Ok(mut payload_reader) = BitReader::with_bit_len(&buf, total_bits as u64)
+                    else {
+                        // Returns before the close below as well; see
+                        // docs/FOLLOWUP.md on this arm.
+                        stage.stats.partial_errors += 1;
+                        return;
+                    };
+                    Self::process_complete_payload(
+                        &stored_header,
+                        &mut payload_reader,
+                        stage,
+                        sink,
+                        ids,
+                    );
                 }
-                return;
             }
-
-            // Take completed payload
-            if let Some((buf, total_bits, stored_header)) = accumulator.take_completed(ch_index) {
-                let Ok(mut payload_reader) = BitReader::with_bit_len(&buf, total_bits as u64)
-                else {
-                    stage.stats.partial_errors += 1;
-                    return;
-                };
-                Self::process_complete_payload(
-                    &stored_header,
-                    &mut payload_reader,
-                    stage,
-                    sink,
-                    ids,
-                );
-            }
-
-            // The close flag belongs to the FINAL fragment, not to the initial
-            // one `stored_header` came from: Unreal's `UChannel::SendBunch` puts
-            // `bOpen` on the first fragment and `bClose` on the last, and
-            // `ReceivedNextBunch` copies the last one's close flags onto the
-            // reassembled bunch. This branch used to return before ever reaching
-            // `handle_channel_close`, so a partial bunch could not close a
-            // channel at all: the actor stayed open for the rest of the replay,
-            // its close row was never emitted, and `actor_closes` never moved.
-            if header.b_close {
-                Self::close_channel(header, stage, accumulator, sink);
-            }
-            return;
+        } else if bit_count != 0 {
+            let mut payload = payload;
+            Self::process_complete_payload(header, &mut payload, stage, sink, ids);
         }
 
-        // Non-partial: process directly
-        if bit_count == 0 {
-            // Handle close
-            if header.b_close {
-                Self::close_channel(header, stage, accumulator, sink);
-            }
-            return;
-        }
-
-        let mut payload = payload;
-        Self::process_complete_payload(header, &mut payload, stage, sink, ids);
-
+        // For a partial bunch the close flag belongs to the FINAL fragment, not
+        // the initial one `stored_header` came from: `UChannel::SendBunch`
+        // puts `bOpen` on the first fragment and `bClose` on the last, and
+        // `ReceivedNextBunch` copies the last one's close flags onto the
+        // reassembled bunch.
         if header.b_close {
             Self::close_channel(header, stage, accumulator, sink);
         }
     }
 
-    /// Close a channel and retire any reassembly state it was holding.
-    ///
-    /// `bClose` always names both steps together: closing the channel without
-    /// also retiring its accumulator entry leaves a partial assembly that can
-    /// never complete (when the channel is destroyed rather than dormant) but
-    /// is never counted as lost either. Every `if header.b_close` site in this
-    /// module calls both, in this order, so they are given one name.
+    /// Close a channel and retire its reassembly state. `bClose` always means
+    /// both: a destroyed channel's partial left behind could never complete
+    /// yet would never be counted lost. Every `b_close` site calls this.
     fn close_channel(
         header: &RawBunchHeader,
         stage: &mut Stage<'_>,
@@ -762,23 +639,13 @@ impl ReplicationReader {
         }
     }
 
-    /// Count a bunch-header failure and the payload bits it abandons.
+    /// Count a bunch-header failure and abandon the bunch.
     ///
-    /// All three header stages -- package-map exports, must-be-mapped GUIDs and
-    /// the channel open -- leave the reader at an indeterminate bit when they
-    /// fail, so the rest of the bunch cannot be framed. Only
-    /// `bunch_header_failures` used to move: the abandoned bits appeared in no
-    /// tally at all, which is what let an out-of-range GUID count drop a whole
-    /// run of path declarations while every bit counter read zero.
-    ///
-    /// The whole window, not `bits_remaining()`, for the reason
-    /// [`super::framing::abandoned_on_error`] already spells out: a failing
-    /// `read_int_packed` consumes its chunks *before* discovering the value runs
-    /// off the end, so a header stage that expires exactly at the payload end
-    /// leaves `bits_remaining() == 0` and charged nothing for a bunch that lost
-    /// every bit it had. That is the same undercount, at a different depth, and
-    /// it read as a clean zero. `payload` is a sub-reader whose window IS this
-    /// bunch's payload, so `len_bits()` is the loss.
+    /// All three header stages (package-map exports, must-be-mapped GUIDs, the
+    /// channel open) leave the reader at an indeterminate bit when they fail,
+    /// so the rest of the bunch cannot be framed. The charge is the whole
+    /// window (`payload`'s window is this bunch's payload), never
+    /// `bits_remaining()`, by the rule on `framing::abandoned_from`.
     fn abandon_bunch(payload: &mut BitReader<'_>, stage: &mut Stage<'_>) {
         stage.stats.bunch_header_failures += 1;
         stage.stats.skipped_bits += payload.len_bits();
@@ -789,27 +656,19 @@ impl ReplicationReader {
     /// complete its open.
     ///
     /// `handle_channel_open` writes the new state only after the actor GUID and
-    /// the spawn block have both read, so every way an open bunch can stop
-    /// short of that leaves whatever the slot held: the bunch refused at the
-    /// channel-state limit, a package-map or must-be-mapped read that fails
-    /// before the open, the open itself failing, and a package-map export bunch
-    /// whose exports read cleanly -- nothing after exports is read, so its open
-    /// never is. Each of those arms calls this. When the slot held a live
-    /// actor, the wire has just said the channel belongs to someone else and
-    /// this reader cannot say who: keeping the old state framed every later
-    /// bunch on the channel under the old actor's archetype and class. The
-    /// state is cleared instead, which sends those bunches to
+    /// spawn block read, so each of the five ways an open bunch stops short
+    /// leaves the old actor in place: refused at the channel-state limit, a
+    /// failed package-map read, a failed must-be-mapped read, a failed open,
+    /// or a package-map export bunch whose exports read cleanly (nothing after
+    /// exports is read). Each arm calls this. The wire has given the channel
+    /// to someone this reader cannot name, so a live actor's state is cleared
+    /// rather than framing later bunches under its schema; they go to
     /// [`Self::drop_unopened`], where they are counted.
     ///
-    /// Only an open bunch displaces anything. A bunch without `b_open` that
-    /// fails a header stage says nothing about who owns the channel, so its
-    /// actor stays live; this returns without looking.
-    ///
-    /// No close is emitted for the displaced actor -- the same rule
-    /// `channel_reopens_while_open` follows for a reopen that succeeds: the
-    /// replay sent no close for it, and a fabricated one would be a row the
-    /// wire never carried. A dormant or already-closed state is not live and
-    /// is left as it is; bunches after it are dropped at the guard either way.
+    /// Only an open bunch displaces; one without `b_open` returns untouched.
+    /// No close is emitted for the displaced actor (the replay sent none, as
+    /// for `channel_reopens_while_open`), and a dormant or closed state is not
+    /// live and is left alone.
     fn retire_after_failed_open(header: &RawBunchHeader, stage: &mut Stage<'_>) {
         if !header.b_open {
             return;
@@ -824,13 +683,10 @@ impl ReplicationReader {
         }
     }
 
-    /// Count and discard a bunch whose channel has no open actor.
-    ///
-    /// Only bits still unread after the bunch's preambles are dropped, so only
-    /// those are counted: a bunch whose must-be-mapped list consumed its whole
-    /// payload lost nothing. `bits_remaining()` is the right measure here, not
-    /// the whole window [`Self::abandon_bunch`] charges: nothing failed to
-    /// read, so the reader stands exactly where the unframed content begins.
+    /// Count and discard a bunch whose channel has no open actor: only the
+    /// bits left after its preambles. `bits_remaining()` is right here, unlike
+    /// in [`Self::abandon_bunch`]: nothing failed to read, so the reader stands
+    /// where the unframed content begins.
     fn drop_unopened(payload: &mut BitReader<'_>, stage: &mut Stage<'_>) {
         let dropped = payload.bits_remaining();
         if dropped == 0 {
@@ -851,15 +707,11 @@ impl ReplicationReader {
     ) {
         let ch_index = header.ch_index;
 
-        // Package map exports. Count the export only when the read succeeds --
-        // a partial failure used to inflate `package_map_exports` anyway.
-        //
-        // The bunch ends here on both outcomes: nothing after the exports is
-        // read, and nothing counts what is left (docs/FOLLOWUP.md says why).
-        // An open this bunch carries is therefore never read, clean exports or
-        // not, so the actor it displaces is retired on both paths. On the clean
-        // one no header failure is counted, and `failed_reopens_while_open` is
-        // the only counter that says an open was lost.
+        // A package-map export bunch ends here on both outcomes: nothing after
+        // the exports is read or counted (docs/FOLLOWUP.md says why). So an
+        // open it carries is never read, and the actor it displaces is retired
+        // either way; on the clean path `failed_reopens_while_open` alone says
+        // so. An export counts only when its read succeeds.
         if header.b_has_package_map_exports {
             if channel::read_package_map_exports(payload, stage.stats, sink).is_ok() {
                 stage.stats.package_map_exports += 1;
@@ -870,10 +722,8 @@ impl ReplicationReader {
             return;
         }
 
-        // Must-be-mapped GUIDs. A failure leaves the reader at an indeterminate
-        // bit, so the rest of this bunch cannot be framed safely -- count it and
-        // abandon the bunch rather than parse on as garbage. An open behind the
-        // list is abandoned with it.
+        // A failed must-be-mapped read leaves the reader at an indeterminate
+        // bit: abandon the bunch, and any open behind the list with it.
         if header.b_has_must_be_mapped_guids
             && channel::read_must_be_mapped_guids(payload, stage.stats).is_err()
         {
@@ -882,12 +732,8 @@ impl ReplicationReader {
             return;
         }
 
-        // Actor channel open. A failed open writes no new state, and it used to
-        // leave the old one alone as well: a channel still holding a live
-        // actor kept it, and every later bunch there was framed as that actor's
-        // -- the stale-schema shape, reported only as one header failure. See
-        // `retire_after_failed_open`, which the two arms above and the
-        // channel-state limit in `process_packet` call as well.
+        // A failed open writes no state; `retire_after_failed_open` clears the
+        // old actor's.
         if header.b_open
             && channel::handle_channel_open(header, payload, stage.channels, stage.stats, sink)
                 .is_err()
@@ -897,9 +743,7 @@ impl ReplicationReader {
             return;
         }
 
-        // Look up channel -- if it never opened, or is not open now, the rest
-        // of the bunch has no actor to be framed under and is dropped. Counted:
-        // these two returns used to move nothing but `bunches`.
+        // No open actor on this channel: nothing to frame the rest under.
         let Some(ch) = stage.channels.get(&ch_index).and_then(|s| s.state.as_ref()) else {
             Self::drop_unopened(payload, stage);
             return;
@@ -912,13 +756,11 @@ impl ReplicationReader {
             return;
         }
 
-        // ReadNetPlayerIndex. The three cheap flags are tested before the path
-        // lookup, which is the whole reason this reads as a nest rather than a
-        // flat `&&` chain: `is_player_controller_channel` costs two NetGuidCache
-        // lookups plus two path normalisations, and it used to run on every one
-        // of the 530 401 bunches to answer a question that decides something for
-        // about 2 000 of them. See [`channel::is_player_controller_channel`] for
-        // what the byte is and what skipping it costs.
+        // ReadNetPlayerIndex. The cheap flags come first: the path check costs
+        // two NetGuidCache lookups and two normalisations, and only open
+        // bunches need it -- at most the 2,028 opens among 530,401 bunches on
+        // 02d4d478 (`validate` at 061155a). What the byte is:
+        // [`channel::is_player_controller_channel`].
         if header.b_open
             && actor_net_guid.is_dynamic()
             && !payload.at_end()
@@ -927,22 +769,20 @@ impl ReplicationReader {
             let _ = payload.read_u8();
         }
 
-        // Frame content blocks
-        let ctx = BunchContext { header, ids };
+        let ctx = BunchContext {
+            header,
+            ids,
+            archetype_net_guid,
+        };
         framing::frame_content_blocks(payload, ch_index, actor_net_guid, stage, sink, &ctx);
     }
 }
 
 /// Copy a partial bunch's payload into `buffer`, byte-aligned, and return how
-/// many bytes it occupies.
-///
-/// [`PartialBunchAccumulator::add_fragment`] concatenates byte slices, but a
-/// bunch payload is a bit window starting at an arbitrary offset inside the
-/// packet, so a fragment must be realigned first. `buffer` is the reader's
-/// long-lived staging area: it only ever grows, and the bytes past the returned
-/// length belong to whatever fragment used it last. `copy_bits_to` rewrites
-/// every byte of `[..byte_count]` -- including the padding bits of the final
-/// one -- so the prefix the caller slices is never stale.
+/// many bytes it occupies: [`PartialBunchAccumulator::add_fragment`]
+/// concatenates bytes, but a payload is a bit window at any offset. `buffer`
+/// only grows and its tail is stale, but `copy_bits_to` rewrites all of
+/// `[..byte_count]`, padding bits included, so the caller's prefix never is.
 fn stage_fragment(payload: BitReader<'_>, buffer: &mut Vec<u8>) -> usize {
     let bit_count = payload.bits_remaining();
     let byte_count = (bit_count as usize).div_ceil(8);
@@ -956,39 +796,35 @@ fn stage_fragment(payload: BitReader<'_>, buffer: &mut Vec<u8>) -> usize {
     byte_count
 }
 
-/// Map a partial-sequence error to the reason reported to the sink.
-///
-/// Shared by the current fragment's own rejection and by every earlier
-/// assembly the same fragment displaced, so both name a discard with the
-/// same [`PartialPayloadReason`] rather than drifting out of step.
-fn reason_for_sequence_kind(kind: crate::error::PartialSequenceKind) -> PartialPayloadReason {
-    match kind {
-        crate::error::PartialSequenceKind::MissingInitial => PartialPayloadReason::MissingInitial,
-        crate::error::PartialSequenceKind::OverlappingInitial => {
+/// Map an accumulator discard cause to the reason reported to the sink, shared
+/// by a rejected fragment and every assembly it displaced so both name a
+/// discard alike.
+fn partial_payload_reason(cause: PartialDiscardCause) -> PartialPayloadReason {
+    use PartialDiscardCause::{Resource, Sequence};
+    match cause {
+        Sequence(PartialSequenceKind::MissingInitial) => PartialPayloadReason::MissingInitial,
+        Sequence(PartialSequenceKind::OverlappingInitial) => {
             PartialPayloadReason::OverlappingInitial
         }
-        crate::error::PartialSequenceKind::MismatchedContinuation => {
+        Sequence(PartialSequenceKind::MismatchedContinuation) => {
             PartialPayloadReason::MismatchedContinuation
         }
-        crate::error::PartialSequenceKind::NonByteAlignedFragment => {
+        Sequence(PartialSequenceKind::NonByteAlignedFragment) => {
             PartialPayloadReason::NonByteAlignedFragment
         }
-    }
-}
-
-/// Map a partial-reassembly resource refusal to the reason reported to the
-/// sink. See [`reason_for_sequence_kind`]: same sharing, same reason why.
-fn reason_for_resource_limit(limit: crate::bunch::PartialResourceLimit) -> PartialPayloadReason {
-    match limit {
-        crate::bunch::PartialResourceLimit::ActiveStates => PartialPayloadReason::ActiveStateLimit,
-        crate::bunch::PartialResourceLimit::BufferedBits => PartialPayloadReason::BufferedBitsLimit,
-        crate::bunch::PartialResourceLimit::Allocation => PartialPayloadReason::AllocationFailure,
+        Resource(PartialResourceLimit::ActiveStates) => PartialPayloadReason::ActiveStateLimit,
+        Resource(PartialResourceLimit::BufferedBits) => PartialPayloadReason::BufferedBitsLimit,
+        Resource(PartialResourceLimit::Allocation) => PartialPayloadReason::AllocationFailure,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{
+        BunchSpec, build_bunch_packet, build_packet, pack, write_bunch, write_byte,
+        write_int_packed, write_serialized_int,
+    };
 
     struct OwnedRejectedPartial {
         header: RawBunchHeader,
@@ -1008,8 +844,8 @@ mod tests {
         opens: Vec<u32>,
         closes: Vec<u32>,
         paths: Vec<(u32, String)>,
-        /// GUID-to-path map consulted by `path_for_guid`. Empty by default, so
-        /// existing tests get the pre-cache behaviour (every lookup is `None`).
+        /// GUID-to-path map for `path_for_guid`; empty by default, so every
+        /// lookup is `None`.
         guid_paths: std::collections::HashMap<u32, String>,
         /// Content-block headers, in arrival order.
         content_blocks: Vec<ContentBlockHeader>,
@@ -1104,10 +940,8 @@ mod tests {
         }
     }
 
-    /// The staging buffer is reused for every partial fragment and only ever
-    /// grows, so a short fragment following a long one must not be able to read
-    /// the long one's bytes back. This is the failure mode the buffer reuse
-    /// could have introduced; it is pinned rather than argued.
+    /// The reused staging buffer only grows: a short fragment after a long one
+    /// must not read the long one's bytes back.
     #[test]
     fn fragment_staging_never_exposes_the_previous_fragment() {
         let mut buffer = Vec::new();
@@ -1136,106 +970,35 @@ mod tests {
         );
     }
 
-    // --- packet builders, for the reassembly test below ---
-
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max_value: u32) {
-        let mut written_value = 0u32;
-        let mut mask = 1u32;
-        while written_value.saturating_add(mask) < max_value {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written_value |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    fn build_packet(bits: &[bool]) -> Vec<u8> {
-        let mut packet = vec![0u8; (bits.len() + 1).div_ceil(8)];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                packet[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        packet[bits.len() >> 3] |= 1 << (bits.len() & 7);
-        packet
-    }
-
     /// A partial bunch split across two fragments must reassemble and then
-    /// frame exactly as an unsplit one would.
-    ///
-    /// The reference replay completes zero partial bunches -- an instrumented
-    /// run reported `partial_fragments = 0`, `partial_completed = 0` against
-    /// 530 401 bunches -- so the oracle cannot see this path at all. It is the
-    /// one place where a bunch payload is copied rather than viewed, which
-    /// makes it exactly the path a rewrite of the copy could break silently.
+    /// frame exactly as an unsplit one would: the one place a bunch payload is
+    /// copied rather than viewed. The reference replay takes this path too
+    /// (131 fragments, 56 completed on 02d4d478, `validate` at 061155a), but
+    /// only as totals; this pins the exact result.
     #[test]
     fn split_bunch_reassembles_and_frames() {
-        // Fragment 1: control bunch, opens channel 2, partial initial,
-        // reliable. Payload is IntPacked(3): a static (odd) actor GUID, so no
-        // spawn block follows.
-        let mut bits = vec![
-            true,  // bControl
-            true,  // bOpen
-            false, // bClose
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            true,  // bPartial
-            false, // VALORANT bit
-            true,  // bPartialInitial
-            false, // bPartialFinal
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 8, crate::types::MAX_PACKET_SIZE_BITS);
-        write_int_packed(&mut bits, 3); // payload: actor GUID 3
+        // Fragment 1 opens channel 2 as a reliable partial initial; its payload
+        // is IntPacked(3), a static (odd) actor GUID, so no spawn block.
+        let mut bits = Vec::new();
+        let initial = BunchSpec {
+            ch_index: 2,
+            b_open: true,
+            b_partial: true,
+            b_partial_initial: true,
+            ..Default::default()
+        };
+        write_bunch(&mut bits, &initial, &guid_three());
 
-        // Fragment 2: partial final on the same channel. Payload is one actor
-        // content block with a zero-bit body.
-        bits.extend_from_slice(&[
-            false, // bControl
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ]);
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            true,  // bPartial
-            false, // VALORANT bit
-            false, // bPartialInitial
-            true,  // bPartialFinal
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 10, crate::types::MAX_PACKET_SIZE_BITS);
-        bits.extend_from_slice(&[
-            true, // hasRepLayout
-            true, // isActor
-        ]);
-        write_int_packed(&mut bits, 0); // contentBits = 0
+        // Fragment 2: the partial final, one actor block with a zero-bit body.
+        let mut block = Vec::new();
+        write_empty_actor_block(&mut block);
+        let last = BunchSpec {
+            ch_index: 2,
+            b_partial: true,
+            b_partial_final: true,
+            ..Default::default()
+        };
+        write_bunch(&mut bits, &last, &block);
 
         let packet = build_packet(&bits);
 
@@ -1257,38 +1020,26 @@ mod tests {
         assert_eq!(stats.rep_layout_blocks, 1);
         assert_eq!(stats.skipped_bits, 0, "nothing may be abandoned");
         assert_eq!(sink.opens, vec![2]);
+        // A clean pass records and drops no diagnostic event -- asserted after
+        // a real reassembly and framing pass, not on a default `NetStats`.
+        #[cfg(feature = "diagnostics")]
+        {
+            assert!(
+                stats.diagnostics.is_empty(),
+                "a clean pass recorded diagnostic events: {:?}",
+                stats.diagnostics
+            );
+            assert_eq!(stats.diagnostics_dropped, 0);
+        }
     }
 
-    /// A partial final with no preceding initial is one error, counted once.
-    /// It used to be counted twice: once by the packet reader's parallel
-    /// partial-state tracker (summed into `partial_errors` at packet end) and
-    /// again by the reassembly accumulator's `validate_sequence`. The
-    /// accumulator is the reassembly authority, so it owns the count.
+    /// A partial final with no initial is one error, counted once, by the
+    /// accumulator: the packet reader's tracker sees it too but is advisory.
     #[test]
     fn a_partial_final_without_an_initial_is_counted_once() {
-        // One partial-final bunch on channel 2, reliable, with no initial
-        // fragment anywhere. Both the reader and the accumulator detect the
-        // missing initial; only the accumulator should count it.
-        let mut bits = vec![
-            false, // bControl
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            true,  // bPartial
-            false, // VALORANT bit
-            false, // bPartialInitial (no initial -> MissingInitial)
-            true,  // bPartialFinal
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 8, crate::types::MAX_PACKET_SIZE_BITS);
-        write_int_packed(&mut bits, 3); // payload: actor GUID 3 (never reached)
-
-        let packet = build_packet(&bits);
+        // Reliable partial final on channel 2, no initial anywhere; its
+        // payload, actor GUID 3, is never reached.
+        let packet = partial_packet(false, false, true, &guid_three());
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
         reader.process_packet(&packet, 0, &mut sink);
@@ -1322,38 +1073,20 @@ mod tests {
         );
     }
 
-    /// A bunch whose header parse fails is counted and abandoned, not silently
-    /// dropped. A truncated must-be-mapped GUID list (declares one GUID, carries
-    /// none) used to be `let _ =`-ed: the reader was left stuck and the rest of
-    /// the bunch (channel open, content framing) parsed garbage, with no counter
-    /// moving.
+    /// A bunch whose header stage fails is counted and abandoned: a truncated
+    /// must-be-mapped list must not leave the reader to parse on as garbage.
     #[test]
     fn a_truncated_bunch_header_failure_is_counted_not_silent() {
-        // Non-partial reliable bunch on channel 2 with a 16-bit payload: a u16
-        // must-be-mapped count of 1 (LE) and then no GUID bits, so
-        // read_must_be_mapped_guids EOFs on the missing GUID.
-        let mut bits = vec![
-            false, // bControl
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            true,  // bHasMustBeMappedGUIDs
-            false, // bPartial
-            false, // VALORANT bit
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 16, crate::types::MAX_PACKET_SIZE_BITS); // 16 payload bits
-        // payload: u16 count = 1 little-endian, then zero GUID bits.
-        bits.extend_from_slice(&[
-            true, false, false, false, false, false, false, false, // 0x01
-            false, false, false, false, false, false, false, false, // 0x00
-        ]);
-
-        let packet = build_packet(&bits);
+        // A 16-bit payload: must-be-mapped count 1 (u16 LE) and no GUID bits,
+        // so the GUID read hits the end.
+        let packet = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_has_must_be_mapped_guids: true,
+                ..Default::default()
+            },
+            &must_be_mapped_count_without_its_guid(),
+        );
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
         reader.process_packet(&packet, 0, &mut sink);
@@ -1367,73 +1100,10 @@ mod tests {
 
     // --- bunch builders for the lifecycle tests below ---
 
-    /// The header flags one synthetic bunch varies. Everything not named here
-    /// is fixed: reliable, and the hardcoded channel FName a reliable bunch
-    /// always carries.
-    #[derive(Default)]
-    struct BunchSpec {
-        ch_index: u32,
-        b_open: bool,
-        b_close: bool,
-        /// Close reason Dormancy rather than Destroyed; only read with
-        /// `b_close`.
-        dormant: bool,
-        b_has_package_map_exports: bool,
-        b_has_must_be_mapped_guids: bool,
-        b_partial: bool,
-        b_partial_initial: bool,
-        b_partial_final: bool,
-    }
-
-    /// Append one bunch (header + payload) in `parse_bunch_header` order.
-    fn write_bunch(bits: &mut Vec<bool>, spec: &BunchSpec, payload_bits: &[bool]) {
-        let b_control = spec.b_open || spec.b_close;
-        bits.push(b_control);
-        if b_control {
-            bits.push(spec.b_open);
-            bits.push(spec.b_close);
-        }
-        if spec.b_close {
-            // Close reason Destroyed (0) or Dormancy (1), read as
-            // SerializedInt(MAX).
-            write_serialized_int(
-                bits,
-                u32::from(spec.dormant),
-                crate::types::ChannelCloseReason::MAX,
-            );
-        }
-        bits.push(false); // bIsReplicationPaused
-        bits.push(true); // bReliable
-        write_int_packed(bits, spec.ch_index);
-        bits.push(spec.b_has_package_map_exports);
-        bits.push(spec.b_has_must_be_mapped_guids);
-        bits.push(spec.b_partial);
-        bits.push(false); // VALORANT bit
-        if spec.b_partial {
-            bits.push(spec.b_partial_initial);
-            bits.push(spec.b_partial_final);
-        }
-        bits.push(true); // channel FName: isHardcoded
-        write_int_packed(bits, 1); // FName index
-        write_serialized_int(
-            bits,
-            payload_bits.len() as u32,
-            crate::types::MAX_PACKET_SIZE_BITS,
-        );
-        bits.extend_from_slice(payload_bits);
-    }
-
-    /// One bunch, one packet.
-    fn build_bunch_packet(spec: &BunchSpec, payload_bits: &[bool]) -> Vec<u8> {
-        let mut bits = Vec::new();
-        write_bunch(&mut bits, spec, payload_bits);
-        build_packet(&bits)
-    }
-
-    /// Little-endian i32, LSB first, matching `BitReader::read_i32`.
+    /// Little-endian i32, matching `BitReader::read_i32`.
     fn write_i32_bits(bits: &mut Vec<bool>, value: i32) {
-        for i in 0..32 {
-            bits.push((value >> i) & 1 != 0);
+        for byte in value.to_le_bytes() {
+            write_byte(bits, byte);
         }
     }
 
@@ -1444,12 +1114,8 @@ mod tests {
         write_int_packed(bits, 0); // contentBits = 0
     }
 
-    /// An out-of-range GUID count drops every path declaration in the bunch,
-    /// and that has to be counted. It used to report the opposite:
-    /// `skip_remaining` swallowed the declarations, `package_map_exports` was
-    /// incremented as if the bunch had been read, and `bunch_header_failures`
-    /// and `skipped_bits` both stayed at zero -- so actors later missing their
-    /// path and class resolution had no counter pointing at the cause.
+    /// An out-of-range GUID count drops every path declaration in the bunch:
+    /// a header failure with its bits tallied, not an export processed.
     #[test]
     fn a_package_map_export_with_an_impossible_guid_count_is_counted() {
         let mut payload: Vec<bool> = Vec::new();
@@ -1480,13 +1146,15 @@ mod tests {
         assert_eq!(stats.exported_guids, 0);
         assert_eq!(
             stats.skipped_bits, 57,
-            "the whole abandoned payload is tallied, not just the unread tail:              the bits the failing stage had already consumed declared exports              that were dropped (package_map_exports and exported_guids are both              0 above), so they are lost too"
+            "the whole abandoned payload is tallied, not just the unread tail: \
+             the bits the failing stage had already consumed declared exports \
+             that were dropped (package_map_exports and exported_guids are both \
+             0 above), so they are lost too"
         );
     }
 
-    /// A negative count is the same failure with a different bit pattern: the
-    /// `as u32` cast in the range test would turn -1 into 4 294 967 295, so the
-    /// sign has to be tested on its own.
+    /// A negative count is the same failure: the range test's `as u32` would
+    /// read -1 as 4,294,967,295, so the sign is tested on its own.
     #[test]
     fn a_negative_package_map_guid_count_is_counted() {
         let mut payload: Vec<bool> = Vec::new();
@@ -1512,10 +1180,8 @@ mod tests {
         assert_eq!(reader.stats().skipped_bits, 49);
     }
 
-    /// A RepLayout-export bunch is skipped whole -- that is a deliberate
-    /// limitation -- but it must not be indistinguishable from an export that
-    /// was read. It is counted on its own line rather than in `skipped_bits`,
-    /// which the oracle reads as bits lost across failed content blocks.
+    /// A RepLayout-export bunch is skipped whole, a deliberate limitation,
+    /// counted on its own line rather than in `skipped_bits`.
     #[test]
     fn a_rep_layout_export_bunch_is_counted_separately() {
         let mut payload: Vec<bool> = Vec::new();
@@ -1544,18 +1210,13 @@ mod tests {
         assert_eq!(stats.skipped_bits, 0, "no content block was involved");
     }
 
-    /// A reassembled partial bunch must apply the close flag its final fragment
-    /// carried. Unreal writes `bOpen` on the first fragment and `bClose` on the
-    /// last, and `UChannel::ReceivedNextBunch` copies the last one's close flags
-    /// onto the reassembled bunch. This reader returned from the partial branch
-    /// before reaching `handle_channel_close`, so the actor stayed open forever,
-    /// its close row was never emitted and `actor_closes` never moved.
+    /// A reassembled partial bunch applies the close flag its final fragment
+    /// carried (see `process_bunch`).
     #[test]
     fn a_reassembled_partial_bunch_applies_its_close_flag() {
         let mut bits = Vec::new();
 
-        // Fragment 1: opens channel 2 for static actor GUID 3. Byte-aligned,
-        // as every non-final fragment must be.
+        // Fragment 1: opens channel 2 for static actor GUID 3, byte-aligned.
         let mut first: Vec<bool> = Vec::new();
         write_int_packed(&mut first, 3);
         write_bunch(
@@ -1570,8 +1231,7 @@ mod tests {
             &first,
         );
 
-        // Fragment 2: the final fragment, carrying the close flag and the
-        // actor's content block.
+        // Fragment 2: the final, carrying the close flag and the actor block.
         let mut last: Vec<bool> = Vec::new();
         write_empty_actor_block(&mut last);
         write_bunch(
@@ -1607,14 +1267,7 @@ mod tests {
         let mut open_payload = Vec::new();
         write_int_packed(&mut open_payload, 3);
         write_empty_actor_block(&mut open_payload);
-        let open = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_payload,
-        );
+        let open = build_open_bunch_packet(2, &open_payload);
         let close = build_bunch_packet(
             &BunchSpec {
                 ch_index: 2,
@@ -1637,10 +1290,8 @@ mod tests {
         assert!(reader.channels.is_empty());
     }
 
-    /// Opening a channel that is already open replaces the actor silently:
-    /// every later block on the channel is attributed to the new actor and the
-    /// old one never gets a close. The replacement is what the wire says, so it
-    /// stands -- but it is counted, because nothing else moves when it happens.
+    /// Opening a channel that is already open replaces its actor, as the wire
+    /// says; nothing else moves, so the replacement is counted.
     #[test]
     fn opening_an_already_open_channel_is_counted() {
         let mut bits = Vec::new();
@@ -1676,13 +1327,10 @@ mod tests {
         );
     }
 
-    /// A failed open must not leave the previous actor live on the channel.
-    ///
-    /// Channel 2 opens static actor 3; a second open on it, for dynamic actor
-    /// 4, stops before its mandatory spawn block and fails. The failure used
-    /// to leave actor 3's state in place, still open, so the next non-open
-    /// bunch on channel 2 was framed as actor 3's -- the stale-schema shape
-    /// CLAUDE.md lists -- while only `bunch_header_failures` moved.
+    /// A failed open must not leave the previous actor live. Channel 2 opens
+    /// static actor 3; a reopen for dynamic actor 4 stops before its spawn
+    /// block. The next bunch must not be framed as actor 3's (the stale-schema
+    /// shape CLAUDE.md lists).
     #[test]
     fn a_failed_reopen_does_not_leave_the_previous_actor_live() {
         let mut bits = Vec::new();
@@ -1752,11 +1400,9 @@ mod tests {
         );
     }
 
-    /// A failed open on a channel with no actor leaves nothing to retire, but
-    /// every later bunch on it is dropped at the channel guard -- and that drop
-    /// used to move no counter at all. The failed open's own 8 bits are the
-    /// bunch-header failure's; the later bunch's 10 are counted apart from
-    /// `skipped_bits`, which the oracle reads as block-level loss.
+    /// A failed first open retires nothing, but the next bunch on the channel
+    /// is dropped at the guard and counted: the open's own 8 bits are the
+    /// header failure's, the later 10 are counted apart from `skipped_bits`.
     #[test]
     fn a_bunch_after_a_failed_first_open_is_counted_not_silent() {
         let mut bits = Vec::new();
@@ -1803,10 +1449,9 @@ mod tests {
         assert!(sink.content_blocks.is_empty());
     }
 
-    /// Dormancy is not destruction, and a dormant channel is not an open one.
-    /// A reopen of it that fails leaves it not open -- nothing live to retire --
-    /// and a bunch that then arrives on it is counted, not framed under the
-    /// dormant actor.
+    /// A dormant channel is not an open one: a failed reopen retires nothing,
+    /// and a bunch that then arrives is counted, not framed under the dormant
+    /// actor.
     #[test]
     fn a_bunch_on_a_dormant_channel_after_a_failed_reopen_is_counted() {
         let mut bits = Vec::new();
@@ -1878,23 +1523,14 @@ mod tests {
 
     // --- open bunches stopped before their open, on a live channel ---
     //
-    // Each probe below opens channel 2 for static actor 3, sends an open bunch
-    // on channel 2 that stops before its own open is read, then one non-open
-    // bunch with an empty block. The open itself failing is covered above by
-    // a_failed_reopen_does_not_leave_the_previous_actor_live; these cover the
-    // arms that return earlier, which used to keep actor 3 live and frame the
-    // later block under it with `failed_reopens_while_open` at 0.
+    // Each probe opens channel 2 for static actor 3, sends an open bunch that
+    // stops before its own open is read, then a non-open bunch with an empty
+    // block. (The open itself failing is
+    // a_failed_reopen_does_not_leave_the_previous_actor_live.)
 
     /// Channel 2 opens for static actor 3, whose empty block frames.
     fn open_actor_three_on_channel_two() -> Vec<u8> {
-        build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_and_empty_block(),
-        )
+        build_open_bunch_packet(2, &open_and_empty_block())
     }
 
     /// A non-open bunch on channel 2 carrying one empty 10-bit actor block.
@@ -1911,18 +1547,15 @@ mod tests {
     }
 
     /// A must-be-mapped list that declares one GUID (u16 1, little-endian) and
-    /// ends there. Nothing may follow it: the GUID read would succeed on
-    /// whatever did.
+    /// ends there; anything after it would satisfy the GUID read.
     fn must_be_mapped_count_without_its_guid() -> Vec<bool> {
         let mut bits = vec![true, false, false, false, false, false, false, false];
         bits.extend([false; 8]);
         bits
     }
 
-    /// What every probe must show: actor 3 was taken off channel 2 and counted,
-    /// so the later block was dropped at the guard -- counted, and failing the
-    /// verdict through `bunches_on_unopened_channel` -- rather than framed
-    /// under actor 3's schema.
+    /// What every probe must show: actor 3 was retired and counted, and the
+    /// later block dropped and counted at the guard, not framed as actor 3's.
     fn assert_actor_three_retired(reader: &ReplicationReader, sink: &TestSink) {
         let stats = reader.stats();
         assert_eq!(stats.actor_opens, 1, "only actor 3's open completed");
@@ -2009,12 +1642,10 @@ mod tests {
         assert_actor_three_retired(&reader, &sink);
     }
 
-    /// Clean exports do not save the open: nothing after a package-map export
-    /// list is read, so an open bunch carrying one never has its open read.
-    /// Nothing failed to read here, so no header failure is counted, and
-    /// `failed_reopens_while_open` is the only counter that says an open was
-    /// lost. The unread open's own bits are not tallied (docs/FOLLOWUP.md),
-    /// so this does not assert `skipped_bits`.
+    /// Clean exports do not save the open: nothing after an export list is
+    /// read. No header failure is counted, `failed_reopens_while_open` alone
+    /// says an open was lost, and the unread bits are not tallied
+    /// (docs/FOLLOWUP.md), so `skipped_bits` is not asserted.
     #[test]
     fn an_open_behind_clean_package_map_exports_retires_the_live_actor() {
         let mut exports: Vec<bool> = Vec::new();
@@ -2050,22 +1681,13 @@ mod tests {
         let mut sink = TestSink::default();
         reader.process_packet(&open_actor_three_on_channel_two(), 0, &mut sink);
 
-        // A packet reader with no room for reliable-sequence state flags the
-        // reopen `has_channel_limit_error`, while the pipeline's own table
-        // still holds channel 2 and actor 3: the refusal lands on a live slot.
+        // A packet reader with no room for reliable-sequence state refuses the
+        // reopen while the pipeline still holds actor 3: a refusal on a live slot.
         reader.packet_reader = RawPacketReader::with_max_channels(0);
-        let reopen = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_and_empty_block(),
-        );
+        let reopen = build_open_bunch_packet(2, &open_and_empty_block());
         reader.process_packet(&reopen, 1, &mut sink);
-        // Restored before the later bunch: the limiting reader would refuse
-        // that one too, and a refused bunch says nothing about whether actor 3
-        // is still live. This one must reach the channel guard.
+        // Restored, so the later bunch reaches the channel guard rather than
+        // being refused too.
         reader.packet_reader = RawPacketReader::new();
         reader.process_packet(&later_block_on_channel_two(), 2, &mut sink);
 
@@ -2078,9 +1700,8 @@ mod tests {
         assert_actor_three_retired(&reader, &sink);
     }
 
-    /// The refusal arm retires before it closes: an open+close bunch refused on
-    /// a live channel carried its own actor's close, not actor 3's, so actor 3
-    /// gets no close row -- the corner a failed open+close already has.
+    /// The refusal arm retires before it closes: a refused open+close bunch
+    /// carried its own actor's close, not actor 3's, so actor 3 gets no close.
     #[test]
     fn an_open_and_close_refused_at_the_channel_limit_closes_nothing_it_did_not_open() {
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
@@ -2109,10 +1730,8 @@ mod tests {
         );
     }
 
-    /// Only an open bunch displaces an actor. A bunch without `b_open` whose
-    /// must-be-mapped read fails is abandoned, but it said nothing about who
-    /// owns the channel: actor 3 stays live and the next bunch is framed under
-    /// it. Pins the `b_open` gate every retire arm shares.
+    /// Only an open bunch displaces an actor: a non-open bunch whose header
+    /// stage fails is abandoned, and actor 3 stays live. Pins the `b_open` gate.
     #[test]
     fn a_header_failure_without_an_open_leaves_the_live_actor_open() {
         let failed = build_bunch_packet(
@@ -2140,10 +1759,9 @@ mod tests {
         assert_eq!(stats.bunches_on_unopened_channel, 0);
     }
 
-    /// The guard counts what it drops, which is the payload left after the
-    /// bunch's preambles -- not the whole window, and nothing at all for a bunch
-    /// whose preamble consumed every bit. A must-be-mapped GUID list is read
-    /// and counted before the guard whether or not the channel is open.
+    /// The guard counts what it drops: the payload left after the preambles,
+    /// nothing for a bunch whose preamble consumed every bit. A must-be-mapped
+    /// list is read and counted before the guard either way.
     #[test]
     fn a_bunch_on_a_never_opened_channel_counts_only_what_it_drops() {
         let mut preamble: Vec<bool> = Vec::new();
@@ -2240,14 +1858,7 @@ mod tests {
         let mut open_payload = Vec::new();
         write_int_packed(&mut open_payload, 3);
         write_empty_actor_block(&mut open_payload);
-        let open = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_payload,
-        );
+        let open = build_open_bunch_packet(2, &open_payload);
         let close = build_bunch_packet(
             &BunchSpec {
                 ch_index: 2,
@@ -2270,14 +1881,7 @@ mod tests {
         let mut reopened_payload = Vec::new();
         write_int_packed(&mut reopened_payload, 5);
         write_empty_actor_block(&mut reopened_payload);
-        let reopened = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &reopened_payload,
-        );
+        let reopened = build_open_bunch_packet(2, &reopened_payload);
         reader.process_packet(&reopened, 2, &mut sink);
         assert_eq!(reader.stats().actor_opens, 2);
         assert_eq!(reader.stats().channel_reopens_while_open, 0);
@@ -2298,14 +1902,7 @@ mod tests {
         write_int_packed(&mut payload, 3);
         write_empty_actor_block(&mut payload);
         let payload_len = payload.len() as u64;
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: crate::types::MAX_ACTIVE_CHANNELS as u32,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
+        let packet = build_open_bunch_packet(crate::types::MAX_ACTIVE_CHANNELS as u32, &payload);
         let mut sink = TestSink::default();
         reader.process_packet(&packet, 0, &mut sink);
 
@@ -2354,24 +1951,15 @@ mod tests {
         assert_eq!(reader.stats().skipped_bits, payload.len() as u64);
     }
 
-    /// A dynamic actor's spawn block is mandatory. A payload that ends at the
-    /// actor GUID used to be accepted as a successful open, emitting an actor
-    /// with archetype and level GUID 0 and no transforms while `actor_opens`
-    /// went up and `bunch_header_failures` stayed at zero -- a plausible actor
-    /// row invented out of nothing.
+    /// A dynamic actor's spawn block is mandatory: a payload that ends at the
+    /// actor GUID is a failed open, not an actor with archetype 0 and no
+    /// transform.
     #[test]
     fn a_dynamic_open_without_its_spawn_block_is_a_failure_not_an_actor() {
         let mut payload: Vec<bool> = Vec::new();
         write_int_packed(&mut payload, 2); // dynamic actor GUID, then nothing
 
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
+        let packet = build_open_bunch_packet(2, &payload);
 
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
@@ -2385,21 +1973,13 @@ mod tests {
     }
 
     /// A static actor has no spawn block, so its open is complete at the actor
-    /// GUID. This is the case the removed `!payload.at_end()` guard could be
-    /// mistaken for, and it must keep working.
+    /// GUID.
     #[test]
     fn a_static_open_with_no_payload_left_is_still_an_actor() {
         let mut payload: Vec<bool> = Vec::new();
         write_int_packed(&mut payload, 3); // static (odd) actor GUID
 
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
+        let packet = build_open_bunch_packet(2, &payload);
 
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
@@ -2411,11 +1991,8 @@ mod tests {
         assert_eq!(sink.opens, vec![2]);
     }
 
-    /// A partial bunch whose continuation never arrives is data loss, and at
-    /// EOF it is the only kind nothing reports: `partial_fragments` moved when
-    /// the initial fragment arrived, `partial_errors` stayed at zero because
-    /// nothing was out of sequence, and the buffered bits went out with the
-    /// accumulator. `finish` is where that becomes visible.
+    /// A partial whose continuation never arrives is loss that only `finish`
+    /// can name: nothing was out of sequence.
     #[test]
     fn an_unfinished_partial_bunch_is_reported_at_eof() {
         let mut payload: Vec<bool> = Vec::new();
@@ -2464,8 +2041,8 @@ mod tests {
         assert_eq!(reader.stats().unfinished_partial_bits, 0);
     }
 
-    /// An unaligned window is realigned to bit zero of the staging buffer --
-    /// that realignment is the only reason the copy exists.
+    /// An unaligned window is realigned to bit zero of the staging buffer, the
+    /// only reason the copy exists.
     #[test]
     fn fragment_staging_realigns_an_offset_window() {
         let packet = [0b1111_0000u8, 0b0000_1111];
@@ -2491,6 +2068,7 @@ mod tests {
         reader.process_packet(&[], 0, &mut sink);
         assert_eq!(reader.stats().packets, 1);
         assert_eq!(reader.stats().bunches, 0);
+        assert_eq!(reader.stats().malformed_packets, 0);
     }
 
     #[test]
@@ -2501,34 +2079,96 @@ mod tests {
         assert_eq!(reader.stats().malformed_packets, 1);
     }
 
-    /// The unresolved callback receives the exact decoded block, not the wire
-    /// bytes or the reusable scratch tail. The 7-bit literal is a golden V13.01
-    /// transform vector: wire 0xBF for actor 2 decodes to 0x66.
-    #[test]
-    fn unresolved_class_net_cache_exposes_the_decoded_whole_payload() {
-        let wire = [0xBF];
-        let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
-        let mut scratch = vec![0xFF; 16];
+    /// One block handed straight to `decode_and_parse_*`, bypassing framing.
+    struct Run {
+        /// What the call returned: `false` only for a failed transform.
+        transformed: bool,
+        stats: NetStats,
+        sink: TestSink,
+        /// Where the bunch reader stood afterwards.
+        position: u64,
+    }
+
+    /// Decode a `bit_count`-bit block for actor 2 from the first `window_bits`
+    /// of `wire` into `scratch`: RepLayout when `function_count` is `None`,
+    /// ClassNetCache with that count otherwise.
+    fn decode_block(
+        wire: &[u8],
+        window_bits: u64,
+        bit_count: usize,
+        function_count: Option<u32>,
+        mut scratch: Vec<u8>,
+        mut sink: TestSink,
+    ) -> Run {
+        let mut payload = BitReader::with_bit_len(wire, window_bits).unwrap();
         let mut stats = NetStats::default();
         let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
         let mut stage = Stage {
             stats: &mut stats,
             channels: &mut channels,
             transform: TransformVersion::V1301,
             scratch: &mut scratch,
         };
+        let actor = NetworkGuid(2);
+        let transformed = match function_count {
+            None => framing::decode_and_parse_rep_layout(
+                &mut payload,
+                bit_count,
+                actor,
+                &mut stage,
+                &mut sink,
+            ),
+            Some(count) => framing::decode_and_parse_class_net_cache(
+                &mut payload,
+                bit_count,
+                actor,
+                count,
+                &mut stage,
+                &mut sink,
+            ),
+        };
+        Run {
+            transformed,
+            stats,
+            sink,
+            position: payload.position(),
+        }
+    }
 
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            7,
-            NetworkGuid(2),
-            0,
-            &mut stage,
-            &mut sink,
-        );
+    /// The golden V13.01 vector: wire 0xBF for actor 2 decodes to 0x66, seven
+    /// bits. The scratch buffer starts full of 0xFF, so a leaked tail shows.
+    fn decode_golden(bit_count: usize, function_count: Option<u32>) -> Run {
+        let sink = TestSink::default();
+        decode_block(&[0xBF], 7, bit_count, function_count, vec![0xFF; 16], sink)
+    }
 
-        assert_eq!(payload.position(), 7);
+    /// Decode the block whose decoded bits are `decoded_bits`, starting from
+    /// an empty scratch buffer.
+    fn decode_bits(decoded_bits: &[bool], function_count: Option<u32>, sink: TestSink) -> Run {
+        let bit_count = decoded_bits.len();
+        let wire = wire_for_short_decoded(&pack(decoded_bits), bit_count, 2);
+        decode_block(
+            &wire,
+            bit_count as u64,
+            bit_count,
+            function_count,
+            Vec::new(),
+            sink,
+        )
+    }
+
+    /// The unresolved callback receives the exact decoded block, not the wire
+    /// bytes or the reusable scratch tail.
+    #[test]
+    fn unresolved_class_net_cache_exposes_the_decoded_whole_payload() {
+        let Run {
+            stats,
+            sink,
+            position,
+            ..
+        } = decode_golden(7, Some(0));
+
+        assert_eq!(position, 7);
         assert_eq!(sink.unresolved_payloads.len(), 1);
         let (failure, decoded) = &sink.unresolved_payloads[0];
         assert_eq!(failure.kind, StreamKind::Rpc);
@@ -2545,44 +2185,80 @@ mod tests {
         assert_eq!(stats.skipped_bits, 7);
     }
 
-    /// A field stream that returns Ok but abandons bits mid-block must be a
-    /// stream failure as well as landing those bits in `skipped_bits`. Before
-    /// the fix, `parse_class_net_cache`
-    /// did `reader.skip_remaining(); break; return Ok(count)` and the framing
-    /// layer only counted `skipped_bits` on Err, so the abandoned bits vanished
-    /// from every counter.
-    ///
-    /// Same golden V13.01 vector as the unresolved test (wire 0xBF -> 0x66 for
-    /// actor 2), but `function_count=2` so the parser walks the stream instead
-    /// of bailing with UnresolvedFunctionCount. Decoded 0x66 yields one handle
-    /// bit (handle=0) then leaves 6 bits -- fewer than the 8 an IntPacked
-    /// payload-length read needs -- so the stream returns Ok(0) after skipping
-    /// those 6 bits. They must be accounted.
+    /// A transform failure goes back to the framing loop, which alone holds the
+    /// header and position its `ParseFailure` event needs. Framing never gets
+    /// here on its own (see `SkipReason::ParseFailure`), so an 8-bit block over
+    /// a 7-bit payload, called directly, is the way in.
+    #[test]
+    fn a_transform_failure_is_reported_back_to_framing() {
+        // RepLayout, then ClassNetCache with a resolved function count.
+        for function_count in [None, Some(2)] {
+            let Run {
+                transformed, stats, ..
+            } = decode_golden(7, function_count);
+            assert!(
+                transformed,
+                "a payload whose transform ran is reported decoded"
+            );
+            assert_eq!(stats.transform_failures, 0);
+
+            let Run {
+                transformed,
+                stats,
+                sink,
+                ..
+            } = decode_golden(8, function_count);
+            assert!(
+                !transformed,
+                "an 8-bit block cannot be copied out of 7 bits"
+            );
+            assert_eq!(stats.transform_failures, 1);
+            assert_eq!(stats.skipped_bits, 8, "the block's whole declared length");
+            assert_eq!(
+                stats.field_stream_failures + stats.rpc_stream_failures,
+                0,
+                "a transform failure is not a stream failure"
+            );
+            assert!(sink.stream_failures.is_empty());
+            assert!(sink.fields.is_empty() && sink.rpcs.is_empty());
+            #[cfg(feature = "diagnostics")]
+            {
+                assert!(
+                    stats.diagnostics.is_empty(),
+                    "the event is the framing loop's to record"
+                );
+            }
+        }
+
+        // Through the framing loop, a block whose transform ran records no
+        // event, whatever its inner stream does (here an unresolved payload).
+        let mut bits = vec![false, true]; // ClassNetCache, isActor
+        write_int_packed(&mut bits, 7);
+        bits.extend([true, true, true, true, true, true, false]);
+        let (stats, sink) = frame_bits(&bits);
+        assert_eq!(stats.class_net_cache_blocks, 1);
+        assert_eq!(stats.transform_failures, 0);
+        assert_eq!(sink.unresolved_payloads.len(), 1);
+        #[cfg(feature = "diagnostics")]
+        {
+            assert!(stats.diagnostics.is_empty());
+        }
+    }
+
+    /// A ClassNetCache walk that returns `Ok` but abandons bits is a stream
+    /// failure with those bits in `skipped_bits`. With `function_count` 2 the
+    /// golden 0x66 gives one handle bit, then 6 bits -- fewer than the 8 a
+    /// payload length needs.
     #[test]
     fn class_net_cache_overrun_ok_path_is_a_stream_failure() {
-        let wire = [0xBF];
-        let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
-        let mut scratch = vec![0xFF; 16];
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
+        let Run {
+            stats,
+            sink,
+            position,
+            ..
+        } = decode_golden(7, Some(2));
 
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            7,
-            NetworkGuid(2),
-            2,
-            &mut stage,
-            &mut sink,
-        );
-
-        assert_eq!(payload.position(), 7);
+        assert_eq!(position, 7);
         assert_eq!(stats.rpc_stream_failures, 1);
         assert_eq!(stats.unresolved_rpc_payloads_preserved, 0);
         assert_eq!(stats.rpcs, 0);
@@ -2597,10 +2273,9 @@ mod tests {
         assert_eq!(sink.stream_failures[0].remaining_bits, 7);
     }
 
-    /// Invert the short V13.01 byte transform for a test payload. Payloads
-    /// below 32 bits are transformed byte-by-byte, so each byte has exactly
-    /// one preimage and can be found independently without duplicating the
-    /// production transform implementation.
+    /// Invert the short V13.01 byte transform for a test payload: below 32
+    /// bits it works byte by byte, so each byte's one preimage can be searched
+    /// for without duplicating the production transform.
     fn wire_for_short_decoded(decoded: &[u8], bit_count: usize, actor: u32) -> Vec<u8> {
         assert!(bit_count < 32);
         let byte_count = bit_count.div_ceil(8);
@@ -2638,36 +2313,18 @@ mod tests {
         write_int_packed(&mut decoded_bits, 0); // RepLayout terminator
         decoded_bits.extend((0..13).map(|index| index % 2 == 0));
 
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink {
+        let sink = TestSink {
             rep_layout_tail_outcome: Some(RepLayoutTailOutcome::Decoded { rpc_count: 1 }),
             ..TestSink::default()
         };
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
+        let Run {
+            transformed,
+            stats,
+            sink,
+            ..
+        } = decode_bits(&decoded_bits, None, sink);
 
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
-
+        assert!(transformed, "the block's transform ran");
         assert!(sink.fields.is_empty());
         assert_eq!(sink.rep_layout_tails, vec![(13, vec![0x55, 0x15])]);
         assert!(sink.stream_failures.is_empty());
@@ -2683,37 +2340,13 @@ mod tests {
         let mut decoded_bits = vec![false]; // property checksum
         write_int_packed(&mut decoded_bits, 0); // RepLayout terminator
         decoded_bits.extend((0..13).map(|index| index % 2 == 0));
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink {
+        let sink = TestSink {
             rep_layout_tail_outcome: Some(RepLayoutTailOutcome::Preserved {
                 cause: StreamFailureCause::UnverifiedRepLayoutTail,
             }),
             ..TestSink::default()
         };
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, sink);
 
         assert_eq!(stats.field_stream_failures, 0);
         assert_eq!(stats.rpc_stream_failures, 1);
@@ -2734,32 +2367,7 @@ mod tests {
         write_int_packed(&mut decoded_bits, 32); // overruns the remaining 8 bits
         decoded_bits.extend(std::iter::repeat_n(false, 8));
         assert_eq!(decoded_bits.len(), 25);
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
         assert_eq!(stats.field_stream_failures, 1);
         assert_eq!(stats.skipped_bits, 24);
@@ -2773,36 +2381,14 @@ mod tests {
         );
     }
 
-    /// The `cause` field must attribute each failure to the arm that produced
-    /// it, and name the record the walk stopped in. The aggregate keyed on
-    /// these values is what separates preserved-unresolved blocks from real
-    /// loss per group; a cause that did not match its arm would misfile
-    /// millions of blocks.
+    /// `cause` names the arm that produced each failure, and the record the
+    /// walk stopped in: the per-group aggregate keyed on it separates
+    /// preserved-unresolved blocks from real loss.
     #[test]
     fn stream_failures_carry_their_cause_and_failing_record() {
-        // Arm 1: an unresolved ClassNetCache group (function_count = 0). The
-        // walk never begins, so the failing record is offset 0, no handle --
-        // and the payload reached the sink as preserved.
-        let wire = [0xBF];
-        let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
-        let mut scratch = vec![0xFF; 16];
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            7,
-            NetworkGuid(2),
-            0,
-            &mut stage,
-            &mut sink,
-        );
+        // Arm 1: an unresolved group (function_count 0). The walk never
+        // begins: offset 0, no handle, and the payload preserved.
+        let Run { sink, .. } = decode_golden(7, Some(0));
         assert_eq!(sink.stream_failures.len(), 1);
         let failure = &sink.stream_failures[0];
         assert_eq!(failure.cause, StreamFailureCause::UnresolvedFunctionCount);
@@ -2810,39 +2396,14 @@ mod tests {
         assert_eq!(failure.record_offset, Some(0));
         assert_eq!(sink.unresolved_payloads.len(), 1, "payload preserved");
 
-        // Arm 2: a RepLayout Ok walk that abandoned a tail. The failing
-        // record -- handle 0, which began at bit 1 after the checksum -- is
-        // named exactly.
+        // Arm 2: a RepLayout Ok walk that abandoned a tail, in the record for
+        // handle 0 that began at bit 1, after the checksum.
         let mut decoded_bits = Vec::new();
         decoded_bits.push(false); // property checksum
         write_int_packed(&mut decoded_bits, 1); // handle 0
         write_int_packed(&mut decoded_bits, 32); // overruns the remaining 8 bits
         decoded_bits.extend(std::iter::repeat_n(false, 8));
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
         assert_eq!(sink.stream_failures.len(), 1);
         let failure = &sink.stream_failures[0];
         assert_eq!(failure.cause, StreamFailureCause::AbandonedTail);
@@ -2850,61 +2411,22 @@ mod tests {
         assert_eq!(failure.record_offset, Some(1));
     }
 
-    /// The `Err` arm must charge the block, not the reader's remainder.
-    ///
-    /// `read_int_packed` consumes each 8-bit chunk before it can discover the
-    /// value does not terminate, so a block whose last `IntPacked` expires
-    /// exactly at the block end leaves the reader at `position() == len` with
-    /// `bits_remaining() == 0`. The arm used to add that remainder, which
-    /// charged **zero** abandoned bits for a block that lost all nine of its
-    /// bits: `field_stream_failures` moved to 1 while `skipped_bits` stayed at
-    /// 0, a failure counted at block level and absent from the bit accounting
-    /// the oracle divides by failed blocks.
-    ///
-    /// Nine decoded bits: the checksum bit, then 0x01 -- an `IntPacked` chunk
-    /// whose low bit says "another chunk follows" when the block has none. The
-    /// handle read therefore fails with `Eof` having already consumed the
-    /// window whole.
+    /// The `Err` arm charges the whole block (see
+    /// `decode_and_parse_rep_layout`), not the reader's remainder. Nine decoded
+    /// bits: the checksum, then 0x01 -- an `IntPacked` chunk promising another
+    /// the block lacks -- so the handle read fails with the window consumed and
+    /// `bits_remaining() == 0`.
     #[test]
     fn rep_layout_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = vec![false]; // property checksum
-        // 0x01 LSB-first: continuation set, payload bits all zero.
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        // 0x01: continuation set, payload bits all zero.
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 9);
 
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
         assert_eq!(stats.field_stream_failures, 1);
         assert_eq!(stats.fields, 0, "no field was emitted");
-        // The reader is exhausted, so `bits_remaining()` is 0 -- the number the
-        // arm used to charge. What was lost is the whole block.
         assert_eq!(sink.stream_failures.len(), 1);
         assert_eq!(sink.stream_failures[0].remaining_bits, 0);
         assert_eq!(sink.stream_failures[0].consumed_bits, 9);
@@ -2919,36 +2441,9 @@ mod tests {
         let mut decoded_bits = vec![false]; // property checksum
         write_int_packed(&mut decoded_bits, 1); // handle 0
         write_int_packed(&mut decoded_bits, 0); // valid zero-bit payload
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 25);
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
         assert_eq!(sink.fields, vec![(0, 0)], "the valid prefix row remains");
         assert_eq!(stats.fields, 1, "NetStats matches the emitted prefix");
@@ -2959,48 +2454,17 @@ mod tests {
         assert_eq!(sink.stream_failures[0].record_offset, Some(17));
     }
 
-    /// The RPC parser's `Err` arm, same shape and same reason.
-    ///
-    /// One handle bit (max clamped to 2) then 0x01, an `IntPacked` that claims
-    /// a chunk the block does not carry. `function_count` is 2 so the parser
-    /// walks the stream rather than bailing with `UnresolvedFunctionCount`,
-    /// which is a different arm with its own accounting.
+    /// The RPC `Err` arm, same shape: one handle bit, then 0x01.
+    /// `function_count` 2 walks the stream rather than taking the unresolved
+    /// arm, which has its own accounting.
     #[test]
     fn class_net_cache_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = Vec::new();
         write_serialized_int(&mut decoded_bits, 0, 2); // one handle bit
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 9);
 
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            2,
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, Some(2), TestSink::default());
 
         assert_eq!(stats.rpc_stream_failures, 1);
         assert_eq!(stats.rpcs, 0, "no RPC was emitted");
@@ -3022,37 +2486,9 @@ mod tests {
         write_serialized_int(&mut decoded_bits, 0, 2);
         write_int_packed(&mut decoded_bits, 0); // valid zero-bit RPC
         write_serialized_int(&mut decoded_bits, 0, 2);
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 18);
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            2,
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, Some(2), TestSink::default());
 
         assert_eq!(sink.rpcs, vec![(0, 0)], "the valid prefix row remains");
         assert_eq!(stats.rpcs, 1, "NetStats matches the emitted prefix");
@@ -3065,12 +2501,7 @@ mod tests {
     /// Frame `bits` as one whole bunch payload, straight through
     /// `frame_content_blocks`, on channel 5 for static actor 42.
     fn frame_bits(bits: &[bool]) -> (NetStats, TestSink) {
-        let mut data = vec![0u8; bits.len().div_ceil(8)];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                data[i >> 3] |= 1 << (i & 7);
-            }
-        }
+        let data = pack(bits);
         let mut payload = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
@@ -3087,6 +2518,7 @@ mod tests {
                 global_bunch_index: 0,
                 channel_bunch_index: 1,
             },
+            archetype_net_guid: NetworkGuid(0),
         };
         let mut stage = Stage {
             stats: &mut stats,
@@ -3119,11 +2551,8 @@ mod tests {
         bits
     }
 
-    /// A header that fails to read has already consumed what it read. The
-    /// abort charged `bits_remaining()`, which is 0 here, so
-    /// `content_block_framing_failures` moved with no bit tally behind it --
-    /// the undercount `abandoned_on_error` and `abandon_bunch` already fixed
-    /// one depth down and one depth up.
+    /// A header that fails to read has consumed what it read: the abort charges
+    /// those 12 bits, not the 0 left (see `framing::abandoned_from`).
     #[test]
     fn a_truncated_block_header_charges_the_bits_it_consumed() {
         let (stats, sink) = frame_bits(&truncated_subobject_header());
@@ -3142,9 +2571,8 @@ mod tests {
         }
     }
 
-    /// `content_bits` is an IntPacked; a continuation byte followed by the end
-    /// of the bunch consumes 8 bits before the read fails. With the 2-bit
-    /// actor header that is 10 bits lost, and the abort charged 0.
+    /// A `content_bits` continuation byte at the end of the bunch consumes 8
+    /// bits before the read fails: with the 2-bit actor header, 10 bits lost.
     #[test]
     fn a_truncated_content_bits_field_charges_the_bits_it_consumed() {
         let mut bits = vec![true, true]; // hasRepLayout, isActor
@@ -3181,14 +2609,10 @@ mod tests {
         assert_eq!(stats.skipped_bits, 12, "22 bits, of which 10 framed");
     }
 
-    /// Verifies that a content-block overrun produces a DiagnosticEvent with
-    /// full context (packet id, channel, bunch flags, consumed/remaining bits).
-    ///
-    /// This is the path the resolved "malformed 1 / skipped 695" residue took
-    /// (see the oracle's module doc), not something every replay still shows.
-    /// The overrun, too, is charged from the failing block's first bit: its
-    /// header and `content_bits` were read and framed nothing, so the loss is
-    /// 2 + 16 + 8 = 26 bits while 8 remained after the read.
+    /// A content-block overrun produces a `DiagnosticEvent` with full context:
+    /// the path the resolved "malformed 1 / skipped 695" residue took (see the
+    /// oracle's module doc). It charges from the block's first bit: 2 + 16 + 8
+    /// = 26 bits, while 8 remained after the read.
     #[cfg(feature = "diagnostics")]
     #[test]
     fn content_bits_overrun_emits_diagnostic() {
@@ -3197,35 +2621,21 @@ mod tests {
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
 
-        // Simulate: bunch payload = 24 bits total
-        //   content block header: has_rep_layout=0 (1 bit), is_actor=1 (1 bit) -> 2 bits
-        //   content_bits = IntPacked(999) -> 16 bits (0x7CE in IntPacked encoding)
-        //   remaining after header+content_bits = 24 - 2 - 16 = 6 bits
-        //   999 > 6 -> overrun
+        // A 2-bit header (has_rep_layout=0, is_actor=1), content_bits =
+        // IntPacked(999) in 16 bits, then 8 bits: 999 overruns what is left.
         let mut bits: Vec<bool> = Vec::new();
-        // has_rep_layout = false
         bits.push(false);
-        // is_actor = true
         bits.push(true);
         // IntPacked(999): 999 = 0x3E7
         //   chunk0: (999 & 0x7F) = 0x67, more=1 -> byte = (0x67 << 1) | 1 = 0xCF
         //   chunk1: (999 >> 7) = 7, more=0 -> byte = (7 << 1) | 0 = 0x0E
-        let packed_bytes = [0xCF_u8, 0x0E];
-        for &byte in &packed_bytes {
-            for i in 0..8 {
-                bits.push((byte & (1 << i)) != 0);
-            }
+        for byte in [0xCF_u8, 0x0E] {
+            write_byte(&mut bits, byte);
         }
         // Add a few more padding bits so remaining > 0 but < 999
         bits.extend(std::iter::repeat_n(false, 8));
 
-        let byte_count = bits.len().div_ceil(8);
-        let mut data = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                data[i >> 3] |= 1 << (i & 7);
-            }
-        }
+        let data = pack(&bits);
 
         let mut payload_reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut stats = NetStats::default();
@@ -3244,6 +2654,7 @@ mod tests {
                 global_bunch_index: 100,
                 channel_bunch_index: 7,
             },
+            archetype_net_guid: NetworkGuid(0),
         };
         let mut stage = Stage {
             stats: &mut stats,
@@ -3261,7 +2672,6 @@ mod tests {
             &ctx,
         );
 
-        // Verify diagnostic was emitted
         assert_eq!(stats.malformed_content_blocks, 1);
         assert_eq!(
             stats.skipped_bits, 26,
@@ -3279,8 +2689,7 @@ mod tests {
         assert_eq!(ev.block_index_in_bunch, 0);
         assert!(ev.content_bits.is_some());
         assert_eq!(ev.content_bits.unwrap(), 999);
-        // remaining_bits should be 8 (the padding bits we added); what the
-        // overrun lost is the whole block from its first bit.
+        // 8 bits remained; the loss is the whole block from its first bit.
         assert_eq!(ev.remaining_bits, 8);
         assert_eq!(ev.bits_skipped, 26);
         assert!(
@@ -3299,41 +2708,77 @@ mod tests {
         }
     }
 
+    /// A diagnostic event names the archetype its channel's open read (9
+    /// here), not a plausible 0. Paths are not resolved by framing: `None`.
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn a_diagnostic_event_carries_the_channel_archetype() {
+        use crate::stats::SkipReason;
+
+        let mut open: Vec<bool> = Vec::new();
+        write_int_packed(&mut open, 2); // dynamic actor GUID
+        write_minimal_spawn_data(&mut open, 9); // archetype 9, not a controller
+        let mut overrun: Vec<bool> = vec![false, true]; // ClassNetCache, isActor
+        write_int_packed(&mut overrun, 999); // declares far more than follows
+        overrun.extend([false; 8]);
+
+        let (reader, _) = run_packets(&[
+            build_open_bunch_packet(2, &open),
+            build_bunch_packet(
+                &BunchSpec {
+                    ch_index: 2,
+                    ..Default::default()
+                },
+                &overrun,
+            ),
+        ]);
+
+        let state = reader.channels[&2]
+            .state
+            .as_ref()
+            .expect("channel 2 opened");
+        assert_eq!(
+            state.archetype_net_guid,
+            NetworkGuid(9),
+            "the open itself must have read archetype 9, or this proves nothing"
+        );
+        let stats = reader.stats();
+        assert_eq!(stats.malformed_content_blocks, 1);
+        assert_eq!(stats.diagnostics.len(), 1);
+        let ev = &stats.diagnostics[0];
+        assert!(matches!(
+            ev.reason,
+            SkipReason::ContentBitsOverrun {
+                declared_content_bits: 999,
+                available_bits: 8
+            }
+        ));
+        assert_eq!(
+            (ev.packet_id, ev.channel_index, ev.actor_net_guid),
+            (1, 2, 2)
+        );
+        assert_eq!(ev.archetype_net_guid, 9);
+        assert!(ev.actor_path.is_none() && ev.class_path.is_none());
+    }
+
     // --- controller property-block regression tests
     // (docs/archive/PROJECT_STATUS.md 17-A) ---
 
-    /// Build a non-partial open bunch around `payload_bits` and return the
-    /// full packet bytes, ready for `process_packet`.
+    /// One reliable, non-partial bunch that opens `ch_index` around
+    /// `payload_bits`, as a packet ready for `process_packet`.
     fn build_open_bunch_packet(ch_index: u32, payload_bits: &[bool]) -> Vec<u8> {
-        let mut bits = vec![
-            true,  // bControl
-            true,  // bOpen
-            false, // bClose
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, ch_index);
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            false, // bPartial
-            false, // VALORANT bit
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(
-            &mut bits,
-            payload_bits.len() as u32,
-            crate::types::MAX_PACKET_SIZE_BITS,
-        );
-        bits.extend_from_slice(payload_bits);
-        build_packet(&bits)
+        let spec = BunchSpec {
+            ch_index,
+            b_open: true,
+            ..Default::default()
+        };
+        build_bunch_packet(&spec, payload_bits)
     }
 
-    /// Write the spawn block for a dynamic actor: archetype, level, and the
-    /// four optional transform vectors (location, rotation, scale, velocity),
-    /// every one absent (leading `false` bit). Velocity is included to match
-    /// the unconditional read -- omitting it is the one-bit regression.
+    /// Write a dynamic actor's spawn block: archetype, level, and the four
+    /// optional transforms (location, rotation, scale, velocity) all absent.
+    /// Velocity matches the unconditional read; omitting it is the one-bit
+    /// regression.
     fn write_minimal_spawn_data(bits: &mut Vec<bool>, archetype_guid: u32) {
         write_int_packed(bits, archetype_guid); // archetype GUID
         write_int_packed(bits, 0); // level GUID (0 -> not valid, returns early)
@@ -3344,17 +2789,12 @@ mod tests {
     }
 
     /// The controller's opening bunch carries nine bits between the spawn
-    /// block and the first content-block header: one velocity bit (read
-    /// unconditionally) plus an eight-bit net-player-index byte (consumed
-    /// because `is_player_controller_channel` resolves the archetype through
-    /// the path cache). Without either one, the first header misframes and
-    /// the controller's own RepLayout property block -- `PlayerState` and
-    /// `SpawnLocation` -- is never walked. docs/archive/PROJECT_STATUS.md
-    /// 17-A found the mechanism; this pins the fix.
-    ///
-    /// Applying either half alone is the one-bit-off failure that destroyed
-    /// seven real subobject rows in the earlier experiment. This test fires
-    /// both together because that is the only combination that works.
+    /// block and the first content-block header: the velocity bit (read
+    /// unconditionally) and the net-player-index byte (consumed because the
+    /// path cache resolves the archetype). Missing either misframes the header
+    /// and the property block (`PlayerState`, `SpawnLocation`) is never walked
+    /// (docs/archive/PROJECT_STATUS.md 17-A). Either half alone destroyed seven
+    /// real subobject rows in the original experiment, so both fire together.
     #[test]
     fn controller_property_block_is_reached() {
         let mut payload: Vec<bool> = Vec::new();
@@ -3363,8 +2803,8 @@ mod tests {
         write_int_packed(&mut payload, 2);
         // Spawn data. Archetype GUID 9 is what the cache will resolve.
         write_minimal_spawn_data(&mut payload, 9);
-        // Net-player-index byte (value 0). On the wire because this is a
-        // PlayerController; consumed only if path_for_guid answers.
+        // Net-player-index byte (value 0), consumed only if path_for_guid
+        // answers.
         payload.extend(std::iter::repeat_n(false, 8));
         // The actor's own RepLayout block.
         payload.push(true); // hasRepLayout
@@ -3374,9 +2814,8 @@ mod tests {
         let packet = build_open_bunch_packet(2, &payload);
 
         let mut sink = TestSink::default();
-        // The cache knows the archetype path from chunk-level exports that
-        // arrived before this bunch; the old pc_guids set did not. That is
-        // the asymmetry the cache lookup fixes.
+        // The cache knows the archetype path from exports that arrived before
+        // this bunch, which a set of `register_path` calls would miss.
         sink.guid_paths
             .insert(9, "Default__BaseReplayController_C".to_string());
 
@@ -3402,9 +2841,8 @@ mod tests {
         );
     }
 
-    /// The 12.01--12.06 replay controller is named BaseJanusController.
-    /// Its player-index byte must be consumed before the first property block,
-    /// just like BaseReplayController from 12.07 onward.
+    /// The 12.01--12.06 controller, BaseJanusController, has its player-index
+    /// byte consumed too, like BaseReplayController from 12.07 on.
     #[test]
     fn legacy_controller_property_block_is_reached() {
         let mut payload = Vec::new();
@@ -3427,19 +2865,15 @@ mod tests {
         assert!(sink.content_blocks[0].is_actor);
     }
 
-    /// A non-controller dynamic actor has no net-player-index byte on the wire,
-    /// so the byte must NOT be consumed. The content-block header must sit
-    /// immediately after the spawn data and frame correctly.
-    ///
-    /// This is the guard against over-consuming: if the byte read were
-    /// unconditional rather than gated on the cache lookup, it would eat the
-    /// first eight bits of the content header here.
+    /// A non-controller dynamic actor has no net-player-index byte: the header
+    /// follows the spawn data directly, and an unconditional byte read would
+    /// eat its first eight bits.
     #[test]
     fn non_controller_dynamic_actor_skips_net_player_index_byte() {
         let mut payload: Vec<bool> = Vec::new();
         write_int_packed(&mut payload, 2); // actor GUID 2 (dynamic)
         write_minimal_spawn_data(&mut payload, 9); // archetype 9, no path in cache
-        // NO net-player-index byte -- this actor is not a controller.
+        // No net-player-index byte: this actor is not a controller.
         payload.push(true); // hasRepLayout
         payload.push(true); // isActor
         write_int_packed(&mut payload, 0); // contentBits = 0
@@ -3447,8 +2881,7 @@ mod tests {
         let packet = build_open_bunch_packet(2, &payload);
 
         let mut sink = TestSink::default();
-        // guid_paths is empty: path_for_guid returns None for every GUID,
-        // so is_player_controller_channel is false.
+        // Empty guid_paths: no GUID resolves, so no channel is a controller.
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         reader.process_packet(&packet, 0, &mut sink);
 
@@ -3459,16 +2892,10 @@ mod tests {
         assert!(sink.content_blocks[0].is_actor);
     }
 
-    /// If the net-player-index byte is on the wire but the cache does NOT
-    /// resolve the channel as a controller, the byte is left unconsumed and
-    /// the first content-block header misframes. This is the exact failure
-    /// mode 17-A describes: the misframed header re-synchronises, so the
-    /// bunch is not lost -- the property block is simply routed to the
-    /// ClassNetCache path instead.
-    ///
-    /// This test proves the cache lookup is what makes the difference: same
-    /// payload as the controller test, but without the path mapping, the
-    /// block is NOT the actor's RepLayout property block.
+    /// With the byte on the wire but no cache path, the byte is not consumed
+    /// and the first header misframes, the 17-A failure: the block
+    /// re-synchronises and goes down the ClassNetCache path instead of being
+    /// lost. Same payload as the controller test; the cache is the difference.
     #[test]
     fn controller_byte_unconsumed_without_cache_path_misframes_header() {
         let mut payload: Vec<bool> = Vec::new();
@@ -3483,15 +2910,11 @@ mod tests {
         let packet = build_open_bunch_packet(2, &payload);
 
         let mut sink = TestSink::default();
-        // ...but the cache does not know the archetype path. This is the
-        // pre-fix state: pc_guids was empty, and the cache lookup that
-        // replaced it had not been added yet.
+        // ...but the cache does not know the archetype path.
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         reader.process_packet(&packet, 0, &mut sink);
 
-        // The block that lands is NOT the actor's property block. With the
-        // fix applied (cache lookup), this misframing cannot happen on a real
-        // controller bunch. Without the fix it is exactly what occurred.
+        // So the block that lands is not the actor's property block.
         let actor_blocks: Vec<_> = sink
             .content_blocks
             .iter()
@@ -3505,12 +2928,11 @@ mod tests {
 
     // --- partial reassembly has exactly one authority ---
     //
-    // The packet reader keeps a per-channel partial tracker of its own. It used
-    // to write `has_partial_error` onto the header, and both the accumulator and
-    // the rejected-row condition read that flag, so any disagreement between the
-    // two trackers changed what was reassembled and what was preserved -- with
-    // `partial_errors` still at zero. Each test below is one such disagreement,
-    // reproduced on `main` before the fix.
+    // The packet reader keeps its own partial tracker. Were its
+    // `has_partial_error` to reach the accumulator or the rejected-row
+    // condition, any disagreement between the two would change what is
+    // reassembled and preserved with `partial_errors` at 0. Each test below
+    // is one such disagreement.
 
     /// A static actor open (GUID 3) followed by an empty actor block.
     fn open_and_empty_block() -> Vec<bool> {
@@ -3564,12 +2986,8 @@ mod tests {
             .sum()
     }
 
-    /// A partial that is both initial and final is a whole bunch every time it
-    /// arrives. The packet reader never retired its state for that shape, so
-    /// the second one on a channel was flagged as an overlapping initial: the
-    /// accumulator refused to complete it, `partial_errors` stayed 0, and the
-    /// same bits were written twice as rejected rows labelled with a cause
-    /// whose counter never moved.
+    /// A partial that is both initial and final is a whole bunch every time,
+    /// and frames exactly as the same payloads sent unfragmented.
     #[test]
     fn an_initial_final_partial_is_a_whole_bunch_every_time() {
         let mut second = Vec::new();
@@ -3614,10 +3032,9 @@ mod tests {
         assert_eq!(stats.skipped_bits, reference.stats().skipped_bits);
     }
 
-    /// An unaligned continuation is rejected by the accumulator alone; the
-    /// packet reader kept its assembly. A clean whole bunch that follows on the
-    /// same channel must still be processed, and the rejected bits preserved
-    /// exactly once.
+    /// An unaligned continuation is rejected by the accumulator alone (the
+    /// packet reader keeps its assembly): a whole bunch after it is still
+    /// processed, and the rejected bits preserved exactly once.
     #[test]
     fn a_whole_bunch_after_an_unaligned_fragment_is_still_processed() {
         let (reader, sink) = run_packets(&[
@@ -3664,9 +3081,8 @@ mod tests {
     }
 
     /// The initial that restarts a channel after an unaligned rejection is
-    /// buffered and later reassembled. It must not also be written as a rejected
-    /// overlapping initial -- that put the same bits into both the decoded
-    /// stream and the preservation table.
+    /// reassembled, and must not also be a rejected row: its bits would be in
+    /// both the decoded stream and the preservation table.
     #[test]
     fn a_reassembled_fragment_is_never_also_a_rejected_row() {
         let mut block = Vec::new();
@@ -3702,10 +3118,7 @@ mod tests {
     }
 
     /// A zero-bit final that overlaps an assembly is an error, not a
-    /// completion. The zero-payload path marked it complete without the guard
-    /// its non-empty sibling carries, so `partial_completed` reported a bunch
-    /// that was never processed and the complete-but-untaken state stayed in
-    /// the accumulator until end of stream.
+    /// completion, and leaves no complete-but-untaken state behind.
     #[test]
     fn a_zero_bit_overlapping_final_is_not_a_completion() {
         let (reader, sink) = run_packets(&[
@@ -3733,14 +3146,63 @@ mod tests {
         assert_eq!(rejected_bits(&sink), stats.skipped_bits);
     }
 
+    /// A refused initial fragment is one rejected row: the empty assembly
+    /// started for it is not also a 0-bit `accumulated_payload` row.
+    #[test]
+    fn a_refused_initial_fragment_is_one_rejected_row() {
+        let (reader, sink) = run_packets(&[partial_packet(false, true, false, &[true; 5])]);
+
+        let stats = reader.stats();
+        assert_eq!(stats.partial_errors, 1);
+        assert_eq!(stats.partial_non_byte_aligned, 1);
+        assert_eq!(
+            rejected_rows(&sink),
+            vec![(
+                "current_fragment",
+                PartialPayloadReason::NonByteAlignedFragment,
+                5
+            )]
+        );
+        assert_eq!(stats.skipped_bits, 5);
+        assert_eq!(rejected_bits(&sink), stats.skipped_bits);
+        assert_eq!(
+            reader.accumulator.active_count(),
+            0,
+            "the refused initial leaves no assembly behind"
+        );
+
+        // Over a buffered assembly, the assembly it replaced is still a row,
+        // under the cause that displaced it; only the empty one is not.
+        let (reader, sink) = run_packets(&[
+            partial_packet(true, true, false, &guid_three()),
+            partial_packet(false, true, false, &[true; 5]),
+        ]);
+        assert_eq!(
+            rejected_rows(&sink),
+            vec![
+                (
+                    "accumulated_payload",
+                    PartialPayloadReason::OverlappingInitial,
+                    8
+                ),
+                (
+                    "current_fragment",
+                    PartialPayloadReason::NonByteAlignedFragment,
+                    5
+                ),
+            ]
+        );
+        assert_eq!(sink.rejected_partials[0].payload, vec![6]);
+        assert_eq!(rejected_bits(&sink), reader.stats().skipped_bits);
+    }
+
     // --- the preservation hand-off itself ---
     //
-    // The accumulator's own tests cover what it displaces. What they cannot see
-    // is the step after: pipeline -> `on_rejected_partial`. Five simultaneous
-    // mutations of that step (rows not written, payloads emptied, three reasons
-    // relabelled, end-of-stream counters zeroed) left every workspace test
-    // green. Each test below pins one of those hand-offs by its bytes, reason
-    // and counters.
+    // The accumulator's tests cover what it displaces, not the step after:
+    // pipeline -> `on_rejected_partial`. Five simultaneous mutations of that
+    // step (rows not written, payloads emptied, three reasons relabelled,
+    // end-of-stream counters zeroed) once left every workspace test green;
+    // each test below pins one hand-off by its bytes, reason and counters.
 
     /// `finish_with_sink` is what the driver calls, not `finish`. It must count
     /// the unfinished assembly and hand the sink its exact bytes, once.
@@ -3775,8 +3237,9 @@ mod tests {
         );
     }
 
-    /// A partial bunch refused because per-channel state is exhausted keeps its
-    /// own reason; it is not a missing initial.
+    /// A partial refused at the channel-state guard keeps its own reason (not
+    /// a missing initial) and still counts in `partial_bunches`, although it
+    /// returns before `process_bunch`, where the others are counted.
     #[test]
     fn a_partial_refused_for_channel_state_keeps_that_reason() {
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
@@ -3789,6 +3252,11 @@ mod tests {
         );
 
         assert_eq!(reader.stats().channel_state_limit_failures, 1);
+        assert_eq!(
+            reader.stats().partial_bunches,
+            1,
+            "a partial refused at the channel-state guard was still attempted"
+        );
         assert_eq!(
             rejected_rows(&sink),
             vec![(

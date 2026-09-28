@@ -16,8 +16,10 @@ import atomic_io  # noqa: E402
 import bench_export  # noqa: E402
 import check_metrics_baseline  # noqa: E402
 import compare_with_csharp  # noqa: E402
+import extract_active_effects  # noqa: E402
 import extract_equippables  # noqa: E402
 import extract_sboxes  # noqa: E402
+import extract_spike_carrier  # noqa: E402
 
 
 class AtomicOutputTests(unittest.TestCase):
@@ -191,6 +193,40 @@ class AtomicOutputTests(unittest.TestCase):
                     sys.argv = argv
 
             self.assert_preserved_when_replace_fails(report, generate)
+
+    def run_parquet_cli(self, module, build_name, built, output):
+        """Run one Parquet-writing CLI on a stubbed build() result."""
+        argv = sys.argv
+        sys.argv = [f"{module.__name__}.py", "--export", str(output.parent),
+                    "--out", str(output)]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+                io.StringIO()
+            ), mock.patch.object(module, build_name, return_value=built):
+                module.main()
+        finally:
+            sys.argv = argv
+
+    def test_spike_carrier_parquet_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "spike_carrier.parquet"
+            self.assert_preserved_when_replace_fails(
+                output,
+                lambda: self.run_parquet_cli(
+                    extract_spike_carrier, "build", ([], {}, 0, {}), output
+                ),
+            )
+
+    def test_active_effects_parquet_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "active_effects.parquet"
+            self.assert_preserved_when_replace_fails(
+                output,
+                lambda: self.run_parquet_cli(
+                    extract_active_effects, "build_with_tally",
+                    ([], {"went_dormant": 0}), output
+                ),
+            )
 
 
 if __name__ == "__main__":

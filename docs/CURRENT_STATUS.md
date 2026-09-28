@@ -1,26 +1,20 @@
 # Current status
 
-The latest common verification run is dated 2026-09-28 and covers all 24
-supported builds. See [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md) for
-per-build replay counts, the shared acceptance criteria, the changes since
-2026-09-25, and resolved findings. All 1,018 unique replays pass, including
-38 of build 13.06, 32 of them added since the 986-replay audit of 2026-09-25.
-On 2026-09-25 the ActiveBlinds empty-delta and null-actor fixes eliminated the
-earlier 81-file failures and recovered 522 typed children.
-The [README support table](../README.md#supported-valorant-builds) reports
-strictly clean replays against all replays checked, using that same report.
-Current workspace test counts are also maintained in the README.
-
-The 2026-09-24 [build support update](LEGACY_BUILD_SUPPORT.md) recovered
-11.06--12.09 transforms and validated all 48 available samples. The
-2026-09-23 [upstream parity update](UPSTREAM_PARITY.md) added 13.06 and scoped
-ability decoding. The new common audit includes these changes; the older
-physical field inventory below retains its own date and parser revision.
-Start with [DATA.md](DATA.md) for the schema and [USAGE.md](USAGE.md) for commands.
+The current state is the 2026-09-28 common verification of all 24 supported
+builds: [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md) has the per-build replay
+counts, the shared acceptance rule and the resolved findings. All 1,018 unique
+replays pass, 38 of them 13.06 (32 added since the 986-replay audit of
+2026-09-25). The [README support table](../README.md#supported-valorant-builds)
+reports the same run, and the README carries the workspace test counts.
+Start with [DATA.md](DATA.md) for the schema and [USAGE.md](USAGE.md) for
+commands; [LEGACY_BUILD_SUPPORT.md](LEGACY_BUILD_SUPPORT.md) and
+[UPSTREAM_PARITY.md](UPSTREAM_PARITY.md) record how 11.06--12.09 and 13.06 were
+added.
 
 ## Historical physical field inventory, 2026-09-09
 
-The accepted 2026-09-09 inventory covered 714 replays and reported:
+The accepted inventory of 714 replays, parser `fc50bfe` (later derived-view
+commits did not change it):
 
 | Table | Physical rows | Rows with a typed value |
 |---|---:|---:|
@@ -28,63 +22,17 @@ The accepted 2026-09-09 inventory covered 714 replays and reported:
 | `checkpoint_fields` | 285,420,158 | 220,648,387 |
 | Combined | 1,305,997,382 | 947,642,232 |
 
-The combined typed-value presence is 72.5608%. This counts physical rows with
-at least one non-null typed value column. It is not semantic coverage, gameplay
-accuracy, or a percentage of known field meanings. Earlier percentages in
-phase documents are dated measurements of earlier parser states and remain
-historical.
-
-That untyped-row inventory includes named properties and whole RPC payloads
-without an accepted type, anonymous or checksum-unresolved fields, structured
-or nested raw parents whose synthesized children may be only partly
-understood, and decoded movement rows whose input bytes are not duplicated in
-`raw_bits`. These categories need separate evidence and denominators; they
-must not be collapsed into one
-semantic backlog percentage.
-
-Across the two field tables, the inventory contains 36,839 table/group/field/
-checksum/build catalog keys. It records 187,106,485 untyped rows with preserved
-raw payloads, 3,075,937 zero-bit markers, and zero preserved rows with a wrong
-raw length. The 168,172,728 nonempty untyped rows without duplicated `raw_bits`
-are all on the decoded movement route. These are transport and catalog counts,
-not counts of distinct gameplay facts or meanings.
-
-The measured starting point for follow-up work is
-[CURRENT_RAW_BACKLOG.md](CURRENT_RAW_BACKLOG.md). Its ranked populations are an
-investigation inventory, not a completed semantic partition or a claim that
-each catalog key is one distinct field meaning.
-
-The subsequent [GAS and PatchVolume wire investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md)
-recovers numeric FastArray structure from all 2,882,152 AbilitiesAndBuffs inner
-windows in those exports. The public
-`tools/extract_fastarray_observations.py` command writes a separate GAS
-observation stream containing numeric headers, item IDs, and raw property
-boundaries while preserving the original bits. It does not add typed values to
-`fields.parquet` or `checkpoint_fields.parquet`, so the accepted Parquet counts
-and typed-presence ratio above remain unchanged.
-
-On 2026-09-28 the extractor's build scope was re-measured on 1,018 exports
-made by parser `259ed10` across all 24 supported builds. All 3,999,493
-`_cnc_h1` inner windows close exactly, and an independent reader agrees on
-every boundary. On that route the extractor accepts the 22 builds that carry
-such windows. 12.10 and 12.11 have none there, and no `_cnc_h1` checkpoint row
-was observed, so both stay unvalidated. See
-[the build-scope entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#build-scope-re-measured-2026-09-28).
-This widens where numeric structure can be extracted. It adds no field
-meanings and no typed Parquet values. A second change the same day admits
-the AbilitiesAndBuffs bodies the parser files under
-`/Script/ShooterGame.AresAbilitySystemComponent`. That is 250,053 main and
-181,108 checkpoint windows, all exact and accepted on all 24 builds, including
-12.10 and 12.11. Until then the extractor selected none of them. See
-[the chained-route entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#chained-route-admitted-2026-09-28).
-
-The investigation also records private structural evidence that the same
-generic walk fully consumes 26,303 selected PatchVolume windows. In both
-populations, numeric boundaries alone do not establish gameplay meanings.
-PatchVolume has since gained both a schema and a public route: its windows are
-GroundVolumeComponent `FragmentInfo` cells, decoded by
-`tools/extract_ground_volumes.py` with the names each replay declares -- see
-[ground-area volumes](GROUND_VOLUMES.md). Parquet is unchanged.
+The combined typed-value presence is 72.5608%: physical rows with at least one
+non-null typed value column, not semantic coverage, gameplay accuracy or a
+share of known field meanings. The untyped rows -- named properties and whole
+RPC payloads without an accepted type, anonymous or checksum-unresolved
+fields, raw parents whose children may be only partly understood, and decoded
+movement rows whose input bytes are not duplicated -- need separate evidence
+and denominators; [CURRENT_RAW_BACKLOG.md](CURRENT_RAW_BACKLOG.md) catalogues
+them. Numeric FastArray structure over the AbilitiesAndBuffs windows is in the
+[GAS and PatchVolume investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md), and
+the PatchVolume cells in [GROUND_VOLUMES.md](GROUND_VOLUMES.md); neither adds
+typed Parquet values, so the counts above stand.
 
 ## Completed evidence phases
 
@@ -106,7 +54,3 @@ The main completed phases are recorded in
 [SECTION_PACKET_TIMELINE.md](SECTION_PACKET_TIMELINE.md). Each document states
 its own evidence boundary; derived section and kill views do not prove game HP,
 healing attribution, damage attribution, causality, or player credit.
-
-The parser acceptance commit for the physical field counts was `fc50bfe`.
-Later derived-view commits did not change those recorded counts. They remain
-a dated physical-row inventory, separate from the current build verification.

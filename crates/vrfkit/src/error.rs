@@ -1,6 +1,7 @@
 //! Unified error type for the CLI.
 
 use thiserror::Error;
+use vrf_net::pipeline::ReplicationReader;
 
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -18,4 +19,11 @@ pub enum CliError {
 
     #[error("{0}")]
     Usage(String),
+}
+
+/// A replication reader for `branch`, or the usage error every subcommand
+/// reports for a branch it cannot read. A helper, not a `From` conversion, so
+/// no other vrf-net error is ever labelled a branch error.
+pub fn replication_reader(branch: &str) -> Result<ReplicationReader, CliError> {
+    ReplicationReader::new(branch).map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))
 }

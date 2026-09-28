@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tools import extract_fastarray_observations as fast
+from tools.tests.wire_fixtures import packed
 
 #: Route identities exactly as the parser exports them. Literal rather than
 #: read from the extractor: a misspelled group selects nothing and would pass
@@ -66,16 +67,6 @@ FIELD_SCHEMA = pa.schema([
     ("bit_count", pa.uint32()), ("raw_bits", pa.binary())])
 CHECKPOINT_SCHEMA = pa.schema([("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()),
                                *FIELD_SCHEMA])
-
-
-def packed(value):
-    out = bytearray()
-    while True:
-        next_value = value >> 7
-        out.append(((value & 127) << 1) | bool(next_value))
-        if not next_value:
-            return bytes(out)
-        value = next_value
 
 
 def payload(deleted=(), changed=(), keys=(8, 5)):
@@ -356,6 +347,17 @@ class FastArrayTests(unittest.TestCase):
                 fast.extract(source, out)
             with self.assertRaisesRegex(ValueError, "outside"):
                 fast.extract(source, source / "forbidden")
+
+    def test_the_receipt_is_written_with_lf_line_endings(self):
+        """LF on every platform, like observations.ndjson (not CRLF on Windows)."""
+        raw, count = payload([1, 3])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); out = root / "result"
+            source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
+            fast.extract(source, out)
+            data = (out / "receipt.json").read_bytes()
+        self.assertIn(b"\n", data)
+        self.assertNotIn(b"\r\n", data)
 
     def test_cli_rejections_retained_and_nonzero_exit(self):
         raw, count = payload([1, 3])

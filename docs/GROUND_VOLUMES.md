@@ -81,8 +81,9 @@ its name:
 - the decoded cells lie on a grid anchored at the owning actor's spawn
   position (below).
 
-A separate IoStore read of the game's component classes (a parallel branch,
-not in this tree) reached the same class.
+`tools/extract_component_classes` reached the same class from the game's
+IoStore containers ([DATA.md](DATA.md#reading-component-classes-out-of-the-game),
+"Not added, and why").
 
 Route completeness: the same strict decoder, with each replay's declaration,
 was run on every other preserved ClassNetCache window or tail in both field
@@ -204,9 +205,8 @@ FGroundVolumeFragment`, one step more (`GridPos : FIntPoint`) for `X`/`Y`,
 an array element repeating its array's name -- it reproduces 14 of the 17
 item and element identities a 13.06 replay declares, and `TJunctions` too.
 Each encodes the type the tool already read, except that `TJunctions` is an
-array (below). The earlier attempt recorded here seeded with 0 or with the
-array's checksum and reproduced nothing; the struct levels in between were
-missing.
+array (below). Seeding with 0 or with the array's checksum reproduces
+nothing: the struct levels in between are needed.
 
 - Not reproduced: `Status`, an enum -- no C++ spelling of an enum type
   reproduces, the failure a survey of the game's Blueprint fields also met --

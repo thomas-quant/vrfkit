@@ -133,7 +133,10 @@ errors.
 The same investigation measured `AuthInitialRandomSeed`: 1,752,939 main rows
 and 567,321 checkpoint rows, all exactly 32 bits. None sets the high bit, so
 signed and unsigned interpretations give the same numbers. No explicit local
-property type declaration was found. Its signedness remains unestablished.
+property type declaration was found, and no upstream declaration at `b51d674`
+or in its pull requests settles it, `InputEventData`'s actions or
+`StopEffectType` either ([2026-09-09 recheck](archive/UPSTREAM_VALUE_RESEARCH.md)).
+Its signedness remains unestablished.
 
 Every main Initial row has an exactly matching Current seed at the same actor,
 object, time and packet. Checkpoints contain 434,312 equal and 133,009 differing
@@ -144,10 +147,9 @@ is introduced by this batch.
 
 ## Validation status
 
-The fixed Rust 1.86 binary completed all 714 exports with eight workers in
-334.8 seconds, including checkpoints. Build populations are 215 for 13.01,
-204 for 13.02, 108 for 13.04 and 187 for 13.05. Original replays and all previous
-exports remain retained. Both full-corpus guards pass: zero overlay decode
+The fixed Rust 1.86 binary completed all 714 exports, including checkpoints:
+215 for 13.01, 204 for 13.02, 108 for 13.04 and 187 for 13.05. Both full-corpus
+guards pass: zero overlay decode
 errors, zero structured-blob failures and zero malformed packets. This does
 not establish that all input bytes have been interpreted.
 
@@ -178,9 +180,7 @@ values, and 12,507 typed children are added. Physical parents and children
 overlap, and checkpoints repeat state. These ratios are not semantic
 completeness; the earlier strict semantic classification has not been rerun.
 
-The 40-check MSRV/build-feature sweep passes, including 692 Rust tests.
 Pinned main and checkpoint baselines pass after review: the reference file
 gains 1,894 HealCauser values, retains all row counts, and reports zero new
 targeting children. Its directly measured typed presence is 914,001 of
-1,296,660 rows (70.4889%). Warning-strict Python validation covers 709 tests;
-the full documentation guard checks these counts against the actual suites.
+1,296,660 rows (70.4889%).

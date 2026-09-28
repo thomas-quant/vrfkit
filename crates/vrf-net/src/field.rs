@@ -1,14 +1,5 @@
-//! Field stream parsing -- self-describing property and RPC iteration.
-//!
-//! # Design: no skipping, no descriptors
-//!
-//! The field stream is self-describing: each field encodes its own handle and
-//! bit length. This means we can iterate **every** field without knowing its
-//! type. The caller receives `(handle, bit_count, &BitReader)` for every
-//! field/RPC through a sink trait, and decides what to do with the raw bits.
-//!
-//! This is the fundamental difference from the upstream parser, which skips
-//! fields that have no registered descriptor.
+//! Field stream parsing -- self-describing property and RPC iteration: every
+//! field and RPC reaches the [`FieldSink`], none is skipped (see the crate docs).
 //!
 //! # RepLayout field stream bit layout
 //!
@@ -37,33 +28,24 @@ use vrf_bitio::BitReader;
 
 use crate::error::{NetError, Result};
 
-/// Sink that receives every field/RPC payload without exception.
-///
-/// Implementors decode the fields they care about and can simply return
-/// for the rest. The raw bits are available through the sub-reader.
+/// Sink that receives every field/RPC payload without exception; it decodes
+/// what it cares about and may ignore the rest.
 pub trait FieldSink {
-    /// A RepLayout property field was encountered.
-    ///
-    /// `reader` is bounded to exactly `bit_count` bits.
+    /// A RepLayout property field; `reader` holds exactly its `bit_count` bits.
     fn on_field(&mut self, handle: u32, bit_count: u32, reader: BitReader<'_>);
 
-    /// A ClassNetCache RPC invocation was encountered.
-    ///
-    /// `reader` is bounded to exactly `bit_count` bits.
+    /// A ClassNetCache RPC; `reader` holds exactly its `bit_count` bits.
     fn on_rpc(&mut self, handle: u32, bit_count: u32, reader: BitReader<'_>);
 }
 
-/// What the parsers track about the record they are currently inside, so the
-/// caller can attach the failing record's identity to a `StreamFailure`.
-///
-/// Diagnostics only. The ordinary parser entry points do not update it;
-/// callers explicitly choose the `_tracked` variants when a diagnostic sink
-/// requests the extra per-record work.
+/// The record a walk is inside, so the caller can name the failing record in a
+/// `StreamFailure`. Diagnostics only: the untracked entry points leave it
+/// alone; the `_tracked` variants fill one in, as the pipeline's content-block
+/// walks do when the sink's `wants_stream_failure_details` asks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WalkContext {
-    /// Bit offset inside the block where the current record begins. Set before
-    /// any read of the record, so it is exact even when the failing read is the
-    /// record's own handle.
+    /// Bit offset inside the block where the current record begins, set
+    /// before any of its reads: exact even when the handle read fails.
     pub record_offset: u64,
     /// Handle of the current non-terminator record once its handle read
     /// succeeds. Cleared at every record boundary, so a failed handle read or
@@ -92,9 +74,8 @@ impl RepLayoutRemainder {
     }
 }
 
-/// Internal walk result that preserves the number of records already emitted
-/// when a later read fails. Public parser APIs still return their established
-/// `Result<(count, remainder)>` shape.
+/// Internal walk result that keeps the count of records emitted before a later
+/// read failed; the public parsers still return `Result<(count, remainder)>`.
 pub(crate) enum WalkOutcome<R> {
     Complete { count: u32, remainder: R },
     Failed { count: u32, error: NetError },
@@ -109,13 +90,20 @@ impl<R> WalkOutcome<R> {
     }
 }
 
+/// Run a record walk written with `?`, keeping the count of records it
+/// emitted before any error.
+fn walk<R>(body: impl FnOnce(&mut u32) -> Result<R>) -> WalkOutcome<R> {
+    let mut count = 0;
+    match body(&mut count) {
+        Ok(remainder) => WalkOutcome::Complete { count, remainder },
+        Err(error) => WalkOutcome::Failed { count, error },
+    }
+}
+
 /// Parse a RepLayout property stream, emitting every field to the sink.
 ///
-/// Returns the number of fields emitted and the count of bits the stream
-/// abandoned mid-block (a declared payload that overran the remaining bits).
-/// The caller folds the abandoned count into `skipped_bits` so the loss is
-/// visible: previously these bits were consumed by `skip_remaining` with zero
-/// accounting because the framing layer only counted `skipped_bits` on `Err`.
+/// Returns the fields emitted and the bits abandoned mid-block (a declared
+/// payload that overran the rest), which the caller adds to `skipped_bits`.
 pub fn parse_rep_layout(
     reader: &mut BitReader<'_>,
     sink: &mut dyn FieldSink,
@@ -150,130 +138,81 @@ fn parse_rep_layout_impl(
     mut ctx: Option<&mut WalkContext>,
     retain_class_net_cache_tail: bool,
 ) -> WalkOutcome<RepLayoutRemainder> {
-    // Property checksum bit -- always present, always ignored.
-    if let Err(error) = reader.read_bit() {
-        return WalkOutcome::Failed {
-            count: 0,
-            error: error.into(),
-        };
-    }
+    walk(|field_count| {
+        // Property checksum bit -- always present, always ignored.
+        reader.read_bit()?;
 
-    let mut field_count = 0u32;
-    let mut remainder = RepLayoutRemainder::None;
-
-    while !reader.at_end() {
-        // Where this record starts. The handle and length reads below are
-        // consumed before an overrun can be detected, and they die with the
-        // record they described, so they are part of what was abandoned.
-        // Counting only `bits_remaining` reported less loss than occurred.
-        let record_start = reader.position();
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.record_offset = record_start;
-            ctx.last_handle = None;
-        }
-        let encoded_handle = match reader.read_int_packed() {
-            Ok(handle) => handle,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: field_count,
-                    error: error.into(),
-                };
+        let mut remainder = RepLayoutRemainder::None;
+        while !reader.at_end() {
+            // The handle and length bits die with an overrunning record, so an
+            // abandon is charged from here, not from `bits_remaining`.
+            let record_start = reader.position();
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.record_offset = record_start;
+                ctx.last_handle = None;
             }
-        };
-        if encoded_handle == 0 {
-            // `FObjectReplicator::ReceivedBunch` may place a ClassNetCache
-            // stream after the RepLayout terminator in this same window.
-            let leftover = reader.bits_remaining();
-            if leftover != 0 {
-                remainder = RepLayoutRemainder::ClassNetCache(leftover);
-                if !retain_class_net_cache_tail {
-                    reader.skip_remaining();
+            let encoded_handle = reader.read_int_packed()?;
+            if encoded_handle == 0 {
+                // `FObjectReplicator::ReceivedBunch` may place a ClassNetCache
+                // stream after the RepLayout terminator in this same window.
+                let leftover = reader.bits_remaining();
+                if leftover != 0 {
+                    remainder = RepLayoutRemainder::ClassNetCache(leftover);
+                    if !retain_class_net_cache_tail {
+                        reader.skip_remaining();
+                    }
                 }
+                break;
             }
-            break;
-        }
 
-        let handle = encoded_handle - 1;
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.last_handle = Some(handle);
-        }
-        // A zero-bit payload is valid (an empty field) and is emitted like any
-        // other: `sub_reader(0)` yields an empty window and the overrun test
-        // below is trivially false for it, so it needs no special case.
-        let payload_bits = match reader.read_int_packed() {
-            Ok(bits) => bits,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: field_count,
-                    error: error.into(),
-                };
+            let handle = encoded_handle - 1;
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.last_handle = Some(handle);
             }
-        };
+            // A zero-bit payload is a valid empty field and needs no special
+            // case: `sub_reader(0)` is an empty window that cannot overrun.
+            let payload_bits = reader.read_int_packed()?;
 
-        if payload_bits as u64 > reader.bits_remaining() {
-            // Malformed: declared more bits than available. Hand the abandoned
-            // remainder back to the caller so it lands in `skipped_bits`
-            // rather than vanishing from every counter.
-            let abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-            remainder = RepLayoutRemainder::Malformed(abandoned_bits);
-            reader.skip_remaining();
-            break;
-        }
-
-        let sub = match reader.sub_reader(payload_bits as u64) {
-            Ok(sub) => sub,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: field_count,
-                    error: error.into(),
-                };
+            if payload_bits as u64 > reader.bits_remaining() {
+                // Declared more bits than remain: hand the abandoned span back
+                // for `skipped_bits`.
+                let abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
+                remainder = RepLayoutRemainder::Malformed(abandoned_bits);
+                reader.skip_remaining();
+                break;
             }
-        };
-        sink.on_field(handle, payload_bits, sub);
-        field_count += 1;
-    }
 
-    WalkOutcome::Complete {
-        count: field_count,
-        remainder,
-    }
+            let sub = reader.sub_reader(payload_bits as u64)?;
+            sink.on_field(handle, payload_bits, sub);
+            *field_count += 1;
+        }
+        Ok(remainder)
+    })
 }
 
 /// Parse a ClassNetCache RPC stream, emitting every invocation to the sink.
 ///
-/// `function_count` is the number of functions in the class's net cache --
-/// this is the upper bound for `read_serialized_int`. The caller provides it
-/// because this layer does not have access to descriptors.
+/// `function_count`, the class's net-cache function count (the caller's to
+/// know: this layer has no descriptors), bounds the handle read. Returns the
+/// RPCs emitted and the bits abandoned mid-block (too few bits left for a
+/// payload length, or a declared payload that overran), as
+/// [`parse_rep_layout`] does.
 ///
 /// # Handle-read clamp (minimum of two)
 ///
-/// Unreal's `UActorChannel::ReadFieldHeaderAndPayload` reads the RPC handle as:
+/// `UActorChannel::ReadFieldHeaderAndPayload`
+/// (`Engine/Source/Runtime/Engine/Private/DataChannel.cpp`) reads the handle as
 ///
 /// ```text
 /// ReadInt(FMath::Max(NetFieldExportGroup->NetFieldExports.Num(), 2))
 /// ```
 ///
-/// The clamp to 2 is critical: when a ClassNetCache declares exactly one
-/// function export, `SerializeInt(value, 1)` would consume **zero bits**
-/// (`ceil(log2(1)) = 0`), but the wire payload always contains the one-bit
-/// handle written by `SerializeInt(value, 2)` on the server.
-///
-/// Without the clamp the reader falls one bit behind the true position,
-/// causing downstream IntPacked reads to desynchronise. The four stream
-/// failures in the corpus (SegmentManager x2, Spline x1, MapMissileMarker x1)
-/// are all capacity-1 groups where this one-bit desync accumulates into an
-/// unrecoverable error. Arithmetic confirms: consuming 1 extra bit at the
-/// handle aligns every subsequent payload length and field boundary perfectly
-/// to the block end with zero bits remaining.
-///
-/// Source: `Engine/Source/Runtime/Engine/Private/DataChannel.cpp`, confirmed by
+/// Without the clamp a capacity-1 group reads a 0-bit handle where the server
+/// wrote one bit, and the stream desyncs by one bit: the cause of all four
+/// corpus stream failures (SegmentManager x2, Spline x1, MapMissileMarker x1),
+/// each of which walks exactly to its block end with the clamp. Confirmed by
 /// `Shiqan/FortniteReplayDecompressor` (C#) and `xNocken/replay-reader` (JS).
-///
-/// Returns the number of RPCs emitted and the count of bits the stream
-/// abandoned mid-block (either too few bits remained for an IntPacked
-/// payload-length read, or a declared payload overran the remainder). See
-/// [`parse_rep_layout`]'s doc comment for why the caller folds this into
-/// `skipped_bits` instead of the old silent `skip_remaining`.
+/// A count of 0 means an unresolved group: it fails loudly, never clamped.
 pub fn parse_class_net_cache(
     reader: &mut BitReader<'_>,
     function_count: u32,
@@ -307,100 +246,59 @@ fn parse_class_net_cache_impl(
     sink: &mut dyn FieldSink,
     mut ctx: Option<&mut WalkContext>,
 ) -> WalkOutcome<u64> {
-    if function_count == 0 {
-        // Zero does not mean "a class with no functions", it means the export
-        // group could not be resolved, so the handle width is unknown and the
-        // records cannot be walked. Returning Ok here would drop the whole
-        // payload without it appearing in any counter, leaving the oracle to
-        // report a clean run over data it silently threw away. Fail instead:
-        // the caller counts the bits and names the group.
-        return WalkOutcome::Failed {
-            count: 0,
-            error: NetError::UnresolvedFunctionCount,
-        };
-    }
-
-    // Unreal clamps the serialized-int maximum to at least 2 so that even a
-    // single-export group consumes exactly 1 bit for the handle on the wire.
-    // Without this, read_serialized_int(1) consumes 0 bits and the stream
-    // desyncs by 1 bit. Capacities >= 2 are unchanged (max(N, 2) == N), and
-    // zero is already rejected above.
-    let handle_max = function_count.max(2);
-
-    let mut rpc_count = 0u32;
-    let mut abandoned_bits = 0u64;
-
-    while !reader.at_end() {
-        // Where this record starts, so the abandon paths below can account the
-        // handle they have already consumed. Without it a block of exactly one
-        // bit -- the handle, and nothing after it -- returned `Ok((0, 0))`:
-        // zero RPCs, zero abandoned bits, no error, which is the same signal a
-        // perfectly parsed empty block gives.
-        let record_start = reader.position();
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.record_offset = record_start;
-            ctx.last_handle = None;
+    walk(|rpc_count| {
+        if function_count == 0 {
+            // An unresolved group, not a class with no functions: the handle
+            // width is unknown. `Ok` would drop the payload from every counter;
+            // failing lets the caller count the bits and name the group.
+            return Err(NetError::UnresolvedFunctionCount);
         }
-        let handle = match reader.read_serialized_int(handle_max) {
-            Ok(handle) => handle,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: rpc_count,
-                    error: error.into(),
-                };
+
+        // The minimum-of-two clamp; see `parse_class_net_cache`.
+        let handle_max = function_count.max(2);
+
+        let mut abandoned_bits = 0u64;
+        while !reader.at_end() {
+            // The abandon paths charge from here, the consumed handle included,
+            // so a one-bit block (just a handle) never reads as a clean empty one.
+            let record_start = reader.position();
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.record_offset = record_start;
+                ctx.last_handle = None;
             }
-        };
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.last_handle = Some(handle);
-        }
-
-        if reader.bits_remaining() < 8 {
-            // Not enough bits for a payload length -- malformed tail. Account
-            // the abandoned remainder, plus the handle that came out of the
-            // same doomed record, so neither is silently dropped.
-            abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-            reader.skip_remaining();
-            break;
-        }
-
-        let payload_bits = match reader.read_int_packed() {
-            Ok(bits) => bits,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: rpc_count,
-                    error: error.into(),
-                };
+            let handle = reader.read_serialized_int(handle_max)?;
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.last_handle = Some(handle);
             }
-        };
 
-        if payload_bits as u64 > reader.bits_remaining() {
-            abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-            reader.skip_remaining();
-            break;
-        }
-
-        let sub = match reader.sub_reader(payload_bits as u64) {
-            Ok(sub) => sub,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: rpc_count,
-                    error: error.into(),
-                };
+            if reader.bits_remaining() < 8 {
+                // Too few bits for a payload length: a malformed tail, charged
+                // together with its handle.
+                abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
+                reader.skip_remaining();
+                break;
             }
-        };
-        sink.on_rpc(handle, payload_bits, sub);
-        rpc_count += 1;
-    }
 
-    WalkOutcome::Complete {
-        count: rpc_count,
-        remainder: abandoned_bits,
-    }
+            let payload_bits = reader.read_int_packed()?;
+
+            if payload_bits as u64 > reader.bits_remaining() {
+                abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
+                reader.skip_remaining();
+                break;
+            }
+
+            let sub = reader.sub_reader(payload_bits as u64)?;
+            sink.on_rpc(handle, payload_bits, sub);
+            *rpc_count += 1;
+        }
+        Ok(abandoned_bits)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{pack, write_int_packed, write_serialized_int};
 
     /// A sink that records all fields/RPCs.
     #[derive(Default)]
@@ -418,46 +316,6 @@ mod tests {
         }
     }
 
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max_value: u32) {
-        let mut written_value = 0u32;
-        let mut mask = 1u32;
-        while written_value.saturating_add(mask) < max_value {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written_value |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
-
     #[test]
     fn rep_layout_single_field() {
         let mut bits = Vec::new();
@@ -468,7 +326,7 @@ mod tests {
         bits.extend(std::iter::repeat_n(true, 32));
         write_int_packed(&mut bits, 0); // terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -491,7 +349,7 @@ mod tests {
         bits.extend(std::iter::repeat_n(true, 16));
         write_int_packed(&mut bits, 0); // terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -506,7 +364,7 @@ mod tests {
         bits.push(false); // checksum
         write_int_packed(&mut bits, 0); // immediate terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -520,7 +378,7 @@ mod tests {
         write_int_packed(&mut bits, 16); // 16 bits payload
         bits.extend(std::iter::repeat_n(false, 16));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_class_net_cache(&mut reader, 10, &mut sink).unwrap();
@@ -529,50 +387,37 @@ mod tests {
         assert_eq!(sink.rpcs, vec![(2, 16)]);
     }
 
-    /// Capacity-1 groups must consume exactly 1 bit for the handle (the
-    /// minimum-of-two clamp). Without the clamp, read_serialized_int(1)
-    /// consumes 0 bits and the stream desyncs. This pins the fix for the
-    /// four corpus stream failures caused by capacity-1 ClassNetCache groups.
+    /// A capacity-1 group reads a one-bit handle (the minimum-of-two clamp),
+    /// the shape of the four corpus stream failures the clamp fixed.
     #[test]
     fn class_net_cache_capacity_one_consumes_one_bit() {
-        // Build a stream for function_count=1:
-        // - handle: serialized_int written with max=2 (server uses the clamp),
-        //   value=0 -> 1 bit (the '0' bit)
-        // - payload_bits: IntPacked(0) -> 8 bits
-        // Total: 9 bits of meaningful data.
+        // function_count=1: a handle the server wrote with max=2 (one bit),
+        // then IntPacked(0) (8 bits): 9 bits, bounded exactly.
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 0, 2); // handle=0, written with max=2 (1 bit)
         write_int_packed(&mut bits, 0); // payload = 0 bits
 
-        let data = bits_to_bytes(&bits);
-        // Bound the reader to exactly the meaningful bit count so we can
-        // verify consumption without byte-padding interference.
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (count, _) = parse_class_net_cache(&mut reader, 1, &mut sink).unwrap();
 
         assert_eq!(count, 1, "should emit exactly one RPC");
         assert_eq!(sink.rpcs, vec![(0, 0)]);
-        // The handle consumed 1 bit (not 0), then IntPacked consumed 8 bits.
-        // Total: 9 bits. The reader should be exactly at the end.
+        // 1 handle bit (not 0) + 8 length bits, ending exactly at the end.
         assert_eq!(reader.position(), 9);
         assert!(reader.at_end());
     }
 
-    /// Capacity-3 groups are unchanged by the minimum-of-two clamp because
-    /// max(3, 2) == 3. This pins that the fix does not alter larger capacities.
+    /// The clamp leaves larger capacities alone: max(3, 2) == 3.
     #[test]
     fn class_net_cache_capacity_three_unchanged() {
-        // Build a stream for function_count=3:
-        // - handle: serialized_int(value=1, max=3) -> 2 bits
-        // - payload_bits: IntPacked(8) -> 8 bits
-        // - payload: 8 bits
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 1, 3); // handle=1, max=3
         write_int_packed(&mut bits, 8); // 8 bits payload
         bits.extend(std::iter::repeat_n(true, 8)); // 8 bits of data
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_class_net_cache(&mut reader, 3, &mut sink).unwrap();
@@ -581,22 +426,17 @@ mod tests {
         assert_eq!(sink.rpcs, vec![(1, 8)]);
     }
 
-    /// An unresolved group must stay loud.
-    ///
-    /// A function count of zero means the group could not be resolved, not that
-    /// the class has no functions. If the minimum-of-two clamp were applied to
-    /// zero as well, such a block would read a one-bit handle and emit
-    /// plausible-looking garbage; an earlier hand walk of one desynced block
-    /// produced seven consecutive plausible records that were all ghosts, so
-    /// plausibility is not evidence of correctness. Failing here is what lets
-    /// the oracle count the block instead of quietly trusting it.
+    /// An unresolved group (function count 0) fails instead of being clamped
+    /// to a one-bit handle and emitting plausible garbage: a hand walk of one
+    /// desynced block once produced seven consecutive plausible records, all
+    /// ghosts, so plausibility is not evidence.
     #[test]
     fn class_net_cache_unresolved_group_still_fails() {
         let mut bits = Vec::new();
         write_int_packed(&mut bits, 8);
         bits.extend(std::iter::repeat_n(true, 8));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
 
@@ -604,15 +444,8 @@ mod tests {
         assert!(sink.rpcs.is_empty());
     }
 
-    /// A RepLayout field whose declared payload overruns the remaining bits
-    /// must return the abandoned bit count so the caller can account it. Before
-    /// the fix these bits were skip_remaining'd with the parser returning
-    /// `Ok(count)`, and the framing layer only counted skipped_bits on Err.
-    ///
-    /// The expected total was raised from 8 to 24 when the record header joined
-    /// the tally: the handle and the payload length are read out of the same
-    /// record that then overran, so all three IntPacked/payload regions are lost
-    /// together. Counting only the 8 bits left over understated it.
+    /// An overrunning RepLayout record returns everything it abandoned: its
+    /// handle and length bits as well as the bits left over.
     #[test]
     fn rep_layout_overrun_returns_abandoned_bits() {
         let mut bits = Vec::new();
@@ -621,9 +454,8 @@ mod tests {
         write_int_packed(&mut bits, 32); // payloadBits = 32 (overruns)
         bits.extend(std::iter::repeat_n(false, 8)); // only 8 bits of payload
 
-        // Bound to the exact bit count, the way the framing layer does: the
-        // byte-padded tail must not be counted as abandoned stream data.
-        let data = bits_to_bytes(&bits);
+        // Bound exactly, as framing binds it, so byte padding is not counted.
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -636,13 +468,8 @@ mod tests {
         assert!(sink.fields.is_empty());
     }
 
-    /// A clean terminator (no overrun) reports zero abandoned bits.
-    ///
-    /// Bound to the exact bit count, the way the framing layer does
-    /// (`decode_and_parse_rep_layout` always calls `with_bit_len(.., bit_count)`)
-    /// -- `BitReader::new` would round the window up to a whole number of
-    /// bytes, and that incidental byte-padding is not what this test is
-    /// about.
+    /// A clean terminator reports zero abandoned bits. Bound exactly, as
+    /// framing binds it (`BitReader::new` would add byte padding).
     #[test]
     fn rep_layout_clean_terminator_reports_zero_abandoned() {
         let mut bits = Vec::new();
@@ -652,7 +479,7 @@ mod tests {
         bits.extend(std::iter::repeat_n(false, 8));
         write_int_packed(&mut bits, 0); // terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (_count, abandoned) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -673,7 +500,7 @@ mod tests {
         write_int_packed(&mut bits, 0);
         bits.extend(std::iter::repeat_n(true, 8));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let mut context = WalkContext::default();
@@ -698,7 +525,7 @@ mod tests {
         let tail_offset = bits.len() as u64;
         bits.extend(std::iter::repeat_n(true, 13));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let WalkOutcome::Complete { count, remainder } =
@@ -714,12 +541,8 @@ mod tests {
         assert_eq!(reader.bits_remaining(), 13);
     }
 
-    /// A terminator that arrives before the declared window ends -- the
-    /// window the caller bounds to `content_bits`, not a byte-rounded one --
-    /// must report the leftover as abandoned. This is the grammar-drift
-    /// shape: a build change moves the terminator earlier, and the tail was
-    /// previously dropped by the implicit `while !reader.at_end()` exit with
-    /// `abandoned_bits` left at its initial 0.
+    /// A terminator before the declared window ends reports the leftover as
+    /// abandoned: the grammar-drift shape, where a build moves it earlier.
     #[test]
     fn rep_layout_terminator_before_window_end_returns_abandoned_bits() {
         let mut bits = Vec::new();
@@ -727,7 +550,7 @@ mod tests {
         write_int_packed(&mut bits, 0); // terminator, immediately
         bits.extend(std::iter::repeat_n(false, 600)); // undeclared trailing bits
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -735,18 +558,16 @@ mod tests {
         assert_eq!(abandoned, 600);
     }
 
-    /// A ClassNetCache stream that EOFs before an IntPacked payload-length read
-    /// completes must return the abandoned tail bits -- including the handle it
-    /// had already consumed out of the same abandoned record.
+    /// A ClassNetCache stream too short for a payload length returns the
+    /// abandoned tail, including the handle already read from that record.
     #[test]
     fn class_net_cache_short_tail_returns_abandoned_bits() {
-        // function_count = 2 -> handle reads 1 bit. After the handle bit only 3
-        // bits remain: fewer than the 8 an IntPacked read needs.
+        // function_count = 2: a 1-bit handle, then 3 bits, fewer than 8.
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 0, 2); // handle = 0, 1 bit
         bits.extend(std::iter::repeat_n(false, 3)); // 3 stray bits
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_class_net_cache(&mut reader, 2, &mut sink).unwrap();
@@ -758,18 +579,15 @@ mod tests {
         );
     }
 
-    /// A block of exactly one bit is the pure form of the omission: the handle
-    /// consumes that bit, nothing remains, and the parser used to return
-    /// `Ok((0, 0))` -- zero RPCs, zero abandoned bits, no error. Every counter
-    /// the caller maintains then reported a clean success for a block that
-    /// could not be parsed at all.
+    /// A one-bit block (only a handle) is not a clean success: that bit is
+    /// reported abandoned, not `Ok((0, 0))`.
     #[test]
     fn class_net_cache_handle_only_block_is_not_a_clean_success() {
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 0, 2); // the whole block: one handle bit
         assert_eq!(bits.len(), 1);
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, 1).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_class_net_cache(&mut reader, 2, &mut sink).unwrap();

@@ -3,9 +3,6 @@
 use vrf_bitio::BitError;
 
 /// Errors that can occur while parsing the replication stream.
-///
-/// All variants carry enough context to locate the failure in the stream.
-/// None of them panic; a malformed bunch is discarded and counted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NetError {
     /// A bit-level read failed (EOF or malformed primitive).
@@ -45,13 +42,9 @@ pub enum NetError {
     #[error("unsupported replay branch: {0}")]
     UnsupportedBranch(#[from] vrf_transform::UnsupportedBranch),
 
-    /// A package-map export bunch declared an impossible GUID count.
-    ///
-    /// Negative, or above [`MAX_GUID_COUNT`](crate::types::MAX_GUID_COUNT). The
-    /// declarations after it cannot be walked, so the bunch is abandoned -- as
-    /// an error rather than a quiet `Ok`, because every path declaration in it
-    /// is lost and actors that needed those paths would otherwise fail to
-    /// resolve with nothing pointing at the cause.
+    /// A package-map export bunch declared a negative GUID count or one above
+    /// [`MAX_GUID_COUNT`](crate::types::MAX_GUID_COUNT). An error rather than
+    /// `Ok`, so the path declarations it drops are counted.
     #[error("package-map export declared {count} GUIDs (max {max})")]
     InvalidGuidCount {
         /// The declared count, as read from the wire.
@@ -60,13 +53,9 @@ pub enum NetError {
         max: u32,
     },
 
-    /// A ClassNetCache block arrived for a group whose function count is unknown.
-    ///
-    /// Distinguished from a class that genuinely has no functions: zero means the
-    /// export group could not be resolved, so the handle width is unknown and the
-    /// record stream cannot be walked at all. This is an error rather than a quiet
-    /// return so the bits are counted and the group is named, instead of the
-    /// payload disappearing with the oracle still reporting a clean run.
+    /// A ClassNetCache block for a group whose function count is 0: the group
+    /// was unresolved, so the handle width is unknown -- not a class with no
+    /// functions.
     #[error("ClassNetCache block for an unresolved group: function count unknown")]
     UnresolvedFunctionCount,
 }

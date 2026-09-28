@@ -57,8 +57,7 @@ The following comparison and test counts describe that initial preservation
 batch, before path resolution changed three of the existing checkpoint tables.
 For the current comparison, see [Checkpoint path resolution](CHECKPOINT_PATH_RESOLUTION.md).
 
-All 714 replays exported successfully with 12 workers in 191.14 seconds; all
-9,282 Parquet outputs were retained. An independent Python parser compared the
+All 714 replays exported successfully. An independent Python parser compared the
 three new tables against decompressed original checkpoint archives, checking
 all values, row order, and output column types/nullability. It shares the
 container's decompression implementation, so this is independent schema
@@ -69,9 +68,6 @@ manifest values also agree after accounting for the three new counters and
 the measured wall-clock `elapsed_ms`. The root audit independently reconciles
 actual Parquet metadata, original input hashes, and reader/writer counts.
 
-Rust 651 tests, Python 657 tests, the MSRV feature matrix, clippy, generated
-table guards, complete documentation checks, baseline rechecks, and full-corpus
-decode/validation checks pass. Private negative controls alter parser input
-or exported rows and require the independent verifier to reject the changes.
-The first build attempt was rejected because source files changed during the
-build; all reported corpus results use the subsequent frozen binary.
+Negative controls that alter parser input or exported rows are rejected by the
+independent verifier, and every corpus result above comes from one frozen
+binary.

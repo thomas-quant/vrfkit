@@ -1,10 +1,9 @@
 //! Channel lifecycle: open, close, and the two bunch-level GUID preambles.
 //!
-//! A bunch that opens a channel carries the actor GUID (and, for dynamic
-//! actors, the spawn block in [`super::spawn`]) ahead of its content blocks. A
-//! bunch that closes one carries nothing but the header flag. Everything here
-//! runs at most a few thousand times per replay; the per-bunch hot path is in
-//! [`super::framing`].
+//! An open bunch carries the actor GUID (and, for a dynamic actor, the spawn
+//! block in [`super::spawn`]) ahead of its content blocks; a close carries only
+//! the header flag. This runs at most a few thousand times per replay; the
+//! per-block hot path is [`super::framing`].
 
 use vrf_bitio::BitReader;
 
@@ -17,11 +16,8 @@ use crate::types::{MAX_GUID_COUNT, NetworkGuid};
 use super::spawn;
 use super::{ActorChannelState, ChannelTable, PLAYER_CONTROLLER_LEAF, ReplicationSink};
 
-/// Whether `path` names the replay controller, in any of the spellings Unreal
-/// uses for the same asset.
-///
-/// The same class arrives under at least four different strings depending on
-/// where in the stream it was written:
+/// Whether `path` names the replay controller, in any of the spellings the
+/// same asset arrives under:
 ///
 /// | source | string |
 /// |---|---|
@@ -30,17 +26,13 @@ use super::{ActorChannelState, ChannelTable, PLAYER_CONTROLLER_LEAF, Replication
 /// | archetype GUID path (class default object) | `Default__BaseReplayController_C` |
 /// | `/_Core/` elided alias | `/Game/Characters/BaseReplayController` |
 ///
-/// In the 12.01--12.06 samples the same role is named BaseJanusController;
-/// its opening bunch also carries the net-player-index byte. Accept that exact
-/// class leaf, preserving the same normalization and rejection of other actors.
+/// The 12.01--12.06 samples name the role BaseJanusController, whose opening
+/// bunch also carries the net-player-index byte; that exact leaf is accepted
+/// too.
 ///
-/// So this normalises instead of comparing: take the last `/`-separated
-/// segment, drop anything before a `.` (the `Asset.Class_C` form), strip a
-/// `Default__` prefix and a `_C` suffix, then compare the bare name.
-///
-/// Getting this wrong is silent. The index byte below is simply not consumed,
-/// and every content block after it in that bunch is shifted by 8 bits -- which
-/// surfaces only as one malformed block and a few hundred skipped bits.
+/// Getting this wrong is silent: the index byte is not consumed, every content
+/// block after it in the bunch shifts by 8 bits, and that surfaces only as one
+/// malformed block and a few hundred skipped bits.
 pub(super) fn is_player_controller_path(path: &str) -> bool {
     let segment = path.rsplit('/').next().unwrap_or(path);
     // `Asset.Class_C` -> `Class_C`; a bare segment is unchanged.
@@ -51,22 +43,15 @@ pub(super) fn is_player_controller_path(path: &str) -> bool {
 }
 
 /// Whether this channel's actor or archetype resolves to the replay
-/// controller, which is what decides the net-player-index byte.
+/// controller, which decides the net-player-index byte.
 ///
-/// Unreal writes a 1-byte "player index" between the actor-open spawn data and
-/// the first content block when the newly opened actor is a dynamic
-/// PlayerController. Without consuming that byte, all subsequent content blocks
-/// in the bunch are shifted by 8 bits.
-///
-/// C# reference: `ReadNetPlayerIndexStage.cs` -- checks `OpenedDynamicActor &&
-/// IsPlayerController(channel archetype/class/actor path)`.
-///
-/// The path comes from the sink's cache, which is always populated -- an
-/// earlier, now-removed `HashSet` fed by intercepting `register_path` was not.
-/// Missing this byte does not desync visibly: combined with the spawn-velocity
-/// bit in [`super::spawn`], the misframed header happens to re-synchronise a
-/// few bits later. See docs/archive/PROJECT_STATUS.md 17-A for the bit-level
-/// mechanism and measurements.
+/// Unreal writes that 1-byte player index between the spawn data and the first
+/// content block only for a dynamic PlayerController (`ReadNetPlayerIndexStage.cs`:
+/// `OpenedDynamicActor && IsPlayerController(archetype/class/actor path)`).
+/// Paths come from the sink's cache (`GuidPathSink::path_for_guid` says why).
+/// A missed byte does not desync visibly: with the spawn-velocity bit in
+/// [`super::spawn`] the misframed header re-synchronises a few bits later
+/// (docs/archive/PROJECT_STATUS.md 17-A has the mechanism and measurements).
 pub(super) fn is_player_controller_channel(
     actor_net_guid: NetworkGuid,
     archetype_net_guid: NetworkGuid,
@@ -80,19 +65,11 @@ pub(super) fn is_player_controller_channel(
 
 /// Read a package-map export bunch: a run of GUID declarations with paths.
 ///
-/// # Failure policy
-///
-/// The two skip paths below drop the whole bunch, and they are not the same
-/// kind of drop:
-///
-/// - a RepLayout export is a *limitation* -- this parser does not implement
-///   that variant -- so it is counted on its own line and reported as `Ok`;
-/// - an impossible GUID count is a *failure*: every path declaration that
-///   followed is lost, and returning `Ok` for it used to increment
-///   `package_map_exports` as though the bunch had been read, leaving actors
-///   that later failed to resolve their path or class with no counter pointing
-///   anywhere. It is now an error, which the caller counts and whose abandoned
-///   bits the caller tallies.
+/// Both skip paths drop the whole bunch, differently. A RepLayout export is a
+/// *limitation* (this parser does not implement that variant): counted on its
+/// own line, `Ok`. An impossible GUID count is a *failure*: every path
+/// declaration after it is lost, so it is an `Err`, which the caller counts
+/// and whose abandoned bits it tallies.
 pub(super) fn read_package_map_exports(
     payload: &mut BitReader<'_>,
     stats: &mut NetStats,
@@ -160,15 +137,9 @@ pub(super) fn handle_channel_open(
         open_packet_id: header.packet_id,
     };
 
-    // Dynamic actors have spawn data. It is mandatory, not optional: the
-    // reference (`NewActorSerializer.cs`) reads archetype, level, location,
-    // rotation, scale and velocity unconditionally. This used to be guarded by
-    // `!payload.at_end()`, which turned "the spawn block is missing" into a
-    // successful open carrying archetype and level GUID 0 and no transforms --
-    // an actor row invented from a payload that ended. A payload that stops one
-    // bit later already failed here; stopping exactly at the boundary now fails
-    // the same way, and the shape is counted so a corpus run can say whether it
-    // ever occurs.
+    // A dynamic actor's spawn block is mandatory (`NewActorSerializer.cs`
+    // reads it unconditionally), so a payload that ends here fails the read.
+    // The shape is counted so a corpus run can say whether it ever occurs.
     if actor_net_guid.is_dynamic() {
         if payload.at_end() {
             stats.actor_opens_missing_spawn += 1;
@@ -178,16 +149,11 @@ pub(super) fn handle_channel_open(
 
     stats.actor_opens += 1;
     sink.on_actor_open(&state);
-    // The row already exists -- this channel's bunch counter was bumped before
-    // the payload reached here -- so this must not overwrite it.
+    // The row already exists (its bunch counter was bumped): `entry`, since an
+    // `insert` would reset it.
     let slot = channels.entry(ch_index).or_default();
-    // Replacing a channel that is still open loses the previous actor: every
-    // later block on this channel is attributed to the new one, and the old one
-    // gets no close. The wire says the new actor owns the channel, so the
-    // replacement stands, but a fabricated close for the old actor would be a
-    // row the replay never sent. Count it instead -- nothing else moves when
-    // this happens. A channel that was properly closed first is the ordinary
-    // reuse and is not counted.
+    // A reopen over a live actor stands and is counted, with no close
+    // fabricated (see `NetStats::channel_reopens_while_open`).
     if slot.state.as_ref().is_some_and(|s| s.is_open) {
         stats.channel_reopens_while_open += 1;
     }

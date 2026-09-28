@@ -7,9 +7,8 @@ field expansion, then [structured-array expansion](STRUCTURED_ARRAY_EXPANSION.md
 for the current candidate measurement and validation state.
 
 The 2026-09-08 corpus contains 714 replays: 13.01 (215), 13.02 (204),
-13.04 (108), and 13.05 (187). The candidate was exported with checkpoints,
-using 12 workers, in 164.23 seconds. All 714 exports succeeded. Every raw
-replay and the preceding exports were retained.
+13.04 (108), and 13.05 (187). The candidate was exported with checkpoints;
+all 714 exports succeeded.
 
 ## Additional array fields
 
@@ -70,13 +69,7 @@ combined. It is not the fraction of game information understood. The ratio
 can decrease as more raw child windows become separately accessible, even
 when all existing values survive and millions of new values become typed.
 
-The earlier identity-only semantic catalog also has a different scope;
-its selected rows cannot serve as a global semantic-coverage percentage.
-
 Candidate binary SHA-256:
 `6c9b2eb16e793f587ffced6921631a4d2836661b3ed50f2e58fcf352f6827095`.
 
-The private investigation retains full exports, exact-bit array comparison,
-checkpoint-span validation, numeric-group receipts, deliberate mutation
-checks and the source/binary association. See [output schemas](USAGE.md) for
-consumer-facing column definitions.
+See [output schemas](USAGE.md) for consumer-facing column definitions.

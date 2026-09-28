@@ -59,7 +59,10 @@ PATH_GROUP = "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:Multi
 
 class Bits:
     def __init__(self, data: bytes, length: int):
-        assert len(data) * 8 >= length
+        # A ValueError, which main() reports per row, not an assert: that
+        # escapes as a traceback, and `python -O` removes it.
+        if len(data) * 8 < length:
+            raise ValueError(f"raw_bits holds {len(data) * 8} bits, bit_count says {length}")
         self.data = data
         self.length = length
         self.pos = 0
@@ -77,6 +80,9 @@ class Bits:
         value = 0
         for shift in range(0, 35, 7):
             byte = self.read(8)
+            if shift == 28 and byte >> 1 > 15:
+                # Past 32 bits: vrf-bitio and validate_type_evidence refuse it.
+                raise ValueError("IntPacked overflow")
             value |= (byte >> 1) << shift
             if byte & 1 == 0:
                 return value

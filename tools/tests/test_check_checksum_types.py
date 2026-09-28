@@ -1,18 +1,15 @@
-"""Guards for the compatible-checksum type check.
-
-The check is only worth running if three things hold, and each one can be
-broken without anything else in the repo noticing:
+"""Guards for the compatible-checksum type check, which is worth running only
+if four things hold, each breakable without anything else noticing:
 
   * the formula reproduces checksums the game itself wrote -- the vectors
-    below are declared checksums from real replays, not values this file
-    computed and then asserted;
+    below are declared checksums from real replays, not computed values;
   * a different type string does NOT reproduce them, so a match is evidence
     of the type and not of the name alone;
   * `untestable` never reaches the match count, and every counter prints
     even at zero;
   * the expected-mismatch list excuses exactly the shapes it names: any
-    other mismatch still fails, an item that applies to the input and
-    covers nothing is STALE and fails, and every count prints at zero.
+    other mismatch still fails, and an item that applies to the input and
+    covers nothing is STALE and fails.
 """
 import contextlib
 import io
@@ -27,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_checksum_types as cct  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # A second implementation of the formula, written from UE 5.3 FCrc rather than
 # from zlib: a CRC-32 table built here, `StrCrc32` feeding every TCHAR as four
 # bytes low byte first, `MemCrc32` over the little-endian static index.
@@ -68,10 +64,9 @@ def ue_checksum(name, cpp_type, static_index=0, parent=0):
     return ue_mem_crc32_u32(static_index, crc)
 
 
-# ---------------------------------------------------------------------------
 # Declared checksums from real replays (the 1,018-replay declaration corpus,
 # 11.06-13.06, collected 2026-09-28), with the parent chain that reproduces
-# them. The chains are PARENT_CHAINS entries; their provenance is there.
+# them; the chains' provenance is in PARENT_CHAINS.
 # (wire name, name hashed, C++ type, chain links, declared checksum)
 
 TRANSFORM = (("Transform", "FTransform"),)
@@ -273,6 +268,16 @@ class ParseTests(unittest.TestCase):
         whole = src.replace("field_type: Float", "field_type: FieldType::Float")
         entries, handles = cct.parse_overlay_table(whole)
         self.assertEqual(len(entries), 2)
+
+    def test_a_repeated_entry_is_refused(self):
+        """Counting cannot see it -- the literal is declared, held and parsed
+        twice -- and a dict would keep one silently."""
+        entry = ('    OverlayEntry {\n        group_path: "/G.A",\n        field_name: "X",\n'
+                 '        field_type: FieldType::Float,\n    },\n')
+        src = ('pub static OVERLAY_TABLE: [OverlayEntry; 2] = [\n' + entry * 2 + '];\n'
+               'pub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; 0] = [];\n')
+        with self.assertRaises(cct.TableError):
+            cct.parse_overlay_table(src)
 
     def test_resolution_constants_are_read_from_overlay_rs(self):
         src = ('const GROUP_ALIASES: &[(&str, &str)] = &[\n    (\n        "/G/A\\\n/B.B_C",\n'
@@ -691,6 +696,80 @@ class MainTests(unittest.TestCase):
         self.assertEqual(run_main("--export", str(empty))[0], 2)
         self.assertEqual(run_main()[0], 2)
 
+    def assert_unreadable(self, d: Path):
+        """Exit 2 with a FAILED line: the code the docstring gives an input
+        that cannot be read, never a traceback with a mismatch's 1."""
+        try:
+            code, out, err = run_main("--export", str(d))
+        except Exception as exc:  # noqa: BLE001 -- escaping is the failure
+            self.fail(f"escaped as a traceback: {exc!r}")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("FAILED:", err)
+
+    def test_a_malformed_manifest_exits_2(self):
+        good = {"handle": 30, "name": "CorrectionIndex", "compatible_checksum": CORRECTION_INDEX}
+
+        def manifest(*fields):
+            return json.dumps({"replay_build": "++Ares-Core+release-13.06",
+                               "net_field_export_groups": [
+                                   {"path": INVENTORY, "fields": list(fields)}]})
+
+        cases = {
+            "not json": "{not json",
+            "not an object": "[1, 2]",
+            "a field without a handle": manifest({k: v for k, v in good.items() if k != "handle"}),
+            "a field that is not an object": manifest("CorrectionIndex"),
+            "a null name": manifest(dict(good, name=None)),
+            "a checksum as text": manifest(dict(good, compatible_checksum=str(CORRECTION_INDEX))),
+            "a handle past u32": manifest(dict(good, handle=1 << 32)),
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                d = self.root / label.replace(" ", "_")
+                d.mkdir()
+                (d / "manifest.json").write_text(text, encoding="utf-8")
+                self.assert_unreadable(d)
+
+    def test_an_unreadable_checkpoint_table_exits_2(self):
+        d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
+        (d / "checkpoint_export_groups.parquet").write_bytes(b"not a parquet file")
+        (d / "checkpoint_export_fields.parquet").write_bytes(b"not a parquet file")
+        self.assert_unreadable(d)
+
+    def test_a_malformed_checkpoint_declaration_exits_2(self):
+        """The checkpoint tables are held to the manifest's shape: each case
+        differs from the control in one column, on a row that joins its
+        group (an orphan never reaches the check)."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        groups = pa.table({"checkpoint_index": pa.array([0], pa.uint32()),
+                           "ordinal": pa.array([0], pa.uint32()),
+                           "group_path": [INVENTORY]})
+
+        def export(name, handle=pa.array([30], pa.uint32()),
+                   checksum=pa.array([CORRECTION_INDEX], pa.uint32()),
+                   rendered_name=pa.array(["CorrectionIndex"])):
+            d = write_export(self.root, name, {})
+            pq.write_table(groups, d / "checkpoint_export_groups.parquet")
+            pq.write_table(pa.table({"checkpoint_index": pa.array([0], pa.uint32()),
+                                     "group_ordinal": pa.array([0], pa.uint32()),
+                                     "handle": handle, "compatible_checksum": checksum,
+                                     "rendered_name": rendered_name}),
+                           d / "checkpoint_export_fields.parquet")
+            return d
+
+        code, out, err = run_main("--export", str(export("control")))
+        self.assertEqual(code, 0, out + err)
+        cases = {
+            "a checksum past u32": dict(checksum=pa.array([1 << 32], pa.int64())),
+            "a handle past u32": dict(handle=pa.array([1 << 32], pa.int64())),
+            "a checksum as text": dict(checksum=pa.array([str(CORRECTION_INDEX)])),
+            "a null name": dict(rendered_name=pa.array([None], pa.string())),
+        }
+        for label, column in cases.items():
+            with self.subTest(label):
+                self.assert_unreadable(export(label.replace(" ", "_"), **column))
+
     def test_corpus_children_and_generated_siblings(self):
         write_export(self.root, "a", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
         write_export(self.root, ".a.vrfkit-staging-1-2", {INVENTORY: [(30, "CorrectionIndex", 5)]})
@@ -729,9 +808,6 @@ class MainTests(unittest.TestCase):
                          [("CorrectionIndex", "match",
                            "AuthServerCorrectRepVariables:FInventoryServerCorrectRepVariables")])
 
-
-# ---------------------------------------------------------------------------
-# The expected-mismatch list
 
 #: `249` (Rotation) in two FTransforms: the committed list's two items.
 ROTATION = 747197698        # under Transform: FTransform

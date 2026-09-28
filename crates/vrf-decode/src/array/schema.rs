@@ -1,33 +1,22 @@
-//! Nesting schema for the RepLayout struct arrays the walker knows how to
-//! descend into.
-//!
-//! The walker in [`super`] can flatten any array's framing without help, but it
-//! cannot tell a nested array apart from an opaque leaf payload: both arrive as
-//! `handle + payloadBits + bits`. The schema is what says "handle 4 at this
-//! level is itself an array" -- so it decides the shape of the emitted paths,
-//! not just their labels.
+//! Nesting schema for the RepLayout struct arrays the walker descends into. A
+//! nested array and an opaque leaf both arrive as `handle + payloadBits +
+//! bits`; only the schema says "handle 4 at this level is itself an array", so
+//! it decides the shape of the emitted paths, not just their labels.
 
-/// Schema for array fields: maps handle -> sub-array schema (if the field is
-/// itself a nested array) or None (leaf/primitive field).
-///
-/// Built from the C# descriptor knowledge. The handle numbers are from the
-/// `CombatRoundReportsDecoder` and related descriptors.
+/// One struct level: which handles are nested arrays, and names for handles.
+/// Handles come from the C# descriptors (`CombatRoundReportsDecoder` and
+/// related).
 #[derive(Debug, Clone)]
 pub struct ArrayFieldSchema {
-    /// For each handle in this struct level, whether it's a sub-array.
-    /// Key = handle, Value = schema for the sub-array's element struct.
+    /// `(handle, element schema)` for each handle that is itself an array.
     pub sub_arrays: &'static [(u32, &'static ArrayFieldSchema)],
-    /// Optional handle -> field name mapping for human-readable output.
-    /// Only leaf fields need names here; sub-array fields get their name from
-    /// the path segment they introduce.
+    /// `(handle, name)` for readable paths; containers are named here too.
     pub field_names: &'static [(u32, &'static str)],
 }
 
 impl ArrayFieldSchema {
-    /// The sub-array schema for `handle`, if this level declares one.
-    ///
-    /// Linear: the longest level here has two entries, so an index would cost
-    /// more than it saves.
+    /// The sub-array schema for `handle`, if this level declares one. Linear:
+    /// the longest level has two entries.
     #[must_use]
     pub(super) fn sub_array(&self, handle: u32) -> Option<&'static ArrayFieldSchema> {
         self.sub_arrays
@@ -36,11 +25,8 @@ impl ArrayFieldSchema {
             .map(|(_, sub)| *sub)
     }
 
-    /// The declared name for `handle` at this level, if there is one.
-    ///
-    /// Container handles are listed in `field_names` alongside the leaves --
-    /// handle 4 is both a `sub_arrays` entry and the name `Reports` -- so this
-    /// one map answers for both kinds.
+    /// The name for `handle` at this level, if any; container handles are
+    /// listed with the leaves (handle 4 is both a sub-array and `Reports`).
     #[must_use]
     pub(super) fn field_name(&self, handle: u32) -> Option<&'static str> {
         self.field_names
@@ -52,43 +38,11 @@ impl ArrayFieldSchema {
 
 // -- CombatRoundReports schema ------------------------------------------------
 //
-// Derived from CombatRoundReports.cs (handles confirmed against the manifest):
-//
-// Rounds[] (top array)
-//   handle 3: RoundNumber (Int32)
-//   handle 4: Reports[] (sub-array)
-//     handle 5: RoundNumber (Int32)
-//     handle 10: Interactions[] (sub-array)
-//       handle 11: Subject (FString)
-//       handle 12: Team (FName)
-//       handle 13: CharacterIcon (ObjectNetGuid)
-//       handle 18: DamageDealt (Float)
-//       handle 19: HitsDealt (Int32)
-//       handle 20: DamageReceived (Float)
-//       handle 21: HitsReceived (Int32)
-//       handle 22: DidKill (Bool)
-//       handle 23: AssistType (EnumByte)
-//       handle 24: KillerPlayerState (ObjectNetGuid)
-//       handle 25: WasKiller (Bool)
-//       handle 26: DealtInteractions[] (sub-array)
-//         handle 44: Regions[] (sub-array)
-//           handle 45: Region (EnumByte)
-//           handle 46: Hits (Int32)
-//           handle 47: Damage (Float)
-//           handle 48: IsWallPen (Bool)
-//           handle 49: IsKill (Bool)
-//           handle 50: DestroyedArmor (ObjectNetGuid)
-//       handle 61: ReceivedInteractions[] (sub-array)
-//         handle 79: Regions[] (sub-array)
-//           handle 80: Region (EnumByte)
-//           handle 81: Hits (Int32)
-//           handle 82: Damage (Float)
-//           handle 83: IsWallPen (Bool)
-//           handle 84: IsKill (Bool)
-//           handle 85: DestroyedArmor (ObjectNetGuid)
-//       handle 96: CombatReportIndex (Int32)
-//       handle 98: ResurrectorPlayerState (ObjectNetGuid)
-//       handle 103: Died (Bool)
+// From `CombatRoundReports.cs` (vendored under third_party/vrp, with each
+// member's type; handles confirmed against the manifest): Rounds[] -> Reports[]
+// at 4 -> Interactions[] at 10 -> DealtInteractions[] at 26 and
+// ReceivedInteractions[] at 61, each holding Regions[] (44 and 79) whose six
+// members sit at 45..=50 and 80..=85 respectively.
 
 /// Regional damage interaction -- leaf level (no sub-arrays).
 static REGION_SCHEMA: ArrayFieldSchema = ArrayFieldSchema {
@@ -100,7 +54,7 @@ static REGION_SCHEMA: ArrayFieldSchema = ArrayFieldSchema {
         (48, "IsWallPen"),
         (49, "IsKill"),
         (50, "DestroyedArmor"),
-        // ReceivedInteractions uses different handles for the same fields:
+        // ReceivedInteractions' Regions: the same members, other handles.
         (80, "Region"),
         (81, "Hits"),
         (82, "Damage"),
@@ -167,27 +121,14 @@ pub static COMBAT_ROUNDS_SCHEMA: ArrayFieldSchema = ArrayFieldSchema {
 
 // -- AbilityCastsThisRound schema ---------------------------------------------
 //
-// `Comp_AbilityStatisticsReplicator` replicates one element per ability cast.
-// The handles are read straight off the replay's own declaration for the group,
-// which names every member:
-//
-// AbilityCastsThisRound[] (top array)
-//   handle 3:  Player (FString, the caster's subject UUID)
-//   handle 4:  Slot          handle 5: Round        handle 6: RoundPhase
-//   handle 7:  CastTime      handle 8: CastLocation handle 9/10: EffectLocations
-//   handle 12: DestroyedCount
-//   handle 13: Effects[] (sub-array)
-//     handle 14: Statistic (the stat enum -- EnemiesSuppressed, EnemiesSlowed, ...)
-//     handle 15: LocalizedStat (FText, decoded for the observed string-table
-//                    history form and rejected for unknown history forms)
-//     handle 16: Value         handle 17: Time
-//     handle 18: AffectedTargetsArray[] (sub-array)
-//       handle 19: AffectedPlayer (packed-int NetGUID -> BombPlayerState actor)
-//       handle 20: Value
-//
-// Only the container handles need to be here. The leaves are named by the
-// replay's declaration, which the walker prefers over the schema anyway; the
-// names below are what label the container segments of the emitted path.
+// `Comp_AbilityStatisticsReplicator` replicates one element per ability cast,
+// and the replay's declaration names every member, so only the containers need
+// to be here: the leaves 3-12 (Player, the caster's subject UUID; Slot, Round,
+// RoundPhase, CastTime, CastLocation, EffectLocations at 9/10, DestroyedCount)
+// are labelled by it. Effects[] at 13 holds Statistic (14, the stat enum:
+// EnemiesSuppressed, ...), LocalizedStat (15, FText), Value (16), Time (17) and
+// AffectedTargetsArray[] at 18: AffectedPlayer (19, an IntPacked NetGUID of a
+// BombPlayerState actor) and Value (20).
 
 /// One affected target: who, and by how much. Leaf level.
 static AFFECTED_TARGET_SCHEMA: ArrayFieldSchema = ArrayFieldSchema {
@@ -218,16 +159,10 @@ pub static ABILITY_CASTS_SCHEMA: ArrayFieldSchema = ArrayFieldSchema {
 
 // -- LifeChangeEvent schemas ---------------------------------------------
 //
-// `DamageableComponent`'s five life-change RPCs each send a struct array whose
-// elements hold the same four members: which damage section changed, the
-// absolute life after the change, the delta, and whether the target was still
-// alive. `docs/DATA.md`'s health section is built on them, and until now
-// nothing shipped could read them -- they arrived as one opaque blob.
-//
-// The local handles differ per function, which is why this is three schemas
-// and not one. Each struct array gets its own local handle space, the same
-// reason `REGION_SCHEMA` needs separate numbering for `DealtInteractions` and
-// `ReceivedInteractions`.
+// `DamageableComponent`'s five life-change RPCs each send a struct array of the
+// same four members (the damage section that changed, life after the change,
+// the delta, still alive), which `docs/DATA.md`'s health section is built on.
+// Each RPC parameter has its own local handle space, hence three schemas.
 //
 // Verified over 20 replays: every element carries all four members with no
 // decode errors, `sum(DeltaLife)` matches the RPC's own scalar total on

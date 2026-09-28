@@ -1,16 +1,14 @@
 //! `++Ares-Core+release-12.10`
 
 use super::SeededTransform;
-use crate::helpers::{swap_adjacent_bits_u8, swap_adjacent_bits_u32, swap_adjacent_bits_u64};
+use crate::helpers::*;
 
-/// `++Ares-Core+release-12.10`
 pub struct V12_10;
 
 impl SeededTransform for V12_10 {
     const BRANCH: &'static str = "++Ares-Core+release-12.10";
     const SEED_ADDEND: u32 = 0x12fd_0ee5;
     const INIT_A_OFFSET: u32 = 0x1b;
-    const TAIL_XOR: u8 = 0xe5;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         let ror4 = state.rotate_right(4);
@@ -21,8 +19,6 @@ impl SeededTransform for V12_10 {
         v = swap_adjacent_bits_u64(v);
         v = v.wrapping_sub(u64::from(ror6));
         v = v.rotate_right((ror5 % 63) + 1);
-        // `!(ror4 as u64)` -- the reference NOTs the *zero-extended* value, so
-        // the upper 32 bits become ones. Negating before widening would differ.
         swap_adjacent_bits_u64(v ^ !u64::from(ror4))
     }
 
@@ -35,7 +31,6 @@ impl SeededTransform for V12_10 {
         v = swap_adjacent_bits_u32(v);
         v = v.wrapping_sub(rot6);
         v = v.rotate_right((rot5 % 31) + 1);
-        // No complement in the 32-bit lane, unlike word64.
         swap_adjacent_bits_u32(v ^ rot4)
     }
 

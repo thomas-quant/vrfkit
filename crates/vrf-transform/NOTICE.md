@@ -40,7 +40,7 @@ SOFTWARE.
 | `crates/vrf-bitio` | The Unreal wire primitives (`IntPacked`, bounded `SerializedInt`, `FString`, bit copying) follow the semantics implemented in `Replay.Encoding/Archives`. |
 
 The reverse engineering of VALORANT's payload transformation originates with that
-project. The additional 12.01--12.09 word transforms were recovered independently
+project. The additional 11.06--12.09 word transforms were recovered independently
 from pinned original executables, using the shared primitives established by
 that project. Native expected-byte vectors are captured by
 `tools/capture_native_transforms.py`; their staging-boundary input is the

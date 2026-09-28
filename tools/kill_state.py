@@ -1,9 +1,6 @@
-"""Project extracted KillData observations into component-local state.
-
-This module deliberately has no file or command-line interface.  Its input is the
-schema-1 document emitted by ``extract_kill_observations.py`` and its output is a
-self-contained, deterministic projection suitable for later joins.
-"""
+"""Project the schema-1 KillData document ``extract_kill_observations.py`` emits
+into a self-contained, deterministic component-local state for later joins.
+Deliberately no file or command-line interface."""
 
 from __future__ import annotations
 
@@ -365,11 +362,9 @@ def _state_token(state: dict[str, Any]) -> Any:
 
 
 def project_kill_state(document: Any) -> dict[str, Any]:
-    """Validate and project one schema-1 kill-observation export.
-
-    Raises :class:`KillStateError` when identity or update order is ambiguous.
-    Checkpoint observations remain snapshots and never create or mutate entities.
-    """
+    """Validate and project one schema-1 kill-observation export; raises
+    :class:`KillStateError` when identity or update order is ambiguous.
+    Checkpoint observations remain snapshots and never create or mutate entities."""
     _require(type(document) is dict, "document must be an object")
     _require(type(document.get("schema_version")) is int and document["schema_version"] == SCHEMA_VERSION, "schema_version must be integer 1")
     _require(document.get("kind") == DOCUMENT_KIND, "kind is unsupported")

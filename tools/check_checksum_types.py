@@ -16,8 +16,8 @@ RPC parameter; a member of a flattened (non-NetSerialize) struct continues
 from its struct property's checksum, and a `TArray`'s inner element from the
 array's. The formula was measured against 13.06 replays by the game-file
 analysis of 2026-09-28 (194 Blueprint fields and several native identities
-reproduce); this tool re-implements it and reports, per build, how many
-declared identities it reproduces, which is what carries it to other builds.
+reproduce); the per-build count of reproduced identities this tool prints is
+what carries it to other builds.
 
 So a checksum is evidence about a TYPE that no descriptor, table or decoder
 in this repo contributed. This tool turns it into a check of the overlay:
@@ -26,30 +26,21 @@ in this repo contributed. This tool turns it into a check of the overlay:
     checksum)` from `manifest.json`'s `net_field_export_groups` and, when
     present, `checkpoint_export_groups/fields.parquet` -- of one or more
     exports.
- 2. Resolve the `FieldType` vrfkit gives it, by parsing the generated tables
-    (`table.rs`, `scoped_types.rs`, `checksum_table.rs`) and the resolution
-    constants in `overlay.rs`, and following `overlay::resolve_entry`'s order:
-    name, `b`-prefixed name, handle (refused when the wire names something
-    else), the same three against the aliased class, exact
-    `(name, group, checksum)` scoped types, the engine object references,
-    and last the checksum table. Validated 2026-09-28: 12,937 of 12,937
-    distinct corpus identities resolve to the same `FieldType` as the Rust
-    `resolve_field_type_with_checksum`, and on 7 exports (11.06-13.06, main
-    and checkpoint) the identities this calls typed are exactly the ones
-    whose rows carry a `value_*` (see docs/CHECKSUM_TYPES.md).
+ 2. Resolve the `FieldType` vrfkit gives it through overlay_mirror, which
+    follows `overlay::resolve_entry` over the generated tables. Validated
+    2026-09-28: 12,937 of 12,937 distinct corpus identities resolve to the
+    same `FieldType` as the Rust `resolve_field_type_with_checksum`, and on 7
+    exports (11.06-13.06, main and checkpoint) the identities this calls typed
+    are exactly the ones whose rows carry a `value_*` (see
+    docs/CHECKSUM_TYPES.md).
  3. Tier 1: map the `FieldType` to the C++ spellings it can stand for
     (`CPP_TYPES`) and recompute the checksum under every KNOWN parent seed:
-    0, and the struct chains in `PARENT_CHAINS` -- short name-level facts,
-    each with its provenance.
- 4. Tier 2: recover more parent seeds from the replay itself. CRC-32 runs
-    backwards, so each member's (name, checksum) and vrfkit's type for it
-    imply exactly one parent checksum (`implied_parent`); two differently
-    named members of one group implying the same parent are siblings typed
-    right, bar a 1-in-2^32 chance -- and bar the systematic false agreement
-    `SiblingSeeds` refuses. What tier 1 left untestable in that group is
-    then re-tested under the recovered seeds. Tier 2 never sees
-    `PARENT_CHAINS`, so it also re-derives their seeds independently, and a
-    chain seed it contradicts fails the run.
+    0, and the struct chains in `PARENT_CHAINS`, each with its provenance.
+ 4. Tier 2: recover more parent seeds from the replay itself -- members of one
+    struct typed right imply the same parent (`SiblingSeeds`) -- and re-test
+    under them what tier 1 left untestable in that group. Tier 2 never sees
+    `PARENT_CHAINS`, so it re-derives their seeds independently, and a chain
+    seed it contradicts fails the run.
 
 Each typed identity lands in exactly one of three buckets:
 
@@ -66,17 +57,15 @@ Each typed identity lands in exactly one of three buckets:
     spelling (`TEnumAsByte<E>`, `E`, `E::Type`) has never been seen to
     reproduce, so an enum property is untestable; a plain `uint8` still
     counts, and an alternative that reproduces is still a mismatch.
-  * object references whose class is not among the candidates. The C++
-    type is `A<Class>*` / `U<Class>*`; candidates are the classes the input
-    itself declares groups for plus `ENGINE_CLASSES`, so a reference to an
-    undeclared class (a data asset, say) cannot be spelled.
+  * object references whose class is not among the candidates: the classes
+    the input itself declares groups for plus `ENGINE_CLASSES`, so a
+    reference to an undeclared class (a data asset, say) cannot be spelled.
   * members of a flattened struct or array whose parent chain is not in
     `PARENT_CHAINS` and whose siblings do not give it back (fewer than two
-    testable members, or only an ambiguous agreement): the parent seed is
-    unknown, so no spelling reproduces. An object reference offers only its
-    `UClass*` spelling towards a parent; its `A<Class>*` / `U<Class>*`
-    candidates, thousands of them, would turn the agreement into a lottery,
-    so they are tested at the parents others establish and never set one.
+    testable members, or only an ambiguous agreement). An object reference
+    offers only `UClass*` towards a parent: its thousands of `A<Class>*` /
+    `U<Class>*` candidates would make the agreement a lottery, so they are
+    tested at the parents others establish and never set one.
   * a bare FName index (`"108"`) not in `HARDCODED_FNAMES`, a non-ASCII name,
     or a declared checksum of 0.
 
@@ -85,42 +74,30 @@ What it cannot tell apart, by construction:
   * `Bool` reproduced as `uint8` is a bitfield bool (`uint8 bFoo:1`) or a
     byte; the checksum names the storage type, and only the wire width
     separates the two. Counted on its own line.
-  * A match says the name and C++ type are what the declaration hashed. It
-    says nothing about the wire FORMAT a NetSerialize type uses, a
-    quantization scale the C++ type does not name, or the meaning of a
-    value -- `decode errors: 0` and the value checks remain the evidence
-    for those.
+  * A match says the name and C++ type are what the declaration hashed, not
+    the wire FORMAT a NetSerialize type uses, a quantization scale the C++
+    type does not name, or the meaning of a value -- `decode errors: 0` and
+    the value checks remain the evidence for those.
   * Groups it never saw. Coverage is the input's; run it on the corpus.
 
-It also checks every `checksum_table.rs` entry the same way: the table has no
-names, so each entry is recomputed under every name that declares its checksum
-in the input. Entries no input declaration carries are counted, not failed.
+Every `checksum_table.rs` entry is checked the same way, under every name that
+declares its checksum in the input; entries no declaration carries are
+counted, not failed.
 
-Counters are printed with their zeros, and so is the price of every
+Every counter prints with its zeros, and so does the price of every
 recomputation: each is a 1-in-2^32 chance of an accidental reproduction, and
 each comparison of two implied parents a 1-in-2^32 chance of an accidental
 agreement, so the expected number of each is printed beside the verdicts.
 
-Expected mismatches
--------------------
 A mismatch vrfkit keeps on purpose is listed, with its reason and evidence,
 in `tools/fixtures/checksum_types_expected.json`. An item names one mismatch
-SHAPE exactly -- the declared checksum, the wire name, the parent it
-reproduces under (`top level` or a `PARENT_CHAINS` label), the `FieldType`
-vrfkit decodes it with and the C++ type the checksum names -- and covers every
-typed identity and `checksum_table.rs` carrier of that shape, in any group.
-Anything else that mismatches fails the run as before. A mismatch a sibling
-seed decided cannot be listed: its label embeds the pair that established it,
-which is no stable key, so its chain has to be named in `PARENT_CHAINS` first.
-
-An item APPLIES wherever the input declares its checksum outside the
-ClassNetCache groups -- not only where some mismatch carries it, or an item
-whose mismatch had gone would never be looked at. An item that applies and
-covers nothing is STALE and fails the run: the mismatch no longer occurs, or
-occurs in another shape (which then also fails as unlisted). An item whose
-checksum the input does not declare is counted as not applicable, the way
-compare_rpc_params.py counts an expected difference for another replay, so a
-single export can still be checked. All three counts print, zeros included.
+shape exactly and covers every identity and `checksum_table.rs` carrier of
+that shape. It applies wherever the input declares its checksum outside the
+ClassNetCache groups, so an item whose mismatch is gone is STALE; an item
+whose checksum the input does not declare is not applicable, so a single
+export can still be checked. A mismatch a sibling seed decided cannot be
+listed (its label embeds the establishing pair, no stable key), so its chain
+must be named in `PARENT_CHAINS` first.
 
 Exit status: 0 when every mismatch is one an item names exactly and no item
 is STALE; 1 when a mismatch is not listed, when an item is STALE, when
@@ -149,8 +126,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 if __package__:
+    from . import overlay_mirror
     from .export_scan import is_generated_sibling
 else:  # direct script execution
+    import overlay_mirror
     from export_scan import is_generated_sibling
 
 REPO = Path(__file__).resolve().parents[1]
@@ -164,20 +143,13 @@ EXPECTED_JSON = REPO / "tools" / "fixtures" / "checksum_types_expected.json"
 
 CLASS_NET_CACHE = "_ClassNetCache"
 
-# --------------------------------------------------------------------------
-# The formula
-
 
 def compatible_checksum(name: str, cpp_type: str, static_index: int = 0,
                         parent: int = 0) -> int:
-    """UE 5.3 `GetRepLayoutCmdCompatibleChecksum` for one property.
-
-    `parent` is the checksum the property's command continues from: 0 at the
-    top of a class or an RPC's parameters, the struct property's checksum for
-    a member of a flattened struct, the array's for a `TArray`'s inner
-    element. ASCII only: `ToLower` and the TCHAR width both differ from
-    Python's outside ASCII, so a non-ASCII input raises instead of hashing to
-    a plausible wrong value.
+    """UE 5.3 `GetRepLayoutCmdCompatibleChecksum` for one property, continuing
+    from `parent` (see the module docstring). ASCII only: `ToLower` and the
+    TCHAR width both differ from Python's outside ASCII, so a non-ASCII input
+    raises instead of hashing to a plausible wrong value.
     """
     if not (name.isascii() and cpp_type.isascii()):
         raise ValueError(f"non-ASCII input: {name!r} {cpp_type!r}")
@@ -187,21 +159,16 @@ def compatible_checksum(name: str, cpp_type: str, static_index: int = 0,
 
 
 def chain_checksum(links) -> int:
-    """The checksum at the end of `(name, cpp_type)` links, outermost first.
-
-    That is the parent seed of the last link's members: a struct's members
-    continue from the struct property, an array's element from the array.
-    """
+    """The checksum at the end of `(name, cpp_type)` links, outermost first:
+    the parent seed of the last link's members."""
     crc = 0
     for name, cpp_type in links:
         crc = compatible_checksum(name, cpp_type, 0, crc)
     return crc
 
 
-# --------------------------------------------------------------------------
-# Name-level facts. Nothing below is a dump: each entry is a name and a type,
-# with where it came from, and the tool prints how many declared checksums
-# each one reproduces so a fact that stops being true is visible.
+# Name-level facts, not a dump: each entry is a name and a type with its
+# source, and the report prints how many declared checksums each reproduces.
 
 #: Hardcoded Unreal FNames the replay writes as a bare index (`"249"`). From
 #: UE 5.3 `UnrealNames.inl`; the indices were read back from the 13.06
@@ -284,9 +251,6 @@ ENGINE_CLASSES = (
     "MaterialInterface", "SoundBase", "AnimMontage", "CurveFloat",
 )
 
-# --------------------------------------------------------------------------
-# FieldType -> C++ spellings
-
 
 @dataclass(frozen=True)
 class FieldTypeSpec:
@@ -317,8 +281,6 @@ CPP_TYPES = {
     "EnumRemainingBits": FieldTypeSpec(("uint8",), ENUM_CAPABLE),
     "Int32": FieldTypeSpec(("int32",), NOT_REPRODUCED),
     "UInt32": FieldTypeSpec(("uint32",), NOT_REPRODUCED),
-    # Not in decode.rs at 9f92756; mapped so a branch that adds it is checked
-    # rather than refused.
     "Int64": FieldTypeSpec(("int64",), NOT_REPRODUCED),
     "UInt64": FieldTypeSpec(("uint64",), NOT_REPRODUCED),
     "Float": FieldTypeSpec(("float",), NOT_REPRODUCED),
@@ -429,85 +391,21 @@ def spec_for(field_type: str) -> FieldTypeSpec:
     return spec
 
 
-# --------------------------------------------------------------------------
-# The generated tables, and the resolution order they are read in
-
-_LIT = r'"((?:[^"\\]|\\.)*)"'
-_TYPE = r"(FieldType::\w+(?:\s*\{[^}]*\})?)"
-ENTRY_RE = re.compile(r"OverlayEntry \{\s*group_path: " + _LIT + r",\s*field_name: "
-                      + _LIT + r",\s*field_type: " + _TYPE, re.S)
-HANDLE_RE = re.compile(r"OverlayHandleEntry \{\s*group_path: " + _LIT
-                       + r",\s*handle: (\d+),\s*field_name: " + _LIT, re.S)
-SCOPED_RE = re.compile(r"\(\s*" + _LIT + r",\s*" + _LIT + r",\s*(\d+),\s*" + _TYPE
-                       + r",?\s*\)", re.S)
-CHECKSUM_RE = re.compile(r"\((\d+), " + _TYPE + r"\),", re.S)
-
-
-def unescape(raw: str) -> str:
-    """Undo the escaping the generators write into a Rust string literal."""
-    return re.sub(r"\\\r?\n\s*", "", raw).replace('\\"', '"').replace("\\\\", "\\")
-
-
-class TableError(Exception):
-    """A generated table or a resolution constant could not be read whole."""
-
-
-def _declared_len(src: str, static: str) -> int:
-    m = re.search(r"pub(?:\(crate\))? static " + static + r": \[[^;]+; (\d+)\]", src)
-    if not m:
-        raise TableError(f"no length declared for {static}")
-    return int(m.group(1))
+#: A generated table, a resolution constant or an input that cannot be read
+#: whole (exit 2). overlay_mirror raises it for the tables.
+TableError = overlay_mirror.ParseError
 
 
 def parse_overlay_table(src: str):
-    """`({(group, name): type}, {(group, handle): name})` from `table.rs`.
-
-    Refuses a table it cannot read whole: the declared array length must equal
-    the entries parsed, or an entry the pattern missed would never be checked.
-    """
-    entries = {(unescape(g), unescape(n)): canonical_type(t) for g, n, t in ENTRY_RE.findall(src)}
-    handles = {(unescape(g), int(h)): unescape(n) for g, h, n in HANDLE_RE.findall(src)}
-    for static, got in (("OVERLAY_TABLE", len(entries)), ("OVERLAY_HANDLE_TABLE", len(handles))):
-        want = _declared_len(src, static)
-        if got != want:
-            raise TableError(f"table.rs {static}: declares {want} entries, parsed {got}")
-    return entries, handles
-
-
-def parse_scoped_types(src: str) -> dict:
-    scoped = {(unescape(n), unescape(g), int(c)): canonical_type(t)
-              for n, g, c, t in SCOPED_RE.findall(src)}
-    want = _declared_len(src, "SCOPED_TYPES")
-    if len(scoped) != want:
-        raise TableError(f"scoped_types.rs: declares {want} entries, parsed {len(scoped)}")
-    return scoped
-
-
-def parse_checksum_table(src: str) -> dict:
-    table = {int(c): canonical_type(t) for c, t in CHECKSUM_RE.findall(src)}
-    want = _declared_len(src, "CHECKSUM_TYPES")
-    if len(table) != want:
-        raise TableError(f"checksum_table.rs: declares {want} entries, parsed {len(table)}")
-    return table
+    """`({(group, name): type}, {(group, handle): name})` from `table.rs`."""
+    return ({(g, n): canonical_type(t) for g, n, t in overlay_mirror.overlay_entries(src)},
+            {(g, h): n for g, h, n in overlay_mirror.handle_entries(src)})
 
 
 def parse_resolution_constants(src: str):
     """`(GROUP_ALIASES, ENGINE_OBJECT_REFS)` from `overlay.rs`."""
-    m = re.search(r"const GROUP_ALIASES: &\[\(&str, &str\)\] = &\[(.*?)\n\];", src, re.S)
-    if not m:
-        raise TableError("overlay.rs: GROUP_ALIASES not found")
-    body = m.group(1)
-    pairs = re.findall(r"\(\s*" + _LIT + r",\s*" + _LIT + r",?\s*\)", body, re.S)
-    if len(pairs) != body.count("("):
-        raise TableError("overlay.rs: a GROUP_ALIASES entry did not parse")
-    aliases = {unescape(a): unescape(b) for a, b in pairs}
-    m = re.search(r"const ENGINE_OBJECT_REFS: \[&str; (\d+)\] = \[(.*?)\];", src, re.S)
-    if not m:
-        raise TableError("overlay.rs: ENGINE_OBJECT_REFS not found")
-    refs = tuple(re.findall(_LIT, m.group(2)))
-    if len(refs) != int(m.group(1)):
-        raise TableError("overlay.rs: ENGINE_OBJECT_REFS length and entries disagree")
-    return aliases, refs
+    return (dict(overlay_mirror.group_aliases(src)),
+            tuple(overlay_mirror.engine_object_refs(src)))
 
 
 def parse_field_type_variants(src: str) -> tuple:
@@ -525,68 +423,25 @@ def parse_field_type_variants(src: str) -> tuple:
     return variants
 
 
-def is_unresolved_fname_index(name: str) -> bool:
-    """`overlay::is_unresolved_fname_index`: a bare decimal names nothing."""
-    return bool(name) and name.isascii() and name.isdigit()
+is_unresolved_fname_index = overlay_mirror.is_fname_index
 
 
-class Resolver:
-    """Python port of `overlay::resolve_entry` over the parsed tables."""
+class Resolver(overlay_mirror.Resolver):
+    """`overlay::resolve_entry` over the parsed tables, in canonical type
+    spellings: `resolve` gives `(FieldType, source)` or `(None, None)`."""
 
-    def __init__(self, entries, handles, scoped, checksums, aliases, engine_refs):
-        self.entries, self.handles = entries, handles
-        self.scoped, self.checksums = scoped, checksums
-        self.aliases, self.engine_refs = aliases, engine_refs
+    engine_value = "ObjectNetGuid"
 
     @classmethod
     def from_repo(cls) -> "Resolver":
-        entries, handles = parse_overlay_table(TABLE_RS.read_text(encoding="utf-8"))
-        aliases, refs = parse_resolution_constants(OVERLAY_RS.read_text(encoding="utf-8"))
-        return cls(entries, handles, parse_scoped_types(SCOPED_RS.read_text(encoding="utf-8")),
-                   parse_checksum_table(CHECKSUM_RS.read_text(encoding="utf-8")), aliases, refs)
-
-    def _in_group(self, group, name, handle):
-        """Name, then `b` + name, then handle -- and the handle refusal."""
-        if name is not None:
-            for probe in (name, "b" + name):
-                field_type = self.entries.get((group, probe))
-                if field_type is not None:
-                    return field_type, "name" if probe == name else "b-prefix"
-        if handle is None:
-            return None, None
-        descriptor_name = self.handles.get((group, handle))
-        if descriptor_name is None:
-            return None, None
-        if name is not None and name != descriptor_name and not is_unresolved_fname_index(name):
-            return None, None  # refused: the wire declares something else here
-        field_type = self.entries.get((group, descriptor_name))
-        return (field_type, "handle") if field_type is not None else (None, None)
-
-    def resolve(self, group, name, handle, checksum):
-        """`(FieldType, source)` as vrfkit resolves it, or `(None, None)`."""
-        field_type, how = self._in_group(group, name, handle)
-        if field_type is not None:
-            return field_type, how
-        aliased = self.aliases.get(group)
-        if aliased is not None:
-            field_type, how = self._in_group(aliased, name, handle)
-            if field_type is not None:
-                return field_type, "alias " + how
-        if name is None:
-            return None, None
-        if checksum is not None:
-            field_type = self.scoped.get((name, group, checksum))
-            if field_type is not None:
-                return field_type, "scoped"
-        if name in self.engine_refs:
-            return "ObjectNetGuid", "engine reference"
-        if checksum is not None and checksum in self.checksums:
-            return self.checksums[checksum], "checksum table"
-        return None, None
-
-
-# --------------------------------------------------------------------------
-# Declarations
+        read = lambda path: path.read_text(encoding="utf-8")  # noqa: E731
+        entries, handles = parse_overlay_table(read(TABLE_RS))
+        aliases, refs = parse_resolution_constants(read(OVERLAY_RS))
+        scoped = {(n, g, c): canonical_type(t)
+                  for n, g, c, t in overlay_mirror.scoped_entries(read(SCOPED_RS))}
+        checksums = {c: canonical_type(t)
+                     for c, t in overlay_mirror.checksum_entries(read(CHECKSUM_RS))}
+        return cls(entries, handles, scoped, checksums, aliases, refs)
 
 
 @dataclass
@@ -637,14 +492,12 @@ def load_declarations(dirs) -> tuple[dict, collections.Counter]:
         ident.exports += 1
 
     for d in dirs:
-        manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
-        build = str(manifest.get("replay_build") or "?").removeprefix("++Ares-Core+release-")
+        build, main_declared = manifest_declarations(d / "manifest.json")
         seen: set = set()
         counts["exports"] += 1
-        for group in manifest.get("net_field_export_groups") or []:
-            for f in group.get("fields") or []:
-                counts["main declarations"] += 1
-                add(build, group["path"], f["name"], f["handle"], f["compatible_checksum"], seen)
+        counts["main declarations"] += len(main_declared)
+        for group, name, handle, checksum in main_declared:
+            add(build, group, name, handle, checksum, seen)
         groups_pq, fields_pq = d / "checkpoint_export_groups.parquet", d / "checkpoint_export_fields.parquet"
         if groups_pq.is_file() and fields_pq.is_file():
             counts["exports with checkpoint declarations"] += 1
@@ -656,6 +509,34 @@ def load_declarations(dirs) -> tuple[dict, collections.Counter]:
     return ids, counts
 
 
+def _require_identities(source, identities) -> None:
+    """Refuse any `(group, name, handle, checksum)` not typed as the export
+    writes it (two strings, two u32), rather than a traceback on a null name
+    or `untestable` for a checksum written as text."""
+    for identity in identities:
+        group, name, handle, checksum = identity
+        if not (isinstance(group, str) and isinstance(name, str)
+                and all(type(v) is int and 0 <= v < 1 << 32 for v in (handle, checksum))):
+            raise TableError(f"{source}: declaration {identity!r} is not (path, name, u32 "
+                             f"handle, u32 checksum)")
+
+
+def manifest_declarations(path: Path) -> tuple[str, list]:
+    """`(build, [(group, name, handle, checksum), ...])` from one manifest.json.
+    A manifest not shaped as manifest.rs writes it raises TableError (exit 2),
+    not a traceback with a mismatch's exit code."""
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        build = str(manifest.get("replay_build") or "?").removeprefix("++Ares-Core+release-")
+        declared = [(group["path"], f["name"], f["handle"], f["compatible_checksum"])
+                    for group in manifest.get("net_field_export_groups") or []
+                    for f in group.get("fields") or []]
+    except (OSError, ValueError, AttributeError, KeyError, TypeError) as exc:
+        raise TableError(f"{path}: {type(exc).__name__}: {exc}") from exc
+    _require_identities(path, declared)
+    return build, declared
+
+
 def checkpoint_declarations(groups_pq: Path, fields_pq: Path):
     """`(declarations, declarations without a group, unique identities)`.
 
@@ -663,14 +544,20 @@ def checkpoint_declarations(groups_pq: Path, fields_pq: Path):
     corpus for 12,937 distinct identities -- so the join and the de-duplication
     run in Arrow rather than row by row in Python.
     """
+    import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    groups = pq.read_table(groups_pq, columns=["checkpoint_index", "ordinal", "group_path"])
-    groups = groups.rename_columns(["checkpoint_index", "group_ordinal", "group_path"])
-    fields = pq.read_table(fields_pq, columns=["checkpoint_index", "group_ordinal", "handle",
-                                               "compatible_checksum", "rendered_name"])
-    joined = fields.join(groups, keys=["checkpoint_index", "group_ordinal"], join_type="left outer")
+    try:
+        groups = pq.read_table(groups_pq, columns=["checkpoint_index", "ordinal", "group_path"])
+        groups = groups.rename_columns(["checkpoint_index", "group_ordinal", "group_path"])
+        fields = pq.read_table(fields_pq, columns=["checkpoint_index", "group_ordinal", "handle",
+                                                   "compatible_checksum", "rendered_name"])
+        joined = fields.join(groups, keys=["checkpoint_index", "group_ordinal"],
+                             join_type="left outer")
+    except (pa.ArrowException, OSError) as exc:
+        raise TableError(f"{groups_pq.parent}: checkpoint declarations cannot be read: "
+                         f"{exc}") from exc
     if joined.num_rows != fields.num_rows:
         # Two groups under one (checkpoint, ordinal): which one a field
         # belongs to is ambiguous, and guessing would type it against either.
@@ -679,7 +566,9 @@ def checkpoint_declarations(groups_pq: Path, fields_pq: Path):
     keys = ["group_path", "rendered_name", "handle", "compatible_checksum"]
     unique = joined.filter(pc.is_valid(joined["group_path"])).group_by(keys).aggregate([])
     cols = [unique.column(k).to_pylist() for k in keys]
-    return fields.num_rows, orphans, list(zip(*cols))
+    identities = list(zip(*cols))
+    _require_identities(fields_pq, identities)
+    return fields.num_rows, orphans, identities
 
 
 def class_candidates(groups) -> list[str]:
@@ -700,10 +589,6 @@ def class_candidates(groups) -> list[str]:
 
 def object_spellings(classes) -> tuple:
     return tuple(f"{prefix}{name}*" for name in classes for prefix in "AU")
-
-
-# --------------------------------------------------------------------------
-# Classification
 
 
 class Hit(NamedTuple):
@@ -733,11 +618,10 @@ class Checker:
     """Classify `(FieldType, name, checksum)` keys; memoised, since the same
     property is declared by hundreds of groups.
 
-    `trials` counts every (spelling, seed, index) recomputed. Each is a
-    1-in-2^32 chance of reproducing a checksum by accident, so the report
-    prints `trials / 2^32` -- the number of chance reproductions to expect --
-    beside the verdicts. It has to stay far below 1 for a verdict to mean
-    anything, and it is the price of every spelling, seed or index added.
+    `trials` counts every (spelling, seed, index) recomputed, each a 1-in-2^32
+    chance of an accidental reproduction; the report prints `trials / 2^32`,
+    the chance reproductions to expect. It must stay far below 1 for a verdict
+    to mean anything, and every spelling, seed or index added raises it.
     """
 
     def __init__(self, seeds: Seeds, objects: tuple):
@@ -838,10 +722,6 @@ def hashable_name(name: str, checksum: int):
     return name, None
 
 
-# --------------------------------------------------------------------------
-# Sibling seeds: a parent's checksum recovered from its members
-
-
 def _crc_table():
     table = []
     for byte in range(256):
@@ -860,12 +740,9 @@ _BY_TOP_BYTE = {entry >> 24: index for index, entry in enumerate(_CRC_TABLE)}
 
 def implied_parent(checksum: int, name: str, cpp_type: str, static_index: int = 0) -> int:
     """The one `parent` for which `compatible_checksum(name, cpp_type,
-    static_index, parent) == checksum`.
-
-    CRC-32 is invertible over a known suffix: run backwards through the
-    hashed bytes and the state that remains is the seed. So each hypothesis
-    `cpp_type` about a nested member implies exactly one parent checksum --
-    and members of one struct, each hypothesised correctly, imply the same.
+    static_index, parent) == checksum`: CRC-32 run backwards over the hashed
+    bytes leaves the seed, so each hypothesis `cpp_type` implies exactly one
+    parent, and members of one struct hypothesised correctly imply the same.
     """
     data = (name.lower().encode("utf-32-le") + cpp_type.lower().encode("utf-32-le")
             + struct.pack("<I", static_index))
@@ -897,38 +774,33 @@ def deviation(name_length: int, hypothesis: str, truth: str):
 class SiblingSeeds:
     """Parent seeds recovered from a group's own declarations.
 
-    Members of one flattened struct continue from the same parent checksum.
-    `implied_parent` turns each member's (name, checksum) and vrfkit's type
-    for it into the parent that type would require; two members with
-    different names implying the SAME parent is a 1-in-2^32 coincidence
-    unless both types are right -- with one exception this class exists to
-    refuse.
+    Members of one flattened struct continue from the same parent checksum,
+    so two differently named members whose types imply the SAME parent
+    (`implied_parent`) are a 1-in-2^32 coincidence unless both types are
+    right -- except for the systematic false agreement this class refuses.
 
-    **The systematic false agreement.** A hypothesis of the truth's length
-    that is wrong shifts the implied parent by an amount fixed by WHERE in
-    the hashed string it is wrong and HOW (`deviation`). Two members wrong in
-    the same place and the same way shift by the same amount and still
-    agree -- at a wrong parent. It happens whenever:
+    A wrong hypothesis of the truth's length shifts the implied parent by an
+    amount fixed by WHERE in the hashed string it is wrong and HOW
+    (`deviation`), so two members wrong the same way still agree, at a wrong
+    parent. That happens when:
 
-      A. both names have the same length and both are given the same wrong
+      A. both names have the same length and both get the same wrong
          spelling of the same wrong truth. The corpus has it: the four 1-char
          GUID words `A`/`B`/`C`/`D` of `BombPlayerState` imply one parent
          under `int32`, `uint8`, `float` and `FName` alike, or
-      B. the name lengths differ by exactly as much as the misplaced part
-         of the spellings (`uint32` read as `uint64` beside `int32` read as
+      B. the name lengths differ by exactly as much as the misplaced part of
+         the spellings (`uint32` read as `uint64` beside `int32` read as
          `int64`, names one character apart).
 
-    So an agreement establishes a parent only through a pair of members that
-    is neither A (checked directly, whatever the truth) nor B for any two
-    spellings in the tool's universe -- every alternative and object pointer
-    it knows (`deviation` keys must not intersect). An alternative of a
-    different length than the hypothesis cannot agree systematically at all:
-    its shift depends on the name's own CRC.
-
-    What remains is chance: every pair of implied parents compared is a
-    1-in-2^32 lottery ticket, counted in `comparisons`. And one residual
-    blind spot: two truths OUTSIDE the universe that deviate identically
-    from their hypotheses, at offsets B aligns, would be taken for right.
+    So a pair establishes a parent only if it is neither A (checked
+    directly, whatever the truth) nor B for any two spellings in the tool's
+    universe, every alternative and object pointer it knows (`deviation` keys
+    must not intersect). An alternative of a different length cannot agree
+    systematically: its shift depends on the name's own CRC. What remains is
+    chance, each comparison of implied parents a 1-in-2^32 ticket counted in
+    `comparisons`, and one blind spot: two truths OUTSIDE the universe that
+    deviate identically from their hypotheses, at offsets B aligns, would be
+    taken for right.
     """
 
     def __init__(self, universe):
@@ -1011,17 +883,14 @@ class Agreements(NamedTuple):
     implied_by: dict
 
 
-# --------------------------------------------------------------------------
-# The run
-
-
 SEED_SOURCES = ("top level", "parent chain", "sibling seed")
+DISAGREE = "DISAGREE: a sibling seed other than the chain's"
 CHAIN_CROSS_CHECK = (
     "re-derived",
     "not re-derived: fewer than two hashable members",
     "not re-derived: fewer than two members agree",
     "not re-derived: agreement refused as ambiguous",
-    "DISAGREE: a sibling seed other than the chain's",  # == DISAGREE
+    DISAGREE,
 )
 
 
@@ -1094,12 +963,9 @@ def sibling_members(rows):
 def apply_sibling_seeds(report: Report, checker: Checker, siblings) -> None:
     """Tier 2: recover parent seeds from each group's own members, re-test
     what the known seeds left untestable, and set the result beside the
-    parent chains.
-
-    It runs on every typed member of a group, those a parent chain already
-    decided included, so the seeds it recovers owe nothing to
-    `PARENT_CHAINS` -- which is what makes re-deriving a chain's seed
-    evidence for the chain, and a chain seed it cannot find a question.
+    parent chains. It runs on every typed member, chain-decided ones
+    included, so its seeds owe nothing to `PARENT_CHAINS`: re-deriving a
+    chain's seed is evidence for the chain.
     """
     by_group = collections.defaultdict(list)
     for row in report.rows:
@@ -1200,14 +1066,11 @@ def check_identities(ids: dict, resolver: Resolver, checker: Checker, siblings=N
 
 
 def check_checksum_table(ids: dict, resolver: Resolver, checker: Checker, sibling_seeds=None):
-    """`(counts, mismatch rows)` for every `checksum_table.rs` entry.
-
-    The table maps a checksum to a type with no name, so each entry is
-    recomputed under every name that declares its checksum in the input --
-    under the known seeds, then under the sibling seeds of the groups that
-    carry it. An entry is a mismatch if any carrier reproduces a different
-    spelling, a match if any carrier reproduces the entry's own, else
-    untestable; entries nothing in the input declares are counted apart.
+    """`(counts, mismatch rows)` for every `checksum_table.rs` entry, each
+    recomputed under every name that declares its checksum in the input (known
+    seeds, then the carrying groups' sibling seeds). A mismatch if any carrier
+    reproduces a different spelling, a match if any reproduces the entry's
+    own, else untestable; entries nothing declares are counted apart.
     """
     carriers = collections.defaultdict(lambda: collections.defaultdict(set))
     for ident in ids.values():
@@ -1238,9 +1101,6 @@ def check_checksum_table(ids: dict, resolver: Resolver, checker: Checker, siblin
                        if v.verdict == "mismatch")
     return counts, bad
 
-
-# --------------------------------------------------------------------------
-# The expected-mismatch list (see "Expected mismatches" in the docstring)
 
 #: What an item keys on, in `ExpectedItem.shape` order, then why and what
 #: showed it. An item with any other key set is refused.
@@ -1278,13 +1138,10 @@ class ExpectedItem(NamedTuple):
 
 
 def load_expected(path: Path, parents) -> list:
-    """The reasoned expected mismatches, as `ExpectedItem`s.
-
-    `parents` are the seed labels an item may name: `top level` and the
-    `PARENT_CHAINS` labels. Anything malformed refuses the whole list rather
-    than dropping an item: a dropped item would turn its mismatch into a
-    failure with no word about why, and a mistyped one would read STALE on
-    every corpus instead of saying what is wrong with it.
+    """The reasoned expected mismatches, as `ExpectedItem`s. `parents` are the
+    labels an item may name (`top level` and the `PARENT_CHAINS` labels).
+    Anything malformed refuses the whole list: a dropped item would fail its
+    mismatch with no word why, and a mistyped one would read STALE forever.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1344,6 +1201,12 @@ class ExpectedOutcome:
 
     def count(self, state: str) -> int:
         return sum(1 for r in self.results if r.state == state)
+
+    @classmethod
+    def unlisted(cls, report, table_bad) -> "ExpectedOutcome":
+        """No list applied: every mismatch is unexpected."""
+        return cls(unexpected_rows=list(report.mismatches),
+                   unexpected_carriers=list(table_bad))
 
 
 def row_shape(row) -> tuple:
@@ -1409,8 +1272,7 @@ def print_report(report: Report, table_counts, table_bad, checker: Checker, decl
     """Every counter, zeros included. Without an `outcome` (no list applied)
     every mismatch is unexpected."""
     if outcome is None:
-        outcome = ExpectedOutcome(unexpected_rows=list(report.mismatches),
-                                  unexpected_carriers=list(table_bad))
+        outcome = ExpectedOutcome.unlisted(report, table_bad)
     p = print
     p(f"inputs: {declared_counts['exports']} export(s), {declared_counts['main declarations']} main "
       f"declarations, {declared_counts['checkpoint declarations']} checkpoint declarations "
@@ -1518,17 +1380,13 @@ def _carrier_line(carrier) -> str:
             f"{spelling} under {seed}")
 
 
-DISAGREE = "DISAGREE: a sibling seed other than the chain's"
-
-
 def exit_status(report: Report, table_bad, outcome=None,
                 expected_name=EXPECTED_JSON.name) -> tuple[int, str]:
-    """`(exit code, closing line)`: 1 for nothing checked, a tier
-    disagreement, a mismatch no item lists or a STALE item, else 0.
-    Without an `outcome` (no list applied) every mismatch is unexpected."""
+    """`(exit code, closing line)`: 1 for nothing checked, a tier disagreement,
+    an unlisted mismatch or a STALE item, else 0; without an `outcome` (no
+    list applied) every mismatch is unexpected."""
     if outcome is None:
-        outcome = ExpectedOutcome(unexpected_rows=list(report.mismatches),
-                                  unexpected_carriers=list(table_bad))
+        outcome = ExpectedOutcome.unlisted(report, table_bad)
     if report.identities == 0:
         return 1, ("\nFAILED: nothing checked -- no declared identity is typed by vrfkit, so "
                    "this input is empty or not an export")

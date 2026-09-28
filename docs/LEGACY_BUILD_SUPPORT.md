@@ -240,26 +240,6 @@ exported with checkpoints. All **104 Parquet files remain byte-identical**.
 This is the complete available three-sample-per-build collection, not a claim
 that every possible replay or field on these branches has been tested.
 
-To reproduce recovery and native comparison, use this directory layout for
-each build: `<root>/<build>/ShooterGame/Binaries/Win64/` containing the
-archived `VALORANT-Win64-Shipping.exe` and matching `stub.dll`. The recovered
-root is separate; the capture tool uses it only for the seven protected builds.
-
-```powershell
-python tools/recover_native_binaries.py --binaries '<archive-root>' --output '<recovered-root>'
-python tools/capture_native_transforms.py --binaries '<archive-root>' --recovered-binaries '<recovered-root>' --check
-cargo +1.86.0 test -p vrf-transform --locked
-cargo +1.86.0 build --release -p vrfkit --locked
-vrfkit validate '<replay-root>/11.06/sample-1.vrf' --diagnostics
-vrfkit export '<replay-root>/11.06/sample-1.vrf' --out '<exports>/11.06/sample-1' --checkpoints
-python tools/validate_type_evidence.py '<exports>' tools/fixtures/public_fixture_type_evidence.json --compare-typed
-```
-
-Repeat validate/export for samples 1--3 of all seven builds. Required-counter,
-nonzero-work and reconciliation checks use `check_decode_errors_corpus.py`.
-Recovery needs optional `pefile`, `unicorn` and `numpy`; ordinary Rust tests
-need no game binaries or emulator.
-
 ## 12.01--12.09 recovery and replay results
 
 The implementation following base commit `0d7a798` adds nine transforms and
@@ -351,12 +331,18 @@ The archived pre-upstream binary reproduces both original baseline hashes;
 column comparison confirms only these previously-null typed cells change.
 All rows, raw bytes, names, identities and other columns are identical.
 
-To reproduce, use the acquired binaries and the three pinned source samples
-for each build. Native capture needs optional `pefile` and `unicorn` Python
-packages; ordinary Rust tests use the committed vectors and need neither.
+### Reproducing 11.06--12.09
+
+Lay out each build as `<root>/<build>/ShooterGame/Binaries/Win64/`, holding the
+archived `VALORANT-Win64-Shipping.exe` and, for the seven protected builds
+(11.06--12.00), the matching `stub.dll`; the recovered root is separate and
+used only for those seven. Recovery needs optional `pefile`, `unicorn` and
+`numpy`, native capture `pefile` and `unicorn`; ordinary Rust tests use the
+committed vectors and need no game binary or emulator.
 
 ```powershell
-python tools/capture_native_transforms.py --binaries '<binary-root>' --recovered-binaries '<recovered-root>' --check
+python tools/recover_native_binaries.py --binaries '<archive-root>' --output '<recovered-root>'
+python tools/capture_native_transforms.py --binaries '<archive-root>' --recovered-binaries '<recovered-root>' --check
 cargo +1.86.0 test -p vrf-transform --locked
 cargo +1.86.0 build --release -p vrfkit --locked
 vrfkit validate '<replay-root>/12.01/sample-1.vrf' --diagnostics
@@ -364,9 +350,8 @@ vrfkit export '<replay-root>/12.01/sample-1.vrf' --out '<exports>/12.01/sample-1
 python tools/validate_type_evidence.py '<exports>' tools/fixtures/public_fixture_type_evidence.json --compare-typed
 ```
 
-Repeat validate/export for samples 1--3 of all nine builds. The same exports
-were checked with the required-counter and reconciliation routines from
-`check_decode_errors_corpus.py`, alongside the framing/loss counters.
+Repeat validate/export for samples 1--3 of every build; the required-counter,
+nonzero-work and reconciliation checks are `check_decode_errors_corpus.py`'s.
 
 ## Replay evidence
 
@@ -399,23 +384,16 @@ was run against the original reader and failed on the same misplaced length.
 
 ## Earlier identity-transform probe
 
-A temporary identity-transform probe was run on `sample-1` from every build.
-All sixteen validations failed, with framing oracle rates of only
-0.711762%--3.804203%. The experimental registrations were removed. Neither
-plaintext passthrough nor merely accepting the branch is a decoding fix.
-
-The upstream parser at
+An identity transform on `sample-1` of every build failed all sixteen
+validations, at framing oracle rates of 0.711762%--3.804203%: neither plaintext
+passthrough nor accepting the branch is a decoding fix. The upstream parser at
 [`2b66c65`](https://github.com/michel-giehl/ValorantReplayParser/tree/2b66c65a7b116154e18ebb84d9f6795f2b080233/src/Replay.Encoding/PayloadEncryption/VersionedTransforms)
-has transforms only for the eight previously supported builds.
-The additional nine transforms above were recovered from the acquired
-game executables listed below. The upstream maintainer describes
-locating the transformed reader through `UActorChannel::ReadContentBlockHeader`
-in [issue #2](https://github.com/michel-giehl/ValorantReplayParser/issues/2).
-
-Each new transform must come with independent expected-byte vectors, followed
-by validation and checkpoint-enabled export of all three available samples
-for its build. Frame success alone is not evidence that typed values agree
-with the wire.
+has transforms only for the eight builds supported before; its maintainer
+located the reader through `UActorChannel::ReadContentBlockHeader`
+([issue #2](https://github.com/michel-giehl/ValorantReplayParser/issues/2)).
+A new transform needs independent expected-byte vectors and then validation and
+checkpoint-enabled export of every available sample: frame success alone is not
+evidence that typed values agree with the wire.
 
 ## Binary analysis feasibility check
 
@@ -445,21 +423,12 @@ be recovered and checked for each executable, not assumed to carry over.
 
 The manifest-link archive
 [`Morilli/riot-manifests` at `573d6e7`](https://github.com/Morilli/riot-manifests/tree/573d6e78edc51395a03513800230eab3dbadbf92/VALORANT/na)
-contains 29 patch entries covering all sixteen missing builds. These are
-links to Riot manifests, not archived game executables. Acquisition was
-initially blocked in the measured environment. A browser check of the CDN
-hostname's HTTP root displayed an SK Broadband school-network notice stating
-that firewall policy blocks the page. DNS resolves several Riot hostnames to
-that warning server, whose expired, mismatched certificate caused the HTTPS
-failures. The earlier TLS error is therefore evidence of the local network
-block, not evidence that Riot's own CDN certificate is invalid or that the
-archived files have disappeared.
-
-After the user requested a retry, DNS resolved to Riot's CloudFront endpoint
-and certificate-verified HTTPS downloads succeeded. All sixteen executables
-below were acquired from the latest recorded patch for each replay branch.
-Only `ShooterGame/Binaries/Win64/VALORANT-Win64-Shipping.exe` was selected;
-the installed game was not replaced or launched. Every downloaded file:
+contains 29 patch entries covering all sixteen missing builds: links to Riot
+manifests, not archived executables. All sixteen executables below were
+downloaded over certificate-verified HTTPS from the latest recorded patch for
+each replay branch, selecting only
+`ShooterGame/Binaries/Win64/VALORANT-Win64-Shipping.exe`; the installed game
+was not replaced or launched. Every downloaded file:
 
 - Passed `ManifestDownloader --verify-only` against its RMAN chunk hashes.
 - Contained its expected `++Ares-Core+release-<build>` branch label.
@@ -485,13 +454,6 @@ the installed game was not replaced or launched. Every downloaded file:
 | 12.07 | 12.07.00.4488404 | 214,767,368 |
 | 12.08 | 12.08.00.4578383 | 214,750,840 |
 | 12.09 | 12.09.00.4704114 | 184,074,872 |
-
-The selected manifest file sizes sum to **3,312,627,760 bytes** (3.313 GB,
-3.085 GiB). The sixteen RMAN files add 148,679,917 bytes. Summing the compressed
-chunks referenced by those executables gives 1,688,334,507 bytes, or
-**1,837,014,424 bytes** including manifests for the nominal download payload;
-HTTP/TLS overhead and retries are not measured by that figure. Generated
-metadata and future Ghidra databases need additional space.
 
 All sixteen executables and the seven matching protected-build stubs were
 acquired and verified. The 11.06--12.00 executables have encrypted `.text`, a

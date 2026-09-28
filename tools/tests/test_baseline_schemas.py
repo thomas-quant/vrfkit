@@ -11,9 +11,9 @@ import check_baseline_schemas as schemas  # noqa: E402
 
 class BaselineSchemaTests(unittest.TestCase):
     def test_committed_baselines_are_schema_valid_and_cross_consistent(self):
-        self.assertEqual(schemas.validate_repository(require_hashes=False), [])
+        self.assertEqual(schemas.validate_repository(), [])
 
-    def test_legacy_export_without_hashes_fails_strict_validation(self):
+    def test_legacy_export_without_hashes_fails(self):
         data = {
             "replay": "sample.vrf",
             "counters": {key: 0 for key in schemas.MAIN_COUNTERS},
@@ -21,15 +21,8 @@ class BaselineSchemaTests(unittest.TestCase):
                 name: {"rows": 0, "bytes": 0} for name in schemas.MAIN_PARQUET
             },
         }
-        path = Path("export_sample.json")
-
-        strict = schemas.validate_export_baseline(path, data)
-        migrating = schemas.validate_export_baseline(
-            path, data, require_hashes=False
-        )
-
-        self.assertTrue(any("sha256" in problem for problem in strict), strict)
-        self.assertEqual(migrating, [])
+        problems = schemas.validate_export_baseline(Path("export_sample.json"), data)
+        self.assertTrue(any("sha256" in problem for problem in problems), problems)
 
     def test_a_non_sha256_placeholder_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -75,7 +68,7 @@ class BaselineSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "unvalidated.json").write_text("{}", encoding="utf-8")
-            problems = schemas.validate_repository(root, require_hashes=False)
+            problems = schemas.validate_repository(root)
         self.assertTrue(any("unvalidated.json" in p and "unknown" in p for p in problems),
                         problems)
 
