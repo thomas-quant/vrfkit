@@ -677,42 +677,11 @@ impl ExportSink<'_> {
             (Some("AbilityCastsThisRound"), _) => self
                 .current_group_path
                 .contains("AbilityStatisticsReplicator"),
-            (Some("AllPlayersObfuscatedPlayerInformation"), Some(1_349_268_968)) => {
-                self.admits(MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation)
-                    && self.current_group_path.as_ref()
-                        == "/Script/ShooterGame.OwnerExclusivePlayerInfo"
-            }
-            (Some("TrackedRewards"), Some(976_048_801)) => {
-                self.admits(MeasuredArrayRoute::TrackedRewards)
-                    && self.current_group_path.as_ref()
-                        == "/Script/ShooterGame.OwnerExclusivePlayerInfo"
-            }
-            (Some("SelectedV2"), Some(4_218_721_055)) => {
-                self.admits(MeasuredArrayRoute::SelectedV2)
-                    && self.current_group_path.as_ref()
-                        == "/Script/ShooterGame.PersonalizationComponent"
-            }
-            (Some("KillData"), Some(1_493_759_848)) => {
-                self.admits(MeasuredArrayRoute::KillData)
-                    && self.current_group_path.as_ref()
-                        == "/Script/ShooterGame.PlayerMatchStatsComponent"
-            }
-            (Some("ServerActiveEffects"), Some(3_301_618_856)) => {
-                self.admits(MeasuredArrayRoute::ServerActiveEffects)
-                    && self.current_group_path.as_ref()
-                        == "/Script/ShooterGame.EffectManagerComponent"
-            }
-            (Some("RequestedIgnoreActors"), Some(1_063_739_204)) => {
-                self.admits(MeasuredArrayRoute::RequestedIgnoreActors)
-                    && self.current_group_path.as_ref()
-                        == "/Script/ShooterGame.FiniteSpeedMovementComponent"
-            }
-            (Some("ActiveBlinds"), Some(3_853_965_310)) => {
-                self.admits(MeasuredArrayRoute::ActiveBlinds)
-                    && self.current_group_path.as_ref()
-                        == "/Script/ShooterGame.BlindManagerComponent"
-            }
-            _ => false,
+            // The measured routes: the same identity-to-route map that picks
+            // the exact walker in `emit_flattened_array`, gated per branch.
+            (Some(name), _) => measured_array_route(&self.current_group_path, name, checksum)
+                .is_some_and(|route| self.admits(route)),
+            (None, _) => false,
         }
     }
 
@@ -3066,23 +3035,17 @@ mod tests {
     /// raw rows. Every case is a leaf the 13.05 route types, so a typed child
     /// appears exactly where the branch admits the route and nowhere else.
     ///
-    /// `is_known_array_field` picks each parent's admission bit by hand, so
-    /// what this checks is that every parent reads its own route's bit. Each
-    /// flattened route has a case, from a match with no wildcard, and every
-    /// supported branch runs, plus no branch at all; the expected admission
-    /// comes from `MeasuredArrayRoutes::for_branch`, whose table
-    /// `routes_are_pinned_for_every_supported_branch` pins. This used to be
-    /// four routes on five branches, and an arm reading another route's bit
-    /// passed wherever the two agreed on those five: ServerActiveEffects
-    /// reading SelectedV2's, RequestedIgnoreActors reading the projectile
-    /// path's, AllPlayersObfuscatedPlayerInformation reading ActiveBlinds'.
-    /// Each dropped every child of its route on some legacy build with no
-    /// counter moving. Two pairs are admitted on exactly the same branches
-    /// -- AllPlayersObfuscatedPlayerInformation with TrackedRewards, KillData
-    /// with RequestedIgnoreActors -- so a swap inside either pair changes no
-    /// output on any build, and no branch can tell them apart. Each case's
-    /// identity is also checked against `measured_array_route`, the second
-    /// identity-to-route mapping.
+    /// Admission and the exact walker both take a parent's route from
+    /// `measured_array_route`, so what this checks is that every parent maps
+    /// to its own route there and reads that route's bit. Each flattened route
+    /// has a case, from a match with no wildcard, and every supported branch
+    /// runs, plus no branch at all; the expected admission comes from
+    /// `MeasuredArrayRoutes::for_branch`, whose table
+    /// `routes_are_pinned_for_every_supported_branch` pins. Two pairs are
+    /// admitted on exactly the same branches -- AllPlayersObfuscatedPlayerInformation
+    /// with TrackedRewards, KillData with RequestedIgnoreActors -- so a swap
+    /// inside either pair changes no output on any build; only the identity
+    /// pin below can see it.
     #[test]
     fn legacy_branches_expand_only_their_admitted_routes() {
         let mut reference = Vec::new();
@@ -3146,9 +3109,7 @@ mod tests {
             };
             Some(case)
         };
-        // `emit_flattened_array` picks the exact walker from the other
-        // mapping, `measured_array_route`. A case expands through the lenient
-        // walker too, so it cannot see that map go wrong; pin it here.
+        // The identity pin: each case must map to its own route.
         for route in MeasuredArrayRoute::ALL {
             if let Some(((group, parent, checksum), _, _)) = case_for(route) {
                 assert_eq!(
