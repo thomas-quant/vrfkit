@@ -633,12 +633,11 @@ class _BitReader:
         return self.read_bits(1)
 
     def read_bits(self, n: int) -> int:
-        """Read `n` bits LSB first from one slice, as a per-bit loop would.
-
-        That loop made 2.8M calls on one replay's shot blobs. Its contract is
-        kept: a short read leaves the position at the end and raises EOFError,
-        and a declared length past the buffer raises IndexError -- aborting
-        the conversion -- where a slice alone would silently pad with zeros.
+        """Read `n` bits LSB first from one slice (a per-bit loop made 2.8M
+        calls on one replay's shot blobs), with that loop's contract: a short
+        read leaves the position at the end and raises EOFError, and a declared
+        length past the buffer raises IndexError, aborting the conversion,
+        where a slice alone would silently pad with zeros.
         """
         start = self._pos
         stop = min(start + n, self._bit_len)
@@ -680,19 +679,14 @@ class _BitReader:
 
 
 def _read_effect_vector(r: _BitReader):
-    # Evaluated left to right, so a short read on y or z leaves the reader in
-    # exactly the position the three-statement version left it in.
+    # Left to right: a short read on y or z stops where sequential reads would.
     return (r.read_f64(), r.read_f64(), r.read_f64())
 
 
 class _EffectArraySpec(NamedTuple):
-    """How to read one of the three effect value arrays.
-
-    The arrays share their whole wire shape and differ only in which two
-    property handles carry the gameplay-tag index and the value, and in how the
-    value itself is read. The handle numbers are the containing struct's own,
-    which is why they are not contiguous across the three.
-    """
+    """How to read one of the three effect value arrays: same wire shape,
+    different tag/value handles (the containing struct's own, hence not
+    contiguous) and value reader."""
 
     tag_handle: int
     value_handle: int
@@ -708,37 +702,29 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
                             tally=None):
     """Decode one effect value array -> list of (tag_index, value) tuples.
 
-    ``spec.read_value`` must raise on a short read rather than return a
-    sentinel: a failed read has to leave whatever value a previous element
-    handle already stored untouched, and the reader's position is still
-    advanced by however much the partial read consumed. Both are relied on by
-    the ``consumed``/``skip_bits`` resynchronisation below.
+    ``spec.read_value`` must raise on a short read, not return a sentinel: the
+    ``consumed``/``skip_bits`` resync relies on a failed read leaving the
+    element's earlier value untouched and the position advanced by what it
+    consumed.
 
-    This decodes the preserved raw shot blobs independently of the additive
-    JSON written by crates/vrf-decode/src/effect.rs. The adapter keeps the raw
-    source even when a typed value is present.
-    Where the Rust decoder rejects a blob outright on a shape it names
-    (`PayloadUnderread`, `PayloadOverread`, `ResidualBits`, ...), this port
-    keeps going and returns what it already decoded -- correct for a shot
-    stream that must not go missing whole, but only if the two shapes that
-    correspond to fabricated *downstream* values are counted rather than
-    absorbed: a (tag, value) pair where one half's read failed (dropped
-    silently by `_decode_effect_blob`, same as a missing `FiringState
-    .AttackVector.N` -- see `spray_control.py`), and bits left over after the
-    element loop ends that are too many to be sub-byte padding (Rust's own
-    `ResidualBits` threshold: more than a byte means the framing did not end
-    where this parse thinks it did).
+    Decodes the preserved raw blob, independently of effect.rs's additive
+    JSON. Where effect.rs rejects a blob outright (`PayloadUnderread`,
+    `PayloadOverread`, `ResidualBits`, ...), this port keeps what it decoded,
+    so a shot is not lost whole, and counts the two shapes that fabricate
+    downstream values: a pair with one half unreadable (dropped by
+    `_decode_effect_blob`, like a missing `FiringState.AttackVector.N`; see
+    spray_control.py), and more than 7 bits left after the element loop
+    (Rust's `ResidualBits` threshold: the framing did not end where this
+    parse expected).
     """
     r = _BitReader(data, bit_count)
     try:
         count = r.read_int_packed()
     except (EOFError, ValueError):
         count = None
-    # No readable count, or one past Rust's MAX_ARRAY_COUNT (256): the framing
-    # broke at its first IntPacked. Nothing is decoded, but the window it left
-    # still reaches the residual check below, which an early return skipped.
-    # Count 0 enters the loop, which consumes the array terminator the Rust
-    # decoder also accepts after it.
+    # No readable count, or one past Rust's MAX_ARRAY_COUNT (256): framing
+    # broke at the first IntPacked, but the window still reaches the residual
+    # check. Count 0 enters the loop, which consumes the terminator Rust accepts.
     framed = count is not None and count <= 256
     elements = [(None, None)] * count if framed else []
     while framed and not r.at_end():
@@ -787,20 +773,13 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
             if consumed < payload_bits:
                 r.skip_bits(payload_bits - consumed)
         elements[idx] = (tag, val)
-    # Every declared slot with one or both halves still missing -- whether an
-    # index the array never got around to visiting before truncating, or one
-    # that was reached but lost its tag or value mid-read -- is a pair
-    # `_decode_effect_blob` drops silently below. Tallied once, by count, in
-    # one place, rather than re-deriving the same "one half missing" test
-    # (and risking a second, disagreeing count) at every call site.
+    # A declared slot missing either half, never visited or lost mid-read, is
+    # a pair `_decode_effect_blob` drops.
     half_read = sum(1 for tag, val in elements if tag is None or val is None)
     if half_read:
         _bump(tally, "effect_half_read_pairs", half_read)
-    # Rust's `ResidualBits`: more than a byte of unconsumed window after the
-    # element loop ends -- by a clean terminator, an index/handle out of
-    # range, or simply running out of bits -- means this blob's framing did
-    # not end where this parse thinks it did. Sub-byte padding is normal and
-    # not counted, matching the Rust guard's own tolerance.
+    # However the loop ended, more than 7 bits left is Rust's `ResidualBits`;
+    # sub-byte padding is normal, as the Rust guard also tolerates.
     if r.bits_remaining() > 7:
         _bump(tally, "effect_array_residual_bits")
     return elements
@@ -808,22 +787,10 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
 
 def _decode_effect_blob(blob: _EffectBlob | None, spec: _EffectArraySpec,
                         tag_table: dict, tally=None) -> dict:
-    """Decode one effect blob into {tag_name: value}, dropping half-read pairs.
+    """Decode one effect blob into {tag_name: value}; an absent blob is {}.
 
-    An absent blob and a blob that decodes to nothing are the same thing to
-    every caller: an empty mapping. A half-read pair and residual framing bits
-    are NOT the same thing to every caller -- see `_decode_effect_elements`,
-    which tallies both -- so this still drops them from the returned mapping
-    (a `FiringState.AttackVector.N` a caller cannot find is exactly how
-    `_build_shot_event` is meant to notice one is missing) but no longer
-    without a count reaching the summary.
-
-    The bit length comes from the parser's `bit_count` column, not from
-    `len(data) * 8`. Those two agree on every effect blob measured -- 692,840
-    across the 11 cross-validated replays, zero disagreements -- so this is a
-    no-op on today's data. It is not a no-op on the contract: a payload whose
-    declared length is not a whole number of bytes would otherwise have its
-    padding bits decoded as data, and nothing downstream would report it.
+    Half-read pairs are dropped, counted by `_decode_effect_elements`: a
+    missing `FiringState.AttackVector.N` is how `_build_shot_event` notices.
     """
     if blob is None:
         return {}
@@ -869,13 +836,12 @@ def _decode_rotation_short(data: bytes, bit_count: int) -> dict:
 # Shot events
 # ---------------------------------------------------------------------------
 class _EffectBlob(NamedTuple):
-    """One undecoded value array, with the bit length the parser declared.
+    """One undecoded value array with the bit length the parser declared.
 
-    The two are carried together because `data` alone is not enough. Parquet
-    stores whole bytes, so a payload of N bits arrives as ceil(N/8) bytes with
-    up to 7 padding bits in the last one. Deriving the length as
-    `len(data) * 8` hands those padding bits to the decoder as if they were
-    data.
+    Parquet stores whole bytes, so N bits arrive as ceil(N/8) bytes; taking
+    the length as len(data) * 8 would decode up to 7 padding bits as data.
+    The two agree on all 692,840 effect blobs of the 11 cross-validated
+    replays, so only a test tells the readings apart.
     """
 
     data: bytes
@@ -891,12 +857,9 @@ class _EffectBlobs(NamedTuple):
 
 
 class _ShotContext(NamedTuple):
-    """Per-replay lookups every shot event needs, resolved once per conversion.
-
-    The two lookups default to None so a caller that has neither still produces
-    an event -- with a null equippable and fire_mode "unknown", which is what
-    the reference emits for a server-world effect anyway.
-    """
+    """Per-replay lookups every shot event needs. Without the two lookups an
+    event still comes out, with a null equippable and fire_mode "unknown", as
+    the reference emits a server-world effect."""
 
     tag_table: dict
     equippable_lookup: object = None
@@ -910,37 +873,24 @@ def _build_shot_event(
 ) -> dict:
     """Build a valorant_shot_received event from decoded RPC params.
 
-    Always returns an event. Effects with no firing state -- server-world
-    effects rather than weapon shots -- come back with a null equippable and
-    fire_mode "unknown", which is how the reference emits them and what
-    valplay's "unknown" weapon bucket exists to receive.
+    Always returns one. 172 of 02d4d478's 2,647 effect RPCs are server-world
+    effects (source_id DedicatedServerWorldSourceID) with no firing state,
+    attack vectors or weapon. They come back with a null equippable and
+    fire_mode "unknown", as the reference emits them, for valplay's "unknown"
+    weapon bucket and shots_without_equippable diagnostic; every section they
+    would distort already guards on firing_player_state or attack_vectors.
     """
-    # Decode blobs: tag_name -> value
     tag_table = ctx.tag_table
     floats = _decode_effect_blob(blobs.floats, _EFFECT_FLOATS, tag_table, tally)
     objects = _decode_effect_blob(blobs.objects, _EFFECT_OBJECTS, tag_table, tally)
     vectors = _decode_effect_blob(blobs.vectors, _EFFECT_VECTORS, tag_table, tally)
 
-    # Events with no firing state are emitted too, not filtered out.
-    #
-    # 172 of 02d4d478's 2,647 effect RPCs carry no FiringPlayerState, no
-    # attack vectors and no weapon -- they are server-world effects
-    # (source_id = DedicatedServerWorldSourceID), not weapon shots. Dropping
-    # them looked cleaner and was the wrong call: valplay's weapons section
-    # has an "unknown" bucket and weapon_stats has a
-    # shots_without_equippable diagnostic, both built precisely to surface
-    # these. Filtering them here hid information the consumer was designed to
-    # report, which is the same silent-drop mistake the parser invariants
-    # exist to prevent.
-    #
-    # Every downstream section that would be distorted by them already guards
-    # on firing_player_state or attack_vectors, so they land in the buckets
-    # meant for them rather than polluting any metric.
-
-    # Extract scalar params from the RPC payload
     location = scalar_params.get("Location")
     rotation = scalar_params.get("Rotation")
-    # Fallback: Location/Rotation may arrive as unnamed params "248"/"249"
+    # Location/Rotation arrive under their bare handles "248"/"249", the only
+    # spelling observed (typed on 2,647 of 2,647 shots on 02d4d478). A
+    # {BitCount, Data} blob there means the overlay failed to type it: the
+    # dict branches and _decode_rotation_short decode the wire. Keep them.
     if location is None:
         raw248 = scalar_params.get("248")
         if isinstance(raw248, dict) and "Data" in raw248:
@@ -949,9 +899,6 @@ def _build_shot_event(
                 x = _struct.unpack_from('<d', raw_bytes, 0)[0]
                 y = _struct.unpack_from('<d', raw_bytes, 8)[0]
                 z = _struct.unpack_from('<d', raw_bytes, 16)[0]
-                # Full precision: the reference emits the raw double
-                # (559.962145690918), and rounding here was the only thing
-                # keeping shot_rays.sample_rays from matching.
                 location = _vec3(x, y, z)
         elif raw248 is not None:
             location = raw248
@@ -971,11 +918,9 @@ def _build_shot_event(
     wait_on = scalar_params.get("WaitOnReplicationActor")
     alliance = scalar_params.get("AllianceFilter")
 
-    # Parse location/rotation from value_str compact format if needed
     loc_obj = _parse_vector_or_zero(location, tally)
     rot_obj = _parse_rotation(rotation, tally)
 
-    # Build attack vectors
     attack_keys = (f"FiringState.AttackVector.{i}" for i in range(1, 16))
     attack_vectors = [{"x": x, "y": y, "z": z} for x, y, z in
                       (vectors[key] for key in attack_keys if key in vectors)]
@@ -983,7 +928,6 @@ def _build_shot_event(
     burst = floats.get("FiringState.BurstShotNumber")
     yaw_switch = floats.get("FiringState.YawSwitch")
 
-    # Ammo
     ammo = floats.get("FiringState.AmmoRemaining")
     if ammo is not None:
         ammo = int(ammo)
@@ -1000,9 +944,8 @@ def _build_shot_event(
     firing_player = objects.get("FiringState.FiringPlayerState")
     firing_state = objects.get("FiringState.FiringState")
 
-    # Weapon identity: FiringState is a subobject of the gun, so its outer is
-    # the equippable actor. Null when the chain does not reach a known
-    # equippable -- never guessed.
+    # FiringState's outer is the gun; null, never guessed, when the chain does
+    # not reach a known equippable.
     equippable = None
     if ctx.equippable_lookup is not None and firing_state:
         hit = ctx.equippable_lookup(firing_state)
@@ -1021,34 +964,31 @@ def _build_shot_event(
     else:
         fire_mode, fire_mode_evidence = "unknown", None
 
-    # Only an int is an enum ordinal. Anything else -- the {BitCount, Data}
-    # blob of a field the overlay could not type -- passes through unchanged,
-    # like every other shot param; str() published its Python repr.
+    # Only an int is an enum ordinal; anything else (the {BitCount, Data} blob
+    # of an untyped field) passes through unchanged, like every shot param.
     alliance_str = alliance
     if isinstance(alliance, int):
         alliance_str = ALLIANCE_MAP.get(alliance, f"alliance_unknown_{alliance}")
 
     shot = {
         "effect_id": effect_id,
-        # Float32 on the wire; the reference prints its shortest round-trip
-        # (12.780108) rather than the widened value. Same treatment as the
-        # spawn and position coordinates -- it was simply missed there.
+        # Float32 (as is random_seed): the reference prints the shortest
+        # round-trip (12.780108), not the widened value.
         "start_movement_time": _f32_shortest(start_time)
         if isinstance(start_time, float) else start_time,
         "source_id": source_id,
         "is_local_effect": bool(is_local),
         "is_transient": bool(is_transient) if is_transient is not None else True,
         "wait_on_replication_actor": wait_on or 0,
-        # Absent means absent. The reference emits null on 101 of 02d4d478's
-        # 2,647 effects; defaulting to "alliance_any" collapsed two distinct
-        # input states into one output.
+        # Null when absent, as the reference on 101 of 02d4d478's 2,647
+        # effects; a default would merge two input states.
         "alliance_filter": alliance_str,
         "location": loc_obj,
         "rotation": rot_obj,
         "ammo_remaining": ammo,
-        # Absent means absent. The reference emits null on 172 of 2,647
-        # shots; defaulting to 1 also rewrote a genuine 0, and one consumer
-        # (compute_metrics.py:1560) reads the field without its own default.
+        # Null when absent, as the reference on 172 of 2,647 shots: a default
+        # of 1 rewrote a genuine 0, and compute_metrics.py:1560 reads it
+        # without a default of its own.
         "num_projectiles": num_proj,
         "random_seed": _f32_shortest(random_seed)
         if isinstance(random_seed, float) else random_seed,
@@ -1070,10 +1010,8 @@ def _build_shot_event(
         "time_ms": time_ms,
         "packet_id": packet_id,
         "actor_net_guid": actor_net_guid,
-        # Both were previously substitutes: object_net_guid repeated the actor
-        # guid and channel was hardcoded 0. fields.parquet carries the real
-        # values on every shot row, and the reference disagrees with both
-        # substitutes on all 2,647 events (object 22 vs actor 2, channel 1).
+        # fields.parquet's real values, as the reference has them on all 2,647
+        # events (object 22 where the actor is 2, channel 1).
         "object_net_guid": object_net_guid,
         "channel": channel_index,
         "shot": shot,
@@ -1083,44 +1021,30 @@ def _build_shot_event(
 # ---------------------------------------------------------------------------
 # Combat report leaf labels
 #
-# The parser labels each flattened array leaf with the name the REPLAY declares
-# for that handle, which is the wire's own statement and the right thing for
-# fields.parquet to archive. It is NOT the right thing for this bundle, for two
-# independent reasons, and both are load-bearing.
+# The parser labels each flattened array leaf with the name the replay
+# declares: right for fields.parquet, wrong for this bundle twice over.
 #
-# 1. compute_metrics.py is read-only and reads these keys by name: Subject,
-#    Team, DidKill, Died, AssistType, DamageDealt, DamageReceived, HitsDealt,
-#    HitsReceived, DealtInteractions[].Regions[].{Region,Hits,IsWallPen}. The
-#    wire spells six of those differently -- `bDidKill`, `bDied`, `bIsWallPen`,
-#    `ParticipantSubject`, and Riot's own typos `DamageRecieved` and
-#    `HitsRecieved`. Passing those through silently zeroes every metric that
-#    reads them.
+# 1. compute_metrics.py reads the reference's names (Subject, Team, DidKill,
+#    Died, AssistType, DamageDealt, DamageReceived, HitsDealt, HitsReceived,
+#    DealtInteractions[].Regions[].{Region,Hits,IsWallPen}), and the wire
+#    spells six differently: bDidKill, bDied, bIsWallPen, ParticipantSubject,
+#    and Riot's typos DamageRecieved and HitsRecieved.
+# 2. Declared names are not unique within one flattened element: the
+#    HUDConfig/StateRemainingTime/GameTime/GamePhase struct is flattened at
+#    eight positions (handles 6, 99 and 105 all declare HUDConfig at the
+#    Reports level; 27/31 and 62/66 one level down). Keyed by name, 3,405 of
+#    20,298 distinct payload paths on 02d4d478 would merge, uncounted.
 #
-# 2. The declared names are NOT unique within one flattened element. UE flattens
-#    the same four-member struct (HUDConfig / StateRemainingTime / GameTime /
-#    GamePhase) at eight nesting positions, so handles 6, 99 and 105 all declare
-#    `HUDConfig` at the Reports level, and 27/31, 62/66 pair up one level down.
-#    A payload is a JSON object built by last-wins assignment, so under the
-#    declared names those keys merge: measured on 02d4d478, 3,405 of 20,298
-#    distinct payload paths would collapse and their values would be destroyed
-#    with no counter moving. fields.parquet keeps the `handle` column and loses
-#    nothing; this projection has no such escape hatch.
-#
-# So the bundle keys on the handle, not on the emitted name: the reference's
-# member name where the C# parser has one, `_h{handle}` -- the label this bundle
-# already carried -- where it does not. That keeps events.ndjson byte-identical
-# across this change, which is what makes the metrics comparison meaningful.
-#
-# This is the "no hardcoded names in the parser" invariant working as intended:
-# the Rust side emits what the wire says, and the table that renames it for a
-# downstream consumer lives here, where labelling is a presentation concern.
+# So the bundle keys on the handle: the reference's member name where the C#
+# parser has one, else `_h{handle}`, the label this bundle already carried
+# (events.ndjson stayed byte-identical). The parser emits what the wire says;
+# relabelling for a consumer is this adapter's presentation concern.
 # ---------------------------------------------------------------------------
 COMBAT_REPORT_GROUP = "CombatReportComponent"
 
-# handle -> the member name the C# reference emits for it. Leaf handles only;
-# the container handles (4 Reports, 10 Interactions, 26 DealtInteractions,
-# 61 ReceivedInteractions, 44/79 Regions) are path segments the parser takes
-# from its own schema and never renames.
+# handle -> the member name the C# reference emits. Leaf handles only: the
+# containers (4 Reports, 10 Interactions, 26 DealtInteractions,
+# 61 ReceivedInteractions, 44/79 Regions) keep the parser's schema names.
 COMBAT_REPORT_REFERENCE_NAMES = {
     3: "RoundNumber",              # wire: RoundNum
     5: "RoundNumber",
@@ -1153,25 +1077,18 @@ COMBAT_REPORT_REFERENCE_NAMES = {
 }
 
 
-# Handles the parser treats as sub-array containers, not leaves. A row carrying
-# one of these is a container the walker gave its schema name to, so it is
-# already the reference's spelling and must be left alone.
+# Sub-array container handles: such a row already carries the walker's schema
+# name, the reference's spelling, and is left alone.
 COMBAT_REPORT_CONTAINER_HANDLES = frozenset({4, 10, 26, 44, 61, 79})
 
 
 def _combat_report_leaf_name(group_path: str, field_name: str, handle) -> str:
-    """Relabel one combat-report array leaf for the bundle.
+    """Relabel the LAST segment of one combat-report array leaf for the bundle.
 
-    Only the LAST path segment is touched: everything before it is a container
-    segment the parser names from its own schema, so it already matches.
-
-    Two rows the walker SYNTHESISES rather than reads are excluded, because for
-    them the parser's own label is already right and rewriting it would be a
-    regression: `emit_remaining_raw`'s `..._raw` row (handle u32::MAX, which
-    would otherwise become `_h4294967295`), and the depth-limit row that carries
-    a container handle. Neither occurs on the corpus -- MAX_ELEMENTS is 4096
-    against a real peak near 50, and MAX_RECURSION_DEPTH is 12 against a real
-    depth of 5 -- so this is an unreachable edge being closed, not a fix.
+    Two synthesised rows keep the parser's label: `emit_remaining_raw`'s
+    `..._raw` (handle u32::MAX, else `_h4294967295`) and the depth-limit row
+    carrying a container handle. Neither occurs on the corpus (MAX_ELEMENTS
+    4096 against a peak near 50; MAX_RECURSION_DEPTH 12 against a depth of 5).
     """
     if not group_path or COMBAT_REPORT_GROUP not in group_path:
         return field_name
@@ -1184,9 +1101,6 @@ def _combat_report_leaf_name(group_path: str, field_name: str, handle) -> str:
         return field_name
     name = COMBAT_REPORT_REFERENCE_NAMES.get(handle)
     if name is None:
-        # No reference name for this handle: keep the handle-derived label the
-        # bundle has always used. Its uniqueness is the whole point -- the
-        # declared name is not unique at this nesting level.
         name = f"_h{handle}"
     return head + dot + name
 
