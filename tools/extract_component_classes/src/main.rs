@@ -152,6 +152,9 @@ struct Counts {
     legacy_paks_not_read: usize,
     toc_entries: usize,
     indexed_files: usize,
+    /// Directory-index files naming a TOC entry past the end of the TOC, or
+    /// one a later file also names: neither can be attached to a chunk.
+    indexed_files_dropped: usize,
     package_chunks: usize,
     package_chunks_unindexed: usize,
     package_files_not_package_chunks: usize,
@@ -239,7 +242,11 @@ fn run(args: &Args) -> Result<i32, String> {
                 .map_err(|e| format!("{}: {e}", container.name))?;
             counts.indexed_files += index.len();
             for (path, entry) in index {
-                by_entry.insert(entry, path);
+                if entry as usize >= container.toc.chunk_ids.len()
+                    || by_entry.insert(entry, path).is_some()
+                {
+                    counts.indexed_files_dropped += 1;
+                }
             }
         }
         let mut packages_here = 0usize;
@@ -689,6 +696,7 @@ fn count_pairs(c: &Counts) -> Vec<(String, usize)> {
         ("legacy_paks_not_read".into(), c.legacy_paks_not_read),
         ("toc_entries".into(), c.toc_entries),
         ("indexed_files".into(), c.indexed_files),
+        ("indexed_files_dropped".into(), c.indexed_files_dropped),
         ("package_chunks".into(), c.package_chunks),
         (
             "package_chunks_unindexed".into(),
@@ -803,16 +811,11 @@ mod tests {
         assert_eq!(utc_timestamp(t), "2025-09-23T01:36:34Z");
     }
 
-    /// The run lists every container it read, global included: the script
-    /// object map, and so every `/Script` path in the output, comes from
-    /// there.
-    #[test]
-    fn provenance_lists_the_global_container() {
-        use crate::script::tests::build_script_objects;
+    /// A one-chunk TOC over stored (uncompressed) bytes.
+    fn stored_toc(len: usize, chunk_type: u8, directory_index: Vec<u8>) -> Vec<u8> {
         use crate::toc::tests::{TocSpec, build_toc};
         use crate::toc::{ChunkId, CompressedBlock, FLAG_INDEXED, OffsetLength};
-
-        let stored = |len: usize, chunk_type: u8| TocSpec {
+        build_toc(&TocSpec {
             flags: FLAG_INDEXED,
             block_size: 0x10000,
             methods: vec![],
@@ -833,17 +836,25 @@ mod tests {
                 uncompressed_size: len as u32,
                 method: 0,
             }],
-            ..TocSpec::default()
-        };
-        let dir = std::env::temp_dir().join(format!("ecc-provenance-{}", std::process::id()));
+            directory_index,
+            ..crate::toc::tests::TocSpec::default()
+        })
+    }
+
+    /// Run the tool with `--format json` over a synthetic Paks directory: a
+    /// global container and one container `other` whose single chunk is not
+    /// a package, so there is nothing to scan and the run fails, but still
+    /// reports. Returns the exit code and the JSON.
+    fn run_synthetic(test: &str, other_index: Vec<u8>) -> (Result<i32, String>, String) {
+        use crate::script::tests::build_script_objects;
+        let dir = std::env::temp_dir().join(format!("ecc-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let script = build_script_objects(&["/Script/A"], &[(0, 0, "/Script/A", None)]);
-        let global = build_toc(&stored(script.len(), CHUNK_SCRIPT_OBJECTS));
+        let global = stored_toc(script.len(), CHUNK_SCRIPT_OBJECTS, Vec::new());
         std::fs::write(dir.join("global.utoc"), global).unwrap();
         std::fs::write(dir.join("global.ucas"), &script).unwrap();
-        // One chunk that is not a package, so there is nothing to scan.
-        std::fs::write(dir.join("other.utoc"), build_toc(&stored(4, 2))).unwrap();
+        std::fs::write(dir.join("other.utoc"), stored_toc(4, 2, other_index)).unwrap();
         std::fs::write(dir.join("other.ucas"), [0u8; 4]).unwrap();
         let out = dir.join("out.json");
         let args = Args {
@@ -857,9 +868,16 @@ mod tests {
         let code = run(&args);
         let json = std::fs::read_to_string(&out);
         std::fs::remove_dir_all(&dir).unwrap();
-        // No package was read, which is a failed run, but it still reports.
+        (code, json.unwrap())
+    }
+
+    /// The run lists every container it read, global included: the script
+    /// object map, and so every `/Script` path in the output, comes from
+    /// there.
+    #[test]
+    fn provenance_lists_the_global_container() {
+        let (code, json) = run_synthetic("provenance", Vec::new());
         assert_eq!(code, Ok(1));
-        let json = json.unwrap();
         let names: Vec<&str> = json
             .match_indices("\"name\": \"")
             .map(|(at, key)| {
@@ -868,6 +886,29 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["global", "other"]);
+    }
+
+    /// A directory-index file that names an entry past the TOC, or an entry
+    /// another file also names, cannot be attached to a chunk. Both used to
+    /// vanish from the listing without a count.
+    #[test]
+    fn directory_index_files_that_name_no_entry_of_their_own_are_counted() {
+        use crate::dirindex::tests::build_index;
+        const NONE: u32 = u32::MAX;
+        // One directory holding three files, for TOC entries 0, 0 and 9; the
+        // TOC has one entry.
+        let index = build_index(
+            "../../../",
+            &[(NONE, NONE, NONE, 0)],
+            &[(0, 1, 0), (1, 2, 0), (2, NONE, 9)],
+            &["a.ubulk", "b.ubulk", "c.ubulk"],
+        );
+        let (code, json) = run_synthetic("dropped", index);
+        assert_eq!(code, Ok(1));
+        assert!(json.contains("\"indexed_files\": 3,"), "{json}");
+        assert!(json.contains("\"indexed_files_dropped\": 2,"), "{json}");
+        let (_, json) = run_synthetic("none-dropped", Vec::new());
+        assert!(json.contains("\"indexed_files_dropped\": 0,"), "{json}");
     }
 
     #[test]
