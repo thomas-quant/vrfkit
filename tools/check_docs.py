@@ -393,9 +393,8 @@ FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
 CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
 INLINE_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
-#: A Rust or Python source naming a doc heading. ASCII by construction: the
-#: sources are ASCII, and a slug never holds a dot, so a sentence-ending `.`
-#: after the anchor is not read as part of it.
+#: A Rust or Python source naming a doc heading. A slug never holds a dot, so
+#: a sentence-ending `.` after the anchor is not read as part of it.
 CODE_ANCHOR_RE = re.compile(r"\b(docs/(?:[\w.-]+/)*[\w.-]+\.md)#([\w-]+)")
 
 
