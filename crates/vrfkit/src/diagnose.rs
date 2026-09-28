@@ -1,37 +1,17 @@
 //! `diag` subcommand -- a stats-only pass over the whole replay.
 //!
-//! # Why this exists, and why not one of the two existing commands
-//!
-//! The failure diagnostics `validate` prints are capped twice -- the 32-line
-//! `ChannelState::stream_failures` window and the capped `NetStats::diagnostics`
-//! log -- which is right for a human reading one replay and useless for
-//! counting a population. The bounded [`FailureAggregate`] in the sink
-//! collects every failure; something has to walk a replay and read it. Two
-//! candidates were rejected:
-//!
-//! - **`validate` walking checkpoints too** would move every counter that
-//!   command's pinned baselines hold and add failure paths to a command whose
-//!   job is to report, not to abort (see `oracle.rs`'s `checkpoint_scope_note`
-//!   for the full argument). The oracle's scope stays exactly what it was.
-//! - **`export` skipping the Parquet writes** would still be the export path:
-//!   writer threads, staged output directories, a manifest, an atomic publish.
-//!   None of that carries a failure counter, and a flag that quietly produces
-//!   no files from the command whose contract is "writes the files" is the
-//!   shape of bug this repo refuses.
-//!
-//! So `diag` is its own subcommand that **writes no table**: it drives the
-//! same sink over the ReplayData stream and every Checkpoint chunk, keeps the
-//! main and checkpoint passes separate, and emits one JSON document
-//! aggregating every stream failure by kind, cause, group path, function
-//! count and handle. No Parquet file is created and none is needed -- every
-//! number this command reports comes from `NetStats`, the sink's own
-//! counters and the failure aggregate, all of which exist before any writer.
-//!
-//! # What it deliberately does not do
-//!
-//! It prints no verdict and exits 0 for any replay it could read. Judging a
-//! replay is `validate`'s job, and a second oracle would drift from the
-//! first. A file that cannot be read at all is an error, as everywhere else.
+//! `validate`'s failure diagnostics are capped twice (the 32-line
+//! `ChannelState::stream_failures` window and the capped `NetStats`
+//! diagnostics log): right for reading one replay, useless for counting a
+//! population. `validate` walking checkpoints would move every counter its
+//! pinned baselines hold (see `oracle.rs`'s `checkpoint_scope_note`), and an
+//! `export` without writes would still be the export path, whose contract is
+//! writing the files. So `diag` drives the same sink over ReplayData and every
+//! Checkpoint chunk, keeps the passes apart, writes no table, and emits one
+//! JSON document aggregating every stream failure ([`FailureAggregate`]) by
+//! kind, cause, group path, function count and handle. It prints no verdict
+//! and exits 0 for any readable replay: judging is `validate`'s job, and a
+//! second oracle would drift from the first.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -49,9 +29,8 @@ use vrf_schema::{NetGuidCache, read_checkpoint_tables};
 use crate::error::{CliError, replication_reader};
 use crate::sink::{ChannelState, ExportSink, FailureAggregate, RecordBuffers, SinkTotals};
 
-/// Per-checkpoint-chunk metadata the JSON reports alongside the checkpoint
-/// pass's counters, so the checkpoint walk is auditable rather than a black
-/// box that printed a number.
+/// The checkpoint pass's counters and per-chunk metadata, so the walk is
+/// auditable rather than a single printed number.
 #[derive(Debug, Default)]
 struct DiagCheckpointStats {
     chunks: u64,
@@ -63,24 +42,15 @@ struct DiagCheckpointStats {
     guid_entries: u64,
     group_records: u64,
     exported_fields: u64,
-    /// Field rows the snapshot produced. Counted and dropped, never written:
-    /// same policy as `export --checkpoints`, which writes them to
-    /// `checkpoint_fields.parquet`. A diag run that wrote them would be
-    /// creating the Parquet this command exists to avoid.
+    /// Field rows the snapshot produced: counted, never written (`export
+    /// --checkpoints` writes them to `checkpoint_fields.parquet`).
     field_rows_dropped: u64,
     actor_rows_dropped: u64,
     movement_rows_dropped: u64,
     net: NetStats,
-    /// The same [`SinkTotals`] `export` sums, through the same `absorb`. `diag`
-    /// used to re-declare it as `DiagSinkTotals` with a line-for-line copy of
-    /// `absorb`, justified by `SinkTotals` living in the `export`-gated driver.
-    /// It now lives in `sink`, so the copy -- a second place a new counter had
-    /// to be wired in by hand, with nothing to say it had been missed -- is
-    /// gone.
     sink: SinkTotals,
-    /// Where `absorb` merges the checkpoint pass's per-field overlay
-    /// breakdown. Filled and never printed: the diag JSON carries counters,
-    /// not the breakdown.
+    /// Where `absorb` merges the per-field overlay breakdown; never printed,
+    /// as the JSON carries counters only.
     overlay_errors: OverlayErrorReport,
     failures: FailureAggregate,
 }
@@ -112,8 +82,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut sink_totals = SinkTotals::default();
-    // Where `absorb` merges the main pass's per-field overlay breakdown. Filled
-    // and never printed, like `DiagCheckpointStats::overlay_errors`.
+    // Never printed, like `DiagCheckpointStats::overlay_errors`.
     let mut overlay_errors = OverlayErrorReport::default();
     let mut channel_state = ChannelState::new();
     channel_state.enable_failure_aggregate(include_payloads);
@@ -130,8 +99,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
         let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
         match chunk.chunk_type {
             ChunkType::Event => {
-                // The server timeline is independent of the replication pass
-                // and carries no stream-failure signal; counted, not parsed.
+                // Independent of replication, with no stream-failure signal.
                 event_chunks += 1;
             }
             ChunkType::Checkpoint => {
@@ -251,8 +219,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
         None => println!("{json}"),
     }
 
-    // A short stdout receipt even when the JSON went to a file, so a caller
-    // scanning output sees the reconciliation shape without parsing JSON.
+    // A one-line stderr receipt wherever the JSON went, so a caller sees the
+    // reconciliation shape without parsing JSON.
     eprintln!(
         "diag: main failures {} (payloads preserved {}, real loss {}) | \
          checkpoint failures {} (payloads preserved {}, real loss {})",
@@ -266,9 +234,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     Ok(())
 }
 
-/// Refuse an output path that resolves to the replay itself. The diagnostic is
-/// assembled in memory and written last, so without this check a successful
-/// run could replace its own source with JSON.
+/// Refuse an output path that resolves to the replay itself: the JSON is built
+/// in memory and written last, so a successful run could replace its source.
 fn reject_input_output_alias(input: &str, output: &str) -> Result<(), CliError> {
     let input = fs::canonicalize(input)?;
     let output = canonicalize_destination(output)?;
@@ -360,9 +327,9 @@ fn write_json_file(path: &str, json: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Walk one Checkpoint chunk the way `driver::checkpoints::process_chunk`
-/// does, minus the writer: fresh GUID cache, export map, reader and channel
-/// state per archive, because a checkpoint is an independent replay state.
+/// Walk one Checkpoint chunk as `driver::checkpoints::process_chunk` does,
+/// minus the writers: a fresh GUID cache, export map, reader and channel state
+/// per archive.
 fn process_checkpoint_chunk(
     payload: &[u8],
     branch: &str,
@@ -386,9 +353,6 @@ fn process_checkpoint_chunk(
     channels.enable_failure_aggregate(include_payloads);
     let mut buffers = RecordBuffers::default();
     let mut packet_count = 0u64;
-    // No writer here, so unlike `driver::checkpoints::process_chunk` there is
-    // no error a callback cannot propagate: the closure is infallible and the
-    // frame walk returns its own errors through `?`.
     let walk = walk_demo_frames(frame, flags, &mut cache, |pkt, packet_cache| {
         {
             let mut sink = ExportSink::new(packet_cache, &mut channels, &mut buffers);
@@ -419,9 +383,8 @@ fn process_checkpoint_chunk(
     Ok(())
 }
 
-/// `++Ares-Core+release-13.04` -> `13.04`. The corpus is labelled by this
-/// suffix everywhere downstream; a branch that does not carry it stays
-/// unlabelled rather than guessed.
+/// `++Ares-Core+release-13.04` -> `13.04`, the corpus label downstream; a
+/// branch without the marker stays `unknown` rather than guessed.
 fn build_label(branch: &str) -> &str {
     branch
         .rsplit("release-")
@@ -743,8 +706,6 @@ mod tests {
     use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
     use vrf_net::stats::NetStats;
 
-    /// The frame-skip tallies land under their prefixed keys with their own
-    /// values, zeros included, as members of an object already open.
     #[test]
     fn frame_skips_json_carries_every_tally_under_its_prefix() {
         let mut skips = FrameSkips::default();
@@ -761,8 +722,7 @@ mod tests {
         );
     }
 
-    /// The channel-guard counters reach the diag JSON with their measured
-    /// values. Distinct values, so a key wired to the wrong field shows.
+    /// Distinct values, so a key wired to the wrong field shows.
     #[test]
     fn net_stats_json_carries_the_channel_guard_counters() {
         let stats = NetStats {
@@ -782,8 +742,6 @@ mod tests {
         }
     }
 
-    /// The branch-to-build label the corpus aggregation joins on. A branch
-    /// without the `release-` marker stays unlabelled rather than guessed.
     #[test]
     fn build_labels_come_from_the_release_marker() {
         assert_eq!(build_label("++Ares-Core+release-13.01"), "13.01");
@@ -791,9 +749,7 @@ mod tests {
         assert_eq!(build_label("++Ares-Core+dev"), "unknown");
     }
 
-    /// Escaping must keep the JSON one-document-parseable: quotes, backslash
-    /// and control bytes never terminate the string early. A replay-declared
-    /// path is the only free-form text this emitter writes.
+    /// A replay-declared path is the only free-form text this emitter writes.
     #[test]
     fn json_strings_escape_terminators_and_control_bytes() {
         let mut out = String::new();
@@ -847,16 +803,10 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Every counter `SinkTotals` holds reaches the diag JSON exactly once.
-    ///
-    /// The key list in `push_sink_totals` is written by hand, and a counter
-    /// missing from it is not printed as zero -- it is absent from the
-    /// document, so no reader of the JSON could ever notice. The literal
-    /// below has no `..`, so a counter added to `SinkTotals`, `OverlayStats`
-    /// or `ArrayDecodeStats` stops this test compiling until it is given the
-    /// next value from `next()`; if the printer then omits it, that value is
-    /// missing from the printed set. The expected set is counted from the
-    /// literal itself, so there is no second number to keep in step.
+    /// A counter missing from the hand-written key list is absent, not 0. The
+    /// literal has no `..`, so a new counter stops this compiling until it takes
+    /// the next `next()` value, which a printer that omits it then lacks; the
+    /// expected set is counted from the literal, so no second number drifts.
     #[test]
     fn push_sink_totals_prints_every_sink_counter_exactly_once() {
         let last = std::cell::Cell::new(0u64);
