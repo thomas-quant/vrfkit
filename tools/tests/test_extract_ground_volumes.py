@@ -602,6 +602,16 @@ class CliTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside"):
                 gv.extract(source, source / "forbidden")
 
+    def test_the_receipt_is_written_with_lf_line_endings(self):
+        """Text mode wrote receipt.json with CRLF on Windows, while the two
+        ndjson files were LF on every platform."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gv.extract(make_export(root, [window_row()]), root / "result")
+            data = (root / "result" / "receipt.json").read_bytes()
+        self.assertIn(b"\n", data)
+        self.assertNotIn(b"\r\n", data)
+
     def test_status_name_is_written_and_counted_per_declaration(self):
         cases = (("13.06", {}, (), "PartiallyOutside", "status_named"),
                  ("13.05", {}, (), None, "status_unnamed_declaration"),

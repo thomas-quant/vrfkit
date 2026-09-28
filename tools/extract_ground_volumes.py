@@ -681,7 +681,7 @@ def extract(export_dir: Path, out_dir: Path) -> dict:
                       "semantics."),
         }
         (stage / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n",
-                                            encoding="utf-8")
+                                            encoding="utf-8", newline="\n")
         os.rename(stage, out_dir)
         return receipt
     finally:

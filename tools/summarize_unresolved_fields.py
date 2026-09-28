@@ -28,8 +28,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
+    from .atomic_io import atomic_write_text
     from .export_scan import child_exports, leftover_note, skipped_report
 else:
+    from atomic_io import atomic_write_text
     from export_scan import child_exports, leftover_note, skipped_report
 
 
@@ -381,9 +383,7 @@ def summarize(exports: list[Path], jobs: int = 1, top: int = 25) -> tuple[dict, 
 
 
 def _write_json(path: Path, document: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:

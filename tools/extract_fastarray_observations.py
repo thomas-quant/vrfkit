@@ -321,7 +321,8 @@ def extract(export_dir: Path, out_dir: Path) -> dict:
                    "input_sha256_before": before, "input_sha256_after": after,
                    "extractor_sha256": script_hash, "observations_sha256": sha(output),
                    "scope": "Numeric FastArray boundaries; no field names, gameplay meanings, casts, or player attribution."}
-        (stage / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        (stage / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8",
+                                            newline="\n")
         os.rename(stage, out_dir)
         return receipt
     finally:

@@ -121,6 +121,23 @@ class RawPriorityTests(unittest.TestCase):
         self.assertEqual(summary["tables"]["fields"]["physical_rows"], 1)
         self.assertEqual(summary["skipped_generated_dirs"], expected_skipped)
 
+    def test_both_reports_are_replaced_atomically_with_lf_line_endings(self):
+        """They were written in text mode, so CRLF on Windows, through a
+        temp-and-rename of their own with no fsync."""
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as out:
+            parent = Path(td)
+            self.write_export(parent / "one", [field("/A", "raw", 9, 8, b"\x01")])
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = priority.main([str(parent), "--output-dir", out, "--jobs", "1"])
+            names = sorted(path.name for path in Path(out).iterdir())
+            reports = {name: (Path(out) / name).read_bytes() for name in names}
+        self.assertEqual(code, 0)
+        self.assertEqual(names, ["raw_untyped_catalog.json", "raw_untyped_summary.json"])
+        for name, data in reports.items():
+            with self.subTest(name=name):
+                self.assertIn(b"\n", data)
+                self.assertNotIn(b"\r\n", data)
+
     def test_a_parent_holding_only_leftovers_is_an_error_that_counts_them(self):
         with tempfile.TemporaryDirectory() as td:
             parent = Path(td)

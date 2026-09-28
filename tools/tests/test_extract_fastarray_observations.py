@@ -357,6 +357,18 @@ class FastArrayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside"):
                 fast.extract(source, source / "forbidden")
 
+    def test_the_receipt_is_written_with_lf_line_endings(self):
+        """Text mode wrote receipt.json with CRLF on Windows, while
+        observations.ndjson was LF on every platform."""
+        raw, count = payload([1, 3])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); out = root / "result"
+            source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
+            fast.extract(source, out)
+            data = (out / "receipt.json").read_bytes()
+        self.assertIn(b"\n", data)
+        self.assertNotIn(b"\r\n", data)
+
     def test_cli_rejections_retained_and_nonzero_exit(self):
         raw, count = payload([1, 3])
         with tempfile.TemporaryDirectory() as tmp:
