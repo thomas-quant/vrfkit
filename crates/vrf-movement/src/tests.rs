@@ -154,8 +154,67 @@ fn build_move(variant1: bool, timestamp: u32, x: f32, y: f32, z: f32) -> BitWrit
     w
 }
 
-/// Build a ComponentDataStream payload (direct, not byte-wrapped).
+/// Bits after the envelope of a byte-wrapped stream. The decoder never reads
+/// them; the value only has to be non-zero.
+const ENVELOPE_TRAILER_BITS: u32 = 24;
+
+/// Build a ComponentDataStream in the shape real replays use: a byte-wrapped
+/// envelope whose inner movementBitCount is 0, a section that ends in a `000`
+/// terminator plus non-zero bits, and a trailer after the envelope.
+///
+/// Counted with temporary counters over `vrfkit validate` on 02d4d478
+/// (13.01), 02eef9e2 (13.06) and one 11.06 replay, 6,167,472 streams: every
+/// one is byte-wrapped with inner movementBitCount 0, its last move is
+/// followed by 11 to 26 bits that start with `000` and are non-zero after it,
+/// and exactly 24 bits follow the envelope.
 fn build_component_data_stream(moves: &[BitWriter]) -> BitWriter {
+    byte_wrapped(&open_section_payload(moves), ENVELOPE_TRAILER_BITS)
+}
+
+/// The envelope's payload: the inner u16 movementBitCount 0, so the section
+/// runs to the end of the envelope, then the magic, `moves` under the usual
+/// marker sequence, a `000` terminator and 8 to 15 non-zero bits that end the
+/// payload on a byte boundary. After the last move 11 to 18 bits remain,
+/// inside the 31 the decoder stops at without reading another marker.
+fn open_section_payload(moves: &[BitWriter]) -> BitWriter {
+    assert!(
+        !moves.is_empty(),
+        "a real section carries at least one move"
+    );
+    let mut payload = BitWriter::new();
+    payload.write_u16(0);
+    payload.write_u8(MOVEMENT_MAGIC);
+    let mut marker: u8 = 1;
+    for mv in moves {
+        payload.write_bits_u64(u64::from(marker), 3);
+        payload.write_other(mv);
+        marker = next_marker(marker);
+    }
+    payload.write_bits_u64(0, 3);
+    let tail = 8 + (8 - (payload.bit_count() + 8) % 8) % 8;
+    for i in 0..tail {
+        payload.write_bit(i % 2 == 0);
+    }
+    payload
+}
+
+/// Wrap `payload`, a whole number of bytes, in the envelope: a u16 byte
+/// count, the payload, then `trailer_bits` non-zero bits outside it.
+fn byte_wrapped(payload: &BitWriter, trailer_bits: u32) -> BitWriter {
+    assert_eq!(payload.bit_count() % 8, 0, "an envelope holds whole bytes");
+    let mut stream = BitWriter::new();
+    stream.write_u16((payload.bit_count() / 8) as u16);
+    stream.write_other(payload);
+    for i in 0..trailer_bits {
+        stream.write_bit(i % 3 == 0);
+    }
+    stream
+}
+
+/// Build a ComponentDataStream in the direct form: no envelope, and the u16
+/// is the section's own bit count. The decoder accepts it, as the C#
+/// reference does; none of the streams counted above uses it.
+fn build_direct_component_data_stream(moves: &[BitWriter]) -> BitWriter {
     let mut movement = BitWriter::new();
     movement.write_u8(MOVEMENT_MAGIC);
 
@@ -462,6 +521,27 @@ fn decodes_two_moves_in_one_update() {
 }
 
 #[test]
+fn decodes_the_direct_component_form() {
+    // The other round trips go through the byte-wrapped envelope. This is the
+    // one that pins the direct form, where the first u16 is the section's own
+    // bit count.
+    let stream = build_direct_component_data_stream(&[
+        build_move(false, 42, 1.0, 2.0, 3.0),
+        build_move(true, 84, 10.0, 11.0, 12.0),
+    ]);
+    let (result, moves) = decode(&build_rpc_payload(9999, &stream));
+
+    assert_eq!(result.error_count, 0);
+    assert_eq!(result.total_moves, 2);
+    assert_eq!(moves.len(), 2);
+    assert_eq!((moves[0].move_type, moves[0].timestamp), (0, 42));
+    assert!((moves[0].pos_x - 1.0).abs() < 0.001);
+    assert_eq!((moves[1].move_type, moves[1].timestamp), (1, 84));
+    assert!((moves[1].pos_z - 12.0).abs() < 0.001);
+    assert!((moves[1].vel_y - 5.0).abs() < 0.001);
+}
+
+#[test]
 fn empty_rpc_returns_zero() {
     // Zero bits -> empty
     let data = [0u8; 0];
@@ -607,7 +687,8 @@ fn an_open_window_tail_is_tallied_apart_from_a_sized_one() {
 #[test]
 fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
     // The grammar's own end: at most 31 bits after a decoded move. The
-    // builder's trailing zero marker is 3 of them and is never read.
+    // builder's `000` terminator and the bits after it are 11 to 18 of them
+    // and are never read.
     let stream = build_component_data_stream(&[
         build_move(false, 42, 1.0, 2.0, 3.0),
         build_move(true, 84, 10.0, 11.0, 12.0),
