@@ -1,42 +1,28 @@
 #!/usr/bin/env python3
 """Generate tools/equippable_table.py from the C# parser's resolver.
 
-Weapon display names ("Vandal", "Sheriff") exist nowhere in the replay wire
-format. The game ships them as client-side assets; the C# reference parser
-carries a hand-maintained table in
+Weapon display names ("Vandal", "Sheriff") are not on the wire; the game ships
+them as client-side assets. The C# reference parser's hand-maintained
+Define(classPath, name, category) table, vendored at
+third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs and read
+by default, is extracted here rather than retyped. The Rust crates keep no
+name table and emit class_path only; the mapping lives in the Python adapter,
+where "AssaultRifle_AK" -> "Vandal" is labelling, not parsing
+(docs/archive/PROJECT_STATUS.md section 8, docs/archive/NEXT_STEPS_FINDINGS.md).
 
-    ValorantReplayParser/src/Replay.Valorant/Combat/ValorantEquippableResolver.cs
-
-as a list of Define(classPath, name, category) entries. That file is vendored
-with the rest of the descriptor sources, at
-third_party/vrp/Replay.Valorant/Combat/, and is the default input. Reproducing
-shot.equippable.name therefore requires a table, and this generator extracts it
-from that authoritative source rather than having anyone retype the paths.
-
-This does NOT weaken the parser's "no hardcoded names" invariant: the Rust
-crates stay free of name tables and emit class_path only. The mapping lives on
-the presentation side, in the Python adapter, where turning
-"AssaultRifle_AK" into "Vandal" is a labelling concern rather than a parsing
-rule. See docs/archive/PROJECT_STATUS.md section 8 and
-docs/archive/NEXT_STEPS_FINDINGS.md.
-
-The names are the C# table's, not the game's, and one of them differs.
-Compared with the installed 13.06 game's own display names (string tables
-read statically, 2026-09-28): 21 of the 25 match, "Spike" and "Tour de Force"
-differ only in case ("SPIKE", "Tour De Force"), Equippable_Unarmed has no
-equippable data asset, and CompactPistol_C is "Bandit" (string-table key
-CompactPistol_DisplayName), not "Compact Pistol". The table is deliberately
-not overridden here:
-
-- A hand edit of the output fails --check, and editing the vendored resolver
-  breaks its byte-for-byte provenance (third_party/vrp/README.md).
-- The only consumer here, tools/to_valplay_bundle.py, emits the name as
-  shot.equippable.name to match the C# parser's bundle, and valplay prices
-  weapons by that name. valplay leaves "Compact Pistol" unpriced on purpose
-  and lists "Bandit" at 600 as unverified, so emitting "Bandit" would give
-  the gun that price there. valplay's tests pin the literal strings, not
-  this table, so they would stay green. Renaming it is valplay's decision,
-  made together with the price.
+The names are the C# table's, not the game's. Against the installed 13.06
+game's display names (string tables read statically, 2026-09-28) 21 of the 25
+match, "Spike" and "Tour de Force" differ only in case ("SPIKE", "Tour De
+Force"), Equippable_Unarmed has no equippable data asset, and CompactPistol_C
+is "Bandit" (key CompactPistol_DisplayName), not "Compact Pistol". The table
+is deliberately not overridden: a hand edit of the output fails --check;
+editing the vendored resolver breaks its byte-for-byte provenance
+(third_party/vrp/README.md); and the only consumer, tools/to_valplay_bundle.py,
+emits the name as shot.equippable.name to match the C# bundle while valplay
+prices weapons by it -- it leaves "Compact Pistol" unpriced on purpose and
+lists "Bandit" at an unverified 600, which a rename would silently apply, as
+its tests pin the literal strings, not this table. A rename is valplay's
+decision, made with the price.
 
 Usage:
     python tools/extract_equippables.py [--csharp-root <path>] [--check]
@@ -58,12 +44,9 @@ if __package__:
 else:  # direct script execution
     from atomic_io import atomic_write_text
 
-# The input is vendored (third_party/vrp/README.md). It used to default to
-# VRFKIT_CSHARP_DIR, which no one set, so a plain run -- and the --check this
-# docstring advertised for CI -- stopped at "resolver not found".
 DEFAULT_CSHARP_ROOT = Path(__file__).resolve().parent.parent / "third_party" / "vrp"
 RESOLVER_RELPATH = Path("Combat/ValorantEquippableResolver.cs")  # below Replay.Valorant
-# Written into the generated header. Fixed rather than taken from the input, so
+# The generated header's source line: fixed, not taken from the input, so
 # --check agrees for any root holding the same resolver.
 SOURCE_LABEL = "third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs"
 OUTPUT_PATH = Path(__file__).parent / "equippable_table.py"
@@ -74,9 +57,8 @@ DEFINE_RE = re.compile(
     r"ValorantEquippableCategory\.(\w+)\s*\)"
 )
 
-# The game renamed this one asset directory between the 13.01 and 13.02
-# recordings. Both spellings occur in the corpus and identify the same class;
-# keep the equivalence exact so an unrelated path's casing is never guessed.
+# The Dmr -> DMR directory rename between the 13.01 and 13.02 recordings; both
+# spellings occur in the corpus. Exact, so no other path's casing is guessed.
 PATH_VARIANTS = (
     (
         "/Game/Equippables/Guns/SniperRifles/Dmr/DMR.DMR_C",
@@ -86,12 +68,9 @@ PATH_VARIANTS = (
 
 
 def pascal_to_snake(name: str) -> str:
-    """SniperRifle -> sniper_rifle, Smg -> smg.
-
-    Matches the category strings the C# JSON writer emits, verified against
-    02d4d478's reference bundle: machine_gun, sniper_rifle, sidearm, smg,
-    rifle, shotgun, ability.
-    """
+    """SniperRifle -> sniper_rifle, Smg -> smg: the C# JSON writer's
+    categories, checked against 02d4d478's reference bundle (machine_gun,
+    sniper_rifle, sidearm, smg, rifle, shotgun, ability)."""
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
@@ -170,11 +149,9 @@ def render(definitions: list[tuple[str, str, str]], source_rel: str) -> str:
 
 
 def find_resolver(root: Path) -> Path | None:
-    """The resolver below a vendored root or an upstream clone's root.
-
-    The vendored copy keeps Replay.Valorant directly under its root; upstream
-    has it under src/. Same two layouts compare_descriptor_sources.py accepts.
-    """
+    """The resolver below a vendored root (Replay.Valorant directly under it)
+    or an upstream clone's (under src/), the layouts
+    compare_descriptor_sources.py accepts."""
     for descriptors in (root / "Replay.Valorant", root / "src" / "Replay.Valorant"):
         if (descriptors / RESOLVER_RELPATH).is_file():
             return descriptors / RESOLVER_RELPATH

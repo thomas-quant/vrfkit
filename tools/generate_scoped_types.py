@@ -1,31 +1,17 @@
 """Generate exact group/name/checksum field types from reviewed wire evidence.
 
-Unlike donor checksum propagation, these entries never apply to another group
-or another field name. The evidence fixture is explicit; this tool does not
-infer types from widths or names. Run again after editing the fixture, and use
---check to detect stale generated Rust.
-
-Every fixture type name maps to exactly one `FieldType` expression below.
-`FTextTree` is the full-tree FText reader; like the geometry shapes it has an
-independent decoder in `validate_type_evidence.py`. The geometry shapes (`VectorNetQuantize100`, `RotationShort`, `RepMovementByte`,
-`RepMovementShort`) and `EnumRemainingBits` exist for upstream descriptors whose
-types are not primitives; each needs an independent decoder in
-`validate_type_evidence.py` before an entry may use it. A `RepMovement` entry's
-quantization is part of its type name because the checksum cannot carry it:
-`ReplicatedMovement` has one checksum whether a class replicates byte or short
-rotation components, which is why it is the dropped conflict in
-`extract_checksum_types.py`. The exact group in the key is what separates them.
-
-A `RepMovement` entry must also state its location level,
-`location_quantization`: `RoundWholeNumber`, `RoundOneDecimal` or
-`RoundTwoDecimals` (`VectorQuantization`). The level is a per-class choice the
-wire does not carry, and exact consumption cannot catch a wrong one -- it
-changes no width -- so it is measured, never defaulted here: join the actor's
-first update to its `actors.parquet` spawn position (docs/DATA.md,
+Each entry is one exact (group, field, checksum) identity and never
+propagates to another group or name; the evidence fixture is explicit and
+nothing is inferred from widths or names. Rerun after editing the fixture;
+--check detects stale generated Rust. Every type name needs an independent
+decoder in validate_type_evidence.py (test_generate_scoped_types enforces it).
+A RepMovement type name carries its rotator quantization because
+`ReplicatedMovement` has one checksum for both widths (the dropped conflict in
+extract_checksum_types.py), and its `location_quantization` is required and
+measured, never defaulted, since exact consumption cannot catch a wrong level:
+join the first update to the actors.parquet spawn (docs/DATA.md,
 "`ReplicatedMovement.location` is world units, at a per-class level") and add
-the group to `REP_MOVEMENT_LOCATION_EVIDENCE` in
-crates/vrf-decode/src/tests/overlay.rs, which fails on a `RepMovement` type it
-does not list. The key is refused on any other type.
+the group to REP_MOVEMENT_LOCATION_EVIDENCE in vrf-decode tests::overlay.
 """
 from __future__ import annotations
 
@@ -43,9 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "tools/fixtures/scoped_type_evidence.json"
 OUTPUT = ROOT / "crates/vrf-decode/src/scoped_types.rs"
 
-#: Fixture type name -> the rustfmt-stable lines of its `FieldType` expression.
-#: The multi-line `RepMovement` form is the one rustfmt gives a struct literal
-#: this long, so `cargo fmt --check` and `--check` here agree on one spelling.
+#: Fixture type name -> the rustfmt-stable lines of its `FieldType` expression,
+#: so `cargo fmt --check` and `--check` here agree on one spelling.
 TYPES = {
     "Byte": ("FieldType::Byte",),
     "Bool": ("FieldType::Bool",),
@@ -71,12 +56,9 @@ TYPES = {
         "}",
     ),
 }
-#: Types whose expression names `RotatorQuantization` and `VectorQuantization`.
-#: The import is emitted only when one is present: an unused `use` fails
-#: clippy's `-D warnings`.
+#: Types naming `RotatorQuantization` and `VectorQuantization`; their import is
+#: emitted only when used, as an unused `use` fails clippy's `-D warnings`.
 NEEDS_ROTATOR_QUANTIZATION = {"RepMovementByte", "RepMovementShort"}
-#: The `VectorQuantization` variants a `RepMovement` entry's
-#: `location_quantization` may name.
 LOCATION_LEVELS = {"RoundWholeNumber", "RoundOneDecimal", "RoundTwoDecimals"}
 
 
