@@ -43,8 +43,10 @@
 //! identical in shape and differ only in the order of a handful of bit
 //! primitives, which is exactly the situation where a copy-paste error is
 //! invisible in review; a per-build file makes `git log` on one build show only
-//! that build's history. The `distinct_builds_produce_distinct_output` test in
-//! the crate root is the backstop that catches such an error anyway.
+//! that build's history. The per-build vectors in `tests/golden.rs` and
+//! `tests/native.rs` are what catch such an error: every registered build must
+//! carry vectors at each staging boundary, so all three word functions are
+//! checked byte for byte.
 
 use crate::helpers::initial_prng_a;
 

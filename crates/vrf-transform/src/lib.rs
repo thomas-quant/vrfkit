@@ -436,25 +436,4 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn distinct_builds_produce_distinct_output() {
-        // A regression guard against copy-paste errors between version impls:
-        // no two builds may agree on a non-trivial payload.
-        let payload = [0xBFu8, 0xDF, 0x6F, 0x9E, 0xA1, 0xF2, 0x7B, 0xA0, 0x11];
-        let bit_count = 65;
-        let mut outputs = Vec::new();
-        for v in ALL_VERSIONS.iter().copied() {
-            let mut buf = vec![0u8; TransformVersion::output_byte_count(bit_count)];
-            let mut r = BitReader::new(&payload);
-            v.decode_from(&mut r, bit_count, seed_for(bit_count, 2), &mut buf)
-                .unwrap();
-            assert!(
-                !outputs.contains(&buf),
-                "{} duplicates another build",
-                v.branch()
-            );
-            outputs.push(buf);
-        }
-    }
 }
