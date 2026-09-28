@@ -16,7 +16,7 @@ record, not things to run.
 2. [CLI](#2-cli) -- [`inspect`](#inspect) / [`validate`](#validate) / [`diag`](#diag) / [`export`](#export)
 3. [Output](#3-output) -- [`fields`](#fieldsparquet) / [`movement`](#movementparquet) / [`actors`](#actorsparquet) / [`net_guids`](#net_guidsparquet) / [`events`](#eventsparquet) / [`checkpoint_fields`](#checkpoint_fieldsparquet) / [`manifest.json`](#manifestjson)
 4. [Using it as a library](#4-using-it-as-a-library)
-5. [`tools/` reference](#5-tools-reference) -- [Generators](#generators) / [Validation](#validation) / [Reading the installed game](#reading-the-installed-game) / [Downstream conversion](#downstream-conversion) / [Analysis helpers](#analysis-helpers)
+5. [`tools/` reference](#5-tools-reference) -- [Generators](#generators) / [Validation](#validation) / [Reading the installed game](#reading-the-installed-game) / [Downstream conversion](#downstream-conversion-tools) / [Analysis helpers](#analysis-helpers)
 6. [Validation suite](#6-validation-suite)
 7. [Supported builds](#7-supported-builds)
 8. [Known limits](#8-known-limits)
