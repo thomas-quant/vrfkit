@@ -768,6 +768,46 @@ class EffectBlobBitLengthTests(unittest.TestCase):
             bundle._EffectBlob(b"\x00\x01")  # bit_count is not optional
 
 
+class EffectFramingTallyTests(unittest.TestCase):
+    """Bits a blob's framing leaves unaccounted for reach the residual counter.
+
+    The port keeps going where the Rust decoder rejects a blob, so a framing
+    that ended somewhere else than this parse expected is only visible as
+    `effect_array_residual_bits`. The early exits for an unreadable or
+    oversized element count returned before that check.
+    """
+
+    SPEC = bundle._EFFECT_FLOATS
+    # One float element (tag 284, value 1.0), element and array terminators.
+    ONE_ELEMENT = bytes.fromhex("02021020390412400000803f0000")
+
+    def residual(self, data: bytes, bit_count: int | None = None):
+        tally = bundle._Tally()
+        elements = bundle._decode_effect_elements(
+            data, len(data) * 8 if bit_count is None else bit_count, self.SPEC, tally)
+        return elements, tally["effect_array_residual_bits"]
+
+    def test_a_well_formed_array_leaves_nothing(self):
+        self.assertEqual(self.residual(self.ONE_ELEMENT), ([(284, 1.0)], 0))
+
+    def test_a_tail_after_the_terminator_is_counted(self):
+        self.assertEqual(self.residual(self.ONE_ELEMENT + bytes(6)), ([(284, 1.0)], 1))
+
+    def test_an_oversized_count_is_counted(self):
+        # IntPacked 383, past Rust's MAX_ARRAY_COUNT of 256, then 40 bytes.
+        self.assertEqual(self.residual(bytes([0xFF, 0x04]) + bytes(40), 336), ([], 1))
+
+    def test_an_unreadable_count_with_bits_left_is_counted(self):
+        # Six continuation bytes overflow IntPacked's 35-bit limit.
+        self.assertEqual(self.residual(bytes([0xFF] * 6) + bytes(10)), ([], 1))
+
+    def test_an_empty_array_is_not_counted(self):
+        # Count 0 is the whole blob, or is followed by the array terminator
+        # the Rust decoder also accepts.
+        self.assertEqual(self.residual(b"\x00"), ([], 0))
+        self.assertEqual(self.residual(b"\x00\x00"), ([], 0))
+
+
 class ShotEffectRawSourceTests(unittest.TestCase):
     """An additive Rust JSON overlay must not replace the shot wire source."""
 

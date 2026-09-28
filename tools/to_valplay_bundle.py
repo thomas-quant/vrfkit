@@ -943,11 +943,15 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
     try:
         count = r.read_int_packed()
     except (EOFError, ValueError):
-        return []
-    if count > 256 or count == 0:
-        return []
-    elements = [(None, None)] * count
-    while not r.at_end():
+        count = None
+    # No readable count, or one past Rust's MAX_ARRAY_COUNT (256): the framing
+    # broke at its first IntPacked. Nothing is decoded, but the window it left
+    # still reaches the residual check below, which an early return skipped.
+    # Count 0 enters the loop, which consumes the array terminator the Rust
+    # decoder also accepts after it.
+    framed = count is not None and count <= 256
+    elements = [(None, None)] * count if framed else []
+    while framed and not r.at_end():
         try:
             enc_idx = r.read_int_packed()
         except (EOFError, ValueError):
