@@ -7,6 +7,7 @@
 //! materialise them.
 
 use crate::error::ContainerError;
+use crate::io::le_u32;
 
 /// Discriminant for the framing chunks that follow the replay info.
 ///
@@ -124,19 +125,8 @@ impl<'a> ChunkIterator<'a> {
             });
         }
 
-        // The two header fields are a fixed 8 bytes at a known offset, so they
-        // are decoded directly rather than through a `BitReader`. The `available
-        // >= 8` check above is what makes the conversion succeed; the `else`
-        // arm is unreachable and re-reports truncation rather than panicking.
-        let Ok(header) = <[u8; 8]>::try_from(&self.data[self.pos..self.pos + 8]) else {
-            return Err(ContainerError::Truncated {
-                context: "chunk header",
-                needed: 8,
-                available,
-            });
-        };
-        let raw_type = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-        let size = i32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let raw_type = le_u32(self.data, self.pos);
+        let size = le_u32(self.data, self.pos + 4) as i32;
 
         if size < 0 {
             return Err(ContainerError::InvalidChunkSize { size });

@@ -16,9 +16,8 @@
 //! compressed archive reports [`ContainerError::OodleUnsupported`] rather than
 //! silently returning nothing.
 
-use vrf_bitio::BitReader;
-
 use crate::error::ContainerError;
+use crate::io::le_u32;
 use crate::limits::MAX_CHUNK_SIZE;
 
 /// Parsed metadata from a ReplayData chunk's inner framing.
@@ -84,11 +83,10 @@ pub fn parse_replay_data_meta(payload: &[u8]) -> Result<ReplayDataMeta, Containe
             available: payload.len(),
         });
     }
-    let mut reader = BitReader::new(payload);
-    let time1 = read_u32(&mut reader)?;
-    let time2 = read_u32(&mut reader)?;
-    let size_in_bytes = read_i32(&mut reader)?;
-    let memory_size_in_bytes = read_i32(&mut reader)?;
+    let time1 = le_u32(payload, 0);
+    let time2 = le_u32(payload, 4);
+    let size_in_bytes = le_u32(payload, 8) as i32;
+    let memory_size_in_bytes = le_u32(payload, 12) as i32;
 
     if !(0..=MAX_CHUNK_SIZE).contains(&memory_size_in_bytes) {
         return Err(ContainerError::InvalidMemorySize {
@@ -239,9 +237,8 @@ pub(crate) fn decompress_oodle_archive(
         });
     }
 
-    let mut hdr_reader = BitReader::new(&archive[..OODLE_HEADER_BYTES]);
-    let decompressed_size = read_i32(&mut hdr_reader)?;
-    let compressed_size = read_i32(&mut hdr_reader)?;
+    let decompressed_size = le_u32(archive, 0) as i32;
+    let compressed_size = le_u32(archive, 4) as i32;
 
     if let Some(expected) = expected_decompressed {
         if decompressed_size != expected {
@@ -339,16 +336,4 @@ fn inflate(input: &[u8], decompressed_size: usize) -> Result<(Vec<u8>, usize), C
     Err(ContainerError::OodleUnsupported {
         needed: decompressed_size,
     })
-}
-
-fn read_u32(reader: &mut BitReader<'_>) -> Result<u32, ContainerError> {
-    reader
-        .read_u32()
-        .map_err(|e| ContainerError::BitIo(e.to_string()))
-}
-
-fn read_i32(reader: &mut BitReader<'_>) -> Result<i32, ContainerError> {
-    reader
-        .read_i32()
-        .map_err(|e| ContainerError::BitIo(e.to_string()))
 }
