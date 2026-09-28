@@ -912,14 +912,7 @@ impl ExportSink<'_> {
         for ((f, declared_type), (nested, _, _)) in
             flattened.iter().zip(leaf_types).zip(nested_results)
         {
-            // Build full field name: "Rounds[0].RoundNumber" etc. `f.path`
-            // already carries its own leading separator.
-            let full_name = self.channel_state.names.intern_fmt(|out| {
-                out.push_str(parent_name);
-                out.push_str(&f.path);
-            });
-
-            let (vi, vf, vb, vs) = match declared_type {
+            let columns = match declared_type {
                 Some(VerifiedArrayLeaf::Field(ft)) => decode_leaf_with_stats(
                     ft,
                     &f.raw_bits,
@@ -950,21 +943,14 @@ impl ExportSink<'_> {
                 ),
                 None => (None, None, None, None),
             };
-
-            self.push_field(FieldValues {
-                handle: f.handle,
-                field_name: Some(full_name),
-                // An array leaf is addressed by its position inside the array
-                // payload, not by a handle the group declares, so there is no
-                // checksum for it to carry. The null says exactly that.
-                compatible_checksum: None,
-                bit_count: f.bit_count,
-                raw_bits: Some(SmallVec::from_slice(&f.raw_bits)),
-                value_i64: vi,
-                value_f64: vf,
-                value_bool: vb,
-                value_str: vs,
-            });
+            // `f.path` carries its own leading separator: "Rounds[0].RoundNumber".
+            self.push_child(
+                f.handle,
+                &[parent_name, &f.path],
+                f.bit_count,
+                &f.raw_bits,
+                columns,
+            );
             self.stats.fields_emitted += 1;
 
             // Nested rows follow their preserved raw container row immediately.
@@ -972,24 +958,46 @@ impl ExportSink<'_> {
             // container was emitted, so a malformed member cannot leak a prefix.
             if let Some(nested) = nested {
                 for leaf in nested {
-                    let field_name = self.channel_state.names.intern_fmt(|out| {
-                        out.push_str(parent_name);
-                        out.push_str(&f.path);
-                        out.push_str(&leaf.path);
-                    });
-                    self.push_field(FieldValues {
-                        handle: leaf.handle,
-                        field_name: Some(field_name),
-                        compatible_checksum: None,
-                        bit_count: leaf.bit_count,
-                        raw_bits: Some(SmallVec::from_slice(&leaf.raw_bits)),
-                        value_i64: Some(leaf.value_i64),
-                        ..FieldValues::default()
-                    });
+                    self.push_child(
+                        leaf.handle,
+                        &[parent_name, &f.path, &leaf.path],
+                        leaf.bit_count,
+                        &leaf.raw_bits,
+                        (Some(leaf.value_i64), None, None, None),
+                    );
                     self.stats.fields_emitted += 1;
                 }
             }
         }
+    }
+
+    /// Push one row decoded out of a parent payload, named by concatenating
+    /// `name`. The row is addressed by its position inside that payload, not
+    /// by a handle the group declares, so there is no checksum for it to
+    /// carry; the null says exactly that. Counting it is the caller's job.
+    pub(super) fn push_child(
+        &mut self,
+        handle: u32,
+        name: &[&str],
+        bit_count: u32,
+        raw: &[u8],
+        (value_i64, value_f64, value_bool, value_str): DecodedColumns,
+    ) {
+        let field_name = self
+            .channel_state
+            .names
+            .intern_fmt(|out| name.iter().for_each(|part| out.push_str(part)));
+        self.push_field(FieldValues {
+            handle,
+            field_name: Some(field_name),
+            compatible_checksum: None,
+            bit_count,
+            raw_bits: Some(SmallVec::from_slice(raw)),
+            value_i64,
+            value_f64,
+            value_bool,
+            value_str,
+        });
     }
 
     /// The group this block belongs to, with game-mode sibling classes mapped

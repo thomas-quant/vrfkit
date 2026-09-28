@@ -438,33 +438,22 @@ impl ExportSink<'_> {
         let flattened =
             decode_struct_array(raw, bit_count, Some(schema), &[], &mut self.stats.array);
         for field in &flattened {
-            let (value_i64, value_f64, value_bool, value_str) =
-                match life_change_member_type(&field.path) {
-                    Some(ft) => super::blobs::decode_leaf_with_stats(
-                        ft,
-                        &field.raw_bits,
-                        field.bit_count,
-                        &mut self.stats.array_leaf_decode_errors,
-                    ),
-                    None => (None, None, None, None),
-                };
-            let full_name = self.channel_state.names.intern_fmt(|out| {
-                out.push_str(prefix);
-                out.push_str(&field.path);
-            });
-            self.push_field(FieldValues {
-                handle: rpc_handle,
-                field_name: Some(full_name),
-                // A member is addressed inside the array payload, so the
-                // replay declares no checksum for it. See `FieldRecord`.
-                compatible_checksum: None,
-                bit_count: field.bit_count,
-                raw_bits: Some(SmallVec::from_slice(&field.raw_bits)),
-                value_i64,
-                value_f64,
-                value_bool,
-                value_str,
-            });
+            let columns = match life_change_member_type(&field.path) {
+                Some(ft) => super::blobs::decode_leaf_with_stats(
+                    ft,
+                    &field.raw_bits,
+                    field.bit_count,
+                    &mut self.stats.array_leaf_decode_errors,
+                ),
+                None => (None, None, None, None),
+            };
+            self.push_child(
+                rpc_handle,
+                &[prefix, &field.path],
+                field.bit_count,
+                &field.raw_bits,
+                columns,
+            );
             self.stats.fields_emitted += 1;
         }
     }
@@ -551,22 +540,14 @@ impl ExportSink<'_> {
             }
             decoded.push((field, columns));
         }
-        for (field, (value_i64, value_f64, value_bool, value_str)) in decoded {
-            let full_name = self.channel_state.names.intern_fmt(|out| {
-                out.push_str(prefix);
-                out.push_str(&field.path);
-            });
-            self.push_field(FieldValues {
-                handle: rpc_handle,
-                field_name: Some(full_name),
-                compatible_checksum: None,
-                bit_count: field.bit_count,
-                raw_bits: Some(SmallVec::from_slice(&field.raw_bits)),
-                value_i64,
-                value_f64,
-                value_bool,
-                value_str,
-            });
+        for (field, columns) in decoded {
+            self.push_child(
+                rpc_handle,
+                &[prefix, &field.path],
+                field.bit_count,
+                &field.raw_bits,
+                columns,
+            );
             self.stats.fields_emitted += 1;
         }
     }
@@ -629,22 +610,14 @@ impl ExportSink<'_> {
         let Some(decoded) = decoded else {
             return;
         };
-        for (field, (value_i64, value_f64, value_bool, value_str)) in decoded {
-            let full_name = self.channel_state.names.intern_fmt(|out| {
-                out.push_str(prefix);
-                out.push_str(&field.path);
-            });
-            self.push_field(FieldValues {
-                handle: rpc_handle,
-                field_name: Some(full_name),
-                compatible_checksum: None,
-                bit_count: field.bit_count,
-                raw_bits: Some(SmallVec::from_slice(&field.raw_bits)),
-                value_i64,
-                value_f64,
-                value_bool,
-                value_str,
-            });
+        for (field, columns) in decoded {
+            self.push_child(
+                rpc_handle,
+                &[prefix, &field.path],
+                field.bit_count,
+                &field.raw_bits,
+                columns,
+            );
             self.stats.targeting_world_locations_decoded = self
                 .stats
                 .targeting_world_locations_decoded
