@@ -62,6 +62,24 @@ in the manifest, so nothing looked wrong until the join was counted. The rule is
 **last non-zero write wins** -- 0 is not a NetGUID. Before the fix 64 of 69
 replays joined all ten and the worst managed 7; after it, 71 of 71 do.
 
+**The manifest keeps one pawn per player, and a reconnect gives a player two.**
+On 39c2bb2c (13.05) PlayerState 256 writes `SpawnedCharacter` 1510 at t=66, 0
+at 1,851,838 and 45530 at 1,948,245; the manifest keeps 45530, and pawn 1510 --
+open from t=66 to 1,851,642 -- is in no manifest field. A join on the manifest
+alone labelled its 1,854 effect records `unconfirmed_actor`, in a run that
+exited 0, and its spike custody `unknown`. The analysis tools therefore take player
+bodies from every non-zero value of the field, through
+`tools/player_identity.py`. Measured on the 1,018-export audit corpus (parser
+259ed10, 2026-09-28; main `fields.parquet`, top-level `SpawnedCharacter` rows
+on `BombPlayerState_C` and its Swiftplay alias): 10,426 rows, all typed, naming
+10,250 pawns, each by exactly one PlayerState; 97 of them in 86 exports are
+earlier values the manifest dropped; the manifest's value is the last non-zero
+history value for every player. A pawn's own `PlayerState` is not a body
+criterion: 1,236 pawns carry a manifest player's PlayerState without ever being
+a `SpawnedCharacter` value, and every one is Astra's `Rift_TargetingForm_PC_C`.
+Every named pawn's own top-level `PlayerState` names the PlayerState that
+spawned it (10,250 of 10,250), which is the independent check on the join.
+
 ## Economy
 
 | Data | Source | Status |
@@ -261,8 +279,10 @@ about the epoch.
 For an executable view of these observations, use
 `tools/extract_player_effects.py` (see [USAGE.md](USAGE.md#analysis-helpers)).
 Effect replication can also target cameras, drones and decoys. The tool keeps
-those observations but admits a player target only through the manifest's
-`SpawnedCharacter` identity; possession alone is not a player body.
+those observations but admits a player target only through a
+`SpawnedCharacter` value -- the manifest's, or an earlier one the manifest
+dropped when the player reconnected (see [Player identity](#player-identity));
+possession alone is not a player body.
 
 A debuff shows up as a continuous effect played **on the affected player's own
 actor**, not on the caster's. `EffectManagerComponent`'s
@@ -522,6 +542,18 @@ reports `NO CARRIER` 0 times across the 71 exports, against 2 before the
 disconnect fix above. Both of those were pawns whose `Owner` pointed at a
 character the manifest had lost, and the tool said `NO CARRIER` rather than
 guessing -- which is the only reason the failure was findable.
+
+The same loss had a second shape, which the 71 did not contain: a player who
+reconnects is given a new pawn, and the manifest keeps only that one. On the
+1,018-export audit corpus (parser 259ed10, 2026-09-28) the manifest-only join
+left 123 `Owner` intervals in 32 exports `unknown` -- every one an agent pawn
+that an earlier `SpawnedCharacter` value names -- and 28 plants in 17 exports
+`NO CARRIER`. Joined through the whole `SpawnedCharacter` history
+(`tools/player_identity.py`), both are 0 across all 1,018 exports, and those
+123 intervals carry `carrier_identity_provenance` naming the earlier pawn. The
+same pass removed a quieter fault: the manifest-only map held a `None` key for
+a player with no character, so on the four 11-PlayerState exports 265 `loose`
+intervals carried that player's subject; now none does.
 
 ## Actor / GUID / structure
 

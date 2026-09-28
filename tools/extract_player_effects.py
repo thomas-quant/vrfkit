@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Extract blind updates and continuous-effect observations by target identity.
 
-Port of ValorantReplayParser 2b66c65's player-body distinction. Only manifest
-character_net_guid (SpawnedCharacter) proves a player target. PossessedCharacter,
-Owner and Instigator can identify a controlled device, not an affected body.
-All observations remain in the output, including blinds on non-player actors.
+Port of ValorantReplayParser 2b66c65's player-body distinction. Only a
+SpawnedCharacter value proves a player target: the manifest's character_net_guid
+(the last one) or an earlier value from the same field's history, the pawn a
+player had before reconnecting (see player_identity.py). PossessedCharacter,
+Owner, Instigator and a pawn's own PlayerState can identify a controlled device,
+not an affected body. All observations remain in the output, including blinds
+on non-player actors.
 These are replicated updates / RPC observations, not deduplicated hit counts,
 cast attribution or inferred effect intervals. Checkpoint snapshots are excluded.
 """
@@ -21,8 +24,10 @@ import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import atomic_write_text
+    from .player_identity import FINAL_PROVENANCE, load_player_bodies
 else:
     from atomic_io import atomic_write_text
+    from player_identity import FINAL_PROVENANCE, load_player_bodies
 
 
 BLIND_GROUP = "/Script/ShooterGame.BlindManagerComponent"
@@ -38,14 +43,9 @@ COLUMNS = ["time_ms", "packet_id", "channel_index", "actor_net_guid",
 
 def build(export_dir: Path) -> dict:
     manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
-    subjects = defaultdict(set)
-    for player in manifest.get("players", []):
-        guid = player.get("character_net_guid")
-        if guid:
-            subjects[int(guid)].add(player.get("subject"))
-    players = {guid: next(iter(values)) for guid, values in subjects.items()
-               if len(values) == 1}
-    conflicts = set(subjects) - players.keys()
+    bodies = load_player_bodies(export_dir, manifest)
+    players = bodies.subjects
+    conflicts = bodies.conflicts
     guid_paths = defaultdict(set)
     for row in pq.read_table(export_dir / "net_guids.parquet",
                              columns=["net_guid", "path"]).to_pylist():
@@ -69,9 +69,7 @@ def build(export_dir: Path) -> dict:
                                      "conflicting_manifest_identity" if actor in conflicts
                                      else "unconfirmed_actor")
         record["target_subject"] = players.get(actor)
-        record["identity_provenance"] = (
-            "manifest.players.character_net_guid (SpawnedCharacter)"
-            if actor in players else None)
+        record["identity_provenance"] = bodies.provenance.get(actor)
         container = record["values"].get("EffectContainer")
         record["effect_container_path"] = paths.get(container)
         record["observation_index"] = len(records)
@@ -79,6 +77,8 @@ def build(export_dir: Path) -> dict:
         tally[record["kind"]] += 1
         if actor in players:
             tally["player_" + record["kind"]] += 1
+            if bodies.provenance[actor] != FINAL_PROVENANCE:
+                tally["player_body_via_non_final_spawned_character"] += 1
         else:
             tally["unconfirmed_target_observations"] += 1
 
@@ -123,6 +123,7 @@ def build(export_dir: Path) -> dict:
     finish()
     counters = ["blind_update", "continuous_start", "continuous_stop",
                 "player_blind_update", "player_continuous_start", "player_continuous_stop",
+                "player_body_via_non_final_spawned_character",
                 "unconfirmed_target_observations", "blind_parent_rows", "other_effect_rows",
                 "same_packet_parameter_restarts", "untyped_members"]
     return {
@@ -132,7 +133,8 @@ def build(export_dir: Path) -> dict:
         "records": records,
         "totals": {**{key: tally[key] for key in counters},
                    "conflicting_manifest_character_guids": len(conflicts),
-                   "conflicting_effect_paths": sum(len(v) > 1 for v in guid_paths.values())},
+                   "conflicting_effect_paths": sum(len(v) > 1 for v in guid_paths.values()),
+                   "player_identity": bodies.counts},
     }
 
 

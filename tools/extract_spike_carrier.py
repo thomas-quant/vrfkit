@@ -8,6 +8,13 @@ dropped projectile, ground pickup, next player, and so on. This script pairs
 consecutive `Owner` writes into intervals, resolves each owner NetGUID to a
 class, and joins players through to their manifest `subject`.
 
+A player is every pawn a `SpawnedCharacter` value names, not only the one the
+manifest keeps: a player who reconnects is given a new pawn, and the old one
+carried and planted spikes too (`player_identity.py`). Over the 1,018-export
+audit corpus (2026-09-28) the manifest-only join left 123 `Owner` writes in 32
+exports `unknown`, every one an earlier pawn of a manifest player; the
+`carrier_identity_provenance` column says which pawn a carrier was.
+
 This is a *derived* view over the raw export, not a new wire decode: every
 value comes out of `fields.parquet` / `actors.parquet` / `manifest.json`.
 vrfkit itself exports raw tables; analytical joins live here so the parser
@@ -33,8 +40,8 @@ physically holding it, which includes:
   Pawn_Aggrobot_SeekerNade_C   -- Gekko's Wingman, which really does carry and
                                   plant the spike
 
-Rather than allowlisting proxy classes, an owner that is not a manifest
-character is asked for its own `Instigator` -- Wingman's is the Gekko player --
+Rather than allowlisting proxy classes, an owner that is not a player's pawn
+is asked for its own `Instigator` -- Wingman's is the Gekko player --
 and that is reported as `carrier_pawn_guid` with `via_proxy_class` set.
 
 NetGUID note: `Owner` used to arrive untyped on this group, so an earlier
@@ -59,6 +66,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+if __package__:
+    from .player_identity import EARLIER_PROVENANCE, load_player_bodies
+else:
+    from player_identity import EARLIER_PROVENANCE, load_player_bodies
+
 BOMB_CLASS = "BombEquippable.BombEquippable_C"
 
 #: Holder kinds that mean somebody is actually carrying the spike.
@@ -79,8 +91,9 @@ def classify_owner(owner: int, owner_class: str | None,
                    pawn_subject: dict, instigator: dict):
     """Who, if anyone, is carrying the spike for this `Owner` value.
 
-    Returns `(kind, carrier_pawn_guid, via_proxy_class)`. A manifest character
-    is the carrier itself; a ground pickup or drop projectile means nobody has
+    Returns `(kind, carrier_pawn_guid, via_proxy_class)`. A player's pawn (a
+    key of `pawn_subject`, from `player_identity`) is the carrier itself; a
+    ground pickup or drop projectile means nobody has
     it; anything else is asked for its own `Instigator`, which walks a proxy
     such as Gekko's Wingman back to the player that spawned it. An owner that
     is none of those stays `unknown` rather than being guessed at.
@@ -181,8 +194,12 @@ def build(out_dir: Path):
             if ev == "close":
                 bomb_close.setdefault(g, t)
 
-    pawn_subject = {p["character_net_guid"]: p["subject"]
-                    for p in manifest.get("players", [])}
+    # Every SpawnedCharacter pawn, not only the manifest's last one. The old
+    # `{character_net_guid: subject}` also held a None key for a manifest
+    # player with no character (the 11-player exports carry one), so an owner
+    # with no Instigator -- `instigator.get()` is None -- tested as a proxy.
+    bodies = load_player_bodies(out_dir, manifest)
+    pawn_subject = bodies.subjects
 
     # Round boundaries from the replay's own roundStarted events. A
     # `roundStarted` row whose metadata does not parse as an integer has no
@@ -264,13 +281,16 @@ def build(out_dir: Path):
                 "holder_kind": kind,
                 "carrier_pawn_guid": carrier,
                 "carrier_subject": pawn_subject.get(carrier, "") or None,
+                # Which SpawnedCharacter value proved the carrier's pawn: the
+                # manifest's (the last) or an earlier one. None with no carrier.
+                "carrier_identity_provenance": bodies.provenance.get(carrier),
                 "via_proxy_class": proxy or None,
                 "in_hand": any(t <= h and (end is None or h <= end)
                                for h in held),
             })
 
     rows.sort(key=lambda r: (r["from_ms"], r["bomb_net_guid"]))
-    return rows, events, malformed_round_meta
+    return rows, events, malformed_round_meta, bodies.counts
 
 
 SCHEMA = pa.schema([
@@ -284,6 +304,7 @@ SCHEMA = pa.schema([
     pa.field("holder_kind", pa.string()),
     pa.field("carrier_pawn_guid", pa.int64()),
     pa.field("carrier_subject", pa.string()),
+    pa.field("carrier_identity_provenance", pa.string()),
     pa.field("via_proxy_class", pa.string()),
     pa.field("in_hand", pa.bool_()),
 ])
@@ -299,7 +320,7 @@ def main() -> int:
                     help="also print the timeline, carried intervals only")
     args = ap.parse_args()
 
-    rows, events, malformed_round_meta = build(args.export)
+    rows, events, malformed_round_meta, identity = build(args.export)
     cols = {name: [r[name] for r in rows] for name in SCHEMA.names}
     table = pa.Table.from_pydict(cols, schema=SCHEMA)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -311,6 +332,10 @@ def main() -> int:
         print(f"  {k:8s} {n}")
     print(f"  malformed roundStarted metadata: {malformed_round_meta} "
           f"(round_number is null for the interval(s) it touches)")
+    # Printed with its zero, like the line above.
+    earlier = sum(r["carrier_identity_provenance"] == EARLIER_PROVENANCE for r in rows)
+    print(f"  carried by an earlier SpawnedCharacter pawn: {earlier} interval(s); "
+          f"player identity: {json.dumps(identity, sort_keys=True)}")
 
     held = [r for r in rows if r["holder_kind"] in HELD_KINDS]
     print(f"  rounds {len({r['round_number'] for r in rows})}, "

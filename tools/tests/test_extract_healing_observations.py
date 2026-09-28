@@ -457,5 +457,34 @@ class Tests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), before)
 
 
+class EarlierPawnTests(unittest.TestCase):
+    """The recipient pawn 40 is the one a player had before reconnecting:
+    SpawnedCharacter goes 40 -> 0 -> 45 and the manifest keeps 45."""
+
+    make = Tests.make
+
+    def test_recipient_on_an_earlier_pawn_is_joined_to_its_player(self):
+        state = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
+        history = [
+            row("SpawnedCharacter", time_ms=t, packet_id=t, actor_net_guid=7,
+                object_net_guid=None, group_path=state, handle=0, value_i64=v)
+            for t, v in ((10, 40), (20, 0), (30, 45))
+        ]
+        td, p = self.make(history + fixture())
+        self.addCleanup(td.cleanup)
+        data = manifest()
+        data["players"] = [
+            {"actor_net_guid": 7, "subject": "recipient", "character_net_guid": 45},
+            {"actor_net_guid": 8, "subject": "source", "character_net_guid": 50},
+        ]
+        (p / "manifest.json").write_text(json.dumps(data))
+        d = tool.extract(p)
+        recipient = d["observations"][0]["recipient_corroboration"]
+        self.assertTrue(recipient["static_manifest_character"])
+        self.assertEqual(recipient["subject"], "recipient")
+        self.assertEqual(d["player_identity"]["non_final_spawned_character_pawns"], 1)
+        self.assertEqual(d["counts"]["amount_validated"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
