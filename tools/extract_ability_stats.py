@@ -87,11 +87,11 @@ _STAT_NAMES_1305 = {**_BASE_STAT_NAMES, 27: "TimeSprinting"}
 # 13.06, measured 2026-09-28 over all 38 13.06 exports of the 1,018-replay
 # audit (parser 259ed10, `export --checkpoints`): 14,814 pairs of 29 IDs, zero
 # missing partners, duplicate or null members, ID or reverse-name collisions,
-# every ID with exactly its 13.05 name. That agreement is the evidence: those
-# 38 exports validate against this entry by construction. 57, 62 and 65 were
-# not observed on 13.06 (rare on 13.05 too: 12, 15 and 7 of its 401 audit
-# exports) and stay unknown, failing as unknown_statistic_id ("not yet
-# measured on this build").
+# every ID with exactly its 13.05 name. That agreement is the evidence, not the
+# `known` status: this entry was built from those 38 exports, so they validate
+# against it by construction. 57, 62 and 65 were not observed on 13.06 (rare
+# on 13.05 too: 12, 15 and 7 of its 401 audit exports) and stay unknown,
+# failing as unknown_statistic_id ("not yet measured on this build").
 _UNOBSERVED_IN_1306 = frozenset({57, 62, 65})
 KNOWN_STAT_NAMES = {
     "13.01": dict(_BASE_STAT_NAMES),
