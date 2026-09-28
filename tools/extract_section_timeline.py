@@ -7,13 +7,11 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import aliases, atomic_write_text, sha256_file
+    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
     from . import extract_section_observations, section_timeline
 else:
-    from atomic_io import aliases, atomic_write_text, sha256_file
+    from atomic_io import aliases, atomic_write_text, sha256_file as sha
     import extract_section_observations, section_timeline
-
-sha = sha256_file
 
 def actor_rows(path):
     ordinal=0

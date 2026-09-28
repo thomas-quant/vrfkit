@@ -53,7 +53,7 @@ class DormantCloseTests(unittest.TestCase):
 
     def test_a_dormant_actor_does_not_end_its_effect_instance(self):
         """Dormancy is not destruction: the instance stays open-ended."""
-        rows = effects.build(_export(self.tmp, [(7, "open", 100), (7, "dormant", 500)]))
+        rows = effects.build_with_tally(_export(self.tmp, [(7, "open", 100), (7, "dormant", 500)]))[0]
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["close_ms"])
         self.assertIsNone(rows[0]["duration_ms"])
@@ -65,7 +65,7 @@ class DormantCloseTests(unittest.TestCase):
         self.assertEqual(effects.build_with_tally(out)[1]["went_dormant"], 1)
 
     def test_a_real_close_still_ends_the_instance(self):
-        rows = effects.build(_export(self.tmp, [(7, "open", 100), (7, "close", 500)]))
+        rows = effects.build_with_tally(_export(self.tmp, [(7, "open", 100), (7, "close", 500)]))[0]
         self.assertEqual((rows[0]["close_ms"], rows[0]["duration_ms"]), (500, 400))
         self.assertEqual(
             effects.build_with_tally(_export(self.tmp, [(7, "open", 100), (7, "close", 500)]))[1]
@@ -154,7 +154,7 @@ class ActorKindTests(unittest.TestCase):
     def test_every_row_carries_its_actor_kind(self):
         import tempfile
         with tempfile.TemporaryDirectory() as temp:
-            rows = effects.build(_export(Path(temp), [(7, "open", 100), (7, "close", 500)]))
+            rows = effects.build_with_tally(_export(Path(temp), [(7, "open", 100), (7, "close", 500)]))[0]
         self.assertEqual(rows[0]["actor_kind"], "game_object")
         self.assertIn("actor_kind", effects.SCHEMA.names)
 

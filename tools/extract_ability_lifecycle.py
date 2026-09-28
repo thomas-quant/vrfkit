@@ -73,7 +73,7 @@ def _reference(rows: list[dict], field: str) -> dict:
     evidence = [
         {"net_guid": int(row["value_i64"]), "time_ms": int(row["time_ms"]),
          "packet_id": int(row["packet_id"])}
-        for row in rows if (row.get("field_name") or "").casefold() == field.casefold()
+        for row in rows if row.get("field_name") == field
         and row.get("value_i64") is not None
     ]
     values = sorted({row["net_guid"] for row in evidence if row["net_guid"] != 0})

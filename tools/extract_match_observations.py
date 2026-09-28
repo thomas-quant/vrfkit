@@ -447,8 +447,7 @@ def build(export_dir: Path) -> dict:
         end_key = ((end, interval.get("to_packet_id")) if end is not None else None)
         reset_crossed = interval["end_boundary"] == "round_reset"
         evidence = []
-        if (weapon is not None and end_key is not None and not reset_crossed
-                and interval["end_boundary"] == "state_change"):
+        if weapon is not None and interval["end_boundary"] == "state_change":
             evidence = [change for change in positive_magazine_by_weapon[weapon]
                         if start_key < (change["time_ms"], change["packet_id"]) < end_key]
         interval["magazine_increase_count"] = len(evidence)
@@ -685,13 +684,12 @@ def build(export_dir: Path) -> dict:
             "purchased_item": ambiguous_purchase_packets,
         },
     }
-    observations["quality_gaps"] = [
-        "RoundInfos money is unavailable in this export" if not round_balances else None,
-        "Team loadout values are unavailable in this export" if not team_loadouts else None,
-        "No firing EffectID observations were present" if not shot_times else None,
-        "No authoritative spikeDefused events were present" if not defuse_events else None,
-    ]
-    observations["quality_gaps"] = [gap for gap in observations["quality_gaps"] if gap]
+    observations["quality_gaps"] = [gap for missing, gap in (
+        (not round_balances, "RoundInfos money is unavailable in this export"),
+        (not team_loadouts, "Team loadout values are unavailable in this export"),
+        (not shot_times, "No firing EffectID observations were present"),
+        (not defuse_events, "No authoritative spikeDefused events were present"),
+    ) if missing]
     return observations
 
 

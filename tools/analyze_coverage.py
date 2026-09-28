@@ -22,7 +22,6 @@ import json
 import re
 import sys
 from pathlib import Path
-from collections import Counter
 
 VRFKIT_ROOT = Path(__file__).parent.parent
 MANIFEST_PATH = VRFKIT_ROOT / "out" / "nested" / "manifest.json"
@@ -120,8 +119,8 @@ def main(argv: list[str]) -> int:
     else:
         csharp_paths = set()
         print(f"NOTE: C# descriptor dir not found ({csharp_dir}); "
-              f"pass --csharp-dir to classify extractor-missed groups. "
-              f"All uncovered groups will read as 'no descriptor'.",
+              "pass --csharp-dir to classify extractor-missed groups. "
+              "All uncovered groups will read as 'no descriptor'.",
               file=sys.stderr)
 
     print(f"Replay groups: {len(groups_in_replay)}")
@@ -133,10 +132,10 @@ def main(argv: list[str]) -> int:
     counts, uncovered_ext_miss, uncovered_no_desc = classify(
         groups_in_replay, overlay_groups, csharp_paths)
 
-    print(f"=== Replay group classification ===")
+    print("=== Replay group classification ===")
     print(f"  Covered by overlay:    {counts['covered']}")
     print(missed_report(counts["extractor_missed"], measured))
-    print(f"  No C# descriptor (raw-only):               "
+    print("  No C# descriptor (raw-only):               "
           f"{counts['no_descriptor']}"
           + ("" if measured else "  <- every uncovered group, unclassified"))
     print()
@@ -149,23 +148,23 @@ def main(argv: list[str]) -> int:
     ext_miss_fields = sum(fc for _, fc in uncovered_ext_miss)
     no_desc_fields = sum(fc for _, fc in uncovered_no_desc)
 
-    print(f"=== Field-level breakdown ===")
+    print("=== Field-level breakdown ===")
     print(f"  Total declared fields in replay: {total_fields_in_replay}")
     print(f"  In overlay-covered groups:       {covered_fields}")
-    print(f"  In extractor-missed groups:      "
+    print("  In extractor-missed groups:      "
           + (str(ext_miss_fields) if measured else "NOT MEASURED"))
     print(f"  In no-descriptor groups:         {no_desc_fields}")
     print()
 
     if uncovered_ext_miss:
-        print(f"=== Extractor-missed groups (C# descriptor exists, overlay missing) ===")
+        print("=== Extractor-missed groups (C# descriptor exists, overlay missing) ===")
         uncovered_ext_miss.sort(key=lambda x: -x[1])
         for path, fc in uncovered_ext_miss[:20]:
             print(f"  {fc:>4} fields  {path}")
         print()
 
     if uncovered_no_desc:
-        print(f"=== Top no-descriptor groups (by field count) ===")
+        print("=== Top no-descriptor groups (by field count) ===")
         uncovered_no_desc.sort(key=lambda x: -x[1])
         for path, fc in uncovered_no_desc[:20]:
             print(f"  {fc:>4} fields  {path}")

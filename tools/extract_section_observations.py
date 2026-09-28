@@ -15,10 +15,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import aliases, atomic_write_text, sha256_file
+    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
     from .extract_kill_observations import InputError, exact_ref, parse_array
 else:
-    from atomic_io import aliases, atomic_write_text, sha256_file
+    from atomic_io import aliases, atomic_write_text, sha256_file as sha
     from extract_kill_observations import InputError, exact_ref, parse_array
 
 SCHEMA_VERSION = 1
@@ -50,9 +50,6 @@ HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py")
 
 class IntegrityError(InputError):
     pass
-
-
-sha = sha256_file
 
 
 def raw(r, ordinal, population):

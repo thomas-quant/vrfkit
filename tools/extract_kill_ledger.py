@@ -19,11 +19,11 @@ import pyarrow.parquet as pq
 
 if __package__:
     from . import extract_kill_observations as observation_extractor
-    from .atomic_io import atomic_write_text, sha256_file
+    from .atomic_io import atomic_write_text, sha256_file as file_sha
     from .extract_kill_observations import InputError, exact_ref
 else:
     import extract_kill_observations as observation_extractor
-    from atomic_io import atomic_write_text, sha256_file
+    from atomic_io import atomic_write_text, sha256_file as file_sha
     from extract_kill_observations import InputError, exact_ref
 
 MAX_REPLICATION_LAG_MS = 50
@@ -191,14 +191,19 @@ def resolve_round(rounds, timestamp):
             'round_event_row_ordinal':row['event_row_ordinal']}
 
 
+def joinable(death):
+    """A validated death payload whose killer, victim and round all resolved."""
+    return (death['payload_issue'] is None
+            and death['killer_identity']['status'] == death['victim_identity']['status'] == 'resolved'
+            and death['round_identity']['status'] == 'resolved')
+
+
 def match_deaths(deaths, complete_main):
     """Require exactly one candidate on each side, without consuming greedily."""
     by_pair = defaultdict(list)
     for index, death in enumerate(deaths):
-        killer, victim = death['killer_identity'], death['victim_identity']
-        if (death['payload_issue'] is None and killer['status'] == victim['status'] == 'resolved'
-            and death['round_identity']['status'] == 'resolved'):
-            by_pair[(killer['player_state_ref'], victim['player_state_ref'],
+        if joinable(death):
+            by_pair[(death['killer_identity']['player_state_ref'], death['victim_identity']['player_state_ref'],
                      death['round_identity']['round_number'])].append(index)
     candidates, reverse = [], defaultdict(list)
     for index, observation in enumerate(complete_main):
@@ -212,8 +217,6 @@ def match_deaths(deaths, complete_main):
     return [(index, options[0]) for index, options in enumerate(candidates)
             if len(options) == 1 and len(reverse[options[0]]) == 1], candidates, dict(reverse)
 
-
-file_sha = sha256_file
 
 def player_state_rows(path):
     """Preserve physical field ordinals while selecting top-level properties."""
@@ -330,9 +333,7 @@ def extract(export, observations_path=None):
              'event_killer_player_state_ref':death['killer_identity']['player_state_ref'],
              'replication_lag_ms':observation['time_ms']-death['time1']}
             for death in deaths
-            if death['payload_issue'] is None
-            and death['killer_identity']['status'] == death['victim_identity']['status'] == 'resolved'
-            and death['round_identity']['status'] == 'resolved'
+            if joinable(death)
             and death['round_identity']['round_number'] == observation['members']['round_number']
             and death['victim_identity']['player_state_ref'] == observation['members']['victim_ref']
             and death['killer_identity']['player_state_ref'] != observation['actor_net_guid']

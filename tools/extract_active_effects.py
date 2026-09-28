@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
+from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
@@ -164,11 +164,6 @@ def is_effect_class(class_path: str) -> bool:
     return True
 
 
-def build(out_dir: Path) -> list[dict]:
-    """The effect instances alone. See [`build_with_tally`] for what was lost."""
-    return build_with_tally(out_dir)[0]
-
-
 def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
     actors_path = out_dir / "actors.parquet"
     if not actors_path.exists():
@@ -251,7 +246,7 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
         if pending is not None:
             rows.append(_row(g, pending, None))
 
-    rows.sort(key=lambda r: (r["open_ms"] if r["open_ms"] is not None else -1, r["actor_net_guid"]))
+    rows.sort(key=lambda r: (r["open_ms"], r["actor_net_guid"]))
     return rows, tally
 
 
@@ -301,7 +296,6 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, args.out, compression="zstd")
 
-    from collections import Counter
     by_type = Counter(r["effect_type"] for r in rows)
     by_kind = Counter(r["actor_kind"] for r in rows)
     print(f"wrote {args.out} ({len(rows)} effect instances)")

@@ -3310,7 +3310,7 @@ def _print_summary(output_dir: Path, result: dict) -> None:
         print(f"\nConversion complete: {output_dir}")
     print(f"  events.ndjson:   {result['events_written']:,} lines")
     print(f"  movement.ndjson: {result['movement_written']:,} lines")
-    print(f"  manifest.json:   written")
+    print("  manifest.json:   written")
     for line in tally.lines():
         print(line)
 

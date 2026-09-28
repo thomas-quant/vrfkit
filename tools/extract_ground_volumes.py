@@ -568,7 +568,6 @@ def window_record(row: dict, ordinal: int, population: str, build: str, schema: 
     except WireError as error:
         record["status"] = str(error)
         record["entries"] = None
-        items, counts = [], Counter()
     return record, items, counts
 
 
