@@ -1057,11 +1057,15 @@ original additions, checked in the 714-replay corpus. Run on a sample, the
 for that reason alone. `tools/fixtures/type_evidence_scoped.json` holds checksum-scoped
 specifications for the scoped types added on 2026-09-28, in their exported
 spelling (`_ClassNetCache` group and function-qualified name for RPC
-parameters), and the Blueprint properties typed by exact identity from the
-same date on (the Sova bolts' `TrailPosition`, the possession flags, Killjoy's
-`DeployedActor`, `CurrentCharge` and the round-loss-streak and match-timer
-fields of the Bomb and Swiftplay game states). Every identity in it must be
-observed, so run it on a set of exports that contains each one. A specimen must not be promoted to gameplay semantics
+parameters), and the 99 Blueprint properties typed by exact identity from the
+same date on -- the Sova bolts' `TrailPosition`, the possession flags, Killjoy's
+`DeployedActor`, `CurrentCharge`, the round-loss-streak and match-timer fields
+of the Bomb and Swiftplay game states, the ceremonies, the kill-effect classes,
+the ability items, map interactables and finisher objects, and six pre-13.01
+paths -- 112 specifications in all. Every identity in it must be observed, so
+run it on a set of exports that contains each one (nine replays cover all 112
+on the 1,018-replay corpus: 69,796 rows, 0 failures, 0 mismatches on
+2026-09-28). A specimen must not be promoted to gameplay semantics
 just because this primitive check passes.
 
 `validate_ability_array_evidence.py <export-directory> [...] --compare-typed
