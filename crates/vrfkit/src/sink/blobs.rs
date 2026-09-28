@@ -307,10 +307,12 @@ fn blind_member_width_valid(handle: u32, width: u32) -> bool {
 }
 
 /// The array bits minus the one extra zero IntPacked an empty ActiveBlinds delta
-/// may carry after its index terminator (57 windows in 13.01/13.02/13.04/13.05);
-/// the parent keeps its original bits, and each spared byte is counted
-/// (`ExportStats::active_blinds_empty_trailers`). Populated arrays, nonzero
-/// tails and other trailers keep the exact-window checks.
+/// may carry after its index terminator: 57 windows in 13.01/13.02/13.04/13.05
+/// among the 986 replays of the 2026-09-25 audit that prompted it, and 60 in 41
+/// of the 1,018 corpus replays on 2026-09-29, 3 of them in 13.06, all in the
+/// main pass. The parent keeps its original bits, and each spared byte is
+/// counted (`ExportStats::active_blinds_empty_trailers`). Populated arrays,
+/// nonzero tails and other trailers keep the exact-window checks.
 fn active_blind_array_bits(raw: &[u8], bit_count: u32) -> u32 {
     let without_empty_trailer = (|| {
         let mut reader = BitReader::with_bit_len(raw, u64::from(bit_count)).ok()?;
