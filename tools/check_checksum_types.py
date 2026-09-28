@@ -1053,12 +1053,13 @@ class Agreements(NamedTuple):
 
 
 SEED_SOURCES = ("top level", "parent chain", "sibling seed")
+DISAGREE = "DISAGREE: a sibling seed other than the chain's"
 CHAIN_CROSS_CHECK = (
     "re-derived",
     "not re-derived: fewer than two hashable members",
     "not re-derived: fewer than two members agree",
     "not re-derived: agreement refused as ambiguous",
-    "DISAGREE: a sibling seed other than the chain's",  # == DISAGREE
+    DISAGREE,
 )
 
 
@@ -1382,6 +1383,12 @@ class ExpectedOutcome:
     def count(self, state: str) -> int:
         return sum(1 for r in self.results if r.state == state)
 
+    @classmethod
+    def unlisted(cls, report, table_bad) -> "ExpectedOutcome":
+        """No list applied: every mismatch is unexpected."""
+        return cls(unexpected_rows=list(report.mismatches),
+                   unexpected_carriers=list(table_bad))
+
 
 def row_shape(row) -> tuple:
     """A mismatch row's shape, in `ExpectedItem.shape` order."""
@@ -1446,8 +1453,7 @@ def print_report(report: Report, table_counts, table_bad, checker: Checker, decl
     """Every counter, zeros included. Without an `outcome` (no list applied)
     every mismatch is unexpected."""
     if outcome is None:
-        outcome = ExpectedOutcome(unexpected_rows=list(report.mismatches),
-                                  unexpected_carriers=list(table_bad))
+        outcome = ExpectedOutcome.unlisted(report, table_bad)
     p = print
     p(f"inputs: {declared_counts['exports']} export(s), {declared_counts['main declarations']} main "
       f"declarations, {declared_counts['checkpoint declarations']} checkpoint declarations "
@@ -1555,17 +1561,13 @@ def _carrier_line(carrier) -> str:
             f"{spelling} under {seed}")
 
 
-DISAGREE = "DISAGREE: a sibling seed other than the chain's"
-
-
 def exit_status(report: Report, table_bad, outcome=None,
                 expected_name=EXPECTED_JSON.name) -> tuple[int, str]:
     """`(exit code, closing line)`: 1 for nothing checked, a tier
     disagreement, a mismatch no item lists or a STALE item, else 0.
     Without an `outcome` (no list applied) every mismatch is unexpected."""
     if outcome is None:
-        outcome = ExpectedOutcome(unexpected_rows=list(report.mismatches),
-                                  unexpected_carriers=list(table_bad))
+        outcome = ExpectedOutcome.unlisted(report, table_bad)
     if report.identities == 0:
         return 1, ("\nFAILED: nothing checked -- no declared identity is typed by vrfkit, so "
                    "this input is empty or not an export")
