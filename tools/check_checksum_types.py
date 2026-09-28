@@ -637,14 +637,12 @@ def load_declarations(dirs) -> tuple[dict, collections.Counter]:
         ident.exports += 1
 
     for d in dirs:
-        manifest = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
-        build = str(manifest.get("replay_build") or "?").removeprefix("++Ares-Core+release-")
+        build, main_declared = manifest_declarations(d / "manifest.json")
         seen: set = set()
         counts["exports"] += 1
-        for group in manifest.get("net_field_export_groups") or []:
-            for f in group.get("fields") or []:
-                counts["main declarations"] += 1
-                add(build, group["path"], f["name"], f["handle"], f["compatible_checksum"], seen)
+        counts["main declarations"] += len(main_declared)
+        for group, name, handle, checksum in main_declared:
+            add(build, group, name, handle, checksum, seen)
         groups_pq, fields_pq = d / "checkpoint_export_groups.parquet", d / "checkpoint_export_fields.parquet"
         if groups_pq.is_file() and fields_pq.is_file():
             counts["exports with checkpoint declarations"] += 1
@@ -656,6 +654,37 @@ def load_declarations(dirs) -> tuple[dict, collections.Counter]:
     return ids, counts
 
 
+def _require_identities(source, identities) -> None:
+    """Refuse any `(group, name, handle, checksum)` not typed as the export
+    writes it (two strings, two u32): a null name used to escape as a
+    traceback, and a checksum written as text to read as untestable, exit 0."""
+    for identity in identities:
+        group, name, handle, checksum = identity
+        if not (isinstance(group, str) and isinstance(name, str)
+                and all(type(v) is int and 0 <= v < 1 << 32 for v in (handle, checksum))):
+            raise TableError(f"{source}: declaration {identity!r} is not (path, name, u32 "
+                             f"handle, u32 checksum)")
+
+
+def manifest_declarations(path: Path) -> tuple[str, list]:
+    """`(build, [(group, name, handle, checksum), ...])` from one manifest.json.
+
+    A manifest that is not the shape manifest.rs writes raises TableError, so
+    it exits 2 like any input that cannot be read, not with a traceback and the
+    exit code of a mismatch.
+    """
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        build = str(manifest.get("replay_build") or "?").removeprefix("++Ares-Core+release-")
+        declared = [(group["path"], f["name"], f["handle"], f["compatible_checksum"])
+                    for group in manifest.get("net_field_export_groups") or []
+                    for f in group.get("fields") or []]
+    except (OSError, ValueError, AttributeError, KeyError, TypeError) as exc:
+        raise TableError(f"{path}: {type(exc).__name__}: {exc}") from exc
+    _require_identities(path, declared)
+    return build, declared
+
+
 def checkpoint_declarations(groups_pq: Path, fields_pq: Path):
     """`(declarations, declarations without a group, unique identities)`.
 
@@ -663,14 +692,20 @@ def checkpoint_declarations(groups_pq: Path, fields_pq: Path):
     corpus for 12,937 distinct identities -- so the join and the de-duplication
     run in Arrow rather than row by row in Python.
     """
+    import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    groups = pq.read_table(groups_pq, columns=["checkpoint_index", "ordinal", "group_path"])
-    groups = groups.rename_columns(["checkpoint_index", "group_ordinal", "group_path"])
-    fields = pq.read_table(fields_pq, columns=["checkpoint_index", "group_ordinal", "handle",
-                                               "compatible_checksum", "rendered_name"])
-    joined = fields.join(groups, keys=["checkpoint_index", "group_ordinal"], join_type="left outer")
+    try:
+        groups = pq.read_table(groups_pq, columns=["checkpoint_index", "ordinal", "group_path"])
+        groups = groups.rename_columns(["checkpoint_index", "group_ordinal", "group_path"])
+        fields = pq.read_table(fields_pq, columns=["checkpoint_index", "group_ordinal", "handle",
+                                                   "compatible_checksum", "rendered_name"])
+        joined = fields.join(groups, keys=["checkpoint_index", "group_ordinal"],
+                             join_type="left outer")
+    except (pa.ArrowException, OSError) as exc:
+        raise TableError(f"{groups_pq.parent}: checkpoint declarations cannot be read: "
+                         f"{exc}") from exc
     if joined.num_rows != fields.num_rows:
         # Two groups under one (checkpoint, ordinal): which one a field
         # belongs to is ambiguous, and guessing would type it against either.
@@ -679,7 +714,9 @@ def checkpoint_declarations(groups_pq: Path, fields_pq: Path):
     keys = ["group_path", "rendered_name", "handle", "compatible_checksum"]
     unique = joined.filter(pc.is_valid(joined["group_path"])).group_by(keys).aggregate([])
     cols = [unique.column(k).to_pylist() for k in keys]
-    return fields.num_rows, orphans, list(zip(*cols))
+    identities = list(zip(*cols))
+    _require_identities(fields_pq, identities)
+    return fields.num_rows, orphans, identities
 
 
 def class_candidates(groups) -> list[str]:

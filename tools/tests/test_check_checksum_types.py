@@ -691,6 +691,46 @@ class MainTests(unittest.TestCase):
         self.assertEqual(run_main("--export", str(empty))[0], 2)
         self.assertEqual(run_main()[0], 2)
 
+    def assert_unreadable(self, d: Path):
+        """Exit 2 with a FAILED line: the code the docstring gives an input
+        that cannot be read, never a traceback with a mismatch's 1."""
+        try:
+            code, out, err = run_main("--export", str(d))
+        except Exception as exc:  # noqa: BLE001 -- escaping is the failure
+            self.fail(f"escaped as a traceback: {exc!r}")
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("FAILED:", err)
+
+    def test_a_malformed_manifest_exits_2(self):
+        good = {"handle": 30, "name": "CorrectionIndex", "compatible_checksum": CORRECTION_INDEX}
+
+        def manifest(*fields):
+            return json.dumps({"replay_build": "++Ares-Core+release-13.06",
+                               "net_field_export_groups": [
+                                   {"path": INVENTORY, "fields": list(fields)}]})
+
+        cases = {
+            "not json": "{not json",
+            "not an object": "[1, 2]",
+            "a field without a handle": manifest({k: v for k, v in good.items() if k != "handle"}),
+            "a field that is not an object": manifest("CorrectionIndex"),
+            "a null name": manifest(dict(good, name=None)),
+            "a checksum as text": manifest(dict(good, compatible_checksum=str(CORRECTION_INDEX))),
+            "a handle past u32": manifest(dict(good, handle=1 << 32)),
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                d = self.root / label.replace(" ", "_")
+                d.mkdir()
+                (d / "manifest.json").write_text(text, encoding="utf-8")
+                self.assert_unreadable(d)
+
+    def test_an_unreadable_checkpoint_table_exits_2(self):
+        d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
+        (d / "checkpoint_export_groups.parquet").write_bytes(b"not a parquet file")
+        (d / "checkpoint_export_fields.parquet").write_bytes(b"not a parquet file")
+        self.assert_unreadable(d)
+
     def test_corpus_children_and_generated_siblings(self):
         write_export(self.root, "a", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
         write_export(self.root, ".a.vrfkit-staging-1-2", {INVENTORY: [(30, "CorrectionIndex", 5)]})
