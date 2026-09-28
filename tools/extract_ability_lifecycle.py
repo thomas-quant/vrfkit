@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Derive evidence-first ability actor ownership and lifecycle candidates.
 
-This view makes no cast-count claim.  A candidate is admitted only when its
-class lives below ``/Game/Characters/<name>/`` and has an explicit ability path
-segment. Owner and Instigator are reported as replicated references; a player
-identity is linked only when an unambiguous reference equals a pawn a
-``SpawnedCharacter`` value proves: the manifest ``character_net_guid``, or an
-earlier value the manifest dropped when the player reconnected (see
-``player_identity.py``). This is not proof that the player cast an ability.
+No cast-count claim. A candidate is admitted only when its class lives below
+``/Game/Characters/<name>/`` with an explicit ability path segment. Owner and
+Instigator are reported as replicated references, linked to a player only
+when an unambiguous one equals a ``SpawnedCharacter`` pawn
+(``player_identity.py``), which is still not proof of a cast.
 """
 
 from __future__ import annotations
@@ -258,8 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     print("wrote {} ({} candidate(s), {} linked, {} unresolved, {} closed, {} right-censored)".format(
         args.out, totals["candidate_instances"], totals["linked_player_reference"],
         totals["unresolved_player_reference"], totals["closed"], totals["right_censored"]))
-    # Printed with its zero: a pawn the manifest dropped on a reconnect links
-    # only through the SpawnedCharacter history, and 0 must read as "none".
+    # Printed with its zero, so 0 reads as "none".
     print("  linked via an earlier SpawnedCharacter pawn: {}; player identity: {}".format(
         totals["linked_via_non_final_spawned_character"],
         json.dumps(totals["player_identity"], sort_keys=True)))

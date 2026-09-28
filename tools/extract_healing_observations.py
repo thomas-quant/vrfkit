@@ -162,9 +162,7 @@ def ref_value(r, typed):
         raise InputError("invalid reference window")
     v = exact_ref(r["raw_bits"], r["bit_count"])
     if typed:
-        # Absent is reported apart from wrong: an export from a parser that
-        # predates this reference's typing is stale input, not corruption.
-        # Neither can pass -- there would be no typed value to check.
+        # Absent (a stale export, not corruption) fails apart from wrong.
         if r["value_i64"] is None:
             raise IntegrityError("untyped reference; re-export with a parser that types it")
         if type(r["value_i64"]) is not int or r["value_i64"] != v:
@@ -276,9 +274,8 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
         by[r["field_name"]].append((ordinal, r))
     duplicates = {n: [x[0] for x in q] for n, q in by.items() if len(q) > 1}
     # All three direct references are typed ObjectNetGuid by exact scoped
-    # entries (tools/fixtures/scoped_type_evidence.json), so each must carry a
-    # value equal to its raw window. Reading one as untyped would turn every
-    # typed row into an "invalid" edge while the run still exits 0.
+    # entries (tools/fixtures/scoped_type_evidence.json), each equal to its raw
+    # window; read as untyped, every edge would be "invalid" behind exit 0.
     top = {
         n: edge(n, by, typed=True)
         for n in (
@@ -530,8 +527,6 @@ def extract(export):
     source_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     declared = declarations(manifest)
-    # Every pawn a SpawnedCharacter value names, not only the manifest's last
-    # one: a reconnected player's earlier pawn is still that player's body.
     bodies = load_player_bodies(export, manifest)
     players = bodies.subjects
     paths = {
@@ -614,9 +609,8 @@ def extract(export):
         for x in observations
         if x["amount"]["status"] == "validated" and not x["ambiguity_reasons"]
     ]
-    # Every edge status, zeros included: an "invalid" edge leaves the amount
-    # validated and adds no ambiguity reason, so without this tally it would
-    # reach no summary at all.
+    # Zeros included: an "invalid" edge leaves the amount validated, so only
+    # this tally brings it to the summary.
     edge_status = {
         k: dict.fromkeys(EDGE_STATUSES, 0)
         for k in ("causer", "event_instigator", "event_instigator_pawn")
