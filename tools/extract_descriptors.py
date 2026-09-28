@@ -1,49 +1,22 @@
-"""Extract field type descriptors from the upstream C# source and emit a Rust
-overlay table mapping (group_path, field_name) -> FieldType.
+"""Emit the Rust overlay table (group_path, field_name) -> FieldType from the
+C# descriptors.
 
-Scans every .cs file under the Replay.Valorant directory tree for descriptor
-classes (subclasses of ExportGroupDescriptor) and extracts:
-  - The group path (from `override string Path =>`)
-  - Each field's export name and type (from AddProperty(...).Type() calls)
+Scans every .cs file under Replay.Valorant for ExportGroupDescriptor
+subclasses, class by class in multi-class files, and reads each one's Path and
+its AddProperty(...).Type() calls; fields propagate through inheritance (agent
+descriptors get GenericAgentDescriptor's). ClassNetCache descriptors emit Skip
+entries for their AddFunction names so coverage counts them, and the parameter
+descriptors defined beside them are read like any other. A custom decoder is
+Raw unless PAYLOAD_DECODER_TYPES names its wire type; .Ignore() is Skip. Each
+class's ExportGroupKind decides whether its properties can be wire names at
+all (EXPORT_GROUP_KIND_POLICY).
 
-For classes that inherit from a base with Configure() (like agent descriptors
-inheriting GenericAgentDescriptor), the parent's fields are propagated to each
-child path.
-
-Additionally handles:
-  - Multi-class files: each class's Configure() method is identified and its
-    fields are attributed to the correct class.
-  - ClassNetCache descriptors: AddFunction<TParams>/AddFunctionHandle<TParams>
-    calls emit Skip entries for the function names, ensuring coverage analysis
-    counts them as covered.
-  - Internal sealed class parameter descriptors defined alongside their parent
-    ClassNetCache descriptor.
-
-Each descriptor's `ExportGroupKind` decides whether its declared properties can
-be wire field names at all. A FastArray descriptor describes an array element
-struct, not a net field export group, so it contributes nothing; an AttributeSet
-replicates only the generic FGameplayAttributeData pair, so its per-attribute
-properties contribute nothing. Every other kind emits unchanged. See
-EXPORT_GROUP_KIND_POLICY -- an unclassified kind is a hard failure.
-
-Fields using custom IFieldDecoder implementations or RawPayload are classified
-as Raw. Fields using .Ignore() are classified as Skip. An AddProperty whose type
-method is none of the above is a HARD FAILURE, not a silent omission: it used to
-fall off the end of the ladder and contribute nothing, so one new method
-upstream would untype every field declaring it while the run still reported
-success. That includes a statement whose method `_extract_type_name` could not
-see -- a generic `.Enum<EFoo>()`, or none at all, `AddProperty(x => x.Foo);` --
-which still fell off after unknown named methods stopped doing so. The only
-exceptions are the declarations DECODERLESS_PROPERTIES names, each measured,
-and each printed in the run's summary.
-
-Two descriptor classes that share a Path and declare one field at two different
-types are a hard failure too. The dedup kept the first entry without comparing
-types, so which one shipped was decided by class sort order.
-
-Literal AddPropertyHandle declarations also emit a separate handle-to-name
-table. Runtime lookup remains name-first; the handle table is only a fallback
-for replays whose field name differs from the descriptor's label.
+Hard failures, never silent omissions: an AddProperty whose type method is
+unclassified or absent (except the DECODERLESS_PROPERTIES, which the summary
+lists), an unparseable Path, Kind or Categories override, and two classes
+typing one (path, field) differently. Literal AddPropertyHandle declarations
+also fill a handle -> name table, only a runtime fallback for replays whose
+field name differs from the descriptor's label; lookup stays name-first.
 
 Usage:
     python tools/extract_descriptors.py <replay_valorant_dir> <out.rs>
@@ -73,7 +46,6 @@ def normalize_csharp_identifier(identifier: str) -> str:
     return identifier[1:] if identifier.startswith("@") else identifier
 
 
-# Known primitive type method names -> Rust FieldType variant
 PRIMITIVE_TYPES = {
     "Int32": "FieldType::Int32",
     "UInt32": "FieldType::UInt32",
@@ -99,8 +71,8 @@ PRIMITIVE_TYPES = {
     "Ignore": "FieldType::Skip",
 }
 
-# Every explicit Path override must be parsed. Otherwise a new expression
-# shape would quietly remove an entire group from the generated table.
+# Every explicit Path override must parse, or a new expression shape would
+# quietly remove its whole group from the table.
 PATH_OVERRIDE_MARKER_RE = re.compile(r'\boverride\s+string\s+Path\b')
 PATH_EXPRESSION_RE = re.compile(
     r'override\s+string\s+Path\s*=>(?P<expression>[^;]+);', re.DOTALL
@@ -157,9 +129,9 @@ def resolve_path_expression(
             position += identifier.end()
         need_term = False
 
-# Find every public/internal descriptor class in a file. The optional ``@``
-# sits outside the name capture so all dictionaries use the semantic C# name.
-# Groups are named: a positional group(2) shifts when a group is added.
+# The optional ``@`` sits outside the name capture so every dictionary uses the
+# semantic C# name. Groups are named: a positional group(2) shifts when a group
+# is added.
 MULTI_CLASS_RE = re.compile(
     rf'(?:public|internal)\s+(?:sealed\s+)?(?:abstract\s+)?class\s+'
     rf'@?(?P<name>{CSHARP_IDENTIFIER})'
@@ -212,30 +184,21 @@ def base_class_key(bases: str) -> str:
     return class_key(bases)
 
 
-# What each ExportGroupKind means for THIS table, which answers exactly one
-# question: can this descriptor's property names ever be wire field names?
-#
-# `Kind` is pure metadata inside the C#. `DescriptorCatalogIndex` and
-# `ExportBindingRegistry` expose it, and the only readers are the JSON writers
-# and the export statistics -- no decode path branches on it. That is what
-# makes it trustworthy here: it is the author's declaration of what the
-# descriptor describes, and it cannot have been bent to make decoding work.
-#
-#   "emit"          the group's net field export names these properties.
-#   "drop"          the descriptor is not a net field export group at all, so
-#                   none of its properties can ever be an overlay key.
-#   "attribute_set" only the generic pair below is replicated; the
-#                   per-attribute properties are C# labels, not wire names.
-#
-# Unknown MUST stay "emit". It is not a fallback for "we did not look" -- it is
-# the C# default from the protected parameterless constructor, and four live
-# descriptors with paths never override Kind at all (CoveAbilityDescriptor,
-# DarkCoverAbilityDescriptor, ProjectileSmokeScreenDescriptor,
-# SmokeScreenManagerDescriptor), plus BaseReplayPlayerState which declares it
-# explicitly. Their fields decode today; dropping them loses real values.
-#
-# A Kind that is not a key here is a hard failure, not a default. A new C# enum
-# member has to be classified by someone, not silently swept into "emit".
+# Whether each ExportGroupKind's property names can be wire field names.
+# `Kind` is metadata in the C#: only the JSON writers and export statistics read
+# it (via DescriptorCatalogIndex and ExportBindingRegistry), no decode path
+# branches on it, so it is the author's declaration of what the descriptor
+# describes and cannot have been bent to make decoding work.
+#   "emit"          the group's net field exports are these properties.
+#   "drop"          not a net field export group (FastArray: an array element
+#                   struct), so no property can be an overlay key.
+#   "attribute_set" only the generic pair below replicates; per-attribute
+#                   properties are C# labels, not wire names.
+# Unknown MUST emit: it is the C# default from the protected parameterless
+# constructor, CoveAbility, DarkCoverAbility, ProjectileSmokeScreen and
+# SmokeScreenManager descriptors never override it, and BaseReplayPlayerState
+# declares it; their fields decode. An unlisted Kind is a hard failure, so a
+# new C# enum member is classified by someone, not swept into "emit".
 EXPORT_GROUP_KIND_POLICY = {
     "Unknown": "emit",
     "Actor": "emit",
@@ -246,21 +209,17 @@ EXPORT_GROUP_KIND_POLICY = {
     "ClassNetCache": "emit",
 }
 
-# The two members of UE's FGameplayAttributeData.
-#
-# An AttributeSet group replicates one attribute subobject per attribute, and
-# every one of them carries this same generic pair. The C# descriptor also
-# declares a property per attribute (Health, MaxHealth, Shield, ...) so a caller
-# can name what it read; those names are never on the wire.
-#
-# Measured across the 11 cross-validated replays: /Script/ShooterGame.
-# AresAttributeSet presents BaseValue (133,284 rows) and CurrentValue (132,808
-# rows), all decoded, and no other field name -- 0 rows for any of the six.
+# The two members of UE's FGameplayAttributeData, which every attribute
+# subobject of an AttributeSet group carries. The C# descriptor also names each
+# attribute (Health, MaxHealth, Shield, ...); those names never reach the wire.
+# Across the 11 cross-validated replays /Script/ShooterGame.AresAttributeSet
+# presents BaseValue (133,284 rows) and CurrentValue (132,808), all decoded,
+# and no other field name -- 0 rows for any of the six.
 ATTRIBUTE_SET_WIRE_PROPERTIES = ("BaseValue", "CurrentValue")
 
-# Default when no class in the inheritance chain overrides Kind. The C# base
-# `ExportGroupDescriptor`'s protected parameterless constructor leaves `_kind`
-# at `default(ExportGroupKind)`, and Unknown is ordinal 0.
+# Kind when no class in the chain overrides it: ExportGroupDescriptor's
+# protected parameterless constructor leaves `_kind` at
+# `default(ExportGroupKind)`, and Unknown is ordinal 0.
 DEFAULT_EXPORT_GROUP_KIND = "Unknown"
 
 EXPORT_CATEGORY_NAMES = {
@@ -303,10 +262,9 @@ EXPORT_GROUP_KIND_TYPE = (
     r'(?:global\s*::\s*)?'
     r'(?:[A-Za-z_]\w*\s*\.\s*)*ExportGroupKind'
 )
-# Detect the override first and parse it second, the same way Categories does.
-# A `Kind` override written in a shape this file cannot read must fail loudly:
-# silently reading it as absent would resolve the class to Unknown, and Unknown
-# emits everything -- so the failure would look exactly like success.
+# Detect the override, then parse it, as for Categories: an unreadable `Kind`
+# override read as absent would resolve to Unknown, which emits everything --
+# a failure that looks exactly like success.
 KIND_OVERRIDE_MARKER_RE = re.compile(
     rf'\boverride\s+(?P<return_type>{CATEGORY_RETURN_TYPE})\s+@?Kind\b'
 )
@@ -315,39 +273,30 @@ KIND_OVERRIDE_RE = re.compile(
     rf'{EXPORT_GROUP_KIND_TYPE}\s*\.\s*(?P<kind>\w+)\s*;'
 )
 
-# Sentinel `rejected` label for an AddProperty whose type method IS classified
-# but whose export name could not be extracted (e.g. a named constant instead
-# of a string literal or lambda leaf). Distinct from a real type-method name so
-# the failure report below does not read as "add this method to PRIMITIVE_TYPES".
+# `rejected` label for an AddProperty whose type method IS classified but whose
+# export name is not extractable (e.g. a named constant, not a string literal or
+# lambda leaf), so the report does not read as "add this to PRIMITIVE_TYPES".
 _UNNAMED_FIELD = "<unresolvable field name>"
 
-# Sentinel `rejected` label for an AddProperty that reaches the end of the type
-# ladder with no type method `_extract_type_name` can name: a bare
-# `AddProperty(x => x.Foo);`, or a call shape that regex does not match. Only a
-# NAMED unknown method used to be recorded, so these left without a word.
+# `rejected` label for an AddProperty with no type method `_extract_type_name`
+# can name: a bare `AddProperty(x => x.Foo);` or a call shape it cannot match.
 _NO_TYPE_METHOD = "<no type method>"
 
-# The only AddProperty declarations allowed to have no type method, keyed
-# (descriptor class, C# property). Any other one is a hard failure, and so is a
-# listed property its class now declares WITH a type -- then the reason below
-# no longer describes the source.
-#
-# They contribute no entry, which is what they did before this list existed.
-# Upstream binds each property and gives it no decoder: the builder's Decoder
-# stays null, ReplayExportBinder.ResolveFieldDecoder returns null, and
-# FieldPayloadParser skips the payload bits (upstream's parser, read at the
-# vendored commit 8824794). There is no declared type to import. A Skip or Raw
-# entry would not be neutral either: any table hit in the group returns before
-# the scoped-type, engine-reference and checksum fallbacks in overlay.rs, so it
-# would stop them typing that name.
-#
+# The only AddProperty declarations allowed no type method, keyed (descriptor
+# class, C# property); any other is a hard failure, and so is a listed property
+# its class now declares WITH a type. They contribute no entry. Upstream binds
+# each with no decoder: the builder's Decoder stays null,
+# ReplayExportBinder.ResolveFieldDecoder returns null and FieldPayloadParser
+# skips the bits (upstream's parser at the vendored commit 8824794), so there
+# is no type to import -- and a Skip or Raw entry would pre-empt the scoped,
+# engine-reference and checksum fallbacks in overlay.rs for that name.
 # Measured 2026-09-28 by logging every statement the splitter produced over
 # third_party/vrp and re-running each through the ladder: 464 distinct
-# statements, 461 yield a field, these 3 yielded nothing and were not rejected,
-# and nothing else took that path. Upstream 2d2e05e, b51d674, 2b66c65, 2103d92
-# and 8b7afcb declare the same three this way and no other. None of the three
-# names reached the wire in the 1,018-replay corpus exported by 259ed10: 0 rows
-# in fields.parquet and checkpoint_fields.parquet under its exact group path.
+# statements, 461 yield a field, these 3 yield nothing and are not rejected,
+# and nothing else takes that path. Upstream 2d2e05e, b51d674, 2b66c65, 2103d92
+# and 8b7afcb declare the same three this way and no other, and none reached
+# the wire in the 1,018-replay corpus exported by 259ed10 (0 rows in
+# fields.parquet and checkpoint_fields.parquet under its exact group path).
 DECODERLESS_PROPERTIES = frozenset({
     # /Script/ShooterGame.AresAbilitySystemComponent, Kind Component. The wire
     # names there are OwnerActor, AvatarActor, SpawnedAttributes and
@@ -360,57 +309,43 @@ DECODERLESS_PROPERTIES = frozenset({
     ("RemoteCharacterUpdateDescriptor", "ComponentDataStream"),
 })
 
-# SerializedInt(maxValue: N) or SerializedInt(N)
 SERIALIZED_INT_RE = re.compile(
     r'\.SerializedInt\(\s*(?:maxValue:\s*)?(\d+)\s*\)'
 )
 
-# ByteArray(maxBytes) or ByteArray(N)
 BYTE_ARRAY_RE = re.compile(
     r'\.ByteArray\(\s*(?:maxBytes:\s*)?(\d+)\s*\)'
 )
 
-# ReplicatedMovement with rotation quantization
 REP_MOVEMENT_RE = re.compile(
     r'\.ReplicatedMovement\(\s*ERotatorQuantization\.(?P<quant>\w+)\s*\)'
 )
 
-# Simple .ReplicatedMovement() (defaults to ShortComponents)
 REP_MOVEMENT_DEFAULT_RE = re.compile(
     r'\.ReplicatedMovement\(\s*\)'
 )
 REP_MOVEMENT_PROPERTY_RE = re.compile(
     rf'\.ReplicatedMovement\(\s*(?P<property>{CSHARP_IDENTIFIER_TOKEN})\s*\)'
 )
-#: The location quantization every `RepMovement` entry is emitted with.
-#:
-#: The descriptors declare only the rotator width. The level the location was
-#: rounded to is a per-class choice (Unreal's `LocationQuantizationLevel`) that
-#: the wire does not carry, and the C# reader decodes every class at two
-#: decimals (its `ReplicatedMovementDecoder` reads `VectorNetQuantize100`).
-#: The wire contradicts that on 25 of the 26 classes the table declares:
-#: joined to the actor's spawn position in actors.parquet, their packed
-#: integer IS the world coordinate (median |packed| / |spawn| 1.000 on every
-#: class and every build that carries it; 1,018 replays over 21 builds,
-#: measured 2026-09-28). So the default is whole units -- also the engine's
-#: own `FRepMovement` default -- and `apply_type_corrections.py` pins the one
-#: class measured at two decimals. docs/DATA.md has the per-class figures.
-#:
-#: A class nobody has measured gets this default, which is a prior, not a
-#: measurement. `tests::overlay` lists every group given a `RepMovement` type
-#: (by this table or by the scoped types) with the level measured for it, and
-#: fails on one it does not list, so a new class cannot take the default
-#: without somebody checking it against spawn positions first.
+#: The location quantization every `RepMovement` entry is emitted with. The
+#: descriptors declare only the rotator width; the location level is a
+#: per-class choice (Unreal's `LocationQuantizationLevel`) the wire does not
+#: carry, and the C# reader decodes every class at two decimals
+#: (`ReplicatedMovementDecoder` reads `VectorNetQuantize100`). On 25 of the 26
+#: classes the table declares, the packed integer joined to the actor's
+#: actors.parquet spawn IS the world coordinate (median |packed| / |spawn|
+#: 1.000 on every class and build carrying it; 1,018 replays, 21 builds,
+#: 2026-09-28), so the default is whole units, also FRepMovement's own;
+#: apply_type_corrections.py pins the one two-decimal class, and docs/DATA.md
+#: has the per-class figures. For an unmeasured class this is a prior:
+#: `tests::overlay` lists every RepMovement group (table or scoped) with its
+#: measured level and fails on one it does not list.
 REP_MOVEMENT_LOCATION = "VectorQuantization::RoundWholeNumber"
 
 
 def rep_movement_type(rotation: str) -> str:
-    """The complete `FieldType::RepMovement` literal for one rotator width.
-
-    The single place the literal is spelled: the explicit-quantization call,
-    the bare `.ReplicatedMovement()` default and the virtual-property form
-    all emit through here, so the three cannot drift apart.
-    """
+    """The `FieldType::RepMovement` literal for one rotator width; all three
+    ReplicatedMovement call shapes spell it through here."""
     if rotation not in {"ByteComponents", "ShortComponents"}:
         raise ValueError(f"unsupported rotator quantization {rotation!r}")
     return (
@@ -426,41 +361,30 @@ MOVEMENT_OVERRIDE_RE = re.compile(
     r'ERotatorQuantization\.(?P<value>\w+)\s*;'
 )
 
-# RepLayoutDynamicArray<T>() — captures the inner type for documentation;
-# treated as Raw because we cannot decode the TArray wire format generically.
+# RepLayoutDynamicArray<T>(): an opaque TArray this table cannot decode
+# generically, so Raw.
 REP_LAYOUT_DYN_ARRAY_RE = re.compile(
     r'\.RepLayoutDynamicArray<\w+>\(\s*\)'
 )
 
-# Decode(...) -- custom decoder, classified as Raw unless the decoder it names
-# is one of PAYLOAD_DECODER_TYPES below.
+# A custom `.Decode(...)` decoder: Raw unless PAYLOAD_DECODER_TYPES names it.
 DECODE_RE = re.compile(
     r'\.Decode\('
 )
 
-# `.Decode(ValorantPayloadDecoders.X(...))` sites whose decoder NAMES its wire
-# type, so reading it is not inference.
-#
-# Why this exists: the C# reference moved these fields from a direct
-# `.FVectorNetQuantize100()` call to a decoder object, and this extractor keyed
-# only on the method name. Everything routed through `.Decode(` therefore
-# collapsed to Raw. That is exactly the hazard docs/archive/PROJECT_STATUS.md
-# section 8 names under "A CUSTOM C# DECODER MEANS THE TYPE IS UNKNOWN, NOT RAW"
-# -- and it had
-# already fired: the committed table.rs carries these eight entries typed, and
-# regenerating without this map silently downgrades all eight.
-#
-# Only decoders whose name states a type belong here. `RawPayload` and
-# `CapturedPayload` are genuinely opaque and must keep falling through to Raw:
-# a decoder we cannot name a type for is unknown, not raw, and pretending
-# otherwise is the failure this comment is about.
+# `.Decode(ValorantPayloadDecoders.X(...))` decoders whose NAME states the wire
+# type, so reading it is not inference. Without this map a regeneration
+# downgrades eight committed typed entries to Raw (the C# moved them from direct
+# `.FVectorNetQuantize100()` calls onto decoder objects). `RawPayload` and
+# `CapturedPayload` are opaque and stay Raw: a decoder that names no type means
+# the type is unknown, which is not the same as raw.
 PAYLOAD_DECODER_TYPES = {
     "VectorNetQuantize": "FieldType::VectorNetQuantize { scale: 1 }",
     "VectorNetQuantize10": "FieldType::VectorNetQuantize { scale: 10 }",
     "VectorNetQuantize100": "FieldType::VectorNetQuantize { scale: 100 }",
     "VectorNetQuantizeNormal": "FieldType::VectorNetQuantizeNormal",
-    # An equippable arrives as the object's net GUID; the decoder resolves it to
-    # a weapon afterwards. Section 7-J is the record of getting this one wrong.
+    # An equippable arrives as the object's net GUID; the decoder resolves it
+    # to a weapon afterwards.
     "Equippable": "FieldType::ObjectNetGuid",
 }
 
@@ -469,17 +393,15 @@ PAYLOAD_DECODER_RE = re.compile(
     r'ValorantPayloadDecoders\s*\.\s*(?P<decoder>\w+)'
 )
 
-# ClassNetCache AddFunction patterns
 ADD_FUNCTION_RE = re.compile(
     r'AddFunction(?:Handle)?(?:<(?P<params>\w+)>)?\s*\(\s*'
     r'(?:(?P<handle>\d+)\s*,\s*)?'
     r'"(?P<name>[^"]+)"'
 )
 
-# Expression-bodied wrappers whose implementation delegates to
-# AddPropertyHandle(...).Decode(...). DamageParameters<T>.AddRaw is the live
-# example. Discover the wrapper from its implementation instead of baking the
-# helper's name into the extractor.
+# Expression-bodied wrappers that delegate to AddPropertyHandle(...).Decode(...),
+# found by their body rather than by a baked-in name (the live one is
+# DamageParameters<T>.AddRaw).
 RAW_WRAPPER_DEF_RE = re.compile(
     r'(?:public|internal|protected|private)\s+(?:static\s+)?void\s+'
     rf'@?(?P<name>{CSHARP_IDENTIFIER})\s*\([^)]*\)\s*=>\s*'
@@ -493,17 +415,11 @@ RAW_WRAPPER_DEF_RE = re.compile(
 def _mask_raw_wrapper_definitions(code_view: str) -> str:
     """Blank out a raw-wrapper's OWN definition, not any call to it.
 
-    `RAW_WRAPPER_DEF_RE` matches e.g. `protected void AddRaw(uint handle,
-    Expression<Func<T, ValorantRawPayload?>> property, string typeName) =>
-    AddPropertyHandle(handle, property, ExportCategory.Gunplay).Decode(` --
-    the SAME `AddPropertyHandle(...).Decode(` shape `extract_fields_from_block`
-    looks for on a real call site, except `property`/`typeName` here are the
-    wrapper's own formal parameters, not a field name. Left unmasked, the
-    trailing `AddPropertyHandle(...)` line starts a statement whose name this
-    file can never resolve -- not a dropped declaration, just the macro
-    defining itself. Blanking (not deleting, so line/column positions the rest
-    of this module relies on do not shift) keeps that line from ever looking
-    like the start of an AddProperty-shaped statement.
+    The definition (`protected void AddRaw(uint handle, ... property, string
+    typeName) => AddPropertyHandle(handle, property, ...).Decode(`) has the
+    shape of a real call site, with formal parameters where the field name
+    goes, so left in place it would start an unresolvable statement. Blanked
+    rather than deleted, so the line/column offsets the module relies on hold.
     """
     chars = list(code_view)
     for m in RAW_WRAPPER_DEF_RE.finditer(code_view):
@@ -516,13 +432,10 @@ def _mask_raw_wrapper_definitions(code_view: str) -> str:
 def _split_statements(
     block: str, wrapper_re: re.Pattern[str] | None
 ) -> list[tuple[str, str]]:
-    """`(raw text, code view)` of every AddProperty or raw-wrapper statement.
-
-    A statement starts on a line whose live code begins with `AddProperty` or
-    a raw-wrapper call, and continuation lines are joined until one ends with
-    `;`, so a `.Type()` or `.Decode()` call on a later line stays with it. A
-    statement still open when the block ends is kept.
-    """
+    """`(raw text, code view)` of every AddProperty or raw-wrapper statement:
+    from a line whose live code starts with one, joined until a line ends with
+    `;` (so a `.Type()` or `.Decode()` on a later line stays with it); a
+    statement still open when the block ends is kept."""
     code_lines = _mask_raw_wrapper_definitions(csharp_code_view(block)).splitlines()
     statements: list[tuple[str, str]] = []
     raw: list[str] = []
@@ -560,11 +473,8 @@ def _statement_type(code_line: str) -> tuple[str | None, str | None]:
         return rep_movement_type("ShortComponents"), None
     if movement_property := REP_MOVEMENT_PROPERTY_RE.search(code_line):
         return MOVEMENT_TYPE_PREFIX + movement_property.group("property") + ">", None
-    # RepLayoutDynamicArray<T>() -- treated as Raw (opaque TArray)
     if REP_LAYOUT_DYN_ARRAY_RE.search(code_line):
         return "FieldType::Raw", None
-    # A named payload decoder carries its type; anything else is custom and
-    # therefore unknown, which we record as Raw.
     if DECODE_RE.search(code_line):
         decoder = PAYLOAD_DECODER_RE.search(code_line)
         return PAYLOAD_DECODER_TYPES.get(
@@ -583,24 +493,14 @@ def extract_fields_from_block(
 ) -> list[tuple[str, str, int | None]]:
     """Extract (field_export_name, rust_type, literal_handle) tuples.
 
-    Handles AddProperty and AddPropertyHandle patterns, including multi-line
-    statements where the .Type() or .Decode() call is on a continuation line.
-    ``literal_handle`` is populated only when the declaration supplies a
-    concrete decimal handle; unresolved helper parameters remain ``None``.
-
-    ``rejected`` collects ``(type_method, statement)`` for every AddProperty
-    whose type method this file cannot classify, ``(_NO_TYPE_METHOD,
-    statement)`` for every AddProperty with no type method it can name (a bare
-    ``AddProperty(x => x.Foo);``), and ``(_UNNAMED_FIELD, statement)`` for
-    every AddProperty whose type method IS classified but whose export name
-    could not be extracted (e.g. a named constant instead of a string literal
-    or lambda leaf). All three used to fall off the end of the ladder and
-    contribute nothing -- no entry, no counter, no message -- so one new method
-    upstream (`.Int64()`), or one declaration naming its field through a
-    constant, would untype a field while the run still reported success. The
-    caller fails on a non-empty set, less the decoder-less declarations
-    DECODERLESS_PROPERTIES names. The statement goes in, so the double scan
-    (Configure body, then the whole class body for helpers) reports it once.
+    ``literal_handle`` is set only when the declaration supplies a decimal
+    handle. ``rejected`` collects ``(label, statement)`` for every AddProperty
+    this file cannot fully classify: an unknown type method, no type method
+    (``_NO_TYPE_METHOD``) or no extractable name (``_UNNAMED_FIELD``). Each
+    would otherwise untype a field silently -- one new upstream method
+    (``.Int64()``) untypes every field declaring it -- so the caller fails on
+    any, less DECODERLESS_PROPERTIES. The statement is the set key, so the
+    Configure scan and the whole-class helper scan report it once.
     """
     wrapper_re = re.compile(
         r'@?(' + '|'.join(map(re.escape, sorted(raw_wrapper_names))) + r')\s*\('
@@ -627,10 +527,8 @@ def extract_fields_from_block(
 
 
 def extract_cnc_functions(block: str) -> list[str]:
-    """Extract function names from a ClassNetCache Configure() block.
-
-    Returns list of function export names (e.g. "MulticastEndRound").
-    """
+    """The function export names ("MulticastEndRound", ...) that a
+    ClassNetCache Configure() block adds."""
     names = []
     for m in ADD_FUNCTION_RE.finditer(block):
         names.append(m.group("name"))
@@ -640,11 +538,8 @@ def extract_cnc_functions(block: str) -> list[str]:
 def extract_called_cnc_helper_functions(
     class_body: str, configure_body: str
 ) -> list[str]:
-    """Extract AddFunction calls from parameterless helpers Configure invokes.
-
-    Limiting the scan to called helpers prevents an unused method from silently
-    becoming a generated descriptor entry.
-    """
+    """AddFunction names from the parameterless helpers Configure calls; only
+    called ones, so an unused method cannot become a table entry."""
     names = []
     helper_calls = re.findall(r'(?m)^\s*(\w+)\s*\(\s*\)\s*;', configure_body)
     for helper_name in helper_calls:
@@ -762,26 +657,21 @@ def _extract_literal_handle(
 
 
 def _extract_type_name(line: str) -> str | None:
-    """Extract the type method name (the .Type() call) from a line.
+    """The type method name (the `.Type()` call) in a line.
 
-    Type arguments are skipped, so a generic `.Enum<EFoo>()` names `Enum` and
-    is rejected as an unknown method rather than as no method at all. The
-    parameterless `RepLayoutDynamicArray<T>()` -- the only generic call the
-    descriptors make -- has its own branch earlier in the ladder; its
-    element-decoder overload, or a qualified `<Ns.T>`, falls through to here
-    and is rejected by name.
+    Type arguments are skipped, so a generic `.Enum<EFoo>()` is rejected by
+    name as an unknown method, not as no method. The parameterless
+    `RepLayoutDynamicArray<T>()`, the descriptors' only generic call, has its
+    own ladder branch; its element-decoder overload or a qualified `<Ns.T>`
+    lands here and is rejected by name.
     """
     m = re.search(r'\)\s*\.(\w+)\s*(?:<[^()]*>)?\s*\(', line)
     return m.group(1) if m else None
 
 
 def find_class_body_range(source: str, class_start: int) -> tuple[int, int]:
-    """Find the range of the class body (between opening and closing braces).
-
-    Returns (body_start, body_end) where body_start is right after the opening
-    brace and body_end is at the closing brace.
-    """
-    # Find the opening brace after the class declaration
+    """(body_start, body_end) of the first braced body at or after
+    `class_start`: just after its `{`, and at its closing `}`."""
     brace_pos = source.find('{', class_start)
     if brace_pos == -1:
         return (class_start, len(source))
@@ -1175,10 +1065,8 @@ def fields_for_export_group_kind(
             if field[0] in ATTRIBUTE_SET_WIRE_PROPERTIES
         ]
         if not kept:
-            # Emptying the group is never the right answer here. Either the
-            # generic pair got renamed upstream or this descriptor is not the
-            # shape this policy assumes; both need a human, and a silently
-            # empty group would take 266,092 decoded values with it.
+            # A renamed pair or an unexpected descriptor shape needs a human;
+            # a silently emptied group would lose 266,092 decoded values.
             raise SystemExit(
                 f"{class_name} ({path}): AttributeSet descriptor declares none "
                 f"of {', '.join(ATTRIBUTE_SET_WIRE_PROPERTIES)}. Check whether "
@@ -1313,16 +1201,14 @@ def main(argv: list[str]) -> int:
     if not src_dir.is_dir():
         raise SystemExit(f"source directory not found: {src_dir}")
 
-    # Phase 1: scan all files, build class -> (path, fields) map
-    # and class -> base_class map for inheritance.
-    # Some files contain multiple class declarations (e.g. weapon descriptors).
+    # Phase 1: scan every file (some declare several classes) into per-class
+    # paths, fields and bases.
     class_paths: dict[str, str] = {}        # class_name -> path
     class_fields: dict[str, list[tuple[str, str, int | None]]] = {}
     class_bases: dict[str, str] = {}        # class_name -> base_class_name
     class_category_overrides: dict[str, frozenset[str]] = {}
     class_kind_overrides: dict[str, str] = {}  # class_name -> ExportGroupKind
     movement_overrides: dict[str, dict[str, str]] = {}
-    # ClassNetCache function names -> Skip entries
     cnc_functions: dict[str, list[str]] = {}  # class_name -> function names
     runtime_cnc_specs: list[tuple[str, str]] = []  # (path suffix, function name)
     # (type_method, statement) for every AddProperty this file cannot classify.
@@ -1399,11 +1285,9 @@ def main(argv: list[str]) -> int:
                     path.group("suffix"), names[0]
                 )
 
-    # Every access level, not only the two the supported shape uses. Upstream
-    # 8b7afcb builds Raze's caches through `private static
-    # ClassNetCacheDescriptor Rpc(...)` helpers; a marker that looked only for
-    # public/internal factories let that file through with its caches silently
-    # absent from the table instead of failing here.
+    # Every access level: upstream 8b7afcb builds Raze's caches through
+    # `private static ClassNetCacheDescriptor Rpc(...)` helpers, which a
+    # public/internal-only marker let through with the caches silently absent.
     cache_factory_marker = re.compile(
         rf'\b(?:public|internal|protected|private)\s+static\s+ClassNetCacheDescriptor\s+'
         rf'@?(?P<name>{CSHARP_IDENTIFIER})\s*\('
@@ -1443,9 +1327,9 @@ def main(argv: list[str]) -> int:
                     raise SystemExit(f"{cs_file}: {error}") from error
                 static_cache_specs.append((path + suffix, function_name))
 
-    # Build inheritance and live raw-wrapper ownership before parsing fields so
-    # a derived descriptor can use wrappers declared in any source file while
-    # an unrelated class with a same-named method cannot inherit that meaning.
+    # Inheritance and raw-wrapper ownership come before fields, so a derived
+    # descriptor can use a wrapper declared in any file while an unrelated
+    # class with a same-named method cannot inherit its meaning.
     raw_wrapper_names_by_class: dict[str, set[str]] = {}
     class_declarations_by_name: dict[str, list[Path]] = {}
     for cs_file, source, code_view in sources:
@@ -1496,9 +1380,9 @@ def main(argv: list[str]) -> int:
             *(raw_wrapper_names_by_class.get(c, ()) for c in ancestors(class_name))
         )
 
-    # Runtime-created ClassNetCaches do not have descriptor classes or literal
-    # paths. Discover the constructor shape, resolve its RpcDescriptor.Name,
-    # and later apply it to descriptor paths in the Agent category.
+    # Runtime-created ClassNetCaches have no descriptor class or literal path:
+    # read the constructor's suffix and RpcDescriptor.Name from source, and
+    # apply them to every Agent-category descriptor path in phase 3c.
     runtime_cache_re = re.compile(
         rf'\bnew\s+'
         rf'(?:(?:global\s*::\s*)?(?:{CSHARP_IDENTIFIER_TOKEN}\s*\.\s*)*)'
@@ -1511,13 +1395,11 @@ def main(argv: list[str]) -> int:
     factory_call_re = re.compile(
         rf'\s*@?(?P<factory>{CSHARP_IDENTIFIER})\s*\(\s*\)\s*'
     )
-    # A live `new ClassNetCacheDescriptor(...)` that the shape above cannot
-    # read is an unsupported construction, not an absent cache. Upstream
-    # 8b7afcb passes `CreateFunctions(agent)` where this expects a `[...]`
-    # list; the loop below then matched nothing, and all 29 agent
-    # `_ClassNetCache` entries left the table while the run reported success
-    # (compare_descriptor_sources.py against the vendored tree plus that one
-    # file, 2026-09-28).
+    # A live `new ClassNetCacheDescriptor(...)` the shape above cannot read is
+    # unsupported, not absent: upstream 8b7afcb's `CreateFunctions(agent)`,
+    # where a `[...]` list is expected, dropped all 29 agent `_ClassNetCache`
+    # entries while the run succeeded (compare_descriptor_sources.py on the
+    # vendored tree plus that file, 2026-09-28).
     runtime_cache_marker_re = re.compile(
         rf'\bnew\s+'
         rf'(?:(?:global\s*::\s*)?(?:{CSHARP_IDENTIFIER_TOKEN}\s*\.\s*)*)'
@@ -1649,11 +1531,8 @@ def main(argv: list[str]) -> int:
 
     for cs_file, source, code_view in sources:
 
-        # Find all class declarations in this file
         class_matches = list(MULTI_CLASS_RE.finditer(code_view))
 
-        # Extract Path for each class (find Path declarations and associate
-        # with the class whose body contains them)
         for cm in class_matches:
             class_name = declared_class_key(cm)
             body_start, body_end = find_class_body_range(code_view, cm.start())
@@ -1683,7 +1562,6 @@ def main(argv: list[str]) -> int:
                     property_name
                 ] = quantization
 
-            # Extract Path declarations within this class body
             path_match = next(
                 (
                     match
@@ -1705,14 +1583,12 @@ def main(argv: list[str]) -> int:
                 except ValueError as error:
                     raise SystemExit(f"{class_name}.Path: {error}") from error
 
-            # Check if this is a ClassNetCache descriptor
             raw_base = cm.group("base")
             is_cnc = raw_base and "ClassNetCacheDescriptor" in raw_base
             # Both scans below report into this, so a statement they both see
             # is sorted into rejected_types / decoderless_seen once.
             class_rejected: set[tuple[str, str]] = set()
 
-            # Find Configure() methods within this class body
             configure_re = re.compile(
                 r'(?:protected\s+)?override\s+void\s+Configure\(\)'
             )
@@ -1741,7 +1617,6 @@ def main(argv: list[str]) -> int:
 
                 if configure_body is not None:
                     if is_cnc:
-                        # Extract function names for CNC
                         funcs = extract_cnc_functions(configure_body)
                         funcs.extend(
                             extract_called_cnc_helper_functions(
@@ -1751,19 +1626,15 @@ def main(argv: list[str]) -> int:
                         if funcs:
                             cnc_functions[class_name] = funcs
                     else:
-                        # Extract fields for ExportGroupDescriptor
                         fields = extract_fields_from_block(
                             configure_body, raw_wrapper_names, class_rejected
                         )
                         if fields:
                             class_fields[class_name] = fields
 
-            # Also look for helper methods (AddSharedFields, AddDeathFields,
-            # etc.) that define fields -- these are called from Configure() but
-            # defined as separate methods in the same class body.
+            # Helper methods Configure() calls (AddSharedFields,
+            # AddDeathFields, ...) declare fields elsewhere in the class body.
             if not is_cnc:
-                # Look for methods that contain AddProperty calls but aren't
-                # Configure(). These are helper methods.
                 helper_fields = extract_fields_from_block(
                     scoped_class_body, raw_wrapper_names, class_rejected
                 )
@@ -1786,13 +1657,9 @@ def main(argv: list[str]) -> int:
                 else:
                     rejected_types.add((method, statement))
 
-    # A declared property whose type this file cannot classify -- or whose
-    # export name it cannot extract (see `_UNNAMED_FIELD`), or that names no
-    # type method at all (see `_NO_TYPE_METHOD`) -- is an unknown, not an
-    # absence. Failing here rather than emitting a table that quietly
-    # omits it is the same rule EXPORT_GROUP_KIND_POLICY applies to an
-    # unclassified Kind -- and it fails BEFORE the output is written, so a run
-    # that stops here leaves the previous table in place.
+    # An unclassifiable declaration is an unknown, not an absence (the rule
+    # EXPORT_GROUP_KIND_POLICY applies to a Kind). It fails before the write,
+    # so the previous table survives.
     if rejected_types:
         methods = sorted({method for method, _stmt in rejected_types})
         print(
@@ -1818,9 +1685,8 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    # The other direction: a listed property its class now declares WITH a
-    # type. The reason DECODERLESS_PROPERTIES records for it would describe
-    # nothing, and the next reader would trust it. Also before the write.
+    # The other direction, also before the write: a listed property its class
+    # now types would leave DECODERLESS_PROPERTIES describing nothing.
     now_typed = sorted(
         f"{cls}.{prop}"
         for cls, prop in DECODERLESS_PROPERTIES
@@ -1833,20 +1699,13 @@ def main(argv: list[str]) -> int:
         )
 
     def effective_export_group_kind(cls: str) -> str:
-        """The Kind a descriptor gets, walking up to the nearest override.
-
-        C# `Kind` is `virtual`, so a derived descriptor with no override of its
-        own inherits the nearest base's -- every agent ability descriptor gets
-        Actor from GenericAgentDescriptor this way. A chain that reaches the
-        top with no override at all ends at the base class's own default.
-        """
+        """C# `Kind` is virtual: the nearest override up the chain (agent
+        abilities get Actor from GenericAgentDescriptor), else the default."""
         return nearest(class_kind_overrides, cls, DEFAULT_EXPORT_GROUP_KIND)
 
-    # Phase 2: resolve inheritance -- propagate fields from base classes
-    # For classes with a Path but no fields, inherit from their base.
-    # For classes that DO have fields, also merge parent fields (handles the
-    # RPC parameter pattern where child.Configure() calls parent.AddSharedFields()
-    # which declares additional fields not in the child's own Configure()).
+    # Phase 2: inheritance. A class inherits its base's fields, merged under
+    # its own when it has some (the RPC parameter pattern: child.Configure()
+    # calls the parent's AddSharedFields()).
     def get_fields(
         cls: str, visited: set[str] | None = None
     ) -> list[tuple[str, str, int | None]]:
@@ -1891,22 +1750,14 @@ def main(argv: list[str]) -> int:
     handle_entries: list[tuple[str, int, str]] = []
     groups_seen: set[str] = set()
 
-    # 3a: ExportGroupDescriptor entries (RepLayout + RPC parameter groups)
-    #
-    # Each descriptor's ExportGroupKind decides whether its declared properties
-    # can be wire field names at all; see EXPORT_GROUP_KIND_POLICY. Only this
-    # phase consults it. Phases 3b and 3c are built from ClassNetCacheDescriptor
-    # classes, a separate C# hierarchy with no Kind property, and are untouched.
+    # 3a: ExportGroupDescriptor entries (RepLayout + RPC parameter groups).
+    # Only this phase applies EXPORT_GROUP_KIND_POLICY: 3b/3c come from
+    # ClassNetCacheDescriptor, a C# hierarchy with no Kind.
     kind_dropped: Counter[str] = Counter()
-    #: (group_path, field_name) -> the type the descriptors declared for it.
-    #:
-    #: The dedup further down keeps the FIRST entry for a key without looking
-    #: at its type, so two descriptor classes sharing a Path and declaring one
-    #: field as Float and Int32 resolved by `sorted(class_paths.items())` --
-    #: rename a class and the table changes type. The explicit handle table
-    #: below already refuses its analogous conflict; this is the same rule for
-    #: types, scoped to this phase because 3b/3c emit Skip for FUNCTION names,
-    #: a different namespace that the dedup is right to settle silently.
+    #: (group_path, field_name) -> the declared type. Classes sharing a Path
+    #: must agree, or class sort order would pick the type (the dedup below
+    #: keeps the first entry). Scoped to 3a: 3b/3c emit Skip for function
+    #: names, which the dedup rightly settles.
     declared_type: dict[tuple[str, str], tuple[str, str]] = {}
     for class_name, path in sorted(class_paths.items()):
         fields = get_fields(class_name)
@@ -1922,8 +1773,7 @@ def main(argv: list[str]) -> int:
             kind_dropped[kind] += len(fields) - len(kept)
         fields = kept
         if not fields:
-            # The whole group goes: nothing it declares can ever be looked up,
-            # so leaving the path in groups_seen would overstate coverage.
+            # Nothing in the group can be looked up, so it leaves groups_seen.
             continue
         groups_seen.add(path)
         for field_name, rust_type, literal_handle in fields:
@@ -1940,11 +1790,9 @@ def main(argv: list[str]) -> int:
             if literal_handle is not None:
                 handle_entries.append((path, literal_handle, field_name))
 
-    # 3b: ClassNetCache function entries
-    # Each function in a CNC group gets a Skip entry. This tells analyze_coverage
-    # that the group IS covered, and preserves the function name in the overlay
-    # table for documentation. The actual type decoding for RPC parameters
-    # happens via the parameter group entries from 3a.
+    # 3b: a Skip entry per ClassNetCache function, so analyze_coverage counts
+    # the group and the table names the function; its parameters are typed by
+    # their own groups in 3a.
     for class_name, funcs in sorted(cnc_functions.items()):
         path = class_paths.get(class_name)
         if not path:
@@ -1958,11 +1806,9 @@ def main(argv: list[str]) -> int:
             nearest(class_category_overrides, cls, frozenset()) & {"Agent", "All"}
         )
 
-    # 3c: runtime-created ClassNetCache entries. The live factory builds one
-    # cache for every Agent-category descriptor using `descriptor.Path +
-    # "_ClassNetCache"` and a shared RpcDescriptor. The constructor suffix and
-    # RPC name were parsed from source above; no replay path or alias is baked
-    # into the generator.
+    # 3c: runtime-created caches, one per Agent-category descriptor at
+    # `descriptor.Path + "_ClassNetCache"` with a shared RpcDescriptor; suffix
+    # and RPC name come from source, no path or alias is baked in.
     for suffix, function_name in sorted(set(runtime_cnc_specs)):
         for class_name, path in sorted(class_paths.items()):
             if not has_effective_agent_category(class_name):
@@ -2000,7 +1846,6 @@ def main(argv: list[str]) -> int:
     entries.sort(key=lambda e: (e[0], e[1]))
     handle_entries.sort(key=lambda e: (e[0], e[1]))
 
-    # Count after dedup
     raw_count = sum(1 for _, _, t in entries if t == "FieldType::Raw")
     skip_count = sum(1 for _, _, t in entries if t == "FieldType::Skip")
     type_counts: Counter[str] = Counter()
@@ -2009,26 +1854,20 @@ def main(argv: list[str]) -> int:
             base_type = t.split("{")[0].strip().replace("FieldType::", "")
             type_counts[base_type] += 1
 
-    # Report
     print(f"Groups: {len(groups_seen)}")
     print(f"Fields: {len(entries)}")
     print(f"  Raw (custom decoder): {raw_count}")
     print(f"  Skip (ignored): {skip_count}")
     print(f"  Typed: {len(entries) - raw_count - skip_count}")
     print(f"Handle aliases: {len(handle_entries)}")
-    # Printed unconditionally, zero included: CLAUDE.md's rule verbatim --
-    # "A counter that cannot move is worse than one that reports a wrong
-    # number. Print zeros. A line that appears only when non-zero cannot
-    # distinguish 'nothing is wrong' from 'this code stopped running'." A
-    # regression in EXPORT_GROUP_KIND_POLICY that let everything through would
-    # otherwise look identical to a run that correctly dropped nothing.
+    # Printed even at zero (CLAUDE.md), so a policy that let everything through
+    # cannot pass for a run with nothing to drop; 8 on the vendored tree.
     print(f"Declared properties dropped by ExportGroupKind: "
           f"{sum(kind_dropped.values())}")
     for kind, count in sorted(kind_dropped.items()):
         print(f"  {kind}: {count}")
-    # Same rule. On the vendored tree this reads 3, one per
-    # DECODERLESS_PROPERTIES entry; fewer there means the scan stopped seeing
-    # them, not that they stopped mattering.
+    # Same rule: 3 on the vendored tree, one per DECODERLESS_PROPERTIES entry;
+    # fewer means the scan stopped seeing them.
     print(f"Declared without a type method (no entry): {len(decoderless_seen)}")
     for cls, prop in sorted(decoderless_seen):
         print(f"  {cls}.{prop}")
@@ -2036,7 +1875,6 @@ def main(argv: list[str]) -> int:
     for t, c in type_counts.most_common():
         print(f"  {t}: {c}")
 
-    # Generate Rust source
     lines = [
         "// Overlay table mapping (group_path, field_name) -> FieldType.",
         "//",
