@@ -47,7 +47,7 @@ pub struct MovementUpdate {
 }
 
 /// Result of decoding the full RPC payload.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RpcDecodeResult {
     /// Total moves decoded across all updates.
     pub total_moves: u32,

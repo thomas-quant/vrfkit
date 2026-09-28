@@ -37,16 +37,7 @@ pub fn decode_movement_rpc(
     mut emit: impl FnMut(MovementMove),
 ) -> Result<RpcDecodeResult, MovementError> {
     let end_bit = reader.len_bits();
-
-    let mut result = RpcDecodeResult {
-        total_moves: 0,
-        update_count: 0,
-        error_count: 0,
-        sized_section_tails: 0,
-        sized_section_tail_bits: 0,
-        open_section_tails: 0,
-        open_section_tail_bits: 0,
-    };
+    let mut result = RpcDecodeResult::default();
 
     // First bit: consumed but value ignored (C# discards via `TryReadBit(out _)`).
     // If no bits remain, the payload is empty.
@@ -255,26 +246,15 @@ fn decode_component_data_stream(
     // The byte count must be > 0 and byte_count * 8 must fit in remaining bits.
     let byte_count = u64::from(first_u16);
     if byte_count > 0 && reader.bits_remaining() >= byte_count * 8 {
-        // Looks like a byte-wrapped envelope. Parse inner component payload.
+        // Looks like a byte-wrapped envelope: the inner component payload
+        // starts with its own u16 movementBitCount.
         let mut inner = reader.sub_reader(byte_count * 8)?;
-        return parse_component_payload(&mut inner, shooter_guid, result, emit);
+        let bit_count = read_u16_checked(&mut inner)?;
+        parse_movement_with_bit_count(&mut inner, bit_count, shooter_guid, result, emit)
+    } else {
+        // Not byte-wrapped: first_u16 is the movementBitCount.
+        parse_movement_with_bit_count(reader, first_u16, shooter_guid, result, emit)
     }
-
-    // Not byte-wrapped: first_u16 is the movementBitCount.
-    parse_movement_with_bit_count(reader, first_u16, shooter_guid, result, emit)
-}
-
-/// Parse the component payload (inside byte-wrapper or at top level).
-///
-/// Reads a u16 movementBitCount, then the movement section.
-fn parse_component_payload(
-    reader: &mut BitReader<'_>,
-    shooter_guid: u32,
-    result: &mut RpcDecodeResult,
-    emit: &mut impl FnMut(MovementMove),
-) -> Result<(), MovementError> {
-    let movement_bit_count = read_u16_checked(reader)?;
-    parse_movement_with_bit_count(reader, movement_bit_count, shooter_guid, result, emit)
 }
 
 /// Read a u16, failing with `TruncatedComponentHeader` rather than the
