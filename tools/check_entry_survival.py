@@ -1339,7 +1339,7 @@ def to_json(tally_: Tally, catalog: Catalog, judgement: Judgement, stale: list) 
 
 def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: LoadStats,
         verbose: bool = False, show: str | None = None,
-        json_path: Path | None = None) -> int:
+        json_path: Path | None = None, expected_name: str = EXPECTED_JSON.name) -> int:
     overlay = Overlay(catalog)
     t = tally(replays, catalog, overlay)
     if len(t.builds) < 2:
@@ -1390,9 +1390,9 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
     if failing:
         problems.append(f"{len(failing)} entr(y/ies) declared in their reference window lost "
                         f"their declaration with evidence (field-missing, or moved with the "
-                        f"typing lost) and are not in {EXPECTED_JSON.name}")
+                        f"typing lost) and are not in {expected_name}")
     if stale:
-        problems.append(f"{len(stale)} item(s) of {EXPECTED_JSON.name} match no failing "
+        problems.append(f"{len(stale)} item(s) of {expected_name} match no failing "
                         f"finding (STALE): " + "; ".join(
                             f"{i['entry']} {i['build']} {i['finding']}" for i in stale))
     if stats.orphan_checkpoint_fields or stats.path_index_mismatches:
@@ -1449,7 +1449,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2
     try:
-        return run(replays, catalog, expected, stats, args.verbose, args.show, args.json)
+        return run(replays, catalog, expected, stats, args.verbose, args.show, args.json,
+                   expected_name=args.expected.name)
     except InputError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2

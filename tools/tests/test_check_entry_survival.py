@@ -521,6 +521,26 @@ class LoadTests(unittest.TestCase):
                                          r"does not declare HasStopped")
         self.assertEqual(sum(f["fails"] for f in data["findings"]), 0)
 
+    def test_failures_name_the_expected_list_that_was_read(self):
+        """Both FAILED lines named the default list even when --expected
+        pointed elsewhere, sending the reader to the wrong file."""
+        stale = {"entry": f"table|{STATE}|bArmed", "build": "13.02",
+                 "finding": "field-missing", "reason": "r", "evidence": "e"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "exports"
+            write_committed_findings(root)
+            path = Path(tmp) / "other_expected.json"
+            path.write_text(json.dumps({"expected": [stale]}), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                code = guard.main(["--root", str(root), "--expected", str(path)])
+        self.assertEqual(code, 1)
+        failed = [line for line in err.getvalue().splitlines() if line.startswith("FAILED:")]
+        self.assertEqual(len(failed), 2, err.getvalue())
+        self.assertIn("are not in other_expected.json", failed[0])
+        self.assertIn("item(s) of other_expected.json match no failing finding", failed[1])
+        self.assertNotIn(guard.EXPECTED_JSON.name, err.getvalue())
+
     def test_each_committed_item_is_needed(self):
         """Drop either committed item and its finding fails the run by name --
         the list honours HasStopped only while the item is there."""
