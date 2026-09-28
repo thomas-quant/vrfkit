@@ -50,6 +50,31 @@ use publish::OutputTransaction;
 use summary::RunTotals;
 use writers::WriterThread;
 
+/// The six tables every export writes. With [`CHECKPOINT_TABLES`] and
+/// [`MANIFEST`], every name `run` creates: `publish` refuses a destination
+/// holding anything else, so a table missing here makes the next export to
+/// the same directory refuse it.
+const MAIN_TABLES: [&str; 6] = [
+    "fields.parquet",
+    "movement.parquet",
+    "actors.parquet",
+    "net_guids.parquet",
+    "events.parquet",
+    "partials.parquet",
+];
+/// The tables written only when `--checkpoints` asks for them.
+const CHECKPOINT_TABLES: [&str; 7] = [
+    "checkpoint_fields.parquet",
+    "checkpoint_actors.parquet",
+    "checkpoint_net_guids.parquet",
+    "checkpoint_blocks.parquet",
+    "checkpoint_guid_entries.parquet",
+    "checkpoint_export_groups.parquet",
+    "checkpoint_export_fields.parquet",
+];
+/// Written after every table is complete.
+const MANIFEST: &str = "manifest.json";
+
 /// The structural payload for an Event group that declares `word_count` words,
 /// or `None` when the payload does not fit that layout.
 ///
@@ -397,7 +422,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     //
     // Before the summary so the path the summary prints names a file that
     // exists by the time it is read.
-    let staged_manifest_path = out_path.join("manifest.json");
+    let staged_manifest_path = out_path.join(MANIFEST);
     // Drain per-PlayerState identity (Subject + SpawnedCharacter) captured
     // during the walk into a sorted players list for the manifest.
     let mut players: Vec<(u32, Option<String>, Option<u32>)> = channel_state
@@ -451,7 +476,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     // only after every table and the manifest are complete; a failed run before
     // here drops the guard and removes staging without touching the prior run.
     output.publish()?;
-    let manifest_path = destination.join("manifest.json");
+    let manifest_path = destination.join(MANIFEST);
 
     summary::print(
         &destination,

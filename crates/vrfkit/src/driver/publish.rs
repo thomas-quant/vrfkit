@@ -29,6 +29,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::{CHECKPOINT_TABLES, MAIN_TABLES, MANIFEST};
+
 static NEXT_OUTPUT_PATH: AtomicU64 = AtomicU64::new(0);
 
 /// What sits between the destination name and the kind in every sibling this
@@ -55,7 +57,9 @@ pub(super) struct OutputTransaction {
 impl OutputTransaction {
     /// Create an empty, uniquely named staging directory beside `destination`,
     /// first warning on stderr about every sibling an earlier export to the
-    /// same destination left behind (see [`report_leftovers`]).
+    /// same destination left behind (see [`report_leftovers`]). A destination
+    /// holding anything an export does not write is refused before that (see
+    /// [`foreign_entries`]).
     pub(super) fn begin(destination: &Path) -> io::Result<Self> {
         Self::begin_reporting_to(destination, &mut io::stderr())
     }
@@ -75,6 +79,33 @@ impl OutputTransaction {
                 format!(
                     "export destination exists but is not a directory: {}",
                     destination.display()
+                ),
+            ));
+        }
+        // `publish` replaces the whole directory, so whatever else it holds
+        // would be deleted with it. Refused here, before anything is decoded
+        // or created.
+        let foreign = foreign_entries(destination).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not list export destination {} to check that it holds only \
+                     export output: {error}",
+                    destination.display()
+                ),
+            )
+        })?;
+        if !foreign.is_empty() {
+            let them = if foreign.len() == 1 { "it" } else { "them" };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "export destination {} holds {} an export does not write ({}); publishing \
+                     replaces the whole directory and would delete {them} -- choose a new or \
+                     empty directory, or remove {them} from this one",
+                    destination.display(),
+                    entry_count(foreign.len()),
+                    name_list(&foreign)
                 ),
             ));
         }
@@ -110,7 +141,13 @@ impl OutputTransaction {
     /// destination as its working directory printed only `I/O error: ...
     /// (os error 32)` -- no path, and no sign that a fully decoded export had
     /// just been thrown away.
-    pub(super) fn publish(mut self) -> io::Result<()> {
+    pub(super) fn publish(self) -> io::Result<()> {
+        self.publish_reporting_to(&mut io::stderr())
+    }
+
+    /// [`publish`](Self::publish), with its warnings written to `warnings`,
+    /// so a test reads exactly the lines an operator would.
+    fn publish_reporting_to(mut self, warnings: &mut dyn Write) -> io::Result<()> {
         let prior = if self.destination.exists() {
             let backup = unique_sibling(&self.destination, PREVIOUS)?;
             if let Err(error) = fs::rename(&self.destination, &backup) {
@@ -160,15 +197,48 @@ impl OutputTransaction {
             // Publication is already committed. A cleanup failure must not be
             // reported as a failed export (which would falsely imply the old
             // destination was still active), but it must not be silent either.
-            if let Err(error) = remove_generated(&backup) {
-                eprintln!(
-                    "warning: export published, but prior-output backup {} could not be removed: {error}",
-                    backup.display()
-                );
+            if let Some(warning) = discard_prior_output(&backup) {
+                let _ = writeln!(warnings, "warning: export published, but {warning}");
             }
         }
         Ok(())
     }
+}
+
+/// Delete the prior output `publish` moved aside, or say why it was kept.
+///
+/// `begin` refused a destination holding anything an export does not write,
+/// but the whole decode runs between the two, and a file saved into `--out`
+/// meanwhile would be deleted here without anyone having been asked. So the
+/// backup is checked again -- as exactly what is about to be deleted -- and
+/// anything foreign in it, or a listing that fails, keeps all of it.
+fn discard_prior_output(backup: &Path) -> Option<String> {
+    let foreign = match foreign_entries(backup) {
+        Ok(foreign) => foreign,
+        Err(error) => {
+            return Some(format!(
+                "prior-output backup {} could not be listed to check that it holds only export \
+                 output ({error}); it was kept -- delete it once you have checked it",
+                backup.display()
+            ));
+        }
+    };
+    if !foreign.is_empty() {
+        return Some(format!(
+            "the prior output it replaced gained {} an export does not write ({}) while this \
+             export ran; it was kept, not deleted, at {} -- move what you need out of it, then \
+             delete it",
+            entry_count(foreign.len()),
+            name_list(&foreign),
+            backup.display()
+        ));
+    }
+    remove_generated(backup).err().map(|error| {
+        format!(
+            "prior-output backup {} could not be removed: {error}",
+            backup.display()
+        )
+    })
 }
 
 impl Drop for OutputTransaction {
@@ -305,6 +375,65 @@ fn leftover_warning(
     }
 }
 
+/// Every name an export writes into its directory.
+fn output_names() -> impl Iterator<Item = &'static str> {
+    MAIN_TABLES
+        .into_iter()
+        .chain(CHECKPOINT_TABLES)
+        .chain([MANIFEST])
+}
+
+/// The entries of `directory` that no export writes, sorted by name; none
+/// for a directory that does not exist.
+///
+/// An export writes only files, each named in [`MAIN_TABLES`],
+/// [`CHECKPOINT_TABLES`] or [`MANIFEST`]. Anything else is foreign: another
+/// file, a subdirectory (its whole tree would go with it), a directory or
+/// symlink that merely bears a table's name, and also what Explorer leaves
+/// behind (`desktop.ini`, `Thumbs.db`). The comparison is exact, case
+/// included, because an export writes exactly these names. The leftovers
+/// this module names are never among them: they are siblings of the
+/// destination, not entries of it.
+fn foreign_entries(directory: &Path) -> io::Result<Vec<OsString>> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut foreign = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let is_output = entry.file_type()?.is_file() && output_names().any(|output| name == output);
+        if !is_output {
+            foreign.push(name);
+        }
+    }
+    foreign.sort();
+    Ok(foreign)
+}
+
+/// `1 entry`, `2 entries`.
+fn entry_count(count: usize) -> String {
+    format!("{count} entr{}", if count == 1 { "y" } else { "ies" })
+}
+
+/// The first few `names`, and how many more there are: a folder of
+/// downloads can hold thousands, and the count already says how many.
+fn name_list(names: &[OsString]) -> String {
+    const SHOWN: usize = 8;
+    let mut list = names
+        .iter()
+        .take(SHOWN)
+        .map(|name| name.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        list.push_str(&format!(", and {} more", names.len() - SHOWN));
+    }
+    list
+}
+
 fn usable_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -395,7 +524,9 @@ fn unique_sibling(destination: &Path, kind: &str) -> io::Result<PathBuf> {
 
 /// Remove only paths generated by this module. `remove_dir_all` does not
 /// follow directory symlinks, and the exact generated path is never derived
-/// from an untrusted glob or environment variable.
+/// from an untrusted glob or environment variable. A prior-output backup has
+/// a generated name but the user's contents, so it only comes here once
+/// [`discard_prior_output`] has found nothing in it an export does not write.
 fn remove_generated(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
@@ -407,8 +538,11 @@ fn remove_generated(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OutputTransaction, PREVIOUS, STAGING, generated_kind, generated_name};
-    use std::ffi::OsStr;
+    use super::{
+        CHECKPOINT_TABLES, MANIFEST, OutputTransaction, PREVIOUS, STAGING, entry_count,
+        generated_kind, generated_name, name_list, output_names,
+    };
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -744,22 +878,195 @@ mod tests {
         }
     }
 
+    /// A complete `--checkpoints` export -- every name an export writes -- is
+    /// what a re-export replaces, and a table this run does not rewrite is
+    /// gone afterwards rather than left mixed in with the new set.
     #[test]
     fn a_successful_publication_replaces_the_directory_as_one_complete_set() {
         let root = TestDir::new();
         let destination = root.path().join("export");
         fs::create_dir(&destination).unwrap();
-        fs::write(destination.join("old-only.parquet"), b"old").unwrap();
+        for name in output_names() {
+            fs::write(destination.join(name), b"old").unwrap();
+        }
 
-        let transaction = OutputTransaction::begin(&destination).unwrap();
-        fs::write(transaction.path().join("manifest.json"), b"new complete").unwrap();
-        transaction.publish().unwrap();
+        let (transaction, warnings) = begin_capturing(&destination);
+        assert_eq!(warnings, "", "a prior export is not a leftover");
+        fs::write(transaction.path().join(MANIFEST), b"new complete").unwrap();
+        let mut warnings = Vec::new();
+        transaction.publish_reporting_to(&mut warnings).unwrap();
 
         assert_eq!(
-            fs::read(destination.join("manifest.json")).unwrap(),
+            fs::read(destination.join(MANIFEST)).unwrap(),
             b"new complete"
         );
-        assert!(!destination.join("old-only.parquet").exists());
+        assert!(!destination.join(CHECKPOINT_TABLES[0]).exists());
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "only the destination remains: no staging and no prior-output backup"
+        );
+        assert!(
+            warnings.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&warnings)
+        );
+    }
+
+    /// A destination that does not exist yet, or exists and is empty, has
+    /// nothing to lose and is published into as before.
+    #[test]
+    fn a_missing_or_empty_destination_is_accepted() {
+        let root = TestDir::new();
+        let empty = root.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        for destination in [root.path().join("missing"), empty] {
+            let (transaction, warnings) = begin_capturing(&destination);
+            assert_eq!(warnings, "");
+            fs::write(transaction.path().join(MANIFEST), b"new complete").unwrap();
+            transaction.publish().unwrap();
+            assert_eq!(
+                fs::read(destination.join(MANIFEST)).unwrap(),
+                b"new complete"
+            );
+        }
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    /// An export writes files. A directory by a table's name is not one, and
+    /// neither is the tree under it.
+    #[test]
+    fn a_directory_named_like_a_table_is_a_foreign_entry() {
+        let root = TestDir::new();
+        let destination = root.path().join("export");
+        let impostor = destination.join(CHECKPOINT_TABLES[0]);
+        fs::create_dir_all(&impostor).unwrap();
+        fs::write(impostor.join("part-0.parquet"), b"someone else's dataset").unwrap();
+        fs::write(destination.join(MANIFEST), b"old complete").unwrap();
+
+        let error = OutputTransaction::begin_reporting_to(&destination, &mut Vec::new())
+            .err()
+            .expect("a directory is never export output");
+        assert!(
+            error.to_string().contains(&format!(
+                "1 entry an export does not write ({})",
+                CHECKPOINT_TABLES[0]
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(impostor.join("part-0.parquet")).unwrap(),
+            b"someone else's dataset"
+        );
+    }
+
+    /// Something saved into `--out` after `begin` checked it -- while the
+    /// decode ran -- is found again at publication, in the backup that was
+    /// about to be deleted, and the backup is kept and named instead.
+    #[test]
+    fn an_entry_that_appears_during_the_run_keeps_the_prior_output() {
+        let root = TestDir::new();
+        let destination = root.path().join("export");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join(MANIFEST), b"old complete").unwrap();
+
+        let (transaction, _) = begin_capturing(&destination);
+        fs::write(transaction.path().join(MANIFEST), b"new complete").unwrap();
+        fs::write(destination.join("notes.txt"), b"saved mid-run").unwrap();
+        let mut warnings = Vec::new();
+        transaction.publish_reporting_to(&mut warnings).unwrap();
+
+        assert_eq!(
+            fs::read(destination.join(MANIFEST)).unwrap(),
+            b"new complete"
+        );
+        let kept: Vec<PathBuf> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path != &destination)
+            .collect();
+        assert_eq!(kept.len(), 1, "the prior output must survive: {kept:?}");
+        assert_eq!(
+            generated_kind(kept[0].file_name().unwrap(), OsStr::new("export")),
+            Some(PREVIOUS)
+        );
+        assert_eq!(
+            fs::read(kept[0].join("notes.txt")).unwrap(),
+            b"saved mid-run"
+        );
+        let warnings = String::from_utf8(warnings).unwrap();
+        assert_eq!(warnings.lines().count(), 1, "{warnings}");
+        for expected in [
+            "1 entry an export does not write (notes.txt)".to_owned(),
+            kept[0].display().to_string(),
+        ] {
+            assert!(
+                warnings.contains(&expected),
+                "missing {expected:?}: {warnings}"
+            );
+        }
+    }
+
+    /// The list stops after a few names; the count never does.
+    #[test]
+    fn a_long_list_of_foreign_entries_names_the_first_and_counts_the_rest() {
+        let names: Vec<OsString> = (0..10).map(|i| OsString::from(format!("f{i}"))).collect();
+        assert_eq!(
+            name_list(&names),
+            "f0, f1, f2, f3, f4, f5, f6, f7, and 2 more"
+        );
+        assert_eq!(name_list(&names[..2]), "f0, f1");
+        assert_eq!(entry_count(1), "1 entry");
+        assert_eq!(entry_count(10), "10 entries");
+    }
+
+    /// `export dir/match.vrf --out dir` exited 0 with no warning line and left
+    /// `dir` holding only the export: publication moved the whole prior
+    /// directory aside and deleted it, the replay, the user's files and a
+    /// subdirectory with it. Measured with the pinned 12.10 public fixture.
+    /// Such a destination is refused before anything is decoded, and left
+    /// exactly as it was.
+    #[test]
+    fn a_destination_holding_foreign_entries_is_refused_and_left_intact() {
+        let root = TestDir::new();
+        let destination = root.path().join("export");
+        fs::create_dir_all(destination.join("sub")).unwrap();
+        let kept: [(PathBuf, &[u8]); 4] = [
+            (destination.join("match.vrf"), b"the replay itself"),
+            (destination.join("precious.txt"), b"a file of the user's"),
+            (destination.join("sub").join("notes.txt"), b"nested"),
+            (destination.join("manifest.json"), b"old complete"),
+        ];
+        for (path, bytes) in &kept {
+            fs::write(path, bytes).unwrap();
+        }
+
+        let outcome = OutputTransaction::begin_reporting_to(&destination, &mut Vec::new())
+            .and_then(|transaction| {
+                fs::write(transaction.path().join("manifest.json"), b"new complete")?;
+                transaction.publish()
+            });
+
+        for (path, bytes) in &kept {
+            assert_eq!(
+                fs::read(path).ok().as_deref(),
+                Some(*bytes),
+                "{} must survive an export to {}",
+                path.display(),
+                destination.display()
+            );
+        }
+        let error = outcome.expect_err("a destination holding foreign entries must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let message = error.to_string();
+        assert!(
+            message.contains("3 entries an export does not write (match.vrf, precious.txt, sub)"),
+            "the refusal must count and name every foreign entry, and only those: {message}"
+        );
+        assert!(
+            message.contains("choose a new or empty directory"),
+            "the refusal must say how to proceed: {message}"
+        );
         assert!(staging_entries(root.path()).is_empty());
     }
 }

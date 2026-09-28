@@ -18,6 +18,7 @@ use vrf_decode::{OverlayErrorReport, OverlayStats};
 use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 
+use super::CHECKPOINT_TABLES;
 use super::checkpoints::CheckpointStats;
 use crate::sink::SinkTotals;
 
@@ -563,17 +564,6 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.rep_layout_cnc_tails_decoded, cp.sink.rep_layout_cnc_tails_preserved
     );
 }
-
-/// Tables written only when `--checkpoints` is given.
-const CHECKPOINT_TABLES: [&str; 7] = [
-    "checkpoint_fields.parquet",
-    "checkpoint_actors.parquet",
-    "checkpoint_net_guids.parquet",
-    "checkpoint_blocks.parquet",
-    "checkpoint_guid_entries.parquet",
-    "checkpoint_export_groups.parquet",
-    "checkpoint_export_fields.parquet",
-];
 
 /// A warning line when this run drops a checkpoint table an earlier run at
 /// this destination had.
