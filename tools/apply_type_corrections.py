@@ -449,8 +449,14 @@ ADDITIONS = [
      "CurrentFuel", "FieldType::Double"),
     ("/Game/Characters/Components/Comp_AbilityFuelSystem.Comp_AbilityFuelSystem_C",
      "IsFuelDraining", "FieldType::Bool"),
-    # LongestActiveBlindDuration: Float 0.0..2.1 s, agent-common
+    # LongestActiveBlindDuration: Float seconds, agent-common
     # (blind_duration_is_typed in crates/vrf-decode/src/tests/overlay.rs).
+    # 2026-09-29, 25 replays exported with --checkpoints by 061155a (one per
+    # build 11.06-13.06, 13.02 twice), rows of this group and name: 1,727
+    # main rows in 17 builds and 2,431 checkpoint rows, every one 32 bits and
+    # a finite Float. Main 0.0..3.0 s (857 at 0; 1.5 s x176, 2.25 s x67);
+    # checkpoint 0.0 but for two 1.5 s. No row in the 12.05, 12.10, 12.11,
+    # 13.00, 13.01, 13.04 and 13.05 replays.
     ("/Script/ShooterGame.BlindManagerComponent",
      "LongestActiveBlindDuration", "FieldType::Float"),
     # ZoomMultiplierComponent, the ADS/scope FOV transition; no descriptor
