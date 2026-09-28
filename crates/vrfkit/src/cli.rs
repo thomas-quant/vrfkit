@@ -26,7 +26,9 @@ SUBCOMMANDS:
               --json  Write the aggregate to a file instead of stdout
               --include-payloads  Include bounded raw payload samples
     export    Write six Parquet tables (fields, movement, actors,
-              net_guids, events, partials) + manifest.json
+              net_guids, events, partials) + manifest.json into
+              --out, which must be new, empty or hold only export
+              output: anything else there is refused, not deleted
               --checkpoints  Also parse Checkpoint chunks into
                              checkpoint_fields, checkpoint_actors,
                              checkpoint_net_guids, checkpoint_blocks,
