@@ -2,7 +2,7 @@
 //!
 //! `FieldSink` receives replicated properties and RPCs; `ReplicationSink`
 //! receives actor lifecycle, content-block framing and the two failure paths.
-//! Everything these produce goes through `ExportSink::push_field`, so the nine
+//! Everything these produce goes through `ExportSink::push_field`, so the six
 //! block-context columns are stamped in exactly one place.
 
 use std::sync::Arc;
@@ -238,7 +238,8 @@ impl FieldSink for ExportSink<'_> {
             let fallback_reader = reader.clone();
             let parsed = self.try_parse_rpc_params(handle, reader, field_name.as_deref());
             if !parsed {
-                // Fallback: emit raw bits as a single row (no param group found).
+                // Nothing walked (no function name, or no parameter before the
+                // stream ended): one raw row for the whole payload.
                 self.push_field(FieldValues {
                     handle,
                     field_name,
@@ -763,8 +764,9 @@ impl ReplicationSink for ExportSink<'_> {
 
     /// Sample the decoded bytes of a block whose inner stream failed to walk.
     ///
-    /// Framing calls this right after `on_stream_failure` for the same block
-    /// whenever the decoded bytes exist, so the aggregate's samples for the
+    /// Framing calls this beside `on_stream_failure` for the same block (just
+    /// before or just after it, by failure path) whenever the decoded bytes
+    /// exist, so the aggregate's samples for the
     /// real-loss shapes carry the payload that actually failed -- the
     /// evidence a cause hypothesis needs. Bounded like every sample: the
     /// first few per cell, payloads truncated.

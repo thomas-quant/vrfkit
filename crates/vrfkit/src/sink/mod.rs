@@ -648,8 +648,8 @@ impl<'a> ExportSink<'a> {
 
     /// Push one field row, stamped with the current block context.
     ///
-    /// Every `FieldRecord` this crate produces is built here. Nine of the
-    /// fourteen columns are block context that no call site should be able to
+    /// Every `FieldRecord` this crate produces is built here. Six of the
+    /// fifteen columns are block context that no call site should be able to
     /// get wrong, and before this they were spelled out at seven of them.
     fn push_field(&mut self, row: FieldValues) {
         self.records.fields.push(FieldRecord {

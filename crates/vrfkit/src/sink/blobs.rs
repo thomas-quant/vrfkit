@@ -20,8 +20,8 @@ use super::intern::put;
 use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 
 /// The four typed columns a decoded value lands in. At most one is ever
-/// populated; see the crate-level note on why this is four nullable columns
-/// rather than a union.
+/// populated; `vrf_export`'s crate doc ("sparse value columns vs. Union") says
+/// why this is four nullable columns rather than a union.
 type DecodedColumns = (Option<i64>, Option<f64>, Option<bool>, Option<String>);
 
 /// What the replay declares at `handle`: one slot of
@@ -666,8 +666,9 @@ impl ExportSink<'_> {
             (Some("Rounds"), _) => self.current_group_path.contains("CombatReportComponent"),
             // A RepLayout dynamic array of ability-cast structs. Each element
             // carries a GUID FString (handle 3), ints, floats and vectors;
-            // `decode_struct_array` walks it with no hardcoded schema, naming
-            // leaves from the replay's own declarations or `_h{N}`.
+            // `decode_struct_array` names leaves from the replay's own
+            // declarations or `_h{N}`, and `get_array_schema` adds only the
+            // nested `Effects` array's schema.
             (Some("AbilityCastsThisRound"), _) => self
                 .current_group_path
                 .contains("AbilityStatisticsReplicator"),
@@ -1043,7 +1044,7 @@ impl ExportSink<'_> {
     /// Decode a `MultiContents` blob and emit one row per item NetGUID.
     ///
     /// The blob is a RepLayout dynamic array of object references
-    /// (`TArray<AAresItem*>`); [`vrf_decode::decode_object_ref_array`] walks the
+    /// (`TArray<AAresItem*>`); [`vrf_decode::decode_object_ref_array_with_stats`] walks the
     /// framing and returns `(wire element index, NetGUID)` pairs. Each lands as
     /// a `MultiContents[index]` row with the NetGUID in `value_i64`, the same
     /// column a single `ItemSlot.Contents` decode populates. The wire index,

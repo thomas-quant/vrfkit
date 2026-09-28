@@ -200,11 +200,12 @@ impl FailureAggregate {
         }
     }
 
-    /// Attach one real-payload sample to a cell. Called from
-    /// `on_unresolved_class_net_cache_payload` (whose block `on_stream_failure`
-    /// counts right after) and from `on_stream_failure_payload` (whose block
-    /// `on_stream_failure` has already counted) -- either way the count is
-    /// moved by exactly one [`Self::note_failure`] per failure, never here.
+    /// Attach one real-payload sample to a cell. Called from the payload
+    /// callbacks (`on_unresolved_class_net_cache_payload`,
+    /// `on_stream_failure_payload`, `on_rep_layout_tail_failure_payload`), each
+    /// of which framing makes beside the block's `on_stream_failure`, before or
+    /// after it -- either way the count is moved by exactly one
+    /// [`Self::note_failure`] per failure, never here.
     pub fn note_payload(&mut self, failure: &StreamFailure, group_path: Arc<str>, payload: &[u8]) {
         if !self.retain_payloads {
             return;
