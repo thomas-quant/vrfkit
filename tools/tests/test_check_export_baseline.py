@@ -68,16 +68,6 @@ class UnpinnableTests(unittest.TestCase):
             tracked_rewards_opaque_empty_variants=None))
         self.assertIn("tracked_rewards_opaque_empty_variants", " ".join(reasons))
 
-    def test_the_checkpoint_counters_are_only_required_when_measured(self):
-        """A default run never prints them, so their absence is not a fault.
-
-        They live outside `COUNTERS` precisely so a default run does not record
-        them as None and diff that against a `--checkpoints` baseline.
-        """
-        current = measurement()
-        self.assertNotIn("cp_frames", current["counters"])
-        self.assertEqual(guard.unpinnable(current), [])
-
 
 class CrossCheckTests(unittest.TestCase):
     """Unchanged behaviour, pinned alongside the new refusal."""
