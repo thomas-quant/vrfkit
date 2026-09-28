@@ -152,7 +152,8 @@ vrfkit diag match.vrf --json failure-samples.json --include-payloads
 JSON schema version 3 separates main/checkpoint counters and aggregates by
 stream kind, cause, resolved group, function count, handle and consumed bits.
 `chunks` and `checkpoint_meta` also carry the ExternalData blobs and bytes and
-the GameSpecificFrameData bytes the DemoFrame walk skipped undecoded.
+the GameSpecificFrameData bytes the DemoFrame walk skipped undecoded, and the
+frames whose time was NaN or infinite (`non_finite_frame_times`).
 Totals include every failure. Distinct cells are bounded; an explicit overflow
 bucket accounts for additional keys. Check overflow before treating the listed
 groups as a complete distribution. Whole RPC payloads preserved by the parser
@@ -631,6 +632,9 @@ Every loss and fallback counter for the run, including the checkpoint pass when
 | `event_payloads_decoded` | Event payloads whose exact known arity, tag, public enum name and time relation populated the structural overlay. |
 | `event_payload_unknown_groups` | Event groups outside that measured vocabulary; their raw payload remains preserved. |
 | `event_layout_mismatches` | Known groups that failed any structural guard; all nullable overlay columns remain empty. |
+| `movement_envelope_trailers`, `movement_envelope_trailer_bits` | In each `sink` block: byte-wrapped movement streams and the bits after their envelopes, which nothing reads. Printed as `Envelope trailers:` (`Checkpoint envelope trailers:`); 24 bits per stream on every measured replay, which `verify_build_corpus.py` requires. |
+| `active_blinds_empty_trailers` | In each `sink` block: empty `ActiveBlinds` deltas whose one trailing zero byte the strict array walker was spared; the parent row keeps it. Printed as `ActiveBlinds trailers:` (`Checkpoint ActiveBlinds trailers:`). |
+| `frame_non_finite_times` | DemoFrames whose time was NaN or infinite; their packets carry 0 ms, as in the reference. `checkpoints.checkpoint_frame_non_finite_times` counts the snapshot frames. Printed as `Frame times:` (`Checkpoint frame times:`), and by `validate`. |
 
 It is `malformed_content_blocks + transform_failures + field_stream_failures +
 max(0, rpc_stream_failures - unresolved_rpc_payloads_preserved)`, computed by
@@ -1546,7 +1550,8 @@ Each replay receives `validate`, `export --checkpoints`, required-counter
 and Parquet row-count checks, and independent Python comparisons for the
 observed fields in `public_fixture_type_evidence.json`. Missing counters,
 nonzero framing/transform/array/type failures and changed inputs fail the
-strict audit. Every build must also show positive checkpoint block and
+strict audit, as does a movement envelope trailer total that is not 24 bits
+per stream. Every build must also show positive checkpoint block and
 decoded-value counts; otherwise `build_errors` makes the command fail. Unknown
 RPCs preserved whole are counted separately from loss.
 Unobserved evidence fields are reported as absent, never as verified values.
