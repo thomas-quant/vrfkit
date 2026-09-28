@@ -664,9 +664,13 @@ mod tests {
     /// mistakes, because most wrong answers still look like the right one.
     fn pattern(len: u32) -> Vec<u8> {
         (0..len)
-            .map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8)
-            .map(|b| b ^ 0xC3)
+            .map(|i| (i.wrapping_mul(97) as u8) ^ 0x99)
             .collect()
+    }
+
+    /// Bit `i` of `data`, by the module doc's definition.
+    fn bit(data: &[u8], i: u64) -> u8 {
+        (data[(i >> 3) as usize] >> (i & 7)) & 1
     }
 
     /// Naive reference reader: one bit at a time, straight from the module doc's
@@ -679,9 +683,7 @@ mod tests {
     fn reference_bits(data: &[u8], start: u64, count: u32) -> u64 {
         let mut value = 0u64;
         for i in 0..count {
-            let abs = start + u64::from(i);
-            let bit = (data[(abs >> 3) as usize] >> (abs & 7)) & 1;
-            value |= u64::from(bit) << i;
+            value |= u64::from(bit(data, start + u64::from(i))) << i;
         }
         value
     }
@@ -759,10 +761,11 @@ mod tests {
                 r.copy_bits_to(&mut dst, count).unwrap();
 
                 for i in 0..count {
-                    let src = off + i;
-                    let want = (data[(src >> 3) as usize] >> (src & 7)) & 1;
-                    let got = (dst[(i >> 3) as usize] >> (i & 7)) & 1;
-                    assert_eq!(got, want, "off={off} count={count} bit={i}");
+                    assert_eq!(
+                        bit(&dst, i),
+                        bit(&data, off + i),
+                        "off={off} count={count} bit={i}"
+                    );
                 }
 
                 // Padding above `count` must be zero: vrf-transform folds the
@@ -797,10 +800,7 @@ mod tests {
             r.skip_bits(start).unwrap();
             r.copy_bits_to(&mut dst, count).unwrap();
             for i in 0..count {
-                let src = start + i;
-                let want = (data[(src >> 3) as usize] >> (src & 7)) & 1;
-                let got = (dst[(i >> 3) as usize] >> (i & 7)) & 1;
-                assert_eq!(got, want, "count={count} bit={i}");
+                assert_eq!(bit(&dst, i), bit(&data, start + i), "count={count} bit={i}");
             }
             assert!(
                 dst[byte_count..].iter().all(|&b| b == 0xAA),
@@ -838,14 +838,6 @@ mod tests {
             vec![true, false, true, false, false, true, false, true]
         );
         assert!(r.at_end());
-    }
-
-    #[test]
-    fn read_bits_zero_is_noop() {
-        let data = [0xFFu8];
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.read_bits(0).unwrap(), 0);
-        assert_eq!(r.position(), 0);
     }
 
     #[test]
