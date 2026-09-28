@@ -21,11 +21,11 @@
     "event_layout_mismatches": 0,
     "event_payloads_decoded": 195,
     "event_payload_unknown_groups": 0,
-    "overlay_decoded_ok": 797309,
+    "overlay_decoded_ok": 797451,
     "overlay_decode_errors": 0,
     "overlay_raw_skip": 26507,
-    "overlay_not_in_table": 163567,
-    "overlay_no_field_name": 1612,
+    "overlay_not_in_table": 163788,
+    "overlay_no_field_name": 1249,
     "overlay_rows_offered": 988995,
     "effect_blobs_decoded": 61617,
     "struct_blobs_decoded": 207,
@@ -36,8 +36,8 @@
   "parquet": {
     "fields": {
       "rows": 1296660,
-      "bytes": 16457034,
-      "sha256": "54f469f93e5ae4d965cec422dfd39b8958c77104a11394095ab81105b53531cb"
+      "bytes": 16454468,
+      "sha256": "363e91b9c774a35b5a4f9e621dbe2251c4224c9c149ca2402581a98f5d479b7d"
     },
     "movement": {
       "rows": 1844147,

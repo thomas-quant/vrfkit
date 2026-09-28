@@ -293,7 +293,7 @@ class PairParsingTests(unittest.TestCase):
         )
 
     def test_every_target_is_an_absolute_object_path(self):
-        """Native `/Script/` classes and, for three pairs, Blueprint classes."""
+        """Native `/Script/` classes and, for four pairs, Blueprint classes."""
         for leaf, target in guard.remap_pairs():
             self.assertTrue(target.startswith(("/Script/", "/Game/")), f"{leaf} -> {target}")
             self.assertIn(".", target, f"{leaf} -> {target}")

@@ -66,7 +66,7 @@ use super::{ChannelState, ExportSink};
 /// bare instance name never matches a declared group and every handle it
 /// carries stays unnamed. Remapping the leaf to its class's RepLayout group
 /// lets the handles pick up names and types -- `CurrentEquippable` (the spike
-/// carrier) included. The class is usually native; three components are
+/// carrier) included. The class is usually native; four components are
 /// instances of a Blueprint class, and for those the Blueprint class is what
 /// the replay declares and what the pair names.
 ///
@@ -369,6 +369,31 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     (
         "ChooseTeleportSpot_StateComponent",
         "/Game/Characters/States/ChooseMapLocationOnNavMesh_StateComponent.ChooseMapLocationOnNavMesh_StateComponent_C",
+        GroupKind::RepLayout,
+    ),
+    // The armour section. In 13.06 the four packages that export the name --
+    // `BasicArmorItem`, `HeavyArmorItem`, `LightArmorItem` and
+    // `PlasmaArmorItem` -- all add `AttachedDamageSection` as this Blueprint
+    // subclass of `AttachedDamageSectionComponent`.
+    // Over the 1,018-replay corpus the Blueprint group is declared in all 529
+    // replays whose bare leaf carries RepLayout rows and in all 6,895
+    // checkpoints that carry them, and every handle those rows use is declared
+    // there: 2 `bAlive` (1 bit on every row), 5 `LastKnownDamageOwner` (a
+    // packed reference that consumes its window exactly on every row) and, in
+    // checkpoints only, 3 `Life` (32 bits).
+    //
+    // The pair does not reach every armour block, and that is not this table's
+    // doing. `unique_leaf_match` runs first and tries the leaf plus
+    // `Component`, so a replay that also declares the native
+    // `AttachedDamageSectionComponent` group binds the armour blocks to the
+    // native parent before this fallback is consulted. In the corpus those are
+    // exactly the 486 replays that carry Phoenix's `PreventDeathDamageSection`,
+    // a native instance. The native group declares only `bAlive` there, so
+    // handles 3 and 5 stay unnamed in those replays. This pair names only the
+    // rows that were bare; docs/DATA.md has the numbers.
+    (
+        "AttachedDamageSection",
+        "/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C",
         GroupKind::RepLayout,
     ),
     // GAS creates its attribute sets as runtime subobjects rather than as
@@ -1331,6 +1356,10 @@ mod tests {
             (
                 "ChooseTeleportSpot_StateComponent",
                 "/Game/Characters/States/ChooseMapLocationOnNavMesh_StateComponent.ChooseMapLocationOnNavMesh_StateComponent_C",
+            ),
+            (
+                "AttachedDamageSection",
+                "/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C",
             ),
         ] {
             assert_eq!(

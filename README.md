@@ -188,16 +188,16 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,457,034 |
+| `fields.parquet` | 1,296,660 | 16,454,468 |
 | `movement.parquet` | 1,844,147 | 31,886,449 |
 | `actors.parquet` | 3,827 | 87,281 |
 | `net_guids.parquet` | 16,167 | 153,606 |
 | `events.parquet` | 195 | 13,411 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,217,231 |
+| `checkpoint_fields.parquet` | 352,089 | 1,217,887 |
 | `checkpoint_actors.parquet` | 3,014 | 27,118 |
 | `checkpoint_net_guids.parquet` | 74,270 | 277,718 |
-| `checkpoint_blocks.parquet` | 22,247 | 175,046 |
+| `checkpoint_blocks.parquet` | 22,247 | 175,048 |
 | `checkpoint_guid_entries.parquet` | 74,270 | 928,714 |
 | `checkpoint_export_groups.parquet` | 8,307 | 27,041 |
 | `checkpoint_export_fields.parquet` | 49,314 | 287,130 |
@@ -749,14 +749,14 @@ partial-header and shot-array corrections and the component remaps read from the
 13.06 game:
 
 ```
-Decoded OK:   797,309      Decode errors:      0
-Raw/Skip:      26,507      Not in table: 163,567
-No field name:  1,612      Typed:          80.6%
+Decoded OK:   797,451      Decode errors:      0
+Raw/Skip:      26,507      Not in table: 163,788
+No field name:  1,249      Typed:          80.6%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (797,309 + 26,507 + 163,567 +
-1,612 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
+The four buckets partition `Rows offered` exactly (797,451 + 26,507 + 163,788 +
+1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
 in table`, and they contradicted the baseline this repo commits for the same
