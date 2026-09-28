@@ -1,18 +1,15 @@
-"""Guards for the compatible-checksum type check.
-
-The check is only worth running if three things hold, and each one can be
-broken without anything else in the repo noticing:
+"""Guards for the compatible-checksum type check, which is worth running only
+if four things hold, each breakable without anything else noticing:
 
   * the formula reproduces checksums the game itself wrote -- the vectors
-    below are declared checksums from real replays, not values this file
-    computed and then asserted;
+    below are declared checksums from real replays, not computed values;
   * a different type string does NOT reproduce them, so a match is evidence
     of the type and not of the name alone;
   * `untestable` never reaches the match count, and every counter prints
     even at zero;
   * the expected-mismatch list excuses exactly the shapes it names: any
-    other mismatch still fails, an item that applies to the input and
-    covers nothing is STALE and fails, and every count prints at zero.
+    other mismatch still fails, and an item that applies to the input and
+    covers nothing is STALE and fails.
 """
 import contextlib
 import io
@@ -27,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_checksum_types as cct  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # A second implementation of the formula, written from UE 5.3 FCrc rather than
 # from zlib: a CRC-32 table built here, `StrCrc32` feeding every TCHAR as four
 # bytes low byte first, `MemCrc32` over the little-endian static index.
@@ -68,10 +64,9 @@ def ue_checksum(name, cpp_type, static_index=0, parent=0):
     return ue_mem_crc32_u32(static_index, crc)
 
 
-# ---------------------------------------------------------------------------
 # Declared checksums from real replays (the 1,018-replay declaration corpus,
 # 11.06-13.06, collected 2026-09-28), with the parent chain that reproduces
-# them. The chains are PARENT_CHAINS entries; their provenance is there.
+# them; the chains' provenance is in PARENT_CHAINS.
 # (wire name, name hashed, C++ type, chain links, declared checksum)
 
 TRANSFORM = (("Transform", "FTransform"),)
@@ -779,9 +774,6 @@ class MainTests(unittest.TestCase):
                          [("CorrectionIndex", "match",
                            "AuthServerCorrectRepVariables:FInventoryServerCorrectRepVariables")])
 
-
-# ---------------------------------------------------------------------------
-# The expected-mismatch list
 
 #: `249` (Rotation) in two FTransforms: the committed list's two items.
 ROTATION = 747197698        # under Transform: FTransform
