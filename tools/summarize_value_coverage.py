@@ -24,9 +24,9 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .export_scan import child_exports, leftover_note, skipped_report
+    from .export_scan import discover_exports, skipped_report
 else:
-    from export_scan import child_exports, leftover_note, skipped_report
+    from export_scan import discover_exports, skipped_report
 
 VALUE_COLUMNS = ("value_i64", "value_f64", "value_bool", "value_str")
 TABLES = ("fields", "checkpoint_fields")
@@ -60,26 +60,8 @@ def _count_parquet(parquet: pq.ParquetFile, filename: str) -> dict[str, int]:
     return {"rows": rows, "typed_rows": typed, "untyped_rows": rows - typed, "multi_value_rows": multi}
 
 
-def discover(inputs: list[Path], skipped: list[Path] | None = None) -> list[Path]:
-    """Exports named directly, or the direct child exports of a parent.
-
-    A parent's `vrfkit export` staging/backup leftovers are never exports
-    (see `export_scan.py`); they are appended to `skipped` when it is given.
-    """
-    exports: set[Path] = set()
-    for root in inputs:
-        if not root.is_dir():
-            raise ValueError(f"not an export directory or parent: {root}")
-        if (root / "fields.parquet").is_file():
-            exports.add(root.resolve())
-            continue
-        children, leftovers = child_exports(root)
-        if skipped is not None:
-            skipped.extend(leftovers)
-        if not children:
-            raise ValueError(f"no direct child exports in {root}{leftover_note(leftovers)}")
-        exports.update(child.resolve() for child in children)
-    return sorted(exports)
+#: Export directories named directly, or the direct child exports of a parent.
+discover = discover_exports
 
 
 def count_export(directory: Path) -> dict[str, dict[str, int]]:

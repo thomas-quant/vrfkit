@@ -82,6 +82,31 @@ def child_exports(parent: Path) -> tuple[list[Path], list[Path]]:
     return candidates, skipped
 
 
+def discover_exports(inputs: Iterable[Path], skipped: list[Path] | None = None, *,
+                     error: type[Exception] = ValueError,
+                     no_children: str = "no direct child exports in") -> list[Path]:
+    """Exports named directly, or the direct child exports of a parent.
+
+    Sorted, resolved and unique. A parent's generated siblings are never
+    exports; they are appended to `skipped` when it is given. `error` and
+    `no_children` keep each caller's own exception class and wording.
+    """
+    exports: set[Path] = set()
+    for root in inputs:
+        if not root.is_dir():
+            raise error(f"not an export directory or parent: {root}")
+        if (root / "fields.parquet").is_file():
+            exports.add(root.resolve())
+            continue
+        children, leftovers = child_exports(root)
+        if skipped is not None:
+            skipped.extend(leftovers)
+        if not children:
+            raise error(f"{no_children} {root}{leftover_note(leftovers)}")
+        exports.update(child.resolve() for child in children)
+    return sorted(exports)
+
+
 def generated_ancestor(path: Path, root: Path) -> Path | None:
     """The generated sibling directory `path` lies in below `root`, if any.
 
