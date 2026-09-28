@@ -744,8 +744,9 @@ ADDITIONS = [
     # LocalizedStat, an FText whose string-table key is the statistic's name
     # (EnemiesBlinded, DamageDealt, ...): 29 distinct values over 4,341 rows,
     # each 1:1 with a `Statistic` value and without a collision; all 4,341
-    # decode with zero residual bits on decode_ftext's layout. `Statistic`
-    # itself decodes to a bare integer, so this column is the only
+    # decode with zero residual bits on decode_ftext's layout (an earlier
+    # check: 225 of 225 rows, to EnemiesBlocked, HealingDone and 17 more).
+    # `Statistic` itself decodes to a bare integer, so this column is the only
     # machine-readable map from those integers to names.
     ("/Game/Characters/_Core/Comp_AbilityStatisticsReplicator"
      ".Comp_AbilityStatisticsReplicator_C",

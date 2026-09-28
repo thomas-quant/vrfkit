@@ -1,18 +1,10 @@
-"""Guards for the ADDITIONS pass in apply_type_corrections.py.
+"""Guards for apply_type_corrections.py: its retype rules, its ADDITIONS
+insertion, and `main()`'s verdict on the file.
 
-The corrections in that script rewrite entries that already exist; the
-additions pass INSERTS entries the C# descriptors cannot declare. Insertion has
-two failure modes the replacements do not:
-
-* the table exists in two layouts -- one entry per line as
-  extract_descriptors.py emits it, and the rustfmt'd multi-line form that gets
-  committed. The script's own docstring records that a newline-anchored helper
-  silently matched nothing on a freshly generated table, which is exactly when
-  it is supposed to run. An insertion pass that only works on one layout fails
-  the same way.
-* the slice is sorted by (group_path, field_name) and declared with an explicit
-  length. Inserting at the wrong position breaks `tests::overlay::table_is_sorted`
-  and forgetting the length breaks the build.
+Every fixture exists in both table layouts (one entry per line as generated,
+and rustfmt's multi-line form as committed), because a pass that works on only
+one fails silently on the other. The slice is sorted by (group_path,
+field_name) and declares its length, so an insertion must keep both true.
 """
 import contextlib
 import io
@@ -27,10 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import apply_type_corrections as atc  # noqa: E402
 
 
-#: A synthetic table containing every real ADDITION plus bookends that sort
-#: before and after all of them. DERIVED from ADDITIONS rather than hardcoded:
-#: the first version of this file pinned "the two entries" as a literal and
-#: broke the moment a third was added, which is noise rather than signal.
+#: A synthetic table holding every real ADDITION between bookends that sort
+#: before and after all of them; derived from ADDITIONS, so it cannot go stale.
 BOOKENDS = [
     ("/Game/AAA.AAA_C", "Alpha"),
     ("/Script/ShooterGame.AmmoComponent", "MagazineAmmo"),
@@ -54,21 +44,14 @@ def rustfmt_type(field_type):
 def render_table(rows, one_line=False, braced_multiline=False, handles=None):
     """A table.rs holding `rows`, each `(group, field, full FieldType)`.
 
-    The default layout is the rustfmt'd one that is committed; `one_line` is
-    the one extract_descriptors.py emits, before cargo fmt. Rows carry their
-    own type because an Int32-only table cannot show a wrong-type bug -- the
-    substring check it has to expose is `"Int32" in "FieldType::UInt32"`.
-
-    `braced_multiline` lays braced types (`RepMovement { .. }`) out over
-    several lines, the way the committed, rustfmt'd table.rs has them. Without
-    it the formatted layout keeps them on one line, where a pass that replaces
-    the one-line type literal still matches although the real file would not.
-
-    With `handles` (`(group, handle, field)` rows, possibly none) the file is
-    complete: both generated header lines and both slice lengths are written
-    truthfully, and OVERLAY_HANDLE_TABLE follows the last entry as it does in
-    the real file. Without it the header lines are placeholders and the file
-    ends with OVERLAY_TABLE.
+    The default layout is the committed rustfmt'd one; `one_line` is the one
+    extract_descriptors.py emits. Rows carry their own type because an
+    Int32-only table cannot show the `"Int32" in "FieldType::UInt32"` bug.
+    `braced_multiline` breaks braced types over lines as rustfmt does, where a
+    one-line literal replace would no longer match. With `handles` (possibly
+    empty) the file is complete -- true header lines and slice lengths, and
+    OVERLAY_HANDLE_TABLE after the last entry; without it the header lines are
+    placeholders and the file ends with OVERLAY_TABLE.
     """
     if one_line:
         body = "".join(
@@ -121,17 +104,11 @@ N_ADDED = len(atc.ADDITIONS)
 
 class AdditionsTests(unittest.TestCase):
     def test_every_addition_names_a_real_field_type(self):
-        """`FieldType::X` with a plausible X, and no duplicates.
-
-        The COUNT is deliberately not pinned -- see 26-I and 32 for the bar an
-        addition has to clear. What is pinned is that each one is well formed
-        and appears once.
-        """
+        """Each addition is well formed (`FieldType::X`) and appears once."""
         seen = set()
         for group, field, ftype in atc.ADDITIONS:
-            # Most groups are full UE paths ("/Script/..."); a few replay-declared
-            # groups are bare names ("MagazineAmmo"). Either is valid; empty or
-            # non-alphanumeric-leading garbage is not.
+            # Every group today is a full UE path; a bare replay-declared name
+            # would be valid too. Empty or non-alphanumeric-leading is not.
             self.assertTrue(group.startswith("/") or group[0].isalpha(), group)
             self.assertTrue(field and not field.startswith("_"), field)
             self.assertTrue(ftype.startswith("FieldType::"), ftype)
@@ -139,136 +116,16 @@ class AdditionsTests(unittest.TestCase):
             seen.add((group, field))
 
     def test_additions_stay_the_narrow_exception(self):
-        """A guardrail on scope: trips on every change so growth is deliberate.
-
-        Each entry asserts a type NO descriptor declares, so the bar is
-        individual wire evidence -- the ADDITIONS rationale block plus a
-        per-field Rust pin in tests/overlay.rs. The count is pinned exactly
-        so adding or removing one forces this number to update in the same
-        commit. The prior `<= 8` ceiling silently went stale at 13; an exact
-        count cannot.
-
-        25 -> 47 is one piece of evidence, not 22: `FTransform` reaches this
-        wire as three separate double vectors, and the 22 entries apply that
-        one finding to every group carrying them. `Scale3D` reading exactly
-        (1,1,1) is what rules out any other split, and the replay's own
-        `compatible_checksum` agrees with the grouping without having been used
-        to derive it.
-
-        47 -> 49 is two ordinary additions: `StopMovementTime`, the other half
-        of a pair whose `StartMovementTime` is already Float, and
-        `HandleNumber`, whose 3,741 rows hold a dense 1..765. One entry each is
-        enough -- checksum propagation carries both to their sibling RPCs.
-
-        70 -> 73 types the authoritative scoreboard counters.
-        `BasicCombatStatsComponent` carries the cumulative K/D/A the game's own
-        scoreboard reads from: on release-13.02 all 407 observed updates are
-        exactly 32 bits, and read little-endian as Int32 the final per-player
-        counters match the in-game scoreboard on all ten players, including two
-        post-round objective-bomb deaths that the kill RPC stream reports but
-        the scoreboard deliberately excludes.
-
-        73 -> 86 types two time fields verified across all 714 exports. Four
-        additions cover every group carrying `ServerMovementTime`; nine cover
-        the descriptor-silent pawn groups carrying
-        `ReplayLastTransformUpdateTimeStamp`. The other 33 timestamp groups are
-        corrections from the descriptor's Skip, so they do not count here.
-
-        64 -> 70 is two findings, not six. Five entries type `249` as the
-        rotation that pairs with the already-typed `248` on every RPC that
-        sends the pair numbered -- 441,814 rows, whose 3/19/35/51-bit widths
-        are `3 + 16 x (flags set)` and nothing else, and whose named spelling
-        the table already carries on the same UFunction. The sixth is
-        `AuthCurrentRandomSeed`, 120,853 rows of near-total distinctness across
-        the full i32 range.
-
-        125 -> 127 is one finding on two twins: `EffectManagerComponent` on
-        the weapons' `MulticastPlay{Continuous,OneShot}EffectFromClient`.
-        Checksum 1051633025 belongs to these two parameters only; all
-        3,112,054 rows over the 1,018-replay audit are IntPacked GUIDs that
-        resolve to `EffectManager`, whose outer is the holder's pawn -- and
-        equals the weapon's typed Instigator at that time on 3,111,803.
-
-        127 -> 132 is the rest of `NetMulticastApplyForceModule` beside the
-        already-typed HandleNumber/SourceLocation: RespawnNumber, NetTimestamp,
-        ModuleType, Module, Character -- 665,519 calls each. Each checks out
-        against something outside itself: RespawnNumber against the typed
-        AresInventory counter, NetTimestamp against two typed clocks, Module
-        by resolving to ForceModule classes, Character by equalling the row's
-        own actor GUID, and ModuleType by agreeing with the Remove RPC on
-        every paired row. Remove's ModuleType is not an addition: it follows
-        through the checksum table, like HandleNumber does.
-
-        132 -> 135 types `ReadyingStateComponent.AuthEquipSpeed` (3 bits on
-        all 1,015,515 rows; equals its EnumByte sibling AutoEquipSpeed in the
-        same packet) and the two AresInventory correction counters (32 bits,
-        strictly increasing, LastSeen < Correction on every paired row, and
-        every checkpoint value equal to the preceding main-stream one).
-
-        135 -> 137 types HawkFlash's `ReplicatedMovement` (ByteComponents:
-        the only reading that consumes all 1,033,952 payloads; Short fails on
-        54.6%) and its `Banking` (64-bit doubles, -180..180, on 801,700 rows),
-        on that exact group only.
-
-        137 -> 142 is one finding: Cypher's trapwire and cage classes were
-        renamed in 13.01, and five descriptor-typed fields -- `Deployed` on
-        both wires, `CreatedByCharacter` on both ability items, the cage's
-        `RelativeScale3D` -- follow them to the new paths with the same name,
-        checksum and width. Relocations, like BaseTeamState, not new types.
-
-        63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
-        for being a wrong `FString`; it is back because a decoder now exists
-        and the reason given for waiting was itself wrong -- `Statistic` was
-        said to carry the same fact, but it decodes to a bare integer and no
-        table in this repo maps those integers to names. 225 of 225 rows now
-        decode to `EnemiesBlocked`, `HealingDone` and 17 more.
-
-        61 -> 63 types Phoenix's `MulticastAddSmokeScreenPoint`. Viper's class
-        declares the same RPC and was typed; Phoenix's was not, so 2,791 rows
-        over 31 replays read null while decode errors stayed at 0, and Viper's
-        working side made the ability look handled. The checksum fallback could
-        not carry it -- different properties, different checksums -- and
-        refusing rather than guessing is what made this a missing name.
-
-        62 -> 61 drops `LocalizedStat`: typed `FString`, it decoded to null on
-        3,011 of 3,011 rows because the wire is an `FText`. Removing a type that
-        produces nothing is not a loss -- the bits stay in `raw_bits`.
-
-        56 -> 62 added the six members of `AbilityCastsThisRound[].Effects[]`,
-        the authoritative debuff log. `AffectedPlayer` resolves to a manifest
-        actor 224/224 over exactly 10 players.
-
-        49 -> 56 added the seven members of `AbilityCastsThisRound`, the
-        per-cast ability log. One finding, seven fields, each checked against
-        something outside itself -- `Player` matches a manifest subject 352/352,
-        `Round` covers exactly 0..17.
-
-        48 -> 49 added `CalloutRegionTrackingComponent.CurrentRegion`, the named
-        map area a player is standing in: every one of its 1,957 non-zero rows
-        resolves through `net_guids` to a `CalloutRegion_*` path.
-
-        49 -> 48 removed one: `MagazineAmmo.AmmoCount`. The cooked game says
-        that group is an `AmmoComponent`, which the replay declares with handle
-        2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
-        reaches a real declaration and the guessed name is gone.
+        """Pinned exactly, so adding or removing an ADDITION updates this
+        number in the same commit. The evidence for each lives at its entry in
+        apply_type_corrections.py; check_docs measures the count too.
         """
         self.assertEqual(len(atc.ADDITIONS), 142, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
-        """Same guardrail for the handle -> name additions.
-
-        Each names a handle the replay leaves unnamed so the overlay can type
-        it; the (group, field_name) must also appear in ADDITIONS, or the name
-        resolves to nothing. Pinned exactly like ADDITIONS.
-
-        Currently empty. Its one entry named `MagazineAmmo` handle 2 as
-        `AmmoCount`, which the cooked game corrected: that group is an
-        `AmmoComponent`, and the replay declares handle 2 on it as
-        `AuthResourceAmount`. The leaf remap in `sink/paths.rs` reaches the real
-        declaration, so the hand-written name is not needed. The mechanism stays
-        because the next unnamed handle will not necessarily have a native group
-        to borrow from.
-        """
+        """The same pin for the handle -> name additions (empty; docs/DATA.md
+        says why the mechanism stays). Each (group, field_name) must also be an
+        ADDITION, or the name would type nothing."""
         self.assertEqual(len(atc.HANDLE_ADDITIONS), 0, atc.HANDLE_ADDITIONS)
         addition_keys = {(g, f) for g, f, _t in atc.ADDITIONS}
         for group, _handle, field in atc.HANDLE_ADDITIONS:
@@ -278,13 +135,9 @@ class AdditionsTests(unittest.TestCase):
             )
 
     def test_every_addition_is_also_verified(self):
-        """An addition absent from EXPECTED would apply once and never be checked.
-
-        The whole `FieldType::...` is asserted, not its variant name: EXPECTED
-        now carries full types so `verify` can compare them exactly, and the
-        variant-only form could not tell `FieldType::Int32` from
-        `FieldType::UInt32`.
-        """
+        """An addition absent from EXPECTED would apply once and never be
+        checked. The whole `FieldType::...` is asserted: a variant name alone
+        cannot tell `FieldType::Int32` from `FieldType::UInt32`."""
         for group, field, ftype in atc.ADDITIONS:
             self.assertIn((group, field, ftype), atc.EXPECTED)
 
@@ -333,14 +186,8 @@ class AdditionsTests(unittest.TestCase):
         )
 
     def test_both_generated_header_lines_are_recounted(self):
-        """The shape line went stale for exactly the reason the bucket line did.
-
-        `// N entries from M groups.` is written by extract_descriptors.py from
-        the descriptors it read, and ADDITIONS then inserts entries -- and, when
-        an addition names a group no descriptor declared, a whole new group. The
-        committed table said "1185 entries from 171 groups" above a bucket line
-        that summed to 1188, over a slice declared 1188 long.
-        """
+        """`// N entries from M groups.` counts the descriptors; ADDITIONS add
+        entries and, for a group no descriptor declares, whole groups."""
         out, _ = atc.apply_additions(render_table(WITHOUT))
         out, lines = atc.rewrite_header(out)
         n_groups = len({g for g, _f in GROUPS})
@@ -367,18 +214,10 @@ class AdditionsTests(unittest.TestCase):
             atc.rewrite_header(out.replace("// 0 entries from 0 groups.\n", ""))
 
     def test_appends_past_the_end_of_the_slice(self):
-        """An entry sorting after every existing entry is the new tail, not a
-        fatal error.
-
-        The first `];` in the final split block is OVERLAY_TABLE's close; the
-        splice lands before it and the table stays sorted. The prior behavior
-        was to refuse -- that blocked any addition whose group sorts last
-        (e.g. ZoomMultiplierComponent, which is how the append path was
-        forced into existence), so the append is handled now rather than
-        rejected. The end-to-end insertion tests above also cross this path
-        because the ZoomMultiplier additions sort past the synthetic tail
-        bookend.
-        """
+        """An entry sorting after every existing one is the new tail, spliced
+        before OVERLAY_TABLE's `];` (the first in the final split block), not
+        refused. The insertion tests above never reach this path: every
+        ADDITION sorts before their ZzzTail bookend."""
         earlier = [("/AAAAA.First", "Field", "FieldType::Int32")]
         out, n = atc.apply_additions(render_table(earlier))
         self.assertEqual(n, len(atc.ADDITIONS))
@@ -390,12 +229,9 @@ class AdditionsTests(unittest.TestCase):
 
 
 class RetypeTests(unittest.TestCase):
-    """`retype` keys on each block's OWN entry, never on text elsewhere.
-
-    The split on `    OverlayEntry {` leaves OVERLAY_HANDLE_TABLE in the last
-    block, and that table repeats group paths and field names. A substring pass
-    would read them as the last entry's; these pin that it does not.
-    """
+    """`retype` keys on each block's OWN entry, never on text elsewhere: the
+    last split block also holds OVERLAY_HANDLE_TABLE, which repeats group paths
+    and field names."""
 
     GROUP = "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation"
 
@@ -434,10 +270,9 @@ class RetypeTests(unittest.TestCase):
                 "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=2))
 
     def test_a_braced_retype_changes_the_entry_it_counts(self):
-        """The count claims an entry changed. rustfmt breaks a braced type
-        over lines, so its one-line literal is not in the file: replacing that
-        literal changed nothing while the count still said one entry had. A
-        change the rewrite cannot make in place is refused, not guessed."""
+        """The count claims an entry changed, so it must have: rustfmt breaks a
+        braced type over lines, where its one-line literal is not there to
+        replace. A change that cannot be made in place is refused."""
         group = atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS[0]
         rep = ("FieldType::RepMovement {{ rotation: RotatorQuantization::{}, "
                "location: VectorQuantization::{} }}")
@@ -470,16 +305,11 @@ def whole_table(overrides=None, drop=(), one_line=False, braced_multiline=False,
                 extra=(), handles=()):
     """A complete table.rs that satisfies every correction, minus `overrides`.
 
-    Derived from EXPECTED rather than hand-written, so it cannot go stale as
-    corrections are added. `overrides` maps an EXPECTED key to the type the
-    file should carry INSTEAD, which is how "regenerated but never corrected"
-    is expressed, and `drop` leaves keys out. The two generated header lines
-    and both slice lengths are written truthfully, so `main()` fails for the
-    reason under test and not because the fixture is malformed.
-
-    `extra` adds `(group, field, type)` rows and `handles` fills
-    OVERLAY_HANDLE_TABLE with `(group, handle, field)` entries, the text the
-    real file carries after its last OverlayEntry.
+    Derived from EXPECTED, so it cannot go stale. `overrides` maps an EXPECTED
+    key to the type the file carries INSTEAD ("regenerated but never
+    corrected"), `drop` leaves keys out, `extra` adds `(group, field, type)`
+    rows and `handles` fills OVERLAY_HANDLE_TABLE. Header lines and slice
+    lengths are true, so `main()` fails for the reason under test.
     """
     overrides = overrides or {}
     rows = [
@@ -490,12 +320,10 @@ def whole_table(overrides=None, drop=(), one_line=False, braced_multiline=False,
     return render_table(sorted(rows), one_line, braced_multiline, list(handles))
 
 
-#: The two mutations below are deliberately BUCKET-NEUTRAL -- they swap one
-#: typed variant for another, so the generated header lines are identical
-#: either way and `--check` cannot pass or fail for header reasons.
-#:
-#: `SmokeScreen.ReplicatedMovement` is rewritten per entry, so it applies in
-#: BOTH layouts: a file carrying ShortComponents is correctable.
+#: The mutations below are BUCKET-NEUTRAL: each swaps one typed variant for
+#: another, so the header lines are identical either way and `--check` fails
+#: for the reason under test, not a header. SmokeScreen's rule rewrites each
+#: entry in both layouts, so a file carrying ShortComponents is correctable.
 UNCORRECTED_SMOKESCREEN = {
     ("SmokeScreen", "ReplicatedMovement"):
         "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
@@ -517,8 +345,7 @@ UNCORRECTED_GAME_OBJECT_ROTATORS = {
     for group in atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS
 }
 #: A correction whose entry is gone, as if the descriptors stopped declaring
-#: it: no pass can create the entry, so the correction is DEAD in either
-#: layout and has to fail loudly. Pass it as `drop=`.
+#: it: no rule can create it, so it is DEAD in either layout. Pass as `drop=`.
 DEAD_TIME_REMAINING = [("TimedBomb.TimedBomb_C", "TimeRemainingToExplode")]
 #: The first line of each FAILED section `main()` prints.
 DEAD_HEADER = "corrections are missing from"
@@ -526,14 +353,8 @@ UNCORRECTED_HEADER = "the file was never corrected"
 
 
 class MainOnDiskTests(unittest.TestCase):
-    """`--check` verified the CORRECTED COPY, not the file on disk.
-
-    It applied every correction to the in-memory content and then verified
-    that, suppressing only the write. So it could not tell "table.rs is already
-    corrected" from "table.rs is correctable and nobody corrected it" -- and CI
-    runs exactly this command, so a regenerated table.rs committed without
-    running the script goes green while the Rust build uses the uncorrected one.
-    """
+    """`main()` on a real file: `--check` must judge the file on disk, not the
+    corrected copy, so a correctable file nobody corrected fails CI."""
 
     def setUp(self):
         self._real_table = atc.TABLE_RS
@@ -562,7 +383,7 @@ class MainOnDiskTests(unittest.TestCase):
         self.assertIn("verified", out)
 
     def test_a_correctable_but_uncorrected_file_fails(self):
-        """The whole point. The passes CAN fix it, and nobody ran them."""
+        """The rules CAN fix it, and nobody ran them."""
         code, _out, err = self.run_main(
             whole_table(UNCORRECTED_SMOKESCREEN), "--check"
         )
@@ -570,7 +391,7 @@ class MainOnDiskTests(unittest.TestCase):
         self.assertIn("ShortComponents", err)
 
     def test_a_dead_pattern_still_fails_loudly(self):
-        """Unchanged behaviour: a correction that cannot be applied at all."""
+        """A correction that cannot be applied at all."""
         code, _out, err = self.run_main(
             whole_table(drop=DEAD_TIME_REMAINING), "--check"
         )
@@ -580,8 +401,8 @@ class MainOnDiskTests(unittest.TestCase):
 
     def test_the_two_failure_modes_are_distinguishable(self):
         """One table can trip BOTH at once -- a correction whose entry is gone
-        and one the passes apply fine in memory. One report that hides the
-        other is how the second one gets missed."""
+        and one the rules apply in memory -- and neither report may hide the
+        other."""
         code, _out, err = self.run_main(
             whole_table(UNCORRECTED_SMOKESCREEN, drop=DEAD_TIME_REMAINING), "--check")
         self.assertEqual(code, 1)
@@ -623,9 +444,8 @@ class MainOnDiskTests(unittest.TestCase):
             self.assertEqual(atc.main(), 0)
 
     def test_the_seeker_nade_location_level_is_corrected_in_both_layouts(self):
-        """The one two-decimal class. The pass that pins it must fire on the
-        generator's one-line output AND on the rustfmt'd file, and `--check`
-        must refuse a file that still carries the whole-unit default."""
+        """The one two-decimal class: its rule fires in both layouts, and
+        `--check` refuses a file still carrying the whole-unit default."""
         want = (
             "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
             "location: VectorQuantization::RoundTwoDecimals }"
@@ -646,13 +466,9 @@ class MainOnDiskTests(unittest.TestCase):
                     types[(atc.SEEKER_NADE_GROUP, "ReplicatedMovement")], want)
 
     def test_the_game_object_rotators_are_corrected_in_both_layouts(self):
-        """The five AGameObject classes read byte rotator components.
-
-        The pass has to fire on the generator's one-line output and on the
-        rustfmt'd file -- a `str.replace` of the one-line type literal would
-        match the first and silently not the second -- and `--check` must
-        refuse a file that still carries the short default on any of them.
-        """
+        """The five AGameObject classes read byte rotator components: the rule
+        fires in both layouts (a one-line literal replace would silently miss
+        the rustfmt'd one), and `--check` refuses the short default on any."""
         want = (
             "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
             "location: VectorQuantization::RoundWholeNumber }"
@@ -695,24 +511,18 @@ class MainOnDiskTests(unittest.TestCase):
         self.assertEqual(out, whole_table())
 
     def test_an_uncorrected_weapon_group_is_reported(self):
-        """The 18 weapon groups had NO expectation of any kind.
-
-        EXPECTED's "215"/"216" rows name five hardcoded non-weapon groups; the
-        weapon pass discovers its own targets and nothing checked its result,
-        so it could no-op in silence.
-        """
+        """EXPECTED names only the five non-weapon "215"/"216" groups; the
+        weapon rule discovers its targets, so its result is checked from the
+        table, or it could no-op in silence."""
         raw_weapons = {(WEAPON_GROUP, "215"): "FieldType::Raw"}
         code, _out, err = self.run_main(whole_table(raw_weapons), "--check")
         self.assertEqual(code, 1, "an uncorrected weapon group must be caught")
         self.assertIn(WEAPON_GROUP, err)
 
     def test_a_table_with_no_weapon_groups_at_all_is_reported(self):
-        """The other shape of the same silence: the discovery finds nothing.
-
-        `content.splitlines()` is how the pass finds its groups. If that ever
-        stops matching, or the groups stop being emitted, "Applied 0" is the
-        only trace -- so the absence itself has to be the failure.
-        """
+        """The other shape of the same silence: discovery finds no weapon
+        group at all, and a count of 0 would be the only trace, so the
+        absence itself fails."""
         code, _out, err = self.run_main(
             whole_table(drop=[(WEAPON_GROUP, "215"), (WEAPON_GROUP, "216")]),
             "--check",
@@ -726,13 +536,11 @@ class MainOnDiskTests(unittest.TestCase):
         self.assertIn(f"all {len(atc.EXPECTED) + len(WEAPON_ROWS)} ", out)
 
     def test_the_handle_table_cannot_retype_the_last_entry(self):
-        """Splitting on `    OverlayEntry {` leaves OVERLAY_HANDLE_TABLE inside
-        the last block, and handle entries repeat group paths and field names.
-        A pass that looks for its trigger anywhere in the block reads a handle
-        entry as the last entry's own group or field and retypes that entry.
-        Nothing reports it: verify() checks EXPECTED keys only, and the exit
-        code is 0. One case per trigger a pass has used; each tail type is the
-        type that pass rewrites."""
+        """A rule that looked for its trigger anywhere in the last block would
+        read a handle entry (OVERLAY_HANDLE_TABLE sits there) as the last
+        entry's group or field and retype it, unreported: verify() checks
+        EXPECTED keys only and the exit code is 0. One case per trigger a rule
+        has used; each tail type is the type that rule rewrites."""
         tail = ("zzz/Tail.Tail_C", "Unrelated")
         short_whole = (
             "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
@@ -775,13 +583,8 @@ class MainOnDiskTests(unittest.TestCase):
 
 
 class VerifyMatchesTheWholeTypeTests(unittest.TestCase):
-    """`verify` compared the required type as a SUBSTRING of the found one.
-
-    `"Int32" in "FieldType::UInt32"` is True and `"Byte" in "FieldType::EnumByte"`
-    is True, so an entry with the wrong signedness or the wrong byte variant
-    verified clean -- the two mistakes a hand-written type table is most likely
-    to make were the two it could not catch.
-    """
+    """`verify` compares whole types: a substring test passes the wrong
+    signedness and the wrong byte variant (see EXPECTED)."""
 
     def _wrong_type(self, group, field, wrong):
         """One-entry table declaring a real EXPECTED key at the wrong type."""
@@ -816,13 +619,9 @@ class VerifyMatchesTheWholeTypeTests(unittest.TestCase):
         )
 
     def test_a_pre_existing_wrong_type_is_skipped_by_additions_and_reported(self):
-        """The other half: ADDITIONS skips a key that is already there.
-
-        So a table that already carries the key at the WRONG type is neither
-        corrected nor -- before this -- reported. Skipping is the right call
-        (silently overwriting a declaration the descriptors do make would be
-        worse), which is exactly why the report has to fire.
-        """
+        """ADDITIONS skips a key already present (overwriting a declaration the
+        descriptors make would be worse), so a key there at the WRONG type must
+        be reported instead."""
         table = self._wrong_type(
             "/Script/ShooterGame.BaseTeamState", "LoadoutValue", "FieldType::UInt32"
         )
@@ -834,7 +633,7 @@ class VerifyMatchesTheWholeTypeTests(unittest.TestCase):
         )
 
     def test_the_committed_types_still_verify(self):
-        """The tightening must not turn the real table's types into failures."""
+        """The exact comparison passes the committed table."""
         problems = atc.verify(atc.TABLE_RS.read_text(encoding="utf-8"))
         self.assertEqual(problems, [])
 
