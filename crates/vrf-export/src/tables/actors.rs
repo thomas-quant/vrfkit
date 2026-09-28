@@ -6,11 +6,10 @@
 
 use std::sync::Arc;
 
-use arrow_array::builder::StringDictionaryBuilder;
-use arrow_array::types::Int32Type;
-use arrow_array::{ArrayRef, Float32Array, RecordBatch, StringArray, UInt32Array};
+use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
+use super::columns::{actor_columns, batch};
 use crate::error::ExportError;
 use crate::record::ActorRecord;
 use crate::schema::actors_schema_ref;
@@ -57,72 +56,6 @@ impl Table for ActorsTable {
     }
 
     fn build_batch(rows: &[ActorRecord]) -> Result<RecordBatch, ExportError> {
-        let len = rows.len();
-
-        let time_ms: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.time_ms),
-        ));
-        let packet_id: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.packet_id),
-        ));
-        let channel_index: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.channel_index),
-        ));
-        let actor_net_guid: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.actor_net_guid),
-        ));
-        let event: ArrayRef = Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.event)));
-
-        // Dictionary-encoded class_path (nullable).
-        let mut class_path_builder =
-            StringDictionaryBuilder::<Int32Type>::with_capacity(len, 128, len * 30);
-        for r in rows {
-            match &r.class_path {
-                Some(p) => class_path_builder.append_value(p),
-                None => class_path_builder.append_null(),
-            }
-        }
-        let class_path: ArrayRef = Arc::new(class_path_builder.finish());
-
-        // Dictionary-encoded archetype_path (nullable).
-        let mut archetype_path_builder =
-            StringDictionaryBuilder::<Int32Type>::with_capacity(len, 128, len * 30);
-        for r in rows {
-            match &r.archetype_path {
-                Some(p) => archetype_path_builder.append_value(p),
-                None => archetype_path_builder.append_null(),
-            }
-        }
-        let archetype_path: ArrayRef = Arc::new(archetype_path_builder.finish());
-
-        let spawn_x: ArrayRef = Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.spawn_x)));
-        let spawn_y: ArrayRef = Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.spawn_y)));
-        let spawn_z: ArrayRef = Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.spawn_z)));
-        let spawn_pitch: ArrayRef =
-            Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.spawn_pitch)));
-        let spawn_yaw: ArrayRef =
-            Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.spawn_yaw)));
-        let spawn_roll: ArrayRef =
-            Arc::new(Float32Array::from_iter(rows.iter().map(|r| r.spawn_roll)));
-
-        RecordBatch::try_new(
-            actors_schema_ref(),
-            vec![
-                time_ms,
-                packet_id,
-                channel_index,
-                actor_net_guid,
-                event,
-                class_path,
-                archetype_path,
-                spawn_x,
-                spawn_y,
-                spawn_z,
-                spawn_pitch,
-                spawn_yaw,
-                spawn_roll,
-            ],
-        )
-        .map_err(|e| ExportError::Parquet(e.into()))
+        batch(actors_schema_ref(), actor_columns(rows.iter(), rows.len()))
     }
 }

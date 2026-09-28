@@ -1,3 +1,4 @@
+use super::columns::batch;
 use crate::schema::partials_schema_ref;
 use crate::writer::{Table, TableWriter};
 use crate::{ExportError, PartialRecord};
@@ -38,7 +39,7 @@ impl Table for PartialsTable {
         let b = |f: fn(&PartialRecord) -> bool| -> ArrayRef {
             Arc::new(BooleanArray::from_iter(r.iter().map(f)))
         };
-        RecordBatch::try_new(
+        batch(
             partials_schema_ref(),
             vec![
                 s(|x| x.source),
@@ -84,7 +85,6 @@ impl Table for PartialsTable {
                 )),
             ],
         )
-        .map_err(|e| ExportError::Parquet(e.into()))
     }
 }
 

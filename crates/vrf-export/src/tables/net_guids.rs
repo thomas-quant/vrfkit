@@ -11,11 +11,10 @@
 
 use std::sync::Arc;
 
-use arrow_array::builder::StringDictionaryBuilder;
-use arrow_array::types::Int32Type;
-use arrow_array::{ArrayRef, RecordBatch, UInt32Array};
+use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
+use super::columns::{batch, net_guid_columns};
 use crate::error::ExportError;
 use crate::record::NetGuidRecord;
 use crate::schema::net_guids_schema_ref;
@@ -54,24 +53,9 @@ impl Table for NetGuidsTable {
     }
 
     fn build_batch(rows: &[NetGuidRecord]) -> Result<RecordBatch, ExportError> {
-        let len = rows.len();
-
-        let net_guid: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.net_guid),
-        ));
-
-        let mut path_builder =
-            StringDictionaryBuilder::<Int32Type>::with_capacity(len, 1024, len * 40);
-        for r in rows {
-            path_builder.append_value(&r.path);
-        }
-        let path: ArrayRef = Arc::new(path_builder.finish());
-
-        let outer_net_guid: ArrayRef = Arc::new(UInt32Array::from_iter(
-            rows.iter().map(|r| r.outer_net_guid),
-        ));
-
-        RecordBatch::try_new(net_guids_schema_ref(), vec![net_guid, path, outer_net_guid])
-            .map_err(|e| ExportError::Parquet(e.into()))
+        batch(
+            net_guids_schema_ref(),
+            net_guid_columns(rows.iter(), rows.len()),
+        )
     }
 }

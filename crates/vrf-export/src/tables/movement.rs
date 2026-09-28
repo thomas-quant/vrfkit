@@ -10,6 +10,7 @@ use std::sync::Arc;
 use arrow_array::{ArrayRef, Float32Array, RecordBatch, UInt8Array, UInt32Array};
 use arrow_schema::Schema;
 
+use super::columns::batch;
 use crate::error::ExportError;
 use crate::record::MovementRecord;
 use crate::schema::movement_schema_ref;
@@ -81,62 +82,39 @@ impl Table for MovementTable {
     }
 
     fn build_batch(rows: &[MovementRecord]) -> Result<RecordBatch, ExportError> {
-        let time_ms: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.time_ms),
-        ));
-        let packet_id: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.packet_id),
-        ));
-        let character_net_guid: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.character_net_guid),
-        ));
-        let pos_x: ArrayRef =
-            Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_x)));
-        let pos_y: ArrayRef =
-            Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_y)));
-        let pos_z: ArrayRef =
-            Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_z)));
-        let yaw: ArrayRef = Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.yaw)));
-        let pitch: ArrayRef =
-            Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pitch)));
-        let vel_x: ArrayRef =
-            Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_x)));
-        let vel_y: ArrayRef =
-            Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_y)));
-        let vel_z: ArrayRef =
-            Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_z)));
-        let timestamp: ArrayRef = Arc::new(UInt32Array::from_iter_values(
-            rows.iter().map(|r| r.timestamp),
-        ));
-        let movement_state: ArrayRef = Arc::new(UInt8Array::from_iter_values(
-            rows.iter().map(|r| r.movement_state),
-        ));
-        let move_type: ArrayRef = Arc::new(UInt8Array::from_iter_values(
-            rows.iter().map(|r| r.move_type),
-        ));
-
         // Order must match movement_schema() exactly -- RecordBatch::try_new
         // only checks types, so a swap between two same-typed columns (e.g.
         // movement_state and move_type) would pass and corrupt the export.
-        RecordBatch::try_new(
+        batch(
             movement_schema_ref(),
             vec![
-                time_ms,
-                packet_id,
-                character_net_guid,
-                pos_x,
-                pos_y,
-                pos_z,
-                yaw,
-                pitch,
-                vel_x,
-                vel_y,
-                vel_z,
-                timestamp,
-                movement_state,
-                move_type,
+                Arc::new(UInt32Array::from_iter_values(
+                    rows.iter().map(|r| r.time_ms),
+                )) as ArrayRef,
+                Arc::new(UInt32Array::from_iter_values(
+                    rows.iter().map(|r| r.packet_id),
+                )),
+                Arc::new(UInt32Array::from_iter_values(
+                    rows.iter().map(|r| r.character_net_guid),
+                )),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_x))),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_y))),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_z))),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.yaw))),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pitch))),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_x))),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_y))),
+                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_z))),
+                Arc::new(UInt32Array::from_iter_values(
+                    rows.iter().map(|r| r.timestamp),
+                )),
+                Arc::new(UInt8Array::from_iter_values(
+                    rows.iter().map(|r| r.movement_state),
+                )),
+                Arc::new(UInt8Array::from_iter_values(
+                    rows.iter().map(|r| r.move_type),
+                )),
             ],
         )
-        .map_err(|e| ExportError::Parquet(e.into()))
     }
 }

@@ -12,13 +12,12 @@
 
 use std::sync::Arc;
 
-use arrow_array::builder::StringDictionaryBuilder;
-use arrow_array::types::Int32Type;
 use arrow_array::{
     ArrayRef, BinaryArray, Float32Array, Int32Array, RecordBatch, StringArray, UInt32Array,
 };
 use arrow_schema::Schema;
 
+use super::columns::{batch, dict};
 use crate::error::ExportError;
 use crate::record::EventRecord;
 use crate::schema::events_schema_ref;
@@ -72,57 +71,39 @@ impl Table for EventsTable {
 
     fn build_batch(rows: &[EventRecord]) -> Result<RecordBatch, ExportError> {
         let len = rows.len();
-
-        let id: ArrayRef = Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|r| r.id.as_str()),
-        ));
-
-        let mut group_builder =
-            StringDictionaryBuilder::<Int32Type>::with_capacity(len, 16, len * 24);
-        for r in rows {
-            group_builder.append_value(&r.group);
-        }
-        let group: ArrayRef = Arc::new(group_builder.finish());
-
-        let metadata: ArrayRef = Arc::new(StringArray::from_iter_values(
-            rows.iter().map(|r| r.metadata.as_str()),
-        ));
-        let time1: ArrayRef = Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time1)));
-        let time2: ArrayRef = Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time2)));
-        let payload_size: ArrayRef = Arc::new(Int32Array::from_iter_values(
-            rows.iter().map(|r| r.payload_size),
-        ));
-        let raw_payload: ArrayRef = Arc::new(BinaryArray::from_iter_values(
-            rows.iter().map(|r| r.raw_payload.as_slice()),
-        ));
-        let word0: ArrayRef = Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word0)));
-        let word1: ArrayRef = Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word1)));
-        let payload_tag: ArrayRef =
-            Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.payload_tag)));
-        let payload_name: ArrayRef = Arc::new(StringArray::from_iter(
-            rows.iter().map(|r| r.payload_name.as_deref()),
-        ));
-        let payload_seconds: ArrayRef = Arc::new(Float32Array::from_iter(
-            rows.iter().map(|r| r.payload_seconds),
-        ));
-
-        RecordBatch::try_new(
+        batch(
             events_schema_ref(),
             vec![
-                id,
-                group,
-                metadata,
-                time1,
-                time2,
-                payload_size,
-                raw_payload,
-                word0,
-                word1,
-                payload_tag,
-                payload_name,
-                payload_seconds,
+                Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|r| r.id.as_str()),
+                )) as ArrayRef,
+                dict(
+                    len,
+                    16,
+                    len * 24,
+                    rows.iter().map(|r| Some(r.group.as_str())),
+                ),
+                Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|r| r.metadata.as_str()),
+                )),
+                Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time1))),
+                Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time2))),
+                Arc::new(Int32Array::from_iter_values(
+                    rows.iter().map(|r| r.payload_size),
+                )),
+                Arc::new(BinaryArray::from_iter_values(
+                    rows.iter().map(|r| r.raw_payload.as_slice()),
+                )),
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word0))),
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word1))),
+                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.payload_tag))),
+                Arc::new(StringArray::from_iter(
+                    rows.iter().map(|r| r.payload_name.as_deref()),
+                )),
+                Arc::new(Float32Array::from_iter(
+                    rows.iter().map(|r| r.payload_seconds),
+                )),
             ],
         )
-        .map_err(|e| ExportError::Parquet(e.into()))
     }
 }
