@@ -59,82 +59,30 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
 
     match args[1].as_str() {
         "inspect" => {
-            let file = args
-                .get(2)
-                .ok_or_else(|| CliError::Usage("inspect requires <file.vrf>".to_string()))?;
-            let mut redact_identifiers = false;
-            for arg in args.iter().skip(3) {
-                match arg.as_str() {
-                    "--redact-identifiers" if !redact_identifiers => {
-                        redact_identifiers = true;
-                    }
-                    "--redact-identifiers" => {
-                        return Err(CliError::Usage(
-                            "duplicate option: --redact-identifiers".to_string(),
-                        ));
-                    }
-                    other => {
-                        return Err(CliError::Usage(format!(
-                            "unknown inspect option or surplus argument: {other}"
-                        )));
-                    }
-                }
-            }
+            let (file, [redact_identifiers], []) = parse(
+                args,
+                ["--redact-identifiers"],
+                [],
+                "unknown inspect option or surplus argument: ",
+            )?;
             inspect::run(file, redact_identifiers).map(|()| 0)
         }
         "validate" => {
-            let file = args
-                .get(2)
-                .ok_or_else(|| CliError::Usage("validate requires <file.vrf>".to_string()))?;
-            let mut diagnostics = false;
-            for arg in args.iter().skip(3) {
-                match arg.as_str() {
-                    "--diagnostics" if !diagnostics => diagnostics = true,
-                    "--diagnostics" => {
-                        return Err(CliError::Usage(
-                            "duplicate option: --diagnostics".to_string(),
-                        ));
-                    }
-                    other => {
-                        return Err(CliError::Usage(format!(
-                            "unknown validate option or surplus argument: {other}"
-                        )));
-                    }
-                }
-            }
+            let (file, [diagnostics], []) = parse(
+                args,
+                ["--diagnostics"],
+                [],
+                "unknown validate option or surplus argument: ",
+            )?;
             oracle::run(file, diagnostics).map(oracle::Verdict::exit_code)
         }
         "diag" => {
-            let file = args
-                .get(2)
-                .ok_or_else(|| CliError::Usage("diag requires <file.vrf>".to_string()))?;
-            let mut json: Option<&str> = None;
-            let mut include_payloads = false;
-            let mut i = 3;
-            while i < args.len() {
-                if args[i] == "--json" {
-                    if json.is_some() {
-                        return Err(CliError::Usage("duplicate option: --json".to_string()));
-                    }
-                    i += 1;
-                    json = Some(args.get(i).map(String::as_str).ok_or_else(|| {
-                        CliError::Usage("--json requires a file path".to_string())
-                    })?);
-                } else if args[i] == "--include-payloads" {
-                    if include_payloads {
-                        return Err(CliError::Usage(
-                            "duplicate option: --include-payloads".to_string(),
-                        ));
-                    }
-                    include_payloads = true;
-                } else {
-                    return Err(CliError::Usage(format!(
-                        "unknown diag option or surplus argument: {}",
-                        args[i]
-                    )));
-                }
-                i += 1;
-            }
+            let (file, [include_payloads], [json]) = parse(
+                args,
+                ["--include-payloads"],
+                [("--json", "--json requires a file path")],
+                "unknown diag option or surplus argument: ",
+            )?;
             crate::diagnose::run(file, json, include_payloads).map(|()| 0)
         }
         "export" => export(args).map(|()| 0),
@@ -148,36 +96,54 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
     }
 }
 
-#[cfg(feature = "export")]
-fn export(args: &[String]) -> Result<(), CliError> {
+/// The input path, whether each flag was given, and each valued option's value.
+type Parsed<'a, const F: usize, const V: usize> = (&'a str, [bool; F], [Option<&'a str>; V]);
+
+/// Split `<subcommand> <file.vrf> [options]`. Each of `flags` may appear
+/// once. Each of `valued` may appear once and takes the next argument as its
+/// value, whatever it looks like; the pair's second element is the message
+/// when there is none. Anything else is refused as `{unknown}{argument}`.
+fn parse<'a, const F: usize, const V: usize>(
+    args: &'a [String],
+    flags: [&str; F],
+    valued: [(&str, &str); V],
+    unknown: &str,
+) -> Result<Parsed<'a, F, V>, CliError> {
     let file = args
         .get(2)
-        .ok_or_else(|| CliError::Usage("export requires <file.vrf>".to_string()))?;
-    let mut out_dir: Option<&str> = None;
-    let mut with_checkpoints = false;
-    let mut i = 3;
-    while i < args.len() {
-        if args[i] == "--out" {
-            if out_dir.is_some() {
-                return Err(CliError::Usage("duplicate option: --out".to_string()));
+        .ok_or_else(|| CliError::Usage(format!("{} requires <file.vrf>", args[1])))?;
+    let (mut set, mut values) = ([false; F], [None; V]);
+    let mut rest = args[3..].iter();
+    while let Some(arg) = rest.next() {
+        let duplicate = || CliError::Usage(format!("duplicate option: {arg}"));
+        if let Some(i) = flags.iter().position(|flag| arg == flag) {
+            if set[i] {
+                return Err(duplicate());
             }
-            i += 1;
-            out_dir =
-                Some(args.get(i).map(String::as_str).ok_or_else(|| {
-                    CliError::Usage("--out requires a directory path".to_string())
-                })?);
-        } else if args[i] == "--checkpoints" {
-            if with_checkpoints {
-                return Err(CliError::Usage(
-                    "duplicate option: --checkpoints".to_string(),
-                ));
+            set[i] = true;
+        } else if let Some(i) = valued.iter().position(|(option, _)| arg == option) {
+            if values[i].is_some() {
+                return Err(duplicate());
             }
-            with_checkpoints = true;
+            let value = rest
+                .next()
+                .ok_or_else(|| CliError::Usage(valued[i].1.to_string()))?;
+            values[i] = Some(value.as_str());
         } else {
-            return Err(CliError::Usage(format!("unknown option: {}", args[i])));
+            return Err(CliError::Usage(format!("{unknown}{arg}")));
         }
-        i += 1;
     }
+    Ok((file, set, values))
+}
+
+#[cfg(feature = "export")]
+fn export(args: &[String]) -> Result<(), CliError> {
+    let (file, [with_checkpoints], [out_dir]) = parse(
+        args,
+        ["--checkpoints"],
+        [("--out", "--out requires a directory path")],
+        "unknown option: ",
+    )?;
     let out_dir =
         out_dir.ok_or_else(|| CliError::Usage("export requires --out <dir>".to_string()))?;
     crate::driver::run(file, out_dir, with_checkpoints)
