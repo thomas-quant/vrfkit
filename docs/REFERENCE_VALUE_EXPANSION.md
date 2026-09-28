@@ -52,11 +52,8 @@ lifecycle meaning.
 
 ## Coverage and validation
 
-The following snapshot predates the
-[targeting and heal expansion](TARGETING_AND_HEAL_VALUES.md). Its typed-row
-ratios are historical; that report carries the newer direct measurement.
-
-A direct scan of all four typed columns in all 714 exports measured:
+A direct scan of all four typed columns in all 714 exports measured (historical:
+[TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) has the newer scan):
 
 | Scope | Physical rows | Rows with typed values | Presence |
 |---|---:|---:|---:|
@@ -64,15 +61,12 @@ A direct scan of all four typed columns in all 714 exports measured:
 | Checkpoints | 285,420,158 | 220,640,840 | 77.3039% |
 | Combined | 1,305,984,875 | 945,798,373 | 72.4203% |
 
-This is physical typed-value presence, not semantic completeness or coverage of
-unique gameplay facts. Parent rows and child rows can describe the same input.
-The preceding [text-history measurement](TEXT_HISTORY_EXPANSION.md) is historical.
+Parent and child rows can describe the same input; this is physical presence,
+not semantic coverage.
 
-Full-corpus independent comparison passed all 714 files in 114.672 seconds.
-Both corpus guards, all 40 build/feature checks, both pinned reference exports
-and the full documentation check passed. At acceptance of this parser batch,
-before the later kill-ledger tooling, Rust had 689 passing tests and Python
-had 678. The frozen full-corpus executable SHA-256 is
+The full-corpus independent comparison passed all 714 files, as did both corpus
+guards and both pinned reference exports. The frozen full-corpus executable
+SHA-256 is
 `569b6cff14e873a75956b7bbfba918d6a340279e7ed8f540c059d769deeddbb8`.
 The comparison requires existing coordinates, raw windows, rows and all other
 values to remain exact; the eleven other Parquet tables must be byte-identical.

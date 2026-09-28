@@ -1,8 +1,7 @@
 # September 8, 2026 partial preservation and unresolved-data audit
 
-**Header-order correction:** The partial missing-initial/rejection figures below
-are historical parser classifications. [The corrected header audit](PARTIAL_HEADER_CORRECTION.md)
-reassembles all 961,004 observed fragments; the source data was present.
+**Superseded in part:** its missing-initial figures are the old parser's
+misclassification ([header-order correction](PARTIAL_HEADER_CORRECTION.md)).
 
 This batch was built from `f22e2de` plus the changes described below, with
 Rust 1.86.0. The frozen executable SHA-256 is
@@ -115,16 +114,9 @@ audit breaks transitions at conflicting same-packet samples, rejects
 conflicting identities, and permits dynamic actor GUIDs without static path
 registrations. Missing first samples remain left-censored.
 
-## Validation and retained evidence
+## Validation
 
-Rust 632 tests and Python 639 tests passed, including MSRV feature checks,
-strict clippy/rustdoc, interop, generated-file guards, full documentation
-validation and normal export/checkpoint baseline rechecks. Both documented
-corpus guards passed on all 714 files. The block oracle still excludes
-unreassembled partials from its validation denominator; preserving their raw
-bytes does not turn that score into end-to-end semantic completeness.
-
-Private run `20260908-next` retains input inventory and hashes, frozen binary,
-all exports and diagnostics, the direct-packet reference and its receipts,
-independent field/partial comparisons, failed initial checks and successful
-rechecks. Originals and earlier exports remain intact.
+Both documented corpus guards and the export/checkpoint baselines passed on all
+714 files. The block oracle still excludes unreassembled partials from its
+denominator; preserving their raw bytes does not make that score end-to-end
+completeness.

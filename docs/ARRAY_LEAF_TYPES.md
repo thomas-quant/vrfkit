@@ -60,13 +60,12 @@ are not independent kills or a deduplicated inventory ledger.
 
 ## Historical validation of this value-only batch
 
-The frozen candidate exported all 714 files successfully in 219.50 seconds.
-The independent full comparison passed 714/714 in 200.813 seconds: every prior
+The frozen candidate exported all 714 files successfully, and the independent
+full comparison passed 714/714: every prior
 row coordinate, raw window, and previously decoded value is unchanged; all new
 values match independent decoding; eleven other tables are byte-identical.
-Export quality counters are unchanged on every file. The MSRV sweep passes
-with 672 Rust tests and 666 Python tests; both corpus guards, the reference
-output baselines, and the full documentation check pass.
+Export quality counters are unchanged on every file; both corpus guards and the
+reference output baselines pass.
 
 The comparison confirms 39,963,673 newly typed values: 2,436,567 main and
 37,527,106 checkpoint. There are no additional physical rows in this batch.
@@ -77,10 +76,8 @@ The comparison confirms 39,963,673 newly typed values: 2,436,567 main and
 | Checkpoint | 277,331,271 | 211,676,767 | 76.3263% |
 | Combined | 1,297,460,642 | 929,453,240 | 71.6363% |
 
-These counts are the previously measured typed rows plus newly filled,
-previously all-null targets, with every other value and row count independently
-verified unchanged. The ratio is physical typed-value presence, not semantic
-completeness, unique game facts, or a percentage of replay bytes.
+These are the previously measured typed rows plus newly filled, previously
+all-null targets: physical presence, not semantic completeness.
 
 The current measurement includes additional nested reference rows and is
 recorded in [NESTED_ARRAY_REFERENCES.md](NESTED_ARRAY_REFERENCES.md).

@@ -58,11 +58,9 @@ can include windows that produced no exported child row.
 
 ## Measurement and validation
 
-The frozen candidate exported all 714 replays successfully in 174.48 seconds.
-Its four-build pilot and full independent comparison passed; the latter
-checked all 714 files in 347.562 seconds. All 40 required build/feature checks,
-677 Rust tests, 666 Python tests, both full-corpus guards, schema checks,
-reference baselines and the full documentation check pass.
+The frozen candidate exported all 714 replays successfully. Its four-build
+pilot, the full independent comparison of all 714 files, both full-corpus
+guards and the reference baselines passed.
 
 The comparison checks every old row and decoded value, exact new child
 values/raw windows/coordinates, immediate parent-child adjacency, and revised
@@ -79,8 +77,7 @@ all 714 retained exports. Zero, false and empty strings count as populated.
 | Checkpoint | 285,420,158 | 219,765,654 | 76.9972% |
 | Combined | 1,305,984,875 | 937,977,473 | 71.8215% |
 
-The prior value-only batch measured 71.6363% on fewer rows. This batch adds
-typed child rows, so both numerator and denominator increase. These physical
-row ratios are not semantic completeness, unique events or a fraction of
-replay bytes. See [ARRAY_LEAF_TYPES.md](ARRAY_LEAF_TYPES.md) for the preceding
-sixteen direct member types and their remaining interpretation limits.
+The prior value-only batch measured 71.6363% on fewer rows; this one adds typed
+child rows, so numerator and denominator both grow. See
+[ARRAY_LEAF_TYPES.md](ARRAY_LEAF_TYPES.md) for the preceding sixteen direct
+member types and their remaining interpretation limits.
