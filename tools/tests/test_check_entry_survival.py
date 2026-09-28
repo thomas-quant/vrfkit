@@ -294,6 +294,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("moves with evidence: 0 group(s)", out)
         self.assertIn("never declared in any build of the input: 0 table", out)
         self.assertIn("0 field row(s) joining no group", out)
+        self.assertIn("field(s) (0 without a name or checksum)", out)
         self.assertIn("OK:", out)
 
     def test_pass_and_fail_do_not_look_alike(self):
@@ -462,6 +463,44 @@ class LoadTests(unittest.TestCase):
         self.assertIn((OLD, "Deployed", 21, 17), r.fields)
         self.assertNotIn("Ghost", {f[1] for f in r.fields})
         self.assertEqual((stats.orphan_checkpoint_fields, stats.path_index_mismatches), (1, 1))
+
+    INCOMPLETE = [{"handle": 3, "name": "bArmed", "compatible_checksum": 11},
+                  {"handle": 4, "compatible_checksum": 12},
+                  {"handle": 5, "name": None, "compatible_checksum": 13},
+                  {"handle": 6, "name": "bSafe"},
+                  {"handle": 7, "name": "bLoud", "compatible_checksum": "14"}]
+
+    def write_incomplete(self, directory: Path, build: str):
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text(json.dumps({
+            "replay_build": f"++Ares-Core+release-{build}",
+            "net_field_export_groups": [{"path": STATE, "fields": self.INCOMPLETE}]}),
+            encoding="utf-8")
+
+    def test_a_field_without_a_name_or_checksum_is_counted_not_declared(self):
+        """It was recorded under None with no tally, and a None name at a
+        mapped handle resolves through the handle: a guess."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "e"
+            self.write_incomplete(d, "13.01")
+            stats = guard.LoadStats()
+            r = guard.load_export(d, stats)
+        self.assertEqual(r.fields, frozenset({(STATE, "bArmed", 11, 3)}))
+        self.assertEqual((stats.main_fields, stats.fields_without_identity), (5, 4))
+
+    def test_a_field_without_a_name_or_checksum_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "exports"
+            write_export(root / "a", "13.01", {STATE: [("bArmed", 11, 3)]})
+            self.write_incomplete(root / "b", "13.02")
+            empty = Path(tmp) / "empty.json"
+            empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as out, \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                code = guard.main(["--root", str(root), "--expected", str(empty)])
+        self.assertEqual(code, 1, out.getvalue() + err.getvalue())
+        self.assertIn("with 6 field(s) (4 without a name or checksum)", out.getvalue())
+        self.assertIn("without a name or checksum -- the input is inconsistent", err.getvalue())
 
     def test_an_orphaned_checkpoint_field_fails_the_run(self):
         cat = catalog(table(STATE, "bArmed"))

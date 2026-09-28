@@ -605,6 +605,7 @@ class LoadStats:
     exports: int = 0
     main_groups: int = 0
     main_fields: int = 0
+    fields_without_identity: int = 0
     exports_with_checkpoints: int = 0
     checkpoint_groups: int = 0
     checkpoint_fields: int = 0
@@ -667,9 +668,15 @@ def load_export(directory: Path, stats: LoadStats) -> Replay:
         groups.add(path)
         stats.main_groups += 1
         for f in group.get("fields") or []:
-            fields.add((path, _intern(f.get("name")), f.get("compatible_checksum"),
-                        f.get("handle")))
             stats.main_fields += 1
+            name, checksum = f.get("name"), f.get("compatible_checksum")
+            if not isinstance(name, str) or type(checksum) is not int:
+                # Counted and failed like an orphaned checkpoint field. Kept
+                # under None, a nameless field at a mapped handle resolved
+                # through the handle alone.
+                stats.fields_without_identity += 1
+                continue
+            fields.add((path, _intern(name), checksum, f.get("handle")))
 
     group_file = directory / "checkpoint_export_groups.parquet"
     field_file = directory / "checkpoint_export_fields.parquet"
@@ -1356,7 +1363,8 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
     print("entries: " + ", ".join(f"{len(kinds[k])} {k}" for k in KINDS)
           + f" = {len(catalog.entries)}")
     print(f"declarations: {stats.main_groups} main-stream group(s) with {stats.main_fields} "
-          f"field(s); {stats.exports_with_checkpoints} export(s) with checkpoint tables, "
+          f"field(s) ({stats.fields_without_identity} without a name or checksum); "
+          f"{stats.exports_with_checkpoints} export(s) with checkpoint tables, "
           f"{stats.checkpoint_groups} group row(s), {stats.checkpoint_fields} field row(s); "
           f"{stats.orphan_checkpoint_fields} field row(s) joining no group, "
           f"{stats.path_index_mismatches} path-index mismatch(es)")
@@ -1398,6 +1406,9 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
     if stats.orphan_checkpoint_fields or stats.path_index_mismatches:
         problems.append("checkpoint field declarations that join no group -- the input is "
                         "inconsistent, so what it declares is not known")
+    if stats.fields_without_identity:
+        problems.append("main-stream field declarations without a name or checksum -- the "
+                        "input is inconsistent, so what it declares is not known")
     if problems:
         print()
         for p in problems:
