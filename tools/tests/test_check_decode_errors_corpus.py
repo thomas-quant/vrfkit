@@ -24,6 +24,12 @@ failure lines, and the checkpoint pass never read its array truncation,
 residual and leaf lines, although summary.rs prints all of them unconditionally
 and verify_build_corpus.py requires every one to be zero. A replay with seven
 leaf errors classified clean and the run printed OK. See `SinkFailureTests`.
+
+A fifth, the first one again for those gates: their work counters (`Array
+decode: N elements / M fields`, `Movement rows`) were read and printed and
+never required to move, so an array walker that was never reached passed as
+"0 array failures". See `LivenessCoverageTests` and the `noarray` /
+`cpnoarray` / `nomovement` wiring tests.
 """
 import contextlib
 import io
@@ -47,6 +53,7 @@ import check_decode_errors_corpus as guard  # noqa: E402
 #: verify_build_corpus.py's SINK_ZERO; their values are illustrative, not
 #: from that log.
 CLEAN_SINK = """
+Movement rows:     2407298
 Movement errors:   0
 Array decode:      25052 elements / 96076 fields / 0 errors / 0 truncations
 Array residual:    0 root bits / 0 nested bits / 0 implicit ends
@@ -80,6 +87,7 @@ No field name:     0
 Struct blobs:      0 decoded / 0 failed
 Reward opaque:     0 empty variants
 Reward opaque:     0 empty variants
+Movement rows:     0
 Movement errors:   0
 Array decode:      0 elements / 0 fields / 0 errors / 0 truncations
 Array residual:    0 root bits / 0 nested bits / 0 implicit ends
@@ -194,37 +202,70 @@ class ReadCountersTests(unittest.TestCase):
                 self.assertIn(label, err)
 
 
+#: Corpus totals from a working main pass: every work counter moved, every
+#: failure counter at zero.
+WORKING_TOTALS = {
+    "decode_errors": 0, "decoded_ok": 129000, "raw_skip": 900,
+    "not_in_table": 100, "no_field_name": 0, "rows_offered": 130000,
+    "struct_blobs_decoded": 63, "struct_blobs_failed": 0,
+    "movement_rows": 2407298, "array_elements": 25052, "array_fields": 96076,
+}
+
+#: `(work counter, the label its failure must name, a failure label it must
+#: say is left without evidence)` for every main-pass work counter.
+MAIN_WORK_CASES = (
+    ("decoded_ok", "Decoded OK", "Decode errors"),
+    ("struct_blobs_decoded", "Struct blobs ... decoded", "Struct blobs failed"),
+    ("array_elements", "Array decode ... elements", "Array residual root bits"),
+    ("array_fields", "Array decode ... fields", "Array leaf errs"),
+    ("movement_rows", "Movement rows", "Movement errors"),
+)
+
+
 class DeadCounterTests(unittest.TestCase):
     """The counters that are summed for the whole corpus and must have moved."""
 
     def test_a_working_corpus_has_no_dead_counters(self):
-        totals = {"decode_errors": 0, "decoded_ok": 129000, "raw_skip": 900,
-                  "not_in_table": 100, "no_field_name": 0, "rows_offered": 130000,
-                  "struct_blobs_decoded": 63, "struct_blobs_failed": 0}
-        self.assertEqual(guard.dead_counters(totals), [])
+        self.assertEqual(guard.dead_counters(WORKING_TOTALS), [])
 
     def test_a_corpus_where_no_overlay_row_decoded_is_not_a_pass(self):
-        totals = {"decode_errors": 0, "decoded_ok": 0, "raw_skip": 0,
-                  "not_in_table": 0, "no_field_name": 0, "rows_offered": 0,
-                  "struct_blobs_decoded": 63, "struct_blobs_failed": 0}
+        totals = dict(WORKING_TOTALS, decoded_ok=0, raw_skip=0, not_in_table=0,
+                      rows_offered=0)
         dead = guard.dead_counters(totals)
         self.assertTrue(dead)
         self.assertIn("Decoded OK", " ".join(dead))
 
     def test_a_corpus_where_no_struct_blob_decoded_is_not_a_pass(self):
         """The 13.02 shape: the decoders stop running and nothing else moves."""
-        totals = {"decode_errors": 0, "decoded_ok": 129000, "raw_skip": 900,
-                  "not_in_table": 100, "no_field_name": 0, "rows_offered": 130000,
-                  "struct_blobs_decoded": 0, "struct_blobs_failed": 0}
+        totals = dict(WORKING_TOTALS, struct_blobs_decoded=0)
         dead = guard.dead_counters(totals)
         self.assertTrue(dead)
         self.assertIn("Struct blobs", " ".join(dead))
 
-    def test_an_exporter_that_decoded_nothing_at_all_fails_on_both(self):
-        totals = {"decode_errors": 0, "decoded_ok": 0, "raw_skip": 0,
-                  "not_in_table": 0, "no_field_name": 0, "rows_offered": 0,
-                  "struct_blobs_decoded": 0, "struct_blobs_failed": 0}
-        self.assertEqual(len(guard.dead_counters(totals)), 2)
+    def test_each_work_counter_that_stays_at_zero_is_named_alone(self):
+        """The array walker and the movement decoder are additive passes, like
+        the struct blobs: stopping one moves nothing else, so its own work
+        counter is the only thing that can say so -- and the failure must name
+        the gates it leaves without evidence."""
+        for key, label, gate in MAIN_WORK_CASES:
+            with self.subTest(counter=key):
+                dead = guard.dead_counters(dict(WORKING_TOTALS, **{key: 0}))
+                self.assertEqual(len(dead), 1, dead)
+                self.assertTrue(dead[0].startswith(f"{label} totalled 0"), dead)
+                self.assertIn(gate, dead[0])
+
+    def test_an_absent_work_counter_is_dead_not_a_pass(self):
+        """`read_counters` requires each one; a totals dict without it must
+        still not read as work that happened."""
+        for key, label, _gate in MAIN_WORK_CASES:
+            with self.subTest(counter=key):
+                totals = dict(WORKING_TOTALS)
+                del totals[key]
+                self.assertEqual(len(guard.dead_counters(totals)), 1)
+
+    def test_an_exporter_that_decoded_nothing_at_all_fails_on_every_one(self):
+        totals = {key: 0 for key in WORKING_TOTALS}
+        self.assertEqual(len(guard.dead_counters(totals)), len(MAIN_WORK_CASES))
 
 
 class ReconcileTests(unittest.TestCase):
@@ -545,19 +586,47 @@ class DeadCheckpointCounterTests(unittest.TestCase):
     checkpoint decoders never ran must not read as a clean checkpoint sweep.
     """
 
+    WORKING = {"checkpoint_decoded": 500, "checkpoint_blobs_decoded": 8,
+               "checkpoint_array_elements": 44652,
+               "checkpoint_array_fields": 364594}
+
+    #: `(work counter, label, a failure label it must say is vacuous)`.
+    CASES = (
+        ("checkpoint_decoded", "Overlay ... decoded (checkpoint)",
+         "Checkpoint overlay errors"),
+        ("checkpoint_blobs_decoded", "Checkpoint blobs ... decoded",
+         "Checkpoint blobs failed"),
+        ("checkpoint_array_elements", "Checkpoint array ... elements",
+         "Checkpoint fails array"),
+        ("checkpoint_array_fields", "Checkpoint array ... fields",
+         "Checkpoint leaf errors"),
+    )
+
     def test_a_working_checkpoint_corpus_has_no_dead_counters(self):
-        totals = {"checkpoint_decoded": 500, "checkpoint_blobs_decoded": 8}
-        self.assertEqual(guard.dead_checkpoint_counters(totals), [])
+        self.assertEqual(guard.dead_checkpoint_counters(self.WORKING), [])
 
     def test_a_corpus_where_no_checkpoint_field_decoded_is_not_a_pass(self):
-        totals = {"checkpoint_decoded": 0, "checkpoint_blobs_decoded": 8}
+        totals = dict(self.WORKING, checkpoint_decoded=0)
         dead = guard.dead_checkpoint_counters(totals)
         self.assertTrue(dead)
 
     def test_a_corpus_where_no_checkpoint_blob_decoded_is_not_a_pass(self):
-        totals = {"checkpoint_decoded": 500, "checkpoint_blobs_decoded": 0}
+        totals = dict(self.WORKING, checkpoint_blobs_decoded=0)
         dead = guard.dead_checkpoint_counters(totals)
         self.assertTrue(dead)
+
+    def test_each_checkpoint_work_counter_that_stays_at_zero_is_named_alone(self):
+        for key, label, gate in self.CASES:
+            with self.subTest(counter=key):
+                dead = guard.dead_checkpoint_counters(dict(self.WORKING, **{key: 0}))
+                self.assertEqual(len(dead), 1, dead)
+                self.assertTrue(dead[0].startswith(f"{label} totalled 0"), dead)
+                self.assertIn(gate, dead[0])
+
+    def test_a_checkpoint_pass_that_decoded_nothing_fails_on_every_one(self):
+        totals = {key: 0 for key in self.WORKING}
+        self.assertEqual(len(guard.dead_checkpoint_counters(totals)),
+                         len(self.CASES))
 
 
 #: `(counter key, label its line starts with, replacement line, value)` for
@@ -743,6 +812,7 @@ class SinkFailureTests(unittest.TestCase):
 #: regexes, so a regex that reads the wrong field of its line is caught
 #: instead of restated.
 SINK_FORMATS = (
+    ("movement_rows", "Movement rows:", 0),
     ("movement_errors", "Movement errors:", 0),
     ("array_elements", "Array decode:", 0),
     ("array_fields", "Array decode:", 1),
@@ -904,6 +974,57 @@ class VerifyBuildCorpusAgreementTests(unittest.TestCase):
                         [(key, 1)])
 
 
+class LivenessCoverageTests(unittest.TestCase):
+    """Every failure gate is backed by a work counter that must move, or is
+    declared unbacked with a reason -- never neither.
+
+    The gate that made this necessary: the array, leaf and movement failure
+    counters were added to FAILURES with their work counters parsed, required
+    and printed but never required to MOVE, so an array walker that was never
+    reached passed as "0 array failures" -- the Decoded OK / struct blob hole
+    this module had already closed once. A failure counter added to FAILURES
+    without a work counter, or without saying why it has none, turns this red.
+    """
+
+    @property
+    def PASSES(self):
+        # Read at test time, not class creation: a missing table must fail
+        # these tests, not take the whole module down at import.
+        return (
+            ("main", guard.FAILURES, guard.MUST_MOVE, guard.UNBACKED,
+             guard.REQUIRED),
+            ("checkpoint", guard.CHECKPOINT_FAILURES, guard.CHECKPOINT_MUST_MOVE,
+             guard.CHECKPOINT_UNBACKED, guard.CHECKPOINT_REQUIRED),
+        )
+
+    def test_every_failure_gate_is_backed_or_declared_unbacked_exactly_once(self):
+        for name, failures, must_move, unbacked, _required in self.PASSES:
+            with self.subTest(pass_=name):
+                claimed = [gate for _key, _label, gates in must_move for gate in gates]
+                claimed += [key for key, _why in unbacked]
+                self.assertEqual(sorted(claimed),
+                                 sorted(key for key, _label in failures))
+
+    def test_every_work_counter_is_required_and_is_not_itself_a_failure(self):
+        """A work counter that could be absent would read as a dead zero or,
+        defaulted, as work; one that is also a failure counter is gated both
+        ways and backs nothing."""
+        for name, failures, must_move, _unbacked, required in self.PASSES:
+            failure_keys = {key for key, _label in failures}
+            required_keys = {key for key, _label in required}
+            for key, _label, gates in must_move:
+                with self.subTest(pass_=name, work=key):
+                    self.assertIn(key, required_keys)
+                    self.assertNotIn(key, failure_keys)
+                    self.assertTrue(gates, f"{key} backs no gate")
+
+    def test_every_unbacked_gate_says_why(self):
+        for name, _failures, _must_move, unbacked, _required in self.PASSES:
+            for key, why in unbacked:
+                with self.subTest(pass_=name, gate=key):
+                    self.assertTrue(why.strip())
+
+
 #: Stand-in for `vrfkit.exe`, playing the part `_export_one` expects --
 #: `[str(exe), "export", str(replay), "--out", str(out)]`. Run under
 #: `sys.executable`, the "export" token becomes the script Python executes (the
@@ -926,6 +1047,7 @@ name = replay.name
 
 # The main-pass sink lines every export prints, failure counters at zero.
 SINK = """
+Movement rows:     100
 Movement errors:   0
 Array decode:      10 elements / 40 fields / 0 errors / 0 truncations
 Array residual:    0 root bits / 0 nested bits / 0 implicit ends
@@ -1048,6 +1170,25 @@ if "cptails" in name:
     emit(CLEAN, checkpoints=CHECKPOINTS.replace(
         "Checkpoint movement tails: 0 sized (0 bits)",
         "Checkpoint movement tails: 3 sized (9 bits)"))
+# The array walker never reached: Decoded OK, the struct blobs and every
+# failure counter are exactly what a good run prints. The checkpoint names are
+# tested first because they contain the main-pass ones.
+if "cpnoarray" in name:
+    emit(CLEAN, checkpoints=CHECKPOINTS.replace(
+        "30 elements / 90 fields", "0 elements / 0 fields"))
+
+if "cpnofields" in name:
+    emit(CLEAN, checkpoints=CHECKPOINTS.replace(
+        "30 elements / 90 fields", "30 elements / 0 fields"))
+
+if "noarray" in name:
+    emit(CLEAN, sink=SINK.replace("10 elements / 40 fields", "0 elements / 0 fields"))
+
+if "nofields" in name:
+    emit(CLEAN, sink=SINK.replace("10 elements / 40 fields", "10 elements / 0 fields"))
+
+if "nomovement" in name:
+    emit(CLEAN, sink=SINK.replace("Movement rows:     100", "Movement rows:     0"))
 
 emit(CLEAN)
 '''
@@ -1139,6 +1280,7 @@ class MainWiringTests(unittest.TestCase):
         code, output = self.run_main(["--checkpoints"])
         self.assertEqual(code, 0, output)
         for line in (
+            "movement rows     : 100",
             "movement errors   : 0",
             "array decode      : 10 elements / 40 fields / 0 errors / 0 truncations",
             "array residual    : 0 root bits / 0 nested bits / 0 implicit ends",
@@ -1154,6 +1296,91 @@ class MainWiringTests(unittest.TestCase):
         ):
             with self.subTest(line=line):
                 self.assertRegex(output, rf"(?m)^{re.escape(line)}$")
+
+    def test_the_ok_line_separates_backed_gates_from_unbacked_ones(self):
+        """Every run says which zero failure counters are evidence: the work
+        that moved under them, and the gates no work counter backs -- never
+        "0 on all 10" with the unbacked ones silently counted in."""
+        self.make_replay("a.vrf")
+        code, output = self.run_main(["--checkpoints"])
+        self.assertEqual(code, 0, output)
+        self.assertRegex(
+            output,
+            r"(?m)^unbacked gates    : Truncated RPCs \(summary\.rs prints no "
+            r"count of RPC parameter walks\); CNC brute force unwalked \(.+\)$")
+        self.assertRegex(
+            output,
+            r"(?m)^checkpoint unbacked gates: Checkpoint fails movement \(.+\); "
+            r"Checkpoint fails truncated RPC \(.+\); Checkpoint movement tails "
+            r"sized \(.+\); Checkpoint movement tails open \(.+\); Checkpoint CNC "
+            r"brute force unwalked \(.+\)$")
+        ok = [line for line in output.splitlines() if line.startswith("OK:")]
+        self.assertEqual(len(ok), 1, output)
+        self.assertIn(
+            "11 backed by work that moved (Decoded OK 90, Struct blobs ... "
+            "decoded 5, Array decode ... elements 10, Array decode ... fields "
+            "40, Movement rows 100), 2 with no work counter (Truncated RPCs, "
+            "CNC brute force unwalked)",
+            ok[0])
+        self.assertIn(
+            "8 backed by work that moved (Overlay ... decoded (checkpoint) 500, "
+            "Checkpoint blobs ... decoded 8, Checkpoint array ... elements 30, "
+            "Checkpoint array ... fields 90), 5 with no work counter "
+            "(Checkpoint fails movement, Checkpoint fails truncated RPC, "
+            "Checkpoint movement tails sized, Checkpoint movement tails open, "
+            "Checkpoint CNC brute force unwalked)",
+            ok[0])
+
+    def test_an_array_walker_that_never_ran_fails_the_run(self):
+        """The finding's shape: Decoded OK, the struct blobs and every failure
+        counter read exactly as on a good run, and `Array decode: 0 elements /
+        0 fields` sat printed and unread beside them. It used to print OK."""
+        self.make_replay("noarray.vrf")
+        code, output = self.run_main()
+        self.assertEqual(code, 1, output)
+        self.assertIn("Array decode ... elements totalled 0", output)
+        self.assertIn("Array decode ... fields totalled 0", output)
+        self.assertNotIn("OK:", output)
+
+    def test_array_leaves_that_never_emitted_fail_the_run(self):
+        self.make_replay("nofields.vrf")
+        code, output = self.run_main()
+        self.assertEqual(code, 1, output)
+        self.assertIn("Array decode ... fields totalled 0", output)
+        self.assertNotIn("Array decode ... elements totalled 0", output)
+
+    def test_a_movement_decoder_that_never_ran_fails_the_run(self):
+        self.make_replay("nomovement.vrf")
+        code, output = self.run_main()
+        self.assertEqual(code, 1, output)
+        self.assertIn("Movement rows totalled 0", output)
+        self.assertNotIn("OK:", output)
+
+    def test_a_checkpoint_array_walker_that_never_ran_fails_a_checkpoint_run(self):
+        self.make_replay("cpnoarray.vrf")
+        code, output = self.run_main(["--checkpoints"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Checkpoint array ... elements totalled 0", output)
+        self.assertIn("Checkpoint array ... fields totalled 0", output)
+        self.assertNotIn("OK:", output)
+
+    def test_checkpoint_array_leaves_that_never_emitted_fail_a_checkpoint_run(self):
+        self.make_replay("cpnofields.vrf")
+        code, output = self.run_main(["--checkpoints"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Checkpoint array ... fields totalled 0", output)
+        self.assertNotIn("Checkpoint array ... elements totalled 0", output)
+
+    def test_one_replay_that_did_the_work_keeps_the_corpus_alive(self):
+        """Corpus totals, as the docstring says: a replay whose walker found
+        no array beside one whose walker did is not a dead counter. (A
+        per-replay rule would need every healthy replay to carry arrays;
+        the 2026-09-28 audit measured that they all do, but the gate does not
+        depend on it.)"""
+        self.make_replay("a.vrf")
+        self.make_replay("noarray.vrf")
+        code, output = self.run_main()
+        self.assertEqual(code, 0, output)
 
     def test_an_exporter_that_decoded_nothing_fails_the_run(self):
         """The 13.02 shape, one script down from the Rust regression: every
