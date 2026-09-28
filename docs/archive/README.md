@@ -16,6 +16,7 @@ this is.
 | [`CHECKPOINT_SPEC.md`](CHECKPOINT_SPEC.md) | The Checkpoint-chunk byte-level format investigation | Implemented in `vrf-container`'s checkpoint module and two `vrf-schema` tables, behind `vrfkit export --checkpoints`; PROJECT_STATUS.md section 22-I has the measurements that justified it |
 | [`NEXT_STEPS_FINDINGS.md`](NEXT_STEPS_FINDINGS.md) | The 7-A weapon-resolution re-scoping | Implemented in commits 47849d2, b258dfd, 1f3afe4; PROJECT_STATUS.md section 5-L |
 | [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | Nothing -- it is the work log itself, sections 1-36 | Superseded by [`../../README.md`](../../README.md), [`../DATA.md`](../DATA.md), [`../USAGE.md`](../USAGE.md) |
+| [`CORPUS_SWEEPS.md`](CORPUS_SWEEPS.md) | Nothing -- the dated corpus sweeps README and USAGE quoted until 2026-09-29 | Superseded by [`../BUILD_VERIFICATION.md`](../BUILD_VERIFICATION.md) |
 
 Brief #3 is worth reading for something other than history: the design
 constraints it argues for -- one row per block, never a fabricated per-field

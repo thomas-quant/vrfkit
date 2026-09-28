@@ -20,10 +20,9 @@ by, or approved by Riot Games.
 
 **Verified state (2026-09-28):** Rust has **793 passing** tests; Python has
 **1306 passing** tests. All 24 supported builds received the same verification
-on **1,018 unique replays**; all **1,018** meet every strict criterion. The two
-ActiveBlinds decoding errors found by the first 2026-09-25 audit were fixed
-that day. See [build verification](docs/BUILD_VERIFICATION.md)
-for the measured scope, common checks and remaining limits.
+on **1,018 unique replays**; all **1,018** meet every strict criterion. See
+[build verification](docs/BUILD_VERIFICATION.md) for the measured scope, common
+checks and remaining limits.
 
 - Run it: [`docs/USAGE.md`](docs/USAGE.md)
 - What's extractable: [`docs/DATA.md`](docs/DATA.md)
@@ -84,14 +83,11 @@ can be represented by their rows instead of a duplicate raw RPC.
 | **11.07** | `release-11.07` | 3/3 | Validation + checkpoints + typed/raw |
 | **11.06** | `release-11.06` | 3/3 | Validation + checkpoints + typed/raw |
 
-Measured 2026-09-28 on all **1,018 unique available replays**, across all 24
-supported branches. Every row uses the [same acceptance rule](docs/BUILD_VERIFICATION.md).
-**Clean/checked** includes the strict array and array-leaf error counters:
-✅ **1,018/1,018** are clean. All 1,018 pass ReplayData validation,
-checkpoint-enabled export and the independent comparisons on observed
-evidence fields. The full report records counts and limits, and what changed
-since the 986-replay audit of 2026-09-25; this is not a claim that every field
-is understood.
+Measured 2026-09-28 on all **1,018 unique available replays** across the 24
+supported branches, every row by the [same acceptance rule](docs/BUILD_VERIFICATION.md):
+ReplayData validation, checkpoint-enabled export, the independent comparisons on
+observed evidence fields, and the strict array and array-leaf error counters.
+✅ **1,018/1,018** are clean -- not a claim that every field is understood.
 Structured-array child rows are admitted per build and per route: all
 measured routes on 13.01--13.06, a measured subset on 11.06--13.00
 ([legacy route table](docs/LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
@@ -119,12 +115,11 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
   statistics can be joined to actors and rounds. Repeated snapshots require
   deduplication; unresolved ownership and incomplete effect pairs remain gaps.
 - **Numeric FastArray observations** — the standalone GAS extractor retains
-  replication keys, deleted/changed item IDs and raw property boundaries.
-  On 2026-09-28 every window it reads in 1,018 exports closed exactly:
-  3,999,493 `_cnc_h1` windows across 22 builds, and 431,161 chained windows,
-  main and checkpoint, across all 24. Property names and gameplay meanings
-  remain unverified. This output is separate from Parquet typed-value
-  coverage.
+  replication keys, deleted/changed item IDs and raw property boundaries; every
+  window it reads in the 1,018-export audit closed exactly
+  ([investigation](docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md)). Property names
+  and gameplay meanings remain unverified, and this output is separate from
+  Parquet typed-value coverage.
 - **Status-effect observations** — nearsight, slow, detain and suppress can
   arrive on affected actors. Matched start/stop records support intervals;
   unmatched records must not be assigned an invented duration.
@@ -300,15 +295,6 @@ Figures are wall-clock / peak memory. Output is **byte-for-byte identical**
 before and after. Detail and the optimizations measured and then rejected are
 in `docs/archive/PROJECT_STATUS.md` section 25.
 
-> These times fluctuate by +/-10% run to run on the same commit and machine:
-> on 2026-08-04 export was 0.79 s and validate 0.65 s; on 2026-08-05 they were
-> 0.85 s and 0.693 s. This is machine state, not code -- confirmed by A/B-ing
-> before/after binaries at section 36-F.
-
-`inspect` inventories every chunk kind. `validate` walks ReplayData;
-`export --checkpoints` additionally walks checkpoint replication and writes
-its fields separately. A ReplayData verdict does not validate checkpoints.
-
 ## Comparison with the C# reference parser
 
 The same replay (`02d4d478`) was diffed against the output of the existing C#
@@ -379,10 +365,9 @@ The 13 kills are the ones by character 576, Gekko (`AggroBot_PC_C`).
 upstream's Gekko descriptor spells the class path `Aggrobot` where the replay
 says `AggroBot`, so upstream drops every RPC on that actor. `8824794` corrects
 the path (`f67ea66`) and agrees with vrfkit, which takes names from the replay
-and never needed the descriptor. This paragraph used to say the character never
-replicates the RPC; it does. The existing pipeline papered over the 13 missing
-kills by recovering them later as CombatReport credit, so they vanished from
-the timeline. In vrfkit the timeline itself is complete.
+and never needed the descriptor. The existing pipeline papered over the 13
+missing kills by recovering them later as CombatReport credit, so they vanished
+from the timeline; in vrfkit the timeline itself is complete.
 
 The one extra damage record is a killing blow (29.45 dealt, 20 taken) on the
 `DamageableComponent` of Gekko's E-ability projectile -- actor 27232, packet
@@ -397,9 +382,6 @@ replay, packet, actor, subobject, channel, function and values, and fails if
 it stops occurring exactly so.
 
 ## The Event chunk -- the server's own timeline
-
-The claim above was, for a long time, witnessed only by our own parser. It no
-longer is.
 
 The `.vrf` Event chunk is the event list the server labeled and wrote itself,
 stored elsewhere in the file under a different encoding, and **the existing C#
@@ -446,80 +428,16 @@ additional typed children in the 986-replay corpus; an independent
 before/after comparison verified those values and preserved every existing
 field row and raw payload.
 
-The measurements below describe earlier corpus revisions.
-
-
-The September 2026 follow-up re-exported and retained all 714 replays
-(13.01: 215, 13.02: 204, 13.04: 108, 13.05: 187), with checkpoints.
-ReplayData block validation passes on every file. Separate main/checkpoint
-diagnostics reduce block loss from 240,679 / 53,582 to zero by recovering or
-preserving post-RepLayout tails. Unknown payloads remain explicitly raw.
-The subsequent [partial-header correction](docs/PARTIAL_HEADER_CORRECTION.md)
-reassembles all 125,037 main and 835,967 checkpoint fragments into 293,720
-complete bunches. The earlier missing-initial conclusion was a header-order
-error; unknown inner payloads still remain explicitly preserved.
-
-In that earlier tail-preservation run, main physical typed coverage increased
-from 66.18% to **69.92%**; checkpoint
-from 41.24% to **41.30%**. These percentages count non-null value columns, not
-game facts understood. The time fields add 37,601,710 typed rows across the
-two streams. Three analysis helpers expose physical coverage, the observed
-32-ID ability-stat dictionary, and conservative match observations.
-See [implementation and measurement notes](docs/FOLLOWUP.md) for exact
-denominators, raw/decoded distinctions and before/after evidence.
-
-The historical 2026-08-31 run covered 527 machine-local `.vrf` files with its
-then-current preservation-aware oracle (`tools/validate_corpus.py`).
-
-```
-succeeded: 527/527        failed: 0
-branches : 215  ++Ares-Core+release-13.01
-           204  ++Ares-Core+release-13.02
-           108  ++Ares-Core+release-13.04
-pass rate: min 100.000000%  median 100.000000%  max 100.000000%
-totals   : 344,569,357 content blocks / malformed framing 0
-```
-
-`malformed framing 0` is the content-block framing counter; it does not prove
-that earlier transport stages retained every payload. A 100% block pass rate
-means the measured blocks reached ordinary field/RPC rows or an explicit
-preservation row. Partial reassembly rejections are outside that score.
-It does **not** mean every property is typed: when a block cannot be assigned to
-a `_ClassNetCache` group, its inner handles cannot be named, so vrfkit emits one
-reserved row (`handle = u32::MAX`) with the complete decoded payload in
-`raw_bits` and increments `RPC unresolved/raw`. Such a block is uninterpreted,
-not lost, and therefore does not reduce the current oracle pass rate.
-
-### Historical attribution-gap measurement
-
-The earlier release-13.01-only 215-replay run, before unresolved whole-payload
-rows were separated from genuine loss in the oracle score, reported:
-
-```
-succeeded: 215/215        failed: 0
-branches : 215  ++Ares-Core+release-13.01
-pass rate: min 97.487378%  median 99.323434%  max 99.682485%
-totals   : 136,545,822 content blocks / 98,884,839 fields / 75,571,092 RPCs
-           malformed framing 0        unattributed 1,972,019,383 bits
-```
-
-An even older implementation also printed 100%, but for the wrong reason: it
-silently dropped blocks whose group it could not find and incremented no
-counter. Exposing that path first produced the historical 97--99% figures;
-preserving unresolved decoded payloads removed that attribution loss. It
-did not address the separate field-stream tails until this follow-up.
-The exact `185d452`/`a73ee3a` comparison now reproduces the accounting change
-on two 13.01 inputs with unchanged block populations and emitted row counts.
-That experiment is scoped in [FOLLOWUP.md](docs/FOLLOWUP.md); it does not
-establish regression absence for all historical changes or for 13.05, which
-both old revisions reject.
-
-In that historical 13.01 measurement, **97.283437% of unattributed bits were
-`AbilitiesAndBuffsComponent`**; the replay declared no cache group for that
-class. `MeleeAttackState1`-`4` and `_Alt` were already resolved through the
-shared `MeleeAttackStateComponent_ClassNetCache`. The attribution limitation
-still exists, but the full unresolved payload now survives in `raw_bits` even
-though it cannot yet be expanded into named field rows.
+A 100% block pass rate means every measured block reached an ordinary
+field/RPC row or an explicit preservation row; partial reassembly rejections
+are outside that score, and `malformed framing 0` does not prove that earlier
+transport stages kept every payload. It is **not** a typing claim either: a
+block that cannot be assigned a `_ClassNetCache` group has inner handles
+nothing can name, so it becomes one reserved row (`handle = u32::MAX`, the
+complete decoded payload in `raw_bits`) counted under `RPC unresolved/raw` --
+uninterpreted, not lost. The earlier sweeps, from the 215-replay 13.01 run that
+first exposed unattributed blocks to the 714-replay tail preservation, are in
+[`docs/archive/CORPUS_SWEEPS.md`](docs/archive/CORPUS_SWEEPS.md).
 
 The controller's opening bunch was once framed nine bits early (the
 spawn-velocity bit and the net-player-index byte); see
@@ -566,21 +484,15 @@ Effect blobs:  61,617
 ```
 
 The four buckets partition `Rows offered` exactly (822,185 + 24,747 + 140,814 +
-1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
-block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
-were an older snapshot, taken before overlay entries that moved rows out of `Not
-in table`, and they contradicted the baseline this repo commits for the same
-replay. `check_docs.py` now compares both the parquet row/byte table and these
-counters against that baseline so the same drift cannot go unreported again.
+1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. `check_docs.py`
+compares these counters and the Parquet row/byte table with that baseline.
 
 **Effect decoding is additive and does not move these buckets.** The overlay
 buckets are settled before the effect pass, so rows that gained a value from an
 effect are still counted under `Not in table`; merging them into `Decoded OK`
 would double-count and move the baseline for unrelated reasons. `Effect blobs`
 is reported separately -- without it, 61,617 rows gain a value yet the summary
-prints identically. (The bucket counts themselves do move as overlay entries
-are added, which is exactly how the figures above went stale once; they are
-whatever `tools/baselines/export_02d4d478.json` currently records.)
+prints identically.
 
 Physical value coverage is the fraction of `fields.parquet` rows with at
 least one non-null `value_*` column. It cannot be computed by adding overlay,
@@ -592,29 +504,11 @@ Adding raw child windows changes this denominator even when every old typed
 value survives; compare raw preservation and newly typed values separately.
 That snapshot is not a fraction of all game information understood.
 
-The historical [array and checkpoint expansion](docs/ARRAY_CONTEXT_EXPANSION.md)
-predates the [structured-array expansion](docs/STRUCTURED_ARRAY_EXPANSION.md),
-which added 75,275,443 raw child windows and 3,510,015 typed reward windows in
-that completed export. Both 714-file corpus guards and the all-file comparison
-passed at that phase revision.
-
-The earlier [714-replay schema expansion](docs/SCHEMA_EXPANSION.md) independently
-verified 6,805,323 additional typed values, with physical coverage of 69.98%
-main and 52.90% checkpoint. Raw field columns and non-field exports are unchanged.
-
 Measure the files you actually use, with checkpoint rows reported separately:
 
 ```bash
 python tools/summarize_value_coverage.py <export-directory> > coverage.json
 python tools/summarize_value_coverage.py <parent-of-export-directories> --jobs 4
-```
-
-**These numbers change often; re-measure before quoting** -- four of the six
-were left stale at one point:
-
-```
-cargo build --release
-.\target\release\vrfkit.exe export <replay.vrf> --out out\probe
 ```
 
 `Typed` is the ratio printed in the summary: rows the overlay decoded
@@ -637,14 +531,12 @@ replays that splits 10,062,142 untyped rows 0.5% / 48.6% / 51.0%, and the first
 bucket is supposed to be empty. The recipe is in
 [`docs/USAGE.md`](docs/USAGE.md#fieldsparquet).
 
-The historical 215-replay release-13.01 export sweep had **zero decode
-errors**, checked by `tools/check_decode_errors_corpus.py`. The historical 108-file
-release-13.04 export/checkpoint sweep likewise reports zero overlay, struct and
-checkpoint decode failures. This separate check exists because `vrfkit
-validate` does not print overlay counters, so `validate_corpus.py` alone cannot
-see a wrong type. Reaching zero found three places where the wire disagreed
-with the C# declarations; they are recorded with evidence in
-`tools/apply_type_corrections.py` (219 corrections, verified with `--check`).
+Decode errors are checked by `tools/check_decode_errors_corpus.py`, separately,
+because `vrfkit validate` prints no overlay counters and `validate_corpus.py`
+alone cannot see a wrong type. Reaching zero on the 215-replay 13.01 sweep found
+three places where the wire disagreed with the C# declarations; they are
+recorded with evidence in `tools/apply_type_corrections.py` (219 corrections,
+verified with `--check`).
 
 | Symptom | Actual | Evidence |
 |---|---|---|
@@ -704,72 +596,25 @@ So adding a build is one `SeededTransform` impl: its branch, `SEED_ADDEND`,
 `INIT_A_OFFSET`, optionally `ADD_OFFSET` and `TAIL_XOR` (both defaulted), and
 three word functions (`word64` / `word32` / `byte`); everything else is shared.
 
-**13.02 and 13.04 are confirmed by live measurement, not only golden
-vectors.** A 527-replay machine-local sweep on 2026-08-31 covered all three
-then-available branches:
-
-```
-215  ++Ares-Core+release-13.01
-204  ++Ares-Core+release-13.02
-108  ++Ares-Core+release-13.04
-
-527/527 succeeded, oracle pass rate 100.000000% on every replay
-344,569,357 content blocks / malformed framing 0
-```
-
-The 13.04 subset was also exported with checkpoint decoding enabled. All 108
-replays contained checkpoints and reported zero typed-overlay errors, zero
-struct-blob failures and zero checkpoint failures over 110,152,399 offered
-rows, 20,756 decoded struct blobs, 3,129,483 decoded checkpoint fields and
-1,872 decoded checkpoint blobs. The
-machine-local corpus can rotate; the reproducible transform oracle remains the
+Every build in the table above is confirmed on live replays, not only by
+transform vectors. The 13.04 corpus was also exported with checkpoints on
+2026-08-31: all 108 replays carried them and reported zero typed-overlay,
+struct-blob and checkpoint failures over 110,152,399 offered rows, 20,756
+decoded struct blobs, 3,129,483 decoded checkpoint fields and 1,872 decoded
+checkpoint blobs. A machine-local corpus can rotate; the reproducible oracle is
 88 mechanically extracted upstream golden vectors (11 staging boundaries per
-build, eight builds). The 13.06 implementation was first validated on six real
-replays; [the upstream parity report](docs/UPSTREAM_PARITY.md) records the
-before/after comparisons and the limits of that sample. The 2026-09-28
-[common audit](docs/BUILD_VERIFICATION.md) checks 38 replays of 13.06.
-
-The sixteen recovered 11.06--12.09 builds add 1,264 native-machine-code
-vectors and a full 48-sample main/checkpoint validation; see the
-[build support validation report](docs/LEGACY_BUILD_SUPPORT.md).
+build, eight builds) plus 1,264 native-machine-code vectors for the sixteen
+recovered 11.06--12.09 builds, with a full 48-sample main/checkpoint validation
+([build support validation report](docs/LEGACY_BUILD_SUPPORT.md)). 13.06 was
+first validated on six real replays ([upstream parity report](docs/UPSTREAM_PARITY.md));
+the 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 38.
 
 The 768-byte S-box is shared across builds, which makes it usable as a
 **signature for locating the transform function in a binary.**
 
 ## Design
 
-### 1. Separate preservation, framing and typing
-
-Unreal's property stream is **self-describing.** Each field carries a handle
-and a bit-length before its value:
-
-```
-[1-bit checksum] repeat {
-    handle       = IntPacked   -> 0 ends the list
-    payload_bits = IntPacked
-    (payload_bits of value)
-}
-```
-
-Field boundaries can be walked exactly without knowing the type. The
-`handle -> name` map is the dynamic schema the replay itself delivers
-(`NetFieldExportGroup`) where the group and handle are declared. Missing group
-attribution and unnamed handles are explicit cases, not guaranteed names.
-
-So decoding is split into two layers:
-
-- **Base path** -- every field whose inner stream can be walked is emitted as
-  `{group, handle, name, bit_count, raw_bits}`. No branch is skipped on the
-  grounds that the type is unknown.
-- **Overlay** -- if a type is registered for `(group, handle)`, the decoded
-  value is emitted alongside it.
-
-If a field's format is discovered later, retained raw payloads can be
-reinterpreted. Unresolved ClassNetCache blocks have a whole-payload row rather
-than named parameters; interpreting them requires the corresponding schema
-and framing. Payloads lost before export require parsing the original replay.
-
-### 2. A clean parallelization point
+### 1. A clean parallelization point
 
 The content-block **header and declared bit-length are plaintext**; the
 transform only touches the payload that follows. So framing (sequential,
@@ -777,7 +622,7 @@ unavoidable because of the replication state machine) and block decode (fully
 independent) can be separated. The transform is determined solely by
 `(bits, seed)`, so it parallelizes per block.
 
-### 3. Output is Parquet
+### 2. Output is Parquet
 
 Columnar storage collapses the repeated path and name strings via dictionary
 encoding, zstd compresses it well, and it reads directly in `pyarrow` /
@@ -786,37 +631,19 @@ movement stream, JSON parsing was measured at 84% of processing time.
 
 ## Validation suite
 
-Full detail is in [`docs/USAGE.md`](docs/USAGE.md) section 6. The checks are
-layered, and the layers catch different things:
+The checks are layered, and the layers catch different things; each is in
+[`docs/USAGE.md`](docs/USAGE.md) section 6 with what it misses:
 
-- **Common build audit** (`verify_build_corpus.py`) -- identical validation,
-  checkpoint export, quality-counter and independent typed/raw checks on
-  every available replay; per-build clean/checked counts are in the support table.
+- **Common build audit** (`verify_build_corpus.py`) -- one set of checks on
+  every available replay; per-build results are the support table above.
 - **Framing** (`validate_corpus.py`) -- content-block framing, loss accounting
   and unresolved-payload preservation.
 - **Bytes** (`check_export_baseline.py`) -- regression in any export counter
   or in a file's rows, bytes or SHA-256.
-- **Decode** (`check_decode_errors_corpus.py`, scoped export corpora) -- overlay
-  type errors, struct-blob failures, array/leaf/truncated-RPC/movement
-  failures, unwalked CNC brute-force payloads and movement-section tails; the
-  recorded 13.04 scope is all 108 files with checkpoints enabled.
+- **Decode** (`check_decode_errors_corpus.py`) -- overlay, struct, array,
+  movement and brute-force failures, and the work counters behind them.
 - **Semantics** (`check_metrics_baseline.py`, 8 builds) -- round count,
   score, K/D/A invariants that need no baseline.
-
-Two of the headline metrics are **not** "100% / high is good" and reading them
-that way is a trap:
-
-- Unresolved ClassNetCache payloads are preserved whole as marked raw rows
-  and therefore do not lower the oracle score. Field-stream failures
-  lower the score when present. This is not a typing claim: those
-  rows cannot yet be split into named properties. `Malformed framing`,
-  `Transform failed`, and `RPC payload lost` must remain zero; a non-zero
-  `RPC unresolved/raw` count describes preserved, uninterpreted data.
-- The **~83.1% `Typed`** ratio reads low because of the *RPC-parameter
-  denominator* -- most of `Not in table` is RPC parameters with no C#
-  descriptor. A low ratio is uninterpreted, not lost: those rows still carry
-  `raw_bits`, and additive decoders (effects, structs, the economy typing)
-  fill `value_*` without moving the bucket.
 
 ## Generated files
 
@@ -832,42 +659,12 @@ The following files are generated and must never be edited by hand:
 | `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` | Expected bytes from pinned original executable readers |
 | `tools/equippable_table.py` | `tools/extract_equippables.py` | Weapon class path to display name, from the vendored `ValorantEquippableResolver.cs` |
 
-The overlay table's and the equippable table's input is in the tree, so anyone
-can regenerate them; CI does, and fails if either result differs from the
-committed file:
-
-```bash
-python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
-    crates/vrf-decode/src/table.rs
-python tools/apply_type_corrections.py
-cargo +1.86.0 fmt -p vrf-decode
-python tools/extract_equippables.py --check
-```
-
-The S-box and golden-vector generators require an upstream checkout:
-
-```bash
-python tools/extract_sboxes.py <path>/ValorantSeededTransformHelpers.cs \
-    crates/vrf-transform/src/sbox.rs
-python tools/extract_golden.py <path>/ValorantSeededTransformTests.cs \
-    crates/vrf-transform/tests/data/golden_vectors.rs
-```
-
-Both embed an integrity check -- the S-box must be a permutation of 0..255 and
-the golden-vector hex length must match the bit count, or generation is
-refused.
-
-**Order matters** for the overlay table:
-`extract_descriptors.py` -> `apply_type_corrections.py` -> `cargo fmt`. The
-corrections script works on both the just-generated single-line form and the
-rustfmt form, but some patterns stop matching after `cargo fmt`, so the script
-does not trust its own apply count -- it **re-verifies the final state after
-applying** and fails if it disagrees:
-
-```bash
-python tools/apply_type_corrections.py           # apply, then verify
-python tools/apply_type_corrections.py --check   # verify only
-```
+Regenerate them as [`CONTRIBUTING.md`](CONTRIBUTING.md#generated-files--never-hand-edit)
+describes; CI regenerates `table.rs` and `equippable_table.py` from the
+vendored input and fails if either differs. The S-box and golden-vector
+generators need an upstream checkout, and each refuses to write a table that
+fails its integrity check: the S-box must be a permutation of 0..255, and each
+golden vector's hex length must match its bit count.
 
 ## License
 
