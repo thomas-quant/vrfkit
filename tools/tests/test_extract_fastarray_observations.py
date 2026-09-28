@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tools import extract_fastarray_observations as fast
+from tools.tests.wire_fixtures import packed
 
 #: Route identities exactly as the parser exports them. Literal rather than
 #: read from the extractor: a misspelled group selects nothing and would pass
@@ -66,16 +67,6 @@ FIELD_SCHEMA = pa.schema([
     ("bit_count", pa.uint32()), ("raw_bits", pa.binary())])
 CHECKPOINT_SCHEMA = pa.schema([("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()),
                                *FIELD_SCHEMA])
-
-
-def packed(value):
-    out = bytearray()
-    while True:
-        next_value = value >> 7
-        out.append(((value & 127) << 1) | bool(next_value))
-        if not next_value:
-            return bytes(out)
-        value = next_value
 
 
 def payload(deleted=(), changed=(), keys=(8, 5)):

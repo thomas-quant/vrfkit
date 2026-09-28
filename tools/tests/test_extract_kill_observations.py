@@ -4,65 +4,7 @@ import pyarrow as pa, pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_kill_observations as tool
-
-
-def ip(v):
-    out = []
-    while True:
-        q = v & 127
-        v >>= 7
-        out.append((q << 1) | (1 if v else 0))
-        if not v:
-            return out
-
-
-def array(elements):
-    bits = []
-
-    def put_byte(x):
-        bits.extend((x >> i) & 1 for i in range(8))
-
-    def put_raw(raw, width):
-        bits.extend((raw[i // 8] >> (i % 8)) & 1 for i in range(width))
-
-    for x in ip(max([i for i, _ in elements], default=-1) + 1):
-        put_byte(x)
-    for index, fields in elements:
-        for x in ip(index + 1):
-            put_byte(x)
-        for handle, width, raw in fields:
-            for x in ip(handle + 1):
-                put_byte(x)
-            for x in ip(width):
-                put_byte(x)
-            put_raw(raw, width)
-        put_byte(0)
-    put_byte(0)
-    raw = bytearray((len(bits) + 7) // 8)
-    for i, x in enumerate(bits):
-        raw[i // 8] |= x << (i % 8)
-    return bytes(raw), len(bits)
-
-
-SCHEMA = pa.schema(
-    [
-        ("time_ms", pa.uint32()),
-        ("packet_id", pa.uint32()),
-        ("channel_index", pa.uint32()),
-        ("actor_net_guid", pa.uint32()),
-        ("object_net_guid", pa.uint32()),
-        ("group_path", pa.string()),
-        ("handle", pa.uint32()),
-        ("field_name", pa.string()),
-        ("compatible_checksum", pa.uint32()),
-        ("bit_count", pa.uint32()),
-        ("raw_bits", pa.binary()),
-        ("value_i64", pa.int64()),
-        ("value_f64", pa.float64()),
-        ("value_bool", pa.bool_()),
-        ("value_str", pa.string()),
-    ]
-)
+from tools.tests.wire_fixtures import FIELD_SCHEMA as SCHEMA, array
 
 
 def row(**kw):

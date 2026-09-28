@@ -4,71 +4,16 @@ import pyarrow as pa, pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_healing_observations as tool
-
-SCHEMA = pa.schema(
-    [
-        (n, t)
-        for n, t in [
-            ("time_ms", pa.uint32()),
-            ("packet_id", pa.uint32()),
-            ("channel_index", pa.uint32()),
-            ("actor_net_guid", pa.uint32()),
-            ("object_net_guid", pa.uint32()),
-            ("group_path", pa.string()),
-            ("handle", pa.uint32()),
-            ("field_name", pa.string()),
-            ("compatible_checksum", pa.uint32()),
-            ("bit_count", pa.uint32()),
-            ("raw_bits", pa.binary()),
-            ("value_i64", pa.int64()),
-            ("value_f64", pa.float64()),
-            ("value_bool", pa.bool_()),
-            ("value_str", pa.string()),
-        ]
-    ]
+from tools.tests.wire_fixtures import (
+    CHECKPOINT_FIELD_SCHEMA as CHECKPOINT_SCHEMA,
+    FIELD_SCHEMA as SCHEMA,
+    array,
+    packed,
 )
-CHECKPOINT_SCHEMA = pa.schema(
-    [("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()), *SCHEMA]
-)
-
-
-def ip(v):
-    out = []
-    while True:
-        q = v & 127
-        v >>= 7
-        out.append((q << 1) | (1 if v else 0))
-        if not v:
-            return out
 
 
 def ref(v):
-    return bytes(ip(v)), 8 * len(ip(v))
-
-
-def arr(fields):
-    bits = []
-
-    def byte(x):
-        bits.extend((x >> i) & 1 for i in range(8))
-
-    def raw(x, w):
-        bits.extend((x[i // 8] >> (i % 8)) & 1 for i in range(w))
-
-    byte(2)
-    byte(2)
-    for h, w, x in fields:
-        for z in ip(h + 1):
-            byte(z)
-        for z in ip(w):
-            byte(z)
-        raw(x, w)
-    byte(0)
-    byte(0)
-    b = bytearray((len(bits) + 7) // 8)
-    for i, x in enumerate(bits):
-        b[i // 8] |= x << (i % 8)
-    return bytes(b), len(bits)
+    return packed(v), 8 * len(packed(v))
 
 
 def row(name, crc=None, raw=b"", bits=0, **kw):
@@ -97,7 +42,7 @@ def fixture(value=-0.0, causer=True):
     f = struct.pack("<f", value)
     cr, cw = ref(60)
     fields = [(2, cw, cr), (3, 32, f), (4, 32, f), (5, 1, b"\1")]
-    parent, pw = arr(fields)
+    parent, pw = array([(0, fields)])
     rows = [
         row("MulticastNotifyHeal.HealTaken", 1894010429, f, 32, value_f64=value),
         row(
