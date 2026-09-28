@@ -34,6 +34,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+if __package__:
+    from .atomic_io import atomic_write_file
+else:
+    from atomic_io import atomic_write_file
+
 # Substrings that mark a class as a persistent ability effect. Matched
 # case-insensitively against the full class_path. The list is broad on
 # purpose -- a missed effect simply does not appear -- but a false positive is
@@ -293,8 +298,7 @@ def main() -> int:
     rows, tally = build_with_tally(args.export)
     cols = {name: [r[name] for r in rows] for name in SCHEMA.names}
     table = pa.Table.from_pydict(cols, schema=SCHEMA)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, args.out, compression="zstd")
+    atomic_write_file(args.out, lambda out: pq.write_table(table, out, compression="zstd"))
 
     by_type = Counter(r["effect_type"] for r in rows)
     by_kind = Counter(r["actor_kind"] for r in rows)

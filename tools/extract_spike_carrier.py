@@ -68,8 +68,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
+    from .atomic_io import atomic_write_file
     from .player_identity import EARLIER_PROVENANCE, load_player_bodies
 else:
+    from atomic_io import atomic_write_file
     from player_identity import EARLIER_PROVENANCE, load_player_bodies
 
 BOMB_CLASS = "BombEquippable.BombEquippable_C"
@@ -325,8 +327,7 @@ def main() -> int:
     rows, events, malformed_round_meta, identity = build(args.export)
     cols = {name: [r[name] for r in rows] for name in SCHEMA.names}
     table = pa.Table.from_pydict(cols, schema=SCHEMA)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, args.out, compression="zstd")
+    atomic_write_file(args.out, lambda out: pq.write_table(table, out, compression="zstd"))
 
     by_kind = Counter(r["holder_kind"] for r in rows)
     print(f"wrote {args.out} ({len(rows)} custody intervals)")

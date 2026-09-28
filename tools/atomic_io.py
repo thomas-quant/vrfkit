@@ -84,3 +84,24 @@ def atomic_write_text(
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def atomic_write_file(path: Path, write) -> None:
+    """Replace a file atomically with what `write(handle)` writes to a binary
+    handle -- `atomic_write_text` for writers such as pq.write_table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parent = path.parent.resolve()
+    target = require_descendant(path, parent)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            write(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
