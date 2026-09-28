@@ -215,7 +215,7 @@ pub struct ExportStats {
     /// The first failure verbatim, so the summary can name the member and handle.
     pub struct_blob_first_error: Option<String>,
 
-    /// Movement-decode problems: per-update soft errors
+    /// Movement-decode problems: soft errors counted per occurrence
     /// (`RpcDecodeResult.error_count`) plus hard `Err`s. Without it a changed
     /// section format shortens `movement.parquet` with every counter clean.
     pub movement_rpc_errors: u64,
@@ -306,7 +306,7 @@ impl ExportStats {
                         .movement_rpc_errors
                         .saturating_add(u64::from(error_count));
                     self.movement_first_error.get_or_insert(format!(
-                        "{error_count} movement update(s) skipped mid-decode"
+                        "{error_count} movement decode error(s) in one RPC batch"
                     ));
                 }
             }
@@ -420,7 +420,12 @@ mod movement_stats_tests {
         let mut s = ExportStats::default();
         s.record_movement_decode(ok(2, 5, 3).as_ref());
         assert_eq!(s.movement_rpc_errors, 3);
-        assert!(s.movement_first_error.is_some());
+        // `error_count` counts decode problems per occurrence; the updates
+        // after a failed stream are still decoded, so none were "skipped".
+        assert_eq!(
+            s.movement_first_error.as_deref(),
+            Some("3 movement decode error(s) in one RPC batch")
+        );
         // A later hard failure adds to the count but must not overwrite the
         // first error.
         let first = s.movement_first_error.clone();
