@@ -204,9 +204,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     let class_net = stats.class_net_cache_blocks;
     let malformed = stats.malformed_content_blocks;
     let deleted = stats.deleted_blocks;
-    let rpc_payloads_lost = stats
-        .rpc_stream_failures
-        .saturating_sub(stats.unresolved_rpc_payloads_preserved);
+    let rpc_payloads_lost = stats.rpc_payloads_lost();
     let failed = stats.lost_content_blocks();
 
     println!();

@@ -125,9 +125,7 @@ pub(super) fn print(
         net_stats.malformed_content_blocks,
         net_stats.transform_failures,
         net_stats.field_stream_failures,
-        net_stats
-            .rpc_stream_failures
-            .saturating_sub(net_stats.unresolved_rpc_payloads_preserved),
+        net_stats.rpc_payloads_lost(),
         net_stats.unresolved_rpc_payloads_preserved
     );
     // Blocks whose header or `content_bits` could not be read, a depth before
@@ -296,10 +294,6 @@ pub(super) fn print(
 }
 
 fn print_checkpoints(cp: &CheckpointStats) {
-    let rpc_payloads_lost = cp
-        .net
-        .rpc_stream_failures
-        .saturating_sub(cp.net.unresolved_rpc_payloads_preserved);
     eprintln!();
     eprintln!("=== Checkpoints ===");
     eprintln!("  Checkpoints:      {}", cp.chunks);
@@ -354,7 +348,7 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.net.malformed_content_blocks,
         cp.net.transform_failures,
         cp.net.field_stream_failures,
-        rpc_payloads_lost,
+        cp.net.rpc_payloads_lost(),
         cp.net.unfinished_partials,
         cp.net.unfinished_partial_bits,
         cp.net.skipped_bits
