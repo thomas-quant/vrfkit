@@ -180,6 +180,9 @@ impl ExportSink<'_> {
             let param_checksum: Option<u32> = param_export.map(|f| f.compatible_checksum);
 
             // Build field_name: "FunctionName.ParamName" or "FunctionName._h{N}".
+            // A dot, as in `Rounds[0].X`, because group paths already use ':'
+            // (`...ShooterCharacter:MulticastNotifyKilledEnemy`); downstream
+            // splits on the first '.' to recover function and parameter.
             //
             // Interned rather than `format!`-ed per row: the distinct set is
             // bounded by the schema (a few hundred), while this loop body runs

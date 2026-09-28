@@ -745,16 +745,3 @@ impl GuidPathSink for ExportSink<'_> {
         self.cache.get_path_by_guid(guid)
     }
 }
-
-/// The field-name prefix used for RPC parameters.
-///
-/// RPC parameters are emitted as `FunctionName.ParamName` (dot-separated).
-/// This mirrors the existing `Rounds[0].Reports[1].X` convention for nested
-/// TArray elements, giving downstream consumers a reliable prefix to split on
-/// when distinguishing RPC parameters from ordinary replicated properties.
-///
-/// Why dot and not colon: colons appear in the *group path* (e.g.
-/// `/Script/ShooterGame.ShooterCharacter:MulticastNotifyKilledEnemy`), so using
-/// a dot in the field name avoids ambiguity with the path namespace. Downstream
-/// can split on the first `.` in field_name to recover function vs parameter.
-const _RPC_PARAM_NAMING_DOC: () = ();
