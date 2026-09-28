@@ -1159,6 +1159,233 @@ class FabricatedLocationTests(TallyTestCase):
         self.assertEqual(tally["fabricated_shot_locations"], 0)
 
 
+class RawSourcedFieldTests(TallyTestCase):
+    """A field whose consumer decodes the raw wire blob gets the blob, typed or not.
+
+    RoundInfos (valplay's `_roundinfo` bit-decodes it) and a damage RPC's
+    LifeChangeEvents (valplay's `_decode_remaining_hp`) were gated on
+    `is_raw`, which `_get_value` sets only when EVERY typed column is null --
+    though raw_bits travels beside typed values by design. Once the overlay
+    typed either one, RoundInfos vanished from the payload with no counter
+    and LifeChangeEvents became a typed value its consumer skips. The shot
+    arrays already read raw_bits directly; all three now share that path.
+    """
+
+    OEPI = "/Script/ShooterGame.OwnerExclusivePlayerInfo"
+    RI_RAW = bytes.fromhex("0102030405")
+    RI_BLOB = {
+        "BitCount": 40,
+        "Data": base64.b64encode(RI_RAW).decode("ascii"),
+        "TypeName": "TArray<FAresPlayerRoundInfo>",
+    }
+
+    def roundinfos(self, **overrides) -> dict:
+        row = {
+            "time_ms": 10, "packet_id": 1, "actor": 5, "object": 5,
+            "group_path": self.OEPI, "handle": 39, "field_name": "RoundInfos",
+            "bit_count": 40, "raw_bits": self.RI_RAW,
+        }
+        row.update(overrides)
+        return row
+
+    def roundinfos_child(self) -> dict:
+        return {
+            "time_ms": 10, "packet_id": 1, "actor": 5, "object": 5,
+            "group_path": self.OEPI, "handle": 43,
+            "field_name": "RoundInfos[0].EndOfRoundMoney",
+            "bit_count": 32, "value_i64": 900,
+        }
+
+    def property_payload(self, tmp: str) -> dict:
+        (event,) = self.events_of(tmp, "export_group_received")
+        return event["payload"]
+
+    def test_an_untyped_roundinfos_row_publishes_its_blob(self):
+        """The shape that has always worked, pinned so the fix cannot move it.
+        stream.rs writes the decoded children first and the parent row below."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(
+                tmp, [self.roundinfos_child(), self.roundinfos()])
+            payload = self.property_payload(tmp)
+        self.assertEqual(payload, {"RoundInfos": self.RI_BLOB})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_typed_roundinfos_row_still_publishes_its_raw_blob(self):
+        """The defect: a value_str beside raw_bits made the payload `{}`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [
+                self.roundinfos_child(), self.roundinfos(value_str="[]"),
+            ])
+            payload = self.property_payload(tmp)
+        self.assertEqual(payload, {"RoundInfos": self.RI_BLOB})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_roundinfos_row_without_raw_bits_is_counted(self):
+        """No raw bits, no blob: counted, and the typed value is not thrown away."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [
+                self.roundinfos(raw_bits=None, bit_count=None, value_str="[]"),
+            ])
+            payload = self.property_payload(tmp)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+        self.assertEqual(payload, {"RoundInfos": "[]"})
+
+    def test_roundinfos_children_without_their_blob_are_counted(self):
+        """The children are dropped by design -- the blob carries them -- so
+        children with no blob beside them are a loss, counted once."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [self.roundinfos_child()])
+            payload = self.property_payload(tmp)
+        self.assertEqual(payload, {})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+
+    DAMAGE = "MulticastNotifyDamage_Point"
+    LCE_RAW = bytes.fromhex("02021620772418400000ce421a400000b0c11c02010000")
+    LCE_BLOB = {
+        "BitCount": 177,
+        "Data": base64.b64encode(LCE_RAW).decode("ascii"),
+        "TypeName": "LifeChangeEvents",
+    }
+
+    def damage_rows(self, **parent) -> list[dict]:
+        """One damage invocation shaped like the corpus: every row carries the
+        function's handle, and the decoded LifeChangeEvents members precede
+        the parent row that holds the whole blob."""
+        common = {"time_ms": 20, "packet_id": 2, "actor": 7,
+                  "group_path": self.RPC_GROUP, "handle": 1}
+        lce = {**common, "field_name": f"{self.DAMAGE}.LifeChangeEvents",
+               "bit_count": 177, "raw_bits": self.LCE_RAW}
+        lce.update(parent)
+        return [
+            {**common, "field_name": f"{self.DAMAGE}.DamageTaken",
+             "bit_count": 32, "value_f64": 30.0},
+            {**common,
+             "field_name": f"{self.DAMAGE}.LifeChangeEvents[0].LifeResult",
+             "bit_count": 32, "value_f64": 70.0, "raw_bits": b"\x00\x00\x8cB"},
+            lce,
+        ]
+
+    def damage_payload(self, tmp: str) -> dict:
+        (event,) = self.events_of(tmp, "rpc_received")
+        return event["payload"]
+
+    def test_an_untyped_life_change_blob_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows())
+            payload = self.damage_payload(tmp)
+        self.assertEqual(payload, {"DamageTaken": 30.0,
+                                   "LifeChangeEvents": self.LCE_BLOB})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_typed_life_change_row_still_publishes_its_raw_blob(self):
+        """Typed, it fell through to the generic pass-through and shipped the
+        typed value where valplay's HP decoder reads the blob."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows(value_str="[{}]"))
+            payload = self.damage_payload(tmp)
+        self.assertEqual(payload["LifeChangeEvents"], self.LCE_BLOB)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_life_change_row_without_raw_bits_is_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows(
+                raw_bits=None, bit_count=None, value_str="[{}]"))
+            payload = self.damage_payload(tmp)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+        self.assertEqual(payload["LifeChangeEvents"], "[{}]")
+
+    def test_life_change_members_without_their_blob_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows()[:2])
+            payload = self.damage_payload(tmp)
+        self.assertNotIn("LifeChangeEvents", payload)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+
+    def test_shot_arrays_without_raw_bits_are_counted(self):
+        """Their consumer is this file's own effect decoder; it gets nothing."""
+        rows = [{
+            "time_ms": 30, "packet_id": 3, "actor": 2, "object": 22,
+            "channel_index": 1, "group_path": ShotEffectRawSourceTests.SHOT_RPC,
+            "handle": 9,
+            "field_name": f"ReplayPlayContinuousEffectAtLocation.{name}",
+            "value_str": "[]",
+        } for name in ("FloatValues", "ObjectValues", "VectorValues")]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, rows)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 3)
+
+
+class DamagedBoneTests(TallyTestCase):
+    """DamagedBone is an FName the overlay decodes; an undecoded one is null, not guessed.
+
+    The raw branch ASCII-decoded the wire bytes with errors='replace' inside a
+    bare `except`, so it could not fail -- and this rendering already shipped
+    mojibake once (apply_type_corrections.py records it for all 581 payloads
+    when the field was forced to Raw). `null` is also what valplay can take:
+    its `_bone_region` files None under 'other', where a raw blob dict would
+    raise TypeError on `bone in HEAD_BONES`, a frozenset.
+    """
+
+    FIELD = "MulticastNotifyDamage_Point.DamagedBone"
+    # An FName "Head" as it sits in the corpus (105 bits).
+    HEAD_RAW = bytes.fromhex("0a00000090cac2c8aa00000000")
+
+    def bone_payload(self, **row) -> tuple[dict, dict]:
+        base = {"time_ms": 20, "packet_id": 2, "actor": 7,
+                "group_path": self.RPC_GROUP, "handle": 1,
+                "field_name": self.FIELD, "bit_count": 105,
+                "raw_bits": self.HEAD_RAW}
+        base.update(row)
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [base])
+            (event,) = self.events_of(tmp, "rpc_received")
+        return event["payload"], summary["tally"]
+
+    def test_a_decoded_bone_is_passed_through(self):
+        payload, tally = self.bone_payload(value_str="Head")
+        self.assertEqual(payload, {"DamagedBone": "Head"})
+        self.assertEqual(tally["damaged_bone_undecoded"], 0)
+
+    def test_an_undecoded_bone_is_null_and_counted(self):
+        payload, tally = self.bone_payload()
+        self.assertEqual(payload, {"DamagedBone": None})
+        self.assertEqual(tally["damaged_bone_undecoded"], 1)
+
+
+class RawGateHardeningTests(TallyTestCase):
+    """Two more `is_raw` gates that lost a value, uncounted, once it was typed."""
+
+    def test_a_typed_container_row_does_not_replace_its_decoded_elements(self):
+        """stream.rs emits a flattened array's element rows first and the
+        container row below. The container was skipped only when raw, so a
+        typed one landed through the direct top-level assignment -- which no
+        conflict counter sees -- and replaced the decoded list."""
+        common = {"time_ms": 10, "packet_id": 1, "actor": 5,
+                  "group_path": "/Game/Test/Holder.Holder_C"}
+        rows = [
+            {**common, "field_name": "Items[0].Count", "bit_count": 32,
+             "value_i64": 3},
+            {**common, "field_name": "Items", "bit_count": 40,
+             "raw_bits": b"\x01\x02\x03\x04\x05", "value_str": "[3]"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        self.assertEqual(event["payload"], {"Items": [{"Index": 0, "Count": 3}]})
+        self.assertEqual(summary["tally"]["payload_shape_conflicts"], 0)
+
+    def test_a_typed_function_row_is_carried(self):
+        """A row that IS the function carried its value only when raw."""
+        row = {"time_ms": 20, "packet_id": 2, "actor": 7,
+               "group_path": self.RPC_GROUP, "handle": 4,
+               "field_name": "MulticastSomething", "bit_count": 8,
+               "value_i64": 5}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.convert_rows(tmp, [row])
+            (event,) = self.events_of(tmp, "rpc_received")
+        self.assertEqual(event["payload"], {"MulticastSomething": 5})
+
+
 class SummaryReportingTests(TallyTestCase):
     """The summary must not say 'complete' about a conversion that lost rows."""
 
@@ -1802,6 +2029,8 @@ class AdapterAccountingTests(SeamTestCase):
                 "upstream_row_count_disagreement",
                 "unknown_actor_lifecycle_events",
                 "non_finite_movement_rows",
+                "raw_blobs_unavailable",
+                "damaged_bone_undecoded",
             ]),
         )
 

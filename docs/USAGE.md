@@ -782,6 +782,16 @@ non-finite position, velocity, yaw or pitch. Those are written `Infinity` /
 `json` reads them, a strict parser such as orjson rejects the line. None occurs
 on the 1,018-export corpus, and the decoder does not rule them out.
 
+The blobs a consumer decodes itself -- `RoundInfos`, a damage RPC's
+`LifeChangeEvents`, the shot effect arrays -- are built from `raw_bits` whether
+or not the overlay also typed the row, so typing one upstream cannot change or
+drop it. `raw_blobs_unavailable` counts those that could not be built: the row
+had no raw bits (its typed value, if any, is published in the blob's place), or
+only decoded members arrived. `damaged_bone_undecoded` counts `DamagedBone`
+values the parser could not decode; they are published as `null`, never
+rendered from the raw bytes. All three counters are 0 on the 11 exports of the
+2026-09-28 A/B (builds 11.06-13.06).
+
 `players` is deliberately **not** forwarded: valplay derives the same table
 from the same `BombPlayerState` rows and its version keeps a *set* of character
 GUIDs, which is what attributes a resurrected player's kills. Forwarding the
@@ -1021,7 +1031,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 919 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 932 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check

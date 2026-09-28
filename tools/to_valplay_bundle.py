@@ -120,8 +120,36 @@ ALTERNATE_FIRE_MARKERS = (
 #
 # Our raw bits for RoundInfos are byte-identical to the reference's, so passing
 # them through is exact rather than approximate.
+#
+# The blob is built from raw_bits DIRECTLY, whether or not the overlay also
+# typed the row. It used to be taken only when `_get_value` reported the row
+# raw -- which it does only when every typed column is null, though raw_bits
+# travels beside a typed value by design -- so a typed RoundInfos row dropped
+# its blob and, with it, every decoded child, with no counter moving. Keyed by
+# the wire's own field name. See `_RAW_SOURCED_RPC_PARAMS` for the RPC side.
 RAW_BLOB_PREFERRED = {
     "RoundInfos": "TArray<FAresPlayerRoundInfo>",
+}
+
+# RPC parameters whose consumer decodes the raw wire blob itself, by function.
+# Built from raw_bits whenever the row has them, typed or not -- the same rule
+# as RAW_BLOB_PREFERRED -- so typing a parameter upstream can neither drop the
+# blob nor swap it for a value its consumer cannot read.
+#
+# * The shot effect arrays feed this file's own effect decoder
+#   (`_decode_effect_elements`), which needs the exact payload window.
+# * A damage RPC's LifeChangeEvents feeds valplay's `_decode_remaining_hp`
+#   (weapon_stats.py), which reads the bits of the blob and nothing else.
+#
+# valplay's resource_budget.RETAINED_RAW_BLOB_KEYS lists every blob its metrics
+# decode: these, RoundInfos, and AggregateKills/Deaths/Assists and Score. The
+# last four take the generic path here -- no branch of this file depends on
+# whether they are raw -- and valplay reads either shape of them.
+_RAW_SOURCED_RPC_PARAMS = {
+    "ReplayPlayContinuousEffectAtLocation":
+        frozenset({"FloatValues", "ObjectValues", "VectorValues"}),
+    "MulticastNotifyDamage_Point": frozenset({"LifeChangeEvents"}),
+    "MulticastNotifyDamage_Base": frozenset({"LifeChangeEvents"}),
 }
 
 
@@ -292,6 +320,13 @@ class _Tally(dict):
         "non_finite_movement_rows":
             "movement rows written with a non-finite value (spelled "
             "Infinity/NaN; strict JSON parsers reject the line)",
+        "raw_blobs_unavailable":
+            "wire blobs a consumer decodes itself (RoundInfos, damage "
+            "LifeChangeEvents, shot effect arrays) that could not be built: "
+            "the row had no raw bits, or only its decoded members arrived",
+        "damaged_bone_undecoded":
+            "DamagedBone values the parser could not decode (published as "
+            "null, never guessed from the raw bytes)",
     }
 
     def __init__(self):
@@ -1503,11 +1538,33 @@ def _get_value(row_i64, row_f64, row_bool, row_str, row_raw, row_bits,
     if row_str is not None:
         return row_str, False
     if row_raw is not None:
-        # Return as {BitCount, Data, TypeName} blob format matching C# output
-        bit_count = row_bits
-        data_b64 = base64.b64encode(row_raw).decode('ascii')
-        return {"BitCount": bit_count, "Data": data_b64}, True
+        return _raw_blob(row_raw, row_bits), True
     return None, False
+
+
+def _raw_blob(row_raw, row_bits) -> dict:
+    """The {BitCount, Data} blob of one row's raw bits, as the C# output has it.
+
+    One builder for every site that publishes raw bits -- `_get_value` and the
+    raw-sourced fields -- so the key order, which is part of the bytes, has
+    one source. A caller that labels the blob adds `TypeName` after these two.
+    """
+    return {"BitCount": row_bits,
+            "Data": base64.b64encode(row_raw).decode('ascii')}
+
+
+def _count_unbuilt_blobs(blob_state, tally) -> None:
+    """Count the raw-sourced fields one event needed and did not get.
+
+    `blob_state` maps each raw-sourced field the event touched -- by its
+    container row or by a decoded member -- to whether its blob was built;
+    `None` when it touched none. Counted per event and field, not per row, so
+    a blob whose members all arrived without it counts once.
+    """
+    if blob_state:
+        unbuilt = sum(1 for built in blob_state.values() if not built)
+        if unbuilt:
+            tally.bump("raw_blobs_unavailable", unbuilt)
 
 
 def _split_rpc_field(field_name: str):
@@ -1595,7 +1652,8 @@ def _normalize_rpc_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 # RPC parameter normalization
 # ---------------------------------------------------------------------------
-def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict | None:
+def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
+                         tally=None) -> dict | None:
     """Normalize an RPC parameter name and value to match C# parser output.
 
     WHY: vrfkit uses prefixed 'b' for booleans (e.g. 'bDamageKilledTarget')
@@ -1610,7 +1668,12 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict
     Confirmed by injecting two such rows and reading them back out of
     `events.ndjson`, not inferred. The parent blob row still carries the same
     information in the shape this adapter expects, so skipping the children
-    loses nothing here.
+    loses nothing here -- as long as the parent is there. On the damage RPCs,
+    whose blob valplay decodes, a member that arrives without it is counted
+    (`raw_blobs_unavailable`, see `_build_rpc_events`).
+
+    `tally` is optional so the function stays callable on its own; the
+    conversion passes the real one for `damaged_bone_undecoded`.
     """
     if "[" in param and param.split("[", 1)[0] in (
         "LifeChangeEvents",
@@ -1673,7 +1736,9 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict
                 result[out_name] = value
             return result
 
-        # LifeChangeEvents: keep as blob
+        # LifeChangeEvents: keep as blob. `_build_rpc_events` builds it from
+        # raw_bits whenever the row has them, typed or not (see
+        # `_RAW_SOURCED_RPC_PARAMS`), so `is_raw` here means "the blob exists".
         if param == "LifeChangeEvents" and is_raw:
             # Pass through as {BitCount, Data, TypeName} matching C# format
             if isinstance(value, dict):
@@ -1681,22 +1746,23 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict
             result[out_name] = value
             return result
 
-        # DamagedBone: raw -> string "0" or actual bone name
+        # DamagedBone is an FName the overlay decodes into value_str: all
+        # 632,906 MulticastNotifyDamage_Point rows on the 1,018-export corpus
+        # are typed (2026-09-28; _Base carries none). A raw one is a decode
+        # the parser could not do -- it counts that on its side -- and it is
+        # published as null and counted, not guessed at.
+        #
+        # This branch used to ASCII-decode the wire bytes with
+        # errors='replace' inside a bare `except`, so it could not fail: the
+        # FName "Head" came out as '\n\x00\x00\x00' plus replacement
+        # characters, the same mojibake apply_type_corrections.py records
+        # shipping for all 581 payloads when the field was forced to Raw.
+        # Null rather than the raw blob because valplay's `_bone_region`
+        # files None under "other", and would raise TypeError on a dict
+        # (`bone in HEAD_BONES`, a frozenset).
         if param == "DamagedBone" and is_raw:
-            if isinstance(value, dict) and "Data" in value:
-                raw_bytes = base64.b64decode(value["Data"])
-                # Try to interpret as a null-terminated string or simple int
-                try:
-                    # It's typically a short string or "0"
-                    decoded = raw_bytes.rstrip(b'\x00').decode('ascii', errors='replace')
-                    if decoded:
-                        result[out_name] = decoded
-                    else:
-                        result[out_name] = "0"
-                except Exception:
-                    result[out_name] = "0"
-                return result
-            result[out_name] = value
+            _bump(tally, "damaged_bone_undecoded")
+            result[out_name] = None
             return result
 
         # DeathMontageEffectOverride and ...Context are genuine blobs and the
@@ -2485,6 +2551,9 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 indexed_names.add(fn[:fn.index('[')])
 
         payload = {}
+        # {RAW_BLOB_PREFERRED name: blob built?} for this event; created only
+        # for an event that carries such a field.
+        blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
             if fn is None:
@@ -2494,6 +2563,29 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                 col_raw[ri], col_bits[ri], tally
             )
+            type_name = RAW_BLOB_PREFERRED.get(fn)
+            if type_name is not None:
+                # The container row of a field whose consumer decodes the
+                # blob: built from raw_bits whether or not the row is also
+                # typed (see RAW_BLOB_PREFERRED). `_get_value` still ran above,
+                # so its multi-typed counter keeps seeing this row.
+                if blob_state is None:
+                    blob_state = {}
+                raw = col_raw[ri]
+                if raw is not None:
+                    blob = _raw_blob(raw, col_bits[ri])
+                    blob["TypeName"] = type_name
+                    payload[fn] = blob
+                    blob_state[fn] = True
+                else:
+                    # No bits, no blob: counted once the event is complete.
+                    # A typed value is published in the blob's place rather
+                    # than dropped -- the consumer skips a non-blob, visibly --
+                    # unless this event already built the blob.
+                    blob_state.setdefault(fn, False)
+                    if value is not None and not blob_state[fn]:
+                        payload[fn] = value
+                continue
             if value is None and not is_raw:
                 continue
 
@@ -2519,21 +2611,31 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
             # Parse the field path and set in nested structure
             parts = _parse_field_path(fn, tally)
             if len(parts) == 1 and parts[0][1] is None:
-                # Simple top-level field. Skip if it's a raw blob that has
-                # indexed sub-fields (the sub-fields carry the decoded data)
-                # -- unless downstream wants the undecoded blob.
+                # Simple top-level field. Skip it when it is the container of
+                # indexed sub-fields: the sub-fields carry the decoded data.
+                #
+                # Skipped whether raw OR typed. This used to test `is_raw`, and
+                # stream.rs writes a flattened array's element rows first and
+                # the container row after them, so a typed container reached
+                # the assignment below -- which no conflict counter watches --
+                # and replaced the decoded list with its own value. No such
+                # typed container occurs on the 1,018-export corpus
+                # (2026-09-28); typing one upstream must not change the bundle.
                 bare_name = parts[0][0]
-                if bare_name in RAW_BLOB_PREFERRED:
-                    if is_raw and isinstance(value, dict):
-                        value["TypeName"] = RAW_BLOB_PREFERRED[bare_name]
-                        payload[bare_name] = value
-                    continue
-                if is_raw and bare_name in indexed_names:
+                if bare_name in indexed_names:
                     continue
                 payload[bare_name] = value
-            elif parts[0][0] not in RAW_BLOB_PREFERRED:
+            elif parts[0][0] in RAW_BLOB_PREFERRED:
+                # A decoded member of a raw-blob field. The blob carries it, so
+                # the member is not published -- which makes a member whose
+                # event built no blob a loss, counted below.
+                if blob_state is None:
+                    blob_state = {}
+                blob_state.setdefault(parts[0][0], False)
+            else:
                 _set_nested(payload, parts, value, tally)
 
+        _count_unbuilt_blobs(blob_state, tally)
         _drop_padding_elements(payload)
 
         # Emit even if payload is empty (some events are just existence signals)
@@ -2596,6 +2698,9 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
         float_blob = None
         object_blob = None
         vector_blob = None
+        # {raw-sourced parameter: blob built?} for this invocation; created
+        # only when it carries one. See `_RAW_SOURCED_RPC_PARAMS`.
+        blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
             if fn is None:
@@ -2616,11 +2721,15 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 # Keyed under the function's own name. The reference emits none
                 # of these functions (they sit in its 241 unbound groups), so
                 # there is no key to match -- this is a vrfkit-only convention.
+                #
+                # A typed row is carried as well. This tested `is_raw`, so a
+                # function row the overlay typed was dropped with no counter;
+                # none is typed on the 1,018-export corpus (2026-09-28).
                 value, is_raw = _get_value(
                     col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                     col_raw[ri], col_bits[ri], tally
                 )
-                if is_raw:
+                if value is not None:
                     if name in payload:
                         tally.bump("rpc_param_collisions")
                     payload[name] = value
@@ -2629,44 +2738,56 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                 col_raw[ri], col_bits[ri], tally
             )
-            # Shot arrays deliberately keep the preserved wire blob as their
-            # source. Rust may add a value_str JSON overlay in the future, but
-            # that must neither replace the Python shot decoder's raw input nor
-            # change rpc_received's established blob payload contract.
-            shot_effect_blob = (
-                name == "ReplayPlayContinuousEffectAtLocation"
-                and param in ("FloatValues", "ObjectValues", "VectorValues")
-                and col_raw[ri] is not None
-            )
-            if shot_effect_blob:
-                # bit_count travels with the bytes. Recomputing it downstream
-                # as len(data) * 8 would feed the last byte's padding bits to
-                # the decoder as data.
-                captured = _EffectBlob(bytes(col_raw[ri]), col_bits[ri])
-                if param == "FloatValues":
-                    float_blob = captured
-                elif param == "ObjectValues":
-                    object_blob = captured
-                elif param == "VectorValues":
-                    vector_blob = captured
-                # Keep the rpc_received wire-blob shape too. `_get_value`
-                # still ran above, so its malformed multi-typed counter stays
-                # visible; this narrowly chooses raw only for these shot-array
-                # consumers that require the exact payload window.
-                value = {
-                    "BitCount": col_bits[ri],
-                    "Data": base64.b64encode(col_raw[ri]).decode("ascii"),
-                }
-                is_raw = True
+            # A raw-sourced parameter keeps the preserved wire blob as its
+            # source whether or not the overlay typed it: a value_str overlay
+            # must neither replace the shot decoder's raw input nor change a
+            # consumer's blob contract. `_get_value` still ran above, so its
+            # multi-typed counter keeps seeing these rows.
+            sourced = _RAW_SOURCED_RPC_PARAMS.get(name)
+            if sourced is not None:
+                if param in sourced:
+                    if blob_state is None:
+                        blob_state = {}
+                    raw = col_raw[ri]
+                    if raw is not None:
+                        bits = col_bits[ri]
+                        if name == "ReplayPlayContinuousEffectAtLocation":
+                            # bit_count travels with the bytes. Recomputing it
+                            # downstream as len(data) * 8 would feed the last
+                            # byte's padding bits to the decoder as data.
+                            captured = _EffectBlob(bytes(raw), bits)
+                            if param == "FloatValues":
+                                float_blob = captured
+                            elif param == "ObjectValues":
+                                object_blob = captured
+                            else:
+                                vector_blob = captured
+                        value = _raw_blob(raw, bits)
+                        is_raw = True
+                        blob_state[param] = True
+                    else:
+                        # Counted once the invocation is complete; whatever
+                        # typed value the row has still goes out below.
+                        blob_state.setdefault(param, False)
+                elif "[" in param:
+                    member_of = param.split("[", 1)[0]
+                    if member_of in sourced:
+                        # A decoded member (dropped by `_normalize_rpc_param`
+                        # because the blob carries it): the blob is expected.
+                        if blob_state is None:
+                            blob_state = {}
+                        blob_state.setdefault(member_of, False)
             if value is None and not is_raw:
                 continue
             # Map parameter names to match C# parser output
-            param_out = _normalize_rpc_param(rpc_name, param, value, is_raw)
+            param_out = _normalize_rpc_param(rpc_name, param, value, is_raw, tally)
             if param_out is not None:
                 for k, v in param_out.items():
                     if k in payload:
                         tally.bump("rpc_param_collisions")
                     payload[k] = v
+
+        _count_unbuilt_blobs(blob_state, tally)
 
         if rpc_name is None:
             tally.bump("unnamed_rpc_invocations")
