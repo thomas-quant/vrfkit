@@ -145,6 +145,15 @@ EXPECTED += [
       for _group in GAME_OBJECT_BYTE_ROTATOR_GROUPS],
     *[(_group, "EffectID", "FieldType::Int64") for _group, _c, _chain in EFFECT_ID_INT64],
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::FName"),
+    # The next eight are not corrections: extract_descriptors.py types them
+    # from PAYLOAD_DECODER_TYPES (`.Decode(ValorantPayloadDecoders.X)` at
+    # DamageParameters.cs:50-51 and MulticastNotifyDamagePointParameters.cs:
+    # 40-46), and they are verified here. EquippableUsed is IntPacked: on
+    # 02d4d478 all 632 values are 8, 16 or 24 bits wide and even, as dynamic
+    # NetGUIDs are (116 distinct), and 114 of 115 resolve to a weapon class
+    # path in actors.parquet. The reference bundle agrees on the scales:
+    # DamageImpactLocation integral, DamageOrigin two decimals,
+    # DamageDirection / DamageImpactNormal unit vectors.
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Point", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Base", "DamageOrigin",
@@ -1179,6 +1188,21 @@ def parse_entries(content: str):
             yield group.group(1), field.group(1), ftype
 
 
+def _own_entry(block: str) -> tuple[str, str, str | None]:
+    """`(group, field, type)` of the entry that opens one split block.
+
+    Splitting on `    OverlayEntry {` leaves the whole OVERLAY_HANDLE_TABLE
+    inside the LAST block, and handle entries repeat group paths and field
+    names. So a pass keys on the block's first `group_path` and `field_name`
+    and its own `field_type`, never on text found anywhere in the block.
+    `("", "", None)` when the block names no entry.
+    """
+    group, field = GROUP_RE.search(block), FIELD_RE.search(block)
+    if not (group and field):
+        return "", "", None
+    return group.group(1), field.group(1), _field_type_of(block)
+
+
 def apply_additions(content: str) -> tuple[str, int]:
     """Insert every entry in `ADDITIONS` that is not already present.
 
@@ -1249,19 +1273,10 @@ def retype_exact(content: str, group: str, field: str, old: str, new: str,
                  expected: int) -> tuple[str, int]:
     """Rewrite `old` -> `new` on the entries keyed EXACTLY `(group, field)`.
 
-    The older passes below match a substring of the group and the field line
-    anywhere in a split block. That is only safe by luck: splitting on
-    `    OverlayEntry {` leaves the whole OVERLAY_HANDLE_TABLE inside the LAST
-    block, and that table repeats group paths and field names -- including
-    `ReplayPlayContinuousEffectAtLocation` / `AllianceFilter` (handle 28) and
-    `MulticastNotifyDamage_Point` / `DeathMontageEffectOverride` (handle 43).
-    A substring pass on either would reach into the tail block and hold only
-    because the last OverlayEntry happens not to carry the old type.
-
-    Here the key is each block's OWN entry: the first `group_path` and
-    `field_name` in the block, compared with `==`, and its own `field_type`
-    compared in full. The type is then replaced once, and its first
-    occurrence in the block is the entry's own `field_type`.
+    The key is each block's OWN entry (see `_own_entry`): its group and field
+    compared with `==`, and its own `field_type` compared in full. The type is
+    then replaced once, and its first occurrence in the block is the entry's
+    own `field_type`.
 
     `expected` is how many entries a freshly generated table must change. On an
     already corrected table the answer is 0; any other count means the key
@@ -1626,10 +1641,11 @@ def main():
     for i, block in enumerate(blocks):
         if i == 0:
             continue
-        if 'field_name: "ReplayLastTransformUpdateTimeStamp"' not in block:
+        _group, field, ftype = _own_entry(block)
+        if field != "ReplayLastTransformUpdateTimeStamp":
             continue
-        if "FieldType::Skip" in block:
-            blocks[i] = block.replace("FieldType::Skip", "FieldType::Float")
+        if ftype == "FieldType::Skip":
+            blocks[i] = block.replace("FieldType::Skip", "FieldType::Float", 1)
             count += 1
     content = "    OverlayEntry {".join(blocks)
 
@@ -1705,12 +1721,14 @@ def main():
     for i, block in enumerate(blocks):
         if i == 0:
             continue
-        if "SmokeScreen" not in block or 'field_name: "ReplicatedMovement"' not in block:
+        group, field, ftype = _own_entry(block)
+        if "SmokeScreen" not in group or field != "ReplicatedMovement":
             continue
-        if "RotatorQuantization::ShortComponents" in block:
+        if "RotatorQuantization::ShortComponents" in (ftype or ""):
             blocks[i] = block.replace(
                 "RotatorQuantization::ShortComponents",
                 "RotatorQuantization::ByteComponents",
+                1,
             )
             count += 1
     content = "    OverlayEntry {".join(blocks)
@@ -1740,14 +1758,14 @@ def main():
     for i, block in enumerate(blocks):
         if i == 0:
             continue
-        if f'group_path: "{SEEKER_NADE_GROUP}"' not in block:
+        group, field, ftype = _own_entry(block)
+        if group != SEEKER_NADE_GROUP or field != "ReplicatedMovement":
             continue
-        if 'field_name: "ReplicatedMovement"' not in block:
-            continue
-        if "VectorQuantization::RoundWholeNumber" in block:
+        if "VectorQuantization::RoundWholeNumber" in (ftype or ""):
             blocks[i] = block.replace(
                 "VectorQuantization::RoundWholeNumber",
                 "VectorQuantization::RoundTwoDecimals",
+                1,
             )
             count += 1
     content = "    OverlayEntry {".join(blocks)
@@ -1811,89 +1829,13 @@ def main():
     for i, block in enumerate(blocks):
         if i == 0:
             continue
-        if ('group_path: "/Script/ShooterGame.EquippableStateMachineComponent"'
-                not in block):
+        group, field, ftype = _own_entry(block)
+        if (group != "/Script/ShooterGame.EquippableStateMachineComponent"
+                or field != "TransitionContext"):
             continue
-        if 'field_name: "TransitionContext"' not in block:
-            continue
-        if "FieldType::Raw" in block:
-            blocks[i] = block.replace("FieldType::Raw", "FieldType::ObjectNetGuid")
+        if ftype == "FieldType::Raw":
+            blocks[i] = block.replace("FieldType::Raw", "FieldType::ObjectNetGuid", 1)
             count += 1
-    content = "    OverlayEntry {".join(blocks)
-
-    # Fix: Raw -> ObjectNetGuid for EquippableUsed on both damage RPCs.
-    #
-    # Not a wire/declaration mismatch like the others above -- the declaration
-    # is simply invisible to the extractor. DamageParameters.cs:51 attaches a
-    # custom decoder:
-    #
-    #   AddPropertyHandle(7, x => x.EquippableUsed, ...)
-    #       .Decode(ValorantPayloadDecoders.Equippable)
-    #
-    # and that decoder (ValorantPayloadDecoders.cs:158) is exactly
-    #
-    #   var netGuid = archive.ReadIntPacked();
-    #
-    # which is what FieldType::ObjectNetGuid already implements. Because
-    # extract_descriptors.py cannot see through .Decode(...), the field lands
-    # here as Raw, and every consumer has to guess the encoding.
-    #
-    # Verified on 02d4d478 across all 632 occurrences: read as IntPacked the
-    # values are 116 distinct and 100% even -- the engine requires dynamic
-    # NetGUIDs to be even (IsDynamic => (Value & 1) == 0) -- and 114 of 115
-    # resolve to a weapon class path in actors.parquet. The bits are 8, 16 or
-    # 24 wide depending on the value, so any fixed-width read is wrong by
-    # construction.
-    blocks = content.split("    OverlayEntry {")
-    for i, block in enumerate(blocks):
-        if i == 0:
-            continue
-        if "DamageableComponent:MulticastNotifyDamage_" not in block:
-            continue
-        if 'field_name: "EquippableUsed"' not in block:
-            continue
-        if "FieldType::Raw" in block:
-            blocks[i] = block.replace("FieldType::Raw", "FieldType::ObjectNetGuid")
-            count += 1
-    content = "    OverlayEntry {".join(blocks)
-
-    # Fix: Raw -> quantized vectors for the damage geometry fields.
-    #
-    # Same invisibility problem as EquippableUsed above: these are attached
-    # with .Decode(ValorantPayloadDecoders.VectorNetQuantize*(...)), so the
-    # extractor sees a custom decoder and emits Raw, even though vrf-decode
-    # already implements the exact quantization.
-    #
-    # Scales come from the C# call sites, not from guesswork:
-    #   DamageParameters.cs:50                    VectorNetQuantize100
-    #   MulticastNotifyDamagePointParameters.cs:40 VectorNetQuantizeNormal
-    #   MulticastNotifyDamagePointParameters.cs:42 VectorNetQuantize
-    #   MulticastNotifyDamagePointParameters.cs:44 VectorNetQuantizeNormal
-    #   MulticastNotifyDamagePointParameters.cs:46 VectorNetQuantize
-    #
-    # Confirmed by the reference bundle's own output: DamageImpactLocation is
-    # integral (scale 1), DamageOrigin carries two decimals (scale 100), and
-    # DamageDirection / DamageImpactNormal are unit vectors.
-    damage_vectors = {
-        "DamageOrigin": "FieldType::VectorNetQuantize { scale: 100 }",
-        "DamageImpactLocation": "FieldType::VectorNetQuantize { scale: 1 }",
-        "DamageImpactBoneRelativeLocation": "FieldType::VectorNetQuantize { scale: 1 }",
-        "DamageDirection": "FieldType::VectorNetQuantizeNormal",
-        "DamageImpactNormal": "FieldType::VectorNetQuantizeNormal",
-    }
-    blocks = content.split("    OverlayEntry {")
-    for i, block in enumerate(blocks):
-        if i == 0:
-            continue
-        if "DamageableComponent:MulticastNotifyDamage_" not in block:
-            continue
-        for field, new_type in damage_vectors.items():
-            if f'field_name: "{field}"' not in block:
-                continue
-            if "FieldType::Raw" in block:
-                blocks[i] = block.replace("FieldType::Raw", new_type)
-                count += 1
-            break
     content = "    OverlayEntry {".join(blocks)
 
     # Fix: EnumRemainingBits -> EnumByte for AllianceFilter on
@@ -1973,7 +1915,7 @@ def main():
     #   resolves 0 of them, as it does for the already-typed
     #   EventInstigatorPawn on the same events, while actors.parquet resolves
     #   62,162 of 62,162 to a `*_PC_C` player pawn open at the event's time_ms
-    #   -- the EquippableUsed standard above. Non-zero only on killing events.
+    #   -- the EquippableUsed standard in EXPECTED. Non-zero only on killing events.
     #   It equals EventInstigatorPawn on 22,224 of them and Character on
     #   1,537, so it is a pawn reference and nothing more specific: not "the
     #   killer", not "the victim".
