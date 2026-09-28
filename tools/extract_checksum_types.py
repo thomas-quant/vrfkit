@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import json
 import re
 import sys
@@ -161,6 +162,7 @@ def load_committed() -> dict[int, str]:
     return committed
 
 
+@dataclasses.dataclass
 class Verdict:
     """How a freshly learned map relates to the committed one.
 
@@ -181,10 +183,11 @@ class Verdict:
                      disagree. No candidate remains safe, so this also fails.
     """
 
-    def __init__(self, disagreed, new, unseen, contradicted=None, ambiguous=None):
-        self.disagreed, self.new, self.unseen = disagreed, new, unseen
-        self.contradicted = contradicted or {}
-        self.ambiguous = ambiguous or {}
+    disagreed: dict
+    new: dict
+    unseen: dict
+    contradicted: dict = dataclasses.field(default_factory=dict)
+    ambiguous: dict = dataclasses.field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
