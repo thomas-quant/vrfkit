@@ -29,8 +29,6 @@ use vrf_container::{
     event_payload_seconds_matches_time, known_event_word_count, parse_event_chunk,
     parse_known_event_payload, parse_preamble,
 };
-#[cfg(test)]
-use vrf_container::{EventPayload, parse_event_payload};
 use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     ActorWriter, CheckpointActorWriter, CheckpointBlockWriter, CheckpointExportFieldWriter,
@@ -74,33 +72,6 @@ const CHECKPOINT_TABLES: [&str; 7] = [
 ];
 /// Written after every table is complete.
 const MANIFEST: &str = "manifest.json";
-
-/// The structural payload for an Event group that declares `word_count` words,
-/// or `None` when the payload does not fit that layout.
-///
-/// The payload is `[u32 tag][N x u32 words][FString name][f32 seconds]` and is
-/// not self-describing: no count precedes the words. `N` was therefore assumed
-/// per group and the words copied from fixed offsets with nothing checking that
-/// the rest of the payload agreed. A build that changed `N` would not fail --
-/// `characterDeath` claims two words, and on a payload carrying one the second
-/// read lands exactly on the `FString`'s length prefix, which is a small
-/// positive integer and reads in the exported column as an entirely plausible
-/// killed NetGUID.
-///
-/// `N` is not readable forward, but it *is* checkable backward: the remaining
-/// three parts have known widths, so the assumed layout must consume the
-/// payload exactly. That is what this verifies. It is the same rule
-/// `vrf_decode::decode_field` applies to every leaf -- refuse to return a
-/// plausible wrong number when bits are left over -- applied to the container
-/// the leaves sit in.
-///
-/// A measured zero-word group is still checked: zero is an established arity,
-/// not the absence of a claim. Unknown groups never call this test helper and
-/// remain raw-only in the production path.
-#[cfg(test)]
-fn typed_event_payload(payload: &[u8], word_count: usize) -> Option<EventPayload> {
-    parse_event_payload(payload, word_count)
-}
 
 pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), CliError> {
     let start = Instant::now();
@@ -461,88 +432,4 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::typed_event_payload;
-
-    /// Build an Event payload: `[u32 tag][words][FString][f32 seconds]`.
-    fn payload(tag: u32, words: &[u32], name: &str) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&tag.to_le_bytes());
-        for w in words {
-            out.extend_from_slice(&w.to_le_bytes());
-        }
-        // Unreal's FString length counts the null terminator.
-        let len = i32::try_from(name.len() + 1).expect("test name fits");
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(name.as_bytes());
-        out.push(0);
-        out.extend_from_slice(&1.5f32.to_le_bytes());
-        out
-    }
-
-    /// A payload that matches the assumed word count yields its words.
-    #[test]
-    fn a_payload_matching_the_assumed_layout_yields_its_words() {
-        let p = payload(
-            3,
-            &[0x1111_1111, 0x2222_2222],
-            "EReplayEventGroup::CharacterDeath",
-        );
-        let parsed = typed_event_payload(&p, 2).expect("two-word layout");
-        assert_eq!(parsed.tag, 3);
-        assert_eq!(parsed.words, [0x1111_1111, 0x2222_2222]);
-        assert_eq!(parsed.name, "EReplayEventGroup::CharacterDeath");
-        assert_eq!(parsed.seconds, 1.5);
-        let p1 = payload(3, &[0x3333_3333], "EReplayEventGroup::RoundStart");
-        assert_eq!(
-            typed_event_payload(&p1, 1).map(|value| value.words),
-            Some(vec![0x3333_3333])
-        );
-    }
-
-    /// A build that changes the word count must not export a plausible NetGUID
-    /// read out of the following `FString`.
-    ///
-    /// The words were copied from fixed offsets with nothing checking that the
-    /// rest of the payload agreed. `characterDeath` claims two words; a payload
-    /// carrying one puts the FString's length prefix exactly where `word1` is
-    /// read, and a length prefix is a small positive integer -- indistinguishable
-    /// from a NetGUID in the exported column. No counter moved and no error was
-    /// raised, because nothing had asked whether the layout still held.
-    #[test]
-    fn a_payload_that_does_not_fit_the_assumed_word_count_yields_nothing() {
-        // One real word, but `characterDeath`'s assumed count is two.
-        let p = payload(3, &[0x1111_1111], "EReplayEventGroup::CharacterDeath");
-        assert_eq!(
-            typed_event_payload(&p, 2),
-            None,
-            "a payload one word short must refuse to name word1"
-        );
-        // ...and the reverse: three words where two were assumed.
-        let p3 = payload(3, &[1, 2, 3], "EReplayEventGroup::CharacterDeath");
-        assert_eq!(typed_event_payload(&p3, 2), None);
-    }
-
-    /// A measured zero-word group is still validated through its tag, FString
-    /// and trailing f32. Unknown groups never call this helper.
-    #[test]
-    fn a_measured_zero_word_group_must_still_fit_the_structural_tail() {
-        let p = payload(4, &[], "EReplayEventGroup::SpikePlanted");
-        let parsed = typed_event_payload(&p, 0).expect("zero-word layout");
-        assert_eq!(parsed.tag, 4);
-        assert!(parsed.words.is_empty());
-        assert_eq!(parsed.name, "EReplayEventGroup::SpikePlanted");
-        assert_eq!(parsed.seconds, 1.5);
-        assert_eq!(typed_event_payload(&[0xAB; 3], 0), None);
-    }
-
-    /// A truncated payload cannot be verified, so it yields nothing rather than
-    /// whatever `get()` happens to return.
-    #[test]
-    fn a_truncated_payload_yields_nothing() {
-        assert_eq!(typed_event_payload(&[0u8; 6], 1), None);
-    }
 }

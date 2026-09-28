@@ -1237,3 +1237,42 @@ mod event_chunks {
         assert_eq!(found, 1);
     }
 } // mod event_chunks
+
+// Two layouts `event_chunks` does not cover, moved here from the vrfkit
+// driver, whose test-only wrapper only forwarded to `parse_event_payload`.
+#[cfg(feature = "event")]
+mod event_payload_layouts {
+    use super::*;
+
+    /// `[u32 tag][words][FString name][f32 seconds]`, seconds fixed at 1.5.
+    fn event_payload(tag: u32, words: &[u32], name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        helpers::add_u32(&mut out, tag);
+        for &word in words {
+            helpers::add_u32(&mut out, word);
+        }
+        helpers::add_fstring(&mut out, name);
+        helpers::add_f32(&mut out, 1.5);
+        out
+    }
+
+    /// A measured zero-word group is still checked through its tag, FString
+    /// and trailing f32: zero is an established arity, not an absent claim.
+    #[test]
+    fn event_payload_accepts_a_zero_word_layout_that_consumes_exactly() {
+        let payload = event_payload(4, &[], "EReplayEventGroup::SpikePlanted");
+        let parsed = parse_event_payload(&payload, 0).expect("zero-word layout");
+        assert_eq!(parsed.tag, 4);
+        assert!(parsed.words.is_empty());
+        assert_eq!(parsed.name, "EReplayEventGroup::SpikePlanted");
+        assert_eq!(parsed.seconds, 1.5);
+    }
+
+    /// A payload shorter than the layout's fixed parts cannot be verified, so
+    /// it yields nothing rather than whatever a partial read returns.
+    #[test]
+    fn event_payload_refuses_a_payload_shorter_than_its_fixed_parts() {
+        assert!(parse_event_payload(&[0xAB; 3], 0).is_none());
+        assert!(parse_event_payload(&[0u8; 6], 1).is_none());
+    }
+}
