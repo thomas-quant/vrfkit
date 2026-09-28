@@ -230,6 +230,9 @@ fn scan_file(data: &[u8]) -> FileReport {
             Err(e) => problems.push(format!("oodle: {e}")),
         }
     }
+    if !oodle_ok {
+        problems.push("no ReplayData chunk decompressed".to_string());
+    }
 
     FileReport {
         branch,
@@ -487,10 +490,27 @@ mod fixture {
     }
 
     /// Replay info followed by a single Header chunk, and nothing else.
-    pub fn minimal_replay() -> Vec<u8> {
+    pub fn header_only_replay() -> Vec<u8> {
         let mut data = replay_info();
         let payload = header_payload();
         add_u32(&mut data, 0); // chunk type: Header
+        add_i32(&mut data, payload.len() as i32);
+        data.extend_from_slice(&payload);
+        data
+    }
+
+    /// The header-only replay plus one ReplayData chunk. The info section
+    /// says uncompressed, so its data is stored as-is: SizeInBytes equals
+    /// MemorySizeInBytes.
+    pub fn minimal_replay() -> Vec<u8> {
+        let mut data = header_only_replay();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 0); // Time1
+        add_u32(&mut payload, 47); // Time2
+        add_i32(&mut payload, 4); // SizeInBytes
+        add_i32(&mut payload, 4); // MemorySizeInBytes
+        payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        add_u32(&mut data, 1); // chunk type: ReplayData
         add_i32(&mut data, payload.len() as i32);
         data.extend_from_slice(&payload);
         data
@@ -508,6 +528,27 @@ fn the_fixture_replay_scans_without_problems() {
         report.problems
     );
     assert_eq!(report.branch.as_deref(), Some("++Ares-Core+release-12.10"));
+    assert!(
+        report.oodle_ok,
+        "the fixture's ReplayData chunk must decompress"
+    );
+}
+
+/// A file whose chunk stream holds no ReplayData chunk -- an aborted
+/// recording, or a regression that renumbers the chunk type -- used to count
+/// as clean. Only the directory-wide `oodle_ok > 0` noticed, and one good file
+/// in the directory satisfied it.
+#[test]
+fn a_replay_with_nothing_decompressed_is_reported() {
+    let report = scan_file(&fixture::header_only_replay());
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|p| p == "no ReplayData chunk decompressed"),
+        "a file with no decompressed ReplayData must be reported, got {:?}",
+        report.problems
+    );
 }
 
 /// Four stray bytes after the last chunk are too few for a chunk header. That
