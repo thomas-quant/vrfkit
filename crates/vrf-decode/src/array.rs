@@ -1480,6 +1480,42 @@ mod tests {
         assert_eq!(anomalies(&stats), [1, 0, 0, 0, 0], "{stats:?}");
     }
 
+    /// The object-reference walker at the same limit: a zero handle closes the
+    /// element and the next one is still read; a 129th field is one
+    /// truncation and a failed read one error, and either stops the array.
+    #[test]
+    fn the_object_ref_walker_reads_the_next_int_packed_at_the_field_limit() {
+        let element_at_the_limit = || {
+            let mut bits = BitWriter::new();
+            bits.int_packed(2); // elementCount
+            bits.int_packed(1); // encodedIndex -> index 0
+            zero_width_fields(&mut bits, MAX_FIELDS_PER_ELEMENT);
+            bits
+        };
+        let mut closed = element_at_the_limit();
+        closed.int_packed(0); // element terminator, read by the limit check
+        closed.int_packed(2); // encodedIndex -> index 1
+        closed.int_packed(3).int_packed(8).int_packed(5); // handle 2: NetGUID 5
+        closed.int_packed(0).int_packed(0); // element and array terminators
+        let mut over = element_at_the_limit();
+        zero_width_fields(&mut over, 1); // a 129th field
+        over.int_packed(0).int_packed(0);
+        let mut failed = element_at_the_limit();
+        failed.repeat(true, 3); // too few bits for the next handle
+
+        for (name, bits, want, counters) in [
+            ("closed", closed, vec![(1, 5)], [0; 5]),
+            ("129th field", over, vec![], [0, 1, 0, 0, 0]),
+            ("failed read", failed, vec![], [1, 0, 0, 0, 0]),
+        ] {
+            let (data, bit_count) = bits.finish();
+            let mut stats = ArrayDecodeStats::default();
+            let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
+            assert_eq!(guids, want, "{name}");
+            assert_eq!(anomalies(&stats), counters, "{name}: {stats:?}");
+        }
+    }
+
     #[test]
     fn repeated_element_indices_cannot_bypass_the_element_work_limit() {
         let mut bits = BitWriter::new();
@@ -1496,6 +1532,53 @@ mod tests {
 
         assert_eq!(stats.elements_decoded, u64::from(MAX_ELEMENTS));
         assert_eq!(stats.truncations, 1, "{stats:?}");
+    }
+
+    /// After `MAX_ELEMENTS` elements both walkers read the next IntPacked in
+    /// the limit check: the index terminator, then the optional trailer as
+    /// after any terminator; another index, one truncation; or a failed read,
+    /// one error. The limit stops the array loop, so the bits it leaves go to
+    /// `unconsumed_root_bits`, except that the struct walker keeps a truncated
+    /// tail as a `._raw` leaf.
+    #[test]
+    fn both_walkers_read_the_next_int_packed_at_the_element_limit() {
+        // (the tail after the last element as `bits(value, width)`, the struct
+        // walker's counters and `._raw` leaf width, the object-ref walker's
+        // counters)
+        let cases = [
+            (0x0000, 16, [0; 5], None, [0; 5]), // terminator, zero trailer
+            (0x0200, 16, [0, 0, 0, 8, 0], None, [0, 0, 0, 8, 0]), // terminator, trailer 1
+            (0x0100, 16, [1, 0, 0, 0, 0], None, [1, 0, 0, 0, 0]), // terminator, cut trailer
+            (0x0002, 16, [0, 1, 0, 0, 0], Some(16), [0, 1, 0, 16, 0]), // one element too many
+            (0b111, 3, [1, 0, 0, 3, 0], None, [1, 0, 0, 3, 0]), // too few bits to read
+        ];
+        for (tail, width, struct_counters, raw_width, object_ref_counters) in cases {
+            let case = format!("tail {tail:#06x}/{width}");
+            let mut bits = BitWriter::new();
+            bits.int_packed(1); // one declared slot
+            for _ in 0..MAX_ELEMENTS {
+                bits.int_packed(1).int_packed(0); // index 0 again, empty element
+            }
+            bits.bits(tail, width);
+            let (data, bit_count) = bits.finish();
+
+            let mut stats = ArrayDecodeStats::default();
+            let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
+            let raw: Vec<(&str, u32)> = fields
+                .iter()
+                .map(|f| (f.path.as_str(), f.bit_count))
+                .collect();
+            let want: Vec<(&str, u32)> = raw_width.map(|n| ("._raw", n)).into_iter().collect();
+            assert_eq!(raw, want, "{case}");
+            assert_eq!(stats.elements_decoded, u64::from(MAX_ELEMENTS), "{case}");
+            assert_eq!(anomalies(&stats), struct_counters, "{case}: {stats:?}");
+
+            let mut stats = ArrayDecodeStats::default();
+            let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
+            assert!(guids.is_empty(), "{case}: {guids:?}");
+            assert_eq!(stats.elements_decoded, u64::from(MAX_ELEMENTS), "{case}");
+            assert_eq!(anomalies(&stats), object_ref_counters, "{case}: {stats:?}");
+        }
     }
 
     /// `AbilityCastsThisRound[].Effects[]` is a nested array only its schema
