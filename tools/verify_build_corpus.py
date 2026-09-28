@@ -293,7 +293,10 @@ def main(argv=None):
         f"{p.relative_to(REPO).as_posix()} {sha256_file(p)}" for p in tracked_sources).encode()).hexdigest()
     exe_hash = sha256_file(args.exe)
     provenance = {"date_utc": datetime.now(timezone.utc).isoformat(),
-                  "parser_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
+                  # Strict: parsed into the report, and a commit hash is ASCII.
+                  "parser_commit": subprocess.check_output(
+                      ["git", "rev-parse", "HEAD"], cwd=REPO, text=True,
+                      encoding="utf-8", errors="strict").strip(),
                   "parser_sources_sha256": source_digest, "exe_sha256": exe_hash,
                   "runner_sha256": sha256_file(Path(__file__)),
                   "evidence_sha256": sha256_file(args.evidence),

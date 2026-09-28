@@ -154,10 +154,14 @@ def parse_build(text: str) -> str | None:
 
 def inspect_build(vrfkit: Path, replay: Path) -> str | None:
     """Inspect one header without allowing a private path into diagnostics."""
+    # Strict: the build label is parsed out of this text, and vrfkit writes
+    # UTF-8, so a decode failure means corrupt output and must be loud.
     result = subprocess.run(
         [str(vrfkit), "inspect", str(replay), "--redact-identifiers"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="strict",
         check=False,
     )
     if result.returncode != 0:
@@ -306,10 +310,15 @@ def export_and_analyze(
     """Export exactly one replay and delete it after streaming the fields."""
     with tempfile.TemporaryDirectory(prefix="vrfkit-raw-inventory-") as temp:
         output = Path(temp) / "export"
+        # "replace": the captured text is never read (only the exit code
+        # decides), so a decode error must not turn a finished export into a
+        # crash.
         result = subprocess.run(
             [str(vrfkit), "export", str(replay.path), "--out", str(output)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
         if result.returncode != 0:
