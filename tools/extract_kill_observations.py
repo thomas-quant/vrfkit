@@ -5,7 +5,7 @@ members remain null and all three serialized clocks remain independent.
 """
 
 from __future__ import annotations
-import argparse, hashlib, json, math, os, re, struct, sys
+import argparse, hashlib, json, math, struct, sys
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -84,7 +84,8 @@ MEMBERS = {
     14: "round_number",
     15: "did_kill_trigger_finisher",
 }
-RX = re.compile(r"^KillData(?:\[[0-9]+\](?:\..*)?)?$")
+#: Raw members a complete (non-partial) element update carries.
+REQUIRED = {DECL[handle][0] for handle in MEMBERS}
 MAX_ELEMENTS = 4096
 MAX_FIELDS = 128
 
@@ -315,46 +316,24 @@ def selected(path):
         offset += batch.num_rows
 
 
+#: Typed column of each directly decoded member; handle 6 (the assistant
+#: container) has none.
+COLUMN = {3: "value_i64", 4: "value_i64", 9: "value_i64", 11: "value_i64", 14: "value_i64",
+          10: "value_f64", 12: "value_f64", 13: "value_f64", 15: "value_bool", 5: "value_str"}
+PRIMITIVE = {"value_i64": int, "value_f64": float, "value_bool": bool, "value_str": str}
+
+
 def value(row, handle):
-    return (
-        row["value_i64"]
-        if handle in (3, 4, 9, 11, 14)
-        else (
-            row["value_f64"]
-            if handle in (10, 12, 13)
-            else (
-                row["value_bool"]
-                if handle == 15
-                else row["value_str"] if handle == 5 else None
-            )
-        )
-    )
+    return row[COLUMN[handle]] if handle in COLUMN else None
 
 
 def validate_direct(row, handle, raw, width):
-    expected_column = (
-        "value_i64"
-        if handle in (3, 4, 9, 11, 14)
-        else (
-            "value_f64"
-            if handle in (10, 12, 13)
-            else "value_bool" if handle == 15 else "value_str" if handle == 5 else None
-        )
-    )
-    populated = {
-        name
-        for name in ("value_i64", "value_f64", "value_bool", "value_str")
-        if row[name] is not None
-    }
+    expected_column = COLUMN.get(handle)
+    populated = {name for name in PRIMITIVE if row[name] is not None}
     if populated != ({expected_column} if expected_column else set()):
         raise InputError(f"KillData handle {handle} populated wrong typed columns")
     actual_value = value(row, handle)
-    expected_type = {
-        "value_i64": int,
-        "value_f64": float,
-        "value_bool": bool,
-        "value_str": str,
-    }.get(expected_column)
+    expected_type = PRIMITIVE.get(expected_column)
     if expected_type is not None and type(actual_value) is not expected_type:
         raise InputError(f"KillData handle {handle} populated the wrong primitive type")
     if handle in (3, 4, 9):
@@ -492,15 +471,7 @@ def extract_table(export, table, declared, refs):
                         raise InputError(
                             f"{table}: assistant ObjectNetGuid typing mismatch"
                         )
-                    resolution = (
-                        "null"
-                        if ref == 0
-                        else (
-                            "resolved_actor"
-                            if ref in refs[scope][0]
-                            else "unresolved_actor"
-                        )
-                    )
+                    resolution = resolve(ref, refs[scope][0], "actor")
                     assistants.setdefault(index, []).append(
                         {
                             "element_index": int(name.split("[")[2].split("]")[0]),
@@ -525,64 +496,25 @@ def extract_table(export, table, declared, refs):
                         "bit_count": width,
                         "raw_bits_hex": raw.hex(),
                     }
-            wire_indices = []
-            for _, index, _, _, _, _ in expected:
-                if index not in wire_indices:
-                    wire_indices.append(index)
-            for index in wire_indices:
+            for index in dict.fromkeys(x[1] for x in expected):
                 item = {name: None for name in MEMBERS.values()}
                 item.update(members.get(index, {}))
                 actor_refs = refs[scope][0]
                 guid_refs = refs[scope][1]
                 victim = item.get("victim_ref")
-                item["victim_ref_resolution"] = (
-                    "missing"
-                    if victim is None
-                    else (
-                        "null"
-                        if victim == 0
-                        else (
-                            "resolved_actor"
-                            if victim in actor_refs
-                            else "unresolved_actor"
-                        )
-                    )
-                )
+                item["victim_ref_resolution"] = resolve(victim, actor_refs, "actor")
                 if victim not in (None, 0):
                     counts["unresolved_actor_refs"] += victim not in actor_refs
                 for key in ("killing_equippable_class_ref", "damage_type_ref"):
                     ref = item.get(key)
-                    item[key + "_resolution"] = (
-                        "missing"
-                        if ref is None
-                        else (
-                            "null"
-                            if ref == 0
-                            else (
-                                "resolved_net_guid"
-                                if ref in guid_refs
-                                else "unresolved_net_guid"
-                            )
-                        )
-                    )
+                    item[key + "_resolution"] = resolve(ref, guid_refs, "net_guid")
                     if ref not in (None, 0):
                         counts["unresolved_guid_refs"] += ref not in guid_refs
                 item["assisting_players"] = (
                     assistants.get(index) if "assisting_players_raw" in item else None
                 )
                 item["raw_members"] = raw_members.get(index, {})
-                complete = set(raw_members.get(index, {})) >= {
-                    "Victim",
-                    "KillingEquippableClass",
-                    "WeaponTheme",
-                    "DamageType",
-                    "DamageTaken",
-                    "DamageRegion",
-                    "GameTimeElapsed",
-                    "RoundTimestamp",
-                    "RoundNumber",
-                    "bDidKillTriggerFinisher",
-                }
+                complete = set(raw_members.get(index, {})) >= REQUIRED
                 counts["partial_updates"] += not complete
                 counts["element_updates"] += 1
                 observations.append(
@@ -613,6 +545,14 @@ def extract_table(export, table, declared, refs):
     if pending:
         raise InputError(f"{table}: unlinked KillData child rows")
     return observations, counts
+
+
+def resolve(ref, known, kind):
+    if ref is None:
+        return "missing"
+    if ref == 0:
+        return "null"
+    return f"resolved_{kind}" if ref in known else f"unresolved_{kind}"
 
 
 def reject_overwrite(export, out):
