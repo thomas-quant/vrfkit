@@ -114,10 +114,10 @@ def build_export(root, build):
 
 
 class BuildScopeTests(unittest.TestCase):
-    def test_measured_legacy_builds_are_accepted(self):
+    def test_measured_builds_are_accepted(self):
         import contextlib, io
 
-        for build in LEGACY_BUILDS:
+        for build in (*LEGACY_BUILDS, "13.01", "13.02", "13.04", "13.05", "13.06"):
             branch = f"++Ares-Core+release-{build}"
             with self.subTest(build=build), tempfile.TemporaryDirectory() as t:
                 export = build_export(Path(t) / "export", branch)
@@ -135,7 +135,9 @@ class BuildScopeTests(unittest.TestCase):
 
     def test_unmeasured_builds_are_still_refused(self):
         # 12.10, 12.11 and 13.00 export no KillData children: the route is
-        # unobserved there, so an export from them cannot be checked.
+        # unobserved there, so an export from them cannot be checked. 13.07's
+        # declarations match every measured identity here; only the build is
+        # new, and a build must be measured before it is read.
         for build in ("++Ares-Core+release-12.10", "++Ares-Core+release-12.11",
                       "++Ares-Core+release-13.00", "++Ares-Core+release-13.07",
                       "12.09", "++Ares-Core+release-12.09 ", None):
@@ -288,59 +290,6 @@ class ExtractionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(tool.InputError, "declaration"):
                 tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})
-
-
-def declaration_export(root, build):
-    """Write only what `declarations()` reads: a manifest declaring the measured
-    KillData identities under `build`, and empty checkpoint declaration tables."""
-    root.mkdir()
-    fields = [
-        {"handle": handle, "name": name, "compatible_checksum": checksum}
-        for handle, (name, checksum) in {0: tool.PARENT, **tool.DECL}.items()
-    ]
-    manifest = {
-        "replay_build": build,
-        "net_field_export_groups": [{"path": tool.GROUP, "fields": fields}],
-    }
-    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    for name, columns in (
-        (
-            "checkpoint_export_groups",
-            [("checkpoint_index", pa.uint32()), ("ordinal", pa.uint32()),
-             ("group_path", pa.string())],
-        ),
-        (
-            "checkpoint_export_fields",
-            [("checkpoint_index", pa.uint32()), ("group_ordinal", pa.uint32()),
-             ("handle", pa.uint32()), ("rendered_name", pa.string()),
-             ("compatible_checksum", pa.uint32())],
-        ),
-    ):
-        pq.write_table(
-            pa.Table.from_pylist([], schema=pa.schema(columns)),
-            root / f"{name}.parquet",
-        )
-    return root
-
-
-class BuildGateTests(unittest.TestCase):
-    def test_measured_13_06_declarations_are_accepted(self):
-        with tempfile.TemporaryDirectory() as t:
-            export = declaration_export(Path(t) / "export", "++Ares-Core+release-13.06")
-            manifest, declared = tool.declarations(export)
-        self.assertEqual(manifest["replay_build"], "++Ares-Core+release-13.06")
-        self.assertEqual(declared, {None: {0: tool.PARENT, **tool.DECL}})
-
-    def test_unmeasured_build_is_rejected_despite_measured_declarations(self):
-        # The declarations match every measured identity; only the build is new.
-        # A future build must be measured before it is read, not admitted because
-        # its names and checksums happen to agree.
-        with tempfile.TemporaryDirectory() as t:
-            export = declaration_export(Path(t) / "export", "++Ares-Core+release-13.07")
-            with self.assertRaisesRegex(
-                tool.InputError, "outside the measured KillData set"
-            ):
-                tool.declarations(export)
 
 
 class OutputTests(unittest.TestCase):

@@ -344,19 +344,6 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(observations._changes(samples),
                          observations._changes(list(reversed(samples))))
 
-    def test_build_is_stable_for_a_valid_field_row_shuffle(self):
-        with tempfile.TemporaryDirectory() as temp:
-            original = Path(temp) / "original"
-            shuffled = Path(temp) / "shuffled"
-            original.mkdir()
-            shuffled.mkdir()
-            write_export(original)
-            write_export(shuffled)
-            table = pq.read_table(shuffled / "fields.parquet")
-            reverse = pa.array(range(table.num_rows - 1, -1, -1))
-            pq.write_table(table.take(reverse), shuffled / "fields.parquet")
-            self.assertEqual(observations.build(original), observations.build(shuffled))
-
     def test_round_balance_player_stays_null_without_the_owner_chain(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

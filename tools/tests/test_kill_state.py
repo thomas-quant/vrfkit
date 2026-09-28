@@ -53,19 +53,8 @@ def members(*, finisher=False, damage=10.0, raw_overrides=None):
         "assisting_players": None,
         "raw_members": raw_members,
     }
-    raw_to_member = {
-        "Victim": "victim_ref",
-        "KillingEquippableClass": "killing_equippable_class_ref",
-        "WeaponTheme": "weapon_theme",
-        "DamageType": "damage_type_ref",
-        "DamageTaken": "damage_taken",
-        "DamageRegion": "damage_region",
-        "GameTimeElapsed": "game_time_elapsed",
-        "RoundTimestamp": "round_timestamp",
-        "RoundNumber": "round_number",
-        "bDidKillTriggerFinisher": "did_kill_trigger_finisher",
-    }
-    for raw_name, member_name in raw_to_member.items():
+    # The member names above are written out; only which to null is shared.
+    for raw_name, member_name in kill_state._RAW_TO_MEMBER.items():
         if raw_name not in raw_members:
             result[member_name] = None
     return result
