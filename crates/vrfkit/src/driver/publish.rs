@@ -365,10 +365,31 @@ fn leftover_warning(
             destination.display()
         )
     } else {
+        // A backup `discard_prior_output` kept can hold what someone saved
+        // into the destination while an export ran. Name it, and do not
+        // advise deleting it the way a backup of export output alone is.
+        let (also, advice) = match foreign_entries(path) {
+            Ok(foreign) if foreign.is_empty() => (
+                String::new(),
+                "delete it once no export to that destination is running",
+            ),
+            Ok(foreign) => (
+                format!(
+                    ", and {} an export does not write ({})",
+                    entry_count(foreign.len()),
+                    name_list(&foreign)
+                ),
+                "move what you need out of it, then delete it once no export to that \
+                 destination is running",
+            ),
+            Err(error) => (
+                format!(", and could not be listed to check for anything else ({error})"),
+                "look inside it before deleting it",
+            ),
+        };
         format!(
             "warning: {} holds output that an earlier export to {} moved aside and did not \
-             remove; it is not the current export and is left in place -- delete it once no \
-             export to that destination is running",
+             remove{also}; it is not the current export and is left in place -- {advice}",
             path.display(),
             destination.display()
         )
@@ -1005,6 +1026,47 @@ mod tests {
                 "missing {expected:?}: {warnings}"
             );
         }
+    }
+
+    /// A prior output kept because something was saved into it mid-run (see
+    /// the test above) holds the user's files. The next export names them,
+    /// and does not advise deleting it the way it does a backup that holds
+    /// export output only.
+    #[test]
+    fn a_kept_prior_output_is_reported_with_what_it_holds_besides_export_output() {
+        let root = TestDir::new();
+        let destination = root.path().join("export");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join(MANIFEST), b"current").unwrap();
+        let kept = root.path().join(".export.vrfkit-previous-4242-7");
+        let plain = root.path().join(".export.vrfkit-previous-4242-8");
+        for backup in [&kept, &plain] {
+            fs::create_dir(backup).unwrap();
+            fs::write(backup.join(MANIFEST), b"old complete").unwrap();
+        }
+        fs::write(kept.join("notes.txt"), b"saved mid-run").unwrap();
+
+        let (_transaction, warnings) = begin_capturing(&destination);
+        let lines: Vec<&str> = warnings.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per leftover: {warnings}");
+        assert!(lines[0].contains(&kept.display().to_string()), "{warnings}");
+        assert!(
+            lines[0].contains("1 entry an export does not write (notes.txt)"),
+            "{warnings}"
+        );
+        assert!(
+            lines[0].contains("move what you need out of it"),
+            "{warnings}"
+        );
+        assert!(
+            lines[1].contains(&plain.display().to_string()),
+            "{warnings}"
+        );
+        assert!(
+            lines[1].ends_with("delete it once no export to that destination is running"),
+            "{warnings}"
+        );
+        assert_eq!(fs::read(kept.join("notes.txt")).unwrap(), b"saved mid-run");
     }
 
     /// The list stops after a few names; the count never does.
