@@ -4,10 +4,10 @@
 //!
 //! Every constant, width and rounding step below is validated against the C#
 //! reference to **zero** error on yaw, pitch and velocity and a maximum of
-//! 0.0005 on position. The 48-bit FixedVector, the `SerializedInt(128)` header
-//! on a QuantizedVector, and the sign-extension of arbitrary-width components
-//! are all wire layout. So are the 25-bit move header and the VLQ timestamp
-//! that [`crate::moves`] reads alongside them. Rewriting any of the
+//! 0.0005 on position. The `SerializedInt(128)` header on a QuantizedVector
+//! and the sign-extension of arbitrary-width components are wire layout. So
+//! are the 25-bit move header, the 48-bit FixedVector it skips and the VLQ
+//! timestamp that [`crate::moves`] reads alongside them. Rewriting any of the
 //! arithmetic here -- even into a form that looks equivalent -- changes
 //! decoded output, so it is left exactly as validated.
 
@@ -15,30 +15,8 @@ use vrf_bitio::BitReader;
 
 use crate::error::MovementError;
 
-/// Scale for FixedVector: each u16 component maps to signed range via (raw - 0x8000) / 65536.
-pub(crate) const FIXED_VECTOR_SCALE: f64 = 1.0 / 65536.0;
-
 /// Angle conversion: raw u16 -> degrees.
 pub(crate) const ANGLE_SCALE: f64 = 360.0 / 65536.0;
-
-/// Read a FixedVector: 3 x u16 packed into 48 bits.
-///
-/// Each component is sign-offset: `(raw - 0x8000) * (1/65536)`.
-/// Result is in range approximately [-0.5, +0.5).
-pub(crate) fn read_fixed_vector(
-    reader: &mut BitReader<'_>,
-) -> Result<(f64, f64, f64), MovementError> {
-    let bits = reader.read_bits(48)?;
-    let rx = (bits & 0xFFFF) as u32;
-    let ry = ((bits >> 16) & 0xFFFF) as u32;
-    let rz = ((bits >> 32) & 0xFFFF) as u32;
-
-    let x = (rx as i32 - 0x8000) as f64 * FIXED_VECTOR_SCALE;
-    let y = (ry as i32 - 0x8000) as f64 * FIXED_VECTOR_SCALE;
-    let z = (rz as i32 - 0x8000) as f64 * FIXED_VECTOR_SCALE;
-
-    Ok((x, y, z))
-}
 
 /// Read a QuantizedVector with the given scale factor.
 ///
@@ -106,12 +84,6 @@ fn read_signed_quantized_components(
     // no error, and a cursor left 189 bits behind so everything after it
     // decodes from the wrong offset. Zero is the only width that legitimately
     // reads nothing, and the caller already handles it.
-    // The current caller only passes non-zero widths. Keep this private
-    // helper's zero-width case defined without evaluating a sign-bit shift;
-    // it consumes no bits and represents three empty components.
-    if component_bits == 0 {
-        return Ok((0, 0, 0));
-    }
     // A real assert, not a `debug_assert`: `[profile.release]` does not enable
     // debug assertions, so a debug-only check would be absent from exactly the
     // binary that exports the corpus. Above 64 this is not a wrong answer but
@@ -120,11 +92,11 @@ fn read_signed_quantized_components(
     //
     // Panicking rather than returning an error is deliberate and follows
     // `copy_bits_to`'s precedent for the same shape: the only caller derives
-    // this width as `info & 63`, so a value above 63 is a bug at the call site
-    // and not malformed input, and a recoverable error would imply the wire
-    // can produce it. One compare against a constant, once per vector header.
+    // this width as `info & 63` and handles 0 itself, so any other value is a
+    // bug at the call site and not malformed input, and a recoverable error
+    // would imply the wire can produce it. Once per vector header.
     assert!(
-        component_bits <= 63,
+        (1..=63).contains(&component_bits),
         "component_bits must be 1..=63, got {component_bits}"
     );
 
@@ -156,19 +128,6 @@ fn read_signed_component(reader: &mut BitReader<'_>, bits: u32) -> Result<i64, M
 fn sign_extend(raw: u64, bit_count: u32) -> i64 {
     let sign_bit = 1u64 << (bit_count - 1);
     (raw ^ sign_bit).wrapping_sub(sign_bit) as i64
-}
-
-/// Read a VLQ-encoded u32.
-///
-/// This is byte-for-byte Unreal's `IntPacked`: each byte carries 7 payload bits
-/// in its high bits and the continuation flag in bit 0
-/// (`value |= ((b >> 1) & 0x7F) << shift`, stopping when `(b & 1) == 0`). The
-/// name "VLQ" comes from the C# reference, which spells the loop out inline
-/// rather than reusing its own IntPacked reader; the encodings are identical,
-/// so this delegates.
-#[inline]
-pub(crate) fn read_vlq(reader: &mut BitReader<'_>) -> Result<u32, MovementError> {
-    Ok(reader.read_int_packed()?)
 }
 
 #[cfg(test)]

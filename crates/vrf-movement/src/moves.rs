@@ -15,7 +15,7 @@
 use vrf_bitio::BitReader;
 
 use crate::error::MovementError;
-use crate::primitives::{ANGLE_SCALE, read_fixed_vector, read_quantized_vector, read_vlq};
+use crate::primitives::{ANGLE_SCALE, read_quantized_vector};
 use crate::types::{MovementMove, RpcDecodeResult};
 
 /// Magic byte at the start of a movement section.
@@ -103,11 +103,11 @@ fn parse_single_move(
     let movement_state = ((header >> 9) & 0xFF) as u8; // bits [9..17]
     let _unused_byte = ((header >> 17) & 0xFF) as u8; // bits [17..25]
 
-    // -- FixedVector: rotationInput (48 bits) -----------------------------
-    let _rotation_input = read_fixed_vector(reader)?;
+    // -- FixedVector: rotationInput (3 x u16), not exported ----------------
+    reader.skip_bits(48)?;
 
-    // -- Timestamp (VLQ) --------------------------------------------------
-    let timestamp = read_vlq(reader)?;
+    // -- Timestamp: the C# reference's "VLQ" is Unreal's IntPacked ----------
+    let timestamp = reader.read_int_packed()?;
 
     // -- Position: QuantizedVector (scaleFactor=100) ----------------------
     let (pos_x, pos_y, pos_z) = read_quantized_vector(reader, 100)?;
@@ -162,6 +162,6 @@ fn parse_single_move(
         timestamp,
         movement_state,
         mode_flags: movement_state, // same field in wire format
-        move_type: if move_type_flag { 1 } else { 0 },
+        move_type: u8::from(move_type_flag),
     })
 }

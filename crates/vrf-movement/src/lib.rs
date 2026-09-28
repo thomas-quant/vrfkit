@@ -136,7 +136,7 @@
 //! |--------|-------|
 //! | `rpc` | Batch, updates array, one update, the component data stream |
 //! | `moves` | The movement section and one move record |
-//! | `primitives` | FixedVector, QuantizedVector, sign extension, VLQ |
+//! | `primitives` | QuantizedVector, sign extension, the angle scale |
 //! | `types` | [`MovementMove`], [`MovementUpdate`], [`RpcDecodeResult`] |
 //! | `error` | [`MovementError`] |
 //!
