@@ -612,11 +612,7 @@ fn print_file_sizes(
     manifest_path: &Path,
     stale_checkpoint_note: Option<&str>,
 ) {
-    let size = |name: &str| {
-        fs::metadata(out_path.join(name))
-            .map(|m| m.len())
-            .unwrap_or(0)
-    };
+    let size = |name: &str| file_size(&out_path.join(name));
 
     eprintln!();
     eprintln!("  fields.parquet:   {} bytes", size("fields.parquet"));
@@ -634,6 +630,12 @@ fn print_file_sizes(
     if let Some(note) = stale_checkpoint_note {
         eprintln!("  DROPPED TABLE:    {note}");
     }
+}
+
+/// A file's size in bytes, or `?` when it cannot be read: a missing table
+/// must not print as a plausible empty one.
+fn file_size(path: &Path) -> String {
+    fs::metadata(path).map_or_else(|_| "?".to_owned(), |m| m.len().to_string())
 }
 
 /// The denominator is every row the overlay was offered, which since RPC
@@ -730,7 +732,7 @@ fn display_tail(value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHECKPOINT_TABLES, display_tail, stale_checkpoint_note};
+    use super::{CHECKPOINT_TABLES, display_tail, file_size, stale_checkpoint_note};
     use std::fs;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -762,6 +764,18 @@ mod tests {
 
         // With the flag, the file is this run's own output and says nothing.
         assert_eq!(stale_checkpoint_note(&dir, true), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A table whose size cannot be read prints `?`, not a plausible `0`.
+    /// Two exports to one destination are supported, and the other run's
+    /// publication can swap the directory between this run's and its summary.
+    #[test]
+    fn an_unreadable_file_size_is_a_visible_absence() {
+        let dir = temp_dir("sizes");
+        fs::write(dir.join("five.parquet"), b"12345").expect("write");
+        assert_eq!(file_size(&dir.join("five.parquet")), "5");
+        assert_eq!(file_size(&dir.join("missing.parquet")), "?");
         let _ = fs::remove_dir_all(&dir);
     }
 
