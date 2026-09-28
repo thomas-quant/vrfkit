@@ -64,6 +64,7 @@ from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
@@ -80,6 +81,11 @@ HELD_KINDS = ("player", "proxy")
 #: the spike lives inside while it sits on the floor; PickupProjectile is the
 #: short arc between a drop and the landing. Both are matched on the leaf name.
 LOOSE_CLASSES = ("EquippableGroundPickup_C", "EquippablePickupProjectile_C")
+
+#: The only field rows `build()` reads: the proxy `Instigator` walk, the
+#: `Owner` custody log and the AresInventory in-hand writes.
+FIELD_NAMES = ("Instigator", "Owner", "CurrentEquippable", "NewCurrentEquippable")
+FIELD_COLUMNS = ("time_ms", "actor_net_guid", "group_path", "field_name", "value_i64")
 
 
 def leaf(class_path: str | None) -> str:
@@ -153,10 +159,14 @@ def load(out_dir: Path):
         if not (out_dir / name).exists():
             raise SystemExit(f"no {name} in {out_dir} -- run `vrfkit export` first")
 
-    fields = pq.read_table(out_dir / "fields.parquet")
-    f = {c: fields.column(c).to_pylist() for c in
-         ("time_ms", "actor_net_guid", "group_path", "field_name",
-          "value_i64", "raw_bits")}
+    # Filtered in Arrow: converting whole columns to Python took ~90% of the
+    # run (4.7 s of 4.8 s on a 1.66M-row 12.09 export) for ~1% of the rows.
+    # Table.filter keeps physical row order, which the first Instigator
+    # write per actor depends on.
+    fields = pq.read_table(out_dir / "fields.parquet", columns=list(FIELD_COLUMNS))
+    fields = fields.filter(pc.is_in(fields.column("field_name"),
+                                    value_set=pa.array(FIELD_NAMES)))
+    f = {c: fields.column(c).to_pylist() for c in FIELD_COLUMNS}
 
     actors = pq.read_table(out_dir / "actors.parquet")
     a = {c: actors.column(c).to_pylist() for c in
@@ -220,36 +230,28 @@ def build(out_dir: Path):
     round_ts = [t for t, _ in round_starts]
 
     def round_of(ms: int):
-        if not round_ts:
-            return None
         i = bisect.bisect_right(round_ts, ms) - 1
         return round_starts[i][1] if i >= 0 else None
 
-    # An actor's own Instigator, used to walk a proxy carrier (Wingman) back to
-    # the player that spawned it.
+    # instigator: an actor's own Instigator (first write), used to walk a
+    # proxy carrier (Wingman) back to the player that spawned it.
+    # owner_log: every Owner write on a bomb channel -- the custody log,
+    # sorted by time below.
+    # in_hand: AresInventory (pawn, bomb) pairs seen in hand, with timestamps.
     instigator: dict[int, int] = {}
-    for i, name in enumerate(f["field_name"]):
-        if name == "Instigator" and f["value_i64"][i]:
-            instigator.setdefault(f["actor_net_guid"][i], f["value_i64"][i])
-
-    # Every Owner write on a bomb channel, in time order: the custody log.
     owner_log: dict[int, list[tuple[int, int]]] = {}
-    for i, grp in enumerate(f["group_path"]):
-        if (BOMB_CLASS in grp and f["field_name"][i] == "Owner"
-                and f["value_i64"][i] is not None):
-            owner_log.setdefault(f["actor_net_guid"][i], []).append(
-                (f["time_ms"][i], f["value_i64"][i]))
-
-    # AresInventory side: (pawn, bomb) pairs seen in hand, with timestamps.
     in_hand: dict[tuple[int, int], list[int]] = {}
-    for i, grp in enumerate(f["group_path"]):
-        if (grp.endswith("AresInventory")
-                and f["field_name"][i] in ("CurrentEquippable",
-                                           "NewCurrentEquippable")
-                and f["value_i64"][i] in bombs):
-            in_hand.setdefault(
-                (f["actor_net_guid"][i], f["value_i64"][i]), []
-            ).append(f["time_ms"][i])
+    for t, actor, grp, name, value in zip(
+            f["time_ms"], f["actor_net_guid"], f["group_path"], f["field_name"],
+            f["value_i64"]):
+        if name == "Instigator":
+            if value:
+                instigator.setdefault(actor, value)
+        elif name == "Owner":
+            if BOMB_CLASS in grp and value is not None:
+                owner_log.setdefault(actor, []).append((t, value))
+        elif grp.endswith("AresInventory") and value in bombs:
+            in_hand.setdefault((actor, value), []).append(t)
 
     rows: list[dict] = []
     for bomb, log in sorted(owner_log.items()):
@@ -280,7 +282,7 @@ def build(out_dir: Path):
                 "owner_class": leaf(cls) or None,
                 "holder_kind": kind,
                 "carrier_pawn_guid": carrier,
-                "carrier_subject": pawn_subject.get(carrier, "") or None,
+                "carrier_subject": pawn_subject.get(carrier) or None,
                 # Which SpawnedCharacter value proved the carrier's pawn: the
                 # manifest's (the last) or an earlier one. None with no carrier.
                 "carrier_identity_provenance": bodies.provenance.get(carrier),
