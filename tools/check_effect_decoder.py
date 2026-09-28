@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Self-check the live shot-effect decoder against pinned wire examples.
 
-The first nine cases are every executable example in the Rust decoder's tests,
-``crates/vrf-decode/src/effect/tests.rs``: six non-empty hex blobs and the
-three one-byte empty arrays.  This script deliberately checks the Python
-decoder that produces the valplay bundle against them.
+The first nine cases are the wire vectors the Rust decoder's tests pin in
+``crates/vrf-decode/src/effect/tests.rs``: six non-empty hex blobs and the three
+one-byte empty arrays.  vrfkit runs that Rust decoder; this script deliberately
+calls the Python decoder that produces the valplay bundle, so the same vectors
+are checked on both sides.
 
 The two ``reference_*`` cases come from the C# reference bundle's
 ``events.ndjson`` for replay 02d4d478:
@@ -79,7 +80,7 @@ CASES = (
         ((284, 1.0), (263, 7.0), (286, 1.0),
          (285, _reference_f32(-68573580.0)), (287, 16.0)),
     ),
-    # Rust effect/tests.rs: packet 30968, Judge FloatValues without TracerOption.
+    # Rust effect/tests.rs: packet 30968, Judge FloatValues, no TracerOption.
     Case(
         "rust_float_shotgun",
         _hex("""

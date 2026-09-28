@@ -4,10 +4,11 @@ source and emit them as a Rust module.
 The tables are 256-byte permutation tables spliced across several C# string
 literals inside `Convert.FromHexString(...)`. Copying them by hand (or via a
 console round-trip) risks silent corruption, and a single wrong byte would make
-every transform with an S-box stage produce garbage that still *looks*
-plausible. So this
-reads the literals directly, concatenates them, and refuses to emit anything
-unless each table is exactly 512 hex chars / 256 unique byte values.
+every transform that uses the tables produce garbage that still *looks*
+plausible: on 2026-09-29, the 15 builds from 11.06 to 13.06 whose
+`crates/vrf-transform/src/versions/*.rs` import `crate::sbox`. So this reads
+the literals directly, concatenates them, and refuses to emit anything unless
+each table is exactly 512 hex chars / 256 unique byte values.
 
 Usage:
     python tools/extract_sboxes.py <helpers.cs> <out.rs>

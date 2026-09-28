@@ -41,13 +41,13 @@ pub struct FieldRecord {
     pub field_name: Option<Arc<str>>,
     /// The `compatible_checksum` the replay declares for this handle. Unreal
     /// hashes the property's *type* into it with its name, so it is a
-    /// build-stable address (the same value on every build checked, 12.10
-    /// through 13.02) and the overlay's last-resort type lookup. **`None`
-    /// means the replay declares
-    /// none**: only rows resolved through a `NetFieldExportGroup` carry one,
-    /// and array leaves and struct blobs are addressed inside a payload, not
-    /// by a declared handle. docs/USAGE.md "fields.parquet" has the
-    /// three-bucket breakdown and the Phoenix smoke-wall case behind it.
+    /// build-stable address (equal on every build compared when this column
+    /// was added, 12.10 to 13.02) and the overlay's last-resort type lookup.
+    /// **`None` means the replay declares none**: only rows resolved through
+    /// a `NetFieldExportGroup` carry one, and array leaves and struct blobs
+    /// are addressed inside a payload, not by a declared handle.
+    /// docs/USAGE.md "fields.parquet" has the three-bucket breakdown and the
+    /// Phoenix smoke-wall case behind it.
     pub compatible_checksum: Option<u32>,
     pub bit_count: u32,
     /// Raw bit payload; `None` for zero-bit fields. `SmallVec` derefs to
