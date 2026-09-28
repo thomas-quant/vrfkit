@@ -119,6 +119,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut overlay_errors = OverlayErrorReport::default();
     let mut channel_state = ChannelState::new();
     channel_state.enable_failure_aggregate(include_payloads);
+    // Never drained: nothing is written, and `ExportSink::new` clears them.
     let mut buffers = RecordBuffers::default();
 
     let mut cp_stats = DiagCheckpointStats {
@@ -155,31 +156,18 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                     walk_demo_frames(&decompressed, flags, &mut cache, |pkt, packet_cache| {
                         let pkt_id = total_packets;
                         total_packets += 1;
-                        {
-                            let mut sink =
-                                ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-                            sink.enable_measured_array_routes(&branch);
-                            sink.time_ms = pkt.time_ms;
-                            sink.packet_id = pkt_id;
-                            repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
-                            sink_totals.absorb(&mut sink.stats, &mut overlay_errors);
-                        }
-                        // The records are dropped, not written; the counters they
-                        // produced were already absorbed above. Draining keeps the
-                        // buffers from growing to the largest packet's worth of
-                        // rows times every packet after a big one.
-                        buffers.fields.clear();
-                        buffers.movement.clear();
-                        buffers.actors.clear();
+                        let mut sink =
+                            ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
+                        sink.enable_measured_array_routes(&branch);
+                        sink.time_ms = pkt.time_ms;
+                        sink.packet_id = pkt_id;
+                        repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
+                        sink_totals.absorb(&mut sink.stats, &mut overlay_errors);
                     })?;
                 replay_data_frames += u64::from(walk.frames);
                 replay_data_frame_skips.absorb(walk.skipped);
             }
-            other => {
-                // `Unknown(u32)` and `Header` -- nothing the replication pass
-                // reads, and nothing a counter could claim to check.
-                let _ = other;
-            }
+            ChunkType::Header | ChunkType::Unknown(_) => {}
         }
     }
 
@@ -416,9 +404,6 @@ fn process_checkpoint_chunk(
         cp.field_rows_dropped += buffers.fields.len() as u64;
         cp.actor_rows_dropped += buffers.actors.len() as u64;
         cp.movement_rows_dropped += buffers.movement.len() as u64;
-        buffers.fields.clear();
-        buffers.actors.clear();
-        buffers.movement.clear();
         packet_count += 1;
     })?;
     reader.finish();
