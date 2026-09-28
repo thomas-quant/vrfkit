@@ -22,6 +22,7 @@ mod inspect;
 #[cfg(feature = "export")]
 mod manifest;
 mod oracle;
+mod report;
 mod sink;
 
 use std::process::ExitCode;

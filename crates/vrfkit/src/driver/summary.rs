@@ -20,6 +20,7 @@ use vrf_net::stats::NetStats;
 
 use super::CHECKPOINT_TABLES;
 use super::checkpoints::CheckpointStats;
+use crate::report;
 use crate::sink::SinkTotals;
 
 /// Everything the run counted that is not in [`NetStats`]. The manifest reads
@@ -104,10 +105,8 @@ pub(super) fn print(
     eprintln!("  Chunks:           {}", totals.chunks_processed);
     eprintln!("  ReplayData frames: {}", totals.frames);
     eprintln!(
-        "  Frame skips:      {} external blobs / {} external bytes / {} game-specific bytes",
-        totals.frame_skips.external_data_blobs,
-        totals.frame_skips.external_data_bytes,
-        totals.frame_skips.game_specific_bytes
+        "  Frame skips:      {}",
+        report::frame_skips(&totals.frame_skips)
     );
     eprintln!("  Packets:          {}", totals.total_packets);
     eprintln!("  Export groups:    {}", totals.export_groups);
@@ -140,24 +139,8 @@ pub(super) fn print(
     );
     eprintln!("  Bunches:          {}", net_stats.bunches);
     eprintln!("  Malformed pkts:   {}", net_stats.malformed_packets);
-    eprintln!(
-        "  Partial bunches:  {} attempted / {} errors / {} accepted fragments / {} completed",
-        net_stats.partial_bunches,
-        net_stats.partial_errors,
-        net_stats.partial_fragments,
-        net_stats.partial_completed
-    );
-    eprintln!(
-        "  Partial causes:   {} missing initial / {} overlapping initial / {} mismatched continuation / {} unaligned / {} channel close / {} resource limit / {} unclassified / {} overclassified",
-        net_stats.partial_missing_initial,
-        net_stats.partial_overlapping_initial,
-        net_stats.partial_mismatched_continuation,
-        net_stats.partial_non_byte_aligned,
-        net_stats.partial_channel_close,
-        net_stats.partial_resource_limit_failures,
-        net_stats.partial_unclassified_errors(),
-        net_stats.partial_overclassified_errors()
-    );
+    eprintln!("  Partial bunches:  {}", report::partial_bunches(net_stats));
+    eprintln!("  Partial causes:   {}", report::partial_causes(net_stats));
     eprintln!("  Bunch header fails: {}", net_stats.bunch_header_failures);
     eprintln!(
         "  Content failures: {} malformed / {} transform / {} field / {} RPC loss / {} unresolved RPC raw",
@@ -370,10 +353,8 @@ fn print_checkpoints(cp: &CheckpointStats) {
     eprintln!("  Frames:           {}", cp.frames);
     eprintln!("  Frame packets:    {}", cp.packets);
     eprintln!(
-        "  Checkpoint frame skips: {} external blobs / {} external bytes / {} game-specific bytes",
-        cp.frame_skips.external_data_blobs,
-        cp.frame_skips.external_data_bytes,
-        cp.frame_skips.game_specific_bytes
+        "  Checkpoint frame skips: {}",
+        report::frame_skips(&cp.frame_skips)
     );
     eprintln!("  Checkpoint rows:  {}", cp.field_rows);
     eprintln!("  Checkpoint actors:{} rows", cp.actor_rows_written);
@@ -395,24 +376,8 @@ fn print_checkpoints(cp: &CheckpointStats) {
         "  Checkpoint net:   {} bunches / {} blocks / {} fields / {} RPCs",
         cp.net.bunches, cp.net.content_blocks, cp.net.fields, cp.net.rpcs
     );
-    eprintln!(
-        "  Checkpoint partial:{} attempted / {} errors / {} accepted fragments / {} completed",
-        cp.net.partial_bunches,
-        cp.net.partial_errors,
-        cp.net.partial_fragments,
-        cp.net.partial_completed
-    );
-    eprintln!(
-        "  Checkpoint causes: {} missing initial / {} overlapping initial / {} mismatched continuation / {} unaligned / {} channel close / {} resource limit / {} unclassified / {} overclassified",
-        cp.net.partial_missing_initial,
-        cp.net.partial_overlapping_initial,
-        cp.net.partial_mismatched_continuation,
-        cp.net.partial_non_byte_aligned,
-        cp.net.partial_channel_close,
-        cp.net.partial_resource_limit_failures,
-        cp.net.partial_unclassified_errors(),
-        cp.net.partial_overclassified_errors()
-    );
+    eprintln!("  Checkpoint partial:{}", report::partial_bunches(&cp.net));
+    eprintln!("  Checkpoint causes: {}", report::partial_causes(&cp.net));
     eprintln!(
         "  Checkpoint loss:  {} malformed packets / {} bunch headers / {} malformed blocks / {} transform / {} field / {} RPC / {} unfinished partials ({} bits) / {} skipped bits",
         cp.net.malformed_packets,

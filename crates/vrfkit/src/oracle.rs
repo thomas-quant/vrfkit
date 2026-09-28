@@ -151,6 +151,7 @@ use vrf_net::stats::{DiagnosticEvent, NetStats, SkipReason};
 use vrf_schema::NetGuidCache;
 
 use crate::error::CliError;
+use crate::report;
 use crate::sink::{ChannelState, ExportSink, RecordBuffers};
 
 /// What a validation run concluded, and the exit code it earns.
@@ -344,24 +345,8 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     println!("    ClassNetCache:      {class_net}");
     println!("    Deleted:            {deleted}");
     println!("    Malformed packets:  {}", stats.malformed_packets);
-    println!(
-        "    Partial bunches:    {} attempted / {} errors / {} accepted fragments / {} completed",
-        stats.partial_bunches,
-        stats.partial_errors,
-        stats.partial_fragments,
-        stats.partial_completed
-    );
-    println!(
-        "    Partial causes:     {} missing initial / {} overlapping initial / {} mismatched continuation / {} unaligned / {} channel close / {} resource limit / {} unclassified / {} overclassified",
-        stats.partial_missing_initial,
-        stats.partial_overlapping_initial,
-        stats.partial_mismatched_continuation,
-        stats.partial_non_byte_aligned,
-        stats.partial_channel_close,
-        stats.partial_resource_limit_failures,
-        stats.partial_unclassified_errors(),
-        stats.partial_overclassified_errors()
-    );
+    println!("    Partial bunches:    {}", report::partial_bunches(stats));
+    println!("    Partial causes:     {}", report::partial_causes(stats));
     println!("    Bunch header failed:{}", stats.bunch_header_failures);
     // Printed unconditionally, zeros included: a drop at the channel guard
     // used to move nothing but `Bunches`, so an absent line would read the
@@ -399,10 +384,8 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     );
     println!("  ReplayData frames:    {frames_walked}");
     println!(
-        "  Frame skips:          {} external blobs / {} external bytes / {} game-specific bytes",
-        frame_skips.external_data_blobs,
-        frame_skips.external_data_bytes,
-        frame_skips.game_specific_bytes
+        "  Frame skips:          {}",
+        report::frame_skips(&frame_skips)
     );
     println!("  Packets:              {}", stats.packets);
     println!("  Bunches:              {}", stats.bunches);
