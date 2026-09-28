@@ -53,7 +53,7 @@
 //! # Event chunks
 //!
 //! Event chunk payloads are uncompressed and carry the server's own labelled
-//! game timeline. Use [`parse_event_chunk`] to read one into an [`EventChunk`];
+//! game timeline. Use `parse_event_chunk` to read one into an `EventChunk`;
 //! its inner payload is handed back raw, for the reason documented there.
 //!
 //! # Cargo features
@@ -64,8 +64,8 @@
 //! | Feature | Turns off |
 //! |---------|-----------|
 //! | `oodle` | The `oozextract` dependency. Plaintext chunks still parse; a compressed archive reports [`ContainerError::OodleUnsupported`] |
-//! | `event` | [`parse_event_chunk`] and [`EventChunk`] |
-//! | `checkpoint` | [`parse_checkpoint_chunk`], [`decompress_checkpoint`], [`decompress_checkpoint_with_trailing`] and [`CheckpointChunk`] |
+//! | `event` | `parse_event_chunk` and `EventChunk` |
+//! | `checkpoint` | `parse_checkpoint_chunk`, `decompress_checkpoint`, `decompress_checkpoint_with_trailing` and `CheckpointChunk` |
 //!
 //! The info, header and chunk-iteration layers are **not** gated: every reader
 //! of the format needs them to find anything at all, so a flag over them would

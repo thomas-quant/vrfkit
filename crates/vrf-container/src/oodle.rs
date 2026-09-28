@@ -47,14 +47,12 @@ pub struct ReplayDataMeta {
     /// zero (a `SizeInBytes` larger than the payload is truncation, reported by
     /// the decompressor, not a negative residual).
     ///
-    /// Reported for the same reason [`CheckpointChunk::trailing_bytes`] is: the
+    /// Reported for the same reason `CheckpointChunk::trailing_bytes` is: the
     /// data-bearing slices are cut to the declared length
     /// (`data_bytes[..size]`, `compressed_data[..compressed_size]`), so anything
     /// past it is replay data that would otherwise be discarded with no error
     /// and no tally. Expected to be zero; a non-zero value means the chunk
     /// framing has changed.
-    ///
-    /// [`CheckpointChunk::trailing_bytes`]: crate::CheckpointChunk::trailing_bytes
     pub trailing_bytes: usize,
 }
 
