@@ -630,6 +630,13 @@ def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool)
     Not a zero gate: skipping these sections is what the reference does, so
     a non-zero count is data this parser leaves undecoded, not a failure. What
     must hold is that the two outputs report the same measurement.
+
+    It cannot see a tally that never reaches them. Each pass feeds its summary
+    line and its manifest keys from one variable, so a pass that stops
+    absorbing its frame walk reports 0 in both, and 0 is also the value the
+    committed baselines pin for 02d4d478. The guard for that wiring is
+    crates/vrfkit/tests/frame_skips.rs, which runs the binary on a replay
+    that carries both sections.
     """
     try:
         quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]

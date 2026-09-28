@@ -111,7 +111,10 @@ transport failures, including unfinished partials, resource limits and
 bunches dropped because their channel had no open actor, fail the verdict.
 That holds even when the channel's open arrived in a rejected partial
 fragment: the fragment itself stays unscored, but the complete bunches dropped
-after it count as loss.
+after it count as loss. The exception is a rejected fragment that reopened a
+channel still holding a live actor: it retires nothing, so later bunches are
+framed under that actor rather than dropped (see
+[FOLLOWUP.md](FOLLOWUP.md)).
 
 The example is the preserved `02d4d478` replay after the September 2026
 tail-preservation change. All 714 ReplayData block runs in that historical
@@ -750,7 +753,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `compare_rpc_params.py` | RPC parameters and records against the C# export, with its listed expected differences |
 | `compare_with_csharp.py` | Diff against the C# parser |
 | `check_effect_decoder.py` | Effect decoder (12 cases) |
-| `check_ascii.py` | Rust source ASCII sweep (158 files) |
+| `check_ascii.py` | Rust source ASCII sweep (159 files) |
 | `check_docs.py` | This document itself (below) |
 | `atomic_io.py` | Internal containment, recursive-removal and atomic-replacement helpers shared by mutating tools |
 
@@ -1171,7 +1174,7 @@ field meaning; the analyzer deliberately performs no type inference.
 cargo +1.86.0 test --workspace --locked                              # 805 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
-python -W error tools/check_ascii.py --check                         # 158 files
+python -W error tools/check_ascii.py --check                         # 159 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
 python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1031 tests
 python -W error tools/check_docs.py --fast
