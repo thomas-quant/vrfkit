@@ -153,7 +153,8 @@ JSON schema version 3 separates main/checkpoint counters and aggregates by
 stream kind, cause, resolved group, function count, handle and consumed bits.
 `chunks` and `checkpoint_meta` also carry the ExternalData blobs and bytes and
 the GameSpecificFrameData bytes the DemoFrame walk skipped undecoded, and the
-frames whose time was NaN or infinite (`non_finite_frame_times`).
+frames whose time was NaN or infinite (`replay_data_non_finite_frame_times` in
+`chunks`, `non_finite_frame_times` in `checkpoint_meta`).
 Totals include every failure. Distinct cells are bounded; an explicit overflow
 bucket accounts for additional keys. Check overflow before treating the listed
 groups as a complete distribution. Whole RPC payloads preserved by the parser
@@ -636,7 +637,7 @@ Every loss and fallback counter for the run, including the checkpoint pass when
 | `active_blinds_empty_trailers` | In each `sink` block: empty `ActiveBlinds` deltas whose one trailing zero byte the strict array walker was spared; the parent row keeps it. Printed as `ActiveBlinds trailers:` (`Checkpoint ActiveBlinds trailers:`). |
 | `frame_non_finite_times` | DemoFrames whose time was NaN or infinite; their packets carry 0 ms, as in the reference. `checkpoints.checkpoint_frame_non_finite_times` counts the snapshot frames. Printed as `Frame times:` (`Checkpoint frame times:`), and by `validate`. |
 
-It is `malformed_content_blocks + transform_failures + field_stream_failures +
+`content_blocks_lost` is `malformed_content_blocks + transform_failures + field_stream_failures +
 max(0, rpc_stream_failures - unresolved_rpc_payloads_preserved)`, computed by
 `NetStats::lost_content_blocks` and shared with `validate`'s summary so the two
 cannot drift.
