@@ -439,11 +439,14 @@ pub struct DiagnosticEvent {
     pub channel_index: u32,
     /// Actor network GUID on this channel.
     pub actor_net_guid: u32,
-    /// Resolved path for the actor (if available).
+    /// Always `None`: framing does not resolve paths (the sink owns the GUID
+    /// cache), and nothing fills this in later.
     pub actor_path: Option<String>,
-    /// Archetype GUID.
+    /// Archetype GUID the channel's open read. 0 for a static actor, whose
+    /// open carries no spawn block: the wire's no-object GUID, not a failed
+    /// read.
     pub archetype_net_guid: u32,
-    /// Class path (if resolved).
+    /// Always `None`, for the reason [`Self::actor_path`] is.
     pub class_path: Option<String>,
     /// Bunch header flags.
     pub bunch_flags: BunchFlagSnapshot,

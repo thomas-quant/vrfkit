@@ -48,12 +48,15 @@ use super::{
 /// failure path; building one per bunch cost nine bool copies plus a `Vec`
 /// clone per event for a field read on well under one bunch in a thousand.
 ///
-/// Both fields are diagnostics-only; see [`super::BunchIds`] for why they are
+/// Every field is diagnostics-only; see [`super::BunchIds`] for why they are
 /// still threaded through a build that has diagnostics switched off.
 #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(super) struct BunchContext<'a> {
     pub header: &'a RawBunchHeader,
     pub ids: super::BunchIds,
+    /// The channel's archetype as its open read it: `NetworkGuid(0)` for a
+    /// static actor, whose open carries no spawn block.
+    pub archetype_net_guid: NetworkGuid,
 }
 
 /// Walk a bunch payload as a sequence of content blocks.
@@ -534,7 +537,7 @@ mod diagnostics {
             channel_index: ch_index,
             actor_net_guid: actor_net_guid.0,
             actor_path: None,
-            archetype_net_guid: 0,
+            archetype_net_guid: ctx.archetype_net_guid.0,
             class_path: None,
             bunch_flags: BunchFlagSnapshot {
                 b_open: h.b_open,

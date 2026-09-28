@@ -931,7 +931,11 @@ impl ReplicationReader {
         }
 
         // Frame content blocks
-        let ctx = BunchContext { header, ids };
+        let ctx = BunchContext {
+            header,
+            ids,
+            archetype_net_guid,
+        };
         framing::frame_content_blocks(payload, ch_index, actor_net_guid, stage, sink, &ctx);
     }
 }
@@ -3102,6 +3106,7 @@ mod tests {
                 global_bunch_index: 0,
                 channel_bunch_index: 1,
             },
+            archetype_net_guid: NetworkGuid(0),
         };
         let mut stage = Stage {
             stats: &mut stats,
@@ -3259,6 +3264,7 @@ mod tests {
                 global_bunch_index: 100,
                 channel_bunch_index: 7,
             },
+            archetype_net_guid: NetworkGuid(0),
         };
         let mut stage = Stage {
             stats: &mut stats,
@@ -3312,6 +3318,68 @@ mod tests {
             }
             _ => panic!("expected ContentBitsOverrun"),
         }
+    }
+
+    /// A diagnostic event names the archetype of the channel it happened on.
+    /// Events used to carry a literal 0, so a dynamic actor whose open read
+    /// archetype 9 was reported as archetype 0: a plausible GUID standing in
+    /// for a known one. Paths are not resolved by framing and stay `None`.
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn a_diagnostic_event_carries_the_channel_archetype() {
+        use crate::stats::SkipReason;
+
+        let mut open: Vec<bool> = Vec::new();
+        write_int_packed(&mut open, 2); // dynamic actor GUID
+        write_minimal_spawn_data(&mut open, 9); // archetype 9, not a controller
+        let mut overrun: Vec<bool> = vec![false, true]; // ClassNetCache, isActor
+        write_int_packed(&mut overrun, 999); // declares far more than follows
+        overrun.extend([false; 8]);
+
+        let (reader, _) = run_packets(&[
+            build_bunch_packet(
+                &BunchSpec {
+                    ch_index: 2,
+                    b_open: true,
+                    ..Default::default()
+                },
+                &open,
+            ),
+            build_bunch_packet(
+                &BunchSpec {
+                    ch_index: 2,
+                    ..Default::default()
+                },
+                &overrun,
+            ),
+        ]);
+
+        let state = reader.channels[&2]
+            .state
+            .as_ref()
+            .expect("channel 2 opened");
+        assert_eq!(
+            state.archetype_net_guid,
+            NetworkGuid(9),
+            "the open itself must have read archetype 9, or this proves nothing"
+        );
+        let stats = reader.stats();
+        assert_eq!(stats.malformed_content_blocks, 1);
+        assert_eq!(stats.diagnostics.len(), 1);
+        let ev = &stats.diagnostics[0];
+        assert!(matches!(
+            ev.reason,
+            SkipReason::ContentBitsOverrun {
+                declared_content_bits: 999,
+                available_bits: 8
+            }
+        ));
+        assert_eq!(
+            (ev.packet_id, ev.channel_index, ev.actor_net_guid),
+            (1, 2, 2)
+        );
+        assert_eq!(ev.archetype_net_guid, 9);
+        assert!(ev.actor_path.is_none() && ev.class_path.is_none());
     }
 
     // --- controller property-block regression tests
