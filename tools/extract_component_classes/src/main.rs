@@ -211,11 +211,14 @@ fn run(args: &Args) -> Result<i32, String> {
     if !global_path.is_file() {
         return Err(format!("{}: not found", global_path.display()));
     }
-    let script = load_script_objects(&global_path)?;
+    let (script, global) = load_script_objects(&global_path)?;
     counts.script = script.verify();
 
     let mut containers = Vec::new();
-    let mut provenance = Vec::new();
+    // Every `/Script` path in the output comes from global, so it is listed
+    // with the containers the packages came from. It holds no package chunk
+    // this tool reads.
+    let mut provenance = vec![provenance_of(&global, &global_path, 0)];
     let mut jobs = Vec::new();
     for utoc in &utocs {
         if utoc
@@ -259,15 +262,7 @@ fn run(args: &Args) -> Result<i32, String> {
             });
         }
         counts.package_chunks += packages_here;
-        provenance.push(Provenance {
-            name: container.name.clone(),
-            container_id: container.toc.header.container_id,
-            toc_entries: container.toc.chunk_ids.len(),
-            package_chunks: packages_here,
-            utoc_bytes: file_len(utoc),
-            ucas_bytes: file_len(&container.ucas_path),
-            ucas_modified: modified(&container.ucas_path),
-        });
+        provenance.push(provenance_of(&container, utoc, packages_here));
         containers.push(container);
     }
     if containers.is_empty() {
@@ -420,7 +415,20 @@ fn discover(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     Ok((utocs, paks))
 }
 
-fn load_script_objects(global: &Path) -> Result<ScriptObjects, String> {
+/// Which files a run read, so its output can be matched to them.
+fn provenance_of(container: &Container, utoc: &Path, package_chunks: usize) -> Provenance {
+    Provenance {
+        name: container.name.clone(),
+        container_id: container.toc.header.container_id,
+        toc_entries: container.toc.chunk_ids.len(),
+        package_chunks,
+        utoc_bytes: file_len(utoc),
+        ucas_bytes: file_len(&container.ucas_path),
+        ucas_modified: modified(&container.ucas_path),
+    }
+}
+
+fn load_script_objects(global: &Path) -> Result<(ScriptObjects, Container), String> {
     let container = Container::open(global).map_err(|e| e.to_string())?;
     let entries: Vec<usize> = container
         .toc
@@ -441,7 +449,8 @@ fn load_script_objects(global: &Path) -> Result<ScriptObjects, String> {
     let bytes = container
         .read_chunk(&mut ucas, entries[0], u64::MAX)
         .map_err(|e| e.to_string())?;
-    parse_script_objects(&bytes).map_err(|e| format!("{}: {e}", global.display()))
+    let script = parse_script_objects(&bytes).map_err(|e| format!("{}: {e}", global.display()))?;
+    Ok((script, container))
 }
 
 type Scanned = Vec<(Job, PackageScan)>;
@@ -792,6 +801,73 @@ mod tests {
         assert_eq!(civil_from_days(20_354), (2025, 9, 23));
         let t = UNIX_EPOCH + std::time::Duration::from_secs(1_758_591_394);
         assert_eq!(utc_timestamp(t), "2025-09-23T01:36:34Z");
+    }
+
+    /// The run lists every container it read, global included: the script
+    /// object map, and so every `/Script` path in the output, comes from
+    /// there.
+    #[test]
+    fn provenance_lists_the_global_container() {
+        use crate::script::tests::build_script_objects;
+        use crate::toc::tests::{TocSpec, build_toc};
+        use crate::toc::{ChunkId, CompressedBlock, FLAG_INDEXED, OffsetLength};
+
+        let stored = |len: usize, chunk_type: u8| TocSpec {
+            flags: FLAG_INDEXED,
+            block_size: 0x10000,
+            methods: vec![],
+            chunks: vec![(
+                ChunkId {
+                    id: 1,
+                    index: 0,
+                    chunk_type,
+                },
+                OffsetLength {
+                    offset: 0,
+                    length: len as u64,
+                },
+            )],
+            blocks: vec![CompressedBlock {
+                offset: 0,
+                compressed_size: len as u32,
+                uncompressed_size: len as u32,
+                method: 0,
+            }],
+            ..TocSpec::default()
+        };
+        let dir = std::env::temp_dir().join(format!("ecc-provenance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = build_script_objects(&["/Script/A"], &[(0, 0, "/Script/A", None)]);
+        let global = build_toc(&stored(script.len(), CHUNK_SCRIPT_OBJECTS));
+        std::fs::write(dir.join("global.utoc"), global).unwrap();
+        std::fs::write(dir.join("global.ucas"), &script).unwrap();
+        // One chunk that is not a package, so there is nothing to scan.
+        std::fs::write(dir.join("other.utoc"), build_toc(&stored(4, 2))).unwrap();
+        std::fs::write(dir.join("other.ucas"), [0u8; 4]).unwrap();
+        let out = dir.join("out.json");
+        let args = Args {
+            paks: dir.clone(),
+            format: Format::Json,
+            kind: None,
+            names: BTreeSet::new(),
+            jobs: 1,
+            out: Some(out.clone()),
+        };
+        let code = run(&args);
+        let json = std::fs::read_to_string(&out);
+        std::fs::remove_dir_all(&dir).unwrap();
+        // No package was read, which is a failed run, but it still reports.
+        assert_eq!(code, Ok(1));
+        let json = json.unwrap();
+        let names: Vec<&str> = json
+            .match_indices("\"name\": \"")
+            .map(|(at, key)| {
+                let rest = &json[at + key.len()..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect();
+        assert_eq!(names, ["global", "other"]);
     }
 
     #[test]
