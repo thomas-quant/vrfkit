@@ -1,0 +1,12 @@
+{
+ "description": "Evidenced losses tools/check_entry_survival.py reports and does not fail on. Each item names one finding exactly (entry key, build, finding) and says why it is accepted and what showed it. An item that matches no failing finding is STALE and fails the run, so remove an item as soon as what it describes stops being reported. A loss that is simply not fixed yet does not belong here.",
+ "expected": [
+  {
+   "entry": "table|/Game/GameModes/Bomb/BombGameState.BombGameState_C|TeamEconomy",
+   "build": "13.02",
+   "finding": "field-missing",
+   "reason": "13.02 replaced BombGameState's TeamEconomy array with TeamStates: the per-round team economy is read from BaseTeamState from 13.02 on and from TeamEconomy on 13.01 and earlier (docs/DATA.md, 'Per-round team economy'; docs/archive/PROJECT_STATUS.md 26-H). The TeamEconomy entry and its struct-blob decoder stay for the builds that declare it.",
+   "evidence": "Declaration corpus r3 (1,018 exports, 2026-09-28): TeamEconomy (338800366) declared in 215 of 215 13.01 replays (210 BombGameState, 5 Swiftplay game state) and in 0 of 205 13.02 replays; TeamStates (929598027 and 3930476181) declared in 205 of 205 13.02 replays and in none of 13.01."
+  }
+ ]
+}
