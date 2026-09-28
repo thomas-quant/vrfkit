@@ -71,7 +71,7 @@ pub struct RawChunk {
 
 /// Lazy iterator over the chunk stream following the replay info.
 ///
-/// Each call to [`next`](ChunkIterator::next_chunk) yields the next chunk's
+/// Each call to [`next_chunk`](ChunkIterator::next_chunk) yields the next chunk's
 /// metadata and advances past its payload. The caller decides whether to
 /// inspect the payload (accessible via the returned `RawChunk.data_offset` into
 /// the original buffer) or skip it.
@@ -98,9 +98,9 @@ impl<'a> ChunkIterator<'a> {
 
     /// Whether the iterator has reached the end of the buffer.
     ///
-    /// No in-tree caller: `ChunkIterator` is driven by its `Iterator` impl,
-    /// which returns `None` at the same point. Published for a consumer that
-    /// wants the test without advancing.
+    /// No in-tree caller: every walk calls [`next_chunk`](Self::next_chunk),
+    /// which returns `Ok(None)` at the same point. Kept as public API for a
+    /// consumer that wants the test without advancing.
     #[must_use]
     pub const fn at_end(&self) -> bool {
         self.pos >= self.data.len()

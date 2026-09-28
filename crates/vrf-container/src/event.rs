@@ -211,7 +211,7 @@ pub const fn known_event_word_count(group: &str) -> Option<usize> {
 ///
 /// Requiring this exact constant before exposing the FString prevents a future
 /// format change from turning an arbitrary payload string into a newly
-/// searchable column. The original bytes remain available in `raw_payload`.
+/// searchable column. The original bytes remain in [`EventChunk::payload`].
 #[must_use]
 pub const fn known_event_payload_name(group: &str) -> Option<&'static str> {
     match known_event_group(group) {

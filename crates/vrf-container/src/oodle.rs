@@ -3,7 +3,7 @@
 //! Two framings meet here. A ReplayData chunk states its decompressed length
 //! twice -- once in its own 16-byte prologue as `MemorySizeInBytes`, once
 //! inside the Oodle archive header -- and the parser requires them to agree. A
-//! Checkpoint chunk (see [`crate::checkpoint`]) reuses the archive half only,
+//! Checkpoint chunk (see `crate::checkpoint`) reuses the archive half only,
 //! and has no outer statement to check against, which is why
 //! `decompress_oodle_archive` takes the expected length as an `Option`.
 //!
@@ -33,9 +33,11 @@ use crate::limits::MAX_CHUNK_SIZE;
 /// ```
 #[derive(Debug, Clone)]
 pub struct ReplayDataMeta {
-    /// First timestamp (server tick at chunk start).
+    /// Chunk start time in milliseconds. On 02d4d478 the 19 chunks run (0, 47),
+    /// (47, 91927) ... (1697092, 1772107): contiguous, and the last `time2` is
+    /// the info's `length_in_ms`.
     pub time1: u32,
-    /// Second timestamp (server tick at chunk end).
+    /// Chunk end time in milliseconds.
     pub time2: u32,
     /// On-disk (compressed) size of the data blob.
     pub size_in_bytes: i32,

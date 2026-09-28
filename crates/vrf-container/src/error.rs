@@ -47,7 +47,8 @@ pub enum ContainerError {
     #[error("unsupported LocalFileReplay version: expected 7, got {actual}")]
     UnsupportedLocalReplayVersion { actual: i32 },
 
-    /// An unregistered GUID was found in the custom version container.
+    /// Never constructed: the info parser ignores custom-version GUIDs it does
+    /// not pin, as Unreal readers do.
     #[error("unregistered custom version GUID: {guid:08X?}")]
     UnregisteredCustomVersion { guid: [u32; 4] },
 

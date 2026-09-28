@@ -13,7 +13,7 @@
 //! | ... | u32 | Changelist |
 //! | ... | FString | FriendlyName |
 //! | ... | u32 | IsLive (bool as u32) |
-//! | ... | i64 | Timestamp (Windows ticks) |
+//! | ... | i64 | Timestamp (`FDateTime` ticks) |
 //! | ... | u32 | Compressed (bool as u32) |
 //! | ... | u32 | Encrypted (bool as u32) |
 //! | ... | i32+[u8] | EncryptionKey (length-prefixed byte array) |
