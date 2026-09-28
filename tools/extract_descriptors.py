@@ -1093,31 +1093,31 @@ def mask_nested_type_bodies(source: str) -> str:
     return "".join(masked)
 
 
+def _single_override(class_name, class_body, marker_re, override_re, what, shape):
+    """The class's one readable `override` of a member, or None without one.
+    Any other shape is a hard failure naming the return types, never absent."""
+    member_view = direct_member_code_view(class_body)
+    markers = list(marker_re.finditer(member_view))
+    if not markers:
+        return None
+    overrides = list(override_re.finditer(member_view))
+    if len(markers) != 1 or len(overrides) != 1 or markers[0].start() != overrides[0].start():
+        return_types = ", ".join(sorted({m.group("return_type").strip() for m in markers}))
+        raise SystemExit(f"{class_name}: unsupported {what} override "
+                         f"using return type {return_types!r}; {shape}")
+    return overrides[0]
+
+
 def extract_category_override(
     class_name: str, class_body: str
 ) -> frozenset[str] | None:
     """Parse a class's explicit category flags, rejecting unsupported forms."""
-    category_source = direct_member_code_view(class_body)
-    markers = list(CATEGORY_OVERRIDE_MARKER_RE.finditer(category_source))
-    if not markers:
+    override = _single_override(class_name, class_body, CATEGORY_OVERRIDE_MARKER_RE,
+                                CATEGORY_OVERRIDE_RE, "ExportCategory",
+                                "expected an expression joined with |")
+    if override is None:
         return None
-
-    overrides = list(CATEGORY_OVERRIDE_RE.finditer(category_source))
-    if (
-        len(markers) != 1
-        or len(overrides) != 1
-        or markers[0].start() != overrides[0].start()
-    ):
-        return_types = ", ".join(
-            sorted({marker.group("return_type").strip() for marker in markers})
-        )
-        raise SystemExit(
-            f"{class_name}: unsupported ExportCategory override "
-            f"using return type {return_types!r}; "
-            "expected an expression joined with |"
-        )
-
-    expression = overrides[0].group("expression")
+    expression = override.group("expression")
     if CATEGORY_EXPRESSION_RE.fullmatch(expression) is None:
         raise SystemExit(
             f"{class_name}: unsupported ExportCategory override expression "
@@ -1137,27 +1137,12 @@ def extract_kind_override(
     class_name: str, class_body: str
 ) -> str | None:
     """Parse a class's explicit ExportGroupKind, rejecting unsupported forms."""
-    kind_source = direct_member_code_view(class_body)
-    markers = list(KIND_OVERRIDE_MARKER_RE.finditer(kind_source))
-    if not markers:
+    override = _single_override(class_name, class_body, KIND_OVERRIDE_MARKER_RE,
+                                KIND_OVERRIDE_RE, "ExportGroupKind",
+                                "expected => ExportGroupKind.<Member>;")
+    if override is None:
         return None
-
-    overrides = list(KIND_OVERRIDE_RE.finditer(kind_source))
-    if (
-        len(markers) != 1
-        or len(overrides) != 1
-        or markers[0].start() != overrides[0].start()
-    ):
-        return_types = ", ".join(
-            sorted({marker.group("return_type").strip() for marker in markers})
-        )
-        raise SystemExit(
-            f"{class_name}: unsupported ExportGroupKind override "
-            f"using return type {return_types!r}; "
-            "expected => ExportGroupKind.<Member>;"
-        )
-
-    kind = overrides[0].group("kind")
+    kind = override.group("kind")
     if kind not in EXPORT_GROUP_KIND_POLICY:
         raise SystemExit(
             f"{class_name}: unhandled ExportGroupKind {kind!r}. "
