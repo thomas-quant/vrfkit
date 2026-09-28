@@ -294,34 +294,24 @@ def _bump(tally, name: str, n: int = 1) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scalar and vector formatting
-#
-# Three distinct rounding/precision policies live here and the differences are
-# load-bearing; the names say which is which.
+# Scalar and vector formatting: three load-bearing precision policies, each
+# named by its function.
 # ---------------------------------------------------------------------------
 def _f32_shortest(value):
     """Shortest decimal that round-trips through float32.
 
-    actors.parquet stores spawn coordinates as Float32. Widening one to a
-    Python float exposes the binary artefact -- 2382.2f becomes
-    2382.199951171875 -- while the C# reference serializes the float itself,
-    which System.Text.Json writes with float (not double) round-trip
-    precision: "2382.2".
-
-    Reproducing that means finding the fewest significant digits that still
-    round-trip as a float32, which is exactly what a shortest-round-trip
-    float formatter does.
+    What System.Text.Json writes for a float: the Float32 spawn coordinate
+    2382.2f is "2382.2", where widening it to a Python float prints
+    2382.199951171875.
     """
     if value is None:
         return None
     packed = _struct.unpack("f", _struct.pack("f", value))[0]
     for digits in range(1, 10):
         candidate = float(f"{packed:.{digits}g}")
-        # Rounding up can carry a candidate past the float32 range: FLT_MAX at
-        # four digits is 3.403e+38. Such a candidate cannot round-trip, so it
-        # is not the answer. Python 3.12 packs it as inf and the comparison
-        # below rejects it; Python 3.13 raises OverflowError instead, which
-        # must mean the same thing here rather than abort the conversion.
+        # Rounding can carry a candidate past FLT_MAX (3.403e+38 at four
+        # digits), which cannot round-trip: Python 3.12 packs it as inf and
+        # the comparison rejects it, 3.13 raises OverflowError; both mean no.
         try:
             back = _struct.unpack("f", _struct.pack("f", candidate))[0]
         except OverflowError:
@@ -331,18 +321,14 @@ def _f32_shortest(value):
     return int(packed) if float(packed).is_integer() else packed
 
 
-#: One encoder, reused. `json.dumps` with non-default kwargs cannot use the
-#: module's cached encoder and CONSTRUCTS A NEW JSONEncoder on every call --
-#: 2.4 million of them here, 1.8 s of pure setup. `.encode()` on a single
-#: instance is the same code path with the same output.
+#: One encoder, reused: `json.dumps` with non-default kwargs builds a new
+#: JSONEncoder per call (2.4 million here, 1.8 s of setup); same output.
 _JSON = json.JSONEncoder(separators=(',', ':'), ensure_ascii=True)
 
-#: The movement record, as a template with one `%s` per slot. Key order is the
-#: order the record dict used, which is what `json.dumps` emitted; every slot
-#: is filled with text `_JSON.encode` produced for that value, so the line is
-#: byte-for-byte what encoding the dict would have written. `_write_movement`
-#: splits it on `%s` into the literal fragments it interleaves with the slot
-#: texts, so this stays the one place the line is spelled.
+#: The movement record, one `%s` per slot, in the key order the record dict
+#: had, each slot filled with `_JSON.encode`'s text: byte-for-byte what encoding
+#: the dict wrote. The only place the line is spelled; `_write_movement` splits
+#: it on `%s` into the literal fragments.
 _MOVEMENT_LINE = (
     '{"time_ms":%s,"shooter_character_net_guid":%s,'
     '"position":{"x":%s,"y":%s,"z":%s},'
@@ -350,128 +336,84 @@ _MOVEMENT_LINE = (
     '"yaw":%s,"pitch":%s}\n'
 )
 
-#: Rows per block of movement.ndjson assembled in Arrow and written at once.
-#: Bounds the text held at any moment to one block's worth -- ~48 MB at the
-#: ~184 bytes a line measures on the reference exports -- instead of the
-#: whole file's. Measured on f73d4475's writer alone, 3 runs each: 2**16 and
-#: 2**18 are equal within noise (~3.4 s, ~665 MB peak, which the per-column
-#: dedup sets, not the block), 2**14 is ~4% slower, 2**20 adds 50-80 MB.
+#: Rows per movement.ndjson block assembled in Arrow and written at once: holds
+#: one block's text (~48 MB at ~184 bytes a line), not the file's. f73d4475's
+#: writer alone, 3 runs each: 2**16 and 2**18 equal within noise (~3.4 s,
+#: ~665 MB peak, set by the per-column dedup), 2**14 ~4% slower, 2**20 +50-80 MB.
 _MOVEMENT_BLOCK_ROWS = 1 << 18
 
 
-#: Below this magnitude every integer is exactly representable in float32, so
-#: the shortest round-trip text of an integral float32 IS its integer text.
-#: From here up the two part ways: 123456792.0 round-trips as 123456790.
+#: Below this magnitude every integer is exact in float32, so an integral
+#: float32's shortest round-trip text IS its integer text. Above, they part:
+#: 123456792.0 round-trips as 123456790.
 _F32_EXACT_INT_LIMIT = 2 ** 24
 
 #: numpy's float32 text is positional only for 1e-4 <= |v| < 1e6, judged on
-#: the binary value; Python's float repr -- where the per-value rule ends --
-#: is positional from 1e-4 to 1e16, judged on the decimal. Outside the
-#: narrower band they disagree: 1234567.5 is '1.2345675e+06' to numpy, and
-#: float32(1e-4), which is 9.99999975e-05, is '1e-04' to numpy and '0.0001'
-#: to repr. Compared in float64, because 1e-4 is not a float32.
+#: the binary value; Python's repr (the per-value rule) is positional from 1e-4
+#: to 1e16, judged on the decimal. Outside this band they disagree: 1234567.5
+#: is '1.2345675e+06' to numpy, and float32(1e-4) (9.99999975e-05) is '1e-04'
+#: to numpy but '0.0001' to repr. Compared in float64: 1e-4 is not a float32.
 _F32_POSITIONAL_BAND = (1e-4, 1e6)
 
 
 def _json_scalar_column(arr, *, shorten=False):
-    """The JSON TEXT of each value, computed once per distinct value.
+    """The JSON text of a 1-D numpy float array, once per distinct value.
 
-    `arr` is a 1-D numpy float array. Returns ``(texts, inverse)``: `texts`
-    is a pa.string() array with the text of each distinct value, `inverse` a
-    pa.int32() array mapping every row of `arr` to its entry, so
-    `texts.take(inverse)` is the column's text row by row. `numpy.unique`
-    collapses the column in C and the caller fans the text back out with
-    Arrow's `take`, one write block at a time -- there is no per-row Python
-    loop anywhere, which is what lets `_write_movement` skip building 1.8
-    million dicts and calling the encoder 1.8 million times. The fan-out is
-    the caller's; the text rule is here, and only here.
+    Returns ``(texts, inverse)``: `texts` is a pa.string() array of each
+    distinct value's text, `inverse` a pa.int32() array mapping every row to
+    its entry, so `texts.take(inverse)` is the column's text row by row.
+    numpy.unique collapses the column in C and the caller fans the texts back
+    out with Arrow's take, one write block at a time, so no Python object is
+    made per row. The fan-out is the caller's; the text rule lives here only.
 
-    The contract is per value, and it is checked, not assumed: every row's
-    text is what the per-element version this replaced wrote for that row's
-    own value -- `_JSON.encode(_f32_shortest(v))` for `shorten=True`,
-    `_JSON.encode(v)` for `shorten=False` (`MovementTextRuleTests`).
+    The contract is per value, and checked (`MovementTextRuleTests`): each
+    row's text is `_JSON.encode(_f32_shortest(v))` with `shorten=True`, else
+    `_JSON.encode(v)` -- `Infinity`/`NaN` included, which an f-string would
+    spell as invalid JSON.
 
-    Distinct BIT PATTERNS, not distinct values. -0.0 == 0.0, so a value-level
-    unique merged the two zeros into one entry and wrote whichever sign the
-    sort put first for every zero in the column -- a genuine `0.0` yaw could
-    come out `-0.0`. Unique over the raw bits keeps them apart, and gives
-    each NaN payload its own entry (all spelled `NaN`). No movement column on
-    the corpus holds a -0.0 (0 in 1,973,922,078 rows x 8 columns, 1,018
-    exports, 2026-09-28), so this moved no line: it closes the case instead
-    of depending on its absence.
+    Unique over BIT PATTERNS, not values: -0.0 == 0.0 would merge the zeros
+    under whichever sign sorted first. No movement column holds a -0.0 (0 of
+    1,973,922,078 rows x 8 columns, 1,018 exports, 2026-09-28).
 
-    `shorten=False` encodes each distinct value, `Infinity` and `NaN`
-    included -- an f-string would spell those `inf` and `nan`, invalid JSON.
+    `shorten=True` vectorises only where proven equal to the per-value rule:
+    an integral value below `_F32_EXACT_INT_LIMIT` is its int text, and a
+    non-integral one inside `_F32_POSITIONAL_BAND` is numpy's astype(str),
+    the same Dragon4 shortest round-trip in positional notation. Both checked
+    exhaustively, not sampled: all 556,160,338 non-integral float32 in the
+    band (278,080,169 per sign) and all 33,554,430 integral ones with
+    0 < |v| < 2**24, 0 mismatches (numpy 2.5.2, 2026-09-28); just outside,
+    float32(+/-1e-4) and every non-integral value in 1e6 <= |v| < 2**20
+    differ. Every other value takes the per-value encoder: applied to all,
+    the shortcut wrote +/-inf as -9223372036854775808 and NaN as `nan`.
+    Finiteness is not guaranteed upstream (vrf-movement reads raw f32/f64
+    unchecked; stream.rs narrows f64 with a bare `as f32`), although the
+    corpus holds 0 non-finite values, 0 with |v| >= 2**24 and 0 non-integral
+    ones outside the band in any shortened column. `_write_movement` says how
+    a non-finite value reaches the consumer.
 
-    `shorten=True` takes a vectorised shortcut only where it is proven equal
-    to the per-value rule, and the per-value encoder everywhere else:
-
-    * an integral value below `_F32_EXACT_INT_LIMIT` is written as its int,
-      the way `_f32_shortest` returns an `int` for it;
-    * a non-integral value inside `_F32_POSITIONAL_BAND` is numpy's
-      `astype(str)` -- the same Dragon4 shortest round-trip, in the same
-      positional notation.
-
-    Both are checked EXHAUSTIVELY against the per-value rule, not sampled:
-    all 556,160,338 non-integral float32 inside the band (278,080,169 of each
-    sign) and all 33,554,430 integral ones with 0 < |v| < 2**24, 0
-    mismatches (numpy 2.5.2, 2026-09-28). The same run shows the edges are
-    real: just outside the band, float32(+/-1e-4) and every non-integral
-    value in 1e6 <= |v| < 2**20 differ.
-
-    The shortcut used to be applied to every value, and outside that domain
-    it is wrong:
-
-    * +/-inf pass `v == trunc(v)` and went through the int64 cast, which
-      wrote -9223372036854775808 -- valid JSON, a plausible number, the wrong
-      sign -- with a numpy RuntimeWarning on stderr as the only signal;
-    * NaN fell through to `astype(str)` and was written `nan`, which no JSON
-      parser accepts;
-    * an integral value at or above 2**24 was written as its exact integer
-      rather than its shortest round-trip (123456792 for 123456790), and one
-      at or above 2**63 (1e20) overflowed the cast the same way inf did;
-    * a non-integral value outside the band got numpy's scientific notation
-      where the rule writes positional (see `_F32_POSITIONAL_BAND`).
-
-    Those distinct values now take the per-value encoder. The old docstring
-    excused the first two as "not produced by the decoder"; nothing enforces
-    that -- vrf-movement reads raw f32/f64 components with no finiteness
-    check and stream.rs narrows f64 with a bare `as f32`. None of the four
-    occurs on the corpus (0 non-finite and 0 with |v| >= 2**24 in the scan
-    above; 0 distinct non-integral values outside the band in any shortened
-    column of any export), so this moved no line either. How a non-finite
-    value reaches the consumer, and why it is counted, is `_write_movement`'s
-    to say.
-
-    Worth doing per-distinct because these columns are quantized on the wire
-    and repeat heavily. Measured on 02d4d478's 1,837,220 kept movement rows:
-
-        pos_x 691,850 distinct    pos_z  70,260    vel_y 17,248
-        pos_y 696,435             vel_x  17,358    vel_z  6,071
-
-    so the six shortened columns format 1,499,222 values total instead of
-    11,023,320 -- 7.4x fewer. yaw and pitch dedup too (65,491 and 16,943
-    distinct) but are NOT shortened; see `_write_movement`.
+    Worth it because the columns are quantized and repeat: on 02d4d478's
+    1,837,220 kept rows the six shortened columns format 1,499,222 distinct
+    values instead of 11,023,320 (pos_x 691,850, pos_y 696,435, pos_z 70,260,
+    vel_x 17,358, vel_y 17,248, vel_z 6,071). yaw and pitch dedup (65,491 and
+    16,943 distinct) but are not shortened; see `_write_movement`.
     """
     if arr.dtype.kind != "f" or arr.dtype.itemsize not in (4, 8):
-        # The bit-pattern view below needs a same-width unsigned type, and a
-        # silent mis-view would print plausible numbers. Refuse instead.
+        # The bit-pattern view needs a same-width unsigned type; a silent
+        # mis-view would print plausible numbers.
         raise TypeError(f"_json_scalar_column wants float32/float64, got {arr.dtype}")
     if arr.shape[0] > numpy.iinfo(numpy.int32).max:
-        # The int32 inverse below would wrap and point rows at wrong texts.
+        # The int32 inverse would wrap and point rows at wrong texts.
         raise ValueError(f"{arr.shape[0]:,} rows is more than an int32 index can address")
     ubits, inverse = numpy.unique(
         arr.view(numpy.dtype(f"u{arr.dtype.itemsize}")), return_inverse=True
     )
-    # int32 halves what the caller holds per column until the write, and the
-    # int64 original is dropped at once: peak memory is the acceptance bar
-    # for this function as much as speed is.
+    # int32 halves what the caller holds per column until the write: peak
+    # memory is this function's acceptance bar as much as speed.
     inverse = pa.array(inverse.astype(numpy.int32))
     uniq = ubits.view(arr.dtype)
     if shorten:
-        # The two shortcut domains, then the per-value encoder for the rest.
-        # An object array holds the texts so a wide int can never truncate
-        # against the float column's narrower `<U` width.
+        # An object array, so a wide int text cannot truncate to the float
+        # column's narrower `<U` width.
         magnitude = numpy.abs(uniq.astype(numpy.float64))
         finite = numpy.isfinite(uniq)
         integral = finite & (uniq == numpy.trunc(uniq))
@@ -495,12 +437,8 @@ def _json_scalar_column(arr, *, shorten=False):
 
 
 def _vec3(x, y, z) -> dict:
-    """Build an {x, y, z} dict, emitting integral components as ints.
-
-    Matches how the C# reference serializes a double: System.Text.Json writes
-    0.0 as `0`, so keeping Python floats here would put `0.0` where the
-    reference has `0`.
-    """
+    """Build an {x, y, z} dict with integral components as ints, as
+    System.Text.Json writes a double (0.0 as `0`)."""
     return {
         axis: (int(n) if float(n).is_integer() else n)
         for axis, n in zip(("x", "y", "z"), (x, y, z))
@@ -508,20 +446,11 @@ def _vec3(x, y, z) -> dict:
 
 
 def _parse_vector_or_none(val):
-    """Parse a "(x,y,z)" vector without losing precision; None if unparseable.
+    """Parse a "(x,y,z)" vector at full precision; None if unparseable.
 
-    Full precision matters: the damage direction is a unit vector the reference
-    emits at full float precision (0.055482650227362894). This function used to
-    be contrasted with a _parse_location that rounded to 2 decimals -- that
-    rounding is gone from both, and the only remaining difference is the
-    failure mode, which is what the two names now say.
-
-    Returning None rather than a zero vector is the point of this variant: for
-    damage geometry a zero vector would be a silent wrong value rather than a
-    visible absence.
-
-    Integral components come back as ints so the output matches the C#
-    reference exactly -- it emits {"x": 0, "y": 1, "z": 0}, not 0.0/1.0/0.0.
+    Full precision: the reference emits the damage direction's unit vector as
+    0.055482650227362894. None, not a zero vector: for damage geometry a zero
+    vector would be a silent wrong value. Integral components become ints.
     """
     if isinstance(val, dict):
         return val
@@ -538,28 +467,14 @@ def _parse_vector_or_none(val):
 
 
 def _parse_vector_or_zero(val, tally=None) -> dict:
-    """Parse a Location value into {x, y, z}, preserving full precision.
+    """Parse a shot Location into {x, y, z} at full precision.
 
-    This used to round to 2 decimals, which was the last thing keeping
-    shot_rays.sample_rays from matching the reference -- it emits the raw
-    double (559.962145690918).
-
-    Callers expect a dict, so an unparseable value still yields a zero vector
-    rather than None. That is a fabricated value, tallied as
-    `fabricated_shot_locations` -- `_parse_rotation` below does the same for
-    the paired Rotation parameter, under `fabricated_shot_rotations`.
-
-    It used to be justified by "the shot filter upstream already guarantees a
-    location is present, so it should be unreachable". There is no such
-    filter. `_build_rpc_events` emits a shot for EVERY
-    ReplayPlayContinuousEffectAtLocation invocation and says so in its own
-    comment ("No blob guard"), deliberately, so that effects carrying only
-    scalar params reach the "unknown" bucket instead of being dropped. A
-    fabricated origin is therefore reachable, and an origin is a plausible
-    coordinate -- nothing downstream can tell it from a real one. So it is
-    counted. The value still ships, because a null would break the callers
-    that index into it; what changes is that the run no longer claims it
-    invented nothing.
+    The reference emits the raw double (559.962145690918), and
+    shot_rays.sample_rays matches it only unrounded. An absent or unparseable
+    value still yields the world origin, because callers index into it, and
+    is counted as `fabricated_shot_locations`: every effect RPC emits a shot
+    ("No blob guard" in `_build_rpc_events`), so this is reachable, and an
+    origin is indistinguishable from a real coordinate downstream.
     """
     parsed = _parse_vector_or_none(val)
     if parsed is None:
@@ -569,15 +484,9 @@ def _parse_vector_or_zero(val, tally=None) -> dict:
 
 
 def _parse_rotation(val, tally=None) -> dict:
-    """Parse a Rotation value into {pitch, yaw, roll}.
-
-    Mirrors `_parse_vector_or_zero`: an absent or unparseable Rotation still
-    yields {pitch:0, yaw:0, roll:0} rather than None, because callers (and
-    valplay's spray_control, which reads `shot.rotation` as the real aim
-    direction) expect a dict. That is a fabricated value indistinguishable
-    from a genuine (0,0,0) aim, so both fallback paths below tally it as
-    `fabricated_shot_rotations` rather than shipping it uncounted.
-    """
+    """Parse a Rotation into {pitch, yaw, roll}. As in `_parse_vector_or_zero`,
+    the (0,0,0) fallback is counted, as `fabricated_shot_rotations`: valplay's
+    spray_control reads `shot.rotation` as the real aim."""
     if val is None:
         _bump(tally, "fabricated_shot_rotations")
         return {"pitch": 0, "yaw": 0, "roll": 0}
@@ -593,10 +502,8 @@ def _parse_rotation(val, tally=None) -> dict:
         parts = s.split(",")
         if len(parts) == 3:
             try:
-                # Rust's compact rotator strings are shortest-round-trip f32
-                # decimals. Widen each parsed component back from f32 so the
-                # typed representation matches the legacy raw-wire decoder and
-                # the C# JSON numbers exactly.
+                # Rust writes shortest-round-trip f32 decimals; widening each
+                # back through f32 matches the raw-wire decoder and C# exactly.
                 components = [
                     _struct.unpack("<f", _struct.pack("<f", float(part)))[0]
                     for part in parts
@@ -621,19 +528,14 @@ def _has_alternate_marker(value) -> bool:
 
 
 def _resolve_fire_mode(firing_state_guid, source_id, guid_outer, guid_path):
-    """Classify a shot as primary / alternate fire.
+    """Classify a shot as primary / alternate fire: ``(fire_mode, evidence)``,
+    mirroring ValorantShotFireModeResolver.
 
-    Returns ``(fire_mode, evidence)``, mirroring ValorantShotFireModeResolver.
-
-    The signal is the *name* of the firing-state subobject: a gun replicates
-    "FiringState" for its primary cycle and "ZoomedFiringState",
-    "FiringStateBurst" etc. for its secondary one. Neither the ammo counters
-    nor burst_shot_number carry this -- burst_shot_number just indexes shots
-    within any spray, so treating a non-zero value as "alternate" (as this
-    adapter previously did) misclassified 1,462 of 2,475 shots on 02d4d478.
-
-    "unknown" when no path resolves: those are effects with no firing state at
-    all, not shots whose mode we failed to determine.
+    The signal is the NAME of the firing-state subobject: "FiringState" for
+    the primary cycle, "ZoomedFiringState", "FiringStateBurst", ... for the
+    secondary. burst_shot_number only indexes shots within a spray: reading a
+    non-zero one as alternate misclassified 1,462 of 2,475 shots on 02d4d478.
+    "unknown" means no path resolved: an effect with no firing state at all.
     """
     if _has_alternate_marker(source_id):
         return "alternate", f"source:{source_id}"
@@ -661,15 +563,13 @@ def _resolve_fire_mode(firing_state_guid, source_id, guid_outer, guid_path):
 
 
 def _resolve_equippable(net_guid, guid_outer, guid_path, guid_class):
-    """Walk a GUID's outer chain to the equippable actor that contains it.
+    """Walk a GUID's outer chain to the equippable actor containing it:
+    ``(owner_net_guid, name, category, class_path)`` or ``None``.
 
-    Returns ``(owner_net_guid, name, category, class_path)`` or ``None``.
-
-    Two lookups per hop, because the two tables cover different populations:
-    ``guid_class`` comes from actors.parquet (channel opens, carrying the spawn
-    class path) while ``guid_path`` comes from net_guids.parquet (every GUID the
-    replay registered, including subobjects that never opened a channel).
-    A weapon appears in the first; its FiringState only in the second.
+    Two lookups per hop: ``guid_class`` (actors.parquet: channel opens, with
+    the spawn class path) and ``guid_path`` (net_guids.parquet: every
+    registered GUID, subobjects included). A weapon appears in the first, its
+    FiringState only in the second.
     """
     current = net_guid
     for _ in range(MAX_OUTER_DEPTH):
@@ -692,11 +592,10 @@ def _resolve_equippable(net_guid, guid_outer, guid_path, guid_class):
 def _load_net_guids(export_dir):
     """Read net_guids.parquet into (guid -> outer, guid -> path, row count).
 
-    Returns empty dicts and a `None` row count when the file is absent, so
-    bundles produced by an older vrfkit still convert -- weapon identity is
-    simply left unresolved rather than the run failing. `None` rather than 0
-    because "there was no table" and "the table was empty" are different
-    facts, and only the second one can be compared with a declared count.
+    An absent file gives empty dicts and a `None` row count: older exports
+    still convert, with weapon identity unresolved, and None is not 0 because
+    only an empty table can be compared with a declared count. The row count
+    is the table's height, not either dict's size: both drop rows.
     """
     path = export_dir / "net_guids.parquet"
     if not path.exists():
@@ -707,9 +606,6 @@ def _load_net_guids(export_dir):
     outers = table.column("outer_net_guid").to_pylist()
     guid_outer = {g: o for g, o in zip(guids, outers) if o is not None}
     guid_path = {g: p for g, p in zip(guids, paths) if p}
-    # The row count is returned separately from the two dicts: both drop rows
-    # (a null outer, an empty path), so `len(guid_path)` is NOT the table's
-    # height and cannot be compared with what the export manifest declared.
     return guid_outer, guid_path, len(table)
 
 
