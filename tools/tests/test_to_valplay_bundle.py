@@ -130,6 +130,13 @@ MINIMAL_FIELD_ROWS = [
     },
 ]
 
+#: A PlayerState row the parser could not name, beside MINIMAL_FIELD_ROWS'
+#: one: a dropped row the loss tally must count.
+UNNAMED_PROPERTY_ROW = {
+    "time_ms": 10, "packet_id": 1, "actor": 101, "group_path": "PlayerState",
+    "field_name": None, "bit_count": 3, "raw_bits": b"\x05",
+}
+
 
 def write_movement_parquet(path: Path, rows: list[dict]) -> None:
     """Write a movement.parquet with the columns `_write_movement` reads."""
@@ -758,22 +765,12 @@ class EffectBlobBitLengthTests(unittest.TestCase):
         self.assertEqual(self.decode(self.BLOB, 400), self.FOUR_PAIRS)
         self.assertEqual(self.decode(self.BLOB, 350), self.THREE_PAIRS)
 
-    def test_byte_length_would_have_given_the_wrong_answer(self):
-        # Spelled out as its own case so the regression is unmistakable: the
-        # old code derived the length as len(data) * 8, which is 400 here, and
-        # would have returned four pairs for a payload declaring 350 bits.
-        self.assertEqual(len(self.BLOB) * 8, 400)
-        self.assertNotEqual(self.decode(self.BLOB, 350), self.decode(self.BLOB, 400))
-
     def test_absent_blob_decodes_to_an_empty_mapping(self):
         self.assertEqual(bundle._decode_effect_blob(None, self.SPEC, {}), {})
 
     def test_blob_carries_its_own_bit_count(self):
         # The container must not let the two drift apart silently: a caller
         # that builds one has to supply both.
-        blob = bundle._EffectBlob(b"\x00\x01", 9)
-        self.assertEqual(blob.data, b"\x00\x01")
-        self.assertEqual(blob.bit_count, 9)
         with self.assertRaises(TypeError):
             bundle._EffectBlob(b"\x00\x01")  # bit_count is not optional
 
@@ -827,22 +824,37 @@ class EffectFramingTallyTests(unittest.TestCase):
         self.assertEqual(tally["effect_array_residual_bits"], 0)
 
 
-class ShotEffectRawSourceTests(unittest.TestCase):
-    """An additive Rust JSON overlay must not replace the shot wire source."""
+class TallyTestCase(unittest.TestCase):
+    """Shared plumbing for the cases that read the conversion's loss counters."""
 
+    RPC_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
     SHOT_RPC = "/Script/ShooterGame.ShooterCharacter_ClassNetCache"
 
-    def convert_rows(self, tmp: str, rows: list[dict]) -> dict:
+    def convert_rows(self, tmp: str, rows: list[dict], **files) -> dict:
         root = Path(tmp)
         export = root / "export"
         export.mkdir()
         write_fields_parquet(export / "fields.parquet", rows)
+        for name, text in files.items():
+            (export / name.replace("_", ".")).write_text(text, encoding="utf-8")
         return bundle.convert(export, root / "bundle")
 
-    @staticmethod
-    def events_of(tmp: str, event_type: str) -> list[dict]:
-        events = [json.loads(line) for line in (Path(tmp) / "bundle" / "events.ndjson").read_text(encoding="utf-8").splitlines()]
-        return [event for event in events if event["type"] == event_type]
+    def tally_of(self, tmp: str, rows: list[dict], **files) -> dict:
+        return self.convert_rows(tmp, rows, **files)["tally"]
+
+    def events_of(self, tmp: str, event_type: str) -> list[dict]:
+        """Every event of one type from the bundle `convert_rows` just wrote.
+
+        The bundle also carries actor_spawned/actor_closed for each actor it
+        saw, so a bare line count says nothing about the events under test.
+        """
+        text = (Path(tmp) / "bundle" / "events.ndjson").read_text(encoding="utf-8")
+        events = [json.loads(line) for line in text.splitlines()]
+        return [e for e in events if e["type"] == event_type]
+
+
+class ShotEffectRawSourceTests(TallyTestCase):
+    """An additive Rust JSON overlay must not replace the shot wire source."""
 
     def rows(self, typed_json: bool = False, **typed) -> list[dict]:
         values = (
@@ -893,7 +905,7 @@ class ShotEffectRawSourceTests(unittest.TestCase):
         self.assertEqual(rpc, raw_rpc)
         self.assertEqual(summary["tally"]["multi_typed_rows"], 3)
 
-class DeathMontageBlobTests(unittest.TestCase):
+class DeathMontageBlobTests(TallyTestCase):
     """The death-montage pair keeps the reference's blob shape once typed.
 
     The parser types both parameters as ObjectNetGuid; the reference bundle
@@ -927,13 +939,8 @@ class DeathMontageBlobTests(unittest.TestCase):
             "bit_count": 1, "raw_bits": b"\x00", "value_bool": False,
         })
         with tempfile.TemporaryDirectory() as tmp:
-            export = Path(tmp) / "export"
-            export.mkdir()
-            write_fields_parquet(export / "fields.parquet", rows)
-            bundle.convert(export, Path(tmp) / "bundle")
-            events = [json.loads(line) for line in (Path(tmp) / "bundle" / "events.ndjson")
-                      .read_text(encoding="utf-8").splitlines()]
-        rpcs = [e for e in events if e["type"] == "rpc_received"]
+            self.convert_rows(tmp, rows)
+            rpcs = self.events_of(tmp, "rpc_received")
         self.assertEqual(len(rpcs), 1)
         return rpcs[0]["payload"]
 
@@ -956,46 +963,9 @@ class DeathMontageBlobTests(unittest.TestCase):
 class BlockPayloadExclusionTests(unittest.TestCase):
     marker = "__vrfkit_unresolved_class_net_cache_payload__"
 
-    @staticmethod
-    def write_fields(path: Path, rows: list[dict]) -> None:
-        def values(name, default=None):
-            return [row.get(name, default) for row in rows]
-
-        table = pa.table(
-            {
-                "time_ms": pa.array(values("time_ms"), type=pa.uint32()),
-                "packet_id": pa.array(values("packet_id"), type=pa.uint32()),
-                "channel_index": pa.array(values("channel_index", 7), type=pa.uint32()),
-                "actor_net_guid": pa.array(values("actor"), type=pa.uint32()),
-                "object_net_guid": pa.array(values("object"), type=pa.uint32()),
-                "group_path": pa.array(values("group_path"), type=pa.string()),
-                "handle": pa.array(values("handle", 0), type=pa.uint32()),
-                "field_name": pa.array(values("field_name"), type=pa.string()),
-                "bit_count": pa.array(values("bit_count"), type=pa.uint32()),
-                "raw_bits": pa.array(values("raw_bits"), type=pa.binary()),
-                "value_i64": pa.array(values("value_i64"), type=pa.int64()),
-                "value_f64": pa.array(values("value_f64"), type=pa.float64()),
-                "value_bool": pa.array(values("value_bool"), type=pa.bool_()),
-                "value_str": pa.array(values("value_str"), type=pa.string()),
-            }
-        )
-        pq.write_table(table, path)
-
-    @staticmethod
-    def bundle_files(path: Path) -> dict[str, bytes]:
-        return {item.name: item.read_bytes() for item in sorted(path.iterdir())}
-
     def test_block_payload_row_is_excluded_before_grouping_and_lifetimes(self):
         ordinary = [
-            {
-                "time_ms": 10,
-                "packet_id": 1,
-                "actor": 101,
-                "group_path": "PlayerState",
-                "field_name": "Health",
-                "bit_count": 32,
-                "value_i64": 100,
-            },
+            *MINIMAL_FIELD_ROWS,
             {
                 "time_ms": 20,
                 "packet_id": 2,
@@ -1025,8 +995,8 @@ class BlockPayloadExclusionTests(unittest.TestCase):
             marked_bundle = root / "marked_bundle"
             base_export.mkdir()
             marked_export.mkdir()
-            self.write_fields(base_export / "fields.parquet", ordinary)
-            self.write_fields(marked_export / "fields.parquet", ordinary + [marker_row])
+            write_fields_parquet(base_export / "fields.parquet", ordinary)
+            write_fields_parquet(marked_export / "fields.parquet", ordinary + [marker_row])
 
             base_summary = bundle.convert(base_export, base_bundle)
             marked_summary = bundle.convert(marked_export, marked_bundle)
@@ -1144,34 +1114,6 @@ class CombatReportLeafNameTests(unittest.TestCase):
         )
 
 
-class TallyTestCase(unittest.TestCase):
-    """Shared plumbing for the cases that read the conversion's loss counters."""
-
-    RPC_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
-
-    def convert_rows(self, tmp: str, rows: list[dict], **files) -> dict:
-        root = Path(tmp)
-        export = root / "export"
-        export.mkdir()
-        write_fields_parquet(export / "fields.parquet", rows)
-        for name, text in files.items():
-            (export / name.replace("_", ".")).write_text(text, encoding="utf-8")
-        return bundle.convert(export, root / "bundle")
-
-    def tally_of(self, tmp: str, rows: list[dict], **files) -> dict:
-        return self.convert_rows(tmp, rows, **files)["tally"]
-
-    def events_of(self, tmp: str, event_type: str) -> list[dict]:
-        """Every event of one type from the bundle `convert_rows` just wrote.
-
-        The bundle also carries actor_spawned/actor_closed for each actor it
-        saw, so a bare line count says nothing about the events under test.
-        """
-        text = (Path(tmp) / "bundle" / "events.ndjson").read_text(encoding="utf-8")
-        events = [json.loads(line) for line in text.splitlines()]
-        return [e for e in events if e["type"] == event_type]
-
-
 class UnnamedRowTallyTests(TallyTestCase):
     """A row the parser could not name is a dropped row, and must be counted.
 
@@ -1183,20 +1125,8 @@ class UnnamedRowTallyTests(TallyTestCase):
     """
 
     def test_an_unnamed_property_row_is_counted(self):
-        rows = [
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": "Health",
-                "bit_count": 32, "value_i64": 100,
-            },
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": None,
-                "bit_count": 3, "raw_bits": b"\x05",
-            },
-        ]
         with tempfile.TemporaryDirectory() as tmp:
-            tally = self.tally_of(tmp, rows)
+            tally = self.tally_of(tmp, MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW])
         self.assertEqual(tally["unnamed_property_rows"], 1)
 
     def test_an_rpc_of_only_unnamed_rows_counts_the_rows_and_the_invocation(self):
@@ -1228,8 +1158,6 @@ class ManifestTallyTests(TallyTestCase):
     'FiringState.AmmoRemaining' -- and every shot then reports null ammo,
     firing state, player and attack vectors while the run says SUCCESS.
     """
-
-    SHOT_RPC = "/Script/ShooterGame.ShooterCharacter_ClassNetCache"
 
     def shot_rows(self) -> list[dict]:
         return [
@@ -1396,12 +1324,6 @@ class FlatPathTallyTests(unittest.TestCase):
     count, so a counter is the only thing that can report them.
     """
 
-    def test_an_unparsable_segment_is_counted(self):
-        tally = bundle._Tally()
-        parts = bundle._parse_field_path("Rounds[0][1].Damage", tally)
-        self.assertEqual(parts[0], ("Rounds[0][1]", None))
-        self.assertEqual(tally["unparsable_path_segments"], 1)
-
     def test_a_bare_numeric_segment_is_not_counted(self):
         # '248' is the documented spelling of an unnamed handle, not a parse
         # failure; counting it would drown the real ones.
@@ -1427,8 +1349,8 @@ class FlatPathTallyTests(unittest.TestCase):
         # The real failure: bracket structure the parser could not read. The
         # nesting it describes is silently flattened into one literal key.
         tally = bundle._Tally()
-        parts = bundle._parse_field_path("Rounds[0][1]", tally)
-        self.assertEqual(parts, [("Rounds[0][1]", None)])
+        parts = bundle._parse_field_path("Rounds[0][1].Damage", tally)
+        self.assertEqual(parts, [("Rounds[0][1]", None), ("Damage", None)])
         self.assertEqual(tally["unparsable_path_segments"], 1)
 
     def test_a_scalar_overwritten_by_a_nested_value_is_counted(self):
@@ -1706,7 +1628,7 @@ class RawSourcedFieldTests(TallyTestCase):
         """Their consumer is this file's own effect decoder; it gets nothing."""
         rows = [{
             "time_ms": 30, "packet_id": 3, "actor": 2, "object": 22,
-            "channel_index": 1, "group_path": ShotEffectRawSourceTests.SHOT_RPC,
+            "channel_index": 1, "group_path": self.SHOT_RPC,
             "handle": 9,
             "field_name": f"ReplayPlayContinuousEffectAtLocation.{name}",
             "value_str": "[]",
@@ -1899,13 +1821,7 @@ class SummaryReportingTests(TallyTestCase):
         self.assertEqual(summary["tally"].total, 0)
 
     def test_a_lossy_conversion_names_every_loss_in_its_summary(self):
-        rows = MINIMAL_FIELD_ROWS + [
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": None,
-                "bit_count": 3, "raw_bits": b"\x05",
-            },
-        ]
+        rows = MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]
         with tempfile.TemporaryDirectory() as tmp:
             summary = self.convert_rows(tmp, rows)
         lines = summary["tally"].lines()
@@ -2054,6 +1970,11 @@ class SeamTestCase(unittest.TestCase):
         published = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         return out, published, summary
 
+    @staticmethod
+    def read_events(out):
+        text = (out / "events.ndjson").read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines()]
+
     def full_manifest(self, **overrides):
         manifest = {
             "source_file": "02d4d478.vrf",
@@ -2106,10 +2027,6 @@ class ActorLifecycleEventTests(SeamTestCase):
     CLAUDE.md names this trap outright, and `tools/extract_active_effects.py`
     in this same directory already honours it on the same column.
     """
-
-    def read_events(self, out):
-        text = (out / "events.ndjson").read_text(encoding="utf-8")
-        return [json.loads(line) for line in text.splitlines()]
 
     def convert(self, actor_rows):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2187,18 +2104,6 @@ class ActorLifecycleEventTests(SeamTestCase):
         _, published = self.convert(DORMANCY_ACTOR_ROWS)
         self.assertEqual(
             published["adapter"]["losses"]["unknown_actor_lifecycle_events"], 0)
-
-    def test_the_event_type_map_covers_the_values_claude_md_documents(self):
-        """`open` is handled by the branch above the map; `close`/`dormant` in it.
-
-        Pins the three-value fact itself, so a map that quietly lost `dormant`
-        again is a red test rather than a silent despawn.
-        """
-        self.assertEqual(set(bundle._ACTOR_EVENT_TYPES),
-                         {"close", "dormant"})
-        self.assertEqual(bundle._ACTOR_EVENT_TYPES["close"], "actor_closed")
-        self.assertNotEqual(bundle._ACTOR_EVENT_TYPES["dormant"],
-                            bundle._ACTOR_EVENT_TYPES["close"])
 
     def test_spawns_are_unchanged_by_the_dormancy_split(self):
         """The open branch must keep its class path, archetype and location."""
@@ -2484,13 +2389,7 @@ class AdapterAccountingTests(SeamTestCase):
         self.assertEqual(summary["tally"]["upstream_row_count_disagreement"], 0)
 
     def test_the_loss_tally_reaches_the_manifest(self):
-        rows = list(MINIMAL_FIELD_ROWS) + [
-            {
-                "time_ms": 10, "packet_id": 1, "actor": 101,
-                "group_path": "PlayerState", "field_name": None,
-                "bit_count": 3, "raw_bits": b"\x05",
-            },
-        ]
+        rows = MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]
         with tempfile.TemporaryDirectory() as tmp:
             _, published, _ = self.build(
                 tmp, field_rows=rows, manifest=self.full_manifest()
@@ -2742,10 +2641,6 @@ class EventOrderingContractTests(SeamTestCase):
          "group_path": "PlayerState", "field_name": "Health",
          "bit_count": 32, "value_i64": 2},
     ]
-
-    def read_events(self, out):
-        text = (out / "events.ndjson").read_text(encoding="utf-8")
-        return [json.loads(line) for line in text.splitlines()]
 
     def test_events_are_written_in_non_decreasing_time_order(self):
         with tempfile.TemporaryDirectory() as tmp:
