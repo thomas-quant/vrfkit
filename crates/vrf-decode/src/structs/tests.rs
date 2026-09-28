@@ -513,3 +513,28 @@ fn round_infos_member_with_an_exact_window_still_decodes() {
     let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
     assert_eq!(results[0].end_of_round_money, Some(1900));
 }
+
+/// TeamEconomy declares its replication ID as hardcoded FName `241` and
+/// reports a leftover under `ReplicationId`, the name that reaches the
+/// manifest's struct-blob error. Handles as 12.05 declares them (53).
+#[test]
+fn team_economy_replication_id_that_underreads_is_reported_by_its_label() {
+    let mut names = [None; 56];
+    names[53] = Some("241");
+    // 16 declared bits; the one-byte IntPacked 2 reads 8 of them.
+    let (data, bit_len) = one_member(53, 4, 16);
+    let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
+    match decode_team_economy_declared(&mut r, &names).unwrap_err() {
+        StructBlobError::MemberNotFullyConsumed {
+            name,
+            handle,
+            declared,
+            remaining,
+            ..
+        } => assert_eq!(
+            (name.as_str(), handle, declared, remaining),
+            ("ReplicationId", 53, 16, 8)
+        ),
+        other => panic!("expected MemberNotFullyConsumed, got {other:?}"),
+    }
+}

@@ -269,6 +269,19 @@ fn a_non_finite_float_is_rejected_rather_than_rendered() {
     );
 }
 
+/// The vector arm refuses the same way: packet 4368's vector with x replaced
+/// by f64::NAN (0x7ff8000000000000); y and z are the originals.
+#[test]
+fn a_non_finite_vector_component_is_rejected_rather_than_rendered() {
+    let raw =
+        decode_hex("0202182013041a8102 000000000000f87f 11e6b45fc0eee33f 9417c1fc5684b1bf 0000");
+    let err = decode_effect_blob_json(EffectArrayKind::Vector, &raw, 280).unwrap_err();
+    assert!(
+        matches!(err, EffectBlobError::NonFiniteFloat { index: 0 }),
+        "expected NonFiniteFloat, got {err:?}"
+    );
+}
+
 // ---- Handle derivation ----
 
 /// The pinned vectors come from `ReplayPlayContinuousEffectAtLocation`, the
