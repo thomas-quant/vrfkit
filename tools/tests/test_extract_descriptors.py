@@ -59,15 +59,8 @@ internal static class AgentClassNetCacheDescriptors
 
 
 class GeneratorHarness:
-    """The generator-running helpers both test classes below share.
-
-    A plain mixin, not a TestCase. `SilentDropTests` used to get these by
-    subclassing `ExtractDescriptorsTests`, and unittest collects inherited
-    `test_*` methods, so every test in that class -- 67 of them, each spawning
-    a generator subprocess -- ran a second time under `SilentDropTests`' name
-    and inflated the suite size the docs quote. The `assert*` calls resolve
-    through the `unittest.TestCase` each concrete class also inherits.
-    """
+    """Generator-running helpers for both test classes: a mixin, not a
+    TestCase, so no `test_*` method is collected twice."""
 
     def run_generator_process(
         self, sources: dict[str, str]
@@ -150,9 +143,7 @@ public sealed class ByteFlash : BaseFlash<ByteFlash>
 
     def test_every_movement_form_states_its_location_quantization(self):
         """The explicit, bare and virtual `.ReplicatedMovement` forms all emit
-        the location level. The wire does not carry it, so an entry without it
-        would leave the reader to assume one -- the constant divisor this
-        field exists to replace."""
+        the location level, which the wire does not carry."""
         output = self.run_generator({"Movement.cs": r'''
 public sealed class Explicit : ExportGroupDescriptor<Explicit>
 {
@@ -286,9 +277,8 @@ public sealed class Fade : ExportGroupDescriptor<Fade>
         self.assertIn("Fade.DescriptorPath", error)
 
     def test_a_generic_and_a_plain_class_sharing_a_name_stay_two_classes(self):
-        """C# tells `Res` from `Res<T>` by arity, and the vendored tree declares
-        both for ResourceComponentDescriptor. Keyed by bare name they merged
-        into one record, and file order decided whose fields survived."""
+        """C# tells `Res` from `Res<T>` by arity (the vendored tree has both for
+        ResourceComponentDescriptor); merged, file order picked the fields."""
         generic = r'''
 public abstract class Res<T> : ExportGroupDescriptor<T> where T : Res<T>
 {
@@ -317,11 +307,10 @@ public sealed class Res : Res<Res>
                      ("/res", "OwnValue", "FieldType::Float")})
 
     def test_arity_keys_resolve_own_constants_and_bases(self):
-        """Classes are keyed by name and generic arity (`Gen`2`). The arity
-        counts top-level type arguments only, and a generic class's constants
-        and every base reference use the same key: otherwise `Gen<T>` and
-        `Gen<TKey, TSelf>` merge, a Path stops resolving, or a derived class
-        loses its base's fields."""
+        """The arity key (`Gen`2`) counts top-level type arguments only, and a
+        generic class's constants and every base reference use it too: else
+        `Gen<T>` and `Gen<TKey, TSelf>` merge, a Path stops resolving, or a
+        derived class loses its base's fields."""
         output = self.run_generator({"Generic.cs": r'''
 public class Probe<T> : ExportGroupDescriptor<T>
 {
@@ -372,8 +361,7 @@ internal static class Factories
         self.assertIn("unsupported ClassNetCache factory", error)
 
     def test_private_cache_factory_fails_instead_of_vanishing(self):
-        """Upstream 8b7afcb's ClayDescriptors builds its caches this way; a
-        marker that saw only public/internal factories let them go missing."""
+        """A private static cache factory (upstream 8b7afcb's shape) fails."""
         error = self.run_generator_expecting_failure({"ClayDescriptors.cs": r'''
 public static class ClayDescriptors
 {
@@ -397,9 +385,8 @@ public static class ClayPaths
         self.assertIn("unsupported ClassNetCache factory Rpc", error)
 
     def test_runtime_cache_construction_without_a_factory_list_fails_loudly(self):
-        """Upstream 8b7afcb's AgentClassNetCacheDescriptors passes a method
-        call where the list goes. Unguarded, every agent cache entry vanished
-        from the table and the run still succeeded."""
+        """A method call where the factory list goes (upstream 8b7afcb's
+        shape) fails instead of dropping every agent cache entry."""
         error = self.run_generator_expecting_failure({
             "GenericAgentDescriptor.cs": r'''
 public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
@@ -471,19 +458,9 @@ public sealed class OnlyFastArray : ExportGroupDescriptor<OnlyFastArray>
         self.assertIn("0 entries from 0 groups", output)
 
     def test_named_payload_decoders_carry_their_type_through_decode(self):
-        """`.Decode(ValorantPayloadDecoders.X(...))` must not collapse to Raw
-        when X names a wire type.
-
-        The C# reference moved these fields off direct `.FVectorNetQuantize100()`
-        calls onto decoder objects. The generator keyed only on the method name,
-        so every one of them became Raw -- and the committed table.rs carries
-        them typed, meaning a regeneration would have silently downgraded eight
-        entries. That is the hazard docs/archive/PROJECT_STATUS.md section 8
-        describes.
-
-        RawPayload stays Raw in the same descriptor, because a decoder whose
-        name does not state a type is unknown, not raw.
-        """
+        """`.Decode(ValorantPayloadDecoders.X(...))` keeps the type X names
+        (without that, a regeneration downgrades eight committed entries);
+        RawPayload in the same descriptor stays Raw."""
         output = self.run_generator({
             "Damage.cs": """
 public sealed class DamageParameters : ExportGroupDescriptor<DamageParameters>
@@ -1194,14 +1171,7 @@ internal static class AgentClassNetCacheDescriptors
         )
 
     def test_commented_raw_wrapper_does_not_reclassify_live_typed_call(self):
-        # This fixture also defined the live typed AddValue as
-        # `=> AddPropertyHandle(handle, property, ExportCategory.GameState);`.
-        # That body reaches the end of the type ladder with no type method and
-        # was dropped without a word; it is now a `<no type method>` rejection,
-        # which is right -- the splitter cannot see calls through such a
-        # wrapper, so the definition is their only trace. The case moved to
-        # test_a_typed_wrapper_definition_is_rejected, which also fails if a
-        # typed wrapper is ever misread as a raw one.
+        # A live typed wrapper: test_a_typed_wrapper_definition_is_rejected.
         output = self.run_generator({
             "LiveTypedDescriptor.cs": r'''
 /*
@@ -1965,11 +1935,9 @@ public sealed class BoundedPayloadDescriptor : ExportGroupDescriptor<BoundedPayl
 
 
     # ---- ExportGroupKind ----
-    #
-    # A descriptor's ExportGroupKind decides whether its properties can be wire
-    # field names. Two kinds say no, and every other kind must say yes --
-    # including Unknown, which is the C# default from the protected
-    # parameterless constructor and NOT a "we did not look" marker.
+    # Two kinds say a descriptor's properties are not wire names; every other
+    # must say they are, Unknown (the C# default, not "we did not look")
+    # included.
 
     def test_fast_array_descriptor_contributes_nothing(self):
         output = self.run_generator({
@@ -2181,9 +2149,8 @@ public sealed class ComputedKindDescriptor : ExportGroupDescriptor<ComputedKindD
         self.assertIn("ExportGroupKind", stderr)
 
     def test_class_net_cache_functions_are_not_filtered_by_kind(self):
-        """Phases 3b/3c build from ClassNetCacheDescriptor, a separate C#
-        hierarchy with no Kind property at all. The filter must not reach
-        them."""
+        """Phases 3b/3c build from ClassNetCacheDescriptor, which has no Kind;
+        the filter must not reach them."""
         output = self.run_generator({
             "EffectCache.cs": r'''
 public sealed class EffectManagerComponentClassNetCacheDescriptor : ClassNetCacheDescriptor<EffectManagerComponentClassNetCacheDescriptor>
@@ -2209,15 +2176,9 @@ class SilentDropTests(GeneratorHarness, unittest.TestCase):
     """Ways a declared field left the table without saying so."""
 
     def test_an_unknown_primitive_type_is_rejected_not_dropped(self):
-        """`.Int64()` is not in PRIMITIVE_TYPES, so the statement fell off the
-        end of the type ladder and contributed nothing -- no entry, no counter,
-        no message. Adding one method upstream would untype every field that
-        uses it and the run would still report success.
-
-        This is the same hazard EXPORT_GROUP_KIND_POLICY already names: an
-        unclassified kind is a hard failure, not a default. An unclassified
-        TYPE has to be one too.
-        """
+        """`.Int64()` is not in PRIMITIVE_TYPES. One new upstream method must
+        stop the run, not untype every field using it while it succeeds -- the
+        EXPORT_GROUP_KIND_POLICY rule, applied to types."""
         stderr = self.run_generator_expecting_failure({
             "WidgetDescriptor.cs": r'''
 public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
@@ -2269,14 +2230,10 @@ public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
         }
 
     def test_a_declaration_with_no_type_method_is_rejected_not_dropped(self):
-        """`AddProperty(x => x.Ticks);` names no type method, so
-        `_extract_type_name` returned None and the ladder's last step recorded
-        nothing -- no entry, no rejection, no message. Only a NAMED unknown
-        method was a failure. Upstream really does write this shape, three
-        times (DECODERLESS_PROPERTIES); anywhere else it must stop the run.
-
-        The label is asserted, not just the field name: the report echoes the
-        statement, so "Ticks" would appear under any label.
+        """`AddProperty(x => x.Ticks);` names no type method. Upstream writes
+        this shape three times (DECODERLESS_PROPERTIES); anywhere else it must
+        stop the run. The label is asserted, not just the field name: the
+        report echoes the statement, so "Ticks" would appear under any label.
         """
         stderr = self.run_generator_expecting_failure(
             self.widget(
@@ -2287,10 +2244,8 @@ public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
         self.assertIn("  .<no type method>(): AddProperty(x => x.Ticks);", stderr)
 
     def test_a_generic_type_method_is_rejected_by_name(self):
-        """`.Enum<EMode>()` put a `<` where `_extract_type_name` wanted a `(`,
-        so it read as no type method at all and fell off the same way. It must
-        fail, and name the method a reader has to add.
-        """
+        """A generic `.Enum<EMode>()` fails naming `Enum`, the method a reader
+        has to add, not as no type method at all."""
         stderr = self.run_generator_expecting_failure(
             self.widget(
                 "AddProperty(x => x.Spin).Float();",
@@ -2302,12 +2257,9 @@ public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
         )
 
     def test_a_typed_wrapper_definition_is_rejected(self):
-        """A helper that returns the builder for its caller to type. Its calls
-        (`AddValue(7, x => x.Typed).UInt32();`) do not start with AddProperty,
-        so the splitter never sees them; its own body is the one statement
-        that shows declarations are routed through it, and that body names no
-        type method. Dropping it silently dropped every call with it.
-        """
+        """A helper returning the builder for its caller to type: the splitter
+        never sees its calls (`AddValue(7, x => x.Typed).UInt32();`), so its
+        body, which names no type method, is their only trace and must fail."""
         stderr = self.run_generator_expecting_failure({
             "WrappedDescriptor.cs": r'''
 public sealed class WrappedDescriptor : ExportGroupDescriptor<WrappedDescriptor>
@@ -2333,10 +2285,8 @@ public sealed class WrappedDescriptor : ExportGroupDescriptor<WrappedDescriptor>
         )
 
     def test_the_generic_method_the_ladder_knows_still_generates(self):
-        """The one generic type method the descriptors use keeps its own
-        branch: a `RepLayoutDynamicArray<T>()` is an opaque TArray, so Raw,
-        not a rejection now that `_extract_type_name` can see generic names.
-        """
+        """The descriptors' one generic type method, `RepLayoutDynamicArray<T>()`,
+        keeps its own branch: an opaque TArray, so Raw, not a rejection."""
         output = self.run_generator(
             self.widget(
                 "AddProperty(x => x.Spin).Float();",
@@ -2369,10 +2319,8 @@ public sealed class AresAbilitySystemComponentDescriptor : ExportGroupDescriptor
 '''
 
     def test_a_listed_decoderless_declaration_contributes_nothing(self):
-        """What DECODERLESS_PROPERTIES allows: no entry -- as before -- with
-        the sibling still typed, the run succeeding, and the declaration
-        counted by name in the summary instead of vanishing.
-        """
+        """What DECODERLESS_PROPERTIES allows: no entry, the sibling still
+        typed, the run succeeding, and the declaration named in the summary."""
         result, output = self.run_generator_process({
             "AresAbilitySystemComponentDescriptor.cs":
                 self.DECODERLESS_SOURCE.replace("{TYPE}", ""),
@@ -2436,18 +2384,15 @@ public sealed class BetaDescriptor : ExportGroupDescriptor<BetaDescriptor>
     }
 
     def test_two_classes_typing_one_field_two_ways_is_rejected(self):
-        """Dedup kept the FIRST entry without comparing types, so which type
-        shipped was decided by `sorted(class_paths.items())` -- rename a class
-        and the table changes. The explicit handle table one loop below already
-        refuses the analogous conflict; this is the same rule for types.
-        """
+        """Two classes typing one (path, field) differently fail, as
+        conflicting explicit handles do; otherwise class sort order would pick
+        the type."""
         stderr = self.run_generator_expecting_failure(self.CONFLICTING_CLASSES)
         self.assertIn("Contested", stderr)
 
     def test_two_classes_agreeing_on_one_field_still_dedupes(self):
-        """The case the dedup exists for -- parent and child both declaring the
-        same field -- stays silent. Only a DISAGREEMENT is a failure.
-        """
+        """Parent and child declaring the same field at the same type, the
+        case the dedup exists for, stays silent."""
         agreeing = {
             name: source.replace(".Int32()", ".Float()")
             for name, source in self.CONFLICTING_CLASSES.items()
