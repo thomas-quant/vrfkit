@@ -622,8 +622,10 @@ class TransactionalConversionTests(unittest.TestCase):
             root = Path(temp)
             self.make_export(root / "export")
             printed = io.StringIO()
-            with mock.patch.object(bundle, "_publish_bundle",
-                                   side_effect=OSError("disk full")),                     contextlib.redirect_stdout(printed),                     self.assertRaises(OSError):
+            with (mock.patch.object(bundle, "_publish_bundle",
+                                    side_effect=OSError("disk full")),
+                  contextlib.redirect_stdout(printed),
+                  self.assertRaises(OSError)):
                 bundle.convert(root / "export", root / "bundle")
             self.assertNotIn("Conversion ", printed.getvalue())
 
