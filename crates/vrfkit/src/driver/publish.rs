@@ -607,6 +607,14 @@ mod tests {
             .collect()
     }
 
+    /// `root/{name}`, holding the manifest of a prior complete export.
+    fn prior_output(root: &TestDir, name: &str) -> PathBuf {
+        let destination = root.path().join(name);
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join(MANIFEST), b"old complete").unwrap();
+        destination
+    }
+
     /// `begin`, with the leftover warnings captured instead of printed.
     fn begin_capturing(destination: &Path) -> (OutputTransaction, String) {
         let mut warnings = Vec::new();
@@ -619,9 +627,7 @@ mod tests {
     #[test]
     fn an_aborted_export_preserves_the_prior_output_and_cleans_staging() {
         let root = TestDir::new();
-        let destination = root.path().join("export");
-        fs::create_dir(&destination).unwrap();
-        fs::write(destination.join("manifest.json"), b"old complete").unwrap();
+        let destination = prior_output(&root, "export");
 
         {
             let transaction = OutputTransaction::begin(&destination).unwrap();
@@ -639,9 +645,7 @@ mod tests {
     #[test]
     fn a_publication_failure_restores_the_prior_complete_directory() {
         let root = TestDir::new();
-        let destination = root.path().join("export");
-        fs::create_dir(&destination).unwrap();
-        fs::write(destination.join("manifest.json"), b"old complete").unwrap();
+        let destination = prior_output(&root, "export");
 
         let transaction = OutputTransaction::begin(&destination).unwrap();
         fs::write(transaction.path().join("manifest.json"), b"new complete").unwrap();
@@ -720,9 +724,7 @@ mod tests {
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
         let root = TestDir::new();
-        let destination = root.path().join("export");
-        fs::create_dir(&destination).unwrap();
-        fs::write(destination.join("manifest.json"), b"old complete").unwrap();
+        let destination = prior_output(&root, "export");
 
         let (transaction, _) = begin_capturing(&destination);
         fs::write(transaction.path().join("manifest.json"), b"new complete").unwrap();
@@ -766,9 +768,7 @@ mod tests {
     #[test]
     fn a_staging_directory_left_by_a_killed_export_is_reported_and_kept() {
         let root = TestDir::new();
-        let destination = root.path().join("pub2");
-        fs::create_dir(&destination).unwrap();
-        fs::write(destination.join("manifest.json"), b"old complete").unwrap();
+        let destination = prior_output(&root, "pub2");
         let leftover = root.path().join(".pub2.vrfkit-staging-55396-0");
         fs::create_dir(&leftover).unwrap();
         fs::write(leftover.join("fields.parquet"), b"PAR1 no footer").unwrap();
@@ -987,9 +987,7 @@ mod tests {
     #[test]
     fn an_entry_that_appears_during_the_run_keeps_the_prior_output() {
         let root = TestDir::new();
-        let destination = root.path().join("export");
-        fs::create_dir(&destination).unwrap();
-        fs::write(destination.join(MANIFEST), b"old complete").unwrap();
+        let destination = prior_output(&root, "export");
 
         let (transaction, _) = begin_capturing(&destination);
         fs::write(transaction.path().join(MANIFEST), b"new complete").unwrap();
