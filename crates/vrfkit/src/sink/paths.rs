@@ -76,37 +76,14 @@ use super::{ChannelState, ExportSink};
 /// remapping its RPC stream to it would mis-parse it. That stream stays
 /// unresolved and is brute-forced (fc=34). Every pair added since follows the
 /// same rule, so a remapped component's RPC rows stay bare by design.
+#[rustfmt::skip]
 const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
-    (
-        "ReplayEffect",
-        "/Script/ShooterGame.ReplayEffectComponent",
-        GroupKind::ClassNetCache,
-    ),
-    (
-        "EffectManager",
-        "/Script/ShooterGame.EffectManagerComponent",
-        GroupKind::ClassNetCache,
-    ),
-    (
-        "LocationalEffectManager",
-        "/Script/ShooterGame.LocationalEffectManagerComponent",
-        GroupKind::ClassNetCache,
-    ),
-    (
-        "DamageHandlerComponent",
-        "/Script/ShooterGame.DamageableComponent",
-        GroupKind::ClassNetCache,
-    ),
-    (
-        "InventoryComponent",
-        "/Script/ShooterGame.AresInventory",
-        GroupKind::RepLayout,
-    ),
-    (
-        "AbilitiesAndBuffsComponent",
-        "/Script/ShooterGame.AresAbilitySystemComponent",
-        GroupKind::RepLayout,
-    ),
+    ("ReplayEffect", "/Script/ShooterGame.ReplayEffectComponent", GroupKind::ClassNetCache),
+    ("EffectManager", "/Script/ShooterGame.EffectManagerComponent", GroupKind::ClassNetCache),
+    ("LocationalEffectManager", "/Script/ShooterGame.LocationalEffectManagerComponent", GroupKind::ClassNetCache),
+    ("DamageHandlerComponent", "/Script/ShooterGame.DamageableComponent", GroupKind::ClassNetCache),
+    ("InventoryComponent", "/Script/ShooterGame.AresInventory", GroupKind::RepLayout),
+    ("AbilitiesAndBuffsComponent", "/Script/ShooterGame.AresAbilitySystemComponent", GroupKind::RepLayout),
     // Read out of the shipped game rather than inferred, which is what makes
     // these authoritative where the two pairs above were first argued from
     // handle shapes. A cooked Blueprint stores a component it adds as a
@@ -130,51 +107,15 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     // carries RepLayout rows (checked per replay over the corpus for the pairs
     // added from 13.06), so the handles pick up names and types the moment the
     // leaf resolves.
-    (
-        "ZoomStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "SelectBounceStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "StateMachine_Priming",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "TargetingToggle_StateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "SuppressionRoundsStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "BoostStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "Gun_StateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "RewindStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "UseAbilityStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
+    ("ZoomStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("SelectBounceStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("StateMachine_Priming", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("TargetingToggle_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("SuppressionRoundsStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("BoostStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("Gun_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("RewindStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("UseAbilityStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     // Added from the 13.06 containers with that tool, for every bare group of at
     // least 9,000 rows in the 1,018-replay corpus that passed all of: the
     // instance name has exactly one class in every package that has it; the
@@ -184,194 +125,54 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     // checkpoint's declarations). Where the target group also has rows of its
     // own, the widths agree handle for handle. docs/DATA.md has the numbers and
     // the groups that failed.
-    (
-        "Resume_StateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "Sprint_StateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "Slide_StateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "ProjectileStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "EquipStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "PrimaryTriggerActionStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "EquippableStateMachine_Activate",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "LaserStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "SelfResStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "Ability State Machine (EquippableStateMachine)",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "TimerStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "CloakStateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "SpontaneousEquip_StateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "EquippableStateMachine_Dart",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "EquippableStateMachine_Attack",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "EquippableStateMachine_PickUpOnCooldown",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "SwapCameras_StateMachine",
-        "/Script/ShooterGame.EquippableStateMachineComponent",
-        GroupKind::RepLayout,
-    ),
+    ("Resume_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("Sprint_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("Slide_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("ProjectileStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("EquipStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("PrimaryTriggerActionStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("EquippableStateMachine_Activate", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("LaserStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("SelfResStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("Ability State Machine (EquippableStateMachine)", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("TimerStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("CloakStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("SpontaneousEquip_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("EquippableStateMachine_Dart", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("EquippableStateMachine_Attack", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("EquippableStateMachine_PickUpOnCooldown", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
+    ("SwapCameras_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     // Both ammo counters are the same native component; the Blueprint just
     // instantiates it twice. That is what supersedes the handle addition this
     // group used to need: `AmmoComponent` declares handle 2 as
     // `AuthResourceAmount`, so naming it by hand as `AmmoCount` was a guess in
     // the right place with the wrong word. Magazine reads 0..100, reserve
     // 0..200.
-    (
-        "MagazineAmmo",
-        "/Script/ShooterGame.AmmoComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "ReserveAmmo",
-        "/Script/ShooterGame.AmmoComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "CalloutRegionTracker",
-        "/Script/ShooterGame.CalloutRegionTrackingComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "VisionComponent",
-        "/Script/ShooterGame.ShooterCharacterVisionComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "HealthDamageSection",
-        "/Script/ShooterGame.ChildDamageSectionComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "ShieldDamageSection",
-        "/Script/ShooterGame.ChildDamageSectionComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "OverhealDamageSection",
-        "/Script/ShooterGame.ChildDamageSectionComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "PreventDeathDamageSection",
-        "/Script/ShooterGame.AttachedDamageSectionComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "UsableComponent_EquippableGroundPickup",
-        "/Script/ShooterGame.UsableComponent_EquippableGroundPickups",
-        GroupKind::RepLayout,
-    ),
-    (
-        "Usable_PickUp",
-        "/Script/ShooterGame.UsableComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "StealthComp",
-        "/Script/ShooterGame.SimpleVisualTimelineStealthComp",
-        GroupKind::RepLayout,
-    ),
-    (
-        "StealthV1AddedForAISight",
-        "/Script/ShooterGame.StealthComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "Collision Static Mesh",
-        "/Script/Engine.StaticMeshComponent",
-        GroupKind::RepLayout,
-    ),
-    (
-        "PMAimToolingPointsTarget",
-        "/Script/InputTooling.AimToolingPointsTargetComponent",
-        GroupKind::RepLayout,
-    ),
+    ("MagazineAmmo", "/Script/ShooterGame.AmmoComponent", GroupKind::RepLayout),
+    ("ReserveAmmo", "/Script/ShooterGame.AmmoComponent", GroupKind::RepLayout),
+    ("CalloutRegionTracker", "/Script/ShooterGame.CalloutRegionTrackingComponent", GroupKind::RepLayout),
+    ("VisionComponent", "/Script/ShooterGame.ShooterCharacterVisionComponent", GroupKind::RepLayout),
+    ("HealthDamageSection", "/Script/ShooterGame.ChildDamageSectionComponent", GroupKind::RepLayout),
+    ("ShieldDamageSection", "/Script/ShooterGame.ChildDamageSectionComponent", GroupKind::RepLayout),
+    ("OverhealDamageSection", "/Script/ShooterGame.ChildDamageSectionComponent", GroupKind::RepLayout),
+    ("PreventDeathDamageSection", "/Script/ShooterGame.AttachedDamageSectionComponent", GroupKind::RepLayout),
+    ("UsableComponent_EquippableGroundPickup", "/Script/ShooterGame.UsableComponent_EquippableGroundPickups", GroupKind::RepLayout),
+    ("Usable_PickUp", "/Script/ShooterGame.UsableComponent", GroupKind::RepLayout),
+    ("StealthComp", "/Script/ShooterGame.SimpleVisualTimelineStealthComp", GroupKind::RepLayout),
+    ("StealthV1AddedForAISight", "/Script/ShooterGame.StealthComponent", GroupKind::RepLayout),
+    ("Collision Static Mesh", "/Script/Engine.StaticMeshComponent", GroupKind::RepLayout),
+    ("PMAimToolingPointsTarget", "/Script/InputTooling.AimToolingPointsTargetComponent", GroupKind::RepLayout),
     // The one pair whose widths do not match its target's own rows everywhere:
     // handle 2 is `AttachParent`, a packed object reference, so 16 bits against
     // 24 is the size of the NetGUID it carries, not a type disagreement. The
     // other two handles match exactly.
-    (
-        "PMAimToolingTarget",
-        "/Script/InputTooling.AimToolingSkeletalTargetComponent",
-        GroupKind::RepLayout,
-    ),
+    ("PMAimToolingTarget", "/Script/InputTooling.AimToolingSkeletalTargetComponent", GroupKind::RepLayout),
     // Instances of a Blueprint component class. The replay declares the
     // Blueprint class's group -- not its native parent's -- so that is the
     // target; the tool resolves the class through the package that defines it.
-    (
-        "Comp_Ability_CooldownComponent1",
-        "/Game/Characters/Components/Comp_Ability_CooldownComponent.Comp_Ability_CooldownComponent_C",
-        GroupKind::RepLayout,
-    ),
-    (
-        "DamageSection_Vampire_Q_BloodArmor",
-        "/Game/Characters/Vampire/S0/Ability_Q/DamageSection_Vampire_Q_Heal_BloodArmor.DamageSection_Vampire_Q_Heal_BloodArmor_C",
-        GroupKind::RepLayout,
-    ),
-    (
-        "ChooseTeleportSpot_StateComponent",
-        "/Game/Characters/States/ChooseMapLocationOnNavMesh_StateComponent.ChooseMapLocationOnNavMesh_StateComponent_C",
-        GroupKind::RepLayout,
-    ),
+    ("Comp_Ability_CooldownComponent1", "/Game/Characters/Components/Comp_Ability_CooldownComponent.Comp_Ability_CooldownComponent_C", GroupKind::RepLayout),
+    ("DamageSection_Vampire_Q_BloodArmor", "/Game/Characters/Vampire/S0/Ability_Q/DamageSection_Vampire_Q_Heal_BloodArmor.DamageSection_Vampire_Q_Heal_BloodArmor_C", GroupKind::RepLayout),
+    ("ChooseTeleportSpot_StateComponent", "/Game/Characters/States/ChooseMapLocationOnNavMesh_StateComponent.ChooseMapLocationOnNavMesh_StateComponent_C", GroupKind::RepLayout),
     // The armour section. In 13.06 the four packages that export the name --
     // `BasicArmorItem`, `HeavyArmorItem`, `LightArmorItem` and
     // `PlasmaArmorItem` -- all add `AttachedDamageSection` as this Blueprint
@@ -392,11 +193,7 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     // a native instance. The native group declares only `bAlive` there, so
     // handles 3 and 5 stay unnamed in those replays. This pair names only the
     // rows that were bare; docs/DATA.md has the numbers.
-    (
-        "AttachedDamageSection",
-        "/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C",
-        GroupKind::RepLayout,
-    ),
+    ("AttachedDamageSection", "/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C", GroupKind::RepLayout),
     // GAS creates its attribute sets as runtime subobjects rather than as
     // Blueprint components, so these pairs do not come from a cooked asset like
     // the ones above -- they are read off the wire, and the tool finds no export
@@ -411,16 +208,8 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     // handle (124,280 per-replay handle comparisons, none different). They are
     // the same attribute set replicated again, for actors that are not player
     // characters.
-    (
-        "AresAttributeSet_1",
-        "/Script/ShooterGame.AresAttributeSet",
-        GroupKind::RepLayout,
-    ),
-    (
-        "AresAttributeSet_2",
-        "/Script/ShooterGame.AresAttributeSet",
-        GroupKind::RepLayout,
-    ),
+    ("AresAttributeSet_1", "/Script/ShooterGame.AresAttributeSet", GroupKind::RepLayout),
+    ("AresAttributeSet_2", "/Script/ShooterGame.AresAttributeSet", GroupKind::RepLayout),
 ];
 
 /// Everything a block's resolution depends on that is not cache state.
@@ -1235,15 +1024,10 @@ mod tests {
     /// entry added for any leaf passed it.
     #[test]
     fn component_names_read_from_the_game_reach_their_native_groups() {
+        const ESM: &str = "/Script/ShooterGame.EquippableStateMachineComponent";
         for (leaf, native) in [
-            (
-                "ZoomStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "Gun_StateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
+            ("ZoomStateMachine", ESM),
+            ("Gun_StateMachine", ESM),
             ("MagazineAmmo", "/Script/ShooterGame.AmmoComponent"),
             ("ReserveAmmo", "/Script/ShooterGame.AmmoComponent"),
             (
@@ -1259,74 +1043,23 @@ mod tests {
                 "/Script/InputTooling.AimToolingPointsTargetComponent",
             ),
             // Added from the 13.06 containers by tools/extract_component_classes.
-            (
-                "Resume_StateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "Sprint_StateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "Slide_StateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "ProjectileStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "EquipStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "PrimaryTriggerActionStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "EquippableStateMachine_Activate",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "LaserStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "SelfResStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "Ability State Machine (EquippableStateMachine)",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "TimerStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "CloakStateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "SpontaneousEquip_StateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "EquippableStateMachine_Dart",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "EquippableStateMachine_Attack",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "EquippableStateMachine_PickUpOnCooldown",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
-            (
-                "SwapCameras_StateMachine",
-                "/Script/ShooterGame.EquippableStateMachineComponent",
-            ),
+            ("Resume_StateMachine", ESM),
+            ("Sprint_StateMachine", ESM),
+            ("Slide_StateMachine", ESM),
+            ("ProjectileStateMachine", ESM),
+            ("EquipStateMachine", ESM),
+            ("PrimaryTriggerActionStateMachine", ESM),
+            ("EquippableStateMachine_Activate", ESM),
+            ("LaserStateMachine", ESM),
+            ("SelfResStateMachine", ESM),
+            ("Ability State Machine (EquippableStateMachine)", ESM),
+            ("TimerStateMachine", ESM),
+            ("CloakStateMachine", ESM),
+            ("SpontaneousEquip_StateMachine", ESM),
+            ("EquippableStateMachine_Dart", ESM),
+            ("EquippableStateMachine_Attack", ESM),
+            ("EquippableStateMachine_PickUpOnCooldown", ESM),
+            ("SwapCameras_StateMachine", ESM),
             (
                 "ShieldDamageSection",
                 "/Script/ShooterGame.ChildDamageSectionComponent",
