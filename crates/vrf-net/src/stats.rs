@@ -739,106 +739,74 @@ mod tests {
         assert_eq!(over.partial_overclassified_errors(), 1);
     }
 
+    /// Every counter set to its own multiple of `n`, so absorbing `counted(1)`
+    /// twice must give exactly `counted(2)`. The literal names every field, so
+    /// a new counter does not compile here until it is listed, and once it is,
+    /// a counter `absorb` forgets or overwrites fails the comparison.
+    fn counted(n: u64) -> NetStats {
+        NetStats {
+            packets: n,
+            malformed_packets: 2 * n,
+            bunches: 3 * n,
+            partial_errors: 4 * n,
+            partial_bunches: 35 * n,
+            partial_missing_initial: 36 * n,
+            partial_missing_initial_final: 41 * n,
+            partial_missing_initial_reliable: 42 * n,
+            partial_missing_initial_bits: 43 * n,
+            partial_overlapping_initial: 37 * n,
+            partial_mismatched_continuation: 38 * n,
+            partial_non_byte_aligned: 39 * n,
+            partial_channel_close: 40 * n,
+            partial_fragments: 5 * n,
+            partial_completed: 6 * n,
+            unfinished_partials: 7 * n,
+            unfinished_partial_bits: 8 * n,
+            bunch_header_failures: 9 * n,
+            content_blocks: 10 * n,
+            rep_layout_blocks: 11 * n,
+            class_net_cache_blocks: 12 * n,
+            deleted_blocks: 13 * n,
+            fields: 14 * n,
+            rpcs: 15 * n,
+            skipped_bits: 16 * n,
+            content_block_framing_failures: 34 * n,
+            malformed_content_blocks: 17 * n,
+            transform_failures: 18 * n,
+            field_stream_failures: 19 * n,
+            rpc_stream_failures: 20 * n,
+            unresolved_rpc_payloads_preserved: 21 * n,
+            actor_opens: 22 * n,
+            actor_closes: 23 * n,
+            channel_reopens_while_open: 24 * n,
+            actor_opens_missing_spawn: 25 * n,
+            failed_reopens_while_open: 44 * n,
+            bunches_on_unopened_channel: 45 * n,
+            unopened_channel_bits: 46 * n,
+            channel_state_limit_failures: 26 * n,
+            partial_resource_limit_failures: 27 * n,
+            package_map_exports: 28 * n,
+            rep_layout_export_bunches: 29 * n,
+            exported_guids: 30 * n,
+            must_be_mapped_guids: 31 * n,
+            diagnostics: vec![dummy_event(32); n as usize],
+            diagnostics_dropped: 33 * n,
+        }
+    }
+
     #[test]
     fn absorbing_checkpoint_stats_keeps_every_counter() {
-        let source = NetStats {
-            packets: 1,
-            malformed_packets: 2,
-            bunches: 3,
-            partial_errors: 4,
-            partial_bunches: 35,
-            partial_missing_initial: 36,
-            partial_missing_initial_final: 41,
-            partial_missing_initial_reliable: 42,
-            partial_missing_initial_bits: 43,
-            partial_overlapping_initial: 37,
-            partial_mismatched_continuation: 38,
-            partial_non_byte_aligned: 39,
-            partial_channel_close: 40,
-            partial_fragments: 5,
-            partial_completed: 6,
-            unfinished_partials: 7,
-            unfinished_partial_bits: 8,
-            bunch_header_failures: 9,
-            content_blocks: 10,
-            rep_layout_blocks: 11,
-            class_net_cache_blocks: 12,
-            deleted_blocks: 13,
-            fields: 14,
-            rpcs: 15,
-            skipped_bits: 16,
-            content_block_framing_failures: 34,
-            malformed_content_blocks: 17,
-            transform_failures: 18,
-            field_stream_failures: 19,
-            rpc_stream_failures: 20,
-            unresolved_rpc_payloads_preserved: 21,
-            actor_opens: 22,
-            actor_closes: 23,
-            channel_reopens_while_open: 24,
-            actor_opens_missing_spawn: 25,
-            failed_reopens_while_open: 44,
-            bunches_on_unopened_channel: 45,
-            unopened_channel_bits: 46,
-            channel_state_limit_failures: 26,
-            partial_resource_limit_failures: 27,
-            package_map_exports: 28,
-            rep_layout_export_bunches: 29,
-            exported_guids: 30,
-            must_be_mapped_guids: 31,
-            diagnostics: vec![dummy_event(32)],
-            diagnostics_dropped: 33,
-        };
         let mut totals = NetStats::default();
-        for _ in 0..2 {
-            totals.absorb(&mut source.clone());
-        }
-
+        totals.absorb(&mut counted(1));
+        assert_eq!(format!("{totals:?}"), format!("{:?}", counted(1)));
+        totals.absorb(&mut counted(1));
         assert_eq!(totals.packets, 2);
-        assert_eq!(totals.malformed_packets, 4);
-        assert_eq!(totals.bunches, 6);
-        assert_eq!(totals.partial_errors, 8);
-        assert_eq!(totals.partial_bunches, 70);
-        assert_eq!(totals.partial_missing_initial, 72);
-        assert_eq!(totals.partial_missing_initial_final, 82);
-        assert_eq!(totals.partial_missing_initial_reliable, 84);
-        assert_eq!(totals.partial_missing_initial_bits, 86);
-        assert_eq!(totals.partial_overlapping_initial, 74);
-        assert_eq!(totals.partial_mismatched_continuation, 76);
-        assert_eq!(totals.partial_non_byte_aligned, 78);
-        assert_eq!(totals.partial_channel_close, 80);
-        assert_eq!(totals.partial_fragments, 10);
-        assert_eq!(totals.partial_completed, 12);
-        assert_eq!(totals.unfinished_partials, 14);
-        assert_eq!(totals.unfinished_partial_bits, 16);
-        assert_eq!(totals.bunch_header_failures, 18);
-        assert_eq!(totals.content_blocks, 20);
-        assert_eq!(totals.rep_layout_blocks, 22);
-        assert_eq!(totals.class_net_cache_blocks, 24);
-        assert_eq!(totals.deleted_blocks, 26);
-        assert_eq!(totals.fields, 28);
-        assert_eq!(totals.rpcs, 30);
-        assert_eq!(totals.skipped_bits, 32);
-        assert_eq!(totals.content_block_framing_failures, 68);
-        assert_eq!(totals.malformed_content_blocks, 34);
-        assert_eq!(totals.transform_failures, 36);
-        assert_eq!(totals.field_stream_failures, 38);
-        assert_eq!(totals.rpc_stream_failures, 40);
-        assert_eq!(totals.unresolved_rpc_payloads_preserved, 42);
-        assert_eq!(totals.actor_opens, 44);
-        assert_eq!(totals.actor_closes, 46);
-        assert_eq!(totals.channel_reopens_while_open, 48);
-        assert_eq!(totals.actor_opens_missing_spawn, 50);
-        assert_eq!(totals.failed_reopens_while_open, 88);
-        assert_eq!(totals.bunches_on_unopened_channel, 90);
-        assert_eq!(totals.unopened_channel_bits, 92);
-        assert_eq!(totals.channel_state_limit_failures, 52);
-        assert_eq!(totals.partial_resource_limit_failures, 54);
-        assert_eq!(totals.package_map_exports, 56);
-        assert_eq!(totals.rep_layout_export_bunches, 58);
-        assert_eq!(totals.exported_guids, 60);
-        assert_eq!(totals.must_be_mapped_guids, 62);
         assert_eq!(totals.diagnostics.len(), 2);
         assert_eq!(totals.diagnostics_dropped, 66);
+        assert_eq!(
+            format!("{totals:?}"),
+            format!("{:?}", counted(2)),
+            "every counter, the event log and its dropped count add up"
+        );
     }
 }
