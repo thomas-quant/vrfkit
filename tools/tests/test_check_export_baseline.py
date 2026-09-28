@@ -275,6 +275,267 @@ class CrossCheckTests(unittest.TestCase):
                 guard.reward_opaque_manifest_errors(root, {}, True)))
 
 
+#: Checkpoint GUID declarations, independent of how an index is encoded:
+#: `(checkpoint_index, net_guid, wire outer, target)`, where `target` is a
+#: literal path or an int k meaning "a reference to this checkpoint's k-th
+#: literal". Both checkpoints use one wire ID, so only `checkpoint_index`
+#: separates their tables. The shapes are chosen so that each wrong rule below
+#: resolves at least one reference to a different path.
+DECLARATIONS = (
+    (0, 3, 0, "/Game/Maps/Ascent"),
+    (0, 5, 3, 0),                  # Ascent
+    (0, 7, 3, "/Game/A.A_C"),
+    (0, 19, 3, "/Game/D.D_C"),
+    (0, 9, 7, 1),                  # A.A_C; D.D_C if references were appended
+    (0, 13, 3, 0),                 # Ascent; A.A_C if one-based
+    (1, 11, 0, "/Game/B.B_C"),
+    (1, 15, 11, "/Game/C.C_C"),
+    (1, 21, 11, "/Game/E.E_C"),
+    (1, 23, 11, "/Game/F.F_C"),
+    (1, 12, 11, 0),                # dynamic GUID; B.B_C in a fresh table, F.F_C in a shared one
+    (1, 16, 15, 1),                # C.C_C
+    (1, 17, 0, "/Game/OnlyInCheckpoint"),
+)
+#: The main stream's final registry: net_guid -> (path, outer or None).
+MAIN_GUIDS = {
+    3: ("/Game/Maps/Ascent", None), 5: ("/Game/Maps/Ascent", 3),
+    7: ("/Game/A.A_C", 3), 19: ("/Game/D.D_C", 3), 9: ("/Game/A.A_C", 7),
+    13: ("/Game/Maps/Ascent", 3), 11: ("/Game/B.B_C", None),
+    15: ("/Game/C.C_C", 11), 21: ("/Game/E.E_C", 11), 23: ("/Game/F.F_C", 11),
+    12: ("/Game/B.B_C", 11), 16: ("/Game/C.C_C", 15),
+    40: ("/Game/OnlyInMain", None),
+}
+GUID_ENTRY_SCHEMA = pa.schema([
+    ("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()),
+    ("ordinal", pa.uint32()), ("net_guid", pa.uint32()),
+    ("outer_net_guid", pa.uint32()), ("path_is_string", pa.bool_()),
+    ("literal_path", pa.string()), ("name_index", pa.uint32()), ("flags", pa.uint8()),
+])
+
+
+def encode_guid_entries(rule="zero_based", declarations=DECLARATIONS):
+    """Raw `checkpoint_guid_entries` rows as a serializer following `rule` writes them.
+
+    `zero_based` is the rule the checkpoint reader implements. The others are
+    the wrong rules the doc's negative controls measure: one-based positions,
+    references appended to the table, and one table shared by every
+    checkpoint instead of one per checkpoint.
+    """
+    rows, current, earlier_literals = [], None, 0
+    for checkpoint, guid, outer, target in declarations:
+        if checkpoint != current:
+            if current is not None:
+                earlier_literals += len(literal_slots)
+            current, table, literal_slots = checkpoint, [], []
+        row = {"checkpoint_index": checkpoint, "checkpoint_id": "cp",
+               "ordinal": len(table), "net_guid": guid, "outer_net_guid": outer,
+               "flags": 0}
+        if isinstance(target, str):
+            literal_slots.append(len(table))
+            table.append(target)
+            row.update(path_is_string=True, literal_path=target, name_index=None)
+        else:
+            index = {"zero_based": target, "one_based": target + 1,
+                     "append_references": literal_slots[target],
+                     "shared_table": earlier_literals + target}[rule]
+            table.append(table[literal_slots[target]])
+            row.update(path_is_string=False, literal_path=None, name_index=index)
+        rows.append(row)
+    return rows
+
+
+def write_guid_tables(out, entries, main=MAIN_GUIDS, duplicate=None):
+    """Write the two tables the cross-check joins; `net_guids.path` is
+    dictionary-encoded, as the exporter writes it."""
+    pq.write_table(pa.Table.from_pylist(entries, schema=GUID_ENTRY_SCHEMA),
+                   out / "checkpoint_guid_entries.parquet")
+    guids = sorted(main) + ([duplicate] if duplicate is not None else [])
+    pq.write_table(pa.table({
+        "net_guid": pa.array(guids, pa.uint32()),
+        "path": pa.array([main[g][0] for g in guids]).dictionary_encode(),
+        "outer_net_guid": pa.array([main[g][1] for g in guids], pa.uint32()),
+    }), out / "net_guids.parquet")
+
+
+class CheckpointGuidCrossCheckTests(unittest.TestCase):
+    """The main stream is the independent side of the path-index rule's check."""
+
+    def crosscheck(self, entries, main=MAIN_GUIDS, duplicate=None):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            write_guid_tables(out, entries, main, duplicate)
+            return guard.checkpoint_guid_crosscheck(out)
+
+    def test_the_readers_rule_agrees_with_the_main_stream(self):
+        counts, errors = self.crosscheck(encode_guid_entries())
+        self.assertEqual(errors, [])
+        expected = dict.fromkeys(guard.GUID_CROSSCHECK_KEYS, 0)
+        expected.update(indexed_joined=5, indexed_path_equal=5, indexed_outer_equal=5,
+                        literal_joined=7, literal_path_equal=7, literal_outer_equal=7,
+                        literal_unjoined=1)
+        self.assertEqual(counts, expected)
+
+    def test_rows_are_ordered_by_checkpoint_and_ordinal_not_file_order(self):
+        rows = encode_guid_entries()
+        counts, errors = self.crosscheck(list(reversed(rows)))
+        self.assertEqual(errors, [])
+        self.assertEqual((counts["indexed_path_equal"], counts["literal_path_equal"]), (5, 7))
+
+    def assert_rejected(self, counts, errors, **expected):
+        self.assertTrue(errors, counts)
+        for key, value in expected.items():
+            self.assertEqual(counts[key], value, key)
+
+    def test_one_based_indices_are_rejected(self):
+        counts, errors = self.crosscheck(encode_guid_entries("one_based"))
+        self.assert_rejected(counts, errors, indexed_path_equal=0,
+                             indexed_path_differs=4, indexed_unresolved=1)
+
+    def test_indices_counting_appended_references_are_rejected(self):
+        counts, errors = self.crosscheck(encode_guid_entries("append_references"))
+        self.assert_rejected(counts, errors, indexed_path_equal=4, indexed_path_differs=1)
+        self.assertIn("net_guid 9", " ".join(errors))
+
+    def test_indices_into_a_table_not_reset_per_checkpoint_are_rejected(self):
+        counts, errors = self.crosscheck(encode_guid_entries("shared_table"))
+        self.assert_rejected(counts, errors, indexed_path_equal=3,
+                             indexed_path_differs=1, indexed_unresolved=1)
+
+    def test_an_edited_main_stream_path_is_rejected(self):
+        main = dict(MAIN_GUIDS)
+        main[9] = ("/Game/Other.Other_C", 7)
+        counts, errors = self.crosscheck(encode_guid_entries(), main)
+        self.assert_rejected(counts, errors, indexed_path_differs=1, indexed_path_equal=4)
+        main = dict(MAIN_GUIDS)
+        main[19] = ("/Game/Other.Other_C", 3)
+        counts, errors = self.crosscheck(encode_guid_entries(), main)
+        self.assert_rejected(counts, errors, literal_path_differs=1, indexed_path_differs=0)
+
+    def test_an_index_past_the_preceding_literals_is_counted_not_raised(self):
+        rows = encode_guid_entries()
+        rows[4]["name_index"] = 99
+        counts, errors = self.crosscheck(rows)
+        self.assert_rejected(counts, errors, indexed_unresolved=1, indexed_joined=4)
+        self.assertIn("index 99, 3 preceding literals", " ".join(errors))
+
+    def test_nothing_joined_is_a_failure_not_a_vacuous_pass(self):
+        without_indexed = {g: v for g, v in MAIN_GUIDS.items() if g not in (5, 9, 13, 12, 16)}
+        literal_only = tuple(d for d in DECLARATIONS if isinstance(d[3], str))
+        for name, entries, main in (
+                ("no checkpoint rows", [], MAIN_GUIDS),
+                ("indexed GUIDs absent from the main stream", encode_guid_entries(), without_indexed),
+                ("literal entries only", encode_guid_entries(declarations=literal_only), MAIN_GUIDS)):
+            with self.subTest(name):
+                counts, errors = self.crosscheck(entries, main)
+                self.assertEqual(counts["indexed_joined"], 0)
+                self.assertIn("not compared at all", " ".join(errors))
+
+    def test_a_repeated_main_guid_fails_even_when_both_rows_agree(self):
+        counts, errors = self.crosscheck(encode_guid_entries(), duplicate=9)
+        self.assert_rejected(counts, errors, main_duplicate_guids=1, indexed_path_differs=0)
+
+    def test_outers_compare_by_an_explicit_rule_not_null_as_zero(self):
+        for name, guid, main_outer, key in (
+                ("main writes 0 where the checkpoint has no outer", 3, 0,
+                 "literal_outer_presence_differs"),
+                ("main has no outer where the checkpoint has one", 5, None,
+                 "indexed_outer_presence_differs"),
+                ("both have an outer and they differ", 9, 4, "indexed_outer_value_differs")):
+            with self.subTest(name):
+                main = dict(MAIN_GUIDS)
+                main[guid] = (main[guid][0], main_outer)
+                counts, errors = self.crosscheck(encode_guid_entries(), main)
+                self.assert_rejected(counts, errors, **{key: 1})
+                self.assertEqual(counts["indexed_path_differs"] + counts["literal_path_differs"], 0)
+
+    def test_an_incomplete_raw_record_fails_before_paths_are_compared(self):
+        def reference_with_literal(rows):
+            rows[4]["literal_path"] = "/Game/A.A_C"
+
+        def literal_with_index(rows):
+            rows[0]["name_index"] = 0
+
+        def null_outer(rows):
+            rows[4]["outer_net_guid"] = None
+
+        def gap(rows):
+            del rows[10]
+
+        def repeat(rows):
+            rows.insert(10, dict(rows[10]))
+
+        for change, key in ((reference_with_literal, "malformed_entries"),
+                            (literal_with_index, "malformed_entries"),
+                            (null_outer, "malformed_entries"),
+                            (gap, "ordinal_errors"), (repeat, "ordinal_errors")):
+            with self.subTest(change.__name__):
+                rows = encode_guid_entries()
+                change(rows)
+                counts, errors = self.crosscheck(rows)
+                self.assert_rejected(counts, errors, **{key: 1}, indexed_joined=0)
+                self.assertIn("not a complete raw record", " ".join(errors))
+
+    def test_a_missing_table_or_column_is_reported_not_raised(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            write_guid_tables(out, encode_guid_entries())
+            (out / "net_guids.parquet").unlink()
+            counts, errors = guard.checkpoint_guid_crosscheck(out)
+            self.assertIn("cannot read", " ".join(errors))
+            write_guid_tables(out, encode_guid_entries())
+            entries = pq.read_table(out / "checkpoint_guid_entries.parquet")
+            pq.write_table(entries.drop_columns(["name_index"]),
+                           out / "checkpoint_guid_entries.parquet")
+            counts, errors = guard.checkpoint_guid_crosscheck(out)
+            self.assertIn("cannot read", " ".join(errors))
+            self.assertEqual(set(counts.values()), {0})
+
+    def test_every_count_is_printed_including_zeros(self):
+        counts, _ = self.crosscheck(encode_guid_entries())
+        line = guard.format_guid_crosscheck(counts)
+        for key in guard.GUID_CROSSCHECK_KEYS:
+            self.assertIn(f"{key.replace('_', ' ')} {counts[key]},", line + ",")
+        self.assertIn("indexed path differs 0,", line)
+
+    def test_checkpoint_measurement_runs_the_crosscheck_and_prints_it(self):
+        literals = sum(isinstance(d[3], str) for d in DECLARATIONS)
+        indices = len(DECLARATIONS) - literals
+        summary = (f"Reward opaque: 0 empty variants\nCheckpoint reward opaque: 0 empty variants\n"
+                   f"Target locations: 0 array children\nCheckpoint targets: 0 array children\n"
+                   "  Frame skips:      0 external blobs / 0 external bytes / 0 game-specific bytes\n"
+                   "  Checkpoint frame skips: 0 external blobs / 0 external bytes"
+                   " / 0 game-specific bytes\n"
+                   f"GUID entries: {len(DECLARATIONS)}\n"
+                   f"GUID paths: {literals} literals / {indices} indices / {indices} resolved\n")
+        sink = {"tracked_rewards_opaque_empty_variants": 0, "targeting_world_locations_decoded": 0}
+        frames = {f"frame_{key}": 0 for key in guard.FRAME_SKIP_KEYS}
+        manifest = {"quality": {"sink": sink, **frames, "checkpoints": dict(
+            sink=sink, checkpoint_actor_rows_dropped=0,
+            **{f"checkpoint_{key}": value for key, value in frames.items()},
+            checkpoint_path_resolution_mode="preceding_literal_zero_based",
+            checkpoint_literal_paths=literals, checkpoint_indexed_paths=indices,
+            checkpoint_resolved_path_indices=indices, checkpoint_guid_entries=len(DECLARATIONS))}}
+        edited = dict(MAIN_GUIDS)
+        edited[12] = ("/Game/F.F_C", 11)
+        for main, passes in ((MAIN_GUIDS, True), (edited, False)):
+            with self.subTest(passes=passes), tempfile.TemporaryDirectory() as temp:
+                out = Path(temp)
+                for name in (*guard.PARQUET_FILES, *guard.CHECKPOINT_PARQUET_FILES):
+                    pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
+                write_guid_tables(out, encode_guid_entries(), main)
+                (out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                printed = io.StringIO()
+                with patch.object(guard.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout=summary, stderr="")), \
+                        contextlib.redirect_stdout(printed):
+                    if passes:
+                        guard.measure(Path("fake.exe"), out / "sample.vrf", out, checkpoints=True)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "path the main stream does not declare"):
+                            guard.measure(Path("fake.exe"), out / "sample.vrf", out, checkpoints=True)
+                self.assertIn("Checkpoint GUID cross-check: indexed joined 5,", printed.getvalue())
+
+
 class ContentIdentityTests(unittest.TestCase):
     def test_equal_size_different_bytes_do_not_satisfy_byte_identity(self):
         baseline = measurement()

@@ -615,6 +615,35 @@ mod tests {
         );
     }
 
+    /// `set_field_on_group` against a `path_name_index` no group holds must
+    /// refuse the field and count the drop. `read_net_field_exports` checks
+    /// that the group exists before it gets here, so no reader test reaches
+    /// this branch; only a direct call does.
+    #[test]
+    fn set_field_on_unregistered_group_returns_false_and_counts_the_drop() {
+        let mut cache = NetGuidCache::new();
+        cache
+            .add_export_group(NetFieldExportGroup::new("/Script/G.A".into(), 7, 1))
+            .unwrap();
+        assert_eq!(cache.dropped_field_exports(), 0);
+
+        let placed = cache.set_field_on_group(
+            8,
+            NetFieldExport {
+                handle: 0,
+                compatible_checksum: 0,
+                name: "Orphan".into(),
+            },
+        );
+
+        assert!(!placed);
+        assert_eq!(cache.dropped_field_exports(), 1);
+        // The group registered at another index must not have received it.
+        let group = cache.get_group_by_index(7).unwrap();
+        assert_eq!(group.populated_fields().count(), 0);
+        assert_eq!(cache.group_count(), 1);
+    }
+
     #[test]
     fn cache_set_net_guid_path_stores_and_resolves() {
         let mut cache = NetGuidCache::new();

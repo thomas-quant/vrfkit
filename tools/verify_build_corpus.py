@@ -5,6 +5,8 @@ logs/exports under a new --work-dir. The JSON report contains aggregate build
 counts and content hashes, never source filenames or player identifiers.
 Missing counters and failed checks are errors, not implicit zeros. Absent
 evidence fields are reported separately from mismatching observed values.
+Each export also runs `check_export_baseline.checkpoint_guid_crosscheck`, and
+its counts reach the report as `guid_crosscheck_*`.
 """
 from __future__ import annotations
 
@@ -163,9 +165,12 @@ def check_export(text, directory):
     errors += baseline.reward_opaque_manifest_errors(directory, printed, True)
     errors += baseline.targeting_manifest_errors(directory, printed, True)
     errors += baseline.frame_skip_manifest_errors(directory, printed, True)
+    guid_counts, guid_errors = baseline.checkpoint_guid_crosscheck(directory)
+    if guid_errors:
+        errors += guid_errors + [baseline.format_guid_crosscheck(guid_counts)]
     if errors:
         raise ValueError("; ".join(errors))
-    return tables
+    return tables, guid_counts
 
 
 def audit_one(entry, exe, work, specifications):
@@ -195,7 +200,11 @@ def audit_one(entry, exe, work, specifications):
         counts, failures = manifest_counts(manifest)
         result["counts"].update(counts)
         result["failures"].extend(failures)
-        result["tables"] = check_export(text, export)
+        result["tables"], guid_counts = check_export(text, export)
+        # Every count, zeros included, so the report shows how many entries
+        # each build actually compared rather than only that nothing failed.
+        result["counts"].update({f"guid_crosscheck_{key}": value
+                                 for key, value in guid_counts.items()})
         checked = evidence.validate(export, specifications, compare_typed=True)
         (directory / "type-evidence.json").write_text(json.dumps(checked, indent=2), encoding="utf-8")
         result["evidence_fields"] = {name: value["rows"] for name, value in checked["fields"].items()}
