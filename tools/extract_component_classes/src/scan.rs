@@ -64,8 +64,9 @@ pub struct Candidate {
     pub outer: String,
     pub class: ClassRef,
     /// A `_GEN_VARIABLE` export whose FName carries an instance number. The
-    /// component name that would spawn from it is not established, so these
-    /// are counted and listed with the number kept on the export name.
+    /// instance takes the number too (`X_GEN_VARIABLE` number 3 is listed as
+    /// `X_2`), though the name that would spawn from it is not established.
+    /// Counted in `gen_variable_numbered`; no output column flags the row.
     pub numbered: bool,
 }
 

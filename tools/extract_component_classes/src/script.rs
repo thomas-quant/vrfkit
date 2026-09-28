@@ -148,8 +148,8 @@ pub(crate) mod tests {
         (KIND_SCRIPT_IMPORT << 62) | hash_path(path)
     }
 
-    /// A script object chunk for `(name index, number, path)` triples; each
-    /// object's outer is the path with its last segment removed.
+    /// A script object chunk for `(name index, number, path, outer path)`
+    /// entries; an outer of `None` is null, as a package's is.
     pub fn build_script_objects(
         names: &[&str],
         objects: &[(u32, u32, &str, Option<&str>)],

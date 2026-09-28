@@ -10,9 +10,11 @@
 //! Engine versions before the dependency-bundle change wrote a 44-byte summary
 //! with five offsets. The two are told apart by where the name batch's hash
 //! version lands: on the shipped 13.06 containers it is at byte 52 + 8, which
-//! only the 52-byte layout puts it at. Every region below is then checked to
-//! end exactly where the next offset begins, so a package in the other layout
-//! fails here instead of being read at the wrong offsets.
+//! only the 52-byte layout puts it at. Then the seven offsets must be in order
+//! and inside the header, the name map plus bulk data map must end exactly at
+//! the first region, the public-hash, import and export maps must hold whole
+//! records, and the imported package names must end exactly at the header end.
+//! The bundle and dependency regions are only order-checked.
 
 use crate::names::{MappedName, read_name_batch, with_number};
 use crate::reader::{Cursor, Result, fail};
@@ -332,8 +334,9 @@ pub(crate) mod tests {
     }
 
     /// The older 44-byte summary puts the name batch eight bytes earlier. Read
-    /// with this layout, its hash version is not where it belongs and the
-    /// package is refused rather than misread.
+    /// with this layout, the batch's first two words become the last two
+    /// offsets and the order check refuses the package before the hash version
+    /// is read; `names::tests::a_wrong_hash_version_is_an_error` covers that.
     #[test]
     fn a_summary_of_the_other_width_is_refused() {
         let bytes = build_package(&sample());
