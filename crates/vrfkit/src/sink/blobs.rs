@@ -1369,7 +1369,7 @@ fn decode_array_leaf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::{ChannelState, ExportStats, RecordBuffers};
+    use crate::sink::{ChannelState, ExportStats, MeasuredArrayRoutes, RecordBuffers};
     use std::sync::Arc;
     use vrf_net::field::FieldSink;
 
@@ -3006,65 +3006,139 @@ mod tests {
     /// KillData while its TrackedRewards and ActiveBlinds parents stay single
     /// raw rows. Every case is a leaf the 13.05 route types, so a typed child
     /// appears exactly where the branch admits the route and nowhere else.
+    ///
+    /// `is_known_array_field` picks each parent's admission bit by hand, so
+    /// what this checks is that every parent reads its own route's bit. Each
+    /// flattened route has a case, from a match with no wildcard, and every
+    /// supported branch runs, plus no branch at all; the expected admission
+    /// comes from `MeasuredArrayRoutes::for_branch`, whose table
+    /// `routes_are_pinned_for_every_supported_branch` pins. This used to be
+    /// four routes on five branches, and an arm reading another route's bit
+    /// passed wherever the two agreed on those five: ServerActiveEffects
+    /// reading SelectedV2's, RequestedIgnoreActors reading the projectile
+    /// path's, AllPlayersObfuscatedPlayerInformation reading ActiveBlinds'.
+    /// Each dropped every child of its route on some legacy build with no
+    /// counter moving. Two pairs are admitted on exactly the same branches
+    /// -- AllPlayersObfuscatedPlayerInformation with TrackedRewards, KillData
+    /// with RequestedIgnoreActors -- so a swap inside either pair changes no
+    /// output on any build, and no branch can tell them apart. Each case's
+    /// identity is also checked against `measured_array_route`, the second
+    /// identity-to-route mapping.
     #[test]
     fn legacy_branches_expand_only_their_admitted_routes() {
         let mut reference = Vec::new();
         packed(&mut reference, 5);
-        let cases = [
-            (
-                (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-                (3, "Victim", 3_990_035_472),
-                one_leaf(3, &reference),
-            ),
-            (
-                (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-                (3, "EquippableDataAsset", 1_793_937_854),
-                one_leaf(3, &reference),
-            ),
-            (
-                (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-                (30, "InstancesOfReward", 2_922_243_316),
-                one_leaf(30, &[false; 32]),
-            ),
-            (
-                (
-                    "/Script/ShooterGame.BlindManagerComponent",
-                    "ActiveBlinds",
-                    3_853_965_310,
+        let float: Vec<bool> = (0..32)
+            .map(|bit| 1.5f32.to_bits() & (1 << bit) != 0)
+            .collect();
+        // No wildcard: a new route does not compile until it has a case.
+        let case_for = |route| {
+            let case = match route {
+                MeasuredArrayRoute::KillData => (
+                    (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
+                    (3, "Victim", 3_990_035_472),
+                    one_leaf(3, &reference),
                 ),
-                (11, "CausingActor", 2_370_661_694),
-                one_leaf(11, &bits_from_bytes(&[0])),
-            ),
-        ];
-        // Admission per case, in the order above: KillData, SelectedV2,
-        // TrackedRewards, ActiveBlinds.
-        for (branch, admitted) in [
-            ("++Ares-Core+release-11.06", [true, false, false, false]),
-            ("++Ares-Core+release-11.09", [true, true, false, false]),
-            ("++Ares-Core+release-12.04", [true, true, true, false]),
-            ("++Ares-Core+release-12.10", [false, true, true, false]),
-            ("++Ares-Core+release-13.05", [true, true, true, true]),
-        ] {
-            for ((identity, leaf, bits), want) in cases.iter().zip(admitted) {
+                MeasuredArrayRoute::SelectedV2 => (
+                    (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
+                    (3, "EquippableDataAsset", 1_793_937_854),
+                    one_leaf(3, &reference),
+                ),
+                MeasuredArrayRoute::TrackedRewards => (
+                    (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
+                    (30, "InstancesOfReward", 2_922_243_316),
+                    one_leaf(30, &[false; 32]),
+                ),
+                MeasuredArrayRoute::ActiveBlinds => (
+                    (
+                        "/Script/ShooterGame.BlindManagerComponent",
+                        "ActiveBlinds",
+                        3_853_965_310,
+                    ),
+                    (11, "CausingActor", 2_370_661_694),
+                    one_leaf(11, &bits_from_bytes(&[0])),
+                ),
+                MeasuredArrayRoute::ServerActiveEffects => (
+                    (
+                        "/Script/ShooterGame.EffectManagerComponent",
+                        "ServerActiveEffects",
+                        3_301_618_856,
+                    ),
+                    (33, "StartTimeStamp", 0),
+                    one_leaf(33, &float),
+                ),
+                MeasuredArrayRoute::RequestedIgnoreActors => (
+                    (
+                        "/Script/ShooterGame.FiniteSpeedMovementComponent",
+                        "RequestedIgnoreActors",
+                        1_063_739_204,
+                    ),
+                    (5, "RequestedIgnoreActors", 3_344_674_359),
+                    one_leaf(5, &reference),
+                ),
+                MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation => (
+                    (OWNER, OWNER_PARENT, OWNER_CHECKSUM),
+                    (49, "bIsAfk", 0),
+                    one_leaf(49, &[true]),
+                ),
+                // An RPC parameter, not a flattened property; its gate is
+                // `projectile_path_rpc_expands_only_on_admitting_branches`.
+                MeasuredArrayRoute::NetworkedProjectilePath => return None,
+            };
+            Some(case)
+        };
+        // `emit_flattened_array` picks the exact walker from the other
+        // mapping, `measured_array_route`. A case expands through the lenient
+        // walker too, so it cannot see that map go wrong; pin it here.
+        for route in MeasuredArrayRoute::ALL {
+            if let Some(((group, parent, checksum), _, _)) = case_for(route) {
+                assert_eq!(
+                    measured_array_route(group, parent, Some(checksum)),
+                    Some(route),
+                    "{route:?}"
+                );
+            }
+        }
+        let branches = vrf_transform::ALL_VERSIONS
+            .iter()
+            .map(|version| Some(version.branch()))
+            .chain([None]);
+        let mut expanded = Vec::new();
+        for branch in branches {
+            let admitted =
+                branch.map_or(MeasuredArrayRoutes::NONE, MeasuredArrayRoutes::for_branch);
+            for route in MeasuredArrayRoute::ALL {
+                let Some((identity, leaf, bits)) = case_for(route) else {
+                    continue;
+                };
                 let (records, stats) =
-                    export_array_with_declarations(*identity, &[*leaf], bits, Some(branch));
+                    export_array_with_declarations(identity, &[leaf], &bits, branch);
+                let at = format!("{branch:?} {route:?}");
                 let parent = records.fields.last().unwrap();
-                assert_eq!(parent.field_name.as_deref(), Some(identity.1), "{branch}");
-                assert_eq!(parent.raw_bits.as_deref(), Some(bytes(bits).as_slice()));
-                assert_eq!(stats.array_leaf_decode_errors, 0, "{branch} {}", identity.1);
-                if want {
-                    assert_eq!(records.fields.len(), 2, "{branch} {}", identity.1);
+                assert_eq!(parent.field_name.as_deref(), Some(identity.1), "{at}");
+                assert_eq!(parent.raw_bits.as_deref(), Some(bytes(&bits).as_slice()));
+                assert_eq!(stats.array_leaf_decode_errors, 0, "{at}");
+                if admitted.admits(route) {
+                    if !expanded.contains(&route) {
+                        expanded.push(route);
+                    }
+                    assert_eq!(records.fields.len(), 2, "{at}");
+                    let child = &records.fields[0];
                     assert!(
-                        records.fields[0].value_i64.is_some(),
-                        "{branch} {}: the admitted child is typed",
-                        identity.1
+                        child.value_i64.is_some()
+                            || child.value_f64.is_some()
+                            || child.value_bool.is_some(),
+                        "{at}: the admitted child is typed"
                     );
                 } else {
-                    assert_eq!(records.fields.len(), 1, "{branch} {}", identity.1);
-                    assert_eq!(stats.array.fields_emitted, 0, "{branch} {}", identity.1);
+                    assert_eq!(records.fields.len(), 1, "{at}");
+                    assert_eq!(stats.array.fields_emitted, 0, "{at}");
                 }
             }
         }
+        // Not vacuous: each of the seven flattened routes expanded on some
+        // branch, and the run with no branch kept every one of them raw.
+        assert_eq!(expanded.len(), 7, "{expanded:?}");
     }
 
     #[test]
