@@ -1,5 +1,7 @@
 //! Export wiring: one effect blob in, one JSON array out.
 
+use core::fmt::Write as _;
+
 use super::elements::{
     decode_effect_floats_at, decode_effect_objects_at, decode_effect_vectors_at,
 };
@@ -46,57 +48,41 @@ pub fn decode_effect_blob_json(
     match kind {
         EffectArrayKind::Float => {
             let elements = decode_effect_floats_at(&mut reader, handles)?;
-            out.push('[');
-            for (index, elem) in elements.iter().enumerate() {
-                push_separator(&mut out, index);
-                push_tag(&mut out, elem.tag_index);
-                match elem.value {
-                    Some(v) if v.is_finite() => push_json_f64(&mut out, f64::from(v)),
-                    Some(_) => return Err(EffectBlobError::NonFiniteFloat { index }),
-                    None => out.push_str("null"),
+            let pairs = elements.iter().map(|e| (e.tag_index, e.value));
+            push_elements(&mut out, pairs, |out, index, v| {
+                if !v.is_finite() {
+                    return Err(EffectBlobError::NonFiniteFloat { index });
                 }
-                out.push('}');
-            }
+                push_json_f64(out, f64::from(v));
+                Ok(())
+            })?;
         }
         EffectArrayKind::Object => {
             let elements = decode_effect_objects_at(&mut reader, handles)?;
-            out.push('[');
-            for (index, elem) in elements.iter().enumerate() {
-                push_separator(&mut out, index);
-                push_tag(&mut out, elem.tag_index);
-                match elem.value {
-                    Some(v) => push_u32(&mut out, v),
-                    None => out.push_str("null"),
-                }
-                out.push('}');
-            }
+            let pairs = elements.iter().map(|e| (e.tag_index, e.value));
+            push_elements(&mut out, pairs, |out, _, v| {
+                let _ = write!(out, "{v}");
+                Ok(())
+            })?;
         }
         EffectArrayKind::Vector => {
             let elements = decode_effect_vectors_at(&mut reader, handles)?;
-            out.push('[');
-            for (index, elem) in elements.iter().enumerate() {
-                push_separator(&mut out, index);
-                push_tag(&mut out, elem.tag_index);
-                match elem.value {
-                    Some(v) => {
-                        if !(v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) {
-                            return Err(EffectBlobError::NonFiniteFloat { index });
-                        }
-                        out.push_str("{\"x\":");
-                        push_json_f64(&mut out, v.x);
-                        out.push_str(",\"y\":");
-                        push_json_f64(&mut out, v.y);
-                        out.push_str(",\"z\":");
-                        push_json_f64(&mut out, v.z);
-                        out.push('}');
-                    }
-                    None => out.push_str("null"),
+            let pairs = elements.iter().map(|e| (e.tag_index, e.value));
+            push_elements(&mut out, pairs, |out, index, v| {
+                if !(v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) {
+                    return Err(EffectBlobError::NonFiniteFloat { index });
                 }
+                out.push_str("{\"x\":");
+                push_json_f64(out, v.x);
+                out.push_str(",\"y\":");
+                push_json_f64(out, v.y);
+                out.push_str(",\"z\":");
+                push_json_f64(out, v.z);
                 out.push('}');
-            }
+                Ok(())
+            })?;
         }
     }
-    out.push(']');
 
     // Checked after the decode, not during: the decoders stop at the array
     // terminator by design, so "did it consume the window" is only answerable
@@ -118,35 +104,46 @@ pub fn decode_effect_blob_json(
     Ok(out)
 }
 
-/// Elements are comma-separated; the first one is not preceded by anything.
-fn push_separator(out: &mut String, index: usize) {
-    if index > 0 {
-        out.push(',');
+/// Write `elements` as the JSON array: comma-separated
+/// `{"tag":..,"value":..}` objects, where `push_value` renders a present value
+/// and an absent one is `null`. One loop for the three element types, so the
+/// framing of the array cannot drift between them.
+fn push_elements<V>(
+    out: &mut String,
+    elements: impl Iterator<Item = (Option<u32>, Option<V>)>,
+    mut push_value: impl FnMut(&mut String, usize, V) -> Result<()>,
+) -> Result<()> {
+    out.push('[');
+    for (index, (tag_index, value)) in elements.enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        push_tag(out, tag_index);
+        match value {
+            Some(v) => push_value(out, index, v)?,
+            None => out.push_str("null"),
+        }
+        out.push('}');
     }
+    out.push(']');
+    Ok(())
 }
 
 /// Open one element object and write its `tag` member.
 ///
 /// A hand-written `u32`-to-decimal writer was tried here and for the object
-/// value below, on the reasoning that `write!` builds a `format_args` and
+/// value, on the reasoning that `write!` builds a `format_args` and
 /// dispatches through `Display` for each of a replay's ~128,000 tags. It
 /// measured neutral in an interleaved A/B of the whole export -- the effect
 /// path's time is in `push_json_f64`, not here -- so the twenty lines went
 /// away again and `write!` stayed.
 fn push_tag(out: &mut String, tag_index: Option<u32>) {
-    use core::fmt::Write as _;
     match tag_index {
         Some(t) => {
             let _ = write!(out, "{{\"tag\":{t},\"value\":");
         }
         None => out.push_str("{\"tag\":null,\"value\":"),
     }
-}
-
-/// Append a `u32` in decimal.
-fn push_u32(out: &mut String, value: u32) {
-    use core::fmt::Write as _;
-    let _ = write!(out, "{value}");
 }
 
 /// Append a JSON number for a finite `f64`.
@@ -160,7 +157,6 @@ fn push_u32(out: &mut String, value: u32) {
 /// (`1E20` where Rust writes `100000000000000000000`), and this output is
 /// pinned byte-for-byte by the export oracle.
 fn push_json_f64(out: &mut String, v: f64) {
-    use core::fmt::Write as _;
     // Writing into a String is infallible; the Result exists only to satisfy
     // the `fmt::Write` signature.
     let _ = write!(out, "{v}");
