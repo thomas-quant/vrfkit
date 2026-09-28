@@ -173,7 +173,7 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
         """git on a Korean-locale Windows writes cp949. Its stderr was decoded
         as strict UTF-8, so a failing git call surfaced as a UnicodeDecodeError
         naming a byte instead of the message git printed."""
-        localized = "fatal: 잘못된 개체 이름".encode("cp949")
+        localized = "fatal: \uc798\ubabb\ub41c \uac1c\uccb4 \uc774\ub984".encode("cp949")
         real_run = subprocess.run
 
         def fake_git(failing):
