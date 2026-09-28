@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -167,6 +168,35 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
                 text=True, encoding="utf-8", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(output.exists())
+
+    def test_a_localized_git_failure_keeps_its_message(self):
+        """git on a Korean-locale Windows writes cp949. Its stderr was decoded
+        as strict UTF-8, so a failing git call surfaced as a UnicodeDecodeError
+        naming a byte instead of the message git printed."""
+        localized = "fatal: 잘못된 개체 이름".encode("cp949")
+        real_run = subprocess.run
+
+        def fake_git(failing):
+            def run(cmd, *args, **kwargs):
+                # A real process, so the tool's own text/encoding/errors
+                # arguments do the decoding.
+                if failing in cmd:
+                    stub = f"import sys; sys.stderr.buffer.write({localized!r}); sys.exit(128)"
+                else:
+                    stub = "print('0' * 40)"
+                return real_run([sys.executable, "-c", stub], *args, **kwargs)
+            return run
+
+        with tempfile.TemporaryDirectory() as temp:
+            for failing, message in (("rev-parse", "git rev-parse"),
+                                      ("archive", "git archive failed")):
+                with self.subTest(failing=failing), \
+                        mock.patch.object(audit.subprocess, "run", fake_git(failing)):
+                    with self.assertRaises(ValueError) as caught:
+                        audit.source_from_spec(f"{temp}::HEAD", Path(temp))
+                    self.assertNotIsInstance(caught.exception, UnicodeDecodeError)
+                    self.assertIn(message, str(caught.exception))
+                    self.assertIn("fatal:", str(caught.exception))
 
     def test_invalid_source_fails_without_writing_output(self):
         with tempfile.TemporaryDirectory() as temp:

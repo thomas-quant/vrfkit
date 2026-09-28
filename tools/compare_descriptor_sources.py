@@ -44,8 +44,11 @@ TYPE_MARKER = "field_type:"
 
 
 def run_git(repo: Path, *args: str) -> str:
+    # errors="replace": git's messages follow the locale (cp949 on a Korean
+    # Windows). Strict UTF-8 turned a failing call into a decode error, or on
+    # Windows a None stderr, instead of git's message.
     result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                            text=True, encoding="utf-8", check=False)
+                            text=True, encoding="utf-8", errors="replace", check=False)
     if result.returncode:
         raise ValueError(f"git {' '.join(args)} failed for {repo}: {result.stderr.strip()}")
     return result.stdout.strip()
@@ -217,7 +220,8 @@ def source_from_spec(spec: str, workspace: Path) -> tuple[Path, dict[str, object
     archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if archive.returncode:
-        raise ValueError(f"git archive failed for {spec}: {archive.stderr.decode().strip()}")
+        raise ValueError(f"git archive failed for {spec}: "
+                         f"{archive.stderr.decode(errors='replace').strip()}")
     unpacked = workspace / f"source-{len(list(workspace.iterdir()))}"
     unpacked.mkdir()
     # Unpacked in-process, not with whatever `tar` is first on PATH. On Windows
