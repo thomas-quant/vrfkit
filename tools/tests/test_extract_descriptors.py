@@ -102,8 +102,8 @@ public sealed class ByteFlash : BaseFlash<ByteFlash>
         ERotatorQuantization.ByteComponents;
 }
 '''})
-        self.assertIn('group_path: "/short", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }', output)
-        self.assertIn('group_path: "/byte", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundTwoDecimals }', output)
+        self.assertIn('group_path: "/short", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundWholeNumber }', output)
+        self.assertIn('group_path: "/byte", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundWholeNumber }', output)
 
     def test_every_movement_form_states_its_location_quantization(self):
         """The explicit, bare and virtual `.ReplicatedMovement` forms all emit
@@ -135,8 +135,8 @@ public sealed class Bare : ExportGroupDescriptor<Bare>
             if field == "ReplicatedMovement"
         }
         self.assertEqual(types, {
-            "/explicit": "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundTwoDecimals }",
-            "/bare": "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundTwoDecimals }",
+            "/explicit": "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundWholeNumber }",
+            "/bare": "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundWholeNumber }",
         })
         self.assertIn("use crate::types::{RotatorQuantization, VectorQuantization};", output)
 

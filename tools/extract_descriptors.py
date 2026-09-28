@@ -312,10 +312,24 @@ REP_MOVEMENT_PROPERTY_RE = re.compile(
 )
 #: The location quantization every `RepMovement` entry is emitted with.
 #:
-#: The descriptors declare only the rotator width; the C# reader then decodes
-#: every class's location at two decimals (its `ReplicatedMovementDecoder`
-#: reads `VectorNetQuantize100`). This reproduces that reading.
-REP_MOVEMENT_LOCATION = "VectorQuantization::RoundTwoDecimals"
+#: The descriptors declare only the rotator width. The level the location was
+#: rounded to is a per-class choice (Unreal's `LocationQuantizationLevel`) that
+#: the wire does not carry, and the C# reader decodes every class at two
+#: decimals (its `ReplicatedMovementDecoder` reads `VectorNetQuantize100`).
+#: The wire contradicts that on 24 of the 25 classes the table declares:
+#: joined to the actor's spawn position in actors.parquet, their packed
+#: integer IS the world coordinate (median |packed| / |spawn| 1.000 on every
+#: class and every build that carries it; 1,018 replays over 21 builds,
+#: measured 2026-09-28). So the default is whole units -- also the engine's
+#: own `FRepMovement` default -- and `apply_type_corrections.py` pins the one
+#: class measured at two decimals. docs/DATA.md has the per-class figures.
+#:
+#: A class nobody has measured gets this default, which is a prior, not a
+#: measurement. `tests::overlay` lists every `RepMovement` entry with the
+#: level measured for it and fails on an entry it does not list, so a new
+#: one cannot take the default without somebody checking it against spawn
+#: positions first.
+REP_MOVEMENT_LOCATION = "VectorQuantization::RoundWholeNumber"
 
 
 def rep_movement_type(rotation: str) -> str:

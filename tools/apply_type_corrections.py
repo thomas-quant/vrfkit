@@ -45,6 +45,13 @@ else:  # direct script execution
 
 TABLE_RS = Path(__file__).parent.parent / "crates" / "vrf-decode" / "src" / "table.rs"
 
+#: Gekko's Wingman: the one class whose `ReplicatedMovement` location is packed
+#: at two decimals. See the pass that rewrites it in `main`.
+SEEKER_NADE_GROUP = (
+    "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade."
+    "Pawn_Aggrobot_SeekerNade_C"
+)
+
 #: (group_path substring, field_name, required FieldType -- IN FULL).
 #: One entry per correction the passes below make. Checked against the file
 #: after writing; a miss is a hard failure.
@@ -75,6 +82,9 @@ EXPECTED += [
      "FieldType::Float"),
     ("SmokeScreen", "ReplicatedMovement",
      "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+     "location: VectorQuantization::RoundWholeNumber }"),
+    (SEEKER_NADE_GROUP, "ReplicatedMovement",
+     "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
      "location: VectorQuantization::RoundTwoDecimals }"),
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::Raw"),
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
@@ -1180,6 +1190,43 @@ def main():
             blocks[i] = block.replace(
                 "RotatorQuantization::ShortComponents",
                 "RotatorQuantization::ByteComponents",
+            )
+            count += 1
+    content = "    OverlayEntry {".join(blocks)
+
+    # Fix: location quantization for Gekko's Wingman pawn.
+    #
+    # The generator gives every `RepMovement` entry whole units, the level the
+    # wire shows on the other 24 classes (extract_descriptors.py,
+    # REP_MOVEMENT_LOCATION). This class packs two decimals instead: joined to
+    # its spawn position in actors.parquet (the actor's first
+    # ReplicatedMovement row at its `open` time_ms, same channel), the packed
+    # integer is 100 times the coordinate on all 932 actors in 1,018 replays
+    # over 15 builds -- median |packed| / |spawn| 100.000, p1..p99 99.998 to
+    # 100.001, every component within 0.0502 of spawn after dividing by 100.
+    # Its components are 17-22 bits wide where a whole-unit class on the same
+    # maps needs 10-15. Measured 2026-09-28 at 259ed10.
+    #
+    # Here the C# reference's fixed VectorNetQuantize100 happens to be right,
+    # so this restores what that reader did for this one class. Every other
+    # measured Pawn class replicates at two decimals too (none of them is in
+    # the table yet); that is a pattern, not evidence for a class nobody has
+    # measured.
+    #
+    # Block-based for the same reason as the SmokeScreen pass above: the entry
+    # spans several lines once rustfmt has run.
+    blocks = content.split("    OverlayEntry {")
+    for i, block in enumerate(blocks):
+        if i == 0:
+            continue
+        if f'group_path: "{SEEKER_NADE_GROUP}"' not in block:
+            continue
+        if 'field_name: "ReplicatedMovement"' not in block:
+            continue
+        if "VectorQuantization::RoundWholeNumber" in block:
+            blocks[i] = block.replace(
+                "VectorQuantization::RoundWholeNumber",
+                "VectorQuantization::RoundTwoDecimals",
             )
             count += 1
     content = "    OverlayEntry {".join(blocks)

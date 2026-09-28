@@ -8,6 +8,7 @@ use crate::overlay::{
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
+use crate::types::VectorQuantization;
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
 
 const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
@@ -1250,9 +1251,10 @@ fn an_unlearned_checksum_resolves_nothing() {
 
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 18 groups and `ShortComponents`
-/// on 6, which differ in width, so guessing would desync the block rather than
-/// read a wrong value.
+/// is the one that matters -- `ByteComponents` on 19 groups and `ShortComponents`
+/// on 6, which differ in width, so guessing would desync the block; and one
+/// group packs its location at two decimals where the rest pack whole units,
+/// which a guess would read 100x off with no error at all.
 #[test]
 fn checksums_whose_donors_disagree_are_omitted() {
     for (checksum, why) in [
@@ -1264,6 +1266,198 @@ fn checksums_whose_donors_disagree_are_omitted() {
     ] {
         assert_eq!(lookup_checksum(checksum), None, "{why}");
     }
+}
+
+/// Every `RepMovement` entry the table declares, with the location level the
+/// wire was measured at for that class.
+///
+/// Measured 2026-09-28 over the 1,018 replays audited at 259ed10 (21 of the
+/// 24 builds carry these rows): each actor `open` in actors.parquet joined to
+/// the actor's first `ReplicatedMovement` row at the same `time_ms` on the
+/// same channel, spawn position at least 50 units from the origin, comparing
+/// |packed location integer| with |spawn xyz|. The count is those joins, then
+/// the builds they span; the ratio is the level's divisor on every build.
+/// Checkpoint tables carry no `ReplicatedMovement` rows at all, so this is
+/// main-stream evidence only. docs/DATA.md has the method in full.
+const REP_MOVEMENT_LOCATION_EVIDENCE: [(&str, VectorQuantization); 25] = {
+    use VectorQuantization::{RoundTwoDecimals, RoundWholeNumber};
+    [
+        // 647 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_4/Projectile_Aggrobot_C_ExplodeyPatch.Projectile_Aggrobot_C_ExplodeyPatch_C",
+            RoundWholeNumber,
+        ),
+        // 1,007 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_Aggrobot_Zamboni_Rocket.Projectile_Aggrobot_Zamboni_Rocket_C",
+            RoundWholeNumber,
+        ),
+        // 1,819 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_DiscTurret_PowerWave.Projectile_E_Aggrobot_DiscTurret_PowerWave_C",
+            RoundWholeNumber,
+        ),
+        // 1,812 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_OrbSpawner.Projectile_E_Aggrobot_OrbSpawner_C",
+            RoundWholeNumber,
+        ),
+        // 932 joins, 15 builds, ratio 100.000 -- the one two-decimal class
+        (
+            "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C",
+            RoundTwoDecimals,
+        ),
+        // 5,715 joins, 14 builds, ratio 1.000
+        (
+            "/Game/Characters/BountyHunter/S0/Ability_E/Projectile_E_BountyHunter_Divebomb.Projectile_E_BountyHunter_Divebomb_C",
+            RoundWholeNumber,
+        ),
+        // 5,280 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
+            RoundWholeNumber,
+        ),
+        // 12,032 joins, 14 builds, ratio 1.000
+        (
+            "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+            RoundWholeNumber,
+        ),
+        // 1,046 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+            RoundWholeNumber,
+        ),
+        // 596 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Mage/S0/Ability_Q/Projectile_Mage_Q_Wall.Projectile_Mage_Q_Wall_C",
+            RoundWholeNumber,
+        ),
+        // 703 joins, 8 builds, ratio 1.000
+        (
+            "/Game/Characters/Pandemic/S0/Ability_E/Projectile_Pandemic_E_SmokeScreen_NoCollision.Projectile_Pandemic_E_SmokeScreen_NoCollision_C",
+            RoundWholeNumber,
+        ),
+        // 2,765 joins, 18 builds, ratio 1.000
+        (
+            "/Game/Characters/Phoenix/S0/Ability_Q/Production/Projectile_Phoenix_Q_FlameWall_ThroughWall.Projectile_Phoenix_Q_FlameWall_ThroughWall_C",
+            RoundWholeNumber,
+        ),
+        // 27,667 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
+            RoundWholeNumber,
+        ),
+        // 3,320 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
+            RoundWholeNumber,
+        ),
+        // 3,490 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+            RoundWholeNumber,
+        ),
+        // 3,505 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/Projectile_Smonk_DecayNade.Projectile_Smonk_DecayNade_C",
+            RoundWholeNumber,
+        ),
+        // 3,269 joins, 12 builds, ratio 1.000
+        (
+            "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel.Projectile_Neon_C_Tunnel_C",
+            RoundWholeNumber,
+        ),
+        // 1,029 joins, 11 builds, ratio 1.000
+        (
+            "/Game/Characters/Terra/S0/Ability_4/GameObject_Terra_C_TimeSlowGrenade_Explosion.GameObject_Terra_C_TimeSlowGrenade_Explosion_C",
+            RoundWholeNumber,
+        ),
+        // 1,033 joins, 11 builds, ratio 1.000
+        (
+            "/Game/Characters/Terra/S0/Ability_4/Projectile_Terra_C_TimeSlowGrenade.Projectile_Terra_C_TimeSlowGrenade_C",
+            RoundWholeNumber,
+        ),
+        // 13,892 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Vampire/S0/Ability_4/Projectile_Vampire_4_NearsightAoE.Projectile_Vampire_4_NearsightAoE_C",
+            RoundWholeNumber,
+        ),
+        // 14,935 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_4/Projectile_Wraith_4_Smoke.Projectile_Wraith_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 14,902 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 4,062 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_Q/Projectile_Wraith_Q_NearsightMissile.Projectile_Wraith_Q_NearsightMissile_C",
+            RoundWholeNumber,
+        ),
+        // 11,976 joins, 20 builds, ratio 1.000
+        (
+            "/Game/Characters/Wushu/S0/Ability_4/Projectile_Wushu_4_Smoke.Projectile_Wushu_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 288,644 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Weapons/WeaponPickups/EquippablePickupProjectile.EquippablePickupProjectile_C",
+            RoundWholeNumber,
+        ),
+    ]
+};
+
+/// The location level of every `RepMovement` entry is the measured one, and
+/// the table has no `RepMovement` entry this list does not name.
+///
+/// The level is not on the wire, so the generator has to default it (whole
+/// units, extract_descriptors.py REP_MOVEMENT_LOCATION), and a default is a
+/// prior, not a measurement. Pinning each class keeps a changed default or a
+/// dropped correction from moving a class silently; failing on an unlisted
+/// entry keeps a NEW class from taking the default without anyone checking
+/// it -- add it here only with its spawn-position evidence.
+#[test]
+fn every_rep_movement_entry_carries_its_measured_location_level() {
+    use std::collections::BTreeMap;
+
+    let declared: BTreeMap<&str, VectorQuantization> = OVERLAY_TABLE
+        .iter()
+        .filter_map(|e| match e.field_type {
+            FieldType::RepMovement { location, .. } => Some((e.group_path, location)),
+            _ => None,
+        })
+        .collect();
+    let measured: BTreeMap<&str, VectorQuantization> =
+        REP_MOVEMENT_LOCATION_EVIDENCE.into_iter().collect();
+    assert_eq!(
+        measured.len(),
+        REP_MOVEMENT_LOCATION_EVIDENCE.len(),
+        "the evidence list names a group twice"
+    );
+    for (group, level) in &declared {
+        assert_eq!(
+            measured.get(group),
+            Some(level),
+            "{group}: declared {level:?}; the measured level differs or was never recorded"
+        );
+    }
+    for group in measured.keys() {
+        assert!(
+            declared.contains_key(group),
+            "{group}: measured but not a RepMovement entry in the table"
+        );
+    }
+    // The name rule the checksum map would apply is closed for this field
+    // (donors disagree), so the table is the only route to a RepMovement type.
+    assert!(
+        CHECKSUM_TYPES
+            .iter()
+            .all(|(_, t)| !matches!(t, FieldType::RepMovement { .. })),
+        "a checksum-propagated RepMovement type would bypass the per-class evidence"
+    );
 }
 
 /// The map is only useful if it holds something; a silently empty generated
