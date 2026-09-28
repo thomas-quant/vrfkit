@@ -764,14 +764,14 @@ partial-header and shot-array corrections and the component remaps read from the
 13.06 game:
 
 ```
-Decoded OK:   797,309      Decode errors:      0
-Raw/Skip:      26,507      Not in table: 163,567
-No field name:  1,612      Typed:          80.6%
+Decoded OK:   797,451      Decode errors:      0
+Raw/Skip:      26,507      Not in table: 163,788
+No field name:  1,249      Typed:          80.6%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (797,309 + 26,507 + 163,567 +
-1,612 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
+The four buckets partition `Rows offered` exactly (797,451 + 26,507 + 163,788 +
+1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
 in table`, and they contradicted the baseline this repo commits for the same

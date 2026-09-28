@@ -3,7 +3,7 @@
 
 `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs` maps bare
 component instance names to the class groups a replay declares -- usually a
-native `/Script/...` class, for three pairs a Blueprint `/Game/..._C` class.
+native `/Script/...` class, for four pairs a Blueprint `/Game/..._C` class.
 Those pairs were read out of a shipped game
 (`tools/extract_component_classes` lists them), and a later build can rename a
 component without anything here noticing: the replay never named it either, so
