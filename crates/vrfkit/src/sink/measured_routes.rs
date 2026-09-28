@@ -1,19 +1,12 @@
 //! Which checksum-gated structured-array routes a replay branch admits.
 //!
-//! Each route in [`MeasuredArrayRoute`] expands one exact (group, parent name,
-//! parent checksum) identity into additive child rows, and types a child only
-//! when its declared handle, name and checksum match a measured member table.
-//! Those tables are keyed by handle, so a route is only as right as the
-//! build's member layout: on a build where a member moved to another handle
-//! the route either refuses (and counts it) or emits children it cannot type.
-//!
-//! The gate is therefore per build AND per route, not per build. A route is
-//! admitted for a branch only where it was observed on that build's replays
-//! with every array counter at zero, and an independent decoder matched every
-//! child row it emitted. A route that was never observed on a build is
-//! unobserved, not verified, and stays off there. The measurement behind
-//! every entry, and the reason for every route held back, is in
-//! docs/LEGACY_BUILD_SUPPORT.md.
+//! A [`MeasuredArrayRoute`] expands one exact (group, parent, checksum) identity
+//! into additive child rows and types children through handle-keyed member
+//! tables, so where a build moved a member the route refuses (counted) or
+//! leaves children untyped: the gate is per build AND per route. A route is
+//! admitted only where it was observed on that build's replays with every array
+//! counter at zero and an independent decoder matched every child; unobserved
+//! is not verified and stays off. Measurements: docs/LEGACY_BUILD_SUPPORT.md.
 
 /// One measured structured-array route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,35 +68,17 @@ impl MeasuredArrayRoutes {
         Self(bits)
     }
 
-    /// The routes admitted for `branch`, the replay header's branch string.
+    /// The routes admitted for `branch` (the header's branch string); an unknown
+    /// branch admits nothing. Pinned by `routes_are_pinned_for_every_supported_branch`.
+    /// Legacy entries measured 2026-09-28 over all 48 11.06-12.09 replays (three
+    /// per build) and the single public 12.10/12.11/13.00 fixtures, main stream
+    /// and checkpoints. Held back:
     ///
-    /// An unknown branch admits nothing. The table is pinned for every
-    /// supported branch by `routes_are_pinned_for_every_supported_branch`,
-    /// so a build cannot gain or lose a route without that test changing too.
-    ///
-    /// The legacy entries were measured on 2026-09-28 over all 48 11.06-12.09
-    /// replays (three per build) and the single public 12.10, 12.11 and 13.00
-    /// fixtures, main stream and checkpoints. What holds each route back:
-    ///
-    /// - `AllPlayersObfuscatedPlayerInformation` and `TrackedRewards`, before
-    ///   12.04: two members inserted ahead of `TrackedRewards` move every
-    ///   later `OwnerExclusivePlayerInfo` handle by +3. The handle-keyed
-    ///   member tables would type nothing, so the route is not the one that
-    ///   was measured.
-    /// - `SelectedV2`, 11.06-11.08: a zero-width `DynamicMappings` member at
-    ///   handle 13 moves the nested attachment array to handle 14. The
-    ///   nested route never matches, and the walker skips the zero-width
-    ///   member without a counter.
-    /// - `ActiveBlinds`, every legacy build: through 12.04 `SourceID` and
-    ///   `EffectID` swap handles 4 and 5; from 12.05 the handles match, but
-    ///   some `SourceID` values arrive as the 9-bit hardcoded-name form
-    ///   (index 0) the 297-bit width rule refuses. Either way the refusal
-    ///   moves `array_leaf_decode_errors`.
-    /// - A route with no child observed on a build (the path on 11.06, 12.06
-    ///   and 12.07; four routes in each single-replay 12.10/12.11/13.00
-    ///   fixture) is unobserved there, not verified.
-    ///
-    /// Measurement and per-build counts: docs/LEGACY_BUILD_SUPPORT.md.
+    /// - `AllPlayersObfuscatedPlayerInformation`, `TrackedRewards` < 12.04: handles +3.
+    /// - `SelectedV2` 11.06-11.08: a zero-width `DynamicMappings` at 13 moves the nested array.
+    /// - `ActiveBlinds`, every legacy build: `SourceID`/`EffectID` swapped through 12.04,
+    ///   9-bit hardcoded-name `SourceID`s from 12.05; refusals move `array_leaf_decode_errors`.
+    /// - Any route with no child observed on a build (the path on 11.06, 12.06, 12.07).
     pub(super) fn for_branch(branch: &str) -> Self {
         use MeasuredArrayRoute::{
             AllPlayersObfuscatedPlayerInformation as PlayerInfo, KillData,
@@ -265,12 +240,10 @@ mod tests {
 
     #[test]
     fn active_blinds_stays_off_on_every_legacy_build() {
-        // Both legacy refusal causes move array_leaf_decode_errors; see
-        // `MeasuredArrayRoutes::for_branch`. Only the 13.x builds admit it.
-        for (branch, routes) in PINNED {
+        // Only the 13.x builds admit it; see `MeasuredArrayRoutes::for_branch`.
+        for (branch, _) in PINNED {
             let measured_13x = branch.starts_with("++Ares-Core+release-13.")
                 && *branch != "++Ares-Core+release-13.00";
-            assert_eq!(routes.contains(&ActiveBlinds), measured_13x, "{branch}");
             assert_eq!(
                 MeasuredArrayRoutes::for_branch(branch).admits(ActiveBlinds),
                 measured_13x,
