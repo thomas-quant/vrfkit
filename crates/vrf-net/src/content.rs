@@ -68,44 +68,40 @@ pub fn read_content_block_header(
     actor_net_guid: NetworkGuid,
     sink: &mut dyn GuidPathSink,
 ) -> Result<ContentBlockHeader> {
-    let has_rep_layout = reader.read_bit()?;
+    // Every shape below starts from this; the actor is the default outer.
+    let base = ContentBlockHeader {
+        has_rep_layout: reader.read_bit()?,
+        outer_net_guid: actor_net_guid,
+        ..Default::default()
+    };
 
     // Is this block about the actor itself?
     if reader.read_bit()? {
         return Ok(ContentBlockHeader {
-            has_rep_layout,
             is_actor: true,
-            outer_net_guid: actor_net_guid,
-            ..Default::default()
+            ..base
         });
     }
 
     // Subobject: read object net GUID
-    let object_net_guid = net_guid::internal_load_object(reader, false, 0, sink)?;
-    let is_stably_named = reader.read_bit()?;
+    let base = ContentBlockHeader {
+        object_net_guid: net_guid::internal_load_object(reader, false, 0, sink)?,
+        ..base
+    };
 
-    if is_stably_named {
+    if reader.read_bit()? {
         return Ok(ContentBlockHeader {
-            has_rep_layout,
-            is_actor: false,
-            object_net_guid,
-            outer_net_guid: actor_net_guid,
             is_stably_named: true,
-            ..Default::default()
+            ..base
         });
     }
 
     // Check if deleted
     if reader.read_bit()? {
-        let delete_flags = reader.read_u8()?;
         return Ok(ContentBlockHeader {
-            has_rep_layout,
-            is_actor: false,
             is_deleted: true,
-            object_net_guid,
-            outer_net_guid: actor_net_guid,
-            delete_flags,
-            ..Default::default()
+            delete_flags: reader.read_u8()?,
+            ..base
         });
     }
 
@@ -114,14 +110,9 @@ pub fn read_content_block_header(
     if !class_net_guid.is_valid() {
         // Invalid class GUID means "deleted" with flags = 0
         return Ok(ContentBlockHeader {
-            has_rep_layout,
-            is_actor: false,
             is_deleted: true,
-            object_net_guid,
             has_class_net_guid: true,
-            outer_net_guid: actor_net_guid,
-            delete_flags: 0,
-            ..Default::default()
+            ..base
         });
     }
 
@@ -134,15 +125,10 @@ pub fn read_content_block_header(
     };
 
     Ok(ContentBlockHeader {
-        has_rep_layout,
-        is_actor: false,
-        object_net_guid,
         class_net_guid,
         has_class_net_guid: true,
         outer_net_guid,
-        is_stably_named: false,
-        is_deleted: false,
-        delete_flags: 0,
+        ..base
     })
 }
 

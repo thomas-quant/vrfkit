@@ -93,7 +93,6 @@ pub struct ExportFlags(pub u8);
 
 impl ExportFlags {
     pub const HAS_PATH: u8 = 1 << 0;
-    #[allow(dead_code)]
     pub const NO_LOAD: u8 = 1 << 1;
     pub const HAS_NETWORK_CHECKSUM: u8 = 1 << 2;
 
