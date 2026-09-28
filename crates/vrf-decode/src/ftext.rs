@@ -398,55 +398,35 @@ fn json_string(s: &mut String, value: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::BitWriter;
 
-    struct Bits(Vec<bool>);
-    impl Bits {
-        fn new() -> Self {
-            Self(Vec::new())
-        }
-        fn bits(&mut self, value: u64, width: u32) {
-            for bit in 0..width {
-                self.0.push(value & (1 << bit) != 0);
-            }
-        }
-        fn i32(&mut self, value: i32) {
-            self.bits(value as u32 as u64, 32);
-        }
-        fn string(&mut self, value: &str) {
+    /// The FText pieces these tests assemble, on the shared writer.
+    trait FTextBits {
+        fn string(&mut self, value: &str) -> &mut Self;
+        fn table(&mut self, flags: u32, name: &str, number: i32, key: &str) -> &mut Self;
+        fn empty(&mut self) -> &mut Self;
+    }
+
+    impl FTextBits for BitWriter {
+        fn string(&mut self, value: &str) -> &mut Self {
             self.i32((value.len() + 1) as i32);
             for byte in value.bytes() {
                 self.bits(u64::from(byte), 8);
             }
-            self.bits(0, 8);
+            self.bits(0, 8)
         }
-        fn table(&mut self, flags: u32, name: &str, number: i32, key: &str) {
-            self.bits(u64::from(flags), 32);
-            self.bits(11, 8);
-            self.bits(0, 1);
-            self.string(name);
-            self.i32(number);
-            self.string(key);
+        fn table(&mut self, flags: u32, name: &str, number: i32, key: &str) -> &mut Self {
+            self.bits(u64::from(flags), 32).bits(11, 8).bits(0, 1);
+            self.string(name).i32(number).string(key)
         }
-        fn empty(&mut self) {
-            self.bits(0, 32);
-            self.bits(255, 8);
-            self.i32(0);
-        }
-        fn finish(self) -> (Vec<u8>, u32) {
-            let len = self.0.len() as u32;
-            let mut out = vec![0; self.0.len().div_ceil(8)];
-            for (i, bit) in self.0.into_iter().enumerate() {
-                if bit {
-                    out[i / 8] |= 1 << (i % 8)
-                }
-            }
-            (out, len)
+        fn empty(&mut self) -> &mut Self {
+            self.bits(0, 32).bits(255, 8).i32(0)
         }
     }
 
     #[test]
     fn string_table_preserves_suffix_and_escapes_json() {
-        let mut bits = Bits::new();
+        let mut bits = BitWriter::new();
         bits.table(7, "Table\\Name", 2, "line\n\"key");
         let (raw, count) = bits.finish();
         let tree = decode_ftext_tree(&raw, count).unwrap();
@@ -458,7 +438,7 @@ mod tests {
 
     #[test]
     fn format_keeps_duplicate_names_and_unsigned_bits() {
-        let mut bits = Bits::new();
+        let mut bits = BitWriter::new();
         bits.bits(9, 32);
         bits.bits(3, 8);
         bits.table(0, "T", 0, "Source");
@@ -478,7 +458,7 @@ mod tests {
     #[test]
     fn format_accepts_zero_one_and_two_arguments() {
         for count in 0..=2 {
-            let mut bits = Bits::new();
+            let mut bits = BitWriter::new();
             bits.bits(0, 32);
             bits.bits(3, 8);
             bits.empty();
@@ -499,7 +479,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_terminator_count_tag_flags_and_residual() {
-        let mut terminator = Bits::new();
+        let mut terminator = BitWriter::new();
         terminator.bits(0, 32);
         terminator.bits(11, 8);
         terminator.bits(0, 1);
@@ -511,7 +491,7 @@ mod tests {
             decode_ftext_tree(&raw, count),
             Err(FTextTreeError::MissingStringTerminator)
         ));
-        let mut count_bits = Bits::new();
+        let mut count_bits = BitWriter::new();
         count_bits.bits(0, 32);
         count_bits.bits(3, 8);
         count_bits.empty();
@@ -521,7 +501,7 @@ mod tests {
             decode_ftext_tree(&raw, count),
             Err(FTextTreeError::InvalidArgumentCount { .. })
         ));
-        let mut too_wide = Bits::new();
+        let mut too_wide = BitWriter::new();
         too_wide.bits(0, 32);
         too_wide.bits(3, 8);
         too_wide.empty();
@@ -531,7 +511,7 @@ mod tests {
             decode_ftext_tree(&raw, count),
             Err(FTextTreeError::InvalidArgumentCount { .. })
         ));
-        let mut tag_bits = Bits::new();
+        let mut tag_bits = BitWriter::new();
         tag_bits.bits(0, 32);
         tag_bits.bits(3, 8);
         tag_bits.empty();
@@ -546,7 +526,7 @@ mod tests {
             decode_ftext_tree(&raw, count),
             Err(FTextTreeError::UnsupportedArgumentTag { tag: 99 })
         ));
-        let mut empty = Bits::new();
+        let mut empty = BitWriter::new();
         empty.bits(1, 32);
         empty.bits(255, 8);
         empty.i32(0);
@@ -555,7 +535,7 @@ mod tests {
             decode_ftext_tree(&raw, count),
             Err(FTextTreeError::InvalidEmptyForm)
         ));
-        let mut residual = Bits::new();
+        let mut residual = BitWriter::new();
         residual.empty();
         residual.bits(1, 1);
         let (raw, count) = residual.finish();
@@ -622,7 +602,7 @@ mod tests {
 
     #[test]
     fn as_number_reads_the_no_options_branch_and_a_culture() {
-        let mut bits = Bits::new();
+        let mut bits = BitWriter::new();
         bits.bits(0, 32);
         bits.bits(4, 8);
         bits.bits(3, 8);
@@ -641,7 +621,7 @@ mod tests {
     /// values do, and a negative rounding byte stays signed.
     #[test]
     fn as_number_format_options_keep_their_wire_order() {
-        let mut bits = Bits::new();
+        let mut bits = BitWriter::new();
         bits.bits(0, 32);
         bits.bits(4, 8);
         bits.bits(3, 8);
@@ -675,7 +655,7 @@ mod tests {
     #[test]
     fn as_number_refuses_other_sources_bad_bools_and_non_finite_values() {
         let number = |tag: u64, value: f64, has_format: u64, always_sign: u64| {
-            let mut bits = Bits::new();
+            let mut bits = BitWriter::new();
             bits.bits(1, 32);
             bits.bits(4, 8);
             bits.bits(tag, 8);
@@ -719,7 +699,7 @@ mod tests {
 
     #[test]
     fn unicode_strings_are_strict_and_byte_bounded() {
-        let mut valid = Bits::new();
+        let mut valid = BitWriter::new();
         valid.bits(0, 32);
         valid.bits(11, 8);
         valid.bits(0, 1);
@@ -736,7 +716,7 @@ mod tests {
         assert_eq!(table.name, "\u{1f600}");
 
         for (length, units, width) in [(2, vec![0xff, 0], 8), (-2, vec![0xd800, 0], 16)] {
-            let mut invalid = Bits::new();
+            let mut invalid = BitWriter::new();
             invalid.bits(0, 32);
             invalid.bits(11, 8);
             invalid.bits(0, 1);
@@ -751,7 +731,7 @@ mod tests {
             ));
         }
         for length in [65_537, -32_769, i32::MIN] {
-            let mut invalid = Bits::new();
+            let mut invalid = BitWriter::new();
             invalid.bits(0, 32);
             invalid.bits(11, 8);
             invalid.bits(0, 1);
@@ -767,7 +747,7 @@ mod tests {
     #[test]
     fn depth_and_total_node_budgets_reject_otherwise_complete_trees() {
         for levels in [MAX_DEPTH - 1, MAX_DEPTH] {
-            let mut nested = Bits::new();
+            let mut nested = BitWriter::new();
             for _ in 0..levels {
                 nested.bits(0, 32);
                 nested.bits(3, 8);
@@ -789,7 +769,7 @@ mod tests {
         // Root + source + (one argument and one text per entry): the final
         // argument crosses the global budget while its local count is valid.
         for arguments in [127, 128] {
-            let mut wide = Bits::new();
+            let mut wide = BitWriter::new();
             wide.bits(0, 32);
             wide.bits(3, 8);
             wide.empty();

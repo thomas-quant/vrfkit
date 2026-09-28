@@ -848,60 +848,32 @@ fn push_field_label(path: &mut String, schema: Option<&ArrayFieldSchema>, handle
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Helper: write IntPacked into a bit buffer.
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
+    use crate::test_bits::BitWriter;
 
     #[test]
     fn decode_simple_struct_array() {
         // Build: elementCount=2, element[0] has handle=3 with 32 bits,
         //        element[1] has handle=5 with 8 bits, then terminators.
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 2); // elementCount
+        let mut bits = BitWriter::new();
+        bits.int_packed(2); // elementCount
         // Element 0 (encodedIndex=1)
-        write_int_packed(&mut bits, 1);
+        bits.int_packed(1);
         // Field: encodedHandle=4 (handle=3), payloadBits=32
-        write_int_packed(&mut bits, 4);
-        write_int_packed(&mut bits, 32);
-        bits.extend(std::iter::repeat_n(true, 32)); // payload
-        write_int_packed(&mut bits, 0); // end of element 0
+        bits.int_packed(4);
+        bits.int_packed(32);
+        bits.repeat(true, 32); // payload
+        bits.int_packed(0); // end of element 0
         // Element 1 (encodedIndex=2)
-        write_int_packed(&mut bits, 2);
+        bits.int_packed(2);
         // Field: encodedHandle=6 (handle=5), payloadBits=8
-        write_int_packed(&mut bits, 6);
-        write_int_packed(&mut bits, 8);
-        bits.extend(std::iter::repeat_n(false, 8)); // payload
-        write_int_packed(&mut bits, 0); // end of element 1
+        bits.int_packed(6);
+        bits.int_packed(8);
+        bits.repeat(false, 8); // payload
+        bits.int_packed(0); // end of element 1
         // Array terminator
-        write_int_packed(&mut bits, 0);
+        bits.int_packed(0);
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
@@ -921,34 +893,33 @@ mod tests {
     fn decode_nested_struct_array() {
         // Build: elementCount=1, element[0] has handle=4 (sub-array) with a
         // nested array of 1 element containing handle=7.
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // outer elementCount
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // outer elementCount
 
         // Outer element 0
-        write_int_packed(&mut bits, 1); // encodedIndex=1
+        bits.int_packed(1); // encodedIndex=1
 
         // Inner array field: handle=4, we need to build its payload separately
-        let mut inner_bits = Vec::new();
-        write_int_packed(&mut inner_bits, 1); // inner elementCount
-        write_int_packed(&mut inner_bits, 1); // encodedIndex=1
+        let mut inner_bits = BitWriter::new();
+        inner_bits.int_packed(1); // inner elementCount
+        inner_bits.int_packed(1); // encodedIndex=1
         // Inner field: handle=7, 16 bits
-        write_int_packed(&mut inner_bits, 8); // encodedHandle=8 -> handle=7
-        write_int_packed(&mut inner_bits, 16);
-        inner_bits.extend(std::iter::repeat_n(true, 16));
-        write_int_packed(&mut inner_bits, 0); // end inner element
-        write_int_packed(&mut inner_bits, 0); // inner array terminator
+        inner_bits.int_packed(8); // encodedHandle=8 -> handle=7
+        inner_bits.int_packed(16);
+        inner_bits.repeat(true, 16);
+        inner_bits.int_packed(0); // end inner element
+        inner_bits.int_packed(0); // inner array terminator
 
-        let inner_payload_bits = inner_bits.len() as u32;
+        let inner_payload_bits = inner_bits.bit_len();
         // Outer field header: encodedHandle=5 (handle=4), payloadBits=inner_payload_bits
-        write_int_packed(&mut bits, 5);
-        write_int_packed(&mut bits, inner_payload_bits);
-        bits.extend(inner_bits);
+        bits.int_packed(5);
+        bits.int_packed(inner_payload_bits);
+        bits.append(&inner_bits);
 
-        write_int_packed(&mut bits, 0); // end outer element
-        write_int_packed(&mut bits, 0); // outer array terminator
+        bits.int_packed(0); // end outer element
+        bits.int_packed(0); // outer array terminator
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
 
         // Schema: handle 4 at depth 0 is a sub-array with no further nesting.
         static INNER: ArrayFieldSchema = ArrayFieldSchema {
@@ -973,18 +944,17 @@ mod tests {
     /// One element carrying handles 3 (schema-named), 7 (schema-unnamed) and
     /// 40 (declared by neither).
     fn one_element_with_handles(handles: &[(u32, u32)]) -> (Vec<u8>, u32) {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // elementCount
-        write_int_packed(&mut bits, 1); // encodedIndex=1 -> index 0
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount
+        bits.int_packed(1); // encodedIndex=1 -> index 0
         for &(handle, payload) in handles {
-            write_int_packed(&mut bits, handle + 1);
-            write_int_packed(&mut bits, payload);
-            bits.extend(std::iter::repeat_n(true, payload as usize));
+            bits.int_packed(handle + 1);
+            bits.int_packed(payload);
+            bits.repeat(true, payload as usize);
         }
-        write_int_packed(&mut bits, 0); // end of element
-        write_int_packed(&mut bits, 0); // array terminator
-        let bit_count = bits.len() as u32;
-        (bits_to_bytes(&bits), bit_count)
+        bits.int_packed(0); // end of element
+        bits.int_packed(0); // array terminator
+        bits.finish()
     }
 
     /// The replay's declaration outranks the hardcoded schema on a leaf.
@@ -1078,26 +1048,25 @@ mod tests {
     fn a_container_segment_keeps_its_schema_name() {
         // Outer element 0 carries handle 4 (Reports, a sub-array) whose single
         // element carries handle 5.
-        let mut inner = Vec::new();
-        write_int_packed(&mut inner, 1); // inner elementCount
-        write_int_packed(&mut inner, 1); // encodedIndex=1
-        write_int_packed(&mut inner, 6); // encodedHandle=6 -> handle 5
-        write_int_packed(&mut inner, 32);
-        inner.extend(std::iter::repeat_n(true, 32));
-        write_int_packed(&mut inner, 0); // end inner element
-        write_int_packed(&mut inner, 0); // inner terminator
+        let mut inner = BitWriter::new();
+        inner.int_packed(1); // inner elementCount
+        inner.int_packed(1); // encodedIndex=1
+        inner.int_packed(6); // encodedHandle=6 -> handle 5
+        inner.int_packed(32);
+        inner.repeat(true, 32);
+        inner.int_packed(0); // end inner element
+        inner.int_packed(0); // inner terminator
 
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // outer elementCount
-        write_int_packed(&mut bits, 1); // encodedIndex=1
-        write_int_packed(&mut bits, 5); // encodedHandle=5 -> handle 4
-        write_int_packed(&mut bits, inner.len() as u32);
-        bits.extend(inner);
-        write_int_packed(&mut bits, 0); // end outer element
-        write_int_packed(&mut bits, 0); // outer terminator
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // outer elementCount
+        bits.int_packed(1); // encodedIndex=1
+        bits.int_packed(5); // encodedHandle=5 -> handle 4
+        bits.int_packed(inner.bit_len());
+        bits.append(&inner);
+        bits.int_packed(0); // end outer element
+        bits.int_packed(0); // outer terminator
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
 
         // Declare a DIFFERENT name for the container handle 4, and the real
         // declared name for the leaf handle 5.
@@ -1120,12 +1089,11 @@ mod tests {
 
     #[test]
     fn empty_array_emits_nothing() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 0); // elementCount = 0
-        write_int_packed(&mut bits, 0); // immediate terminator
+        let mut bits = BitWriter::new();
+        bits.int_packed(0); // elementCount = 0
+        bits.int_packed(0); // immediate terminator
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
@@ -1145,15 +1113,14 @@ mod tests {
     fn truncated_payload_mid_element_counts_error() {
         // elementCount=2, element 0 starts, its first field declares 32 bits
         // of payload but only 8 remain -> overrun.
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 2); // elementCount = 2
-        write_int_packed(&mut bits, 1); // encodedIndex = 1 -> element 0
-        write_int_packed(&mut bits, 4); // encodedHandle = 4 -> handle 3
-        write_int_packed(&mut bits, 32); // payloadBits = 32 (overruns)
-        bits.extend(std::iter::repeat_n(true, 8)); // only 8 bits of payload
+        let mut bits = BitWriter::new();
+        bits.int_packed(2); // elementCount = 2
+        bits.int_packed(1); // encodedIndex = 1 -> element 0
+        bits.int_packed(4); // encodedHandle = 4 -> handle 3
+        bits.int_packed(32); // payloadBits = 32 (overruns)
+        bits.repeat(true, 8); // only 8 bits of payload
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
@@ -1171,24 +1138,23 @@ mod tests {
     /// 24-bit one, mirroring the two payload widths seen on real replays.
     #[test]
     fn decode_object_ref_array_extracts_item_netguids() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 2); // elementCount
+        let mut bits = BitWriter::new();
+        bits.int_packed(2); // elementCount
         // Element 0: NetGUID 812 in a 16-bit payload window.
-        write_int_packed(&mut bits, 1); // encodedIndex -> index 0
-        write_int_packed(&mut bits, 3); // encodedHandle -> handle 2
-        write_int_packed(&mut bits, 16); // payloadBits
-        write_int_packed(&mut bits, 812); // ObjectNetGuid payload
-        write_int_packed(&mut bits, 0); // element terminator
+        bits.int_packed(1); // encodedIndex -> index 0
+        bits.int_packed(3); // encodedHandle -> handle 2
+        bits.int_packed(16); // payloadBits
+        bits.int_packed(812); // ObjectNetGuid payload
+        bits.int_packed(0); // element terminator
         // Element 1: NetGUID 25492 in a 24-bit payload window.
-        write_int_packed(&mut bits, 2); // encodedIndex -> index 1
-        write_int_packed(&mut bits, 3); // handle 2
-        write_int_packed(&mut bits, 24); // payloadBits
-        write_int_packed(&mut bits, 25492); // ObjectNetGuid payload
-        write_int_packed(&mut bits, 0); // element terminator
-        write_int_packed(&mut bits, 0); // array terminator
+        bits.int_packed(2); // encodedIndex -> index 1
+        bits.int_packed(3); // handle 2
+        bits.int_packed(24); // payloadBits
+        bits.int_packed(25492); // ObjectNetGuid payload
+        bits.int_packed(0); // element terminator
+        bits.int_packed(0); // array terminator
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let guids = decode_object_ref_array(&data, bit_count);
 
         assert_eq!(guids, vec![(0, 812), (1, 25492)]);
@@ -1198,17 +1164,16 @@ mod tests {
     /// keep that index, not relabel the lone GUID onto slot 0.
     #[test]
     fn decode_object_ref_array_preserves_a_sparse_wire_index() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 3); // elementCount (3-slot array)
-        write_int_packed(&mut bits, 2); // encodedIndex -> index 1 (only element sent)
-        write_int_packed(&mut bits, 3); // encodedHandle -> handle 2
-        write_int_packed(&mut bits, 16); // payloadBits
-        write_int_packed(&mut bits, 5150); // ObjectNetGuid payload
-        write_int_packed(&mut bits, 0); // element terminator
-        write_int_packed(&mut bits, 0); // array terminator
+        let mut bits = BitWriter::new();
+        bits.int_packed(3); // elementCount (3-slot array)
+        bits.int_packed(2); // encodedIndex -> index 1 (only element sent)
+        bits.int_packed(3); // encodedHandle -> handle 2
+        bits.int_packed(16); // payloadBits
+        bits.int_packed(5150); // ObjectNetGuid payload
+        bits.int_packed(0); // element terminator
+        bits.int_packed(0); // array terminator
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let guids = decode_object_ref_array(&data, bit_count);
 
         assert_eq!(guids, vec![(1, 5150)]);
@@ -1217,12 +1182,11 @@ mod tests {
     /// An empty array (elementCount = 0, immediate terminator) decodes to nothing.
     #[test]
     fn decode_object_ref_array_empty() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 0);
-        write_int_packed(&mut bits, 0);
+        let mut bits = BitWriter::new();
+        bits.int_packed(0);
+        bits.int_packed(0);
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let guids = decode_object_ref_array(&data, bit_count);
 
         assert!(guids.is_empty());
@@ -1230,16 +1194,16 @@ mod tests {
 
     #[test]
     fn malformed_object_ref_array_exposes_its_failure_stats() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1);
-        write_int_packed(&mut bits, 1);
-        write_int_packed(&mut bits, 3);
-        write_int_packed(&mut bits, 32); // only eight payload bits follow
-        bits.extend(std::iter::repeat_n(false, 8));
-        let data = bits_to_bytes(&bits);
+        let mut bits = BitWriter::new();
+        bits.int_packed(1);
+        bits.int_packed(1);
+        bits.int_packed(3);
+        bits.int_packed(32); // only eight payload bits follow
+        bits.repeat(false, 8);
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+        let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
 
         assert!(guids.is_empty());
         assert_eq!(stats.errors, 1, "{stats:?}");
@@ -1258,12 +1222,12 @@ mod tests {
 
     /// One `MultiContents` element at wire index 0 carrying NetGUID 5 in an
     /// 8-bit window, closed by its zero handle.
-    fn push_one_closed_item(bits: &mut Vec<bool>) {
-        write_int_packed(bits, 1); // encodedIndex -> index 0
-        write_int_packed(bits, 3); // encodedHandle -> handle 2
-        write_int_packed(bits, 8); // payloadBits
-        write_int_packed(bits, 5); // ObjectNetGuid payload
-        write_int_packed(bits, 0); // element terminator
+    fn push_one_closed_item(bits: &mut BitWriter) {
+        bits.int_packed(1); // encodedIndex -> index 0
+        bits.int_packed(3); // encodedHandle -> handle 2
+        bits.int_packed(8); // payloadBits
+        bits.int_packed(5); // ObjectNetGuid payload
+        bits.int_packed(0); // element terminator
     }
 
     /// A payload cut short after a complete element, before the index
@@ -1275,14 +1239,14 @@ mod tests {
     /// re-sent -- the rows emitted before the cut would pass for all of them.
     #[test]
     fn an_object_ref_array_ending_at_eof_is_not_a_clean_terminator() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 2); // elementCount: two slots
+        let mut bits = BitWriter::new();
+        bits.int_packed(2); // elementCount: two slots
         push_one_closed_item(&mut bits);
         // No second element and no array terminator: the payload just ends.
-        let data = bits_to_bytes(&bits);
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+        let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
 
         assert_eq!(guids, vec![(0, 5)], "the complete element is still decoded");
         assert_eq!(stats.implicit_terminations, 1, "{stats:?}");
@@ -1306,16 +1270,16 @@ mod tests {
     /// second for the same missing bits.
     #[test]
     fn an_object_ref_element_ending_at_eof_counts_once() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // elementCount
-        write_int_packed(&mut bits, 1); // encodedIndex -> index 0
-        write_int_packed(&mut bits, 3); // handle 2
-        write_int_packed(&mut bits, 8); // payloadBits
-        write_int_packed(&mut bits, 5); // NetGUID -- then EOF, no terminators
-        let data = bits_to_bytes(&bits);
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount
+        bits.int_packed(1); // encodedIndex -> index 0
+        bits.int_packed(3); // handle 2
+        bits.int_packed(8); // payloadBits
+        bits.int_packed(5); // NetGUID -- then EOF, no terminators
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+        let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
 
         assert_eq!(guids, vec![(0, 5)]);
         assert_eq!(stats.implicit_terminations, 1, "{stats:?}");
@@ -1329,21 +1293,21 @@ mod tests {
     /// window is 16 bits so that the tally is seen to count bits, not fields.
     #[test]
     fn an_extra_field_in_an_object_ref_element_is_tallied() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // elementCount
-        write_int_packed(&mut bits, 1); // encodedIndex -> index 0
-        write_int_packed(&mut bits, 3); // handle 2
-        write_int_packed(&mut bits, 8); // payloadBits
-        write_int_packed(&mut bits, 5); // NetGUID 5
-        write_int_packed(&mut bits, 4); // handle 3: a field the type does not have
-        write_int_packed(&mut bits, 16); // payloadBits
-        write_int_packed(&mut bits, 300); // two IntPacked bytes
-        write_int_packed(&mut bits, 0); // element terminator
-        write_int_packed(&mut bits, 0); // array terminator
-        let data = bits_to_bytes(&bits);
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount
+        bits.int_packed(1); // encodedIndex -> index 0
+        bits.int_packed(3); // handle 2
+        bits.int_packed(8); // payloadBits
+        bits.int_packed(5); // NetGUID 5
+        bits.int_packed(4); // handle 3: a field the type does not have
+        bits.int_packed(16); // payloadBits
+        bits.int_packed(300); // two IntPacked bytes
+        bits.int_packed(0); // element terminator
+        bits.int_packed(0); // array terminator
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+        let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
 
         assert_eq!(guids, vec![(0, 5)], "the first field is still the item");
         assert_eq!(stats.unconsumed_nested_bits, 16, "{stats:?}");
@@ -1356,22 +1320,22 @@ mod tests {
     /// walker calls foreign, and must not be promoted into the item's place.
     #[test]
     fn an_object_ref_element_whose_first_field_fails_yields_no_item() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // elementCount
-        write_int_packed(&mut bits, 1); // encodedIndex -> index 0
-        write_int_packed(&mut bits, 3); // handle 2
-        write_int_packed(&mut bits, 16); // payloadBits
-        write_int_packed(&mut bits, 5); // NetGUID 5, leaving eight bits unread
-        bits.extend(std::iter::repeat_n(false, 8));
-        write_int_packed(&mut bits, 4); // handle 3: a field the type does not have
-        write_int_packed(&mut bits, 16); // payloadBits
-        write_int_packed(&mut bits, 777); // two IntPacked bytes
-        write_int_packed(&mut bits, 0); // element terminator
-        write_int_packed(&mut bits, 0); // array terminator
-        let data = bits_to_bytes(&bits);
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount
+        bits.int_packed(1); // encodedIndex -> index 0
+        bits.int_packed(3); // handle 2
+        bits.int_packed(16); // payloadBits
+        bits.int_packed(5); // NetGUID 5, leaving eight bits unread
+        bits.repeat(false, 8);
+        bits.int_packed(4); // handle 3: a field the type does not have
+        bits.int_packed(16); // payloadBits
+        bits.int_packed(777); // two IntPacked bytes
+        bits.int_packed(0); // element terminator
+        bits.int_packed(0); // array terminator
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+        let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
 
         assert!(guids.is_empty(), "second field promoted: {guids:?}");
         assert_eq!(anomalies(&stats), [1, 0, 0, 0, 16], "{stats:?}");
@@ -1382,24 +1346,24 @@ mod tests {
     #[test]
     fn terminated_object_ref_arrays_report_no_anomaly() {
         // Two populated slots.
-        let mut two = Vec::new();
-        write_int_packed(&mut two, 2);
+        let mut two = BitWriter::new();
+        two.int_packed(2);
         push_one_closed_item(&mut two);
-        write_int_packed(&mut two, 2); // encodedIndex -> index 1
-        write_int_packed(&mut two, 3);
-        write_int_packed(&mut two, 24);
-        write_int_packed(&mut two, 25492); // three IntPacked bytes
-        write_int_packed(&mut two, 0);
-        write_int_packed(&mut two, 0); // array terminator
+        two.int_packed(2); // encodedIndex -> index 1
+        two.int_packed(3);
+        two.int_packed(24);
+        two.int_packed(25492); // three IntPacked bytes
+        two.int_packed(0);
+        two.int_packed(0); // array terminator
         // An empty array: count, then the terminator.
-        let mut empty = Vec::new();
-        write_int_packed(&mut empty, 0);
-        write_int_packed(&mut empty, 0);
+        let mut empty = BitWriter::new();
+        empty.int_packed(0);
+        empty.int_packed(0);
 
         for (bits, want) in [(two, vec![(0, 5), (1, 25492)]), (empty, vec![])] {
-            let data = bits_to_bytes(&bits);
+            let (data, bit_count) = bits.finish();
             let mut stats = ArrayDecodeStats::default();
-            let guids = decode_object_ref_array_with_stats(&data, bits.len() as u32, &mut stats);
+            let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
             assert_eq!(guids, want);
             assert_eq!(anomalies(&stats), [0; 5], "{stats:?}");
         }
@@ -1411,15 +1375,14 @@ mod tests {
     fn read_failure_mid_stream_counts_error() {
         // elementCount=1, element 0 starts, its field header declares a handle,
         // then the stream ends with too few bits for the payloadBits IntPacked.
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // elementCount = 1
-        write_int_packed(&mut bits, 1); // encodedIndex = 1 -> element 0
-        write_int_packed(&mut bits, 4); // encodedHandle = 4 -> handle 3
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount = 1
+        bits.int_packed(1); // encodedIndex = 1 -> element 0
+        bits.int_packed(4); // encodedHandle = 4 -> handle 3
         // Three stray bits: not enough for an IntPacked payloadBits read.
-        bits.extend(std::iter::repeat_n(false, 3));
+        bits.repeat(false, 3);
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
         let _fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
@@ -1438,31 +1401,30 @@ mod tests {
     /// window exactly.
     #[test]
     fn a_nested_array_that_leaves_bits_reports_them() {
-        let mut inner = Vec::new();
-        write_int_packed(&mut inner, 1); // inner elementCount
-        write_int_packed(&mut inner, 1); // encodedIndex=1
-        write_int_packed(&mut inner, 8); // encodedHandle=8 -> handle 7
-        write_int_packed(&mut inner, 16);
-        inner.extend(std::iter::repeat_n(true, 16));
-        write_int_packed(&mut inner, 0); // end inner element
-        write_int_packed(&mut inner, 0); // inner array terminator
+        let mut inner = BitWriter::new();
+        inner.int_packed(1); // inner elementCount
+        inner.int_packed(1); // encodedIndex=1
+        inner.int_packed(8); // encodedHandle=8 -> handle 7
+        inner.int_packed(16);
+        inner.repeat(true, 16);
+        inner.int_packed(0); // end inner element
+        inner.int_packed(0); // inner array terminator
         // Sixteen bits the inner array will never look at. Not 8: exactly
         // eight bits after a terminator are read as the optional trailer,
         // which is a different path with its own tests.
-        let declared_inner_bits = inner.len() as u32 + 16;
+        let declared_inner_bits = inner.bit_len() + 16;
 
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // outer elementCount
-        write_int_packed(&mut bits, 1); // encodedIndex=1
-        write_int_packed(&mut bits, 5); // encodedHandle=5 -> handle 4
-        write_int_packed(&mut bits, declared_inner_bits);
-        bits.extend(inner);
-        bits.extend(std::iter::repeat_n(true, 16)); // the abandoned tail
-        write_int_packed(&mut bits, 0); // end outer element
-        write_int_packed(&mut bits, 0); // outer array terminator
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // outer elementCount
+        bits.int_packed(1); // encodedIndex=1
+        bits.int_packed(5); // encodedHandle=5 -> handle 4
+        bits.int_packed(declared_inner_bits);
+        bits.append(&inner);
+        bits.repeat(true, 16); // the abandoned tail
+        bits.int_packed(0); // end outer element
+        bits.int_packed(0); // outer array terminator
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
 
         static INNER: ArrayFieldSchema = ArrayFieldSchema {
             sub_arrays: &[],
@@ -1492,15 +1454,14 @@ mod tests {
     fn an_element_ending_at_eof_is_not_a_clean_terminator() {
         // elementCount=1, element 0, one complete 32-bit field, then nothing:
         // no element terminator and no array terminator.
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1);
-        write_int_packed(&mut bits, 1);
-        write_int_packed(&mut bits, 4); // handle 3
-        write_int_packed(&mut bits, 32);
-        bits.extend(std::iter::repeat_n(true, 32));
+        let mut bits = BitWriter::new();
+        bits.int_packed(1);
+        bits.int_packed(1);
+        bits.int_packed(4); // handle 3
+        bits.int_packed(32);
+        bits.repeat(true, 32);
 
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
@@ -1525,28 +1486,28 @@ mod tests {
 
     #[test]
     fn bits_after_the_root_array_terminator_are_tallied() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 0);
-        write_int_packed(&mut bits, 0);
-        bits.extend(std::iter::repeat_n(true, 16));
-        let data = bits_to_bytes(&bits);
+        let mut bits = BitWriter::new();
+        bits.int_packed(0);
+        bits.int_packed(0);
+        bits.repeat(true, 16);
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let _ = decode_struct_array(&data, bits.len() as u32, None, &[], &mut stats);
+        let _ = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
         assert_eq!(stats.unconsumed_root_bits, 16, "{stats:?}");
     }
 
     #[test]
     fn an_out_of_range_element_index_is_malformed_not_a_clean_empty_array() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // one declared element
-        write_int_packed(&mut bits, 2); // index 1 is outside [0, 1)
-        bits.extend(std::iter::repeat_n(true, 16));
-        let data = bits_to_bytes(&bits);
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // one declared element
+        bits.int_packed(2); // index 1 is outside [0, 1)
+        bits.repeat(true, 16);
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let fields = decode_struct_array(&data, bits.len() as u32, None, &[], &mut stats);
+        let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
         assert!(fields.is_empty());
         assert_eq!(stats.errors, 1, "{stats:?}");
@@ -1554,18 +1515,16 @@ mod tests {
 
     #[test]
     fn a_truncated_trailing_int_packed_is_not_accepted() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 0); // zero elements
-        write_int_packed(&mut bits, 0); // array terminator
+        let mut bits = BitWriter::new();
+        bits.int_packed(0); // zero elements
+        bits.int_packed(0); // array terminator
         // Exactly eight trailing bits activates the optional IntPacked read,
         // but the continuation flag asks for a byte that is not present.
-        for bit in 0..8 {
-            bits.push((0x01 & (1 << bit)) != 0);
-        }
-        let data = bits_to_bytes(&bits);
+        bits.bits(0x01, 8);
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let _ = decode_struct_array(&data, bits.len() as u32, None, &[], &mut stats);
+        let _ = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
         assert_eq!(stats.errors, 1, "{stats:?}");
     }
@@ -1609,26 +1568,25 @@ mod tests {
     /// One nested window: a one-element inner array, its terminator, then one
     /// trailing byte holding IntPacked `trailer`.
     fn nested_window_with_trailer(trailer: u32) -> (Vec<u8>, u32) {
-        let mut inner = Vec::new();
-        write_int_packed(&mut inner, 1); // inner elementCount
-        write_int_packed(&mut inner, 1); // encodedIndex=1
-        write_int_packed(&mut inner, 8); // encodedHandle=8 -> handle 7
-        write_int_packed(&mut inner, 16);
-        inner.extend(std::iter::repeat_n(true, 16));
-        write_int_packed(&mut inner, 0); // end inner element
-        write_int_packed(&mut inner, 0); // inner array terminator
-        write_int_packed(&mut inner, trailer); // the optional trailer byte
+        let mut inner = BitWriter::new();
+        inner.int_packed(1); // inner elementCount
+        inner.int_packed(1); // encodedIndex=1
+        inner.int_packed(8); // encodedHandle=8 -> handle 7
+        inner.int_packed(16);
+        inner.repeat(true, 16);
+        inner.int_packed(0); // end inner element
+        inner.int_packed(0); // inner array terminator
+        inner.int_packed(trailer); // the optional trailer byte
 
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // outer elementCount
-        write_int_packed(&mut bits, 1); // encodedIndex=1
-        write_int_packed(&mut bits, 5); // encodedHandle=5 -> handle 4
-        write_int_packed(&mut bits, inner.len() as u32);
-        bits.extend(inner);
-        write_int_packed(&mut bits, 0); // end outer element
-        write_int_packed(&mut bits, 0); // outer array terminator
-        let bit_count = bits.len() as u32;
-        (bits_to_bytes(&bits), bit_count)
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // outer elementCount
+        bits.int_packed(1); // encodedIndex=1
+        bits.int_packed(5); // encodedHandle=5 -> handle 4
+        bits.int_packed(inner.bit_len());
+        bits.append(&inner);
+        bits.int_packed(0); // end outer element
+        bits.int_packed(0); // outer array terminator
+        bits.finish()
     }
 
     /// A nonzero trailer inside a nested array's window is the same anomaly as
@@ -1720,19 +1678,19 @@ mod tests {
 
     #[test]
     fn exactly_max_fields_followed_by_a_terminator_is_not_truncated() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1);
-        write_int_packed(&mut bits, 1);
+        let mut bits = BitWriter::new();
+        bits.int_packed(1);
+        bits.int_packed(1);
         for _ in 0..MAX_FIELDS_PER_ELEMENT {
-            write_int_packed(&mut bits, 1); // handle 0
-            write_int_packed(&mut bits, 0); // valid empty payload
+            bits.int_packed(1); // handle 0
+            bits.int_packed(0); // valid empty payload
         }
-        write_int_packed(&mut bits, 0); // element terminator
-        write_int_packed(&mut bits, 0); // array terminator
-        let data = bits_to_bytes(&bits);
+        bits.int_packed(0); // element terminator
+        bits.int_packed(0); // array terminator
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let _ = decode_struct_array(&data, bits.len() as u32, None, &[], &mut stats);
+        let _ = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
         assert_eq!(stats.truncations, 0, "{stats:?}");
         assert_eq!(stats.errors, 0, "{stats:?}");
@@ -1740,17 +1698,17 @@ mod tests {
 
     #[test]
     fn repeated_element_indices_cannot_bypass_the_element_work_limit() {
-        let mut bits = Vec::new();
-        write_int_packed(&mut bits, 1); // one declared slot
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // one declared slot
         for _ in 0..=MAX_ELEMENTS {
-            write_int_packed(&mut bits, 1); // repeat index 0
-            write_int_packed(&mut bits, 0); // empty element
+            bits.int_packed(1); // repeat index 0
+            bits.int_packed(0); // empty element
         }
-        write_int_packed(&mut bits, 0); // array terminator
-        let data = bits_to_bytes(&bits);
+        bits.int_packed(0); // array terminator
+        let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let _ = decode_struct_array(&data, bits.len() as u32, None, &[], &mut stats);
+        let _ = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
         assert_eq!(stats.elements_decoded, u64::from(MAX_ELEMENTS));
         assert_eq!(stats.truncations, 1, "{stats:?}");

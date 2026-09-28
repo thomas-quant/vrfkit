@@ -2,6 +2,7 @@
 //! produced for the same bytes.
 
 use super::*;
+use crate::test_bits::{BitWriter, hex};
 use vrf_bitio::BitReader;
 
 // -- Declarations ---------------------------------------------------------
@@ -62,7 +63,7 @@ fn owner_exclusive_player_info() -> Vec<Option<&'static str>> {
 /// C# output: [{RoundNumber:0, WinningTeam:"Red", WinningTeamRole:attacker, RoundResult:elimination}]
 #[test]
 fn round_results_row0_red_attacker_elimination() {
-    let data = hex_to_bytes("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
+    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
     let mut r = BitReader::with_bit_len(&data, 264).unwrap();
     let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
     assert_eq!(results.len(), 1);
@@ -76,7 +77,7 @@ fn round_results_row0_red_attacker_elimination() {
 /// C# output: [{RoundNumber:4, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:time_expired}]
 #[test]
 fn round_results_row4_blue_defender_time_expired() {
-    let data = hex_to_bytes("0a0abcd20a00000084d8eaca00000000007c0d048c300000");
+    let data = hex("0a0abcd20a00000084d8eaca00000000007c0d048c300000");
     let mut r = BitReader::with_bit_len(&data, 192).unwrap();
     let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
     assert_eq!(results.len(), 1);
@@ -90,7 +91,7 @@ fn round_results_row4_blue_defender_time_expired() {
 /// C# output: [{RoundNumber:6, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:defuse}]
 #[test]
 fn round_results_row6_blue_defender_defuse() {
-    let data = hex_to_bytes("0e0ebcd20a00000084d8eaca00000000007c0d048c100000");
+    let data = hex("0e0ebcd20a00000084d8eaca00000000007c0d048c100000");
     let mut r = BitReader::with_bit_len(&data, 192).unwrap();
     let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
     assert_eq!(results.len(), 1);
@@ -131,7 +132,7 @@ fn a_zero_bit_blob_is_an_error_for_every_decoder() {
 /// t=72684ms. Members sit at 81..=84 here; the 13.01 decoder read nothing.
 #[test]
 fn round_results_1302_round0() {
-    let data = hex_to_bytes("0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000");
+    let data = hex("0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000");
     let mut r = BitReader::with_bit_len(&data, 272).unwrap();
     let results = decode_round_results(&mut r, &bomb_game_state_1302()).unwrap();
     assert_eq!(results.len(), 1);
@@ -150,7 +151,7 @@ fn round_results_1302_round0() {
 /// match scores looked like a clean export.
 #[test]
 fn round_results_1302_bytes_under_1301_declaration_is_an_error() {
-    let data = hex_to_bytes("0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000");
+    let data = hex("0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000");
     let mut r = BitReader::with_bit_len(&data, 272).unwrap();
     let err = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap_err();
     assert!(
@@ -171,7 +172,7 @@ fn round_results_1302_bytes_under_1301_declaration_is_an_error() {
 /// the decoder is keyed on the declaration and not on either set of numbers.
 #[test]
 fn round_results_1301_bytes_under_1302_declaration_is_an_error() {
-    let data = hex_to_bytes("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
+    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
     let mut r = BitReader::with_bit_len(&data, 264).unwrap();
     let err = decode_round_results(&mut r, &bomb_game_state_1302()).unwrap_err();
     assert!(
@@ -184,7 +185,7 @@ fn round_results_1301_bytes_under_1302_declaration_is_an_error() {
 /// fallback set of handle numbers to guess with.
 #[test]
 fn round_results_with_no_declaration_is_an_error() {
-    let data = hex_to_bytes("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
+    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
     let mut r = BitReader::with_bit_len(&data, 264).unwrap();
     assert!(decode_round_results(&mut r, &[]).is_err());
 }
@@ -193,7 +194,7 @@ fn round_results_with_no_declaration_is_an_error() {
 /// error. This is the shape a renamed or added member takes.
 #[test]
 fn round_results_unknown_member_name_is_reported_by_name() {
-    let data = hex_to_bytes("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
+    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
     let mut r = BitReader::with_bit_len(&data, 264).unwrap();
     let mut declared = bomb_game_state_1301();
     declared[93] = Some("WinningTeamV2");
@@ -213,9 +214,7 @@ fn round_results_unknown_member_name_is_reported_by_name() {
 /// C# output: [{Index:0, LV:0, ALV:0, RepId:272}, {Index:1, LV:0, ALV:0, RepId:274}]
 #[test]
 fn team_economy_row0_initial_spawn() {
-    let data = hex_to_bytes(
-        "0402722021047440000000007640000000000004722025047440000000007640000000000000",
-    );
+    let data = hex("0402722021047440000000007640000000000004722025047440000000007640000000000000");
     let mut r = BitReader::with_bit_len(&data, 304).unwrap();
     let results = decode_team_economy(&mut r).unwrap();
     assert_eq!(results.len(), 2);
@@ -233,7 +232,7 @@ fn team_economy_row0_initial_spawn() {
 /// C# output: [{Index:0, LV:4350, ALV:870, RepId:null}, {Index:1, LV:4150, ALV:830, RepId:null}]
 #[test]
 fn team_economy_row1_round_start() {
-    let data = hex_to_bytes("04027440fe100000764066030000000474403610000076403e0300000000");
+    let data = hex("04027440fe100000764066030000000474403610000076403e0300000000");
     let mut r = BitReader::with_bit_len(&data, 240).unwrap();
     let results = decode_team_economy(&mut r).unwrap();
     assert_eq!(results.len(), 2);
@@ -251,7 +250,7 @@ fn team_economy_row1_round_start() {
 /// C# output: [{Index:0, LV:21200, ALV:4240}, {Index:1, LV:11600, ALV:2320}]
 #[test]
 fn team_economy_row2_midgame() {
-    let data = hex_to_bytes("04027440d052000076409010000000047440502d00007640100900000000");
+    let data = hex("04027440d052000076409010000000047440502d00007640100900000000");
     let mut r = BitReader::with_bit_len(&data, 240).unwrap();
     let results = decode_team_economy(&mut r).unwrap();
     assert_eq!(results.len(), 2);
@@ -270,7 +269,7 @@ fn team_economy_row2_midgame() {
 /// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:1900, EL:0}]
 #[test]
 fn round_infos_row0_end_of_round1() {
-    let data = hex_to_bytes("020252400000000054400000000056400000000058406c0700005a40000000000000");
+    let data = hex("020252400000000054400000000056400000000058406c0700005a40000000000000");
     let mut r = BitReader::with_bit_len(&data, 272).unwrap();
     let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
     assert_eq!(results.len(), 1);
@@ -379,13 +378,6 @@ fn round_infos_rejects_one_more_than_max_fields() {
 
 // -- Helpers --------------------------------------------------------------
 
-fn hex_to_bytes(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
-}
-
 fn base64_to_bytes(s: &str) -> Vec<u8> {
     // Minimal base64 decoder for tests (standard alphabet, with padding).
     const TABLE: [u8; 128] = {
@@ -427,47 +419,19 @@ fn base64_to_bytes(s: &str) -> Vec<u8> {
 
 // -- Unknown enum values --------------------------------------------------
 
-/// Write an Unreal IntPacked value into a bit vector.
-fn push_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-    loop {
-        let mut next = ((value & 0x7F) << 1) as u8;
-        value >>= 7;
-        if value != 0 {
-            next |= 1;
-        }
-        for i in 0..8 {
-            bits.push((next & (1 << i)) != 0);
-        }
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn pack_bits(bits: &[bool]) -> (Vec<u8>, u64) {
-    let mut bytes = vec![0u8; bits.len().div_ceil(8)];
-    for (i, &b) in bits.iter().enumerate() {
-        if b {
-            bytes[i >> 3] |= 1 << (i & 7);
-        }
-    }
-    (bytes, bits.len() as u64)
-}
-
 /// One `RoundResults` element carrying a single member at `handle`, whose
 /// payload is `width` bits holding `value`.
 fn round_results_one_member(handle: u32, value: u32, width: u32) -> (Vec<u8>, u64) {
-    let mut bits = Vec::new();
-    push_int_packed(&mut bits, 1); // element count
-    push_int_packed(&mut bits, 1); // encoded index -> round 0
-    push_int_packed(&mut bits, handle + 1);
-    push_int_packed(&mut bits, width);
-    for i in 0..width {
-        bits.push((value >> i) & 1 != 0);
-    }
-    push_int_packed(&mut bits, 0); // end of element
-    push_int_packed(&mut bits, 0); // end of array
-    pack_bits(&bits)
+    let mut bits = BitWriter::new();
+    bits.int_packed(1); // element count
+    bits.int_packed(1); // encoded index -> round 0
+    bits.int_packed(handle + 1);
+    bits.int_packed(width);
+    bits.bits(u64::from(value), width);
+    bits.int_packed(0); // end of element
+    bits.int_packed(0); // end of array
+    let (data, bit_len) = bits.finish();
+    (data, u64::from(bit_len))
 }
 
 /// An `AresTeamRole` value outside the declared variants must be reported, not
@@ -550,28 +514,24 @@ fn round_results_zero_width_enum_is_an_error_not_an_absent_field() {
 
 #[test]
 fn struct_fname_rejects_a_negative_instance_number() {
-    let mut fname = vec![false]; // inline, not hardcoded
-    for byte in 5i32
-        .to_le_bytes()
-        .into_iter()
-        .chain(*b"Blue\0")
-        .chain((-1i32).to_le_bytes())
-    {
-        for bit in 0..8 {
-            fname.push((byte >> bit) & 1 != 0);
-        }
+    // Inline (not hardcoded) "Blue" with instance number -1.
+    let mut fname = BitWriter::new();
+    fname.bits(0, 1).i32(5);
+    for byte in b"Blue\0" {
+        fname.bits(u64::from(*byte), 8);
     }
+    fname.i32(-1);
     // One element whose WinningTeam (handle 93 on 13.01) is that FName.
-    let mut bits = Vec::new();
-    push_int_packed(&mut bits, 1); // element count
-    push_int_packed(&mut bits, 1); // encoded index -> round 0
-    push_int_packed(&mut bits, 94);
-    push_int_packed(&mut bits, fname.len() as u32);
-    bits.extend(fname);
-    push_int_packed(&mut bits, 0); // end of element
-    push_int_packed(&mut bits, 0); // end of array
-    let (data, bit_len) = pack_bits(&bits);
-    let mut reader = BitReader::with_bit_len(&data, bit_len).unwrap();
+    let mut bits = BitWriter::new();
+    bits.int_packed(1); // element count
+    bits.int_packed(1); // encoded index -> round 0
+    bits.int_packed(94);
+    bits.int_packed(fname.bit_len());
+    bits.append(&fname);
+    bits.int_packed(0); // end of element
+    bits.int_packed(0); // end of array
+    let (data, bit_len) = bits.finish();
+    let mut reader = BitReader::with_bit_len(&data, u64::from(bit_len)).unwrap();
     let err = decode_round_results(&mut reader, &bomb_game_state_1301())
         .expect_err("the struct decoder must propagate invalid FName numbers");
     assert!(
@@ -588,17 +548,16 @@ fn struct_fname_rejects_a_negative_instance_number() {
 /// One `RoundInfos` element carrying a single member at `handle`, whose payload
 /// window is `width` bits holding `value` in its low 32.
 fn round_infos_one_member(handle: u32, value: i32, width: u32) -> (Vec<u8>, u64) {
-    let mut bits = Vec::new();
-    push_int_packed(&mut bits, 1); // element count
-    push_int_packed(&mut bits, 1); // encoded index -> element 0
-    push_int_packed(&mut bits, handle + 1);
-    push_int_packed(&mut bits, width);
-    for i in 0..width {
-        bits.push(i < 32 && (value >> i) & 1 != 0);
-    }
-    push_int_packed(&mut bits, 0); // end of element
-    push_int_packed(&mut bits, 0); // end of array
-    pack_bits(&bits)
+    let mut bits = BitWriter::new();
+    bits.int_packed(1); // element count
+    bits.int_packed(1); // encoded index -> element 0
+    bits.int_packed(handle + 1);
+    bits.int_packed(width);
+    bits.bits(u64::from(value as u32), width);
+    bits.int_packed(0); // end of element
+    bits.int_packed(0); // end of array
+    let (data, bit_len) = bits.finish();
+    (data, u64::from(bit_len))
 }
 
 /// A member that reads less than its declared window must fail, not export the

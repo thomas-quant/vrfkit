@@ -280,48 +280,7 @@ pub fn decode_abilities_and_buffs_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Write an Unreal IntPacked value into a bit vector.
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    /// Write a SerializedInt value with a given max.
-    fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max: u32) {
-        let mut written = 0u32;
-        let mut mask = 1u32;
-        while written.saturating_add(mask) < max {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
+    use crate::test_bits::BitWriter;
 
     /// Build a ClassNetCache stream with one RPC at handle 1, using a given
     /// function_count to determine the handle width.
@@ -334,13 +293,11 @@ mod tests {
     /// misaligned reads return large values that overrun the stream, so only
     /// the correct handle width walks cleanly.
     fn build_one_rpc_stream(function_count: u32, payload_bits: u32) -> (Vec<u8>, u32) {
-        let mut bits = Vec::new();
-        let handle_max = function_count.max(2);
-        write_serialized_int(&mut bits, 1, handle_max);
-        write_int_packed(&mut bits, payload_bits);
-        bits.extend(std::iter::repeat_n(true, payload_bits as usize));
-        let bit_count = bits.len() as u32;
-        (bits_to_bytes(&bits), bit_count)
+        BitWriter::new()
+            .serialized_int(1, function_count.max(2))
+            .int_packed(payload_bits)
+            .repeat(true, payload_bits as usize)
+            .finish()
     }
 
     /// A single-RPC payload at handle 1 should resolve to the minimum
@@ -386,19 +343,16 @@ mod tests {
     /// Multiple RPCs in one stream should all be recovered.
     #[test]
     fn multiple_rpcs() {
-        let mut bits = Vec::new();
-        let handle_max = 10u32;
-        // RPC 1: handle=3, payload=16 bits of 1s
-        write_serialized_int(&mut bits, 3, handle_max);
-        write_int_packed(&mut bits, 16);
-        bits.extend(std::iter::repeat_n(true, 16));
-        // RPC 2: handle=7, payload=8 bits of 1s
-        write_serialized_int(&mut bits, 7, handle_max);
-        write_int_packed(&mut bits, 8);
-        bits.extend(std::iter::repeat_n(true, 8));
-
-        let data = bits_to_bytes(&bits);
-        let bit_count = bits.len() as u32;
+        let (data, bit_count) = BitWriter::new()
+            // RPC 1: handle=3, payload=16 bits of 1s
+            .serialized_int(3, 10)
+            .int_packed(16)
+            .repeat(true, 16)
+            // RPC 2: handle=7, payload=8 bits of 1s
+            .serialized_int(7, 10)
+            .int_packed(8)
+            .repeat(true, 8)
+            .finish();
         let result = brute_force_function_count(&data, bit_count);
         assert!(result.is_some());
         let result = result.unwrap();
@@ -438,18 +392,12 @@ mod tests {
         trailing_bits: u32,
         trailing: u32,
     ) -> (Vec<u8>, u32) {
-        let mut bits = Vec::new();
-        bits.push(flag);
+        let mut bits = BitWriter::new();
+        bits.bits(u64::from(flag), 1);
         for &w in words {
-            for k in 0..32 {
-                bits.push((w >> k) & 1 != 0);
-            }
+            bits.bits(u64::from(w), 32);
         }
-        for k in 0..trailing_bits {
-            bits.push((trailing >> k) & 1 != 0);
-        }
-        let bit_count = bits.len() as u32;
-        (bits_to_bytes(&bits), bit_count)
+        bits.bits(u64::from(trailing), trailing_bits).finish()
     }
 
     /// A real-shape payload: flag(1) + 5 LE u32 words, no trailing. This is

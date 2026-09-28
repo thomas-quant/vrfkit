@@ -6,17 +6,8 @@
 //! the independent Python port that produces the valplay bundle.
 
 use super::*;
+use crate::test_bits::hex as decode_hex;
 use vrf_bitio::BitReader;
-
-/// Decode hex string to bytes (no external crate needed).
-fn decode_hex(hex: &str) -> Vec<u8> {
-    let clean: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(clean.len() % 2 == 0, "hex string must have even length");
-    (0..clean.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
-        .collect()
-}
 
 /// Helper to create a BitReader from a hex string, using only the specified
 /// number of bits.

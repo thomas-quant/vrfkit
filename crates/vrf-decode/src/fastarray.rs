@@ -152,60 +152,37 @@ pub fn decode_fast_array_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::BitWriter;
 
-    fn push(bits: &mut Vec<bool>, value: u64, width: u32) {
-        for k in 0..width {
-            bits.push((value >> k) & 1 != 0);
-        }
+    fn header(deletes: u32, changed: u32) -> BitWriter {
+        let mut bits = BitWriter::new();
+        bits.bits(1, 1).bits(8, 32).bits(5, 32);
+        bits.bits(u64::from(deletes), 32)
+            .bits(u64::from(changed), 32);
+        bits
     }
-    fn packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let more = value > 0x7f;
-            push(bits, u64::from(((value & 0x7f) << 1) | u32::from(more)), 8);
-            value >>= 7;
-            if !more {
-                break;
-            }
-        }
-    }
-    fn bytes(bits: &[bool]) -> Vec<u8> {
-        let mut out = vec![0; bits.len().div_ceil(8)];
-        for (i, b) in bits.iter().enumerate() {
-            if *b {
-                out[i / 8] |= 1 << (i % 8)
-            }
-        }
-        out
-    }
-    fn header(bits: &mut Vec<bool>, deletes: u32, changed: u32) {
-        push(bits, 1, 1);
-        push(bits, 8, 32);
-        push(bits, 5, 32);
-        push(bits, u64::from(deletes), 32);
-        push(bits, u64::from(changed), 32);
+
+    /// Decode the whole of `b` under `mode`.
+    fn decode(b: &BitWriter, mode: ChecksumMode) -> Option<FastArrayDelta> {
+        let (data, bit_count) = b.finish();
+        decode_fast_array_delta(&data, bit_count, mode)
     }
 
     #[test]
     fn deletion_only_closes_exactly() {
-        let mut b = Vec::new();
-        header(&mut b, 2, 0);
-        push(&mut b, 17, 32);
-        push(&mut b, 23, 32);
-        let d = decode_fast_array_delta(&bytes(&b), b.len() as u32, ChecksumMode::Absent).unwrap();
+        let mut b = header(2, 0);
+        b.bits(17, 32).bits(23, 32);
+        let d = decode(&b, ChecksumMode::Absent).unwrap();
         assert_eq!(d.deleted_replication_ids, vec![17, 23]);
-        assert_eq!(d.consumed_bits, b.len() as u32);
+        assert_eq!(d.consumed_bits, b.bit_len());
     }
     #[test]
     fn changed_fields_retain_exact_offsets() {
-        let mut b = Vec::new();
-        header(&mut b, 0, 1);
-        push(&mut b, 7, 32);
-        packed(&mut b, 3);
-        packed(&mut b, 5);
-        let offset = b.len() as u32;
-        push(&mut b, 0b10101, 5);
-        packed(&mut b, 0);
-        let d = decode_fast_array_delta(&bytes(&b), b.len() as u32, ChecksumMode::Absent).unwrap();
+        let mut b = header(0, 1);
+        b.bits(7, 32).int_packed(3).int_packed(5);
+        let offset = b.bit_len();
+        b.bits(0b10101, 5).int_packed(0);
+        let d = decode(&b, ChecksumMode::Absent).unwrap();
         assert_eq!(
             d.changed_items[0].fields,
             vec![RawField {
@@ -217,82 +194,57 @@ mod tests {
     }
     #[test]
     fn rejects_false_support_flag_truncation_and_suffix() {
-        let mut b = Vec::new();
-        header(&mut b, 0, 0);
-        let data = bytes(&b);
-        assert!(decode_fast_array_delta(&data, b.len() as u32 - 1, ChecksumMode::Absent).is_none());
-        b[0] = false;
-        assert!(
-            decode_fast_array_delta(&bytes(&b), b.len() as u32, ChecksumMode::Absent).is_none()
-        );
-        b[0] = true;
-        b.push(true);
-        assert!(
-            decode_fast_array_delta(&bytes(&b), b.len() as u32, ChecksumMode::Absent).is_none()
-        );
+        let mut b = header(0, 0);
+        let (data, bit_count) = b.finish();
+        assert!(decode_fast_array_delta(&data, bit_count - 1, ChecksumMode::Absent).is_none());
+        b.0[0] = false;
+        assert!(decode(&b, ChecksumMode::Absent).is_none());
+        b.0[0] = true;
+        b.0.push(true);
+        assert!(decode(&b, ChecksumMode::Absent).is_none());
     }
 
     #[test]
     fn rejects_negative_counts_and_count_overrun() {
-        let mut negative = Vec::new();
-        header(&mut negative, u32::MAX, 0);
-        assert!(
-            decode_fast_array_delta(
-                &bytes(&negative),
-                negative.len() as u32,
-                ChecksumMode::Absent
-            )
-            .is_none()
-        );
-        let mut overrun = Vec::new();
-        header(&mut overrun, 1, 0);
-        assert!(
-            decode_fast_array_delta(&bytes(&overrun), overrun.len() as u32, ChecksumMode::Absent)
-                .is_none()
-        );
+        assert!(decode(&header(u32::MAX, 0), ChecksumMode::Absent).is_none());
+        assert!(decode(&header(1, 0), ChecksumMode::Absent).is_none());
     }
 
     #[test]
     fn rejects_packed_overflow_and_unterminated_values() {
         for tail in [[1, 1, 1, 1, 32], [1, 1, 1, 1, 1]] {
-            let mut b = Vec::new();
-            header(&mut b, 0, 1);
-            push(&mut b, 7, 32);
+            let mut b = header(0, 1);
+            b.bits(7, 32);
             for byte in tail {
-                push(&mut b, byte, 8);
+                b.bits(byte, 8);
             }
-            assert!(
-                decode_fast_array_delta(&bytes(&b), b.len() as u32, ChecksumMode::Absent).is_none()
-            );
+            assert!(decode(&b, ChecksumMode::Absent).is_none());
         }
     }
 
     #[test]
     fn explicit_checksum_modes_are_distinct() {
-        let mut b = Vec::new();
-        header(&mut b, 0, 1);
-        push(&mut b, 7, 32);
-        push(&mut b, 1, 1);
-        packed(&mut b, 1);
-        packed(&mut b, 3);
-        push(&mut b, 5, 3);
-        packed(&mut b, 0);
-        let data = bytes(&b);
-        assert!(decode_fast_array_delta(&data, b.len() as u32, ChecksumMode::Present).is_some());
-        assert!(decode_fast_array_delta(&data, b.len() as u32, ChecksumMode::Absent).is_none());
+        let mut b = header(0, 1);
+        b.bits(7, 32)
+            .bits(1, 1)
+            .int_packed(1)
+            .int_packed(3)
+            .bits(5, 3);
+        b.int_packed(0);
+        assert!(decode(&b, ChecksumMode::Present).is_some());
+        assert!(decode(&b, ChecksumMode::Absent).is_none());
     }
 
     #[test]
     fn every_bit_truncation_of_changed_fixture_is_rejected() {
-        let mut b = Vec::new();
-        header(&mut b, 0, 1);
-        push(&mut b, 7, 32);
-        packed(&mut b, 3);
-        packed(&mut b, 5);
-        push(&mut b, 21, 5);
-        packed(&mut b, 0);
-        let data = bytes(&b);
-        for bit_count in 0..b.len() as u32 {
+        let mut b = header(0, 1);
+        b.bits(7, 32)
+            .int_packed(3)
+            .int_packed(5)
+            .bits(21, 5)
+            .int_packed(0);
+        let (data, full) = b.finish();
+        for bit_count in 0..full {
             let short = &data[..(bit_count as usize).div_ceil(8)];
             assert!(
                 decode_fast_array_delta(short, bit_count, ChecksumMode::Absent).is_none(),
@@ -301,6 +253,6 @@ mod tests {
         }
         let mut padded = data.clone();
         padded.push(0);
-        assert!(decode_fast_array_delta(&padded, b.len() as u32, ChecksumMode::Absent).is_none());
+        assert!(decode_fast_array_delta(&padded, full, ChecksumMode::Absent).is_none());
     }
 }
