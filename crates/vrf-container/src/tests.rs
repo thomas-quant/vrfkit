@@ -6,7 +6,7 @@ use super::*;
 // Test helpers -- synthetic byte builders mirroring the C# test patterns
 // ===============================================================================
 
-mod helpers {
+pub(crate) mod helpers {
     pub fn add_u16(buf: &mut Vec<u8>, v: u16) {
         buf.extend_from_slice(&v.to_le_bytes());
     }
@@ -36,9 +36,9 @@ mod helpers {
     /// Serialise an FString in its UTF-16 form: a negative length counting
     /// code units (terminator included), then little-endian UTF-16.
     ///
-    /// Only the Event chunk tests need this form, so it is unused when the
-    /// `event` feature is off rather than genuinely dead.
-    #[cfg_attr(not(feature = "event"), allow(dead_code))]
+    /// Only the Event and Checkpoint chunk tests need this form, so it is
+    /// unused when both features are off rather than genuinely dead.
+    #[cfg_attr(not(any(feature = "event", feature = "checkpoint")), allow(dead_code))]
     pub fn add_fstring_utf16(buf: &mut Vec<u8>, s: &str) {
         let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0u16)).collect();
         add_i32(buf, -(units.len() as i32));
@@ -47,79 +47,58 @@ mod helpers {
         }
     }
 
-    pub fn add_guid(buf: &mut Vec<u8>, a: u32, b: u32, c: u32, d: u32) {
-        add_u32(buf, a);
-        add_u32(buf, b);
-        add_u32(buf, c);
-        add_u32(buf, d);
+    pub fn add_guid(buf: &mut Vec<u8>, guid: [u32; 4]) {
+        for word in guid {
+            add_u32(buf, word);
+        }
     }
 
-    pub fn add_byte_array(buf: &mut Vec<u8>, data: &[u8]) {
-        add_i32(buf, data.len() as i32);
-        buf.extend_from_slice(data);
+    /// The `LocalFileReplay` custom-version GUID, the one the info parser pins.
+    pub const LOCAL_REPLAY: [u32; 4] = [0x95A4_F03E, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9];
+
+    /// The replay info fields a test varies. [`replay_info`] fixes the rest:
+    /// file version 7, 60000 ms, network version 19, changelist 1234, not
+    /// live, uncompressed, no encryption key.
+    pub struct Info {
+        pub magic: u32,
+        pub custom_versions: Vec<([u32; 4], i32)>,
+        pub friendly_name: &'static str,
+        pub timestamp: i64,
+        pub encrypted: bool,
     }
 
-    /// Build a minimal replay info section with the standard custom version.
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_replay_info(
-        magic: u32,
-        file_version: u32,
-        include_custom_version: bool,
-        custom_version_value: i32,
-        length_in_ms: i32,
-        network_version: u32,
-        changelist: u32,
-        friendly_name: &str,
-        is_live: bool,
-        timestamp: i64,
-        compressed: bool,
-        encrypted: bool,
-        encryption_key: &[u8],
-    ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32(&mut buf, magic);
-        add_u32(&mut buf, file_version);
-
-        if file_version >= 7 {
-            if include_custom_version {
-                add_i32(&mut buf, 1);
-                add_guid(&mut buf, 0x95A4_F03E, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9);
-                add_i32(&mut buf, custom_version_value);
-            } else {
-                add_i32(&mut buf, 0);
+    /// A valid replay info: the file magic and `LocalFileReplay` version 7.
+    impl Default for Info {
+        fn default() -> Self {
+            Info {
+                magic: 0x43F4_EFDD,
+                custom_versions: vec![(LOCAL_REPLAY, 7)],
+                friendly_name: "Match",
+                timestamp: 42,
+                encrypted: false,
             }
         }
-
-        add_i32(&mut buf, length_in_ms);
-        add_u32(&mut buf, network_version);
-        add_u32(&mut buf, changelist);
-        add_fstring(&mut buf, friendly_name);
-        add_u32(&mut buf, if is_live { 1 } else { 0 });
-        add_i64(&mut buf, timestamp);
-        add_u32(&mut buf, if compressed { 1 } else { 0 });
-        add_u32(&mut buf, if encrypted { 1 } else { 0 });
-        add_byte_array(&mut buf, encryption_key);
-
-        buf
     }
 
-    /// Default replay info: valid, uncompressed, unencrypted.
-    pub fn default_replay_info() -> Vec<u8> {
-        build_replay_info(
-            0x43F4_EFDD,
-            7,
-            true,
-            7,
-            60000,
-            19,
-            1234,
-            "Match",
-            false,
-            42,
-            false,
-            false,
-            &[],
-        )
+    pub fn replay_info(info: &Info) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, info.magic);
+        add_u32(&mut buf, 7); // file version
+        add_i32(&mut buf, info.custom_versions.len() as i32);
+        for &(guid, version) in &info.custom_versions {
+            add_guid(&mut buf, guid);
+            add_i32(&mut buf, version);
+        }
+        add_i32(&mut buf, 60000); // length_in_ms
+        add_u32(&mut buf, 19); // network version
+        add_u32(&mut buf, 1234); // changelist
+        add_fstring(&mut buf, info.friendly_name);
+        add_u32(&mut buf, 0); // is_live
+        add_i64(&mut buf, info.timestamp);
+        add_u32(&mut buf, 0); // compressed
+        add_u32(&mut buf, u32::from(info.encrypted));
+        add_i32(&mut buf, 0); // encryption key length
+        buf
     }
 
     /// Build a raw chunk (type + size + payload).
@@ -133,15 +112,7 @@ mod helpers {
 
     /// Build a valid header chunk payload.
     pub fn build_header_payload() -> Vec<u8> {
-        build_header_payload_custom(0, &[3, 0, 0, 0, 49, 56, 0])
-    }
-
-    pub fn build_header_payload_custom(custom_version_count: i32, valorant_skip: &[u8]) -> Vec<u8> {
-        build_header_payload_for_branch(
-            "++Ares-Core+release-12.10",
-            custom_version_count,
-            valorant_skip,
-        )
+        build_header_payload_for_branch("++Ares-Core+release-12.10", 0, &[3, 0, 0, 0, 49, 56, 0])
     }
 
     pub fn build_header_payload_for_branch(
@@ -160,7 +131,10 @@ mod helpers {
         add_u32(&mut buf, 0x1122_3344); // NetworkChecksum
         add_u32(&mut buf, 32); // EngineNetworkProtocolVersion
         add_u32(&mut buf, 0x5566_7788); // GameNetworkProtocolVersion
-        add_guid(&mut buf, 0x0011_2233, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF);
+        add_guid(
+            &mut buf,
+            [0x0011_2233, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF],
+        );
 
         // ReplayVersion
         add_u16(&mut buf, 12); // Major
@@ -212,7 +186,6 @@ mod helpers {
 #[test]
 fn info_empty_input_rejected() {
     let result = info::parse_replay_info(&[]);
-    assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
         ContainerError::Truncated { .. }
@@ -221,21 +194,10 @@ fn info_empty_input_rejected() {
 
 #[test]
 fn info_bad_magic_rejected() {
-    let data = helpers::build_replay_info(
-        0xDEAD_BEEF,
-        7,
-        true,
-        7,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        magic: 0xDEAD_BEEF,
+        ..Default::default()
+    });
     let result = info::parse_replay_info(&data);
     assert!(matches!(
         result.unwrap_err(),
@@ -262,21 +224,10 @@ fn info_bad_file_version_rejected() {
 
 #[test]
 fn info_missing_custom_version_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        false,
-        7,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        custom_versions: Vec::new(),
+        ..Default::default()
+    });
     let result = info::parse_replay_info(&data);
     assert!(matches!(
         result.unwrap_err(),
@@ -285,51 +236,18 @@ fn info_missing_custom_version_rejected() {
 }
 
 #[test]
-fn info_newer_custom_version_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        8,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
-    let result = info::parse_replay_info(&data);
-    assert!(matches!(
-        result.unwrap_err(),
-        ContainerError::UnsupportedLocalReplayVersion { actual: 8 }
-    ));
-}
-
-#[test]
-fn info_older_custom_version_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        6,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        false,
-        &[],
-    );
-    let result = info::parse_replay_info(&data);
-    assert!(matches!(
-        result.unwrap_err(),
-        ContainerError::UnsupportedLocalReplayVersion { actual: 6 }
-    ));
+fn info_newer_or_older_custom_version_rejected() {
+    for version in [8, 6] {
+        let data = helpers::replay_info(&helpers::Info {
+            custom_versions: vec![(helpers::LOCAL_REPLAY, version)],
+            ..Default::default()
+        });
+        let result = info::parse_replay_info(&data);
+        assert!(matches!(
+            result.unwrap_err(),
+            ContainerError::UnsupportedLocalReplayVersion { actual } if actual == version
+        ));
+    }
 }
 
 /// A custom-version list carrying a GUID the parser does not recognise must
@@ -342,50 +260,25 @@ fn info_older_custom_version_rejected() {
 /// and asserts the info still parses.
 #[test]
 fn info_accepts_unknown_custom_version_guids() {
-    let mut buf = Vec::new();
-    helpers::add_u32(&mut buf, 0x43F4_EFDD); // magic
-    helpers::add_u32(&mut buf, 7); // file version
-    // Two custom versions: an unknown one, then LOCAL_REPLAY.
-    helpers::add_i32(&mut buf, 2);
-    // Unknown GUID with an arbitrary version that must be ignored.
-    helpers::add_guid(&mut buf, 0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444);
-    helpers::add_i32(&mut buf, 999);
-    // The required LocalFileReplay GUID at its required version.
-    helpers::add_guid(&mut buf, 0x95A4_F03E, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9);
-    helpers::add_i32(&mut buf, 7);
-    // Summary fields.
-    helpers::add_i32(&mut buf, 60000); // length_in_ms
-    helpers::add_u32(&mut buf, 19); // network version
-    helpers::add_u32(&mut buf, 1234); // changelist
-    helpers::add_fstring(&mut buf, "Match");
-    helpers::add_u32(&mut buf, 0); // is_live
-    helpers::add_i64(&mut buf, 42); // timestamp
-    helpers::add_u32(&mut buf, 0); // compressed
-    helpers::add_u32(&mut buf, 0); // encrypted
-    helpers::add_byte_array(&mut buf, &[]); // encryption key
-
-    let (info, _offset) = info::parse_replay_info(&buf).unwrap();
+    let data = helpers::replay_info(&helpers::Info {
+        custom_versions: vec![
+            ([0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444], 999),
+            (helpers::LOCAL_REPLAY, 7),
+        ],
+        ..Default::default()
+    });
+    let (info, _offset) = info::parse_replay_info(&data).unwrap();
     assert_eq!(info.length_in_ms, 60000);
     assert_eq!(info.friendly_name, "Match");
 }
 
 #[test]
 fn info_valid_parses_summary() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        7,
-        60000,
-        19,
-        1234,
-        "Match  ",
-        false,
-        123456789,
-        false,
-        false,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        friendly_name: "Match  ",
+        timestamp: 123456789,
+        ..Default::default()
+    });
     let (info, _offset) = info::parse_replay_info(&data).unwrap();
     assert_eq!(info.length_in_ms, 60000);
     assert_eq!(info.network_version, 19);
@@ -400,21 +293,10 @@ fn info_valid_parses_summary() {
 
 #[test]
 fn info_completed_encrypted_without_key_rejected() {
-    let data = helpers::build_replay_info(
-        0x43F4_EFDD,
-        7,
-        true,
-        7,
-        60000,
-        19,
-        1234,
-        "R",
-        false,
-        42,
-        false,
-        true,
-        &[],
-    );
+    let data = helpers::replay_info(&helpers::Info {
+        encrypted: true,
+        ..Default::default()
+    });
     let result = info::parse_replay_info(&data);
     assert!(matches!(
         result.unwrap_err(),
@@ -478,6 +360,8 @@ fn header_valid_parses_all_fields() {
     assert_eq!(header.platform, "Windows");
     assert_eq!(header.build_config, 7);
     assert_eq!(header.build_target_type, 3);
+    // Ends exactly where the layout does, so no residual is reported.
+    assert_eq!(header.trailing_bytes, 0);
 }
 
 /// See `ReplayHeader::trailing_bytes`'s own doc for why a header extension is
@@ -488,24 +372,6 @@ fn header_trailing_bytes_are_reported_not_discarded() {
     payload.extend_from_slice(&[0xAA; 5]);
     let header = header::parse_replay_header(&payload).unwrap();
     assert_eq!(header.trailing_bytes, 5);
-}
-
-/// A header that ends exactly where the layout does reports zero, so the
-/// residual cannot be mistaken for normal framing slack.
-#[test]
-fn header_exact_payload_reports_no_trailing_bytes() {
-    let payload = helpers::build_header_payload();
-    let header = header::parse_replay_header(&payload).unwrap();
-    assert_eq!(header.trailing_bytes, 0);
-}
-
-#[test]
-fn header_alternate_valorant_skip_bytes() {
-    // 12.11 style: [2, 0, 0, 0, 57, 0]
-    let payload = helpers::build_header_payload_custom(0, &[2, 0, 0, 0, 57, 0]);
-    let header = header::parse_replay_header(&payload).unwrap();
-    assert_eq!(header.replay_version.branch, "++Ares-Core+release-12.10");
-    assert_eq!(header.ue4_version, 1001);
 }
 
 #[test]
@@ -535,7 +401,12 @@ fn header_legacy_builds_have_no_valorant_skip_field() {
 fn header_skip_field_starts_at_12_06() {
     for build in ["12.06", "12.07", "12.08", "12.09", "12.10", "13.06"] {
         let branch = format!("++Ares-Core+release-{build}");
-        for skip in [&[0, 0, 0, 0][..], &[3, 0, 0, 0, 49, 56, 0][..]] {
+        // The middle shape is the one measured on 12.11.
+        for skip in [
+            &[0, 0, 0, 0][..],
+            &[2, 0, 0, 0, 57, 0][..],
+            &[3, 0, 0, 0, 49, 56, 0][..],
+        ] {
             let payload = helpers::build_header_payload_for_branch(&branch, 3, skip);
             let header = header::parse_replay_header(&payload).unwrap();
             assert_eq!(header.ue4_version, 1001, "{build}");
@@ -598,18 +469,6 @@ fn chunk_iter_empty_returns_none() {
 }
 
 #[test]
-fn chunk_iter_single_chunk() {
-    let payload = [0xAAu8, 0xBB];
-    let chunk_data = helpers::build_chunk(1, &payload); // ReplayData
-    let mut iter = ChunkIterator::new(&chunk_data, 0);
-    let chunk = iter.next_chunk().unwrap().unwrap();
-    assert_eq!(chunk.chunk_type, ChunkType::ReplayData);
-    assert_eq!(chunk.size_in_bytes, 2);
-    assert_eq!(chunk.data_offset, 8);
-    assert!(iter.next_chunk().unwrap().is_none());
-}
-
-#[test]
 fn chunk_iter_multiple_chunks() {
     let mut data = Vec::new();
     data.extend_from_slice(&helpers::build_chunk(0, &[0x11])); // Header
@@ -621,14 +480,17 @@ fn chunk_iter_multiple_chunks() {
     let c0 = iter.next_chunk().unwrap().unwrap();
     assert_eq!(c0.chunk_type, ChunkType::Header);
     assert_eq!(c0.size_in_bytes, 1);
+    assert_eq!(c0.data_offset, 8);
 
     let c1 = iter.next_chunk().unwrap().unwrap();
     assert_eq!(c1.chunk_type, ChunkType::ReplayData);
     assert_eq!(c1.size_in_bytes, 2);
+    assert_eq!(c1.data_offset, 17);
 
     let c2 = iter.next_chunk().unwrap().unwrap();
     assert_eq!(c2.chunk_type, ChunkType::Event);
     assert_eq!(c2.size_in_bytes, 0);
+    assert_eq!(c2.data_offset, 27);
 
     assert!(iter.next_chunk().unwrap().is_none());
 }
@@ -690,7 +552,7 @@ fn chunk_type_unknown_preserved() {
 
 #[test]
 fn preamble_valid_file() {
-    let mut data = helpers::default_replay_info();
+    let mut data = helpers::replay_info(&helpers::Info::default());
     let header_payload = helpers::build_header_payload();
     data.extend_from_slice(&helpers::build_chunk(0, &header_payload));
     // The chunks after the header start here.
@@ -709,7 +571,7 @@ fn preamble_valid_file() {
 
 #[test]
 fn preamble_unknown_chunk_before_header_rejected() {
-    let mut data = helpers::default_replay_info();
+    let mut data = helpers::replay_info(&helpers::Info::default());
     let unknown = ChunkType::Unknown(0xFFFF_FFFF);
     data.extend_from_slice(&helpers::build_chunk(unknown.to_raw(), &[0x01, 0x02]));
     let header_payload = helpers::build_header_payload();
@@ -723,7 +585,7 @@ fn preamble_unknown_chunk_before_header_rejected() {
 
 #[test]
 fn preamble_data_before_header_rejected() {
-    let mut data = helpers::default_replay_info();
+    let mut data = helpers::replay_info(&helpers::Info::default());
     // ReplayData chunk before Header
     data.extend_from_slice(&helpers::build_chunk(1, &[0xDE; 16]));
 
@@ -737,7 +599,7 @@ fn preamble_data_before_header_rejected() {
 #[test]
 fn preamble_recognized_non_header_chunks_are_not_silently_skipped() {
     for chunk_type in [ChunkType::Checkpoint, ChunkType::Event] {
-        let mut data = helpers::default_replay_info();
+        let mut data = helpers::replay_info(&helpers::Info::default());
         data.extend_from_slice(&helpers::build_chunk(chunk_type.to_raw(), &[0xAB]));
         data.extend_from_slice(&helpers::build_chunk(
             ChunkType::Header.to_raw(),
@@ -754,7 +616,7 @@ fn preamble_recognized_non_header_chunks_are_not_silently_skipped() {
 
 #[test]
 fn fstring_length_and_encoding_errors_keep_their_typed_source() {
-    let valid = helpers::default_replay_info();
+    let valid = helpers::replay_info(&helpers::Info::default());
     let name_offset = valid
         .windows(b"Match\0".len())
         .position(|window| window == b"Match\0")
@@ -823,7 +685,7 @@ fn a_compressed_archive_with_the_decoder_reaches_the_codec() {
 
 #[test]
 fn preamble_no_header_chunk_rejected() {
-    let data = helpers::default_replay_info();
+    let data = helpers::replay_info(&helpers::Info::default());
     // No chunks at all after info
     let result = parse_preamble(&data);
     assert!(matches!(

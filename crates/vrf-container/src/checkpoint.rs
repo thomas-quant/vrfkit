@@ -186,22 +186,14 @@ pub fn decompress_checkpoint_with_trailing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::helpers::add_fstring_utf16;
 
-    /// UTF-16LE with a negative length, which is how every corpus checkpoint
-    /// string arrives.
-    fn push_fstring(out: &mut Vec<u8>, s: &str) {
-        let units: Vec<u16> = s.encode_utf16().chain(core::iter::once(0)).collect();
-        out.extend_from_slice(&(-(units.len() as i32)).to_le_bytes());
-        for u in units {
-            out.extend_from_slice(&u.to_le_bytes());
-        }
-    }
-
+    /// The strings are UTF-16, as every corpus checkpoint string is.
     fn build(archive: &[u8], trailing: usize) -> Vec<u8> {
         let mut out = Vec::new();
-        push_fstring(&mut out, "checkpoint0");
-        push_fstring(&mut out, "checkpoint");
-        push_fstring(&mut out, "1");
+        add_fstring_utf16(&mut out, "checkpoint0");
+        add_fstring_utf16(&mut out, "checkpoint");
+        add_fstring_utf16(&mut out, "1");
         out.extend_from_slice(&47u32.to_le_bytes());
         out.extend_from_slice(&47u32.to_le_bytes());
         out.extend_from_slice(&(archive.len() as i32).to_le_bytes());
