@@ -101,6 +101,11 @@ validation found a counted failure, `2` there was nothing to validate (no Replay
 blocks). Those are three different outcomes and are kept apart deliberately --
 a file this command cannot read must not be reported as a file that passed.
 
+`ReplayData unread` (`replay_data_trailing_bytes` in the manifest and the diag
+JSON) counts ReplayData bytes no reader consumed: an outer chunk longer than
+its inner size, and archive bytes the Oodle codec never read. Any nonzero
+count fails the verdict.
+
 The oracle walks the **ReplayData stream only**. Checkpoint chunks carry their
 own replication framing and are not covered by this verdict; the count above
 says how many were skipped. Use `export --checkpoints` to decode them.
@@ -177,9 +182,15 @@ for the ReplayData verdict. Ordinary exports do not enable this aggregation.
 Parquet export.
 
 ```bash
-vrfkit export replay.vrf --out out/
-vrfkit export replay.vrf --out out/ --checkpoints
+vrfkit export replay.vrf --out out/replay
+vrfkit export replay.vrf --out out/replay --checkpoints
 ```
+
+`--out` must be new, empty, or hold only what an export writes (the thirteen
+tables and `manifest.json`). Anything else in it -- the replay itself, a
+subdirectory, another tool's output, `desktop.ini` -- makes `export` exit 1
+before decoding and name what it found: publishing replaces the whole
+directory, which would delete them.
 
 `--checkpoints` reads the Checkpoint chunks as well and **additionally** writes
 `checkpoint_fields.parquet`, `checkpoint_actors.parquet`,
@@ -199,7 +210,10 @@ directory, `.<out>.vrfkit-staging-<pid>-<n>`, and only once the manifest --
 the last file written -- is complete is that directory renamed to `--out`. A
 prior `--out` is moved aside to `.<out>.vrfkit-previous-<pid>-<n>` for the
 length of that rename and deleted after it. `--out` therefore always holds
-either the previous complete export or the new one, never a mixture.
+either the previous complete export or the new one, never a mixture. If
+something an export does not write appeared in `--out` while it ran, the
+moved-aside copy is kept instead of deleted, and a `warning:` names it and
+what it holds.
 
 - **An error during the run** removes the staging directory and leaves
   `--out` as it was. A failed publication names the step, the paths, and
@@ -214,8 +228,10 @@ either the previous complete export or the new one, never a mixture.
   such sibling before it starts, and deletes nothing: a staging directory
   may belong to an export that is still running, and a `previous` sibling
   beside a missing `--out` may be the only copy of that output (the warning
-  says so). Delete a leftover yourself once no export to that destination is
-  running, or move a `previous` sibling elsewhere to keep it.
+  says so). Beside an existing `--out`, the warning names anything in a
+  `previous` sibling that an export does not write. Delete a leftover
+  yourself once no export to that destination is running, or move a
+  `previous` sibling elsewhere to keep it.
 - **The corpus tools never read a leftover as an export.**
   `audit_match_observations.py`, `validate_type_evidence.py`,
   `summarize_value_coverage.py` and `summarize_unresolved_fields.py` skip
@@ -666,10 +682,8 @@ Take only the layer you need. Every crate is `#![forbid(unsafe_code)]`, and
 ZSTD is deliberately *not* feature-gated out -- every writer picks it, so
 disabling it would produce files this crate could not explain.
 
-CI compiles every core-only and singleton feature listed in this table, plus
-workspace all-features/all-targets, the standalone probe tool, and strict
-rustdoc. The exact copy-paste matrix is in
-[`CONTRIBUTING.md`](../CONTRIBUTING.md#before-you-open-a-pr).
+CI compiles every core-only and singleton feature listed in this table; the
+commands are in [`CONTRIBUTING.md`](../CONTRIBUTING.md#before-you-open-a-pr).
 
 ---
 
@@ -691,11 +705,11 @@ needs it.
 | `extract_golden.py` | `crates/vrf-transform/tests/data/golden_vectors.rs` |
 | `extract_equippables.py` | `tools/equippable_table.py` from the vendored `third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs`; `--check` runs in CI. The names are the C# table's: the 13.06 game calls `CompactPistol_C` "Bandit", not "Compact Pistol". Left as generated on purpose -- the generator's docstring says why |
 
-**Order matters:** `extract_descriptors.py` -> `apply_type_corrections.py` ->
-`cargo fmt`. The corrections script works on both the just-generated single-line
-form and the rustfmt form, but some patterns stop matching after `cargo fmt`. So
-the script does not trust its own apply count -- it **re-verifies the final
-state after applying** and fails if it disagrees.
+Run `extract_descriptors.py` -> `apply_type_corrections.py` -> `cargo fmt`,
+the order CI runs. The corrections key on each entry's own group, field and
+type, so they rewrite the generator's one-line form and the rustfmt form
+alike; the script **re-verifies the final state after applying** rather than
+trusting its apply count, and fails if the two disagree.
 
 ```bash
 python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
@@ -709,32 +723,14 @@ python tools/apply_type_corrections.py --check   # verify only
 CI runs the extract, apply and fmt lines on every push and fails if
 `table.rs` then differs from the committed file.
 
-Those 219 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
-subset absent from the vendored C# descriptor input (`third_party/vrp`).
-
-The `ADDITIONS` pass inserts items the pinned C# input is **silent on**. There are
-currently 142 of them, and every one is admitted on wire evidence written into the
-comment above the list -- bit width, value range, distribution -- and nothing else.
-The original three still show the bar: `BaseTeamState.LoadoutValue` /
-`AverageLoadoutValue` (26-I, where the reference declares the type of the same
-property and only moves the group) and `BombGameState.ChosenCeremonyForRound`
-(section 32, wire evidence only). Broadening it without evidence voids the very
-reason these additions are allowed -- read archive/PROJECT_STATUS.md 26-I and 32
-first, and read the "Deliberately NOT added" note in the same comment, which
-records the fields that failed the bar and why.
-
-Both counts above are measured, not maintained by hand. `check_docs.py` reads the
-204 against `expectation_count(table.rs)`, so a stale one is caught -- but
-**nothing checks the `ADDITIONS` figure**, which is why it sat at 70 while the
-list held 73. Re-measure it by importing the module rather than counting the
-source by eye (`tools/` has to be on the path; the module imports `atomic_io`
-from beside itself):
-
-```bash
-python -c "import importlib.util,sys; sys.path.insert(0,'tools'); \
-spec=importlib.util.spec_from_file_location('atc','tools/apply_type_corrections.py'); \
-m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m.ADDITIONS))"
-```
+Those 219 corrections are the live expectation set the script re-verifies.
+`ADDITIONS` is the subset the vendored C# input (`third_party/vrp`) is
+**silent on**: currently 142 of them, each admitted on wire evidence recorded
+at its entry in `apply_type_corrections.py`, under the bar stated above the
+list, which also names the fields that failed it. The first three
+(`BaseTeamState.LoadoutValue` / `AverageLoadoutValue` and
+`BombGameState.ChosenCeremonyForRound`) are archive/PROJECT_STATUS.md 26-I
+and 32. `check_docs.py` checks both figures.
 
 ### Validation
 
@@ -745,7 +741,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `check_corpus_baseline.py` | Per-build corpus baseline |
 | `check_export_baseline.py` | Export counters + per-file rows/bytes/SHA-256 content identity; with `--checkpoints`, also every checkpoint GUID path against the main stream's own declaration of that GUID ([method](CHECKPOINT_PATH_RESOLUTION.md#cross-check-against-the-main-stream)) |
 | `check_baseline_schemas.py` | All committed baseline schemas, measured SHA-256 hashes, and cross-file replay/counter/table identities. |
-| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads and movement-section tails -- the same zero-required counters as `verify_build_corpus.py` -- and fails when a work counter behind them (decoded rows, struct blobs, array elements and fields, movement rows) never moves; the truncated-RPC gates, the unwalked-CNC gates and the checkpoint movement gates have no work counter and are printed as unbacked (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
+| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads and movement-section tails -- the same zero-required counters as `verify_build_corpus.py` -- and fails when a work counter behind them (decoded rows, struct blobs, array elements and fields, movement rows) never moves; the truncated-RPC gates, the unwalked-CNC gates, the main pass's sized movement-tail gate and the checkpoint movement gates have no work counter and are printed as unbacked (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
 | `corpus_scan.py` | Not a check -- the `.vrf` discovery `validate_corpus.py` and `check_decode_errors_corpus.py` share, so the two can no longer glob a directory two different ways and disagree about what "the corpus" is without saying so. Non-recursive by default; read its docstring for why. |
 | `export_scan.py` | Not a check -- the export discovery the tools that read a directory of exports share: it names the staging and backup directories an interrupted `vrfkit export` leaves behind ([section 2](#if-an-export-is-interrupted)), so none of those tools can count one as an export. A Python test reads the names back out of the Rust code that creates them. |
 | `check_component_remaps.py` | Whether each component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. Fails, too, when an entry of the Rust table does not parse, since that pair would otherwise go unchecked. Re-derive a broken or renamed pair with `extract_component_classes` ([below](#reading-the-installed-game)). |
@@ -789,11 +785,11 @@ python tools/check_docs.py --fast    # skip the count comparison
 
 `tools/extract_component_classes/` is a standalone Rust tool -- not a
 workspace member, with its own lockfile -- and the only thing in this repo that
-reads game files rather than replays. It lists the
-class of every component template in an installed game's IoStore containers,
-which is where `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs`
-comes from. It opens the files for reading only, shares them with every other
-handle, and writes nothing except `--out`.
+reads game files rather than replays. It lists the class of every component
+template in an installed game's IoStore containers, which is where
+`KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs` comes from.
+It opens the files for reading only, shares them with every other handle, and
+writes nothing except `--out`.
 
 ```bash
 cargo +1.86.0 build --release --manifest-path tools/extract_component_classes/Cargo.toml --locked
@@ -813,13 +809,16 @@ package), `export`, `outer`, `class_ref` and `container`. `--kind` keeps one
 shape; `--name` (repeatable) keeps named instances and reports the ones not
 found. Anything that cannot be resolved prints as `?`.
 
-The summary goes to stderr and prints every counter, zeros included, with each
-container's id, size and modification time. Exit 0 means every package was read
-and every self-check held -- each rebuilt script path hashes back to the index
-the game stores, each package name to its chunk id; 1 means something could not
-be read or a check failed (the readable rows are still written); 2 is a usage or
-setup error. The legacy `.pak` files beside the containers have encrypted
-indexes and are not read; the summary lists them.
+The summary goes to stderr and prints every counter, zeros included -- among
+them `indexed_files_dropped`, directory-index files that name no chunk -- and
+each container's id, size and modification time, `global` included; a size or
+time that cannot be read prints as `?` (`null` in JSON). Exit 0 means every
+package was read, each compressed block to its last byte, and every self-check
+held -- each rebuilt script path hashes back to the index the game stores, each
+package name to its chunk id; 1 means something could not be read or a check
+failed (the readable rows are still written); 2 is a usage or setup error. The
+legacy `.pak` files beside the containers have encrypted indexes and are not
+read; the summary lists them.
 
 Procedure and what the output does and does not establish:
 [`DATA.md`](DATA.md#reading-component-classes-out-of-the-game).
@@ -888,7 +887,10 @@ names the shape; valplay's resume marker records it and rebuilds when it moves.
 
 `losses` carries every counter, zero included, so a clean conversion reads as
 zeros rather than as missing keys; the console summary prints only the ones
-that fired. `non_finite_movement_rows` counts movement lines holding a
+that fired. `property_key_collisions` counts property values a same-named row
+of the same event overwrote -- rows the export tells apart only by `handle`, so
+the lost value is a different property, not an older copy (24,060 on
+02d4d478). `non_finite_movement_rows` counts movement lines holding a
 non-finite position, velocity, yaw or pitch. Those are written `Infinity` /
 `-Infinity` / `NaN`, as every non-finite float in the bundle is spelled: Python's
 `json` reads them, a strict parser such as orjson rejects the line. None occurs
@@ -1115,7 +1117,7 @@ semantic evidence.
 |---|---|
 | `analyze_coverage.py` | Coverage analysis |
 | `extract_ability_stats.py` | Validates a build-scoped Statistic/FText dictionary from exact cast/effect array slots, with main and checkpoint observations separate. Dictionaries exist for the measured builds 13.01, 13.02, 13.04, 13.05 and 13.06; any other build's mappings are `unknown_build`. Unknown IDs, changed names, missing partners and conflicts remain visible and return a nonzero exit. Counts are snapshots, not casts. |
-| `extract_kill_observations.py` | Exports main and checkpoint KillData element snapshots with physical parent-row identity, independently checked raw values, nullable missing members and scoped reference status. Keeps all clocks separately; updates are not deduplicated kills. Reads only the measured builds 13.01, 13.02, 13.04, 13.05 and 13.06 and refuses any other. See [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md#measured-builds). |
+| `extract_kill_observations.py` | Exports main and checkpoint KillData element snapshots with physical parent-row identity, independently checked raw values, nullable missing members and scoped reference status. Keeps all clocks separately; updates are not deduplicated kills. Accepts 11.06-12.09 and 13.01-13.06 (`MEASURED_BUILDS`) and refuses 12.10, 12.11, 13.00 and any other build before reading a row. See [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md#measured-builds). |
 | `extract_kill_ledger.py` | Retains character-death events, projects component-local KillData state and links mutually unique same-round PlayerState identities. Preserves unmatched events and observations. Reads the same measured builds as the observation extractor. See [KILL_LEDGER.md](KILL_LEDGER.md). |
 | `extract_healing_observations.py` | Retains serialized heal amounts, section state, raw source rows and separate identity corroboration. Amount sums do not establish effective HP restored or player healing credit. See [HEALING_OBSERVATIONS.md](HEALING_OBSERVATIONS.md) for validation status. |
 | `extract_fastarray_observations.py` | Writes numeric AbilitiesAndBuffs FastArray headers, deleted/changed item IDs and raw field offsets to NDJSON, retaining each input window and physical row identity. Reads two exported routes, `_cnc_h1` under `AbilitiesAndBuffsComponent` and `__vrfkit_chained_cnc_h1__` under `/Script/ShooterGame.AresAbilitySystemComponent`, and labels each record with its `route` and stream (`population`). Accepts what was measured on 2026-09-28: `_cnc_h1` main rows on 22 builds (12.10 and 12.11 have none) and chained rows in both streams on all 24. Any other route, stream or build keeps its raw bits with a rejection reason, and the exit is nonzero. The receipt counts every route and stream, zeros included. Field meanings remain unknown. See [the wire investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md). |
@@ -1252,8 +1254,8 @@ python tools/check_export_baseline.py --baseline tools/baselines/export_02d4d478
 # The checkpoint baseline needs --checkpoints; without it every checkpoint
 # counter reads as missing and the check fails for that reason alone.
 python tools/check_export_baseline.py --baseline tools/baselines/checkpoint_02d4d478.json --checkpoints
-for b in 1210 1211 1300 1302 1304 1305; do
-  python tools/check_corpus_baseline.py --baseline tools/baselines/build_$b.json
+for b in tools/baselines/build_*.json; do
+  python tools/check_corpus_baseline.py --baseline "$b"
 done
 python tools/validate_corpus.py ./target/release/vrfkit.exe <corpus>
 python tools/check_decode_errors_corpus.py ./target/release/vrfkit.exe <corpus>
@@ -1316,8 +1318,8 @@ other difference, and on that one if it stops occurring exactly as listed
 | Check | Watches | Misses | Cost |
 |---|---|---|---|
 | `validate_corpus.py` | Framing (top level of the corpus dir; `--recursive` for subdirectories) | Type errors, broken semantics | ~30 s |
-| `check_export_baseline.py` | 28 export counters + per-file rows/bytes | Other builds | 1 s |
-| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads, movement-section tails, and a decoder whose work counter never moves (top level; `--recursive` for subdirectories) | Broken semantics; a decoder stopped on one build or route while the rest keep its corpus total up; a parameter walk that never runs (no walk counter backs `Truncated RPCs`); a CNC brute force that never runs (`attempted` is legitimately 0 on some builds, so it backs nothing); Checkpoint chunks, unless `--checkpoints` | ~50 s |
+| `check_export_baseline.py` | Every export counter + per-file rows/bytes/SHA-256 | Other builds | 1 s |
+| `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads, movement-section tails, and a decoder whose work counter never moves (top level; `--recursive` for subdirectories) | Broken semantics; a decoder stopped on one build or route while the rest keep its corpus total up; a parameter walk that never runs (no walk counter backs `Truncated RPCs`); a CNC brute force that never runs (`attempted` is legitimately 0 on some builds, so it backs nothing); a sized movement window (none measured; no work counter backs `Movement tails sized`); Checkpoint chunks, unless `--checkpoints` | ~50 s |
 | `check_decode_errors_corpus.py --checkpoints` | The same failure counters for every Checkpoint chunk too (overlay, struct blobs, array truncations/residual bits, leaf errors, truncated RPCs, movement, unwalked CNC payloads, movement tails), and the checkpoint work counters (decoded fields, blobs, array elements and fields) | Broken semantics; checkpoint movement, movement-tail, CNC brute-force and truncated-RPC failures in practice -- no checkpoint RPC reached those decoders on the 1,018-replay audit (each was a RepLayout tail), so their zero is printed as unbacked | slower: `vrfkit export` also decodes every Checkpoint chunk per replay |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A (8 builds) | Errors in the metrics pipeline itself | ~46 s |
 | `compare_combat_report.py` | Metrics-input multiset | Framing | seconds |

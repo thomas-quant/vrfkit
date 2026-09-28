@@ -1012,8 +1012,10 @@ run can be matched to the files it read):
 
 - every one of the 80,800 script object paths the tool rebuilds hashes back to
   the index the game stores for it -- CityHash64 of the lowercased UTF-16 path,
-  which is how the engine forms that index, so a wrong separator or name index
-  cannot pass;
+  which is how the engine forms that index, so a wrong name or outer link
+  cannot pass. The separators are not proved: the hash folds `.` and `:` alike
+  into `/`, and the tool writes `/Script/<Module>.<Class>:<Sub>` and joins
+  anything deeper with `.`, as the engine's `GetPathName` does;
 - every package name hashes back to its chunk id, and agrees with the directory
   index's file name;
 - every TOC file is consumed to its last byte, and 0 packages fail.
@@ -1318,8 +1320,9 @@ The first bucket was 60% of that historical sample: `BaseReplayController`'s
 `ReplayLastTransformUpdateTimeStamp` is now typed after the broader wire audit.
 
 Two ordinary additions came out of the second bucket and are now typed --
-`StopMovementTime` and `HandleNumber`, above. The largest remaining item does
-not yield to a `FieldType` at all.
+`StopMovementTime` (`MulticastStopContinuousEffect`; the evidence is at its
+`ADDITIONS` entry) and `HandleNumber` (the ForceModule row above). The largest
+remaining item does not yield to a `FieldType` at all.
 
 `ClientReplayReceiveInputEventProcessingCapture.InputEventData` (53,605 rows,
 one per `PlayerID` row) is a **tagged union**, not a scalar. The leading byte's
