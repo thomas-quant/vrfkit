@@ -28,40 +28,26 @@ use crate::limits::{
 };
 
 /// Parsed replay info from the file's leading section.
-///
-/// Contains the metadata needed to decide whether the replay is supported and
-/// how to decompress its payload chunks.
 #[derive(Debug, Clone)]
 pub struct ReplayInfo {
     /// Match duration in milliseconds.
     pub length_in_ms: i32,
-    /// Network version as the info section declares it.
-    ///
-    /// NOT the 19 that `EXPECTED_NETWORK_VERSION` pins, and nothing
-    /// here validates it: `02d4d478` carries 480767974. The 19 is checked in
-    /// the *header* chunk, which is a different field in a different section.
-    /// This doc comment used to say "always 19 for supported replays", which
-    /// was never true of any replay in the corpus.
+    /// Network version as the info section declares it: unvalidated, and not
+    /// the 19 the Header chunk pins. `02d4d478` carries 480767974 here.
     pub network_version: u32,
-    /// Build changelist number, as the info section declares it.
-    ///
-    /// A replay carries two: this one and `ReplayHeader::replay_version
-    /// .changelist`, and they disagree -- 5090349 here against 2152573997 in
-    /// the header on `02d4d478`. Downstream (`manifest.json`, and the valplay
-    /// adapter through it) reports the header's.
+    /// Build changelist as the info section declares it. It disagrees with
+    /// `ReplayHeader::replay_version.changelist` (`02d4d478`: 5090349 here,
+    /// 2152573997 there); `manifest.json`, and the valplay adapter through it,
+    /// report the header's.
     pub changelist: u32,
     /// Human-readable name (trailing whitespace trimmed).
     pub friendly_name: String,
     /// Whether the replay was recorded as a live session.
     pub is_live: bool,
-    /// Timestamp in Unreal `FDateTime` ticks: 100 ns units since 0001-01-01.
-    ///
-    /// NOT a Windows FILETIME, which this said until 2026-08-04. The two
-    /// differ by the 1601-year epoch offset, so reading `02d4d478`'s
-    /// 639205853799940000 as FILETIME dates the match to 3626 instead of
-    /// 2026-07-25. No timezone is on the wire, so a calendar rendering would
-    /// be asserting UTC-vs-local that one replay cannot settle; the ticks are
-    /// exported raw as `timestamp_ticks`.
+    /// Unreal `FDateTime` ticks: 100 ns units since 0001-01-01. Not a Windows
+    /// FILETIME: read as one, `02d4d478`'s 639205853799940000 dates the match
+    /// to 3626 instead of 2026-07-25. No timezone is on the wire, so the ticks
+    /// are exported raw as `timestamp_ticks`.
     pub timestamp: i64,
     /// Whether chunk payloads are Oodle-compressed.
     pub compressed: bool,
@@ -71,9 +57,8 @@ pub struct ReplayInfo {
     pub encryption_key: Vec<u8>,
 }
 
-/// Parse the replay info section from the start of the buffer.
-///
-/// Returns the parsed info and the byte offset where chunks begin.
+/// Parse the replay info section from the start of the buffer, returning it and
+/// the byte offset where chunks begin.
 pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), ContainerError> {
     if data.is_empty() {
         return Err(ContainerError::Truncated {
@@ -85,13 +70,11 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
 
     let mut reader = BitReader::new(data);
 
-    // --- Magic ------------------------------------------------------------
     let magic = read_u32(&mut reader, "file magic")?;
     if magic != FILE_MAGIC {
         return Err(ContainerError::FileMagicMismatch { actual: magic });
     }
 
-    // --- Legacy file version ----------------------------------------------
     let file_version = read_u32(&mut reader, "file version")?;
     if file_version != EXPECTED_FILE_VERSION {
         return Err(ContainerError::UnsupportedFileVersion {
@@ -99,7 +82,6 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
         });
     }
 
-    // --- Custom version container -----------------------------------------
     let custom_version_count = read_i32(&mut reader, "custom version count")?;
     if !(0..=MAX_CUSTOM_VERSION_COUNT).contains(&custom_version_count) {
         return Err(ContainerError::CountOverflow {
@@ -116,18 +98,15 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
         let guid = read_guid(&mut reader)?;
         let version = read_i32(&mut reader, "custom version")?;
 
-        // Duplicate check
         if seen_guids.contains(&guid) {
             return Err(ContainerError::DuplicateCustomVersion);
         }
         seen_guids.push(guid);
 
         if guid == LOCAL_REPLAY_GUID {
-            // The one custom version this parser pins. Its version is validated;
-            // every other GUID is ignored so an engine/game bump that adds an
-            // entry does not make every replay unreadable. Unreal readers
-            // conventionally iterate the list and pick out the GUIDs they care
-            // about.
+            // The one custom version pinned here. Other GUIDs are ignored, as
+            // Unreal readers do, so an engine bump that adds one does not make
+            // every replay unreadable (hence no `UnregisteredCustomVersion`).
             if version != LOCAL_REPLAY_VERSION {
                 return Err(ContainerError::UnsupportedLocalReplayVersion { actual: version });
             }
@@ -139,7 +118,6 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
         return Err(ContainerError::MissingLocalReplayVersion);
     }
 
-    // --- Summary ----------------------------------------------------------
     let length_in_ms = read_i32(&mut reader, "length_in_ms")?;
     let network_version = read_u32(&mut reader, "network version")?;
     let changelist = read_u32(&mut reader, "changelist")?;
@@ -151,7 +129,6 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
     let compressed = read_u32(&mut reader, "compressed")? != 0;
     let encrypted = read_u32(&mut reader, "encrypted")? != 0;
 
-    // Encryption key: length-prefixed byte array
     let key_len = read_i32(&mut reader, "encryption key length")?;
     if !(0..=MAX_ENCRYPTION_KEY_BYTES).contains(&key_len) {
         return Err(ContainerError::CountOverflow {
@@ -167,7 +144,6 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
             .map_err(|e| ContainerError::BitIo(e.to_string()))?;
     }
 
-    // Validate: completed encrypted replay must have a key.
     if !is_live && encrypted && encryption_key.is_empty() {
         return Err(ContainerError::EncryptedWithoutKey);
     }

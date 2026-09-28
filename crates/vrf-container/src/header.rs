@@ -11,14 +11,14 @@
 //! | ... | u32 | NetworkChecksum |
 //! | ... | u32 | EngineNetworkProtocolVersion (32) |
 //! | ... | u32 | GameNetworkProtocolVersion |
-//! | ... | [16B] | GUID (4 x u32) |
+//! | ... | 16 bytes | GUID (4 x u32) |
 //! | ... | u16 | ReplayVersion.Major |
 //! | ... | u16 | ReplayVersion.Minor |
 //! | ... | u16 | ReplayVersion.Patch |
 //! | ... | u32 | ReplayVersion.Changelist |
 //! | ... | FString | ReplayVersion.Branch |
 //! | ... | u32 | ValorantSkipByteCount (release-12.06 onward) |
-//! | ... | [N] | Valorant-specific skip bytes (release-12.06 onward) |
+//! | ... | N bytes | Valorant-specific skip bytes (release-12.06 onward) |
 //! | ... | u32 | UE4Version |
 //! | ... | u32 | UE5Version |
 //! | ... | u32 | PackageVersionLicense |
@@ -43,70 +43,47 @@ use crate::limits::{
     NETWORK_MAGIC,
 };
 
-/// Replay version embedded in the header. The `branch` field (e.g.
-/// `"++Ares-Core+release-13.01"`) determines which payload transform is needed.
+/// Replay version embedded in the header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayVersion {
     pub major: u16,
     pub minor: u16,
     pub patch: u16,
     pub changelist: u32,
-    /// The Unreal branch string, e.g. `"++Ares-Core+release-13.01"`.
+    /// The Unreal branch string, e.g. `"++Ares-Core+release-13.01"`. It selects
+    /// the payload transform, and the legacy or modern header layout here.
     pub branch: String,
 }
 
 /// Parsed replay header from the first chunk.
 #[derive(Debug, Clone)]
 pub struct ReplayHeader {
-    /// Network version (always 19).
+    /// Pinned at 19.
     pub network_version: u32,
-    /// Network checksum.
     pub network_checksum: u32,
-    /// Engine network protocol version (always 32).
+    /// Pinned at 32.
     pub engine_network_protocol_version: u32,
-    /// Game network protocol version.
     pub game_network_protocol_version: u32,
     /// Session GUID stored as four u32 values (Unreal serialisation order).
     pub guid: [u32; 4],
-    /// Replay version containing the branch string.
     pub replay_version: ReplayVersion,
-    /// UE4 version number.
     pub ue4_version: u32,
-    /// UE5 version number.
     pub ue5_version: u32,
-    /// Package version license.
     pub package_version_license: u32,
-    /// Level names paired with their time offsets in milliseconds.
+    /// `(level name, time in milliseconds)` pairs.
     pub level_names_and_times: Vec<(String, u32)>,
-    /// Header flags bitfield.
     pub flags: u32,
-    /// Game-specific data strings.
     pub game_specific_data: Vec<String>,
-    /// Minimum recording rate in Hz.
     pub min_record_hz: f32,
-    /// Maximum recording rate in Hz.
     pub max_record_hz: f32,
-    /// Frame time limit in milliseconds.
     pub frame_limit_in_ms: f32,
-    /// Checkpoint time limit in milliseconds.
     pub checkpoint_limit_in_ms: f32,
-    /// Platform identifier string.
     pub platform: String,
-    /// Build configuration byte.
     pub build_config: u8,
-    /// Build target type byte.
     pub build_target_type: u8,
-    /// Bytes of the Header chunk payload this layout never reached.
-    ///
-    /// The parser stops at `BuildTargetType` and used to return success without
-    /// asking whether anything followed, so a header extension -- exactly what a
-    /// new engine build appends -- was skipped permanently with no error and no
-    /// residual. The bytes are not interpreted, because nothing here knows their
-    /// layout; their existence is reported instead, the way
-    /// `CheckpointChunk::trailing_bytes` reports a checkpoint's.
-    ///
-    /// Expected to be zero. A non-zero value means the header grew.
-    /// Written to the manifest as `header_trailing_bytes`.
+    /// Header payload bytes past `BuildTargetType`, reported uninterpreted
+    /// because nothing here knows their layout. Expected 0; non-zero means the
+    /// header grew. Written to the manifest as `header_trailing_bytes`.
     pub trailing_bytes: usize,
 }
 
@@ -114,13 +91,11 @@ pub struct ReplayHeader {
 pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, ContainerError> {
     let mut reader = BitReader::new(payload);
 
-    // --- Network magic ----------------------------------------------------
     let net_magic = read_u32(&mut reader, "network magic")?;
     if net_magic != NETWORK_MAGIC {
         return Err(ContainerError::NetworkMagicMismatch { actual: net_magic });
     }
 
-    // --- Network version --------------------------------------------------
     let network_version = read_u32(&mut reader, "network version")?;
     if network_version != EXPECTED_NETWORK_VERSION {
         return Err(ContainerError::UnexpectedNetworkVersion {
@@ -128,7 +103,6 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         });
     }
 
-    // --- Custom versions (skip) -------------------------------------------
     let custom_version_count = read_i32(&mut reader, "custom version count")?;
     if !(0..=MAX_CUSTOM_VERSION_COUNT).contains(&custom_version_count) {
         return Err(ContainerError::CountOverflow {
@@ -143,10 +117,8 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         .skip_bits(skip_bits)
         .map_err(|e| ContainerError::BitIo(e.to_string()))?;
 
-    // --- Network checksum -------------------------------------------------
     let network_checksum = read_u32(&mut reader, "network checksum")?;
 
-    // --- Engine network protocol version ----------------------------------
     let engine_network_protocol_version = read_u32(&mut reader, "engine net proto version")?;
     if engine_network_protocol_version != EXPECTED_ENGINE_NET_PROTO_VERSION {
         return Err(ContainerError::UnexpectedEngineNetProtoVersion {
@@ -154,13 +126,10 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         });
     }
 
-    // --- Game network protocol version ------------------------------------
     let game_network_protocol_version = read_u32(&mut reader, "game net proto version")?;
 
-    // --- GUID -------------------------------------------------------------
     let guid = read_guid(&mut reader)?;
 
-    // --- Replay version ---------------------------------------------------
     let major = read_u16(&mut reader, "replay version major")?;
     let minor = read_u16(&mut reader, "replay version minor")?;
     let patch = read_u16(&mut reader, "replay version patch")?;
@@ -175,11 +144,13 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         branch,
     };
 
-    // --- Valorant-specific skip bytes -------------------------------------
     // All 36 sampled replays from 11.06 through 12.05 put UE4Version (522)
     // immediately after Branch. The length-prefixed extension first appears
     // in the 12.06 samples. Do not retry a malformed modern header as legacy:
     // doing so would silently interpret its length as a package version.
+    // A legacy build missing from this list fails loudly instead: forced down
+    // the modern path, 11.06, 11.11 and 12.05 samples raise BitIo EOF or
+    // CountOverflow on the level names (checked 2026-09-29).
     let legacy_header = matches!(
         replay_version.branch.as_str(),
         "++Ares-Core+release-11.06"
@@ -202,12 +173,10 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
             .map_err(|e| ContainerError::BitIo(e.to_string()))?;
     }
 
-    // --- UE versions ------------------------------------------------------
     let ue4_version = read_u32(&mut reader, "UE4 version")?;
     let ue5_version = read_u32(&mut reader, "UE5 version")?;
     let package_version_license = read_u32(&mut reader, "package version license")?;
 
-    // --- Level names and times (TupleArray<FString, u32>) -----------------
     let level_count = read_i32(&mut reader, "level names count")?;
     if !(0..=MAX_LEVEL_NAMES_AND_TIMES).contains(&level_count) {
         return Err(ContainerError::CountOverflow {
@@ -223,10 +192,8 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         level_names_and_times.push((name, time));
     }
 
-    // --- Flags ------------------------------------------------------------
     let flags = read_u32(&mut reader, "flags")?;
 
-    // --- Game-specific data (Array<FString>) ------------------------------
     let gsd_count = read_i32(&mut reader, "game specific data count")?;
     if !(0..=MAX_GAME_SPECIFIC_DATA).contains(&gsd_count) {
         return Err(ContainerError::CountOverflow {
@@ -244,13 +211,11 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         )?);
     }
 
-    // --- Recording parameters ---------------------------------------------
     let min_record_hz = read_f32(&mut reader, "min record hz")?;
     let max_record_hz = read_f32(&mut reader, "max record hz")?;
     let frame_limit_in_ms = read_f32(&mut reader, "frame limit")?;
     let checkpoint_limit_in_ms = read_f32(&mut reader, "checkpoint limit")?;
 
-    // --- Platform and build info ------------------------------------------
     let platform = read_fstring(&mut reader, "platform", MAX_FSTRING_BYTES)?;
     let build_config = reader
         .read_u8()
@@ -259,8 +224,7 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         .read_u8()
         .map_err(|e| ContainerError::BitIo(e.to_string()))?;
 
-    // Every read above is byte-granular, so the reader sits on a byte boundary
-    // and this division loses nothing.
+    // Every read above is byte-granular, so this division loses nothing.
     let trailing_bytes = (reader.bits_remaining() / 8) as usize;
 
     Ok(ReplayHeader {
