@@ -1,16 +1,9 @@
-//! The movement section and the single move record inside it.
+//! The movement section and the single move record inside it: the innermost
+//! layer, written in the numeric vocabulary of [`crate::primitives`].
 //!
-//! This is the innermost layer of the RPC: everything above it is framing that
-//! locates these bits, and everything below it (in [`crate::primitives`]) is
-//! the numeric vocabulary they are written in.
-//!
-//! # The marker sequence
-//!
-//! Moves are separated by a 3-bit marker that counts 1, 2, 3, 4, 5, 6, 7, 1, 2,
-//! ... -- it wraps at 7 back to 1. A
-//! marker that does not match the expected next value means the cursor has
-//! drifted, and is reported rather than skipped: continuing from a desynced
-//! position yields well-formed nonsense.
+//! Moves are separated by a 3-bit marker that counts 1 to 7 and wraps to 1. A
+//! marker out of sequence means the cursor has drifted and is an error, not
+//! skipped: continuing from a desynced position yields well-formed nonsense.
 
 use vrf_bitio::BitReader;
 
@@ -22,22 +15,19 @@ use crate::types::{MovementMove, RpcDecodeResult};
 pub(crate) const MOVEMENT_MAGIC: u8 = 0x52;
 
 /// The C# reference's `MaxMovementPaddingBits`: with at most this many bits
-/// left after a move, the section ends without reading another marker.
-///
-/// The name says padding; the bits are not. In every stream measured they are
-/// a `000` terminator where the next marker would sit, then 8 to 23 bits that
-/// are not all zero, and nothing reads them. See the crate docs, "Measured on
-/// real replays".
+/// left after a move, the section ends without reading another marker. The
+/// bits are not padding: in every stream measured they are a `000` terminator
+/// where the next marker would sit, then 8 to 23 bits that are not all zero
+/// (crate docs, "Measured on real replays").
 const MAX_MOVEMENT_PADDING_BITS: u64 = 31;
 
 /// Parse the movement section: magic byte, then a sequence of moves.
 ///
-/// Returns the bits of the section's window left unread at a stop the grammar
-/// does not explain: a zero marker with bits still behind it, or a window too
-/// short for the magic or the first marker. The end after a decoded move with
-/// at most `MAX_MOVEMENT_PADDING_BITS` left returns 0, as does a window that
-/// was read to its last bit. The caller tallies a nonzero return; see
-/// [`RpcDecodeResult::sized_section_tails`] for why it is not an error.
+/// Returns the bits of its window left unread at a stop the grammar does not
+/// explain: a zero marker with bits behind it, or a window too short for the
+/// magic or the first marker. The end within `MAX_MOVEMENT_PADDING_BITS` of a
+/// move returns 0, as does a window read to its last bit. The caller tallies a
+/// nonzero return; [`RpcDecodeResult::sized_section_tails`] says why.
 pub(crate) fn parse_movement_section(
     reader: &mut BitReader<'_>,
     shooter_guid: u32,
@@ -72,8 +62,7 @@ pub(crate) fn parse_movement_section(
         emit(mv);
         result.total_moves += 1;
 
-        // The section's own end: the terminator and the bits after it stay
-        // unread (see MAX_MOVEMENT_PADDING_BITS).
+        // The section's end; what is left stays unread.
         if reader.bits_remaining() <= MAX_MOVEMENT_PADDING_BITS {
             return Ok(0);
         }
@@ -82,15 +71,13 @@ pub(crate) fn parse_movement_section(
         marker = reader.read_bits(3)? as u8;
     }
 
-    // A zero marker ended the section. Inside the loop that is only reachable
-    // with more than MAX_MOVEMENT_PADDING_BITS behind the move, so anything
-    // left here is a tail; after the magic it may be exactly nothing.
+    // A zero marker, which in the loop means more than
+    // MAX_MOVEMENT_PADDING_BITS were left: the rest is a tail (or nothing,
+    // straight after the magic).
     Ok(reader.bits_remaining())
 }
 
-/// Compute the next expected marker in the sequence 1->2->3->4->5->6->7->1->2->...
-///
-/// The sequence wraps at 7 and skips only 0.
+/// The marker expected after `marker`: 1 to 7, wrapping to 1 and never 0.
 #[inline]
 pub(crate) fn next_marker(marker: u8) -> u8 {
     let next = (marker + 1) & 7;
@@ -103,6 +90,11 @@ fn parse_single_move(
     shooter_guid: u32,
 ) -> Result<MovementMove, MovementError> {
     // -- 25-bit header ----------------------------------------------------
+    // Decoded and dropped, but not constant over the 157,457,629 moves in the
+    // crate docs' sample: unusedByte (the C#'s name) is non-zero in
+    // 155,140,482, rotationYawMultiplier in 29,589,841; rotationInput is off
+    // centre in 97,788,473, flag48 set in 150,351,309, the optional byte
+    // present in 9,255,640 and variant1Flag set in 1,655.
     let header = reader.read_bits(25)?;
     let move_type_flag = (header & 1) != 0; // bit 0
     let _rotation_yaw_multiplier = ((header >> 1) & 0xFF) as u8; // bits [1..9]
@@ -115,10 +107,8 @@ fn parse_single_move(
     // -- Timestamp: the C# reference's "VLQ" is Unreal's IntPacked ----------
     let timestamp = reader.read_int_packed()?;
 
-    // -- Position: QuantizedVector (scaleFactor=100) ----------------------
     let (pos_x, pos_y, pos_z) = read_quantized_vector(reader, 100)?;
 
-    // -- Optional byte ----------------------------------------------------
     let has_optional = reader.read_bit()?;
     if has_optional {
         let _optional_byte = reader.read_u8()?;
@@ -134,13 +124,11 @@ fn parse_single_move(
     let yaw = f64::from(raw_yaw) * ANGLE_SCALE;
     let pitch = f64::from(raw_pitch) * ANGLE_SCALE;
 
-    // -- Variant-specific data --------------------------------------------
     let (vel_x, vel_y, vel_z) = if move_type_flag {
-        // Variant 1: has velocity.
         let _variant1_flag = reader.read_bit()?;
         read_quantized_vector(reader, 10)?
     } else {
-        // Variant 0: 33-bit packed angles (no velocity).
+        // Variant 0: 33-bit packed angles, no velocity.
         let variant0_data = reader.read_bits(33)?;
         let has_external_ref = (variant0_data & 1) != 0;
         if has_external_ref {
@@ -149,7 +137,6 @@ fn parse_single_move(
         (0.0, 0.0, 0.0)
     };
 
-    // -- Error sentinel ---------------------------------------------------
     let error_sentinel = reader.read_bit()?;
     if error_sentinel {
         return Err(MovementError::ErrorSentinel);
