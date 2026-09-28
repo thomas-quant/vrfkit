@@ -131,10 +131,6 @@ pub fn decode_round_results(
     reader: &mut BitReader<'_>,
     declared: &[Option<&str>],
 ) -> Result<Vec<RoundResult>> {
-    if reader.at_end() {
-        return Ok(Vec::new());
-    }
-
     decode_elements(
         reader,
         CONTEXT,

@@ -100,13 +100,29 @@ fn round_results_row6_blue_defender_defuse() {
     assert_eq!(results[0].round_result, Some(AresRoundOutcome::Defuse));
 }
 
-/// Empty blob (0 bits) should return empty vec.
+/// A 0-bit blob is an error for all three decoders: not even the element
+/// count is there. RoundResults alone used to return an empty vector for it,
+/// which reads like a blob with nothing to report. The export path never
+/// hands a decoder zero bits: a zero-bit field keeps no raw bits to decode.
 #[test]
-fn round_results_empty() {
-    let data = [];
-    let mut r = BitReader::with_bit_len(&data, 0).unwrap();
-    let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
-    assert!(results.is_empty());
+fn a_zero_bit_blob_is_an_error_for_every_decoder() {
+    let eof = |err: StructBlobError| {
+        matches!(
+            err,
+            StructBlobError::BitIo(vrf_bitio::BitError::Eof {
+                position: 0,
+                length: 0,
+                requested: 8
+            })
+        )
+    };
+    let blob = || BitReader::with_bit_len(&[], 0).unwrap();
+    let err = decode_round_results(&mut blob(), &bomb_game_state_1301()).unwrap_err();
+    assert!(eof(err.clone()), "RoundResults: {err:?}");
+    let err = decode_round_infos(&mut blob(), &owner_exclusive_player_info()).unwrap_err();
+    assert!(eof(err.clone()), "RoundInfos: {err:?}");
+    let err = decode_team_economy(&mut blob()).unwrap_err();
+    assert!(eof(err.clone()), "TeamEconomy: {err:?}");
 }
 
 // -- RoundResults on build 13.02 ------------------------------------------
