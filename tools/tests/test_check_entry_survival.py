@@ -525,6 +525,10 @@ class LoadTests(unittest.TestCase):
         """Drop either committed item and its finding fails the run by name --
         the list honours HasStopped only while the item is there."""
         items = json.loads(guard.EXPECTED_JSON.read_text(encoding="utf-8"))["expected"]
+        # Not a pin on the fixture's size: `write_committed_findings` must
+        # reproduce every committed item, or the end-to-end test above reads
+        # the new one STALE. This names the two it reproduces, so an item
+        # added to the list fails here saying what to add there.
         self.assertEqual(sorted(i["entry"].rsplit("|", 1)[1] for i in items),
                          ["HasStopped", "TeamEconomy"])
         with tempfile.TemporaryDirectory() as tmp:
