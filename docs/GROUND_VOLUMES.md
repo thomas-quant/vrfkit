@@ -213,8 +213,9 @@ missing.
   under `uint8`, `int8`, `uint16`, `int32` and `byte`, with and without the
   struct's `F` prefix. Their types rest on the widths and relations alone.
 - The ClassNetCache field's checksum, `FragmentInfo` 2225407835, is computed
-  differently and does not reproduce this way; the chain's three struct
-  levels make no RepLayout command and are never declared.
+  differently and does not reproduce this way. The levels above the members
+  -- `FragmentInfo`, `Items`, `GridPos` -- are declared in none of the 1,018
+  exports, so their own checksums never appear.
 - Provenance: the struct and member names are from the 13.06 game
   executable's reflection data, read statically on 2026-09-28; no game file
   or extract of one is in this repository. The declared values are from a

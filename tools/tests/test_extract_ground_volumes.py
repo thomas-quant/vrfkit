@@ -71,8 +71,8 @@ def compatible_checksum(name, cpp_type, parent=0, static_index=0):
 
 #: The item struct and its parents, as named in the 13.06 game executable's
 #: reflection data: FragmentInfo:FGroundVolumeFragmentArray -> Items:TArray ->
-#: Items:FGroundVolumeFragment. A struct makes no RepLayout command, so none
-#: of these three is itself declared; only the members below are.
+#: Items:FGroundVolumeFragment. None of these levels (nor GridPos) is declared
+#: in any export of the corpus; only the members below are.
 ITEM_PARENT = compatible_checksum("Items", "FGroundVolumeFragment", compatible_checksum(
     "Items", "TArray", compatible_checksum("FragmentInfo", "FGroundVolumeFragmentArray")))
 #: Declared identity -> its path below FGroundVolumeFragment, one (name, C++
