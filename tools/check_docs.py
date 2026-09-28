@@ -495,14 +495,6 @@ def baseline_table_figures() -> dict[str, tuple[int, int]]:
     return figures
 
 
-def format_baseline_table(figures: dict[str, tuple[int, int]]) -> str:
-    """Canonical Markdown rows, also useful to migration/error tooling."""
-    return "\n".join(
-        f"| `{name}` | {rows:,} | {size:,} |"
-        for name, (rows, size) in figures.items()
-    )
-
-
 def check_baseline_figures(
     docs: dict[str, str], figures: dict[str, tuple[int, int]]
 ) -> list[str]:

@@ -480,11 +480,9 @@ class BaselineFigureTests(unittest.TestCase):
         tables = guard.baseline_table_figures()
         live = f"{tables['fields.parquet'][0]:,}"
         stale = f"{tables['fields.parquet'][0] + 1:,}"
-        docs = {
-            "README.md": guard.format_baseline_table(tables).replace(
-                live, stale, 1
-            )
-        }
+        rows = "\n".join(f"| `{name}` | {n:,} | {size:,} |"
+                         for name, (n, size) in tables.items())
+        docs = {"README.md": rows.replace(live, stale, 1)}
         problems = guard.check_baseline_figures(docs, tables)
         self.assertTrue(any("fields.parquet" in p for p in problems), problems)
 
