@@ -507,8 +507,8 @@ class SummaryFormatDriftTests(unittest.TestCase):
             f"  rendered  : {rendered}\n"
             f"  regex     : {guard.CHECKPOINT_OVERLAY.pattern}\n"
             f"A field was added to or removed from the Rust format string. "
-            f"Update CHECKPOINT_OVERLAY, CHECKPOINT_COUNTERS group numbers, "
-            f"and CHECKPOINT_REQUIRED together.",
+            f"Update CHECKPOINT_OVERLAY and CHECKPOINT_COUNTERS' group numbers "
+            f"and labels together.",
         )
         self.assertEqual(
             list(match.groups()), values,
@@ -525,7 +525,7 @@ class SummaryFormatDriftTests(unittest.TestCase):
         """
         fmt = _overlay_format_string(self.source)
         named = [
-            key for key, pattern, _group in guard.CHECKPOINT_COUNTERS
+            key for key, pattern, _group, _label in guard.CHECKPOINT_COUNTERS
             if pattern is guard.CHECKPOINT_OVERLAY
         ]
         self.assertEqual(
@@ -534,7 +534,7 @@ class SummaryFormatDriftTests(unittest.TestCase):
             f"CHECKPOINT_COUNTERS names {len(named)} of them: {named}",
         )
         groups = sorted(
-            group for _key, pattern, group in guard.CHECKPOINT_COUNTERS
+            group for _key, pattern, group, _label in guard.CHECKPOINT_COUNTERS
             if pattern is guard.CHECKPOINT_OVERLAY
         )
         self.assertEqual(
@@ -542,24 +542,6 @@ class SummaryFormatDriftTests(unittest.TestCase):
             "the overlay capture groups CHECKPOINT_COUNTERS reads are not "
             f"exactly 1..{fmt.count('{}')}: {groups}",
         )
-
-    def test_every_overlay_counter_is_required_and_reaches_a_total(self):
-        """Parsed is not enough: each must be REQUIRED and must be printed.
-
-        `conflicts` was the field the regex missed; a fix that parsed it but
-        left it out of CHECKPOINT_REQUIRED would let a summary that stopped
-        printing it read as fine, which is this repo's named failure mode.
-        """
-        required = {key for key, _label in guard.CHECKPOINT_REQUIRED}
-        for key, pattern, _group in guard.CHECKPOINT_COUNTERS:
-            if pattern is not guard.CHECKPOINT_OVERLAY:
-                continue
-            with self.subTest(counter=key):
-                self.assertIn(
-                    key, required,
-                    f"{key} is parsed but not REQUIRED: a summary that stops "
-                    f"printing it would read as a pass",
-                )
 
     def test_the_fixture_in_this_file_matches_summary_rs_field_count(self):
         """CLEAN_WITH_CHECKPOINTS is the fixture that drifted. Pin it too.
@@ -751,7 +733,8 @@ class SinkFailureTests(unittest.TestCase):
 
     def test_an_absent_failure_counter_is_a_loud_error_not_a_silent_zero(self):
         """Indexed, never `.get(key, 0)`: an absent counter must not gate as 0.
-        `REQUIRED` keeps this from firing on a real run."""
+        `read_counters` requires every counter, which keeps this from
+        firing on a real run."""
         counters, _ = guard.read_counters(CLEAN, 0)
         del counters["array_leaf_errors"]
         with self.assertRaises(KeyError):
@@ -861,9 +844,8 @@ class SinkFormatDriftTests(unittest.TestCase):
 
     Same reasoning as `SummaryFormatDriftTests`: a fixture in this file drifts
     in the same step as the regex, so only the Rust literal can catch a label
-    or field change -- and a regex that stopped matching would make every
-    replay unreadable only if its line is REQUIRED, which the last test here
-    pins too.
+    or field change. A regex that stopped matching makes every replay
+    unreadable, since `read_counters` requires every counter it parses.
     """
 
     def setUp(self):
@@ -872,9 +854,9 @@ class SinkFormatDriftTests(unittest.TestCase):
         self.source = SUMMARY_RS.read_text(encoding="utf-8")
 
     def test_each_regex_reads_its_own_field_of_the_printed_line(self):
-        main = dict(guard.COUNTERS)
+        main = {key: pattern for key, pattern, _label in guard.COUNTERS}
         checkpoint = {key: (pattern, group)
-                      for key, pattern, group in guard.CHECKPOINT_COUNTERS}
+                      for key, pattern, group, _label in guard.CHECKPOINT_COUNTERS}
         for key, label, index in SINK_FORMATS:
             with self.subTest(counter=key):
                 fmt = _format_string(self.source, label)
@@ -900,13 +882,6 @@ class SinkFormatDriftTests(unittest.TestCase):
             with self.subTest(label=label):
                 fmt = _format_string(self.source, label)
                 self.assertEqual(indices, set(range(fmt.count("{}"))))
-
-    def test_every_sink_counter_is_required(self):
-        required = ({key for key, _label in guard.REQUIRED}
-                    | {key for key, _label in guard.CHECKPOINT_REQUIRED})
-        for key, _label, _index in SINK_FORMATS:
-            with self.subTest(counter=key):
-                self.assertIn(key, required)
 
 
 #: tools/verify_build_corpus.py -- read, not imported, so this module keeps
@@ -992,9 +967,9 @@ class LivenessCoverageTests(unittest.TestCase):
         # these tests, not take the whole module down at import.
         return (
             ("main", guard.FAILURES, guard.MUST_MOVE, guard.UNBACKED,
-             guard.REQUIRED),
+             guard.COUNTERS),
             ("checkpoint", guard.CHECKPOINT_FAILURES, guard.CHECKPOINT_MUST_MOVE,
-             guard.CHECKPOINT_UNBACKED, guard.CHECKPOINT_REQUIRED),
+             guard.CHECKPOINT_UNBACKED, guard.CHECKPOINT_COUNTERS),
         )
 
     def test_every_failure_gate_is_backed_or_declared_unbacked_exactly_once(self):
@@ -1011,7 +986,7 @@ class LivenessCoverageTests(unittest.TestCase):
         ways and backs nothing."""
         for name, failures, must_move, _unbacked, required in self.PASSES:
             failure_keys = {key for key, _label in failures}
-            required_keys = {key for key, _label in required}
+            required_keys = {key for key, *_ in required}
             for key, _label, gates in must_move:
                 with self.subTest(pass_=name, work=key):
                     self.assertIn(key, required_keys)

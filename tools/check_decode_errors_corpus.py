@@ -68,7 +68,7 @@ Exit code is 0 only when every replay reported zero on every counter in
 `FAILURES` -- overlay decode errors, struct-blob failures, the array, leaf,
 truncated-RPC and movement failures summary.rs prints beside them, and the
 unwalked CNC brute-force payloads and movement-section tails --
-AND every replay reported every counter in `REQUIRED` at all, AND the corpus
+AND every replay reported every counter in `COUNTERS` at all, AND the corpus
 as a whole moved every work counter in `MUST_MOVE`. A counter that stops being
 printed must not read as zero; that is how the corpus malformed figure stayed a
 vacuous 0 for the project's whole history (see docs/archive/PROJECT_STATUS.md
@@ -207,85 +207,53 @@ MOVEMENT_OPEN_TAILS = _movement_tails_field("Movement tails:", 2)
 MOVEMENT_OPEN_TAIL_BITS = _movement_tails_field("Movement tails:", 3)
 
 
-#: `(key, regex)` for every counter read off the export summary. `no_field_name`
-#: is here -- and REQUIRED below -- because summary.rs defines
-#: `Rows offered = decoded_ok + decoded_err + raw_or_skip + not_in_table +
-#: no_field_name`; leaving it out (as this tool used to) means the four
-#: categories it prints sum to about 0.3% less than the `rows offered` line it
-#: also prints, and a reader has to go read Rust source to know why. See
-#: `reconcile`.
+#: `(key, regex, label)` for every counter read off the export summary, and
+#: every one is REQUIRED: a replay whose summary lacks one is unreadable, and
+#: `label` names the missing line. `no_field_name` is here because summary.rs
+#: defines `Rows offered = decoded_ok + decoded_err + raw_or_skip +
+#: not_in_table + no_field_name`; leaving it out (as this tool used to) means
+#: the four categories it prints sum to about 0.3% less than the `rows offered`
+#: line it also prints, and a reader has to go read Rust source to know why.
+#: summary.rs prints it unconditionally on a healthy export, so its absence
+#: means this run's summary cannot be trusted, not that the category was
+#: legitimately empty -- and `reconcile` depends on it being a real number,
+#: never a defaulted one.
 #:
-#: The sink lines after `tracked_rewards_opaque_empty_variants` are read whole,
-#: work counters (`elements`, `fields`) included, so the totals this tool
-#: prints mirror what summary.rs printed and every field of those lines is
-#: named -- test_check_decode_errors_corpus.py checks both against summary.rs.
-#: `movement_rows` is the work counter behind `movement_errors`; see
-#: `MUST_MOVE`.
+#: The work counters (`decoded_ok`, `struct_blobs_decoded`, `movement_rows`,
+#: the array `elements` and `fields`) are required as well as the error
+#: counters because a zero in an error counter is only evidence when the
+#: matching work counter proves the work happened; see `MUST_MOVE`. The sink
+#: lines after `tracked_rewards_opaque_empty_variants` are read whole, so the
+#: totals this tool prints mirror what summary.rs printed and every field of
+#: those lines is named -- test_check_decode_errors_corpus.py checks both
+#: against summary.rs.
 COUNTERS = (
-    ("decode_errors", DECODE_ERRORS),
-    ("decoded_ok", DECODED_OK),
-    ("raw_skip", RAW_SKIP),
-    ("not_in_table", NOT_IN_TABLE),
-    ("no_field_name", NO_FIELD_NAME),
-    ("rows_offered", ROWS_OFFERED),
-    ("struct_blobs_decoded", STRUCT_DECODED),
-    ("struct_blobs_failed", STRUCT_FAILED),
-    ("tracked_rewards_opaque_empty_variants", REWARD_OPAQUE),
-    ("movement_rows", MOVEMENT_ROWS),
-    ("movement_errors", MOVEMENT_ERRORS),
-    ("array_elements", ARRAY_ELEMENTS),
-    ("array_fields", ARRAY_FIELDS),
-    ("array_errors", ARRAY_ERRORS),
-    ("array_truncations", ARRAY_TRUNCATIONS),
-    ("array_root_bits", ARRAY_ROOT_BITS),
-    ("array_nested_bits", ARRAY_NESTED_BITS),
-    ("array_implicit_ends", ARRAY_IMPLICIT_ENDS),
-    ("array_leaf_errors", ARRAY_LEAF_ERRORS),
-    ("truncated_rpcs", TRUNCATED_RPCS),
-    ("cnc_bruteforce_attempted", CNC_ATTEMPTED),
-    ("cnc_bruteforce_unwalked", CNC_UNWALKED),
-    ("movement_sized_tails", MOVEMENT_SIZED_TAILS),
-    ("movement_sized_tail_bits", MOVEMENT_SIZED_TAIL_BITS),
-    ("movement_open_tails", MOVEMENT_OPEN_TAILS),
-    ("movement_open_tail_bits", MOVEMENT_OPEN_TAIL_BITS),
-)
-
-#: Counters a replay MUST report for its run to mean anything. The work
-#: counters (`decoded_ok`, `struct_blobs_decoded`, `movement_rows`, the array
-#: `elements` and `fields`) are here as well as the error counters because a
-#: zero in an error counter is only evidence when the matching work counter
-#: proves the work happened; see `MUST_MOVE`. `no_field_name` is required for
-#: the same reason every other line here is: `summary.rs` prints it
-#: unconditionally on a healthy export, so its absence means this run's summary
-#: cannot be trusted, not that the category was legitimately empty -- and
-#: `reconcile` depends on it being a real number, never a defaulted one.
-REQUIRED = (
-    ("decode_errors", "Decode errors"),
-    ("decoded_ok", "Decoded OK"),
-    ("raw_skip", "Raw/Skip"),
-    ("not_in_table", "Not in table"),
-    ("no_field_name", "No field name"),
-    ("rows_offered", "Rows offered"),
-    ("struct_blobs_decoded", "Struct blobs ... decoded"),
-    ("struct_blobs_failed", "Struct blobs ... failed"),
-    ("tracked_rewards_opaque_empty_variants", "Reward opaque"),
-    ("movement_rows", "Movement rows"),
-    ("movement_errors", "Movement errors"),
-    ("array_elements", "Array decode ... elements"),
-    ("array_fields", "Array decode ... fields"),
-    ("array_errors", "Array decode ... errors"),
-    ("array_truncations", "Array decode ... truncations"),
-    ("array_root_bits", "Array residual ... root bits"),
-    ("array_nested_bits", "Array residual ... nested bits"),
-    ("array_implicit_ends", "Array residual ... implicit ends"),
-    ("array_leaf_errors", "Array leaf errs"),
-    ("truncated_rpcs", "Truncated RPCs"),
-    ("cnc_bruteforce_attempted", "CNC brute force ... attempted"),
-    ("cnc_bruteforce_unwalked", "CNC brute force ... unwalked"),
-    ("movement_sized_tails", "Movement tails ... sized"),
-    ("movement_sized_tail_bits", "Movement tails ... sized bits"),
-    ("movement_open_tails", "Movement tails ... open"),
-    ("movement_open_tail_bits", "Movement tails ... open bits"),
+    ("decode_errors", DECODE_ERRORS, "Decode errors"),
+    ("decoded_ok", DECODED_OK, "Decoded OK"),
+    ("raw_skip", RAW_SKIP, "Raw/Skip"),
+    ("not_in_table", NOT_IN_TABLE, "Not in table"),
+    ("no_field_name", NO_FIELD_NAME, "No field name"),
+    ("rows_offered", ROWS_OFFERED, "Rows offered"),
+    ("struct_blobs_decoded", STRUCT_DECODED, "Struct blobs ... decoded"),
+    ("struct_blobs_failed", STRUCT_FAILED, "Struct blobs ... failed"),
+    ("tracked_rewards_opaque_empty_variants", REWARD_OPAQUE, "Reward opaque"),
+    ("movement_rows", MOVEMENT_ROWS, "Movement rows"),
+    ("movement_errors", MOVEMENT_ERRORS, "Movement errors"),
+    ("array_elements", ARRAY_ELEMENTS, "Array decode ... elements"),
+    ("array_fields", ARRAY_FIELDS, "Array decode ... fields"),
+    ("array_errors", ARRAY_ERRORS, "Array decode ... errors"),
+    ("array_truncations", ARRAY_TRUNCATIONS, "Array decode ... truncations"),
+    ("array_root_bits", ARRAY_ROOT_BITS, "Array residual ... root bits"),
+    ("array_nested_bits", ARRAY_NESTED_BITS, "Array residual ... nested bits"),
+    ("array_implicit_ends", ARRAY_IMPLICIT_ENDS, "Array residual ... implicit ends"),
+    ("array_leaf_errors", ARRAY_LEAF_ERRORS, "Array leaf errs"),
+    ("truncated_rpcs", TRUNCATED_RPCS, "Truncated RPCs"),
+    ("cnc_bruteforce_attempted", CNC_ATTEMPTED, "CNC brute force ... attempted"),
+    ("cnc_bruteforce_unwalked", CNC_UNWALKED, "CNC brute force ... unwalked"),
+    ("movement_sized_tails", MOVEMENT_SIZED_TAILS, "Movement tails ... sized"),
+    ("movement_sized_tail_bits", MOVEMENT_SIZED_TAIL_BITS, "Movement tails ... sized bits"),
+    ("movement_open_tails", MOVEMENT_OPEN_TAILS, "Movement tails ... open"),
+    ("movement_open_tail_bits", MOVEMENT_OPEN_TAIL_BITS, "Movement tails ... open bits"),
 )
 
 #: Main-pass counters that must be zero on every replay, and the label a
@@ -426,74 +394,57 @@ CHECKPOINT_MOVEMENT_TAILS = re.compile(
     r"(?m)^\s*Checkpoint movement tails:\s+(\d+) sized \((\d+) bits\) / "
     r"(\d+) open \((\d+) bits\)\s*$")
 
-#: `(key, regex, group)` for every checkpoint counter. Only consulted when the
+#: `(key, regex, group, label)` for every checkpoint counter, each REQUIRED as
+#: `COUNTERS` are: `with_checkpoints.then_some(&cp_stats)` in driver/mod.rs
+#: means the whole `=== Checkpoints ===` block prints, zeros included, on every
+#: export run with `--checkpoints` -- even for a replay with no checkpoint
+#: chunks at all. Its absence therefore means this run's checkpoint pass cannot
+#: be trusted, not that there was nothing to report. Only consulted when the
 #: caller asks `read_counters` for `require_checkpoints=True` -- a summary from
 #: a run without `--checkpoints` never has this block at all, and treating its
 #: absence as failure there would break the existing, checkpoint-free
 #: invocation this tool has always supported.
 CHECKPOINT_COUNTERS = (
-    ("checkpoint_decoded", CHECKPOINT_OVERLAY, 1),
-    ("checkpoint_errors", CHECKPOINT_OVERLAY, 2),
-    ("checkpoint_raw_skip", CHECKPOINT_OVERLAY, 3),
-    ("checkpoint_not_in_table", CHECKPOINT_OVERLAY, 4),
-    ("checkpoint_unnamed", CHECKPOINT_OVERLAY, 5),
-    ("checkpoint_conflicts", CHECKPOINT_OVERLAY, 6),
-    ("checkpoint_effect_blobs", CHECKPOINT_OVERLAY, 7),
-    ("checkpoint_blobs_decoded", CHECKPOINT_BLOBS, 1),
-    ("checkpoint_blobs_failed", CHECKPOINT_BLOBS, 2),
-    ("checkpoint_fail_array", CHECKPOINT_FAILS, 1),
-    ("checkpoint_fail_truncated_rpc", CHECKPOINT_FAILS, 2),
-    ("checkpoint_fail_movement", CHECKPOINT_FAILS, 3),
-    ("checkpoint_tracked_rewards_opaque_empty_variants", CHECKPOINT_REWARD_OPAQUE, 1),
-    ("checkpoint_array_elements", CHECKPOINT_ARRAY, 1),
-    ("checkpoint_array_fields", CHECKPOINT_ARRAY, 2),
-    ("checkpoint_array_truncations", CHECKPOINT_ARRAY, 3),
-    ("checkpoint_array_root_bits", CHECKPOINT_ARRAY, 4),
-    ("checkpoint_array_nested_bits", CHECKPOINT_ARRAY, 5),
-    ("checkpoint_array_implicit_ends", CHECKPOINT_ARRAY, 6),
-    ("checkpoint_leaf_errors", CHECKPOINT_LEAF, 1),
-    ("checkpoint_cnc_bruteforce_attempted", CHECKPOINT_CNC_BRUTEFORCE, 1),
-    ("checkpoint_cnc_bruteforce_unwalked", CHECKPOINT_CNC_BRUTEFORCE, 2),
-    ("checkpoint_movement_sized_tails", CHECKPOINT_MOVEMENT_TAILS, 1),
-    ("checkpoint_movement_sized_tail_bits", CHECKPOINT_MOVEMENT_TAILS, 2),
-    ("checkpoint_movement_open_tails", CHECKPOINT_MOVEMENT_TAILS, 3),
-    ("checkpoint_movement_open_tail_bits", CHECKPOINT_MOVEMENT_TAILS, 4),
-)
-
-#: Every checkpoint counter is REQUIRED, on the same reasoning as `REQUIRED`
-#: above: `with_checkpoints.then_some(&cp_stats)` in driver/mod.rs means the
-#: whole `=== Checkpoints ===` block prints, zeros included, on every export
-#: run with `--checkpoints` -- even for a replay with no checkpoint chunks at
-#: all. Its absence therefore means this run's checkpoint pass cannot be
-#: trusted, not that there was nothing to report. Labels name the printed line
-#: they come from, exactly as `REQUIRED` above does.
-CHECKPOINT_REQUIRED = (
-    ("checkpoint_decoded", "Overlay ... decoded (checkpoint)"),
-    ("checkpoint_errors", "Overlay ... errors (checkpoint)"),
-    ("checkpoint_raw_skip", "Overlay ... raw-skip (checkpoint)"),
-    ("checkpoint_not_in_table", "Overlay ... not-in-table (checkpoint)"),
-    ("checkpoint_unnamed", "Overlay ... unnamed (checkpoint)"),
-    ("checkpoint_conflicts", "Overlay ... conflicts (checkpoint)"),
-    ("checkpoint_effect_blobs", "Overlay ... effect blobs (checkpoint)"),
-    ("checkpoint_blobs_decoded", "Checkpoint blobs ... decoded"),
-    ("checkpoint_blobs_failed", "Checkpoint blobs ... failed"),
-    ("checkpoint_fail_array", "Checkpoint fails ... array"),
-    ("checkpoint_fail_truncated_rpc", "Checkpoint fails ... truncated RPC"),
-    ("checkpoint_fail_movement", "Checkpoint fails ... movement"),
-    ("checkpoint_tracked_rewards_opaque_empty_variants", "Checkpoint reward opaque"),
-    ("checkpoint_array_elements", "Checkpoint array ... elements"),
-    ("checkpoint_array_fields", "Checkpoint array ... fields"),
-    ("checkpoint_array_truncations", "Checkpoint array ... truncations"),
-    ("checkpoint_array_root_bits", "Checkpoint array ... root bits"),
-    ("checkpoint_array_nested_bits", "Checkpoint array ... nested bits"),
-    ("checkpoint_array_implicit_ends", "Checkpoint array ... implicit ends"),
-    ("checkpoint_leaf_errors", "Checkpoint leaf ... typed decode errors"),
-    ("checkpoint_cnc_bruteforce_attempted", "Checkpoint CNC brute force ... attempted"),
-    ("checkpoint_cnc_bruteforce_unwalked", "Checkpoint CNC brute force ... unwalked"),
-    ("checkpoint_movement_sized_tails", "Checkpoint movement tails ... sized"),
-    ("checkpoint_movement_sized_tail_bits", "Checkpoint movement tails ... sized bits"),
-    ("checkpoint_movement_open_tails", "Checkpoint movement tails ... open"),
-    ("checkpoint_movement_open_tail_bits", "Checkpoint movement tails ... open bits"),
+    ("checkpoint_decoded", CHECKPOINT_OVERLAY, 1, "Overlay ... decoded (checkpoint)"),
+    ("checkpoint_errors", CHECKPOINT_OVERLAY, 2, "Overlay ... errors (checkpoint)"),
+    ("checkpoint_raw_skip", CHECKPOINT_OVERLAY, 3, "Overlay ... raw-skip (checkpoint)"),
+    ("checkpoint_not_in_table", CHECKPOINT_OVERLAY, 4,
+     "Overlay ... not-in-table (checkpoint)"),
+    ("checkpoint_unnamed", CHECKPOINT_OVERLAY, 5, "Overlay ... unnamed (checkpoint)"),
+    ("checkpoint_conflicts", CHECKPOINT_OVERLAY, 6, "Overlay ... conflicts (checkpoint)"),
+    ("checkpoint_effect_blobs", CHECKPOINT_OVERLAY, 7,
+     "Overlay ... effect blobs (checkpoint)"),
+    ("checkpoint_blobs_decoded", CHECKPOINT_BLOBS, 1, "Checkpoint blobs ... decoded"),
+    ("checkpoint_blobs_failed", CHECKPOINT_BLOBS, 2, "Checkpoint blobs ... failed"),
+    ("checkpoint_fail_array", CHECKPOINT_FAILS, 1, "Checkpoint fails ... array"),
+    ("checkpoint_fail_truncated_rpc", CHECKPOINT_FAILS, 2,
+     "Checkpoint fails ... truncated RPC"),
+    ("checkpoint_fail_movement", CHECKPOINT_FAILS, 3, "Checkpoint fails ... movement"),
+    ("checkpoint_tracked_rewards_opaque_empty_variants", CHECKPOINT_REWARD_OPAQUE, 1,
+     "Checkpoint reward opaque"),
+    ("checkpoint_array_elements", CHECKPOINT_ARRAY, 1, "Checkpoint array ... elements"),
+    ("checkpoint_array_fields", CHECKPOINT_ARRAY, 2, "Checkpoint array ... fields"),
+    ("checkpoint_array_truncations", CHECKPOINT_ARRAY, 3,
+     "Checkpoint array ... truncations"),
+    ("checkpoint_array_root_bits", CHECKPOINT_ARRAY, 4, "Checkpoint array ... root bits"),
+    ("checkpoint_array_nested_bits", CHECKPOINT_ARRAY, 5,
+     "Checkpoint array ... nested bits"),
+    ("checkpoint_array_implicit_ends", CHECKPOINT_ARRAY, 6,
+     "Checkpoint array ... implicit ends"),
+    ("checkpoint_leaf_errors", CHECKPOINT_LEAF, 1,
+     "Checkpoint leaf ... typed decode errors"),
+    ("checkpoint_cnc_bruteforce_attempted", CHECKPOINT_CNC_BRUTEFORCE, 1,
+     "Checkpoint CNC brute force ... attempted"),
+    ("checkpoint_cnc_bruteforce_unwalked", CHECKPOINT_CNC_BRUTEFORCE, 2,
+     "Checkpoint CNC brute force ... unwalked"),
+    ("checkpoint_movement_sized_tails", CHECKPOINT_MOVEMENT_TAILS, 1,
+     "Checkpoint movement tails ... sized"),
+    ("checkpoint_movement_sized_tail_bits", CHECKPOINT_MOVEMENT_TAILS, 2,
+     "Checkpoint movement tails ... sized bits"),
+    ("checkpoint_movement_open_tails", CHECKPOINT_MOVEMENT_TAILS, 3,
+     "Checkpoint movement tails ... open"),
+    ("checkpoint_movement_open_tail_bits", CHECKPOINT_MOVEMENT_TAILS, 4,
+     "Checkpoint movement tails ... open bits"),
 )
 
 #: `FAILURES` for the checkpoint pass: the same thirteen quantities, read off the
@@ -578,22 +529,15 @@ def read_counters(
     tail = " | ".join(l for l in text.splitlines()[-3:] if l.strip())
     if returncode != 0:
         return None, f"exit {returncode}: {tail[:200]}"
-    counters: dict[str, int] = {}
-    for key, pattern in COUNTERS:
-        m = pattern.search(text)
-        if m:
-            counters[key] = int(m.group(1))
-    for required, label in REQUIRED:
-        if required not in counters:
-            return None, f"no {label} counter: {tail[:200]}"
+    table = [(key, pattern, 1, label) for key, pattern, label in COUNTERS]
     if require_checkpoints:
-        for key, pattern, group in CHECKPOINT_COUNTERS:
-            m = pattern.search(text)
-            if m:
-                counters[key] = int(m.group(group))
-        for required, label in CHECKPOINT_REQUIRED:
-            if required not in counters:
-                return None, f"no {label} counter: {tail[:200]}"
+        table += CHECKPOINT_COUNTERS
+    counters: dict[str, int] = {}
+    for key, pattern, group, label in table:
+        m = pattern.search(text)
+        if m is None:
+            return None, f"no {label} counter: {tail[:200]}"
+        counters[key] = int(m.group(group))
     return counters, ""
 
 
@@ -679,7 +623,7 @@ def reconcile(totals: dict[str, int]) -> str | None:
     `no_field_name` is indexed directly, never `totals.get("no_field_name",
     0)`: a `.get` with a default would make an ABSENT counter reconcile
     silently, which is the exact doctrine this function exists to enforce
-    against -- see `REQUIRED`, which is what keeps this KeyError from ever
+    against -- see `COUNTERS`, all required, which keeps this KeyError from ever
     firing on a real run.
 
     `no_field_name` deliberately does NOT join `MUST_MOVE`/`dead_counters`
@@ -781,9 +725,9 @@ def main() -> int:
     started = time.time()
     unreadable: list[tuple[str, str]] = []
     failing: list[tuple[str, list[tuple[str, int]]]] = []
-    totals = {key: 0 for key, _pattern in COUNTERS}
+    totals = {key: 0 for key, *_ in COUNTERS}
     if args.checkpoints:
-        totals.update({key: 0 for key, _pattern, _group in CHECKPOINT_COUNTERS})
+        totals.update({key: 0 for key, *_ in CHECKPOINT_COUNTERS})
     done = 0
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
