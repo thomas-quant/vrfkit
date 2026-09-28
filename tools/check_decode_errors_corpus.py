@@ -1,38 +1,24 @@
 """Assert that the type overlay and the struct-blob decoders decode cleanly
 across a whole corpus.
 
-`vrfkit validate` does not print the overlay counters at all -- only `export`
-does -- so validate_corpus.py cannot see a decode error, and never could. That
-matters because a wrong overlay type is exactly the failure this project is
-least able to notice by other means: the row still emits, the block still
-walks, the block/field/RPC totals do not move, and every counter
-validate_corpus.py reads stays identical.
+`vrfkit validate` does not print the overlay counters -- only `export` does --
+so validate_corpus.py cannot see a decode error, and a wrong overlay type moves
+no counter it reads: the row still emits, the block/field/RPC totals stay put.
+The overlay is strict both ways (Err(BitIo) past the end, Err(NotFullyConsumed)
+on leftover bits), so `Decode errors: 0` over a corpus is a statement about
+every (group, field) type in the table. Only a corpus catches a type whose two
+readings consume the same bits on the reference replay: a rotator
+quantization, for instance, shows only where some payload sets the flag.
 
-The overlay decoder is strict in both directions -- a decoder that runs off the
-end of the payload returns Err(BitIo) and one that leaves bits behind returns
-Err(NotFullyConsumed) -- so `Decode errors: 0` over a corpus is a real
-statement about every (group, field) type in the table, not just the ones one
-replay happens to exercise.
+The struct-blob decoders (RoundResults, TeamEconomy, RoundInfos) are additive,
+so a total failure moves nothing else on the summary: build 13.02 moved
+RoundResults from handle 93 to 81 and every other counter stayed clean while
+the match score stopped being written.
 
-This is the only check that can catch a per-class type whose two candidate
-readings happen to be indistinguishable on the reference replay. A rotator
-quantization, for instance, is not on the wire: it is a descriptor choice, and
-when a class never replicates a rotation both readings consume the same bits.
-The choice only becomes observable on a replay where some payload does set a
-rotator flag, which may be any replay in the corpus but is not necessarily the
-one being developed against.
-
-Exports run into a temporary directory that is deleted as soon as its counters
-have been read, so the peak disk cost is (jobs x one replay's Parquet output)
-rather than the whole corpus.
-
-Corpus discovery is shared with `validate_corpus.py` through `corpus_scan.py`
--- read that module's docstring for why the default does not recurse into
-subdirectories (a `validate_corpus.py`/`check_decode_errors_corpus.py` run
-pointed at the same directory used to disagree by exactly this: 153 files
-against 126, a 27-file gap in a `Demos/old` subdirectory that this tool's
-narrower glob silently skipped, with nothing printed to say so) and why the
-excluded count always prints. Pass `--recursive` to walk subdirectories too.
+Each replay exports into a temporary directory deleted once its counters are
+read, so peak disk is jobs x one replay's output. Discovery is corpus_scan.py's
+(non-recursive by default -- see its docstring); `--recursive` walks
+subdirectories too.
 
 Usage:
     python tools/check_decode_errors_corpus.py <vrfkit.exe> <corpus dir>
@@ -40,85 +26,30 @@ Usage:
     python tools/check_decode_errors_corpus.py <vrfkit.exe> <corpus dir> --recursive
     python tools/check_decode_errors_corpus.py <vrfkit.exe> <corpus dir> --checkpoints
 
-`--checkpoints` passes the same flag on to `vrfkit export`, so it additionally
-decodes every Checkpoint chunk each replay carries, and this tool then checks
-the checkpoint counters the same way it checks the main pass: every counter in
-`CHECKPOINT_COUNTERS` must be present, and every one in `CHECKPOINT_FAILURES`
-must be zero. `conflicts` is present-and-printed but NOT a failure counter: a
-handle conflict is the overlay REFUSING to type a row whose handle the
-replay renamed, which is the protection working, so a nonzero count is a
-legitimate outcome and gating on it would be a false alarm on real data. It is
-required and printed so a rule that started refusing everything is visible. It is opt-in, not the default: decoding checkpoints is
-real extra work, and both this tool's own docstring and every corpus sweep in
-this repo need a `--checkpoints`-free invocation to keep meaning the same
-thing it always has (see docs/USAGE.md). Before this flag existed, checkpoint
-decoding was verified on exactly one pinned replay
-(`tools/baselines/checkpoint_02d4d478.json`) and never across a corpus, even
-though docs/archive/PROJECT_STATUS.md measured 4,024 checkpoints across the
-215-replay corpus.
+`--checkpoints` (opt-in: real extra time and disk) passes the flag on to
+`vrfkit export` and gates the `=== Checkpoints ===` block the same way:
+every `CHECKPOINT_COUNTERS` line present, every `CHECKPOINT_FAILURES` counter
+zero. `conflicts` is required and printed but never gated: a conflict is the
+overlay refusing to type a row whose handle the replay renamed, the protection
+working, so gating it would fail real data.
 
-The struct-blob decoders (RoundResults, TeamEconomy, RoundInfos) are checked
-here for the same reason and are, if anything, a worse case: they are additive,
-so a total failure moves NOTHING else on the summary. Build 13.02 shifted
-RoundResults from handle 93 to 81 and the export stayed clean on every counter
-above while the match score silently stopped being written. "Struct blobs:
-N decoded / 0 failed" is the statement that did not exist then.
+Exit 0 only when every replay printed every `COUNTERS` line with every
+`FAILURES` counter at zero, and the corpus moved every `MUST_MOVE` work
+counter. A counter that stops being printed must not read as zero
+(docs/archive/PROJECT_STATUS.md 5-O), and one that cannot move must not read
+as success (`dead_counters`). `FAILURES` are verify_build_corpus.py's
+SINK_ZERO read off the summary, pinned by test_check_decode_errors_corpus.py.
+As there, only counts are gated: CNC `attempted` and the movement tails' bit
+totals are printed, not failed on, and `RPC suffix bits` stays ungated because
+verify_build_corpus.py records `rpc_suffix_bits_dropped` as a limitation.
 
-Exit code is 0 only when every replay reported zero on every counter in
-`FAILURES` -- overlay decode errors, struct-blob failures, the array, leaf,
-truncated-RPC and movement failures summary.rs prints beside them, and the
-unwalked CNC brute-force payloads and movement-section tails --
-AND every replay reported every counter in `COUNTERS` at all, AND the corpus
-as a whole moved every work counter in `MUST_MOVE`. A counter that stops being
-printed must not read as zero; that is how the corpus malformed figure stayed a
-vacuous 0 for the project's whole history (see docs/archive/PROJECT_STATUS.md
-5-O).
+Every failure gate is either backed in `MUST_MOVE` / `CHECKPOINT_MUST_MOVE` by
+the work counter whose movement makes its zero evidence, or listed in
+`UNBACKED` / `CHECKPOINT_UNBACKED` with the reason none exists and printed as
+unbacked on every run; the test pins that every gate is one or the other.
 
-The array, leaf, truncated-RPC and movement lines were printed on every export
-and never read here, on either pass, although verify_build_corpus.py requires
-every one of them to be zero (its SINK_ZERO). The first 2026-09-25 build audit
-found 116 nonzero array-counter occurrences across 81 replays on 13.01-13.05
-(docs/BUILD_VERIFICATION.md, "Resolved findings") -- main array errors, main
-leaf errors and checkpoint leaf errors, not one of which this gate read. The
-gates now match verify_build_corpus.py's, pinned by
-test_check_decode_errors_corpus.py. `RPC suffix bits` stays ungated on
-purpose: verify_build_corpus.py records `rpc_suffix_bits_dropped` as a
-limitation, not a counter that must be zero.
-
-The same pin caught the next addition: verify_build_corpus.py's SINK_ZERO grew
-`cnc_bruteforce_payloads_unwalked`, `movement_sized_section_tails` and
-`movement_open_section_tails` (zero in both passes of all 1,018 audit replays
-when added), and this gate reads them off the `CNC brute force` and
-`Movement tails` lines and their checkpoint twins. Only the counts are gated,
-as there: `attempted` and the tails' bit totals are read and printed, not
-failed on.
-
-The last of those three is the same argument one step further, and it was
-missing: `Decoded OK` and `Struct blobs: N decoded` were summed, printed, and
-never read again. An exporter whose decoders never ran prints
-
-    Rows offered: 0 / Decoded OK: 0 / Decode errors: 0 / Struct blobs: 0
-    decoded / 0 failed
-
-for every replay -- every counter a truthful zero, no error anywhere -- and
-that used to print "OK: every replay reported Decode errors: 0" and exit 0. A
-counter that CANNOT MOVE must not read as success either; see `dead_counters`.
-
-The array, leaf and movement gates then repeated the hole: `Array decode: N
-elements / M fields` was parsed, required and printed, and never read, so an
-array walker that was never reached passed as "0 array failures". Every
-failure gate is now either paired in `MUST_MOVE` / `CHECKPOINT_MUST_MOVE`
-with the work counter whose movement makes its zero mean something, or listed
-in `UNBACKED` / `CHECKPOINT_UNBACKED` with the reason none exists -- the
-truncated-RPC and unwalked-CNC gates on both passes, the main pass's sized
-movement-tail gate and the checkpoint movement gates -- and those are
-printed as unbacked on every run rather than quoted as evidence.
-test_check_decode_errors_corpus.py pins that every gate is one or the other.
-
-The process exit status is read for the same reason. `vrfkit export` prints
-this summary before it finalises the Parquet files, so an exporter that dies
-writing them has already printed `Decode errors: 0`. A nonzero exit makes the
-replay unreadable rather than clean; see `read_counters`.
+A nonzero export exit makes the replay unreadable, not clean: `vrfkit export`
+prints this summary before it finalises the Parquet files (`read_counters`).
 """
 from __future__ import annotations
 
@@ -149,15 +80,10 @@ def _line_field(label: str, units: tuple[str, ...], index: int) -> re.Pattern[st
     """A regex reading field `index` of one of summary.rs's sink lines.
 
     `units` are the words after each `{}` of the Rust format string; `()`
-    means the line is a single bare number. Anchored on the whole line, start
-    to end: `re.search` takes the FIRST match anywhere in the log, and the same
-    summary prints free-text diagnostics (`Struct blob err:`, `Movement err:`,
-    `Event layout msg:`) whose content this tool does not control. Unanchored,
-    a label quoted inside one of those lines would be read in place of the
-    counter -- `Array leaf errs: 0` in an error message ahead of a real
-    `Array leaf errs: 7` reads as clean. (The other pass's look-alikes,
-    `Checkpoint array:`, `Checkpoint movement:` and `truncated RPC`, differ in
-    case or wording and cannot match either way.)
+    means a single bare number. Anchored on the whole line: `re.search` takes
+    the first match anywhere, and free-text diagnostics (`Struct blob err:`,
+    `Movement err:`) can quote a label -- `Array leaf errs: 0` inside a message
+    ahead of the real `Array leaf errs: 7` would read as clean.
     """
     if not units:
         body = r"(\d+)"
@@ -187,13 +113,9 @@ CNC_UNWALKED = _line_field("CNC brute force:", CNC_BRUTEFORCE_UNITS, 1)
 
 
 def _movement_tails_field(label: str, index: int) -> re.Pattern[str]:
-    """Field `index` of summary.rs's `{} sized ({} bits) / {} open ({} bits)`.
-
-    Not `N unit` pairs joined by ` / `, so `_line_field` cannot spell it; the
-    anchoring is the same, and for the same reason. `Checkpoint movement
-    tails:` begins with `Checkpoint`, so the anchored main-pass pattern can
-    never read it.
-    """
+    """Field `index` of summary.rs's `{} sized ({} bits) / {} open ({} bits)`,
+    which `_line_field` cannot spell; anchored the same way, so the
+    `Checkpoint movement tails:` twin never matches."""
     fields = [r"\d+"] * 4
     fields[index] = r"(\d+)"
     return re.compile(
@@ -207,26 +129,15 @@ MOVEMENT_OPEN_TAILS = _movement_tails_field("Movement tails:", 2)
 MOVEMENT_OPEN_TAIL_BITS = _movement_tails_field("Movement tails:", 3)
 
 
-#: `(key, regex, label)` for every counter read off the export summary, and
-#: every one is REQUIRED: a replay whose summary lacks one is unreadable, and
-#: `label` names the missing line. `no_field_name` is here because summary.rs
-#: defines `Rows offered = decoded_ok + decoded_err + raw_or_skip +
-#: not_in_table + no_field_name`; leaving it out (as this tool used to) means
-#: the four categories it prints sum to about 0.3% less than the `rows offered`
-#: line it also prints, and a reader has to go read Rust source to know why.
-#: summary.rs prints it unconditionally on a healthy export, so its absence
-#: means this run's summary cannot be trusted, not that the category was
-#: legitimately empty -- and `reconcile` depends on it being a real number,
-#: never a defaulted one.
-#:
-#: The work counters (`decoded_ok`, `struct_blobs_decoded`, `movement_rows`,
-#: the array `elements` and `fields`) are required as well as the error
-#: counters because a zero in an error counter is only evidence when the
-#: matching work counter proves the work happened; see `MUST_MOVE`. The sink
-#: lines after `tracked_rewards_opaque_empty_variants` are read whole, so the
-#: totals this tool prints mirror what summary.rs printed and every field of
-#: those lines is named -- test_check_decode_errors_corpus.py checks both
-#: against summary.rs.
+#: `(key, regex, label)` for every counter read off the export summary. All
+#: are required: a summary missing one makes the replay unreadable, and `label`
+#: names the missing line. `no_field_name` completes summary.rs's `Rows offered
+#: = decoded_ok + decoded_err + raw_or_skip + not_in_table + no_field_name`,
+#: which `reconcile` checks with real numbers, never defaults. Work counters
+#: are required beside the error counters because an error zero is evidence
+#: only when the work happened (`MUST_MOVE`). The sink lines after
+#: `tracked_rewards_opaque_empty_variants` are read whole, every field named;
+#: test_check_decode_errors_corpus.py checks both against summary.rs.
 COUNTERS = (
     ("decode_errors", DECODE_ERRORS, "Decode errors"),
     ("decoded_ok", DECODED_OK, "Decoded OK"),
@@ -256,11 +167,10 @@ COUNTERS = (
     ("movement_open_tail_bits", MOVEMENT_OPEN_TAIL_BITS, "Movement tails ... open bits"),
 )
 
-#: Main-pass counters that must be zero on every replay, and the label a
-#: failure is reported under. The same thirteen quantities verify_build_corpus.py's
-#: SINK_ZERO requires to be zero, read off the summary rather than the
-#: manifest; test_check_decode_errors_corpus.py pins the correspondence, so a
-#: counter added there and not here turns that test red.
+#: Main-pass counters that must be zero on every replay, with the label a
+#: failure names: the thirteen quantities verify_build_corpus.py's SINK_ZERO
+#: requires to be zero, read off the summary rather than the manifest (the
+#: test pins the correspondence).
 FAILURES = (
     ("decode_errors", "Decode errors"),
     ("struct_blobs_failed", "Struct blobs failed"),
@@ -277,37 +187,24 @@ FAILURES = (
     ("movement_open_tails", "Movement tails open"),
 )
 
-#: `(work counter, label, failure counters it backs)`: corpus totals that
-#: cannot legitimately stay at zero, the label to name in the failure, and the
-#: `FAILURES` whose zero it turns into evidence. A zero here means the decoder
-#: never ran, not that it ran and found nothing -- and every gate in the third
-#: column then reads 0 vacuously, because a walker that is never reached
-#: cannot report an error.
+#: `(work counter, label, FAILURES it backs)`: corpus totals that cannot
+#: legitimately stay at zero. A zero means the decoder never ran, and every
+#: gate it backs then reads 0 vacuously. The array walker, leaf decoders and
+#: movement decoder are additive like the struct blobs: `ExportSink::on_field`
+#: runs the array flattener before the parent row is pushed, so if
+#: `is_known_array_field` stopped matching, `Decoded OK`, the blobs and
+#: `reconcile` would not move. Every leaf-error path follows a
+#: `decode_struct_array*` call, so `fields` backs the leaf gate;
+#: `decode_movement_rpc` is the only producer of movement rows.
 #:
-#: The array walker, the leaf decoders and the movement decoder are additive
-#: passes, exactly like the struct blobs: `ExportSink::on_field` calls the
-#: array flattener before the parent row is pushed and the overlay applied, so
-#: if `is_known_array_field` stopped matching, `Decoded OK`, the struct blobs
-#: and `reconcile` would all be unchanged and the five array gates and the
-#: leaf gate would read 0 forever. `Array decode: N elements` is what moves
-#: when the walker runs (every leaf-error path runs after a
-#: `decode_struct_array*` call, so `fields` backs the leaf gate), and
-#: `Movement rows` is what moves when `decode_movement_rpc` runs -- it is the
-#: only producer of movement.parquet rows.
-#:
-#: None of these is zero on a healthy replay, so a corpus of any size -- one
-#: replay included -- does not fail on them. Measured 2026-09-28 over the 1,018
-#: `export.log`s of the 259ed10 build audit (`vrfkit export --checkpoints`,
-#: 24 builds 11.06-13.06), each line read with this module's own regexes:
-#: minimum per replay 4,654 decoded rows, 16 struct blobs, 32 array elements,
-#: 182 array fields and 3,001 movement rows; zero replays at zero on any of
-#: them, the pre-13.01 builds (outside the measured-route allowlist) included.
-#:
-#: A corpus total catches a walker that stopped everywhere. It cannot catch one
-#: that stopped on one build of a mixed corpus, or on one route while the
-#: others keep the total up: the measured array routes are branch-gated in
-#: `enable_measured_array_routes` and the generic routes run on every build.
-#: summary.rs prints no per-route counter to catch that with.
+#: Measured 2026-09-28 over the 1,018 `export.log`s of the 259ed10 build audit
+#: (`vrfkit export --checkpoints`, 24 builds 11.06-13.06), read with this
+#: module's regexes: minimum per replay 4,654 decoded rows, 16 struct blobs,
+#: 32 array elements, 182 array fields and 3,001 movement rows, pre-13.01
+#: builds included -- so a one-replay corpus passes. A corpus total cannot
+#: catch a walker stopped on one build, or on one route while others keep the
+#: total up (`enable_measured_array_routes` branch-gates the measured routes);
+#: summary.rs prints no per-route counter.
 MUST_MOVE = (
     ("decoded_ok", "Decoded OK", ("decode_errors",)),
     ("struct_blobs_decoded", "Struct blobs ... decoded", ("struct_blobs_failed",)),
@@ -318,27 +215,21 @@ MUST_MOVE = (
     ("movement_rows", "Movement rows", ("movement_errors", "movement_open_tails")),
 )
 
-#: `(failure counter, why no work counter backs it)`: the `FAILURES` whose zero
-#: this tool cannot turn into evidence, printed on every run so the OK line is
-#: not read as vouching for them.
+#: `(failure counter, why no work counter backs it)`, printed on every run so
+#: the OK line does not vouch for them.
 #:
-#: `truncated_rpcs` is bumped inside `try_parse_rpc_params` when a
-#: FunctionParameters walk breaks, and summary.rs prints no count of walks
-#: begun. The nearest printed counters do not stand in for one: `RPCs:` and
-#: `Sink tally: ... RPCs` also count the post-RepLayout ClassNetCache tails,
-#: which never enter the walk and numbered at least 6 on every one of the
-#: 1,018 audit replays -- so those totals stay above zero with the walk never
-#: running -- and `on_rpc` counts an RPC whose function name did not resolve
-#: exactly as it counts one it walked: `try_parse_rpc_params` returns before
-#: the walk begins, the raw fallback row is written, the RPC tally still
-#: moves. Backing this gate needs a walk counter on the Rust side.
+#: `truncated_rpcs`: summary.rs prints no count of FunctionParameters walks
+#: begun. `RPCs:` and `Sink tally: ... RPCs` cannot stand in: they also count
+#: post-RepLayout ClassNetCache tails, which never enter the walk (at least 6
+#: on every one of the 1,018 audit replays), and RPCs whose function name did
+#: not resolve (`try_parse_rpc_params` returns first, the raw fallback row is
+#: written, the tally still moves). Backing it needs a Rust-side walk counter.
 #:
-#: `movement_sized_tails` is counted only in a window `movementBitCount` sized
-#: (`parse_movement_with_bit_count`, vrf-movement's rpc.rs), and no measured
-#: replay has one: `vrfkit validate`, instrumented to count windows, found
-#: none in 156,407,150 sections of 80 replays covering 11.06-13.06
-#: (2026-09-28). `Movement rows` moves in open windows only, so it vouches
-#: for the open-tail gate and not for this one.
+#: `movement_sized_tails` counts only in a window `movementBitCount` sized
+#: (`parse_movement_with_bit_count`, vrf-movement's rpc.rs): `vrfkit validate`,
+#: instrumented to count windows, found none in 156,407,150 sections of 80
+#: replays covering 11.06-13.06 (2026-09-28). `Movement rows` moves in open
+#: windows only, so it backs the open-tail gate alone.
 UNBACKED = (
     ("truncated_rpcs", "summary.rs prints no count of RPC parameter walks"),
     ("cnc_bruteforce_unwalked",
@@ -348,26 +239,11 @@ UNBACKED = (
      "only a sized movement window can count one, and no measured replay has one"),
 )
 
-# --- Checkpoint counters, parsed only when --checkpoints was passed --------
-#
-# summary.rs's print_checkpoints packs several counters onto each line (see
-# crates/vrfkit/src/driver/summary.rs), unlike the main pass which gets one
-# regex per counter -- so each of these three patterns carries more than one
-# capture group, and CHECKPOINT_COUNTERS names which group is which counter.
-# The seven fields summary.rs prints, in its order. `conflicts` is the one this
-# pattern was missing: it prints
-#
-#   Overlay: {} decoded / {} errors / {} raw-skip / {} not-in-table /
-#            {} unnamed / {} conflicts / {} effect blobs
-#
-# and this regex asked for six fields, so it matched NOTHING on a real
-# `--checkpoints` run -- every replay came back "no Overlay ... decoded
-# (checkpoint) counter" and the whole sweep failed as unreadable. It failed
-# loudly rather than passing vacuously, which is the one thing that saved it,
-# but the check had not run since the Rust side grew the field.
-# test_check_decode_errors_corpus.py reads this format string OUT OF summary.rs
-# so the next field added there breaks the test instead of silently disabling
-# the check again.
+# Checkpoint counters, parsed only under --checkpoints. summary.rs's
+# print_checkpoints packs several counters per line, so each pattern carries
+# several groups and CHECKPOINT_COUNTERS names which is which.
+# test_check_decode_errors_corpus.py reads the Overlay format string out of
+# summary.rs, so a field added there breaks the test, not this regex.
 CHECKPOINT_OVERLAY = re.compile(
     r"Overlay:\s+(\d+) decoded / (\d+) errors / (\d+) raw-skip / "
     r"(\d+) not-in-table / (\d+) unnamed / (\d+) conflicts / "
@@ -377,9 +253,9 @@ CHECKPOINT_FAILS = re.compile(
     r"Checkpoint fails:\s+(\d+) array / (\d+) truncated RPC / (\d+) movement")
 CHECKPOINT_REWARD_OPAQUE = re.compile(
     r"(?m)^\s*Checkpoint reward opaque:\s+(\d+) empty variants\s*$")
-# `Checkpoint fails: N array` above is the array walker's `errors` only. Its
-# truncations, residual bits and implicit ends are on this line, and leaf
-# decode errors on the next; neither line was read before 2026-09-28.
+# `Checkpoint fails: N array` is the array walker's `errors` only; its
+# truncations, residual bits and implicit ends are on this line, leaf decode
+# errors on the next.
 CHECKPOINT_ARRAY = re.compile(
     r"(?m)^\s*Checkpoint array:\s+(\d+) elements / (\d+) fields / "
     r"(\d+) truncations / (\d+) root bits / (\d+) nested bits / "
@@ -394,16 +270,11 @@ CHECKPOINT_MOVEMENT_TAILS = re.compile(
     r"(?m)^\s*Checkpoint movement tails:\s+(\d+) sized \((\d+) bits\) / "
     r"(\d+) open \((\d+) bits\)\s*$")
 
-#: `(key, regex, group, label)` for every checkpoint counter, each REQUIRED as
-#: `COUNTERS` are: `with_checkpoints.then_some(&cp_stats)` in driver/mod.rs
-#: means the whole `=== Checkpoints ===` block prints, zeros included, on every
-#: export run with `--checkpoints` -- even for a replay with no checkpoint
-#: chunks at all. Its absence therefore means this run's checkpoint pass cannot
-#: be trusted, not that there was nothing to report. Only consulted when the
-#: caller asks `read_counters` for `require_checkpoints=True` -- a summary from
-#: a run without `--checkpoints` never has this block at all, and treating its
-#: absence as failure there would break the existing, checkpoint-free
-#: invocation this tool has always supported.
+#: `(key, regex, group, label)`, all required as `COUNTERS` are: driver/mod.rs
+#: (`with_checkpoints.then_some(&cp_stats)`) prints the whole checkpoint
+#: block, zeros included, on every `--checkpoints` export even without
+#: checkpoint chunks, so a missing line means the checkpoint pass cannot be
+#: trusted. Read only for `require_checkpoints=True`.
 CHECKPOINT_COUNTERS = (
     ("checkpoint_decoded", CHECKPOINT_OVERLAY, 1, "Overlay ... decoded (checkpoint)"),
     ("checkpoint_errors", CHECKPOINT_OVERLAY, 2, "Overlay ... errors (checkpoint)"),
@@ -467,16 +338,11 @@ CHECKPOINT_FAILURES = (
 
 FAILURE_LABELS = dict(FAILURES + CHECKPOINT_FAILURES)
 
-#: Checkpoint corpus totals that cannot legitimately stay at zero once
-#: --checkpoints is on, mirroring MUST_MOVE for the main pass, in the same
-#: `(work counter, label, failure counters it backs)` shape. This is the
-#: 13.02 RoundResults incident one level down: `Checkpoint blobs: N decoded`
-#: is additive, so a checkpoint decoder that stopped running would move
-#: nothing else on the summary, and "0 failed" beside a corpus-wide zero
-#: `decoded` says nothing. The checkpoint array walker is additive the same
-#: way. Measured on the same 1,018 audit logs as `MUST_MOVE` (every replay
-#: carried at least 5 checkpoints): minimum per replay 2,054 decoded fields,
-#: 16 blobs, 30 array elements and 255 array fields, no replay at zero.
+#: `MUST_MOVE` for the checkpoint pass: the checkpoint blob decoders and array
+#: walker are additive too (13.02's RoundResults case one level down).
+#: Measured on the same 1,018 audit logs (at least 5 checkpoints per replay):
+#: minimum per replay 2,054 decoded fields, 16 blobs, 30 array elements and
+#: 255 array fields, no replay at zero.
 CHECKPOINT_MUST_MOVE = (
     ("checkpoint_decoded", "Overlay ... decoded (checkpoint)", ("checkpoint_errors",)),
     ("checkpoint_blobs_decoded", "Checkpoint blobs ... decoded",
@@ -489,15 +355,13 @@ CHECKPOINT_MUST_MOVE = (
      ("checkpoint_leaf_errors",)),
 )
 
-#: `UNBACKED`, for the checkpoint pass. Both gates sit behind the RPC callback
-#: (`on_rpc` runs the movement decoder and the parameter walk), and no
-#: checkpoint RPC reached it on the 1,018 audit replays: every one was a
-#: post-RepLayout ClassNetCache tail -- `Checkpoint tails: N decoded` equalled
-#: `Checkpoint sink: ... N RPCs` on 1,018/1,018 (181,108 in all), and
-#: `Dropped: ... N movement rows (checkpoint snapshot)` read 0 on all of them.
-#: A must-move entry here would fail every healthy corpus; backing
-#: `checkpoint_fail_truncated_rpc` with the checkpoint RPC count would vouch for
-#: a walk that never ran.
+#: `UNBACKED` for the checkpoint pass. These gates sit behind `on_rpc` (the
+#: movement decoder and the parameter walk), which no checkpoint RPC reached on
+#: the 1,018 audit replays: `Checkpoint tails: N decoded` equalled `Checkpoint
+#: sink: ... N RPCs` on 1,018/1,018 (181,108 in all, every one a post-RepLayout
+#: ClassNetCache tail) and `Dropped: ... N movement rows (checkpoint snapshot)`
+#: read 0 on all. A must-move entry would fail every healthy corpus, and the
+#: checkpoint RPC count would vouch for a walk that never ran.
 CHECKPOINT_UNBACKED = (
     ("checkpoint_fail_movement",
      "no checkpoint RPC reaches the movement decoder"),
@@ -515,16 +379,12 @@ CHECKPOINT_UNBACKED = (
 def read_counters(
     text: str, returncode: int, require_checkpoints: bool = False,
 ) -> tuple[dict[str, int] | None, str]:
-    """`(counters, error)` for one export's output. `counters` is None on failure.
+    """`(counters, error)` for one export's output; `counters` is None on failure.
 
-    A nonzero exit is a failure even when the summary parsed cleanly: the
-    exporter prints these counters before it finalises the Parquet files, so a
-    run that dies writing them has already printed `Decode errors: 0`.
-
-    `require_checkpoints` defaults to False so a summary from a run without
-    `--checkpoints` -- which has no `=== Checkpoints ===` block at all -- keeps
-    reading exactly as it always has. Pass it only when this replay's export
-    was itself run with `--checkpoints`.
+    A nonzero exit fails even when the summary parsed: the exporter prints
+    these counters before it finalises the Parquet files. Pass
+    `require_checkpoints` only when the export ran with `--checkpoints`; a run
+    without it has no `=== Checkpoints ===` block.
     """
     tail = " | ".join(l for l in text.splitlines()[-3:] if l.strip())
     if returncode != 0:
@@ -544,13 +404,8 @@ def read_counters(
 def replay_failures(counters: dict[str, int], checkpoints: bool) -> list[tuple[str, int]]:
     """`(key, count)` for every failure counter that is nonzero on one replay.
 
-    One table decides what a failure is, for both passes. The per-counter
-    classification used to live inline in `main()`, which gated two main-pass
-    counters and five checkpoint ones while summary.rs printed ten of each.
-
-    Indexed, never `.get(key, 0)`: a counter missing here must raise, not
-    gate as a zero. `read_counters` requires every one of them, so on a real
-    run the KeyError cannot fire.
+    Indexed, never `.get(key, 0)`: a missing counter must raise, not gate as a
+    zero (`read_counters` requires every one).
     """
     gated = FAILURES + (CHECKPOINT_FAILURES if checkpoints else ())
     return [(key, counters[key]) for key, _label in gated if counters[key]]
@@ -564,16 +419,9 @@ def _vacuous(gates: tuple[str, ...]) -> str:
 def dead_counters(totals: dict[str, int], must_move=MUST_MOVE, suffix: str = "") -> list[str]:
     """Corpus totals that never moved, as human-readable failures.
 
-    `Decode errors: 0` is only a statement about the overlay if something was
-    decoded, and `Struct blobs: 0 failed` is only a statement about the struct
-    decoders if some blob was decoded. Both counters were summed and printed
-    and then never read, so a corpus on which nothing ran at all reported a
-    clean sweep. The array and movement gates had the same hole after they
-    were added: their work counters were summed and printed and never read, so
-    an array walker that was never reached passed as "0 array failures".
-
-    The checkpoint pass passes `CHECKPOINT_MUST_MOVE` and the suffix
-    ` (with --checkpoints)`, and only when `--checkpoints` was requested.
+    `Decode errors: 0` says something only if something was decoded; a corpus
+    on which nothing ran must not report a clean sweep. The checkpoint pass
+    passes `CHECKPOINT_MUST_MOVE` and the suffix ` (with --checkpoints)`.
     """
     return [f"{label} totalled 0 across the corpus{suffix}: nothing decoded, so "
             f"the zero in {_vacuous(gates)} says nothing"
@@ -581,22 +429,16 @@ def dead_counters(totals: dict[str, int], must_move=MUST_MOVE, suffix: str = "")
 
 
 def unbacked_line(unbacked: tuple[tuple[str, str], ...]) -> str:
-    """The failure gates no work counter backs, and why, on one line.
-
-    Printed on every run, clean or not: the OK line counts these gates among
-    the ones that read 0, and without this line nothing would say that their
-    zero is not evidence of anything.
-    """
+    """The failure gates no work counter backs, and why, on one line. Printed
+    on every run: the OK line counts these gates among the zeros, and nothing
+    else says their zero is not evidence."""
     return "; ".join(f"{FAILURE_LABELS[key]} ({why})" for key, why in unbacked)
 
 
 def backing_summary(must_move, unbacked, totals: dict[str, int]) -> str:
     """How many of a pass's zero failure counters are evidence, and of what.
-
-    Built from the tables rather than spelled out, so a work counter added to
-    `MUST_MOVE` cannot be left out of the OK line that quotes it, and an
-    unbacked gate cannot be counted among the ones the work vouches for.
-    """
+    Built from the tables, so the OK line cannot omit a work counter or count
+    an unbacked gate as backed."""
     backed = sum(len(gates) for _key, _label, gates in must_move)
     work = ", ".join(f"{label} {totals[key]:,}" for key, label, _gates in must_move)
     none = ", ".join(FAILURE_LABELS[key] for key, _why in unbacked)
@@ -608,24 +450,10 @@ def reconcile(totals: dict[str, int]) -> str | None:
     """None if the five overlay categories sum to `rows_offered`; else why not.
 
     summary.rs defines `Rows offered = decoded_ok + decoded_err + raw_or_skip
-    + not_in_table + no_field_name`. This tool printed the first four for a
-    long time and never `no_field_name`, so its own printed categories summed
-    to about 0.3% less than its own `rows offered` line -- correct numbers,
-    illegible arithmetic, and a reader had to go read the Rust source to know
-    the fifth category existed at all.
-
-    `no_field_name` is indexed directly, never `totals.get("no_field_name",
-    0)`: a `.get` with a default would make an ABSENT counter reconcile
-    silently, which is the exact doctrine this function exists to enforce
-    against -- see `COUNTERS`, all required, which keeps this KeyError from ever
-    firing on a real run.
-
-    `no_field_name` deliberately does NOT join `MUST_MOVE`/`dead_counters`
-    above: unlike `decoded_ok` and `struct_blobs_decoded`, which are large on
-    any real corpus and a corpus-wide zero for either means the decoder never
-    ran, a corpus where every handle happens to resolve to a name is a
-    legitimate (if unlikely) outcome for `no_field_name`, not evidence the
-    check never ran. Gating on it would be a false failure on a clean corpus.
+    + not_in_table + no_field_name`. Every term is indexed, never `.get(key,
+    0)`: a default would let an absent counter reconcile silently.
+    `no_field_name` is not in `MUST_MOVE`: a corpus where every handle resolves
+    to a name is legitimate, so gating it would fail a clean corpus.
     """
     reconciled = (totals["decoded_ok"] + totals["decode_errors"]
                  + totals["raw_skip"] + totals["not_in_table"]
@@ -671,8 +499,6 @@ def _export_one(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """`argv=None` defers to `sys.argv[1:]` (argparse's own default); tests pass
-    an explicit list instead of monkeypatching `sys.argv`."""
     ap = argparse.ArgumentParser()
     ap.add_argument("exe", type=Path)
     ap.add_argument("corpus", type=Path)
@@ -757,8 +583,8 @@ def main() -> int:
           f"{totals['struct_blobs_failed']:,} failed")
     print(f"reward opaque     : {totals['tracked_rewards_opaque_empty_variants']:,} "
           f"empty variants")
-    # Unconditional, zeros included: these are failure counters, and a line
-    # printed only when nonzero could not tell "clean" from "never read".
+    # Unconditional, zeros included: a line printed only when nonzero could
+    # not tell "clean" from "never read".
     print(f"movement rows     : {totals['movement_rows']:,}")
     print(f"movement errors   : {totals['movement_errors']:,}")
     print(f"array decode      : {totals['array_elements']:,} elements / "
@@ -777,9 +603,7 @@ def main() -> int:
           f"({totals['movement_open_tail_bits']:,} bits)")
     print(f"unbacked gates    : {unbacked_line(UNBACKED)}")
     if args.checkpoints:
-        # Unconditional, zeros included, on the same reasoning as every other
-        # line here: a conditional line could not tell "the checkpoint pass
-        # ran clean" from "the checkpoint pass never reached these counters".
+        # Unconditional, zeros included, for the same reason.
         print(f"checkpoint overlay: {totals['checkpoint_decoded']:,} decoded / "
               f"{totals['checkpoint_errors']:,} errors / "
               f"{totals['checkpoint_raw_skip']:,} raw-skip / "
@@ -848,11 +672,6 @@ def main() -> int:
                 print(f"    {line}", file=sys.stderr)
             return 1
 
-    # Fails loudly rather than printing a plausible wrong subtotal: a
-    # mismatch here means summary.rs's five overlay categories no longer sum
-    # to its own `rows offered` line -- most likely a sixth category was added
-    # in Rust that this tool does not know to parse yet, which is exactly the
-    # kind of drift a passing sweep must not paper over. See `reconcile`.
     mismatch = reconcile(totals)
     if mismatch:
         print(f"\nFAILED: the overlay categories do not reconcile: {mismatch}",
