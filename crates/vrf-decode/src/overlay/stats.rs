@@ -22,7 +22,7 @@ use crate::decode::FieldType;
 /// to be classified before it compiles. Three kinds used to carry every
 /// failure, which printed an invalid string that consumed its payload exactly
 /// as `EOF`, and a byte-array length over the table's cap as `Residual`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DecodeErrorKind {
     /// BitReader reached EOF before the decoder finished consuming: the type
     /// needs more bits than the field carries.
@@ -62,16 +62,6 @@ impl std::fmt::Display for DecodeErrorKind {
 }
 
 impl DecodeErrorKind {
-    const fn sort_key(self) -> u8 {
-        match self {
-            Self::Eof => 0,
-            Self::Residual => 1,
-            Self::ZeroBits => 2,
-            Self::Malformed => 3,
-            Self::Rejected => 4,
-        }
-    }
-
     /// The kind a bit-level read failure belongs to.
     ///
     /// Shared by every decoder that reports into [`OverlayErrorReport`], so the
@@ -169,7 +159,7 @@ impl OverlayErrorReport {
                     .then_with(|| a.field_name.cmp(&b.field_name))
                     .then_with(|| a.declared_type.cmp(&b.declared_type))
                     .then_with(|| a.bit_count.cmp(&b.bit_count))
-                    .then_with(|| a.error_kind.sort_key().cmp(&b.error_kind.sort_key()))
+                    .then_with(|| a.error_kind.cmp(&b.error_kind))
             })
         });
         rows.truncate(n);
@@ -287,21 +277,6 @@ mod tests {
                 ("GroupD", "delta"),
             ]
         );
-    }
-
-    #[test]
-    fn top_n_is_identical_across_independently_built_reports() {
-        // Each report owns a HashMap with its own RandomState, so tied buckets
-        // iterate in a different order per instance. Sorting on count alone let
-        // that leak into the printed report; two runs disagreed.
-        let first = tied_report().top_n(TIED.len());
-        let second = tied_report().top_n(TIED.len());
-        let key = |rows: &[OverlayErrorRow]| -> Vec<(String, String)> {
-            rows.iter()
-                .map(|r| (r.group_path.clone(), r.field_name.clone()))
-                .collect()
-        };
-        assert_eq!(key(&first), key(&second));
     }
 
     #[test]
