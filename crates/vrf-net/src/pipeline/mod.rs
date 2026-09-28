@@ -2564,6 +2564,89 @@ mod tests {
         assert_eq!(stats.skipped_bits, 7);
     }
 
+    /// A transform failure is handed back to the framing loop rather than
+    /// recorded where it happens: its `ParseFailure` event needs the block's
+    /// header and position, which only `frame_content_blocks` holds. Framing
+    /// never gets here on its own -- it refuses a block longer than the bunch
+    /// and sizes the scratch buffer to the block -- so an 8-bit block over a
+    /// 7-bit payload, called directly, is the way in.
+    #[test]
+    fn a_transform_failure_is_reported_back_to_framing() {
+        fn decode(rep_layout: bool, bit_count: usize) -> (bool, NetStats, TestSink) {
+            let wire = [0xBF];
+            let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
+            let mut scratch = vec![0xFF; 16];
+            let mut stats = NetStats::default();
+            let mut channels = ChannelTable::default();
+            let mut sink = TestSink::default();
+            let mut stage = Stage {
+                stats: &mut stats,
+                channels: &mut channels,
+                transform: TransformVersion::V1301,
+                scratch: &mut scratch,
+            };
+            let decoded = if rep_layout {
+                framing::decode_and_parse_rep_layout(
+                    &mut payload,
+                    bit_count,
+                    NetworkGuid(2),
+                    &mut stage,
+                    &mut sink,
+                )
+            } else {
+                framing::decode_and_parse_class_net_cache(
+                    &mut payload,
+                    bit_count,
+                    NetworkGuid(2),
+                    2,
+                    &mut stage,
+                    &mut sink,
+                )
+            };
+            (decoded, stats, sink)
+        }
+
+        for rep_layout in [true, false] {
+            let (decoded, stats, _) = decode(rep_layout, 7);
+            assert!(decoded, "a payload whose transform ran is reported decoded");
+            assert_eq!(stats.transform_failures, 0);
+
+            let (decoded, stats, sink) = decode(rep_layout, 8);
+            assert!(!decoded, "an 8-bit block cannot be copied out of 7 bits");
+            assert_eq!(stats.transform_failures, 1);
+            assert_eq!(stats.skipped_bits, 8, "the block's whole declared length");
+            assert_eq!(
+                stats.field_stream_failures + stats.rpc_stream_failures,
+                0,
+                "a transform failure is not a stream failure"
+            );
+            assert!(sink.stream_failures.is_empty());
+            assert!(sink.fields.is_empty() && sink.rpcs.is_empty());
+            #[cfg(feature = "diagnostics")]
+            {
+                assert!(
+                    stats.diagnostics.is_empty(),
+                    "the event is the framing loop's to record"
+                );
+            }
+        }
+
+        // Through the framing loop, a block whose transform ran records no
+        // event, whatever its inner stream then does (here: an unresolved
+        // ClassNetCache payload, which is a stream failure, not an event).
+        let mut bits = vec![false, true]; // ClassNetCache, isActor
+        write_int_packed(&mut bits, 7);
+        bits.extend([true, true, true, true, true, true, false]);
+        let (stats, sink) = frame_bits(&bits);
+        assert_eq!(stats.class_net_cache_blocks, 1);
+        assert_eq!(stats.transform_failures, 0);
+        assert_eq!(sink.unresolved_payloads.len(), 1);
+        #[cfg(feature = "diagnostics")]
+        {
+            assert!(stats.diagnostics.is_empty());
+        }
+    }
+
     /// A field stream that returns Ok but abandons bits mid-block must be a
     /// stream failure as well as landing those bits in `skipped_bits`. Before
     /// the fix, `parse_class_net_cache`

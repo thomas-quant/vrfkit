@@ -4,11 +4,13 @@
 //!
 //! # Diagnostics
 //!
-//! When content blocks fail to parse (malformed payload size, read errors in
-//! the block header, or transform failures), a [`DiagnosticEvent`] is recorded
-//! with full context: packet, bunch, channel, actor, header fields, and the
-//! exact bit position where failure occurred. This is essential for debugging
-//! new game builds where the payload transform may not yet be correct.
+//! When a content block cannot be framed (its header or `content_bits` does
+//! not read, or `content_bits` overruns the bunch) or its payload transform
+//! fails, a [`DiagnosticEvent`] is recorded with full context: packet, bunch,
+//! channel, actor, header fields, and the exact bit position where failure
+//! occurred. A field or RPC stream that fails to walk is counted and reported
+//! to the sink instead; see `SkipReason::ParseFailure`. This is essential for
+//! debugging new game builds where the payload transform may not yet be correct.
 //!
 //! The event log is bounded. On a healthy replay it stays empty -- 02d4d478
 //! records zero events -- but a replay whose transform is wrong can fail one
@@ -413,8 +415,20 @@ pub enum SkipReason {
     HeaderReadError,
     /// Reading the `IntPacked` content-bits field itself failed.
     ContentBitsReadError,
-    /// Payload transform or field/RPC parsing failed -- the decoded block was
-    /// garbage. Only the bits of that one block are skipped.
+    /// The block framed, but its payload transform (the copy out of the bunch
+    /// and the build's decode) failed. Only that block's `content_bits` are
+    /// skipped.
+    ///
+    /// Unreachable from content-block framing by construction: framing
+    /// refuses a `content_bits` larger than the bunch has left (that is
+    /// [`Self::ContentBitsOverrun`]) and sizes the scratch buffer to the block
+    /// before decoding, so this line of `validate`'s skip breakdown reads 0
+    /// unless one of those guards changes.
+    ///
+    /// Field and RPC stream failures are not events. They are counted and
+    /// reported to the sink's `on_stream_failure`, and a healthy replay has
+    /// thousands (`validate` reads 6,490 `RPC unresolved/raw` on 02d4d478 at
+    /// 061155a), which would bury the framing failures this log exists for.
     ParseFailure,
 }
 
@@ -467,7 +481,8 @@ pub struct DiagnosticEvent {
     /// For a block-framing abort that is the failing block's first bit to the
     /// end of the bunch, so it can exceed `remaining_bits`: the header and
     /// `content_bits` reads before the failure consumed bits that framed
-    /// nothing.
+    /// nothing. For a [`SkipReason::ParseFailure`] it is the block's
+    /// `content_bits`.
     pub bits_skipped: u64,
 }
 

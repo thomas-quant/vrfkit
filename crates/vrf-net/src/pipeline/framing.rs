@@ -146,12 +146,16 @@ pub(super) fn frame_content_blocks(
         let function_count = sink.on_content_block(ch_index, actor_net_guid, &header);
 
         stage.stats.content_blocks += 1;
+        let this_block = block_index;
         block_index += 1;
 
+        // Where this block's payload begins, for the event below.
+        let payload_start = payload.position();
+        let mut decoded = true;
         if header.has_rep_layout {
             stage.stats.rep_layout_blocks += 1;
             if content_bits != 0 {
-                decode_and_parse_rep_layout(
+                decoded = decode_and_parse_rep_layout(
                     payload,
                     content_bits as usize,
                     actor_net_guid,
@@ -162,7 +166,7 @@ pub(super) fn frame_content_blocks(
         } else {
             stage.stats.class_net_cache_blocks += 1;
             if content_bits != 0 {
-                decode_and_parse_class_net_cache(
+                decoded = decode_and_parse_class_net_cache(
                     payload,
                     content_bits as usize,
                     actor_net_guid,
@@ -171,6 +175,21 @@ pub(super) fn frame_content_blocks(
                     sink,
                 );
             }
+        }
+        // Counted already; this adds the event. Unreachable here by
+        // construction -- see `SkipReason::ParseFailure`.
+        if !decoded {
+            diagnostics::parse_failure(
+                stage.stats,
+                ctx,
+                ch_index,
+                actor_net_guid,
+                this_block,
+                payload_start,
+                payload.len_bits() - payload_start,
+                &header,
+                content_bits,
+            );
         }
     }
 }
@@ -257,15 +276,22 @@ fn abandoned_from(payload: &BitReader<'_>, block_start: u64) -> u64 {
     payload.len_bits() - block_start
 }
 
+/// Decode one RepLayout block payload and walk its field stream.
+///
+/// Returns `false` only when the payload transform failed. That failure is
+/// already counted (`transform_failures`, `skipped_bits`); the caller records
+/// its `ParseFailure` event, because only the caller holds the block's header
+/// and position. Every other outcome, a stream failure included, is reported
+/// here and returns `true`.
 pub(super) fn decode_and_parse_rep_layout(
     payload: &mut BitReader<'_>,
     bit_count: usize,
     actor_net_guid: NetworkGuid,
     stage: &mut Stage<'_>,
     sink: &mut dyn ReplicationSink,
-) {
+) -> bool {
     let Some(byte_count) = decode_into_scratch(payload, bit_count, actor_net_guid, stage) else {
-        return;
+        return false;
     };
 
     let Ok(mut field_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
@@ -287,7 +313,7 @@ pub(super) fn decode_and_parse_rep_layout(
         });
         stage.stats.field_stream_failures += 1;
         stage.stats.skipped_bits += bit_count as u64;
-        return;
+        return true;
     };
     let detailed = sink.wants_stream_failure_details();
     let mut walk = field::WalkContext::default();
@@ -395,8 +421,12 @@ pub(super) fn decode_and_parse_rep_layout(
             stage.stats.skipped_bits += abandoned_on_error(bit_count);
         }
     }
+    true
 }
 
+/// Decode one ClassNetCache block payload and walk its RPC stream. Returns
+/// `false` only when the payload transform failed, as
+/// `decode_and_parse_rep_layout` does.
 pub(super) fn decode_and_parse_class_net_cache(
     payload: &mut BitReader<'_>,
     bit_count: usize,
@@ -404,9 +434,9 @@ pub(super) fn decode_and_parse_class_net_cache(
     function_count: u32,
     stage: &mut Stage<'_>,
     sink: &mut dyn ReplicationSink,
-) {
+) -> bool {
     let Some(byte_count) = decode_into_scratch(payload, bit_count, actor_net_guid, stage) else {
-        return;
+        return false;
     };
 
     let Ok(mut rpc_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
@@ -426,7 +456,7 @@ pub(super) fn decode_and_parse_class_net_cache(
         });
         stage.stats.rpc_stream_failures += 1;
         stage.stats.skipped_bits += bit_count as u64;
-        return;
+        return true;
     };
     let detailed = sink.wants_stream_failure_details();
     let mut walk = field::WalkContext::default();
@@ -500,6 +530,7 @@ pub(super) fn decode_and_parse_class_net_cache(
             stage.stats.skipped_bits += abandoned_on_error(bit_count);
         }
     }
+    true
 }
 
 /// Diagnostic-event construction, compiled out entirely without the
@@ -646,6 +677,39 @@ mod diagnostics {
         });
     }
 
+    /// A block that framed but whose payload transform failed. The charge is
+    /// the block's `content_bits`, what `decode_into_scratch` added to
+    /// `skipped_bits`; `consumed_bits` and `remaining_bits` are taken where
+    /// the block's payload begins, the point the overrun event reports too.
+    #[cfg(feature = "diagnostics")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn parse_failure(
+        stats: &mut NetStats,
+        ctx: &BunchContext<'_>,
+        ch_index: u32,
+        actor_net_guid: NetworkGuid,
+        block_index: u32,
+        consumed_bits: u64,
+        remaining_bits: u64,
+        header: &ContentBlockHeader,
+        content_bits: u32,
+    ) {
+        stats.record_diagnostic(|| DiagnosticEvent {
+            reason: SkipReason::ParseFailure,
+            content_block_header: Some(ContentBlockHeaderSnapshot::from(header)),
+            content_bits: Some(content_bits),
+            ..base(
+                ctx,
+                ch_index,
+                actor_net_guid,
+                block_index,
+                consumed_bits,
+                remaining_bits,
+                u64::from(content_bits),
+            )
+        });
+    }
+
     #[cfg(not(feature = "diagnostics"))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn header_read_error(
@@ -689,5 +753,90 @@ mod diagnostics {
         _header: &ContentBlockHeader,
         _content_bits: u32,
     ) {
+    }
+
+    #[cfg(not(feature = "diagnostics"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn parse_failure(
+        _stats: &mut NetStats,
+        _ctx: &BunchContext<'_>,
+        _ch_index: u32,
+        _actor_net_guid: NetworkGuid,
+        _block_index: u32,
+        _consumed_bits: u64,
+        _remaining_bits: u64,
+        _header: &ContentBlockHeader,
+        _content_bits: u32,
+    ) {
+    }
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+mod tests {
+    use super::*;
+    use crate::stats::SkipReason;
+
+    /// The `ParseFailure` event names the block whose transform failed: its
+    /// header and declared length, where its payload began, the bits it
+    /// charged, and the bunch and channel it sat in. Framing cannot reach this
+    /// helper on real input (see `SkipReason::ParseFailure`), so it is pinned
+    /// directly.
+    #[test]
+    fn a_parse_failure_event_names_the_block_it_skipped() {
+        let bunch = RawBunchHeader {
+            packet_id: 7,
+            b_reliable: true,
+            payload_bit_count: 200,
+            ..Default::default()
+        };
+        let ctx = BunchContext {
+            header: &bunch,
+            ids: super::super::BunchIds {
+                bunch_index_in_packet: 1,
+                global_bunch_index: 11,
+                channel_bunch_index: 4,
+            },
+            archetype_net_guid: NetworkGuid(9),
+        };
+        let block = ContentBlockHeader {
+            has_rep_layout: true,
+            is_actor: true,
+            ..Default::default()
+        };
+        let mut stats = NetStats::default();
+
+        diagnostics::parse_failure(&mut stats, &ctx, 5, NetworkGuid(2), 3, 120, 80, &block, 33);
+
+        assert_eq!(stats.diagnostics.len(), 1);
+        assert_eq!(stats.diagnostics_dropped, 0);
+        let ev = &stats.diagnostics[0];
+        assert!(matches!(ev.reason, SkipReason::ParseFailure));
+        assert_eq!(
+            (
+                ev.packet_id,
+                ev.bunch_index_in_packet,
+                ev.global_bunch_index,
+                ev.channel_bunch_index
+            ),
+            (7, 1, 11, 4)
+        );
+        assert_eq!(
+            (ev.channel_index, ev.actor_net_guid, ev.archetype_net_guid),
+            (5, 2, 9)
+        );
+        assert_eq!(ev.block_index_in_bunch, 3);
+        assert_eq!((ev.consumed_bits, ev.remaining_bits), (120, 80));
+        assert_eq!(ev.content_bits, Some(33));
+        assert_eq!(
+            ev.bits_skipped, 33,
+            "the block's declared length, which is what skipped_bits was charged"
+        );
+        let snapshot = ev
+            .content_block_header
+            .as_ref()
+            .expect("the block header read before the failure");
+        assert!(snapshot.has_rep_layout && snapshot.is_actor);
+        assert!(ev.bunch_flags.b_reliable && !ev.bunch_flags.b_open);
+        assert_eq!(ev.payload_bit_count, 200);
     }
 }
