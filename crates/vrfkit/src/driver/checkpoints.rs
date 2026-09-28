@@ -1,15 +1,11 @@
 //! The optional Checkpoint pass.
 //!
-//! A checkpoint is a full-state snapshot: its own guid cache, its own export
-//! map, and one DemoFrame re-opening every actor alive at that instant.
-//! Everything about it is independent of the live stream, so it gets its own
-//! cache, reader, channel state and buffers. Sharing any of the four would let
-//! the snapshot's channel opens and archetype mappings leak into the ReplayData
-//! pass and corrupt it.
-//!
-//! Checkpoint rows go to separate tables because their packet, channel and
-//! NetGUID namespaces restart inside each snapshot. Keeping that context out
-//! of the main tables also leaves the default export byte-identical.
+//! A checkpoint is a full-state snapshot (its own GUID cache, export map and a
+//! DemoFrame re-opening every live actor), so each gets a fresh cache, reader,
+//! channel state and buffers: sharing any of them would leak snapshot opens
+//! and archetype mappings into the ReplayData pass. Its rows go to separate
+//! tables because packet, channel and NetGUID namespaces restart in each
+//! snapshot, which also leaves the main tables byte-identical either way.
 
 use std::io::Write;
 
@@ -18,18 +14,18 @@ use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     CheckpointActorRecord, CheckpointActorWriter, CheckpointBlockWriter,
     CheckpointExportFieldRecord, CheckpointExportFieldWriter, CheckpointExportGroupRecord,
-    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointFieldWriter,
-    CheckpointGuidEntryRecord, CheckpointGuidEntryWriter, CheckpointIdentity,
-    CheckpointNetGuidRecord, CheckpointNetGuidWriter, NetGuidRecord, PartialWriter,
+    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointGuidEntryRecord,
+    CheckpointGuidEntryWriter, CheckpointIdentity, CheckpointNetGuidRecord,
+    CheckpointNetGuidWriter, NetGuidRecord, PartialWriter,
 };
 use vrf_frame::{FrameSkips, walk_demo_frames};
-use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::NetStats;
 use vrf_schema::{
     CheckpointReadError, CheckpointTableSink, NetGuidCache, read_checkpoint_tables_with_sink,
 };
 
-use crate::error::CliError;
+use super::writers::WriterThread;
+use crate::error::{CliError, replication_reader};
 use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 
 /// Counters for the optional checkpoint pass. Kept together so the summary
@@ -37,12 +33,9 @@ use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 #[derive(Debug, Default)]
 pub(crate) struct CheckpointStats {
     pub chunks: u64,
-    /// Sum of [`CheckpointChunk::trailing_bytes`](vrf_container::CheckpointChunk::trailing_bytes)
-    /// across every chunk processed. Zero on every corpus checkpoint measured
-    /// so far; printed unconditionally in the summary so a format change that
-    /// starts leaving bytes after the archive is counted instead of silently
-    /// dropped on the floor, same as `replay_data_trailing_bytes` in the main
-    /// pass.
+    /// Sum of [`CheckpointChunk::trailing_bytes`](vrf_container::CheckpointChunk::trailing_bytes):
+    /// 0 on every corpus checkpoint measured, counted so bytes a format change
+    /// leaves after the archive are not dropped unseen.
     pub trailing_bytes: u64,
     pub guid_entries: u64,
     pub literal_paths: u64,
@@ -50,11 +43,10 @@ pub(crate) struct CheckpointStats {
     pub resolved_path_indices: u64,
     pub group_records: u64,
     pub exported_fields: u64,
-    /// DemoFrames walked, as `iter_demo_frames` actually counted them -- not
-    /// assumed to be one per chunk.
+    /// DemoFrames walked, as `walk_demo_frames` counted them -- not assumed to
+    /// be one per chunk.
     pub frames: u64,
-    /// ExternalData and GameSpecificFrameData bytes the snapshot frames
-    /// stepped over; the main pass's `frame_skips` has the same meaning.
+    /// Section bytes the snapshot frames stepped over, as in the main pass.
     pub frame_skips: FrameSkips,
     pub packets: u64,
     pub field_rows: u64,
@@ -66,32 +58,32 @@ pub(crate) struct CheckpointStats {
     pub export_field_rows_written: u64,
     pub partial_rows: u64,
     pub partial_bits: u64,
-    /// Actor rows are written to their checkpoint-scoped table. This retained
-    /// counter remains explicit so a future discard path cannot be silent.
+    /// Actor rows that never reached `checkpoint_actors.parquet`: the sink
+    /// pushes one per open and one per close, so this is each chunk's opens
+    /// and closes less the rows it wrote, measured rather than assumed.
     pub actor_rows_dropped: u64,
     pub movement_rows_dropped: u64,
-    /// Everything the checkpoint sinks counted.
-    ///
-    /// Kept separately from the ReplayData pass's totals, which the export
-    /// baseline pins: mixing them would move a guarded figure by an amount that
-    /// depends on a flag. Kept *at all* because the checkpoint sink is a second
-    /// decode path, and a failure on it that reached no counter would be
-    /// exactly the silent failure this project keeps finding.
-    ///
-    /// It used to be a hand-picked subset -- overlay, effect blobs, struct
-    /// blobs, MultiContents -- and the ones left out were precisely the failure
-    /// counters: array-decode errors, truncated RPCs and movement-decode
-    /// errors. A checkpoint array that overran mid-element therefore wrote its
-    /// parent raw row, lost its flattened children, and recorded nothing
-    /// anywhere. Sharing [`SinkTotals`] with the main pass is what stops the
-    /// two from drifting again.
+    /// Everything the checkpoint sinks counted, through the same
+    /// [`SinkTotals`] as the main pass but apart from its baseline-pinned
+    /// totals, which mixing would move by a flag-dependent amount.
     pub sink: SinkTotals,
     /// Replication/framing counters from every finalized checkpoint reader.
     pub net: NetStats,
 }
 
+impl CheckpointStats {
+    /// Fold in one finished chunk's reader counters, and count as dropped
+    /// every actor row its opens and closes called for beyond the
+    /// `actor_rows` it wrote.
+    fn absorb_chunk_net(&mut self, chunk_net: &mut NetStats, actor_rows: u64) {
+        self.actor_rows_dropped +=
+            (chunk_net.actor_opens + chunk_net.actor_closes).saturating_sub(actor_rows);
+        self.net.absorb(chunk_net);
+    }
+}
+
 pub(super) struct CheckpointWriters<W: Write + Send> {
-    pub fields: CheckpointFieldWriter<W>,
+    pub fields: WriterThread<CheckpointFieldRecord>,
     pub actors: CheckpointActorWriter<W>,
     pub net_guids: CheckpointNetGuidWriter<W>,
     pub blocks: CheckpointBlockWriter<W>,
@@ -210,11 +202,9 @@ impl<W: Write + Send> CheckpointTableSink for DeclarationWriter<'_, W> {
     }
 }
 
-/// Decode one Checkpoint chunk and write its field rows.
-///
-/// `error_report` is the *shared* one: a decode error is a decode error
-/// wherever it happened, and the breakdown the summary prints is the only place
-/// a checkpoint-only failure would ever be seen.
+/// Decode one Checkpoint chunk and write its rows. `error_report` is the
+/// shared one: the summary's breakdown is the only place a checkpoint-only
+/// decode error surfaces.
 pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     payload: &[u8],
     ctx: &ReplayContext<'_>,
@@ -227,6 +217,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.trailing_bytes += cp.trailing_bytes as u64;
     let plain = decompress_checkpoint(cp.archive, ctx.compressed, ctx.encrypted)?;
 
+    let actor_rows_before = stats.actor_rows_written;
     let checkpoint_index = u32::try_from(stats.chunks)
         .map_err(|_| CliError::Usage("too many checkpoint chunks to index".to_owned()))?;
     let checkpoint = CheckpointIdentity {
@@ -270,12 +261,12 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.export_field_rows_written += declarations.field_rows;
 
     let frame = &plain[tables.frame_offset..];
-    let mut reader = ReplicationReader::new(ctx.branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut reader = replication_reader(ctx.branch)?;
     let mut channels = ChannelState::new();
     let mut buffers = RecordBuffers::default();
     let mut packet_count = 0u64;
     let mut block_count = 0u32;
+    let mut field_records = Vec::new();
     let mut packet_error = None;
     let walk = walk_demo_frames(frame, ctx.flags, &mut cache, |pkt, packet_cache| {
         if packet_error.is_some() {
@@ -288,8 +279,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
             sink.time_ms = pkt.time_ms;
             sink.packet_id = packet_count as u32;
             reader.process_packet(pkt.data, packet_count as i32, &mut sink);
-            // Same aggregation the ReplayData pass uses, so the two cannot
-            // diverge on which counters they bother to read. See `sink::totals`.
+            // The ReplayData pass's aggregation, so both read the same counters.
             stats.sink.absorb(&mut sink.stats, error_report);
         }
         let result = (|| -> Result<(), CliError> {
@@ -300,12 +290,11 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
                 .push_batch(buffers.checkpoint_blocks.drain(..))?;
             block_count += packet_blocks;
             stats.field_rows += buffers.fields.len() as u64;
-            writers
-                .fields
-                .push_batch(buffers.fields.drain(..).map(|field| CheckpointFieldRecord {
-                    checkpoint: checkpoint.clone(),
-                    field,
-                }))?;
+            field_records.extend(buffers.fields.drain(..).map(|field| CheckpointFieldRecord {
+                checkpoint: checkpoint.clone(),
+                field,
+            }));
+            writers.fields.append(&mut field_records)?;
             stats.actor_rows_written += buffers.actors.len() as u64;
             writers
                 .actors
@@ -338,10 +327,6 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
         sink.enable_checkpoint_block_context(checkpoint.clone(), stats.field_rows, block_count);
         reader.finish_with_sink(&mut sink);
     }
-    stats.block_rows_written += buffers.checkpoint_blocks.len() as u64;
-    writers
-        .blocks
-        .push_batch(buffers.checkpoint_blocks.drain(..))?;
     for mut record in buffers.partials.drain(..) {
         stats.partial_rows += 1;
         stats.partial_bits += record.bit_count;
@@ -350,7 +335,8 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
         partial_writer.push(record)?;
     }
     let mut chunk_net = reader.stats().clone();
-    stats.net.absorb(&mut chunk_net);
+    let chunk_actor_rows = stats.actor_rows_written - actor_rows_before;
+    stats.absorb_chunk_net(&mut chunk_net, chunk_actor_rows);
 
     let mut guid_entries = cache.net_guid_entries();
     guid_entries.sort_unstable_by_key(|entry| entry.net_guid);
@@ -377,11 +363,6 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.resolved_path_indices += u64::from(tables.resolved_path_indices);
     stats.group_records += u64::from(tables.group_count);
     stats.exported_fields += u64::from(tables.exported_fields);
-    // The actual DemoFrame count `iter_demo_frames` walked, not an assumed
-    // one-per-chunk. `tools/check_export_baseline.py`'s `cp_frames`/`cp_chunks`
-    // pin used to be a tautology -- always equal, because this line always
-    // added exactly 1 -- which could not have caught a build whose checkpoint
-    // carries more than one DemoFrame.
     stats.frames += u64::from(walk.frames);
     stats.frame_skips.absorb(walk.skipped);
     stats.packets += packet_count;
@@ -411,6 +392,34 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// Per chunk, so one chunk's surplus cannot cancel another's loss.
+    #[test]
+    fn actor_rows_a_chunk_opened_or_closed_but_did_not_write_are_dropped() {
+        let mut stats = CheckpointStats::default();
+        let mut clean = NetStats {
+            actor_opens: 3,
+            actor_closes: 1,
+            ..NetStats::default()
+        };
+        stats.absorb_chunk_net(&mut clean, 4);
+        assert_eq!(stats.actor_rows_dropped, 0);
+
+        let mut lossy = NetStats {
+            actor_opens: 2,
+            ..NetStats::default()
+        };
+        stats.absorb_chunk_net(&mut lossy, 1);
+        assert_eq!(stats.actor_rows_dropped, 1, "one open wrote no row");
+
+        let mut surplus = NetStats {
+            actor_opens: 1,
+            ..NetStats::default()
+        };
+        stats.absorb_chunk_net(&mut surplus, 2);
+        assert_eq!(stats.actor_rows_dropped, 1, "a surplus is not a refund");
+        assert_eq!((stats.net.actor_opens, stats.net.actor_closes), (6, 1));
     }
 
     #[test]

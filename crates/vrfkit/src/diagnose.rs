@@ -1,37 +1,17 @@
 //! `diag` subcommand -- a stats-only pass over the whole replay.
 //!
-//! # Why this exists, and why not one of the two existing commands
-//!
-//! The failure diagnostics `validate` prints are capped twice -- the 32-line
-//! `ChannelState::stream_failures` window and the capped `NetStats::diagnostics`
-//! log -- which is right for a human reading one replay and useless for
-//! counting a population. The bounded [`FailureAggregate`] in the sink
-//! collects every failure; something has to walk a replay and read it. Two
-//! candidates were rejected:
-//!
-//! - **`validate` walking checkpoints too** would move every counter that
-//!   command's pinned baselines hold and add failure paths to a command whose
-//!   job is to report, not to abort (see `oracle.rs`'s `checkpoint_scope_note`
-//!   for the full argument). The oracle's scope stays exactly what it was.
-//! - **`export` skipping the Parquet writes** would still be the export path:
-//!   writer threads, staged output directories, a manifest, an atomic publish.
-//!   None of that carries a failure counter, and a flag that quietly produces
-//!   no files from the command whose contract is "writes the files" is the
-//!   shape of bug this repo refuses.
-//!
-//! So `diag` is its own subcommand that **writes no table**: it drives the
-//! same sink over the ReplayData stream and every Checkpoint chunk, keeps the
-//! main and checkpoint passes separate, and emits one JSON document
-//! aggregating every stream failure by kind, cause, group path, function
-//! count and handle. No Parquet file is created and none is needed -- every
-//! number this command reports comes from `NetStats`, the sink's own
-//! counters and the failure aggregate, all of which exist before any writer.
-//!
-//! # What it deliberately does not do
-//!
-//! It prints no verdict and exits 0 for any replay it could read. Judging a
-//! replay is `validate`'s job, and a second oracle would drift from the
-//! first. A file that cannot be read at all is an error, as everywhere else.
+//! `validate`'s failure diagnostics are capped twice (the 32-line
+//! `ChannelState::stream_failures` window and the capped `NetStats`
+//! diagnostics log): right for reading one replay, useless for counting a
+//! population. `validate` walking checkpoints would move every counter its
+//! pinned baselines hold (see `oracle.rs`'s `checkpoint_scope_note`), and an
+//! `export` without writes would still be the export path, whose contract is
+//! writing the files. So `diag` drives the same sink over ReplayData and every
+//! Checkpoint chunk, keeps the passes apart, writes no table, and emits one
+//! JSON document aggregating every stream failure ([`FailureAggregate`]) by
+//! kind, cause, group path, function count and handle. It prints no verdict
+//! and exits 0 for any readable replay: judging is `validate`'s job, and a
+//! second oracle would drift from the first.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -43,16 +23,14 @@ use vrf_container::{
 };
 use vrf_decode::OverlayErrorReport;
 use vrf_frame::{FrameSkips, walk_demo_frames};
-use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::NetStats;
 use vrf_schema::{NetGuidCache, read_checkpoint_tables};
 
-use crate::error::CliError;
+use crate::error::{CliError, replication_reader};
 use crate::sink::{ChannelState, ExportSink, FailureAggregate, RecordBuffers, SinkTotals};
 
-/// Per-checkpoint-chunk metadata the JSON reports alongside the checkpoint
-/// pass's counters, so the checkpoint walk is auditable rather than a black
-/// box that printed a number.
+/// The checkpoint pass's counters and per-chunk metadata, so the walk is
+/// auditable rather than a single printed number.
 #[derive(Debug, Default)]
 struct DiagCheckpointStats {
     chunks: u64,
@@ -64,24 +42,15 @@ struct DiagCheckpointStats {
     guid_entries: u64,
     group_records: u64,
     exported_fields: u64,
-    /// Field rows the snapshot produced. Counted and dropped, never written:
-    /// same policy as `export --checkpoints`, which writes them to
-    /// `checkpoint_fields.parquet`. A diag run that wrote them would be
-    /// creating the Parquet this command exists to avoid.
+    /// Field rows the snapshot produced: counted, never written (`export
+    /// --checkpoints` writes them to `checkpoint_fields.parquet`).
     field_rows_dropped: u64,
     actor_rows_dropped: u64,
     movement_rows_dropped: u64,
     net: NetStats,
-    /// The same [`SinkTotals`] `export` sums, through the same `absorb`. `diag`
-    /// used to re-declare it as `DiagSinkTotals` with a line-for-line copy of
-    /// `absorb`, justified by `SinkTotals` living in the `export`-gated driver.
-    /// It now lives in `sink`, so the copy -- a second place a new counter had
-    /// to be wired in by hand, with nothing to say it had been missed -- is
-    /// gone.
     sink: SinkTotals,
-    /// Where `absorb` merges the checkpoint pass's per-field overlay
-    /// breakdown. Filled and never printed: the diag JSON carries counters,
-    /// not the breakdown.
+    /// Where `absorb` merges the per-field overlay breakdown; never printed,
+    /// as the JSON carries counters only.
     overlay_errors: OverlayErrorReport,
     failures: FailureAggregate,
 }
@@ -104,8 +73,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     eprintln!("diag: walking ReplayData and Checkpoint chunks, writing no table...");
 
     let mut cache = NetGuidCache::new();
-    let mut repl_reader = ReplicationReader::new(&branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut repl_reader = replication_reader(&branch)?;
 
     let mut total_packets: u32 = 0;
     let mut replay_data_chunks: u64 = 0;
@@ -114,11 +82,11 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut sink_totals = SinkTotals::default();
-    // Where `absorb` merges the main pass's per-field overlay breakdown. Filled
-    // and never printed, like `DiagCheckpointStats::overlay_errors`.
+    // Never printed, like `DiagCheckpointStats::overlay_errors`.
     let mut overlay_errors = OverlayErrorReport::default();
     let mut channel_state = ChannelState::new();
     channel_state.enable_failure_aggregate(include_payloads);
+    // Never drained: nothing is written, and `ExportSink::new` clears them.
     let mut buffers = RecordBuffers::default();
 
     let mut cp_stats = DiagCheckpointStats {
@@ -131,8 +99,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
         let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
         match chunk.chunk_type {
             ChunkType::Event => {
-                // The server timeline is independent of the replication pass
-                // and carries no stream-failure signal; counted, not parsed.
+                // Independent of replication, with no stream-failure signal.
                 event_chunks += 1;
             }
             ChunkType::Checkpoint => {
@@ -155,31 +122,18 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                     walk_demo_frames(&decompressed, flags, &mut cache, |pkt, packet_cache| {
                         let pkt_id = total_packets;
                         total_packets += 1;
-                        {
-                            let mut sink =
-                                ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-                            sink.enable_measured_array_routes(&branch);
-                            sink.time_ms = pkt.time_ms;
-                            sink.packet_id = pkt_id;
-                            repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
-                            sink_totals.absorb(&mut sink.stats, &mut overlay_errors);
-                        }
-                        // The records are dropped, not written; the counters they
-                        // produced were already absorbed above. Draining keeps the
-                        // buffers from growing to the largest packet's worth of
-                        // rows times every packet after a big one.
-                        buffers.fields.clear();
-                        buffers.movement.clear();
-                        buffers.actors.clear();
+                        let mut sink =
+                            ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
+                        sink.enable_measured_array_routes(&branch);
+                        sink.time_ms = pkt.time_ms;
+                        sink.packet_id = pkt_id;
+                        repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
+                        sink_totals.absorb(&mut sink.stats, &mut overlay_errors);
                     })?;
                 replay_data_frames += u64::from(walk.frames);
                 replay_data_frame_skips.absorb(walk.skipped);
             }
-            other => {
-                // `Unknown(u32)` and `Header` -- nothing the replication pass
-                // reads, and nothing a counter could claim to check.
-                let _ = other;
-            }
+            ChunkType::Header | ChunkType::Unknown(_) => {}
         }
     }
 
@@ -265,8 +219,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
         None => println!("{json}"),
     }
 
-    // A short stdout receipt even when the JSON went to a file, so a caller
-    // scanning output sees the reconciliation shape without parsing JSON.
+    // A one-line stderr receipt wherever the JSON went, so a caller sees the
+    // reconciliation shape without parsing JSON.
     eprintln!(
         "diag: main failures {} (payloads preserved {}, real loss {}) | \
          checkpoint failures {} (payloads preserved {}, real loss {})",
@@ -280,9 +234,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     Ok(())
 }
 
-/// Refuse an output path that resolves to the replay itself. The diagnostic is
-/// assembled in memory and written last, so without this check a successful
-/// run could replace its own source with JSON.
+/// Refuse an output path that resolves to the replay itself: the JSON is built
+/// in memory and written last, so a successful run could replace its source.
 fn reject_input_output_alias(input: &str, output: &str) -> Result<(), CliError> {
     let input = fs::canonicalize(input)?;
     let output = canonicalize_destination(output)?;
@@ -374,9 +327,9 @@ fn write_json_file(path: &str, json: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Walk one Checkpoint chunk the way `driver::checkpoints::process_chunk`
-/// does, minus the writer: fresh GUID cache, export map, reader and channel
-/// state per archive, because a checkpoint is an independent replay state.
+/// Walk one Checkpoint chunk as `driver::checkpoints::process_chunk` does,
+/// minus the writers: a fresh GUID cache, export map, reader and channel state
+/// per archive.
 fn process_checkpoint_chunk(
     payload: &[u8],
     branch: &str,
@@ -395,15 +348,11 @@ fn process_checkpoint_chunk(
         .map_err(|e| CliError::Usage(format!("checkpoint {}: {e}", cp_chunk.id)))?;
 
     let frame = &plain[tables.frame_offset..];
-    let mut reader = ReplicationReader::new(branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut reader = replication_reader(branch)?;
     let mut channels = ChannelState::new();
     channels.enable_failure_aggregate(include_payloads);
     let mut buffers = RecordBuffers::default();
     let mut packet_count = 0u64;
-    // No writer here, so unlike `driver::checkpoints::process_chunk` there is
-    // no error a callback cannot propagate: the closure is infallible and the
-    // frame walk returns its own errors through `?`.
     let walk = walk_demo_frames(frame, flags, &mut cache, |pkt, packet_cache| {
         {
             let mut sink = ExportSink::new(packet_cache, &mut channels, &mut buffers);
@@ -416,9 +365,6 @@ fn process_checkpoint_chunk(
         cp.field_rows_dropped += buffers.fields.len() as u64;
         cp.actor_rows_dropped += buffers.actors.len() as u64;
         cp.movement_rows_dropped += buffers.movement.len() as u64;
-        buffers.fields.clear();
-        buffers.actors.clear();
-        buffers.movement.clear();
         packet_count += 1;
     })?;
     reader.finish();
@@ -437,9 +383,8 @@ fn process_checkpoint_chunk(
     Ok(())
 }
 
-/// `++Ares-Core+release-13.04` -> `13.04`. The corpus is labelled by this
-/// suffix everywhere downstream; a branch that does not carry it stays
-/// unlabelled rather than guessed.
+/// `++Ares-Core+release-13.04` -> `13.04`, the corpus label downstream; a
+/// branch without the marker stays `unknown` rather than guessed.
 fn build_label(branch: &str) -> &str {
     branch
         .rsplit("release-")
@@ -484,266 +429,200 @@ fn push_frame_skips(out: &mut String, prefix: &str, skips: &FrameSkips) {
     }
 }
 
-fn push_net_stats(out: &mut String, s: &NetStats) {
-    let pairs: Vec<(&str, String)> = vec![
-        ("packets", s.packets.to_string()),
-        ("malformed_packets", s.malformed_packets.to_string()),
-        ("bunches", s.bunches.to_string()),
-        ("partial_errors", s.partial_errors.to_string()),
-        ("partial_bunches", s.partial_bunches.to_string()),
-        (
-            "partial_missing_initial",
-            s.partial_missing_initial.to_string(),
-        ),
-        (
-            "partial_missing_initial_final",
-            s.partial_missing_initial_final.to_string(),
-        ),
-        (
-            "partial_missing_initial_reliable",
-            s.partial_missing_initial_reliable.to_string(),
-        ),
-        (
-            "partial_missing_initial_bits",
-            s.partial_missing_initial_bits.to_string(),
-        ),
-        (
-            "partial_overlapping_initial",
-            s.partial_overlapping_initial.to_string(),
-        ),
-        (
-            "partial_mismatched_continuation",
-            s.partial_mismatched_continuation.to_string(),
-        ),
-        (
-            "partial_non_byte_aligned",
-            s.partial_non_byte_aligned.to_string(),
-        ),
-        ("partial_channel_close", s.partial_channel_close.to_string()),
-        (
-            "partial_unclassified_errors",
-            s.partial_unclassified_errors().to_string(),
-        ),
-        (
-            "partial_overclassified_errors",
-            s.partial_overclassified_errors().to_string(),
-        ),
-        ("partial_fragments", s.partial_fragments.to_string()),
-        ("partial_completed", s.partial_completed.to_string()),
-        ("unfinished_partials", s.unfinished_partials.to_string()),
-        (
-            "unfinished_partial_bits",
-            s.unfinished_partial_bits.to_string(),
-        ),
-        ("bunch_header_failures", s.bunch_header_failures.to_string()),
-        ("content_blocks", s.content_blocks.to_string()),
-        ("rep_layout_blocks", s.rep_layout_blocks.to_string()),
-        (
-            "class_net_cache_blocks",
-            s.class_net_cache_blocks.to_string(),
-        ),
-        ("deleted_blocks", s.deleted_blocks.to_string()),
-        ("fields", s.fields.to_string()),
-        ("rpcs", s.rpcs.to_string()),
-        ("skipped_bits", s.skipped_bits.to_string()),
-        (
-            "content_block_framing_failures",
-            s.content_block_framing_failures.to_string(),
-        ),
-        (
-            "malformed_content_blocks",
-            s.malformed_content_blocks.to_string(),
-        ),
-        ("transform_failures", s.transform_failures.to_string()),
-        ("field_stream_failures", s.field_stream_failures.to_string()),
-        ("rpc_stream_failures", s.rpc_stream_failures.to_string()),
-        (
-            "unresolved_rpc_payloads_preserved",
-            s.unresolved_rpc_payloads_preserved.to_string(),
-        ),
-        ("actor_opens", s.actor_opens.to_string()),
-        ("actor_closes", s.actor_closes.to_string()),
-        (
-            "channel_reopens_while_open",
-            s.channel_reopens_while_open.to_string(),
-        ),
-        (
-            "actor_opens_missing_spawn",
-            s.actor_opens_missing_spawn.to_string(),
-        ),
-        (
-            "failed_reopens_while_open",
-            s.failed_reopens_while_open.to_string(),
-        ),
-        (
-            "bunches_on_unopened_channel",
-            s.bunches_on_unopened_channel.to_string(),
-        ),
-        ("unopened_channel_bits", s.unopened_channel_bits.to_string()),
-        (
-            "channel_state_limit_failures",
-            s.channel_state_limit_failures.to_string(),
-        ),
-        (
-            "partial_resource_limit_failures",
-            s.partial_resource_limit_failures.to_string(),
-        ),
-        ("package_map_exports", s.package_map_exports.to_string()),
-        (
-            "rep_layout_export_bunches",
-            s.rep_layout_export_bunches.to_string(),
-        ),
-        ("exported_guids", s.exported_guids.to_string()),
-        ("must_be_mapped_guids", s.must_be_mapped_guids.to_string()),
-        ("content_blocks_lost", s.lost_content_blocks().to_string()),
-    ];
+/// `{`, one `"key": value` member per line, then `  }` -- the shape both
+/// counter objects share.
+fn push_members(out: &mut String, members: &[(&str, u64)]) {
     out.push_str("{\n");
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        out.push_str("    \"");
-        out.push_str(name);
-        out.push_str("\": ");
-        out.push_str(value);
-        if i + 1 < pairs.len() {
-            out.push(',');
-        }
-        out.push('\n');
+    for (i, (name, value)) in members.iter().enumerate() {
+        let comma = if i + 1 < members.len() { "," } else { "" };
+        out.push_str(&format!("    \"{name}\": {value}{comma}\n"));
     }
     out.push_str("  }");
+}
+
+fn push_net_stats(out: &mut String, s: &NetStats) {
+    push_members(
+        out,
+        &[
+            ("packets", s.packets),
+            ("malformed_packets", s.malformed_packets),
+            ("bunches", s.bunches),
+            ("partial_errors", s.partial_errors),
+            ("partial_bunches", s.partial_bunches),
+            ("partial_missing_initial", s.partial_missing_initial),
+            (
+                "partial_missing_initial_final",
+                s.partial_missing_initial_final,
+            ),
+            (
+                "partial_missing_initial_reliable",
+                s.partial_missing_initial_reliable,
+            ),
+            (
+                "partial_missing_initial_bits",
+                s.partial_missing_initial_bits,
+            ),
+            ("partial_overlapping_initial", s.partial_overlapping_initial),
+            (
+                "partial_mismatched_continuation",
+                s.partial_mismatched_continuation,
+            ),
+            ("partial_non_byte_aligned", s.partial_non_byte_aligned),
+            ("partial_channel_close", s.partial_channel_close),
+            (
+                "partial_unclassified_errors",
+                s.partial_unclassified_errors(),
+            ),
+            (
+                "partial_overclassified_errors",
+                s.partial_overclassified_errors(),
+            ),
+            ("partial_fragments", s.partial_fragments),
+            ("partial_completed", s.partial_completed),
+            ("unfinished_partials", s.unfinished_partials),
+            ("unfinished_partial_bits", s.unfinished_partial_bits),
+            ("bunch_header_failures", s.bunch_header_failures),
+            ("content_blocks", s.content_blocks),
+            ("rep_layout_blocks", s.rep_layout_blocks),
+            ("class_net_cache_blocks", s.class_net_cache_blocks),
+            ("deleted_blocks", s.deleted_blocks),
+            ("fields", s.fields),
+            ("rpcs", s.rpcs),
+            ("skipped_bits", s.skipped_bits),
+            (
+                "content_block_framing_failures",
+                s.content_block_framing_failures,
+            ),
+            ("malformed_content_blocks", s.malformed_content_blocks),
+            ("transform_failures", s.transform_failures),
+            ("field_stream_failures", s.field_stream_failures),
+            ("rpc_stream_failures", s.rpc_stream_failures),
+            (
+                "unresolved_rpc_payloads_preserved",
+                s.unresolved_rpc_payloads_preserved,
+            ),
+            ("actor_opens", s.actor_opens),
+            ("actor_closes", s.actor_closes),
+            ("channel_reopens_while_open", s.channel_reopens_while_open),
+            ("actor_opens_missing_spawn", s.actor_opens_missing_spawn),
+            ("failed_reopens_while_open", s.failed_reopens_while_open),
+            ("bunches_on_unopened_channel", s.bunches_on_unopened_channel),
+            ("unopened_channel_bits", s.unopened_channel_bits),
+            (
+                "channel_state_limit_failures",
+                s.channel_state_limit_failures,
+            ),
+            (
+                "partial_resource_limit_failures",
+                s.partial_resource_limit_failures,
+            ),
+            ("package_map_exports", s.package_map_exports),
+            ("rep_layout_export_bunches", s.rep_layout_export_bunches),
+            ("exported_guids", s.exported_guids),
+            ("must_be_mapped_guids", s.must_be_mapped_guids),
+            ("content_blocks_lost", s.lost_content_blocks()),
+        ],
+    );
 }
 
 fn push_sink_totals(out: &mut String, s: &SinkTotals) {
-    let pairs: Vec<(&str, String)> = vec![
-        ("fields_emitted", s.fields_emitted.to_string()),
-        ("rpcs_emitted", s.rpcs_emitted.to_string()),
-        ("actor_opens", s.actor_opens.to_string()),
-        ("actor_closes", s.actor_closes.to_string()),
-        ("content_blocks", s.content_blocks.to_string()),
-        ("overlay_decoded_ok", s.overlay.decoded_ok.to_string()),
-        ("overlay_decoded_err", s.overlay.decoded_err.to_string()),
-        ("overlay_raw_or_skip", s.overlay.raw_or_skip.to_string()),
-        ("overlay_not_in_table", s.overlay.not_in_table.to_string()),
-        ("overlay_no_field_name", s.overlay.no_field_name.to_string()),
-        (
-            "overlay_handle_conflicts_refused",
-            s.overlay.handle_conflicts_refused.to_string(),
-        ),
-        ("effect_blobs_decoded", s.effect_blobs_decoded.to_string()),
-        ("struct_blobs_decoded", s.struct_blobs_decoded.to_string()),
-        ("struct_blobs_failed", s.struct_blobs_failed.to_string()),
-        (
-            "multi_contents_items_emitted",
-            s.multi_contents_items_emitted.to_string(),
-        ),
-        ("movement_rpc_errors", s.movement_rpc_errors.to_string()),
-        (
-            "movement_sized_section_tails",
-            s.movement_sized_section_tails.to_string(),
-        ),
-        (
-            "movement_sized_section_tail_bits",
-            s.movement_sized_section_tail_bits.to_string(),
-        ),
-        (
-            "movement_open_section_tails",
-            s.movement_open_section_tails.to_string(),
-        ),
-        (
-            "movement_open_section_tail_bits",
-            s.movement_open_section_tail_bits.to_string(),
-        ),
-        (
-            "array_elements_decoded",
-            s.array.elements_decoded.to_string(),
-        ),
-        ("array_fields_emitted", s.array.fields_emitted.to_string()),
-        ("array_truncations", s.array.truncations.to_string()),
-        ("array_errors", s.array.errors.to_string()),
-        (
-            "array_unconsumed_nested_bits",
-            s.array.unconsumed_nested_bits.to_string(),
-        ),
-        (
-            "array_implicit_terminations",
-            s.array.implicit_terminations.to_string(),
-        ),
-        (
-            "array_unconsumed_root_bits",
-            s.array.unconsumed_root_bits.to_string(),
-        ),
-        (
-            "array_leaf_decode_errors",
-            s.array_leaf_decode_errors.to_string(),
-        ),
-        (
-            "targeting_world_locations_decoded",
-            s.targeting_world_locations_decoded.to_string(),
-        ),
-        (
-            "tracked_rewards_opaque_empty_variants",
-            s.tracked_rewards_opaque_empty_variants.to_string(),
-        ),
-        ("truncated_rpcs", s.truncated_rpcs.to_string()),
-        (
-            "rpc_suffix_bits_dropped",
-            s.rpc_suffix_bits_dropped.to_string(),
-        ),
-        ("cnc_rpcs_emitted", s.cnc_rpcs_emitted.to_string()),
-        (
-            "cnc_bruteforce_payloads_attempted",
-            s.cnc_bruteforce_payloads_attempted.to_string(),
-        ),
-        (
-            "cnc_bruteforce_payloads_unwalked",
-            s.cnc_bruteforce_payloads_unwalked.to_string(),
-        ),
-        (
-            "rep_layout_cnc_tails_decoded",
-            s.rep_layout_cnc_tails_decoded.to_string(),
-        ),
-        (
-            "rep_layout_cnc_tails_preserved",
-            s.rep_layout_cnc_tails_preserved.to_string(),
-        ),
-    ];
-    out.push_str("{\n");
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        out.push_str("    \"");
-        out.push_str(name);
-        out.push_str("\": ");
-        out.push_str(value);
-        if i + 1 < pairs.len() {
-            out.push(',');
-        }
-        out.push('\n');
-    }
-    out.push_str("  }");
+    push_members(
+        out,
+        &[
+            ("fields_emitted", s.fields_emitted),
+            ("rpcs_emitted", s.rpcs_emitted),
+            ("actor_opens", s.actor_opens),
+            ("actor_closes", s.actor_closes),
+            ("content_blocks", s.content_blocks),
+            ("overlay_decoded_ok", s.overlay.decoded_ok),
+            ("overlay_decoded_err", s.overlay.decoded_err),
+            ("overlay_raw_or_skip", s.overlay.raw_or_skip),
+            ("overlay_not_in_table", s.overlay.not_in_table),
+            ("overlay_no_field_name", s.overlay.no_field_name),
+            (
+                "overlay_handle_conflicts_refused",
+                s.overlay.handle_conflicts_refused,
+            ),
+            ("effect_blobs_decoded", s.effect_blobs_decoded),
+            ("struct_blobs_decoded", s.struct_blobs_decoded),
+            ("struct_blobs_failed", s.struct_blobs_failed),
+            (
+                "multi_contents_items_emitted",
+                s.multi_contents_items_emitted,
+            ),
+            ("movement_rpc_errors", s.movement_rpc_errors),
+            (
+                "movement_sized_section_tails",
+                s.movement_sized_section_tails,
+            ),
+            (
+                "movement_sized_section_tail_bits",
+                s.movement_sized_section_tail_bits,
+            ),
+            ("movement_open_section_tails", s.movement_open_section_tails),
+            (
+                "movement_open_section_tail_bits",
+                s.movement_open_section_tail_bits,
+            ),
+            ("array_elements_decoded", s.array.elements_decoded),
+            ("array_fields_emitted", s.array.fields_emitted),
+            ("array_truncations", s.array.truncations),
+            ("array_errors", s.array.errors),
+            (
+                "array_unconsumed_nested_bits",
+                s.array.unconsumed_nested_bits,
+            ),
+            ("array_implicit_terminations", s.array.implicit_terminations),
+            ("array_unconsumed_root_bits", s.array.unconsumed_root_bits),
+            ("array_leaf_decode_errors", s.array_leaf_decode_errors),
+            (
+                "targeting_world_locations_decoded",
+                s.targeting_world_locations_decoded,
+            ),
+            (
+                "tracked_rewards_opaque_empty_variants",
+                s.tracked_rewards_opaque_empty_variants,
+            ),
+            ("truncated_rpcs", s.truncated_rpcs),
+            ("rpc_suffix_bits_dropped", s.rpc_suffix_bits_dropped),
+            ("cnc_rpcs_emitted", s.cnc_rpcs_emitted),
+            (
+                "cnc_bruteforce_payloads_attempted",
+                s.cnc_bruteforce_payloads_attempted,
+            ),
+            (
+                "cnc_bruteforce_payloads_unwalked",
+                s.cnc_bruteforce_payloads_unwalked,
+            ),
+            (
+                "rep_layout_cnc_tails_decoded",
+                s.rep_layout_cnc_tails_decoded,
+            ),
+            (
+                "rep_layout_cnc_tails_preserved",
+                s.rep_layout_cnc_tails_preserved,
+            ),
+        ],
+    );
 }
 
 fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
-    out.push_str("{\"total_failures\": ");
-    out.push_str(&agg.total_failures().to_string());
-    out.push_str(", \"preserved_unresolved\": ");
-    out.push_str(&agg.preserved_unresolved().to_string());
-    out.push_str(", \"real_loss\": ");
-    out.push_str(&agg.real_loss().to_string());
-    out.push_str(", \"cell_limit\": ");
-    out.push_str(&FailureAggregate::cell_limit().to_string());
-    out.push_str(", \"overflow\": {\"count\": ");
-    out.push_str(&agg.overflow().count.to_string());
-    out.push_str(", \"bit_count_total\": ");
-    out.push_str(&agg.overflow().bit_count_total.to_string());
-    out.push_str(", \"consumed_bits_total\": ");
-    out.push_str(&agg.overflow().consumed_bits_total.to_string());
-    out.push_str(", \"abandoned_bits_total\": ");
-    out.push_str(&agg.overflow().abandoned_bits_total.to_string());
-    out.push('}');
-    out.push_str(", \"payloads_included\": ");
-    out.push_str(if agg.retains_payloads() {
-        "true"
-    } else {
-        "false"
-    });
-    out.push_str(", \"cells\": [");
+    let overflow = agg.overflow();
+    out.push_str(&format!(
+        "{{\"total_failures\": {}, \"preserved_unresolved\": {}, \"real_loss\": {}, \
+         \"cell_limit\": {}, \"overflow\": {{\"count\": {}, \"bit_count_total\": {}, \
+         \"consumed_bits_total\": {}, \"abandoned_bits_total\": {}}}, \"payloads_included\": {}, \
+         \"cells\": [",
+        agg.total_failures(),
+        agg.preserved_unresolved(),
+        agg.real_loss(),
+        FailureAggregate::cell_limit(),
+        overflow.count,
+        overflow.bit_count_total,
+        overflow.consumed_bits_total,
+        overflow.abandoned_bits_total,
+        agg.retains_payloads(),
+    ));
     for (i, (key, cell)) in agg.cells_sorted().iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
@@ -754,69 +633,50 @@ fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
         push_json_string(out, cause_name(key.cause));
         out.push_str(", \"group_path\": ");
         push_json_string(out, &key.group_path);
-        out.push_str(", \"function_count\": ");
-        out.push_str(&key.function_count.to_string());
-        out.push_str(", \"record_handle\": ");
-        match key.record_handle {
-            Some(handle) => out.push_str(&handle.to_string()),
-            None => out.push_str("null"),
-        }
-        out.push_str(", \"consumed_bits\": ");
-        out.push_str(&key.consumed_bits.to_string());
-        out.push_str(", \"payload_preserved\": ");
-        out.push_str(if key.payload_preserved {
-            "true"
-        } else {
-            "false"
-        });
-        out.push_str(", \"count\": ");
-        out.push_str(&cell.count.to_string());
-        out.push_str(", \"bit_count_total\": ");
-        out.push_str(&cell.bit_count_total.to_string());
-        out.push_str(", \"consumed_bits_total\": ");
-        out.push_str(&cell.consumed_bits_total.to_string());
-        out.push_str(", \"abandoned_bits_total\": ");
-        out.push_str(&cell.abandoned_bits_total.to_string());
-        out.push_str(", \"samples\": [");
+        out.push_str(&format!(
+            ", \"function_count\": {}, \"record_handle\": {}, \"consumed_bits\": {}, \
+             \"payload_preserved\": {}, \"count\": {}, \"bit_count_total\": {}, \
+             \"consumed_bits_total\": {}, \"abandoned_bits_total\": {}, \"samples\": [",
+            key.function_count,
+            json_number_or_null(key.record_handle),
+            key.consumed_bits,
+            key.payload_preserved,
+            cell.count,
+            cell.bit_count_total,
+            cell.consumed_bits_total,
+            cell.abandoned_bits_total,
+        ));
         for (j, sample) in cell.samples.iter().enumerate() {
             if j > 0 {
                 out.push_str(", ");
             }
-            out.push_str("{\"actor_net_guid\": ");
-            out.push_str(&sample.actor_net_guid.to_string());
-            out.push_str(", \"bit_count\": ");
-            out.push_str(&sample.bit_count.to_string());
-            out.push_str(", \"consumed_bits\": ");
-            out.push_str(&sample.consumed_bits.to_string());
-            out.push_str(", \"payload_preserved\": ");
-            out.push_str(if sample.payload_preserved {
-                "true"
-            } else {
-                "false"
-            });
-            out.push_str(", \"abandoned_bits\": ");
-            out.push_str(&sample.abandoned_bits.to_string());
-            out.push_str(", \"record_offset\": ");
-            match sample.record_offset {
-                Some(offset) => out.push_str(&offset.to_string()),
-                None => out.push_str("null"),
-            }
-            out.push_str(", \"payload_hex\": ");
+            out.push_str(&format!(
+                "{{\"actor_net_guid\": {}, \"bit_count\": {}, \"consumed_bits\": {}, \
+                 \"payload_preserved\": {}, \"abandoned_bits\": {}, \"record_offset\": {}, \
+                 \"payload_hex\": ",
+                sample.actor_net_guid,
+                sample.bit_count,
+                sample.consumed_bits,
+                sample.payload_preserved,
+                sample.abandoned_bits,
+                json_number_or_null(sample.record_offset),
+            ));
             match &sample.payload_hex {
                 Some(hex) => push_json_string(out, hex),
                 None => out.push_str("null"),
             }
-            out.push_str(", \"payload_truncated\": ");
-            out.push_str(if sample.payload_truncated {
-                "true"
-            } else {
-                "false"
-            });
-            out.push('}');
+            out.push_str(&format!(
+                ", \"payload_truncated\": {}}}",
+                sample.payload_truncated
+            ));
         }
         out.push_str("]}");
     }
     out.push_str("]}");
+}
+
+fn json_number_or_null<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "null".to_owned(), |value| value.to_string())
 }
 
 fn kind_name(kind: vrf_net::pipeline::StreamKind) -> &'static str {
@@ -839,15 +699,13 @@ fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameSkips, build_label, push_frame_skips, push_json_string, push_net_stats,
-        push_sink_totals, reject_input_output_alias, write_json_file,
+        FrameSkips, build_label, json_number_or_null, push_frame_skips, push_json_string,
+        push_net_stats, push_sink_totals, reject_input_output_alias, write_json_file,
     };
     use crate::sink::SinkTotals;
     use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
     use vrf_net::stats::NetStats;
 
-    /// The frame-skip tallies land under their prefixed keys with their own
-    /// values, zeros included, as members of an object already open.
     #[test]
     fn frame_skips_json_carries_every_tally_under_its_prefix() {
         let mut skips = FrameSkips::default();
@@ -864,8 +722,7 @@ mod tests {
         );
     }
 
-    /// The channel-guard counters reach the diag JSON with their measured
-    /// values. Distinct values, so a key wired to the wrong field shows.
+    /// Distinct values, so a key wired to the wrong field shows.
     #[test]
     fn net_stats_json_carries_the_channel_guard_counters() {
         let stats = NetStats {
@@ -885,8 +742,6 @@ mod tests {
         }
     }
 
-    /// The branch-to-build label the corpus aggregation joins on. A branch
-    /// without the `release-` marker stays unlabelled rather than guessed.
     #[test]
     fn build_labels_come_from_the_release_marker() {
         assert_eq!(build_label("++Ares-Core+release-13.01"), "13.01");
@@ -894,9 +749,7 @@ mod tests {
         assert_eq!(build_label("++Ares-Core+dev"), "unknown");
     }
 
-    /// Escaping must keep the JSON one-document-parseable: quotes, backslash
-    /// and control bytes never terminate the string early. A replay-declared
-    /// path is the only free-form text this emitter writes.
+    /// A replay-declared path is the only free-form text this emitter writes.
     #[test]
     fn json_strings_escape_terminators_and_control_bytes() {
         let mut out = String::new();
@@ -909,6 +762,14 @@ mod tests {
         let mut out = String::new();
         push_json_string(&mut out, "x\u{1f600}y");
         assert_eq!(out, "\"x\\ud83d\\ude00y\"");
+    }
+
+    /// No replay has produced a failure cell with a record handle, so the
+    /// present branch is pinned here rather than by any real output.
+    #[test]
+    fn optional_numbers_render_as_the_number_or_null() {
+        assert_eq!(json_number_or_null(Some(7u32)), "7");
+        assert_eq!(json_number_or_null(None::<u64>), "null");
     }
 
     #[test]
@@ -942,16 +803,10 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Every counter `SinkTotals` holds reaches the diag JSON exactly once.
-    ///
-    /// The key list in `push_sink_totals` is written by hand, and a counter
-    /// missing from it is not printed as zero -- it is absent from the
-    /// document, so no reader of the JSON could ever notice. The literal
-    /// below has no `..`, so a counter added to `SinkTotals`, `OverlayStats`
-    /// or `ArrayDecodeStats` stops this test compiling until it is given the
-    /// next value from `next()`; if the printer then omits it, that value is
-    /// missing from the printed set. The expected set is counted from the
-    /// literal itself, so there is no second number to keep in step.
+    /// A counter missing from the hand-written key list is absent, not 0. The
+    /// literal has no `..`, so a new counter stops this compiling until it takes
+    /// the next `next()` value, which a printer that omits it then lacks; the
+    /// expected set is counted from the literal, so no second number drifts.
     #[test]
     fn push_sink_totals_prints_every_sink_counter_exactly_once() {
         let last = std::cell::Cell::new(0u64);
