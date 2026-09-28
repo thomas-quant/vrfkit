@@ -84,17 +84,16 @@ pub(crate) fn next_marker(marker: u8) -> u8 {
     if next < 2 { 1 } else { next }
 }
 
-/// Parse one MovementMove from the stream.
+/// Parse one MovementMove from the stream. The fields it decodes and drops are
+/// not constant over the 157,457,629 moves of the crate docs' sample:
+/// unusedByte (the C#'s name) is non-zero in 155,140,482, rotationYawMultiplier
+/// in 29,589,841; rotationInput is off centre in 97,788,473, flag48 set in
+/// 150,351,309, the optional byte present in 9,255,640, variant1Flag in 1,655.
 fn parse_single_move(
     reader: &mut BitReader<'_>,
     shooter_guid: u32,
 ) -> Result<MovementMove, MovementError> {
     // -- 25-bit header ----------------------------------------------------
-    // Decoded and dropped, but not constant over the 157,457,629 moves in the
-    // crate docs' sample: unusedByte (the C#'s name) is non-zero in
-    // 155,140,482, rotationYawMultiplier in 29,589,841; rotationInput is off
-    // centre in 97,788,473, flag48 set in 150,351,309, the optional byte
-    // present in 9,255,640 and variant1Flag set in 1,655.
     let header = reader.read_bits(25)?;
     let move_type_flag = (header & 1) != 0; // bit 0
     let _rotation_yaw_multiplier = ((header >> 1) & 0xFF) as u8; // bits [1..9]
