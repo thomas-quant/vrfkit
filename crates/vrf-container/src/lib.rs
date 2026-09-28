@@ -65,7 +65,7 @@
 //! |---------|-----------|
 //! | `oodle` | The `oozextract` dependency. Plaintext chunks still parse; a compressed archive reports [`ContainerError::OodleUnsupported`] |
 //! | `event` | [`parse_event_chunk`] and [`EventChunk`] |
-//! | `checkpoint` | [`parse_checkpoint_chunk`], [`decompress_checkpoint`] and [`CheckpointChunk`] |
+//! | `checkpoint` | [`parse_checkpoint_chunk`], [`decompress_checkpoint`], [`decompress_checkpoint_with_trailing`] and [`CheckpointChunk`] |
 //!
 //! The info, header and chunk-iteration layers are **not** gated: every reader
 //! of the format needs them to find anything at all, so a flag over them would
@@ -98,7 +98,10 @@ pub use oodle::{
 pub use preamble::{Preamble, parse_preamble};
 
 #[cfg(feature = "checkpoint")]
-pub use checkpoint::{CheckpointChunk, decompress_checkpoint, parse_checkpoint_chunk};
+pub use checkpoint::{
+    CheckpointChunk, decompress_checkpoint, decompress_checkpoint_with_trailing,
+    parse_checkpoint_chunk,
+};
 #[cfg(feature = "event")]
 pub use event::{
     EVENT_PAYLOAD_TIME_TOLERANCE_MS, EventChunk, EventPayload, KNOWN_EVENT_GROUPS, KnownEventGroup,

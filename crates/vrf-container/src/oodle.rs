@@ -136,10 +136,10 @@ pub fn parse_replay_data_meta(payload: &[u8]) -> Result<ReplayDataMeta, Containe
 ///
 /// # Trailing bytes
 ///
-/// This form **drops** [`ReplayDataMeta::trailing_bytes`]. Both data paths cut
-/// the payload to the declared length, so a chunk carrying more than its
-/// `SizeInBytes` accounts for loses the excess here with no error and no tally.
-/// Use [`decompress_replay_data_with_trailing`] to see it; the count is
+/// This form **drops** the count [`decompress_replay_data_with_trailing`]
+/// returns: the payload bytes no reader consumed. A chunk carrying more than
+/// its `SizeInBytes` accounts for, or an archive whose codec stream ends
+/// early, loses the excess here with no error and no tally. The count is
 /// expected to be zero, and a caller that ignores it is choosing not to notice
 /// a framing change rather than being unable to.
 pub fn decompress_replay_data(
@@ -150,16 +150,17 @@ pub fn decompress_replay_data(
     decompress_replay_data_with_trailing(payload, compressed, encrypted).map(|(plain, _)| plain)
 }
 
-/// As [`decompress_replay_data`], also reporting the bytes past the declared
-/// archive that the framing does not account for.
+/// As [`decompress_replay_data`], also reporting the payload bytes no reader
+/// consumed.
 ///
-/// The count is [`ReplayDataMeta::trailing_bytes`], computed once from the
-/// prologue. The inner `compressed_data[..compressed_size]` slice in
-/// `decompress_oodle_archive` discards exactly the same bytes -- for a
-/// ReplayData chunk `compressed_size` is pinned to `SizeInBytes - 8` and the
-/// archive slice runs to the end of the payload, so the two residuals are one
-/// residual -- and a checkpoint archive has none at all, because its declared
-/// size *is* its slice length. One count covers both.
+/// Two residuals, added. The first is [`ReplayDataMeta::trailing_bytes`], the
+/// bytes past the declared archive, computed once from the prologue; the inner
+/// `compressed_data[..compressed_size]` slice in `decompress_oodle_archive`
+/// discards exactly those bytes, because for a ReplayData chunk
+/// `compressed_size` is pinned to `SizeInBytes - 8` and the archive slice runs
+/// to the end of the payload. The second is inside the archive: the codec
+/// stops once its output is full and never checks that its input is used up,
+/// so bytes after the last block it reads are counted rather than dropped.
 pub fn decompress_replay_data_with_trailing(
     payload: &[u8],
     compressed: bool,
@@ -191,13 +192,13 @@ pub fn decompress_replay_data_with_trailing(
         return Ok((data_bytes[..size].to_vec(), meta.trailing_bytes));
     }
 
-    let plain = decompress_oodle_archive(
+    let (plain, unread) = decompress_oodle_archive(
         data_bytes,
         meta.size_in_bytes,
         Some(meta.memory_size_in_bytes),
         "oodle compressed data",
     )?;
-    Ok((plain, meta.trailing_bytes))
+    Ok((plain, meta.trailing_bytes + unread))
 }
 
 /// Decompress one Oodle archive: an 8-byte header followed by the codec stream.
@@ -216,6 +217,8 @@ pub fn decompress_replay_data_with_trailing(
 /// such field and passes `None`, which makes the header's own
 /// `decompressed_size` the sole authority.
 ///
+/// Returns the plaintext and the count of archive bytes the codec never read.
+///
 /// Every check a ReplayData chunk performed before this was factored out is
 /// still performed here, in the same order, so its error behaviour is
 /// unchanged; the corpus run over 215 files is what pins that.
@@ -224,7 +227,7 @@ pub(crate) fn decompress_oodle_archive(
     declared_size: i32,
     expected_decompressed: Option<i32>,
     context: &'static str,
-) -> Result<Vec<u8>, ContainerError> {
+) -> Result<(Vec<u8>, usize), ContainerError> {
     if declared_size < OODLE_HEADER_BYTES as i32 {
         return Err(ContainerError::OodleHeaderTooSmall {
             size: declared_size,
@@ -284,9 +287,10 @@ pub(crate) fn decompress_oodle_archive(
     inflate(input, decompressed_size as usize)
 }
 
-/// Run the Oodle codec over `input`, producing exactly `decompressed_size` bytes.
+/// Run the Oodle codec over `input`, producing exactly `decompressed_size`
+/// bytes, and count the input bytes it never read.
 #[cfg(feature = "oodle")]
-fn inflate(input: &[u8], decompressed_size: usize) -> Result<Vec<u8>, ContainerError> {
+fn inflate(input: &[u8], decompressed_size: usize) -> Result<(Vec<u8>, usize), ContainerError> {
     let mut output = vec![0u8; decompressed_size];
 
     // A fresh extractor per archive, deliberately.
@@ -305,8 +309,14 @@ fn inflate(input: &[u8], decompressed_size: usize) -> Result<Vec<u8>, ContainerE
     // but turning a loud failure into a silent decode is exactly what this
     // crate does not do. Reinstate this if `oozextract` grows a `reset()`.
     let mut extractor = oozextract::Extractor::new();
+    // `read` over a slice, not `read_from_slice`: the codec stops once
+    // `output` is full and never checks that its input is used up, and only
+    // this form leaves the slice at what it did not read (`read_from_slice`
+    // keeps its cursor private). The remainder means something only on
+    // success; a failed read consumes the rest of the slice.
+    let mut unread = input;
     let n = extractor
-        .read_from_slice(input, &mut output)
+        .read(&mut unread, &mut output)
         .map_err(|e| ContainerError::OodleDecompression(format!("{e:?}")))?;
 
     if n != decompressed_size {
@@ -316,7 +326,7 @@ fn inflate(input: &[u8], decompressed_size: usize) -> Result<Vec<u8>, ContainerE
         });
     }
 
-    Ok(output)
+    Ok((output, unread.len()))
 }
 
 /// Stand-in used when the `oodle` feature is off.
@@ -326,7 +336,7 @@ fn inflate(input: &[u8], decompressed_size: usize) -> Result<Vec<u8>, ContainerE
 /// problem, and a zero-length "success" would be indistinguishable from an
 /// empty chunk downstream.
 #[cfg(not(feature = "oodle"))]
-fn inflate(input: &[u8], decompressed_size: usize) -> Result<Vec<u8>, ContainerError> {
+fn inflate(input: &[u8], decompressed_size: usize) -> Result<(Vec<u8>, usize), ContainerError> {
     let _ = input;
     Err(ContainerError::OodleUnsupported {
         needed: decompressed_size,

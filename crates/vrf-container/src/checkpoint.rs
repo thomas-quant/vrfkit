@@ -143,11 +143,32 @@ pub fn parse_checkpoint_chunk(payload: &[u8]) -> Result<CheckpointChunk<'_>, Con
 /// [`ContainerError::EncryptedNotSupported`] when `encrypted`, and the same
 /// Oodle error variants a ReplayData chunk produces. An uncompressed replay
 /// returns the archive bytes unchanged.
+///
+/// # Unread bytes
+///
+/// This form **drops** the count [`decompress_checkpoint_with_trailing`]
+/// returns, as [`decompress_replay_data`](crate::decompress_replay_data) does.
 pub fn decompress_checkpoint(
     archive: &[u8],
     compressed: bool,
     encrypted: bool,
 ) -> Result<Vec<u8>, ContainerError> {
+    decompress_checkpoint_with_trailing(archive, compressed, encrypted).map(|(plain, _)| plain)
+}
+
+/// As [`decompress_checkpoint`], also reporting the archive bytes the codec
+/// never read.
+///
+/// The codec stops once its output is full and never checks that its input is
+/// used up, so bytes after the last block it reads would otherwise vanish with
+/// no error and no tally. The archive has no residual past its declared size:
+/// [`CheckpointChunk::archive`] is cut to exactly `SizeInBytes`, and anything
+/// after that is [`CheckpointChunk::trailing_bytes`]. Expected to be zero.
+pub fn decompress_checkpoint_with_trailing(
+    archive: &[u8],
+    compressed: bool,
+    encrypted: bool,
+) -> Result<(Vec<u8>, usize), ContainerError> {
     if encrypted {
         return Err(ContainerError::EncryptedNotSupported);
     }
@@ -155,7 +176,7 @@ pub fn decompress_checkpoint(
         // No corpus file takes this path -- every observed replay is
         // compressed -- so it is deliberately the trivial one rather than a
         // guess at a framing nothing can be checked against.
-        return Ok(archive.to_vec());
+        return Ok((archive.to_vec(), 0));
     }
     // `decompress_oodle_archive` takes the declared size as an i32. Real
     // callers pass a checkpoint archive whose size is already validated as an

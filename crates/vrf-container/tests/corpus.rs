@@ -223,7 +223,7 @@ fn scan_file(data: &[u8]) -> FileReport {
                 oodle_ok = true;
                 if trailing != 0 {
                     notes.push(format!(
-                        "replay data: {trailing} bytes past the declared archive"
+                        "replay data: {trailing} payload bytes no reader consumed"
                     ));
                 }
             }

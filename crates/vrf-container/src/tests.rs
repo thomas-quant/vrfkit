@@ -915,6 +915,57 @@ fn replay_data_short_payload_reports_no_trailing_bytes() {
     ));
 }
 
+/// An Oodle archive around one uncompressed Kraken block (`0x4C`: header
+/// nibble `0xC` with the uncompressed bit set; `0x06`: Kraken, no checksums)
+/// holding `plain`, followed by `unread` bytes inside the declared
+/// `compressed_size` that no block reads.
+#[cfg(feature = "oodle")]
+fn archive_with_unread_input(plain: &[u8], unread: usize) -> Vec<u8> {
+    let mut archive = Vec::new();
+    helpers::add_i32(&mut archive, plain.len() as i32); // decompressed_size
+    helpers::add_i32(&mut archive, (2 + plain.len() + unread) as i32); // compressed_size
+    archive.extend_from_slice(&[0x4C, 0x06]);
+    archive.extend_from_slice(plain);
+    archive.extend(std::iter::repeat_n(0xAB, unread));
+    archive
+}
+
+/// The codec stops once its output is full and never asks whether its input
+/// is used up, so bytes inside the declared archive that no block reads used
+/// to vanish with no error and no tally. They are counted with the framing
+/// residual, and an archive the codec reads to the end reports zero.
+#[cfg(feature = "oodle")]
+#[test]
+fn replay_data_input_the_codec_never_reads_is_counted() {
+    for unread in [7, 0] {
+        let archive = archive_with_unread_input(&[1, 2, 3, 4, 5], unread);
+        let mut payload = Vec::new();
+        helpers::add_u32(&mut payload, 0); // Time1
+        helpers::add_u32(&mut payload, 0); // Time2
+        helpers::add_i32(&mut payload, archive.len() as i32); // SizeInBytes
+        helpers::add_i32(&mut payload, 5); // MemorySizeInBytes
+        payload.extend_from_slice(&archive);
+
+        let (plain, count) = decompress_replay_data_with_trailing(&payload, true, false).unwrap();
+        assert_eq!(plain, [1, 2, 3, 4, 5]);
+        assert_eq!(count, unread, "input the codec never read must be counted");
+    }
+}
+
+/// The same residual in a checkpoint archive, which has no framing residual
+/// of its own: the archive slice is exactly its declared size.
+#[cfg(all(feature = "oodle", feature = "checkpoint"))]
+#[test]
+fn checkpoint_input_the_codec_never_reads_is_counted() {
+    for unread in [7, 0] {
+        let archive = archive_with_unread_input(&[1, 2, 3, 4, 5], unread);
+        let (plain, count) = decompress_checkpoint_with_trailing(&archive, true, false).unwrap();
+        assert_eq!(plain, [1, 2, 3, 4, 5]);
+        assert_eq!(count, unread, "input the codec never read must be counted");
+        assert_eq!(decompress_checkpoint(&archive, true, false).unwrap(), plain);
+    }
+}
+
 #[test]
 fn decompress_encrypted_rejected() {
     let payload = [0u8; 32];
