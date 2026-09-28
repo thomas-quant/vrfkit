@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 if __package__:
@@ -151,14 +152,15 @@ def main(argv=None):
         text = render(entries)
         if args.check:
             if not args.output.is_file() or args.output.read_text(encoding="utf-8") != text:
-                print("ERROR: scoped type table differs from reviewed evidence")
+                print("ERROR: scoped type table differs from reviewed evidence",
+                      file=sys.stderr)
                 return 1
         else:
             atomic_write_text(args.output, text)
         print(f"OK: {len(entries)} scoped field types")
         return 0
     except (ValueError, OSError, KeyError, TypeError) as exc:
-        print(f"ERROR: {exc}")
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
 
