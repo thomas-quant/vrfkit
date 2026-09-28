@@ -1,27 +1,19 @@
-"""
-Python interop verification for vrf-export Parquet files.
-
-Validates:
-1. Parquet files are readable by pyarrow
-2. Schema matches expectations (column names, types, nullability)
-3. Row counts are correct
-"""
+"""Check that pyarrow reads the Parquet files the Rust write_interop_files test
+writes: row counts, column names and order, types and nullability."""
 import os
 import sys
 from pathlib import Path
 
-# Force UTF-8 output on Windows
+# The check marks below need UTF-8 on a Windows console.
 sys.stdout.reconfigure(encoding='utf-8')
 
 import pyarrow
 import pyarrow.parquet as pq
 import pyarrow.types
 
-# Accept only the exact directory written by the Rust test. Picking the newest
-# matching system-temp directory can silently validate another checkout's
-# stale fixture. argv[1] is that directory itself, as CI passes it.
-# VRFKIT_INTEROP_DIR means what it means to the Rust test: the root whose
-# `interop` child holds the files.
+# Only the exact directory the Rust test wrote: the newest temp directory can
+# be another checkout's stale fixture. argv[1] is that directory (as CI passes
+# it); VRFKIT_INTEROP_DIR is the root whose `interop` child holds the files.
 def _find_interop_dir() -> Path:
     if len(sys.argv) > 1:
         return Path(sys.argv[1]).resolve()
@@ -45,29 +37,14 @@ class CheckFailed(Exception):
 
 
 def check(condition, message):
-    """Gate that survives `python -O`.
-
-    Every gate below used to be a bare `assert`. `python -O` and
-    PYTHONOPTIMIZE=1 strip the `assert` statement at compile time, so under
-    either one this script walked the whole file, printed every "verified"
-    tick, printed ALL CHECKS PASSED and exited 0 -- against parquet files it
-    had checked nothing about. A verification script that cannot fail is not a
-    verification script, and the mode that disables it is one environment
-    variable set anywhere in a CI image.
-
-    `raise` is not compiled out, so this holds under every optimisation level.
-    """
+    """Gate that survives `python -O` and PYTHONOPTIMIZE, which compile
+    `assert` out (it once let this script pass files it never checked)."""
     if not condition:
         raise CheckFailed(message)
 
 
 def _assert_gates_are_live():
-    """Prove `check` still fails before trusting anything it reports.
-
-    This is the guard for the regression itself: if someone reintroduces the
-    `assert` form, or wraps `check` in something that swallows, the script
-    stops rather than certifying a file it never inspected.
-    """
+    """Prove `check` still fails before trusting anything it reports."""
     try:
         check(False, "self-test")
     except CheckFailed:
@@ -75,7 +52,6 @@ def _assert_gates_are_live():
     raise SystemExit("FATAL: check() did not raise -- the gates below are not enforced")
 
 def verify_fields():
-    """Verify the fields parquet file."""
     print("=" * 60)
     print("FIELDS TABLE VERIFICATION")
     print("=" * 60)
@@ -90,16 +66,8 @@ def verify_fields():
     print(f"\nColumn count: {len(schema)}")
     expected_cols = [
         "time_ms", "packet_id", "channel_index", "actor_net_guid",
-        # Pre-existing omission: object_net_guid has been in fields_schema()
-        # since subobject blocks started carrying it, but this list was never
-        # updated, so the script aborted here before reaching verify_movement().
         "object_net_guid",
         "group_path", "handle", "field_name",
-        # The same omission again, and the reason it went unnoticed for a
-        # second time: `compatible_checksum` sits between `field_name` and
-        # `bit_count` in fields_schema(), and this list was not updated with
-        # it. Under `python -O` the gate below was compiled away entirely, so
-        # the mismatch printed a tick and reached ALL CHECKS PASSED.
         "compatible_checksum",
         "bit_count",
         "raw_bits", "value_i64", "value_f64", "value_bool", "value_str",
@@ -111,12 +79,10 @@ def verify_fields():
     )
     print("  ✓ Column names match")
 
-    # Print schema details
     print("\nSchema:")
     for field in schema:
         print(f"  {field.name:20s}  {str(field.type):30s}  nullable={field.nullable}")
 
-    # Verify dictionary encoding on group_path
     gp_type = schema.field("group_path").type
     check(
         pyarrow.types.is_dictionary(gp_type),
@@ -131,26 +97,22 @@ def verify_fields():
     )
     print("  ✓ field_name is dictionary-encoded")
 
-    # Verify nullability
     check(schema.field("field_name").nullable, "field_name should be nullable")
     check(schema.field("raw_bits").nullable, "raw_bits should be nullable")
     check(schema.field("value_i64").nullable, "value_i64 should be nullable")
     print("  ✓ Nullable columns are correct")
 
-    # Verify some null values exist
     fn_col = table.column("field_name")
     null_count = fn_col.null_count
     print(f"\n  field_name null count: {null_count} / {table.num_rows}")
     check(null_count > 0, "Expected some null field_names")
     print("  ✓ Null values present where expected")
 
-    # File size
     file_size = os.path.getsize(FIELDS_PATH)
     print(f"\n  Parquet file size: {file_size:,} bytes ({file_size/1024:.1f} KB)")
 
 
 def verify_movement():
-    """Verify the movement parquet file."""
     print("\n" + "=" * 60)
     print("MOVEMENT TABLE VERIFICATION")
     print("=" * 60)
@@ -166,8 +128,7 @@ def verify_movement():
         "time_ms", "packet_id", "character_net_guid",
         "pos_x", "pos_y", "pos_z", "yaw", "pitch",
         "vel_x", "vel_y", "vel_z",
-        # Appended after vel_z, never interleaved: consumers address movement
-        # columns positionally.
+        # Appended after vel_z, not interleaved: consumers read by position.
         "timestamp", "movement_state", "move_type",
     ]
     actual_cols = [f.name for f in schema]
@@ -181,7 +142,6 @@ def verify_movement():
     for field in schema:
         print(f"  {field.name:24s}  {str(field.type):15s}  nullable={field.nullable}")
 
-    # No column should be nullable
     for field in schema:
         check(not field.nullable, f"{field.name} should not be nullable")
     print("\n  ✓ No nullable columns (all dense)")
