@@ -62,7 +62,12 @@ property keeps its checksum across all of them -- `249` in the effect RPCs is
    `overlay.rs`, in `overlay::resolve_entry`'s order.
 3. **Tier 1.** Recomputes the checksum from the C++ spellings that `FieldType`
    can stand for (`CPP_TYPES`), under every known parent seed: 0, and the
-   struct chains in `PARENT_CHAINS`.
+   struct chains in `PARENT_CHAINS`. Every variant `decode.rs` declares must
+   be mapped there -- an unmapped one stops the run, exit 2, before anything
+   is checked. Variants that decode the same C++ type share its spelling:
+   `FText` and `FTextTree` both hash as `FText`, `RotationShort` and
+   `RotationByte` as `FRotator`; the checksum does not say which reader vrfkit
+   uses.
 4. **Tier 2.** Recovers further parent seeds from each group's own members
    (below) and re-tests what tier 1 left untestable under them.
 

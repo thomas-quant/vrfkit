@@ -325,6 +325,9 @@ CPP_TYPES = {
     "Double": FieldTypeSpec(("double",), NOT_REPRODUCED),
     "FString": FieldTypeSpec(("FString",), NOT_REPRODUCED),
     "FText": FieldTypeSpec(("FText",), NOT_REPRODUCED),
+    # The same C++ type as `FText`: which reader vrfkit uses -- the string-table
+    # key reader or the whole history tree -- is not part of the checksum.
+    "FTextTree": FieldTypeSpec(("FText",), NOT_REPRODUCED),
     "FName": FieldTypeSpec(("FName",), NOT_REPRODUCED),
     "ObjectNetGuid": FieldTypeSpec(("UClass*",), OBJECT_UNREPRODUCED, True),
     "Guid": FieldTypeSpec(("FGuid",), NOT_REPRODUCED),

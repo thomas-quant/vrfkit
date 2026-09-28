@@ -652,6 +652,23 @@ class MainTests(unittest.TestCase):
         self.assertEqual(out.count("      0  mismatch"), 2, out)
         self.assertIn("mismatches: 0 identities, 0 checksum_table.rs carriers", out)
 
+    def test_an_unclassified_field_type_variant_stops_the_run(self):
+        """A `FieldType` variant `CPP_TYPES` does not map would otherwise be
+        silently untestable: main() refuses the whole run, exit 2, and names
+        the variant. Removing `FTextTree` stands in for a new variant."""
+        d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
+        trimmed = {k: v for k, v in cct.CPP_TYPES.items() if k != "FTextTree"}
+        self.assertNotEqual(len(trimmed), len(cct.CPP_TYPES), "the fixture must remove a variant")
+        original = cct.CPP_TYPES
+        cct.CPP_TYPES = trimmed
+        try:
+            code, out, err = run_main("--export", str(d))
+        finally:
+            cct.CPP_TYPES = original
+        self.assertEqual(code, 2, out + err)
+        self.assertIn("FieldType variant(s) ['FTextTree'] are not classified in CPP_TYPES", err)
+        self.assertNotIn("OK:", out)
+
     def test_a_type_the_checksum_contradicts_exits_1(self):
         seed = cct.chain_checksum(CORRECT)
         wrong = cct.compatible_checksum("CorrectionIndex", "uint32", 0, seed)
