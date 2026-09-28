@@ -2,15 +2,15 @@
 //!
 //! Five passes carry `walk_demo_frames`' skip tally to an output with one line
 //! of glue each: export's main and checkpoint passes (summary and manifest),
-//! `validate`, and `diag`'s two passes. No corpus guard can see a cut line:
-//! the value is 0 on every replay measured, and the baseline's
-//! summary-vs-manifest reconciliation compares two outputs fed from one
-//! variable. So this builds an uncompressed replay whose frames carry both
-//! sections, two chunks per pass with distinct totals per pass and tally, runs
-//! the real binary, and requires each output to report its own pass's totals:
-//! a pass that absorbs nothing, the other pass's walk or only its last chunk
-//! reads the wrong numbers. With no packets, `validate` ends in exit 2 (no
-//! content blocks), asserted so a crash (exit 1) cannot pass for it.
+//! `validate`, and `diag`'s two passes. Unit tests stop at the walk or start
+//! from a hand-built `FrameSkips`, and no corpus guard can see a cut line: the
+//! value is 0 on every replay measured, and the baseline's summary-vs-manifest
+//! reconciliation compares two outputs fed from one variable. So this runs the
+//! real binary on an uncompressed replay whose frames carry both sections, two
+//! chunks per pass with distinct totals per pass and tally: each output must
+//! report its own pass's totals, not zeros, the other pass's or its last
+//! chunk's. With no packets, `validate` ends in exit 2 (no content blocks),
+//! asserted so a crash (exit 1) cannot pass for it.
 
 mod common;
 
