@@ -635,35 +635,78 @@ mod tests {
         assert_eq!(dst[0], 0x3F);
     }
 
+    /// The three counters `add_fragment` moves, threaded through every call.
+    #[derive(Default)]
+    struct Counters {
+        errs: u64,
+        frags: u64,
+        comps: u64,
+    }
+
+    impl Counters {
+        /// Add a fragment on its header's own channel.
+        fn add(
+            &mut self,
+            acc: &mut PartialBunchAccumulator,
+            header: RawBunchHeader,
+            data: &[u8],
+            bits: usize,
+        ) -> PartialBunchResult {
+            let ch_index = header.ch_index;
+            acc.add_fragment(
+                ch_index,
+                header,
+                data,
+                bits,
+                &mut self.errs,
+                &mut self.frags,
+                &mut self.comps,
+            )
+        }
+    }
+
+    /// An initial fragment on `ch_index`.
+    fn initial(ch_index: u32, ch_sequence: i32, b_reliable: bool) -> RawBunchHeader {
+        RawBunchHeader {
+            ch_index,
+            b_partial: true,
+            b_partial_initial: true,
+            b_reliable,
+            ch_sequence,
+            ..Default::default()
+        }
+    }
+
+    /// An unreliable continuation on `ch_index`, final when `last`.
+    fn continuation(ch_index: u32, ch_sequence: i32, last: bool) -> RawBunchHeader {
+        RawBunchHeader {
+            ch_index,
+            b_partial: true,
+            b_partial_final: last,
+            ch_sequence,
+            ..Default::default()
+        }
+    }
+
+    /// The reliable final fragment that follows `initial(ch_index, 1, true)`.
+    fn reliable_final(ch_index: u32) -> RawBunchHeader {
+        RawBunchHeader {
+            b_reliable: true,
+            ..continuation(ch_index, 2, true)
+        }
+    }
+
     #[test]
     fn accumulator_initial_plus_final() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0u64;
-        let mut frags = 0u64;
-        let mut comps = 0u64;
+        let mut c = Counters::default();
 
-        let h1 = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            b_reliable: true,
-            ch_sequence: 1,
-            ..Default::default()
-        };
-        let r1 = acc.add_fragment(1, h1, &[0xAB], 8, &mut errs, &mut frags, &mut comps);
+        let r1 = c.add(&mut acc, initial(1, 1, true), &[0xAB], 8);
         assert!(!r1.should_process);
 
-        let h2 = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_final: true,
-            b_reliable: true,
-            ch_sequence: 2,
-            ..Default::default()
-        };
-        let r2 = acc.add_fragment(1, h2, &[0xCD], 8, &mut errs, &mut frags, &mut comps);
+        let r2 = c.add(&mut acc, reliable_final(1), &[0xCD], 8);
         assert!(r2.should_process);
-        assert_eq!(errs, 0);
+        assert_eq!(c.errs, 0);
 
         let (buf, bits, _hdr) = acc.take_completed(1).unwrap();
         assert_eq!(bits, 16);
@@ -680,35 +723,17 @@ mod tests {
     #[test]
     fn a_zero_payload_final_fragment_still_counts_as_a_fragment() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0u64;
-        let mut frags = 0u64;
-        let mut comps = 0u64;
+        let mut c = Counters::default();
 
-        let h1 = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            b_reliable: true,
-            ch_sequence: 1,
-            ..Default::default()
-        };
-        acc.add_fragment(1, h1, &[0xAB], 8, &mut errs, &mut frags, &mut comps);
-        assert_eq!(frags, 1);
+        c.add(&mut acc, initial(1, 1, true), &[0xAB], 8);
+        assert_eq!(c.frags, 1);
 
-        let h2 = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_final: true,
-            b_reliable: true,
-            ch_sequence: 2,
-            ..Default::default()
-        };
-        let r2 = acc.add_fragment(1, h2, &[], 0, &mut errs, &mut frags, &mut comps);
+        let r2 = c.add(&mut acc, reliable_final(1), &[], 0);
         assert!(r2.should_process);
-        assert_eq!(errs, 0);
-        assert_eq!(comps, 1);
+        assert_eq!(c.errs, 0);
+        assert_eq!(c.comps, 1);
         assert_eq!(
-            frags, 2,
+            c.frags, 2,
             "two fragments arrived to complete this bunch, not one"
         );
     }
@@ -724,40 +749,25 @@ mod tests {
     #[test]
     fn an_error_flagged_final_fragment_is_not_reported_as_a_completion() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0u64;
-        let mut frags = 0u64;
-        let mut comps = 0u64;
+        let mut c = Counters::default();
 
-        let h1 = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            b_reliable: true,
-            ch_sequence: 1,
-            ..Default::default()
-        };
-        acc.add_fragment(1, h1, &[0xAA], 8, &mut errs, &mut frags, &mut comps);
-        assert_eq!(frags, 1);
+        c.add(&mut acc, initial(1, 1, true), &[0xAA], 8);
+        assert_eq!(c.frags, 1);
 
         // Overlapping initial: also final, on the same header.
         let h2 = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
             b_partial_final: true,
-            b_reliable: true,
-            ch_sequence: 2,
-            ..Default::default()
+            ..initial(1, 2, true)
         };
-        let r2 = acc.add_fragment(1, h2, &[0xBB], 8, &mut errs, &mut frags, &mut comps);
+        let r2 = c.add(&mut acc, h2, &[0xBB], 8);
 
-        assert_eq!(errs, 1, "the overlapping initial must be flagged");
+        assert_eq!(c.errs, 1, "the overlapping initial must be flagged");
         assert!(!r2.should_process);
         assert_eq!(
-            comps, 0,
+            c.comps, 0,
             "an errored final must not be counted as a completion"
         );
-        assert_eq!(frags, 2, "the second fragment still arrived");
+        assert_eq!(c.frags, 2, "the second fragment still arrived");
         assert_eq!(
             r2.discarded_bits, 16,
             "the discarded initial (8 bits) plus the errored final's own \
@@ -776,19 +786,10 @@ mod tests {
     #[test]
     fn partial_reassembly_refuses_more_active_states_than_its_budget() {
         let mut acc = PartialBunchAccumulator::with_limits(1, 64);
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = |ch_index| RawBunchHeader {
-            ch_index,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
-        let first = acc.add_fragment(1, initial(1), &[0xAA], 8, &mut errs, &mut frags, &mut comps);
+        let mut c = Counters::default();
+        let first = c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
         assert_eq!(first.resource_limit, None);
-        let refused =
-            acc.add_fragment(2, initial(2), &[0xBB], 8, &mut errs, &mut frags, &mut comps);
+        let refused = c.add(&mut acc, initial(2, 0, false), &[0xBB], 8);
         assert_eq!(
             refused.resource_limit,
             Some(PartialResourceLimit::ActiveStates)
@@ -801,31 +802,9 @@ mod tests {
     #[test]
     fn partial_reassembly_checks_the_total_before_growing_its_buffer() {
         let mut acc = PartialBunchAccumulator::with_limits(2, 12);
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
-        acc.add_fragment(1, initial, &[0xAA], 8, &mut errs, &mut frags, &mut comps);
-        let final_fragment = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_final: true,
-            ..Default::default()
-        };
-        let refused = acc.add_fragment(
-            1,
-            final_fragment,
-            &[0x1F],
-            5,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
+        let refused = c.add(&mut acc, continuation(1, 0, true), &[0x1F], 5);
         assert_eq!(
             refused.resource_limit,
             Some(PartialResourceLimit::BufferedBits)
@@ -838,29 +817,11 @@ mod tests {
     #[test]
     fn rejected_partial_fragments_report_every_discarded_bit() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            b_reliable: true,
-            ch_sequence: 1,
-            ..Default::default()
-        };
-        acc.add_fragment(1, initial, &[0xAA], 8, &mut errs, &mut frags, &mut comps);
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 1, true), &[0xAA], 8);
 
-        let mismatched = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_final: true,
-            b_reliable: false,
-            ch_sequence: 2,
-            ..Default::default()
-        };
-        let rejected =
-            acc.add_fragment(1, mismatched, &[0x1F], 5, &mut errs, &mut frags, &mut comps);
+        // Unreliable after a reliable initial.
+        let rejected = c.add(&mut acc, continuation(1, 2, true), &[0x1F], 5);
         assert_eq!(
             rejected.error_kind,
             Some(PartialSequenceKind::MismatchedContinuation)
@@ -868,13 +829,7 @@ mod tests {
         assert_eq!(rejected.discarded_bits, 13, "8 buffered + 5 current");
         assert_eq!(acc.total_buffered_bits(), 0);
 
-        let missing = RawBunchHeader {
-            ch_index: 2,
-            b_partial: true,
-            b_partial_final: true,
-            ..Default::default()
-        };
-        let rejected = acc.add_fragment(2, missing, &[0x7F], 7, &mut errs, &mut frags, &mut comps);
+        let rejected = c.add(&mut acc, continuation(2, 0, true), &[0x7F], 7);
         assert_eq!(
             rejected.error_kind,
             Some(PartialSequenceKind::MissingInitial)
@@ -885,27 +840,9 @@ mod tests {
     #[test]
     fn overlapping_initial_reports_the_replaced_payload_but_keeps_the_new_one() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = |sequence| RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            b_reliable: true,
-            ch_sequence: sequence,
-            ..Default::default()
-        };
-        acc.add_fragment(1, initial(1), &[0xAA], 8, &mut errs, &mut frags, &mut comps);
-        let replacement = acc.add_fragment(
-            1,
-            initial(2),
-            &[0xBB, 0xCC],
-            16,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 1, true), &[0xAA], 8);
+        let replacement = c.add(&mut acc, initial(1, 2, true), &[0xBB, 0xCC], 16);
         assert_eq!(replacement.discarded_bits, 8);
         assert_eq!(
             replacement.error_kind,
@@ -924,30 +861,9 @@ mod tests {
     #[test]
     fn non_aligned_nonfinal_reports_buffered_and_current_bits() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
-        acc.add_fragment(1, initial, &[0xAA], 8, &mut errs, &mut frags, &mut comps);
-        let continuation = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            ..Default::default()
-        };
-        let rejected = acc.add_fragment(
-            1,
-            continuation,
-            &[0x07],
-            3,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
+        let rejected = c.add(&mut acc, continuation(1, 0, false), &[0x07], 3);
         assert_eq!(rejected.discarded_bits, 11);
         assert_eq!(
             rejected.error_kind,
@@ -968,12 +884,6 @@ mod tests {
     /// rather than handing it back as a displaced payload.
     #[test]
     fn a_refused_initial_displaces_nothing_of_its_own() {
-        let initial = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
         let displaced_bits = |result: &PartialBunchResult| {
             result
                 .displaced
@@ -981,20 +891,10 @@ mod tests {
                 .map(|(p, _)| p.bit_count)
                 .collect::<Vec<_>>()
         };
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
+        let mut c = Counters::default();
 
         let mut acc = PartialBunchAccumulator::new();
-        let unaligned = acc.add_fragment(
-            1,
-            initial.clone(),
-            &[0x1F],
-            5,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
+        let unaligned = c.add(&mut acc, initial(1, 0, false), &[0x1F], 5);
         assert_eq!(
             unaligned.error_kind,
             Some(PartialSequenceKind::NonByteAlignedFragment)
@@ -1004,8 +904,7 @@ mod tests {
         assert_eq!((acc.active_count(), acc.total_buffered_bits()), (0, 0));
 
         let mut acc = PartialBunchAccumulator::with_limits(2, 4);
-        let over_budget =
-            acc.add_fragment(1, initial, &[0xAA], 8, &mut errs, &mut frags, &mut comps);
+        let over_budget = c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
         assert_eq!(
             over_budget.resource_limit,
             Some(PartialResourceLimit::BufferedBits)
@@ -1013,57 +912,25 @@ mod tests {
         assert_eq!(displaced_bits(&over_budget), Vec::<usize>::new());
         assert_eq!(over_budget.discarded_bits, 8);
         assert_eq!((acc.active_count(), acc.total_buffered_bits()), (0, 0));
-        assert_eq!(errs, 2);
+        assert_eq!(c.errs, 2);
     }
 
     #[test]
     fn overlapping_empty_initial_retains_its_cause() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
-        acc.add_fragment(
-            1,
-            initial.clone(),
-            &[0xAA],
-            8,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
-        let result = acc.add_fragment(1, initial, &[], 0, &mut errs, &mut frags, &mut comps);
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
+        let result = c.add(&mut acc, initial(1, 0, false), &[], 0);
         assert!(result.overlapping_initial);
-        assert_eq!(errs, 1);
+        assert_eq!(c.errs, 1);
     }
 
     #[test]
     fn overlapping_unaligned_initial_reports_both_errors() {
         let mut acc = PartialBunchAccumulator::new();
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
-        acc.add_fragment(
-            1,
-            initial.clone(),
-            &[0xAA],
-            8,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
-        let result = acc.add_fragment(1, initial, &[0x07], 3, &mut errs, &mut frags, &mut comps);
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
+        let result = c.add(&mut acc, initial(1, 0, false), &[0x07], 3);
         assert!(result.overlapping_initial);
         assert_eq!(
             result.error_kind,
@@ -1079,39 +946,15 @@ mod tests {
         );
         assert_eq!(result.displaced[0].0.bit_count, 8);
         assert_eq!(result.discarded_bits, 11, "8 replaced + 3 current");
-        assert_eq!(errs, 2);
+        assert_eq!(c.errs, 2);
     }
 
     #[test]
     fn overlapping_initial_over_resource_limit_retains_both_causes() {
         let mut acc = PartialBunchAccumulator::with_limits(2, 12);
-        let mut errs = 0;
-        let mut frags = 0;
-        let mut comps = 0;
-        let initial = RawBunchHeader {
-            ch_index: 1,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
-        acc.add_fragment(
-            1,
-            initial.clone(),
-            &[0xAA],
-            8,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
-        let result = acc.add_fragment(
-            1,
-            initial,
-            &[0xBB, 0xCC],
-            16,
-            &mut errs,
-            &mut frags,
-            &mut comps,
-        );
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
+        let result = c.add(&mut acc, initial(1, 0, false), &[0xBB, 0xCC], 16);
         assert!(result.overlapping_initial);
         assert_eq!(
             result.resource_limit,
@@ -1127,6 +970,6 @@ mod tests {
         );
         assert_eq!(result.displaced[0].0.bit_count, 8);
         assert_eq!(result.discarded_bits, 24, "8 replaced + 16 current");
-        assert_eq!(errs, 2);
+        assert_eq!(c.errs, 2);
     }
 }
