@@ -145,8 +145,12 @@ def descriptor_manifest(source_dir: Path) -> tuple[str, int]:
 
 def extract_table(source_dir: Path, output: Path) -> tuple[dict[tuple[str, str], str], dict[tuple[str, int], str]]:
     extractor = Path(__file__).with_name("extract_descriptors.py")
+    # errors="replace", as in run_git: a Python child writes a piped stderr in
+    # the locale's code page (cp949 without PYTHONUTF8), and strict UTF-8 lost
+    # its whole message. Only the message is read; the table is a file.
     result = subprocess.run([sys.executable, str(extractor), str(source_dir), str(output)],
-                            capture_output=True, text=True, encoding="utf-8", check=False)
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", check=False)
     if result.returncode:
         raise ValueError("descriptor extraction failed for " + str(source_dir) + ":\n" + result.stderr)
     return parse_table(output)
