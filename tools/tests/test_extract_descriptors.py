@@ -17,6 +17,27 @@ HANDLE_ENTRY_RE = re.compile(
     r'OverlayHandleEntry \{ group_path: "([^"]+)", handle: (\d+), '
     r'field_name: "([^"]+)" \},'
 )
+#: The shared abstract agent base most category tests derive from, with
+#: and without a field of its own, and one concrete agent under it.
+GENERIC_AGENT = r'''
+public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
+{
+    public override ExportCategory Categories => ExportCategory.Agent;
+}
+'''
+GENERIC_AGENT_WITH_OWNER = r'''
+public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
+{
+    public override ExportCategory Categories => ExportCategory.Agent;
+    protected override void Configure() { AddProperty(x => x.Owner).ObjectNetGuid(); }
+}
+'''
+LIVE_AGENT = r'''
+public sealed class LiveAgentDescriptor : GenericAgentDescriptor
+{
+    public override string Path => "/Game/Agents/Live.Live_C";
+}
+'''
 RUNTIME_AGENT_CACHE_FACTORY = r'''
 internal static class AgentClassNetCacheDescriptors
 {
@@ -82,12 +103,17 @@ class GeneratorHarness:
         self.assertNotEqual(result.returncode, 0, "generator unexpectedly succeeded")
         return result.stderr
 
+    def typed_entries(self, output: str) -> set[tuple[str, str, str]]:
+        return {(group, field, field_type.strip())
+                for group, field, field_type in ENTRY_RE.findall(output)}
+
+    def handle_entries(self, output: str) -> set[tuple[str, int, str]]:
+        return {(group, int(handle), field)
+                for group, handle, field in HANDLE_ENTRY_RE.findall(output)}
+
     def runtime_cache_entries(self, output: str) -> set[tuple[str, str, str]]:
-        return {
-            (group, field, field_type.strip())
-            for group, field, field_type in ENTRY_RE.findall(output)
-            if group.endswith("_ClassNetCache")
-        }
+        return {entry for entry in self.typed_entries(output)
+                if entry[0].endswith("_ClassNetCache")}
 
     def entries(self, output: str) -> set[tuple[str, str]]:
         return {
@@ -286,7 +312,7 @@ public sealed class Res : Res<Res>
             with self.subTest(generic_file=generic_file):
                 output = self.run_generator({generic_file: generic, plain_file: plain})
                 self.assertEqual(
-                    {(g, f, t.strip()) for g, f, t in ENTRY_RE.findall(output)},
+                    self.typed_entries(output),
                     {("/res", "BaseValue", "FieldType::Int32"),
                      ("/res", "OwnValue", "FieldType::Float")})
 
@@ -330,7 +356,7 @@ public sealed class UsesTwo : Gen<Dictionary<int, string>, UsesTwo>
 }
 '''})
         self.assertEqual(
-            {(g, f, t.strip()) for g, f, t in ENTRY_RE.findall(output)},
+            self.typed_entries(output),
             {("/probe", "Value", "FieldType::Int32"),
              ("/one", "One", "FieldType::Int32"),
              ("/two", "Two", "FieldType::Float")})
@@ -535,10 +561,7 @@ public sealed class MulticastNotifyDamagePointParameters : DamageParameters<Mult
 ''',
         })
 
-        entries = {
-            (group, field, field_type.strip())
-            for group, field, field_type in ENTRY_RE.findall(output)
-        }
+        entries = self.typed_entries(output)
         self.assertEqual(
             entries,
             {
@@ -590,10 +613,7 @@ public sealed class BombGameStateClassNetCacheDescriptor
 '''
         })
 
-        entries = {
-            (group, field, field_type.strip())
-            for group, field, field_type in ENTRY_RE.findall(output)
-        }
+        entries = self.typed_entries(output)
         self.assertEqual(
             entries,
             {
@@ -604,13 +624,7 @@ public sealed class BombGameStateClassNetCacheDescriptor
 
     def test_runtime_agent_cache_factory_emits_each_agent_cache(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-    protected override void Configure() { AddProperty(x => x.Owner).ObjectNetGuid(); }
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT_WITH_OWNER,
             "AlphaAgentDescriptor.cs": r'''
 public sealed class AlphaAgentDescriptor : GenericAgentDescriptor
 {
@@ -623,30 +637,10 @@ public sealed class BetaAgentDescriptor : GenericAgentDescriptor
     public override string Path => "/Game/Characters/Beta/Beta_PC.Beta_PC_C";
 }
 ''',
-            "AgentClassNetCacheDescriptors.cs": r'''
-internal static class AgentClassNetCacheDescriptors
-{
-    private const string KillFunctionName = "MulticastNotifyKilledEnemy";
-    public static IReadOnlyList<ClassNetCacheDescriptor> Create(IEnumerable<ExportGroupDescriptor> agentDescriptors)
-    {
-        return agentDescriptors
-            .Select(agent => new ClassNetCacheDescriptor(
-                agent.Path + "_ClassNetCache", [CreateKillRpc()]))
-            .ToArray();
-    }
-    private static RpcDescriptor CreateKillRpc() => new RpcDescriptor
-    {
-        Name = KillFunctionName,
-    };
-}
-''',
+            "AgentClassNetCacheDescriptors.cs": RUNTIME_AGENT_CACHE_FACTORY,
         })
 
-        entries = {
-            (group, field, field_type.strip())
-            for group, field, field_type in ENTRY_RE.findall(output)
-            if group.endswith("_ClassNetCache")
-        }
+        entries = self.runtime_cache_entries(output)
         self.assertEqual(
             entries,
             {
@@ -657,13 +651,7 @@ internal static class AgentClassNetCacheDescriptors
 
     def test_runtime_agent_cache_respects_explicit_non_agent_category_override(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-    protected override void Configure() { AddProperty(x => x.Owner).ObjectNetGuid(); }
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT_WITH_OWNER,
             "AlphaAgentDescriptor.cs": r'''
 public sealed class AlphaAgentDescriptor : GenericAgentDescriptor
 {
@@ -678,32 +666,11 @@ public sealed class HunterDronePawnDescriptor : GenericAgentDescriptor
     public override ExportCategory Categories => ExportCategory.Ability;
 }
 ''',
-            "AgentClassNetCacheDescriptors.cs": r'''
-internal static class AgentClassNetCacheDescriptors
-{
-    private const string KillFunctionName = "MulticastNotifyKilledEnemy";
-    public static IReadOnlyList<ClassNetCacheDescriptor> Create(
-        IEnumerable<ExportGroupDescriptor> agentDescriptors)
-    {
-        return agentDescriptors
-            .Select(agent => new ClassNetCacheDescriptor(
-                agent.Path + "_ClassNetCache", [CreateKillRpc()]))
-            .ToArray();
-    }
-    private static RpcDescriptor CreateKillRpc() => new RpcDescriptor
-    {
-        Name = KillFunctionName,
-    };
-}
-''',
+            "AgentClassNetCacheDescriptors.cs": RUNTIME_AGENT_CACHE_FACTORY,
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-                if group.endswith("_ClassNetCache")
-            },
+            self.runtime_cache_entries(output),
             {
                 ("/Game/Characters/Alpha/Alpha_PC.Alpha_PC_C_ClassNetCache", "MulticastNotifyKilledEnemy", "FieldType::Skip"),
             },
@@ -711,13 +678,7 @@ internal static class AgentClassNetCacheDescriptors
 
     def test_fully_qualified_ability_override_suppresses_runtime_agent_cache(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-    protected override void Configure() { AddProperty(x => x.Owner).ObjectNetGuid(); }
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT_WITH_OWNER,
             "OrdinaryAgentDescriptor.cs": r'''
 public sealed class OrdinaryAgentDescriptor : GenericAgentDescriptor
 {
@@ -745,12 +706,7 @@ public sealed class QualifiedAbilityDescriptor : GenericAgentDescriptor
 
     def test_alias_category_override_fails_loudly(self):
         error = self.run_generator_expecting_failure({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
             "AliasAbilityDescriptor.cs": r'''
 using EC = Replay.Models.Descriptors.ExportCategory;
 
@@ -769,12 +725,7 @@ public sealed class AliasAbilityDescriptor : GenericAgentDescriptor
 
     def test_escaped_alias_and_property_category_override_fails_loudly(self):
         error = self.run_generator_expecting_failure({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
             "EscapedAliasAbilityDescriptor.cs": r'''
 using @EC = Replay.Models.Descriptors.ExportCategory;
 
@@ -833,12 +784,7 @@ public override ExportCategory Categories => ExportCategory.Ability;
             with self.subTest(label=label):
                 class_name = f"{label.replace('-', '').title()}AgentDescriptor"
                 output = self.run_generator({
-                    "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
+                    "GenericAgentDescriptor.cs": GENERIC_AGENT,
                     f"{class_name}.cs": f'''
 public sealed class {class_name} : GenericAgentDescriptor
 {{
@@ -858,12 +804,7 @@ public sealed class {class_name} : GenericAgentDescriptor
 
     def test_nested_category_override_does_not_change_outer_category(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
             "OuterAgentDescriptor.cs": r'''
 public sealed class OuterAgentDescriptor : GenericAgentDescriptor
 {
@@ -900,12 +841,7 @@ public sealed class OuterAbilityDescriptor : GenericAgentDescriptor
 
     def test_nested_path_does_not_supply_outer_path(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
             "GenericAbilityDescriptor.cs": r'''
 public abstract class GenericAbilityDescriptor : ExportGroupDescriptor<GenericAbilityDescriptor>
 {
@@ -934,11 +870,8 @@ public sealed class OuterAgentDescriptor : GenericAgentDescriptor
             "AgentClassNetCacheDescriptors.cs": RUNTIME_AGENT_CACHE_FACTORY,
         })
 
-        descriptor_entries = {
-            (group, field, field_type.strip())
-            for group, field, field_type in ENTRY_RE.findall(output)
-            if not group.endswith("_ClassNetCache")
-        }
+        descriptor_entries = {entry for entry in self.typed_entries(output)
+                              if not entry[0].endswith("_ClassNetCache")}
         self.assertEqual(
             descriptor_entries,
             {
@@ -977,10 +910,7 @@ public sealed class OuterDescriptor : ExportGroupDescriptor<OuterDescriptor>
 ''',
         })
 
-        descriptor_entries = {
-            (group, field, field_type.strip())
-            for group, field, field_type in ENTRY_RE.findall(output)
-        }
+        descriptor_entries = self.typed_entries(output)
         self.assertEqual(
             descriptor_entries,
             {
@@ -1010,10 +940,7 @@ public sealed class OuterDescriptor : ExportGroupDescriptor<OuterDescriptor>
 ''',
         })
 
-        descriptor_entries = {
-            (group, field, field_type.strip())
-            for group, field, field_type in ENTRY_RE.findall(output)
-        }
+        descriptor_entries = self.typed_entries(output)
         self.assertEqual(
             descriptor_entries,
             {
@@ -1024,13 +951,7 @@ public sealed class OuterDescriptor : ExportGroupDescriptor<OuterDescriptor>
 
     def test_category_like_comments_preserve_real_and_inherited_categories(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-    protected override void Configure() { AddProperty(x => x.Owner).ObjectNetGuid(); }
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT_WITH_OWNER,
             "CommentedInheritedAgentDescriptor.cs": r'''
 public sealed class CommentedInheritedAgentDescriptor : GenericAgentDescriptor
 {
@@ -1200,18 +1121,8 @@ internal static class AgentClassNetCacheDescriptors
 
     def test_commented_runtime_cache_factory_is_ignored(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentClassNetCacheDescriptors.cs": RUNTIME_AGENT_CACHE_FACTORY
             + r'''
 /*
@@ -1239,18 +1150,8 @@ private static void CreateBogusCaches(
 
     def test_runtime_cache_factory_syntax_inside_string_is_ignored(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentClassNetCacheDescriptors.cs": r'''
 internal static class AgentClassNetCacheDescriptors
 {
@@ -1320,10 +1221,7 @@ public sealed class LiveTypedDescriptor : ExportGroupDescriptor<LiveTypedDescrip
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {
                 ("/test/live-typed", "KnownValue", "FieldType::UInt32"),
             },
@@ -1355,10 +1253,7 @@ public sealed class UnrelatedDescriptor : ExportGroupDescriptor<UnrelatedDescrip
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {
                 ("/test/unrelated", "KnownValue", "FieldType::UInt32"),
             },
@@ -1434,19 +1329,13 @@ public sealed class LiveRawDescriptor : RawBaseDescriptor<LiveRawDescriptor>
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {
                 ("/test/live-raw", "LivePayload", "FieldType::Raw"),
             },
         )
         self.assertEqual(
-            {
-                (group, int(handle), field)
-                for group, handle, field in HANDLE_ENTRY_RE.findall(output)
-            },
+            self.handle_entries(output),
             {("/test/live-raw", 7, "LivePayload")},
         )
 
@@ -1467,10 +1356,7 @@ public sealed class TriviaDescriptor : ExportGroupDescriptor<TriviaDescriptor>
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {
                 ("/test/trivia", "CommentDecode", "FieldType::UInt32"),
                 ("/test/trivia", "CommentSerialized", "FieldType::UInt32"),
@@ -1499,10 +1385,7 @@ public sealed class NameTriviaDescriptor : ExportGroupDescriptor<NameTriviaDescr
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {
                 ("/test/name-trivia", "Right", "FieldType::UInt32"),
                 ("/test/name-trivia", "Live", "FieldType::UInt32"),
@@ -1510,10 +1393,7 @@ public sealed class NameTriviaDescriptor : ExportGroupDescriptor<NameTriviaDescr
             },
         )
         self.assertEqual(
-            {
-                (group, int(handle), field)
-                for group, handle, field in HANDLE_ENTRY_RE.findall(output)
-            },
+            self.handle_entries(output),
             {("/test/name-trivia", 7, "RightHandle")},
         )
 
@@ -1542,34 +1422,18 @@ public sealed class EscapedRawDescriptor : EscapedRawBase<EscapedRawDescriptor>
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {("/test/escaped-raw", "Payload", "FieldType::Raw")},
         )
         self.assertEqual(
-            {
-                (group, int(handle), field)
-                for group, handle, field in HANDLE_ENTRY_RE.findall(output)
-            },
+            self.handle_entries(output),
             {("/test/escaped-raw", 7, "Payload")},
         )
 
     def test_runtime_factory_resolves_within_owning_class(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentClassNetCacheDescriptors.cs": r'''
 internal static class UnrelatedRpcFactory
 {
@@ -1607,18 +1471,8 @@ internal static class AgentClassNetCacheDescriptors
 
     def test_runtime_factory_constant_resolves_within_owning_class(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentClassNetCacheDescriptors.cs": r'''
 internal static class AgentClassNetCacheDescriptors
 {
@@ -1699,18 +1553,8 @@ internal static class AgentClassNetCacheDescriptors
 
     def test_runtime_factory_uses_only_returned_descriptor_name(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentClassNetCacheDescriptors.cs": r'''
 internal static class AgentClassNetCacheDescriptors
 {
@@ -1773,18 +1617,8 @@ internal static class AgentClassNetCacheDescriptors
 
     def test_nested_local_constant_does_not_shadow_owning_class_constant(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentClassNetCacheDescriptors.cs": r'''
 internal static class AgentClassNetCacheDescriptors
 {
@@ -1943,18 +1777,8 @@ internal static class AgentClassNetCacheDescriptors
 
     def test_escaped_runtime_descriptor_type_is_discovered(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentClassNetCacheDescriptors.cs": r'''
 internal static class AgentClassNetCacheDescriptors
 {
@@ -2064,10 +1888,7 @@ public sealed class OuterDescriptor : BaseDescriptor
         })
 
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {
                 ("/outer", "InheritedValue", "FieldType::UInt32"),
                 ("/outer", "OuterValue", "FieldType::UInt32"),
@@ -2078,18 +1899,8 @@ public sealed class OuterDescriptor : BaseDescriptor
 
     def test_unrelated_path_and_factory_arguments_do_not_create_runtime_cache(self):
         output = self.run_generator({
-            "GenericAgentDescriptor.cs": r'''
-public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
-{
-    public override ExportCategory Categories => ExportCategory.Agent;
-}
-''',
-            "LiveAgentDescriptor.cs": r'''
-public sealed class LiveAgentDescriptor : GenericAgentDescriptor
-{
-    public override string Path => "/Game/Agents/Live.Live_C";
-}
-''',
+            "GenericAgentDescriptor.cs": GENERIC_AGENT,
+            "LiveAgentDescriptor.cs": LIVE_AGENT,
             "AgentDiagnostics.cs": r'''
 internal static class AgentDiagnostics
 {
@@ -2125,10 +1936,7 @@ public sealed class ReplayParameters : ExportGroupDescriptor<ReplayParameters>
         })
 
         self.assertEqual(
-            {
-                (group, int(handle), field)
-                for group, handle, field in HANDLE_ENTRY_RE.findall(output)
-            },
+            self.handle_entries(output),
             {
                 ("/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation", 26, "Location"),
                 ("/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation", 27, "Rotation"),
@@ -2152,10 +1960,7 @@ public sealed class BoundedPayloadDescriptor : ExportGroupDescriptor<BoundedPayl
         self.assertEqual(HANDLE_ENTRY_RE.findall(output), [])
         self.assertIn(
             ("/Game/Effects/Bounded.Bounded_C", "Payload", "FieldType::Raw"),
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
         )
 
 
@@ -2540,10 +2345,7 @@ public sealed class WrappedDescriptor : ExportGroupDescriptor<WrappedDescriptor>
             )
         )
         self.assertEqual(
-            {
-                (group, field, field_type.strip())
-                for group, field, field_type in ENTRY_RE.findall(output)
-            },
+            self.typed_entries(output),
             {
                 ("/Script/ShooterGame.Widget", "Spin", "FieldType::Float"),
                 ("/Script/ShooterGame.Widget", "FloatValues", "FieldType::Raw"),
