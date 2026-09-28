@@ -23,42 +23,21 @@
 //!           -> recurse if this field is itself an array
 //! ```
 //!
-//! # Recursion limits
+//! # Limits
 //!
-//! The C# parser uses `MaxItems = 256` for array element count and `MaxFields = 128`
-//! for fields per struct element (see `CombatRoundReportsDecoder`). The generic
-//! `DynamicArrayDecoder` has no explicit limit but fails on malformed data via
-//! `BitsRemaining` checks.
+//! The C# parser uses `MaxItems = 256` elements and `MaxFields = 128` fields per
+//! element (`CombatRoundReportsDecoder`). Ours: [`MAX_ELEMENTS`] 4096 (real data
+//! peaks ~50), [`MAX_FIELDS_PER_ELEMENT`] 128 and [`MAX_RECURSION_DEPTH`] 12 (real
+//! data is 4-5 deep). A limit hit keeps the remaining raw bits and counts a
+//! truncation; nothing panics.
 //!
-//! We use:
-//! - **MAX_ELEMENTS = 4096** per array (generous; real data peaks ~50)
-//! - **MAX_FIELDS_PER_ELEMENT = 128** struct fields per element
-//! - **MAX_RECURSION_DEPTH = 12** levels of nesting (real data is 4-5 deep)
+//! # Output
 //!
-//! When a limit is hit we stop decoding that branch, preserve remaining raw bits
-//! in the output, and increment a truncation counter (never panic/error).
-//!
-//! # Output: flattened field records
-//!
-//! Each leaf value produces a `FlattenedField` with:
-//! - `path`: e.g. `"Rounds[3].Reports[1].DamageDealt"` or `"Rounds[0]._h18"`
-//!   (for fields with unknown names, the handle is used as suffix)
-//! - `handle`: the leaf field's handle within its struct
-//! - `bit_count`: payload bits
-//! - `raw_bits`: the raw bytes of this field's payload
-//!
-//! The path string format was chosen because:
-//! 1. DuckDB/pandas can filter with `LIKE 'Rounds[%].Reports[%].DamageDealt'`
-//! 2. Parquet dictionary encoding collapses repeated path prefixes efficiently
-//! 3. The upstream Python pipeline (compute_metrics.py) can parse it trivially
-//!
-//! # Allocation
-//!
-//! One `String` and one `Vec<u8>` per emitted leaf are unavoidable --
-//! [`FlattenedField`] owns both. Everything else is written into a single
-//! reused path buffer: labels in particular are appended in place rather than
-//! resolved into a temporary `String` that is copied and dropped, which was one
-//! extra allocation per leaf for nothing.
+//! One [`FlattenedField`] per leaf, with a path such as
+//! `Rounds[3].Reports[1].DamageDealt`, or `Rounds[0]._h18` where no name is
+//! known: filterable with `LIKE`, cheap under Parquet dictionary encoding,
+//! trivial to parse. Each leaf owns one `String` and one `Vec<u8>`; the path is
+//! built in one reused buffer.
 
 mod schema;
 
@@ -108,57 +87,32 @@ pub struct ArrayDecodeStats {
     /// Number of times a limit was hit (element count, field count, or depth).
     pub truncations: u64,
     /// BitIo read failures or declared-vs-available overruns the walker
-    /// recovered from by abandoning the rest of the stream.
-    ///
-    /// Without this, a truncated element-count read or a payload that EOFs
-    /// mid-element returned an empty/partial `Vec` with `truncations == 0`,
-    /// indistinguishable from a legitimately empty array. The parent row's
-    /// `raw_bits` are still emitted by the caller (`emit_flattened_array`
-    /// always emits the parent), so this counter is the only signal that
-    /// flattened leaves were lost. Mirrors `struct_blobs_failed`: counted and
-    /// surfaced, never silently dropped.
+    /// recovered from by abandoning the rest of the stream. The caller still
+    /// emits the parent's raw bits, so this is the only sign leaves were lost.
     pub errors: u64,
-    /// Declared bits inside a nested window that the walk stepped past without
-    /// reading, and without moving any other counter: what a nested array
-    /// left in its own window after it stopped decoding, and -- in the
-    /// object-reference walker -- the payload of any field after an element's
-    /// first. See the increment site in `decode_struct_fields` for why this is
-    /// a tally, not an error.
+    /// Declared bits inside a nested window the walk stepped past without
+    /// reading or moving another counter: what a nested array left in its own
+    /// window, and in the object-reference walker the payload of any field
+    /// after an element's first. A tally, not an error (`decode_struct_fields`).
     pub unconsumed_nested_bits: u64,
     /// Bits left after the root array's explicit terminator or an early stop
-    /// of the array loop itself. An element that fails has already moved its
-    /// own counter; the bits after it are abandoned, not counted here again.
-    ///
-    /// The caller retains the whole parent payload, so these bits remain
-    /// recoverable. This counter distinguishes that raw fallback from a fully
-    /// walked root array; the nested equivalent is
-    /// [`Self::unconsumed_nested_bits`].
+    /// of the array loop (an element that fails has moved its own counter, and
+    /// the bits after it are not counted again). They stay in the parent's raw
+    /// bits; the nested equivalent is [`Self::unconsumed_nested_bits`].
     pub unconsumed_root_bits: u64,
     /// Times an element's field loop or an array level ended because the reader
-    /// ran out, rather than because it read an explicit `0` terminator.
-    ///
-    /// The framing ends an element with a zero handle and an array with a zero
-    /// index. Accepting EOF in their place makes a payload truncated mid-stream
-    /// decode to the same shape a complete one does -- the last element simply
-    /// looks finished. Nothing else in the walk distinguishes them, so this
-    /// counter is the only signal.
-    ///
-    /// Not an error: this walker is also handed windows whose final terminator
-    /// is absorbed by byte padding, so raising it would turn well-formed data
-    /// loud.
+    /// ran out instead of reading its explicit `0` terminator: the only sign
+    /// that a payload cut short mid-stream is not a complete one. A tally, not
+    /// an error, in case a well-formed window loses its last terminator to byte
+    /// padding -- a hypothetical case: `tools/fixtures/build_verification.json`
+    /// records 0 on all 24 builds (1,018 replays, main and checkpoint, 259ed10).
     pub implicit_terminations: u64,
 }
 
 impl ArrayDecodeStats {
-    /// Add every counter of `other` into `self`.
-    ///
-    /// The one place a walk's counters are folded into a running total. The
-    /// sum used to be written out field by field in four places (two sink
-    /// decoders, the export totals and the `diag` totals), and none of them
-    /// would have noticed a new field: it compiled, and the new counter read
-    /// as absent everywhere it was not wired in by hand. The destructure below
-    /// has no `..`, so a field added to this struct does not compile until it
-    /// is summed here.
+    /// Add every counter of `other` into `self`: the one place a walk's
+    /// counters are summed. The destructure has no `..`, so a new field does
+    /// not compile until it is summed here.
     pub fn merge_from(&mut self, other: &Self) {
         let Self {
             elements_decoded,
@@ -178,15 +132,9 @@ impl ArrayDecodeStats {
         self.implicit_terminations += implicit_terminations;
     }
 
-    /// Whether a walk recorded none of the five failure shapes.
-    ///
-    /// Measured routes emit typed children only from a clean walk, so this is
-    /// the acceptance test for every one of them. It was spelled out as a
-    /// five-way `== 0` conjunction at each route, and a new failure counter
-    /// added to this struct would have been left out of every copy -- typed
-    /// children would then have been emitted from a walk that had failed. The
-    /// destructure has no `..`: a new field must be classified here as work
-    /// (bound to `_`) or failure (tested) before it compiles.
+    /// Whether a walk recorded none of the five failure shapes: measured routes
+    /// emit typed children only from a clean walk. The destructure has no `..`,
+    /// so a new field must be classified as work (`_`) or failure first.
     #[must_use]
     pub fn is_clean(&self) -> bool {
         let Self {
@@ -206,10 +154,8 @@ impl ArrayDecodeStats {
     }
 }
 
-/// Everything one walk carries down through the recursion.
-///
-/// `declared` and `output`/`stats` are the same for every level; bundling them
-/// keeps the recursive calls to three arguments instead of seven.
+/// Everything one walk carries down through the recursion, the same at every
+/// level.
 struct Walk<'a, 'd> {
     allow_trailing_int_packed: bool,
     /// Names the REPLAY declares for this group's handles, indexed by handle.
@@ -219,19 +165,13 @@ struct Walk<'a, 'd> {
     output: Vec<FlattenedField>,
 }
 
-/// Decode a DynamicArray (struct elements) from raw bits and emit flattened fields.
+/// Decode a DynamicArray of structs from raw bits into flattened leaves.
 ///
-/// `schema` tells us which handles at each depth are themselves arrays (so we
-/// recurse) vs primitives (so we emit as-is). If `schema` is None, we treat all
-/// elements as opaque structs and emit each field without attempting to recurse
-/// into sub-arrays.
-///
-/// `declared` carries the names the REPLAY itself declares for this group's
-/// handles, indexed by handle: slot `h` holds the declared name for handle `h`,
-/// or `None` where the replay declares nothing there. Pass `&[]` when no
-/// declaration is available; the schema's own names are then the only source.
-/// A LEAF label is resolved declaration -> schema -> `_h{handle}`; container
-/// segments come from the schema alone. See the internal `push_leaf_label` helper.
+/// `schema` says which handles at each depth are themselves arrays (recursed
+/// into); `None` emits every field as a leaf. `declared[h]` is the name the
+/// REPLAY declares for handle `h` (`&[]` when there is no declaration). A leaf
+/// is labelled declaration -> schema -> `_h{handle}`, a container segment by
+/// the schema alone (see the internal `push_leaf_label`).
 pub fn decode_struct_array(
     data: &[u8],
     bit_count: u32,
@@ -280,40 +220,24 @@ fn decode_struct_array_window(
 }
 
 /// Decode a RepLayout dynamic array of object references (`TArray<UObject*>`)
-/// into the actor NetGUIDs it carries.
+/// into `(wire index, NetGUID)` pairs, without diagnostics.
 ///
-/// `MultiItemSlot.MultiContents` is this shape: a dynamic array whose every
-/// element is a single object-reference property. The framing is the same one
-/// [`decode_struct_array`] walks for struct arrays -- an `elementCount`, then a
-/// run of `(encodedIndex, handle, payloadBits, payload, element-terminator)`
-/// tuples closed by an index terminator -- confirmed on 245/245 wire payloads,
-/// where each element carries exactly one field at handle 2 whose payload is
-/// the item actor's NetGUID as one IntPacked value. The C# reference types the
-/// property as `TArray<AAresItem*>`.
-///
-/// Returns one NetGUID per populated element, in the order the stream sends
-/// them (element-index order on every payload seen). Malformed input returns
-/// whatever was decoded so far: the caller still emits the parent row from its
-/// own `raw_bits`, so a short `Vec` costs the typed leaves, not the bits.
+/// `MultiItemSlot.MultiContents` (C# `TArray<AAresItem*>`) is this shape: the
+/// [`decode_struct_array`] framing with exactly one field per element, at
+/// handle 2, holding the item actor's NetGUID as one IntPacked -- confirmed on
+/// 245/245 wire payloads. Malformed input returns what was decoded so far; the
+/// caller keeps the parent's raw bits.
 pub fn decode_object_ref_array(data: &[u8], bit_count: u32) -> Vec<(u32, u32)> {
     let mut ignored = ArrayDecodeStats::default();
     decode_object_ref_array_with_stats(data, bit_count, &mut ignored)
 }
 
-/// Decode an object-reference dynamic array while exposing every partial or
-/// malformed path through `stats`.
+/// [`decode_object_ref_array`] with every partial or malformed path counted in
+/// `stats`: the production entry point for `MultiContents`.
 ///
-/// This is the production entry point for `MultiContents`: the parent raw row
-/// is preserved by the caller, while these diagnostics state whether all typed
-/// item rows were recovered. [`decode_object_ref_array`] remains as the
-/// compatibility wrapper for callers that do not need diagnostics.
-///
-/// Returns `(wire element index, NetGUID)` pairs, not a dense `Vec<u32>` in
-/// arrival order. RepLayout dynamic arrays are delta-replicated per element --
-/// a re-send of a 3-slot array can carry only its changed element, at wire
-/// index 1 -- so the declared `encodedIndex` is the only thing that says which
-/// slot a GUID belongs in; dropping it and using arrival order relabels a
-/// sparse update into the wrong slots.
+/// Pairs, not a dense `Vec` in arrival order: the array is delta-replicated per
+/// element (a re-send of a 3-slot array can carry only wire index 1), so the
+/// wire index is the only thing that says which slot a GUID belongs in.
 pub fn decode_object_ref_array_with_stats(
     data: &[u8],
     bit_count: u32,
@@ -343,13 +267,10 @@ fn decode_object_ref_array_reader(
         return out;
     }
 
-    // An explicit `0` index ends the array. Running out of bits instead is
-    // accepted but tallied, the same call `decode_array_level` makes: it is
-    // also what a payload cut short after a complete element looks like, and
-    // this array is delta-replicated -- the slots after the cut would pass for
-    // slots that were simply not re-sent. An element that runs out of bits
-    // has already tallied itself and leaves through the `element_complete`
-    // break below, not through here, so the same EOF is never counted twice.
+    // An explicit `0` index ends the array; EOF instead is accepted but
+    // tallied, as in `decode_array_level` (in a delta array, slots after a cut
+    // would pass for slots not re-sent). An element that runs out of bits has
+    // tallied itself and leaves through the `element_complete` break instead.
     let mut elements_seen = 0u32;
     loop {
         if reader.at_end() {
@@ -381,25 +302,13 @@ fn decode_object_ref_array_reader(
         elements_seen += 1;
         stats.elements_decoded += 1;
 
-        // Each element carries one object-reference field. Walk its handle loop
-        // -- real payloads run it once -- and decode the first payload as the
-        // item's IntPacked NetGUID. The bounded loop keeps a multi-field element
-        // (none seen on the wire, but the framing permits it) from
-        // desynchronising the rest of the array.
-        //
-        // Staying aligned is not the same as having read the bits: a field
-        // after the first is stepped over, not decoded, so its payload width
-        // goes to `unconsumed_nested_bits` -- the tally for declared bits a
-        // walk stepped past. Measured when that was added: in the 1,018-replay
-        // audit corpus, each of the 273,386 elements (all main stream; every
-        // checkpoint `MultiContents` array is empty) carries exactly one
-        // populated field, so it reads zero on real data.
-        //
-        // A zero-width field is skipped with no tally, deliberately: it has no
-        // payload, so skipping it leaves no bit unread. An element made only
-        // of them yields no NetGUID and therefore no row (it still counts in
-        // `elements_decoded`, not in `fields_emitted`); none occur in that
-        // corpus either.
+        // The first populated field is the item's IntPacked NetGUID. Later
+        // fields are stepped over (bounded, to stay aligned) and their payload
+        // goes to `unconsumed_nested_bits`: in the 1,018-replay audit corpus
+        // each of the 273,386 elements (all main stream; every checkpoint
+        // `MultiContents` array is empty) carries exactly one populated field.
+        // A zero-width field has no payload and is skipped untallied; an
+        // element of only those yields no row (none occur in that corpus).
         let mut guid = None;
         // Keyed on position, not on `guid`: a first field that fails to decode
         // is still the first, and the next one must not stand in for it.
@@ -438,9 +347,8 @@ fn decode_object_ref_array_reader(
                 reader.skip_remaining();
                 break;
             }
-            // `sub_reader` carves out the field's declared window and advances
-            // the parent past it, so a NetGUID that spends fewer bits than the
-            // window still leaves the reader aligned on the next handle.
+            // `sub_reader` advances the parent past the whole window, so the
+            // reader stays aligned however many bits the NetGUID spends.
             let Ok(mut sub) = reader.sub_reader(u64::from(payload_bits)) else {
                 stats.errors += 1;
                 break;
@@ -481,7 +389,6 @@ fn decode_array_level(
         return;
     }
 
-    // Read element count.
     let Ok(element_count) = reader.read_int_packed() else {
         stats.errors += 1;
         return;
@@ -489,14 +396,12 @@ fn decode_array_level(
 
     if element_count > MAX_ELEMENTS {
         stats.truncations += 1;
-        // Emit remaining as a single raw field at this level.
         emit_remaining_raw(reader, walk, stats);
         return;
     }
 
-    // Read elements. An explicit `0` index is what ends the array; running out
-    // of bits instead is accepted (a padded window legitimately does that) but
-    // tallied, because it is also what a truncated payload looks like.
+    // An explicit `0` index ends the array; EOF instead is accepted but
+    // tallied (`implicit_terminations`).
     let mut elements_seen = 0u32;
     loop {
         if reader.at_end() {
@@ -542,10 +447,9 @@ fn decode_array_level(
         let _ = write!(walk.path, "[{index}]");
         let closed = decode_struct_fields(reader, walk, schema, depth, stats);
         walk.path.truncate(prefix_len);
-        // An element that did not close on its zero handle has already tallied
-        // why. Reading on would count the same bits again -- as a second EOF,
-        // a second failed read or residual -- so, as in the object-reference
-        // walker, the rest of the stream is abandoned: one anomaly, one counter.
+        // An element that did not close has tallied why; reading on would count
+        // the same bits again, so, as in the object-reference walker, the rest
+        // of the stream is abandoned: one anomaly, one counter.
         if !closed {
             reader.skip_remaining();
             break;
@@ -566,10 +470,8 @@ fn decode_struct_fields(
 ) -> bool {
     for field_idx in 0..=MAX_FIELDS_PER_ELEMENT {
         if reader.at_end() {
-            // An element ends on a zero handle. Reaching EOF instead means the
-            // element was never closed -- harmless for alignment, since there
-            // is nothing after it, but indistinguishable from a complete
-            // element without this tally.
+            // EOF instead of the zero handle: the element was never closed,
+            // which only this tally tells apart from a complete one.
             stats.implicit_terminations += 1;
             return false;
         }
@@ -603,9 +505,7 @@ fn decode_struct_fields(
             continue;
         }
         if u64::from(payload_bits) > reader.bits_remaining() {
-            // Malformed: declared more bits than available. The abandoned bits
-            // are counted as an error so the loss of flattened leaves is
-            // visible, never a silent empty Vec.
+            // Declared more bits than available: the lost leaves are an error.
             stats.errors += 1;
             reader.skip_remaining();
             return false;
@@ -615,9 +515,8 @@ fn decode_struct_fields(
             // A nested array we are still allowed to descend into.
             Some(sub) if depth + 1 < MAX_RECURSION_DEPTH => {
                 let Ok(mut sub_reader) = reader.sub_reader(u64::from(payload_bits)) else {
-                    // Unreachable: the width was bounds-checked just above.
-                    // Counted anyway, so that "unreachable" stays a claim the
-                    // stats can contradict rather than an assumption.
+                    // Unreachable (bounds-checked above), and counted anyway so
+                    // the stats can contradict that claim.
                     stats.errors += 1;
                     return false;
                 };
@@ -625,17 +524,9 @@ fn decode_struct_fields(
                 walk.path.push('.');
                 push_field_label(&mut walk.path, schema, handle);
                 decode_array_level(&mut sub_reader, walk, Some(sub), depth + 1, stats);
-                // The parent's window already advanced past all of these bits,
-                // so dropping them keeps the parent ALIGNED -- but alignment is
-                // not the same claim as the child having CONSUMED them, and
-                // only the first was ever established here. Leaves inside an
-                // abandoned tail are lost silently otherwise.
-                //
-                // A tally rather than an error, deliberately: this is the same
-                // call `truncations` already makes, and the bits themselves
-                // survive in the parent row's `raw_bits`. Zero on a corpus that
-                // decodes cleanly, which is what makes a non-zero value worth
-                // looking at.
+                // The parent is ALIGNED past the window whatever the child
+                // CONSUMED, so leaves in an abandoned tail would vanish: tallied
+                // like `truncations` (the bits survive in the parent's raw bits).
                 stats.unconsumed_nested_bits += sub_reader.bits_remaining();
                 walk.path.truncate(prefix_len);
             }
@@ -651,7 +542,6 @@ fn decode_struct_fields(
                     push_field_label(path, schema, handle);
                 });
             }
-            // Leaf field -- emit as-is.
             None => {
                 let Some(raw) = copy_payload(reader, payload_bits) else {
                     // Unreachable for the same reason; counted the same way.
@@ -672,29 +562,15 @@ fn decode_struct_fields(
 
 /// Consume the format's optional one-IntPacked trailer -- a ZERO one only.
 ///
-/// The C# reference reads an IntPacked whenever exactly eight bits remain
-/// after the index terminator and discards the value, which makes any
-/// appended byte a valid terminator. `consume_trailing_terminator` in
-/// `effect/framing.rs` declines to copy that for the same framing, and so does
-/// this. The effect decoder can reject its whole blob; this walker's callers
-/// keep every leaf already emitted and gate on nothing, so here the refusal is
-/// a tally rather than a rejection:
-///
-/// - `0` is the trailer: consumed, no counter moves.
-/// - Any other value is not a terminator. The byte is left unread, so the
-///   caller's residual tally -- `unconsumed_root_bits` at the root,
-///   `unconsumed_nested_bits` inside a nested window -- reports the eight bits
-///   nothing explained. Before, they were read and discarded with no counter
-///   moving.
-/// - A read failure (a continuation bit asking for a byte past the window) is
-///   `errors`, as before. The failed read already spent the byte, so it is not
-///   ALSO residual: one anomaly, one counter.
-///
-/// Measured when this was tightened: over the 1,018-replay audit corpus (main
-/// and checkpoint streams; every parent the legacy routes and `MultiContents`
-/// hand to this walker), a trailer is read 240 times, all zero, all in
-/// `AbilityCastsThisRound`'s depth-2 `AffectedTargetsArray`. So no existing
-/// counter moves; a nonzero one is new, and is exactly what this is for.
+/// The C# reference reads an IntPacked whenever exactly eight bits remain after
+/// the index terminator and discards it, so any appended byte passes. Like
+/// `consume_trailing_terminator` in `effect/framing.rs` this declines, but
+/// tallies instead of rejecting (callers keep the leaves already emitted): `0`
+/// is consumed silently; another value is left unread for the caller's residual
+/// tally (`unconsumed_root_bits`, or `unconsumed_nested_bits` in a nested
+/// window); a failed read is `errors` only. Over the 1,018-replay audit corpus
+/// (main and checkpoint) a trailer is read 240 times, all zero, all in
+/// `AbilityCastsThisRound`'s depth-2 `AffectedTargetsArray`.
 fn consume_optional_trailing_int_packed(reader: &mut BitReader<'_>, stats: &mut ArrayDecodeStats) {
     if reader.bits_remaining() != 8 {
         return;
@@ -717,10 +593,8 @@ fn take_zero_int_packed(reader: &mut BitReader<'_>) -> vrf_bitio::Result<bool> {
     Ok(zero)
 }
 
-/// Take `payload_bits` bits out of `reader` as owned bytes.
-///
-/// Returns `None` when the window cannot be opened, which is the caller's
-/// signal to stop this element rather than emit a partial record.
+/// Take `payload_bits` bits out of `reader` as owned bytes, or `None` when the
+/// window cannot be opened (the caller then stops the element).
 fn copy_payload(reader: &mut BitReader<'_>, payload_bits: u32) -> Option<Vec<u8>> {
     let mut raw = vec![0u8; (payload_bits as usize).div_ceil(8)];
     let mut sub_reader = reader.sub_reader(u64::from(payload_bits)).ok()?;
@@ -750,12 +624,8 @@ fn emit(
     walk.path.truncate(prefix_len);
 }
 
-/// Emit all remaining bits as a single raw field.
-///
-/// Counts against `stats.fields_emitted` like [`emit`] does -- it pushes a
-/// `FlattenedField` into the same `walk.output` the sink writes one row per
-/// entry of, so a caller summing `fields_emitted` to predict row count must
-/// see this leaf too.
+/// Emit all remaining bits as a single raw field, counted in `fields_emitted`
+/// like [`emit`]: it becomes a row too.
 fn emit_remaining_raw(
     reader: &mut BitReader<'_>,
     walk: &mut Walk<'_, '_>,
@@ -778,49 +648,22 @@ fn emit_remaining_raw(
     stats.fields_emitted += 1;
 }
 
-/// Append a LEAF handle's label, preferring the name the replay declares.
+/// Append a LEAF handle's label: the replay's declared name, then the schema's,
+/// then `_h{handle}`. The replay wins because the schema transcribes the C#
+/// reference and can disagree with the wire: handle 3 is `RoundNum` on the
+/// wire and `RoundNumber` in the schema, and Riot's typos (`DamageRecieved`,
+/// `HitsRecieved`) were silently corrected there. Container segments keep
+/// [`push_field_label`]: the schema decides the nesting, and handles 44 and 79
+/// both declare `RegionalDamageInteractions`.
 ///
-/// Order: the replay's own net field export, then the hardcoded schema, then
-/// `_h{handle}`.
-///
-/// The replay wins because it is the wire's own statement about the field, and
-/// the schema is a transcription of the C# reference that can disagree with it:
-/// handle 3 is `RoundNum` on the wire and `RoundNumber` in the schema, and
-/// Riot's spellings carry typos (`DamageRecieved`, `HitsRecieved`) that the
-/// schema silently corrected. The schema stays as the floor for handles a
-/// replay does not declare.
-///
-/// Only LEAF labels use this. Container segments -- the path components a
-/// sub-array introduces -- keep [`push_field_label`], because the schema is
-/// what decides the nesting in the first place and the declaration adds nothing
-/// there: handles 44 and 79 both declare `RegionalDamageInteractions`, so the
-/// wire cannot tell the two apart where the schema can.
-///
-/// # `declared` applies at every depth, on purpose
-///
-/// It looks wrong that ONE root-group table is consulted for a leaf at any
-/// nesting level, as if a nested element had its own handle space that could
-/// collide with the root's. It does not. Unreal flattens a `TArray` of structs
-/// onto CONSECUTIVE handles of the ENCLOSING group, so one flat handle space
-/// spans the whole tree and the group's own net field exports name every leaf
-/// in it. That is why `COMBAT_ROUNDS_SCHEMA`'s handles are disjoint by depth
-/// (3-4, then 5/10, then 11-26, then 44-50, then 79-85) rather than restarting
-/// per level -- they are all handles of one group.
-///
-/// The typo example above is itself the proof: `DamageRecieved` and
-/// `HitsRecieved` are handles 20 and 21 of `PARTICIPANT_SCHEMA`, which sits at
-/// **depth 2** (`Rounds` -> `Reports` -> `Interactions`). So declaration-beats-
-/// schema was always a statement about nested leaves, not only root ones, and
-/// restricting it to depth 0 would rename those two exported columns --
-/// `tools/to_valplay_bundle.py` maps handle 20 from the wire's `DamageRecieved`
-/// and its test pins the path `Rounds[0].Reports[0].Interactions[0].DamageRecieved`.
-///
-/// The schemas that DO use a private, restarting handle space --
-/// `LIFE_CHANGE_DAMAGE_SCHEMA` (10-13), `LIFE_CHANGE_SECTION_SCHEMA` (1-4) and
-/// `LIFE_CHANGE_BY_SECTION_SCHEMA` (2-5), whose numbering is per RPC parameter
-/// rather than per group -- cannot reach this code with a populated table:
-/// each declares `sub_arrays: &[]`, so no recursion happens, and the export
-/// path passes `declared` as `&[]` for them.
+/// `declared` applies at every depth on purpose: Unreal flattens a `TArray` of
+/// structs onto consecutive handles of the ENCLOSING group, so one handle space
+/// spans the tree (`COMBAT_ROUNDS_SCHEMA`'s handles are disjoint by depth).
+/// `DamageRecieved`/`HitsRecieved` are handles 20/21 at depth 2, and
+/// `tools/to_valplay_bundle.py`'s test pins the path
+/// `Rounds[0].Reports[0].Interactions[0].DamageRecieved`. The `LIFE_CHANGE_*`
+/// schemas number per RPC parameter (10-13, 1-4, 2-5) but declare no
+/// `sub_arrays`, and the export passes them `declared = &[]`.
 fn push_leaf_label(
     path: &mut String,
     declared: &[Option<&str>],
@@ -893,20 +736,18 @@ mod tests {
 
     #[test]
     fn decode_simple_struct_array() {
-        // Build: elementCount=2, element[0] has handle=3 with 32 bits,
-        //        element[1] has handle=5 with 8 bits, then terminators.
+        // elementCount=2, element[0] has handle=3 with 32 bits, element[1]
+        // has handle=5 with 8 bits, then terminators.
         let mut bits = BitWriter::new();
         bits.int_packed(2); // elementCount
-        // Element 0 (encodedIndex=1)
+        // Element 0 (encodedIndex=1): encodedHandle=4 (handle=3), payloadBits=32
         bits.int_packed(1);
-        // Field: encodedHandle=4 (handle=3), payloadBits=32
         bits.int_packed(4);
         bits.int_packed(32);
         bits.repeat(true, 32); // payload
         bits.int_packed(0); // end of element 0
-        // Element 1 (encodedIndex=2)
+        // Element 1 (encodedIndex=2): encodedHandle=6 (handle=5), payloadBits=8
         bits.int_packed(2);
-        // Field: encodedHandle=6 (handle=5), payloadBits=8
         bits.int_packed(6);
         bits.int_packed(8);
         bits.repeat(false, 8); // payload
@@ -1074,11 +915,8 @@ mod tests {
         assert_eq!(stats.errors, 0);
     }
 
-    /// A payload that declares an element but EOFs mid-field must surface an
-    /// error, not return an empty `Vec` indistinguishable from a clean empty
-    /// array. This is the core silent-drop bug: the parent row's raw_bits are
-    /// emitted by the caller regardless, but flattened leaves are lost and,
-    /// without `errors`, the loss was invisible.
+    /// A payload that declares an element but EOFs mid-field is an error, not
+    /// an empty `Vec` that reads like a clean empty array.
     #[test]
     fn truncated_payload_mid_element_counts_error() {
         // elementCount=2, element 0 starts, its first field declares 32 bits
@@ -1201,12 +1039,8 @@ mod tests {
     }
 
     /// A payload cut short after a complete element, before the index
-    /// terminator, must not read as the whole array.
-    ///
-    /// The struct walker tallies this (`decode_array_level`); the object-ref
-    /// walker's loop just stopped at EOF. Delta arrays are sparse, so the
-    /// elements that never arrived look exactly like elements that were not
-    /// re-sent -- the rows emitted before the cut would pass for all of them.
+    /// terminator, must not read as the whole array: in a delta array the
+    /// missing elements would pass for ones not re-sent.
     #[test]
     fn an_object_ref_array_ending_at_eof_is_not_a_clean_terminator() {
         let mut bits = BitWriter::new();
@@ -1255,12 +1089,9 @@ mod tests {
         assert_eq!(stats.implicit_terminations, 1, "{stats:?}");
     }
 
-    /// A second populated field in an element is stepped over to stay
-    /// aligned, and its payload bits are tallied rather than dropped unseen.
-    ///
-    /// `TArray<AAresItem*>` elements have exactly one property, so a second
-    /// field means the framing is not what this walker thinks it is. The
-    /// window is 16 bits so that the tally is seen to count bits, not fields.
+    /// A second populated field (`TArray<AAresItem*>` elements have one) is
+    /// stepped over and its payload bits tallied; the 16-bit window shows the
+    /// tally counts bits, not fields.
     #[test]
     fn an_extra_field_in_an_object_ref_element_is_tallied() {
         let mut bits = BitWriter::new();
@@ -1361,14 +1192,8 @@ mod tests {
         assert_eq!(anomalies(&stats), [1, 0, 0, 0, 0], "{stats:?}");
     }
 
-    /// A nested array that leaves bits inside its own window must say so.
-    ///
-    /// The parent's `sub_reader` advances past the whole declared window, so
-    /// the walk stays aligned and every later element still decodes -- which is
-    /// exactly why this was invisible. Alignment is not completeness: the
-    /// leaves inside the abandoned bits are lost either way, and without a
-    /// tally nothing distinguishes this from a nested array that consumed its
-    /// window exactly.
+    /// A nested array that leaves bits inside its own window must say so: the
+    /// parent's `sub_reader` keeps the walk aligned either way.
     #[test]
     fn a_nested_array_that_leaves_bits_reports_them() {
         // Sixteen bits the inner array will never look at. Not 8: exactly
@@ -1471,12 +1296,7 @@ mod tests {
 
     /// Every byte that can follow the root terminator as the optional trailer
     /// moves exactly one counter, or none for the one byte that IS a
-    /// terminator.
-    ///
-    /// The effect decoder's twin (`consume_trailing_terminator`) rejects a
-    /// nonzero trailer; this walker used to read the byte, throw the value
-    /// away and report a clean walk -- 127 of the 256 possible bytes, every
-    /// even nonzero one, vanished with no counter moving.
+    /// terminator (the C# reference discards any of them).
     #[test]
     fn every_root_trailer_byte_is_accounted_for() {
         for byte in 0..=u8::MAX {
@@ -1537,16 +1357,12 @@ mod tests {
         assert_eq!(stats.errors, 0, "{stats:?}");
     }
 
-    /// The zero trailer is real, so accepting it is not optional: a real
-    /// `Effects[]` window off the wire, pinned so a later tightening of the
-    /// trailer rule has to face it.
-    ///
-    /// Carved from an `AbilityCastsThisRound` parent of 13.01 replay
-    /// `b9d2fac4`: 168 bits holding one effect element (`Value`, `Time`, then
-    /// an `AffectedTargetsArray` whose 24-bit window is `02 00 00` -- capacity
-    /// one, no changed element, and the one-byte zero trailer). Every one of
-    /// the 240 trailers the 1,018-replay audit corpus reads is this depth, in
-    /// this array, and zero.
+    /// The zero trailer is real: an `Effects[]` window off the wire, pinned so a
+    /// tighter trailer rule has to face it. Carved from an
+    /// `AbilityCastsThisRound` parent of 13.01 replay `b9d2fac4`: 168 bits, one
+    /// effect element (`Value`, `Time`, then an `AffectedTargetsArray` whose
+    /// 24-bit window is `02 00 00` -- capacity one, no changed element, the zero
+    /// trailer). All 240 trailers in the 1,018-replay audit corpus are this.
     #[test]
     fn a_real_zero_trailer_is_consumed_and_a_flipped_one_is_not() {
         let mut raw = [
@@ -1627,19 +1443,11 @@ mod tests {
         assert_eq!(stats.truncations, 1, "{stats:?}");
     }
 
-    /// `AbilityCastsThisRound[].Effects[]` is a nested array, and until it had
-    /// a schema the walker could not know that: a sub-array and an opaque leaf
-    /// both arrive as `handle + payloadBits + bits`, so `Effects` was emitted
-    /// whole and the per-cast statistics inside it stayed raw.
-    ///
-    /// The payload below is a real one off the wire, the smallest that carries
-    /// an `AffectedTargetsArray`: 128 bits holding one effect element whose
-    /// only field is handle 18, itself an 80-bit array.
-    ///
-    /// It also pins what the residual tallies read on REAL data, so a later
-    /// change to either counter has to face it and not only hand-built
-    /// fixtures: the nested array consumes its window exactly and the outer
-    /// level closes on its own terminator, so both stay zero.
+    /// `AbilityCastsThisRound[].Effects[]` is a nested array only its schema
+    /// reveals. The payload is real, the smallest carrying an
+    /// `AffectedTargetsArray`: 128 bits, one effect element whose only field is
+    /// handle 18, itself an 80-bit array. It also pins the residual tallies at
+    /// zero on REAL data, not only on hand-built fixtures.
     #[test]
     fn the_ability_effects_array_descends_into_its_targets() {
         let raw = [
@@ -1652,13 +1460,9 @@ mod tests {
         assert_eq!(stats.unconsumed_nested_bits, 0, "{stats:?}");
         assert_eq!(stats.implicit_terminations, 0, "{stats:?}");
 
-        // Without the schema this is one opaque leaf at handle 18. With it, the
-        // walker descends and the target's own members come out with an index.
-        //
-        // Only `Value` appears here, not `AffectedPlayer`: replication is per
+        // Only `Value` appears, not `AffectedPlayer`: replication is per
         // property, so an element re-sent because one member changed carries
-        // only that member. Reconstructing a target means carrying the last
-        // seen value forward per (element index), the same as any delta stream.
+        // only that member (carry the last value forward per element index).
         let paths: Vec<&str> = out.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["[0].AffectedTargetsArray[1].Value"], "{paths:?}");
     }
@@ -1699,9 +1503,7 @@ mod tests {
         }
     }
 
-    /// `merge_from` is the one place a walk's isolated counters are folded into
-    /// a running total. It replaced four hand-written copies of the same seven
-    /// `+=` lines, none of which a new field would have broken.
+    /// `merge_from` sums each counter into its own total.
     #[test]
     fn merge_from_sums_every_field_into_its_own_target() {
         let mut total = distinct_stats(0);
@@ -1770,17 +1572,10 @@ mod tests {
         }
     }
 
-    /// The life-change array walks into its four members, on real wire bytes.
-    ///
-    /// `docs/DATA.md`'s health section rests on these and nothing shipped could
-    /// read them -- the array arrived as one opaque blob, so every figure in that
-    /// section came from a script outside the repository. The fixtures here are
-    /// actual payloads from a 13.02 replay.
-    ///
-    /// The local handles differ per RPC, which is the reason for three schemas.
-    /// `MulticastNotifyHeal` also names its parameter `LifeChangeBySection` rather
-    /// than `LifeChangeEvents`, so a dispatch keyed on the array's name alone
-    /// would miss two of the five functions entirely.
+    /// The life-change array walks into its four members, on actual payloads
+    /// from a 13.02 replay. The local handles differ per RPC (three schemas),
+    /// and `MulticastNotifyHeal` names its parameter `LifeChangeBySection`, so a
+    /// dispatch on the array's name alone would miss two of the five functions.
     #[test]
     fn the_life_change_array_walks_into_its_members() {
         // MulticastNotifyDamage_Point.LifeChangeEvents, one element.
