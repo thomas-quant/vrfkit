@@ -1,15 +1,6 @@
-"""`extract_active_effects.py` must not treat a dormancy close as a despawn.
-
-`actors.parquet` gained a third `event` value when the sink stopped recording
-every channel close as `"close"`. A dormant actor has NOT been destroyed -- it
-merely stopped replicating, which for a settled smoke or wall is the normal
-steady state -- so ending its lifetime there would make persistent effects
-vanish early in any reproduction built on this table.
-
-The failure this file guards is the quieter one: `elif ev == "close"` simply
-does not match `"dormant"`, so the instance stays pending and falls out of the
-loop as open-ended. No row is lost and nothing errors; the output just silently
-changes meaning. Counting is what makes that visible.
+"""`extract_active_effects.py`: a dormant actor is not despawned, and its
+open-ended instance is counted as `went_dormant`; the classifier's keyword
+false positives stay excluded (EFFECT_KEYWORDS holds the corpus counts).
 """
 from __future__ import annotations
 
@@ -59,8 +50,7 @@ class DormantCloseTests(unittest.TestCase):
         self.assertIsNone(rows[0]["duration_ms"])
 
     def test_a_dormant_instance_is_counted_rather_than_quietly_open_ended(self):
-        """The tally is the whole point -- an unexplained open-ended row and a
-        dormancy-ended one are indistinguishable in the table itself."""
+        """The table alone cannot tell it from a row the export cut off."""
         out = _export(self.tmp, [(7, "open", 100), (7, "dormant", 500)])
         self.assertEqual(effects.build_with_tally(out)[1]["went_dormant"], 1)
 
@@ -72,8 +62,7 @@ class DormantCloseTests(unittest.TestCase):
             ["went_dormant"], 0)
 
     def test_an_actor_that_wakes_after_dormancy_keeps_one_instance(self):
-        """A dormant actor that replicates again was never gone. Two instances
-        here would be a false despawn/respawn pair in any reproduction."""
+        """Never gone: two instances would be a false despawn/respawn pair."""
         out = _export(self.tmp, [(7, "open", 100), (7, "dormant", 300), (7, "close", 900)])
         rows, tally = effects.build_with_tally(out)
         self.assertEqual(len(rows), 1)
@@ -96,24 +85,20 @@ ULT_ORB = "/Game/GameObjects/CollectibleOrbs/UltPointOrb.UltPointOrb_C"
 
 
 class ClassifierTests(unittest.TestCase):
-    """Substring keywords matched names they were not written for. Measured
-    over the 1,018-export audit corpus (259ed10, 2026-09-28)."""
+    """Substring keywords matched names they were not written for (the corpus
+    counts are EFFECT_KEYWORDS')."""
 
     def test_chambers_ult_gun_is_not_an_effect(self):
-        """'fire' inside 'FIreRate': 17,304 of 32,714 damage_zone rows, with
-        a median lifetime of ~100 s -- an equippable, not a zone."""
+        """'fire' inside 'FIreRate': an equippable, not a zone."""
         self.assertFalse(effects.is_effect_class(GIANTSLAYER))
 
     def test_breachs_flash_through_walls_is_not_a_wall(self):
-        """'wall' inside 'ThroughWalls': 1,416 rows filed as walls. A flash
-        projectile is not a persistent effect, and no other flash projectile
-        is in the table."""
+        """'wall' inside 'ThroughWalls': a flash projectile, not an effect."""
         self.assertFalse(effects.is_effect_class(BREACH_FLASH))
 
     def test_classify_reads_the_name_the_filter_reads(self):
-        """No class in the corpus needs this, but a 'ThroughWall' name with a
-        real keyword must be classified by that keyword, the way the filter
-        admits it -- not as the wall the filter just refused to see."""
+        """Not needed by the corpus: a 'ThroughWall' name with a real keyword
+        is classified by that keyword, never as the wall the filter refused."""
         path = "/Game/Characters/X/S0/Ability_Q/Projectile_X_ThroughWall_Trap.Projectile_X_ThroughWall_Trap_C"
         self.assertTrue(effects.is_effect_class(path))
         self.assertEqual(effects.classify(path), "trap")
@@ -123,7 +108,7 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(effects.classify(PHOENIX_WALL), "wall")
 
     def test_brimstones_orbital_strike_is_a_damage_zone_not_an_orb(self):
-        """'orb' inside 'OrbitalStrike': 174 rows, 4-9 s of area damage."""
+        """'orb' inside 'OrbitalStrike', 4-9 s of area damage."""
         self.assertTrue(effects.is_effect_class(ORBITAL_STRIKE))
         self.assertEqual(effects.classify(ORBITAL_STRIKE), "damage_zone")
 

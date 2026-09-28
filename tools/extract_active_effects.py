@@ -1,27 +1,18 @@
 #!/usr/bin/env python3
 """Derive a table of persistent ability effects from an export.
 
-VALORANT's persistent abilities -- smokes, walls, slows, traps, molly/decay
-zones, recon bolts, ult orbs -- spawn an actor with a known class, a spawn
-location, and an open/close lifetime. `actors.parquet` already carries all of
-that; this script filters the effect actors out, pairs each actor's open and
-close events into a lifetime, classifies the effect, and writes one row per
-effect instance.
+Persistent abilities (smokes, walls, slows, traps, molly/decay zones, recon
+bolts, ult orbs) spawn an actor with a class, a spawn location and an
+open/close lifetime, all in actors.parquet. This filters the effect actors,
+pairs each open with its close into a lifetime, classifies the effect and
+writes one row per effect instance.
 
-This is a *derived* view over the raw export, not a new wire decode: the data
-is already in `actors.parquet` (class + spawn xyz + open/close). vrfkit itself
-exports raw tables; analytical joins live here so the parser stays focused.
-
-Position note: `spawn_x/y/z` are the actor's spawn transform, which for a
-placed effect (smoke, wall segment, trap) is its world location. For the few
-effects that relocate, `fields.parquet` carries the live `ReplicatedMovement`
-location or `MulticastAddSmokeScreenPoint.Translation`, both in the same world
-units as the spawn. (Exports made before 2026-09-28 wrote that location 100x
-too small on every class but one; see docs/DATA.md, "`ReplicatedMovement.location`
-is world units, at a per-class level".)
-
-Usage:
-    python tools/extract_active_effects.py --export <out_dir> --out active_effects.parquet
+`spawn_x/y/z` is the spawn transform: a placed effect's world location. For
+the few that relocate, fields.parquet carries the live `ReplicatedMovement`
+location or `MulticastAddSmokeScreenPoint.Translation`, in the same units.
+(Exports before 2026-09-28 wrote that location 100x too small on every class
+but one; see docs/DATA.md, "`ReplicatedMovement.location` is world units, at
+a per-class level".)
 """
 
 from __future__ import annotations
@@ -39,20 +30,17 @@ if __package__:
 else:
     from atomic_io import atomic_write_file
 
-# Substrings that mark a class as a persistent ability effect. Matched
-# case-insensitively against the full class_path. The list is broad on
-# purpose -- a missed effect simply does not appear -- but a false positive is
-# not harmless, and this file used to say it was ("a short-lived actor whose
-# open/close still reads sensibly"). Measured over the 1,018-export audit
-# corpus (parser 259ed10, 2026-09-28; actors.parquet opens), three names
-# matched a keyword they do not mean, each handled explicitly below:
+# Substrings marking a persistent ability effect, matched case-insensitively
+# on the full class_path. Broad on purpose (a missed effect just does not
+# appear), but a false positive is not harmless. On the 1,018-export corpus
+# (parser 259ed10, 2026-09-28; actors.parquet opens) three names matched a
+# keyword they do not mean, each handled below:
 #   Gun_Deadeye_X_Giantslayer_Prototype_FIreRatePrototype -- Chamber's ult gun,
 #     "fire" in "FIreRate": 17,304 of 32,714 damage_zone rows, median lifetime
-#     ~100 s. An equippable, not an effect: `gun_` leaves are excluded.
+#     ~100 s. An equippable: `gun_` leaves are excluded.
 #   Projectile_Breach_Q_ThroughWalls_Flash -- "wall" in "ThroughWalls": 1,416
-#     rows filed as walls. A flash projectile, not a persistent effect; no
-#     other flash projectile is in this table (Vyse's placed flash trap is, as
-#     a trap). See NOT_EFFECT_TOKENS.
+#     rows filed as walls. A flash projectile (no other is in this table;
+#     Vyse's placed flash trap is, as a trap). See NOT_EFFECT_TOKENS.
 #   GameObject_Sarge_X_OrbitalStrike_Production -- "orb" in "OrbitalStrike":
 #     174 rows filed as orbs. Brimstone's ult is 4-9 s of area damage, so
 #     `classify` files it as a damage_zone.
@@ -79,10 +67,9 @@ EFFECT_KEYWORDS = (
     "alarmbot",
 )
 
-# Name fragments that contain a keyword without naming an effect, removed
-# before any keyword is matched. "ThroughWall" describes a projectile that
-# passes through walls: it is the whole of Breach's flash's claim to "wall",
-# while Phoenix's `FlameWall_ThroughWall` stays a wall through "FlameWall".
+# Fragments that contain a keyword without naming an effect, removed before
+# matching: "ThroughWall" is Breach's flash's whole claim to "wall", while
+# Phoenix's `FlameWall_ThroughWall` stays a wall through "FlameWall".
 NOT_EFFECT_TOKENS = ("throughwall",)
 
 #: Every `effect_type` value, in the order the summary prints them.
@@ -97,9 +84,8 @@ def _keyword_text(class_path: str) -> str:
     return c
 
 
-# Map a class to a coarse effect family. Order matters: check the more
-# specific tokens first so "SlowField" is a slow, not a field, and so
-# "OrbitalStrike" is a damage zone before "orb" can claim it.
+# A class's coarse effect family. Order matters: "SlowField" is a slow, and
+# "OrbitalStrike" a damage zone before "orb" can claim it.
 def classify(class_path: str) -> str:
     c = _keyword_text(class_path)
     if "smoke" in c or "smokezone" in c:
@@ -120,11 +106,10 @@ def classify(class_path: str) -> str:
     return "other"
 
 
-#: Leaf-name prefix -> `actor_kind`. The table keeps a projectile and the zone
-#: it places as two rows, deliberately (see `is_effect_class`): on 0002c486 an
-#: Omen smoke is a `Projectile_Wraith_4_Smoke` (median 2.3 s) overlapping a
-#: `Zone_Wraith_4_Smoke` (median 16 s). The kind lets a consumer count either
-#: without this tool choosing for it.
+#: Leaf-name prefix -> `actor_kind`. A projectile and the zone it places are
+#: two rows by design: on 0002c486 an Omen smoke is a `Projectile_Wraith_4_Smoke`
+#: (median 2.3 s) overlapping a `Zone_Wraith_4_Smoke` (median 16 s). The kind
+#: lets a consumer count either.
 ACTOR_KINDS = {"projectile": "projectile", "gameobject": "game_object",
                "zone": "zone", "patch": "patch", "pawn": "pawn"}
 #: Every `actor_kind` value, in the order the summary prints them.
@@ -137,12 +122,9 @@ def actor_kind(class_path: str) -> str:
     return ACTOR_KINDS.get(leaf.split("_", 1)[0].lower(), "other")
 
 
-# Internal agent codename, when the class lives under /Game/Characters/<name>/.
-# These are VALORANT's internal names (Sarge = Brimstone, Smonk = Clove,
-# Pandemic = Viper, ...; the vendored descriptors say so in
-# third_party/vrp/.../Agents/Sarge/SargeAgentDescriptor.cs and
-# .../Agents/Smonk/SmonkAbilityDescriptors.cs); they are left as-is rather than
-# mapped to display names, which `equippable_table.py` already owns.
+# The internal agent codename from /Game/Characters/<name>/ (Sarge = Brimstone,
+# Smonk = Clove, Pandemic = Viper, ...; see third_party/vrp/.../Agents/Sarge/
+# SargeAgentDescriptor.cs), left as-is: display names are equippable_table.py's.
 AGENT_RE = re.compile(r"/Game/Characters/(\w+)/")
 
 
@@ -157,12 +139,9 @@ def is_effect_class(class_path: str) -> bool:
     c = _keyword_text(class_path)
     if not any(k in c for k in EFFECT_KEYWORDS):
         return False
-    # Exclude ability *controllers*: classes whose leaf starts with "Ability_"
-    # are the ability actor itself (or a post-death variant), which lives across
-    # the whole match. The transient effect instance is the GameObject_ /
-    # Projectile_ / Patch_ actor it spawns, and that is what we want here.
-    # Exclude equippables too: a "Gun_" leaf is a weapon, whatever its name
-    # happens to contain (Chamber's ult gun, see EFFECT_KEYWORDS).
+    # "Ability_" leaves are the ability controllers, alive all match; the
+    # effect is the GameObject_/Projectile_/Patch_ actor they spawn. "Gun_"
+    # leaves are weapons (Chamber's ult gun, see EFFECT_KEYWORDS).
     leaf = class_path.rsplit("/", 1)[-1].lower()
     if leaf.startswith(("ability_", "gun_")):
         return False
@@ -184,14 +163,10 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
     sy = cols["spawn_y"]
     sz = cols["spawn_z"]
 
-    # Collect events per GUID, then pair each open with the close that follows
-    # it -- not first-open to last-close, which would span unrelated lifetimes
-    # and report absurd durations if a GUID were ever reused. This comment used
-    # to say GUIDs are recycled across rounds; measured over the 1,018-export
-    # audit corpus (parser 259ed10, 2026-09-28; every actors.parquet `open`,
-    # all classes), none is: 2,326,969 opens, 0 GUIDs opened twice in one
-    # export. The pairing stays because nothing shows another build cannot
-    # reuse a GUID, and it costs nothing when none does.
+    # Pair each open with the close that follows it, never first open to last
+    # close. On the 1,018-export corpus (parser 259ed10, 2026-09-28; every
+    # actors.parquet `open`, all classes) no GUID reopens: 2,326,969 opens, 0
+    # opened twice in one export. The pairing stays for builds that might.
     events: dict[int, list[tuple]] = {}
     for i in range(len(guid)):
         cp = class_path[i]
@@ -201,14 +176,9 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
             (time_ms[i], event[i], sx[i], sy[i], sz[i], cp)
         )
 
-    # `went_dormant` counts INSTANCES (a pending open that saw at least one
-    # `dormant` event), not raw `dormant` events: an instance that toggles
-    # dormant more than once before it finally closes or the export ends is
-    # one dormancy, not several. It is a general diagnostic on how many
-    # instances ever went dormant -- it does NOT gate on how the instance
-    # ends, so it counts both ones that later close normally and ones that
-    # end up open-ended. See `main()` below for why it must not be printed as
-    # if it were a decomposition of the open-ended count: it can exceed it.
+    # `went_dormant` counts INSTANCES that saw at least one `dormant` event,
+    # once each, however they end: it is not a share of the open-ended rows
+    # and can exceed them.
     tally = {"went_dormant": 0}
     rows: list[dict] = []
     for g, evs in events.items():
@@ -231,20 +201,10 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
                 # A close with no pending open is an orphan (actor opened before
                 # the export window); drop it rather than invent an open time.
             elif ev == "dormant":
-                # Dormancy is NOT destruction. The actor stopped replicating --
-                # which for a settled smoke or wall is its normal steady state --
-                # so ending the instance here would make persistent effects
-                # vanish early in anything built on this table. The instance
-                # stays pending and, absent a later close, ends up open-ended.
-                #
-                # That is also what the code did before `dormant` existed as a
-                # value, purely because `elif ev == "close"` did not match it.
-                # The behaviour was right and unstated, which is the same shape
-                # as the bug this whole pass was fixing: an open-ended row
-                # because the actor went dormant and an open-ended row because
-                # the export window ended are indistinguishable in the table.
-                # Hence the tally. Counted once per instance, on the first
-                # dormant event it sees, regardless of how it later ends.
+                # Dormancy is NOT destruction: a settled smoke or wall stops
+                # replicating as its steady state. The instance stays pending,
+                # open-ended absent a later close; since that row looks like
+                # one the export window cut off, the tally counts it.
                 if pending is not None and not pending_went_dormant:
                     pending_went_dormant = True
                     tally["went_dormant"] += 1
@@ -310,13 +270,8 @@ def main() -> int:
     print("  by actor kind (class leaf prefix):")
     for k in ACTOR_KIND_ORDER:
         print(f"    {k:12s} {by_kind[k]}")
-    # Printed with its zero. An open-ended row can mean "the actor went dormant"
-    # or "the export window ended first", and the table cannot tell them apart.
-    # `went_dormant` does NOT decompose `open_ended`: it counts every instance
-    # that ever went dormant, including ones that later closed normally and so
-    # are not open-ended, and it can exceed `open_ended`. Printed on its own
-    # line rather than as a parenthetical on `open_ended` so it does not read
-    # as "this many of these rows are because of dormancy".
+    # Printed with its zero, on its own line: went_dormant is not a share of
+    # open_ended (see build_with_tally).
     open_ended = sum(1 for r in rows if r["close_ms"] is None)
     print(f"  {'open-ended':12s} {open_ended}")
     print(f"  {'':12s} ({tally['went_dormant']} instance(s) went dormant at "
