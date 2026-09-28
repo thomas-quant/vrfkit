@@ -21,10 +21,6 @@
 //! as a clean end-of-stream would, and an existing but EMPTY corpus directory
 //! satisfied `0 == 0`. All three are now assertions, and all three are about
 //! signals this test was already computing over the corpus.
-//!
-//! [`FileReport::notes`] is the other half: measurements printed but not
-//! asserted, because nothing has yet measured them across the corpus and a
-//! test that fails on an unmeasured signal is guessing, not checking.
 
 use std::path::{Path, PathBuf};
 
@@ -43,13 +39,6 @@ struct FileReport {
     /// Every problem found in this file. Empty means clean, and the test
     /// asserts on it.
     problems: Vec<String>,
-    /// Measurements that are NOT assertions.
-    ///
-    /// The two residual counts below are new and have never been measured over
-    /// the corpus, so failing on them would be this test guessing. They are
-    /// printed instead: the first corpus run says whether they are ever
-    /// non-zero, and that evidence is what would justify promoting them.
-    notes: Vec<String>,
     /// Privacy-safe observations from structurally known Event payloads. Group
     /// names enter this vector only after matching the fixed public allowlist.
     events: Vec<KnownEventObservation>,
@@ -71,7 +60,6 @@ struct KnownEventObservation {
 /// rather than stopping at the first.
 fn scan_file(data: &[u8]) -> FileReport {
     let mut problems = Vec::new();
-    let mut notes = Vec::new();
     let mut events = Vec::new();
     let mut event_rows = 0;
     let mut unknown_event_groups = 0;
@@ -89,7 +77,7 @@ fn scan_file(data: &[u8]) -> FileReport {
 
     let branch = Some(preamble.header.replay_version.branch.clone());
     if preamble.header.trailing_bytes != 0 {
-        notes.push(format!(
+        problems.push(format!(
             "header: {} bytes past the parsed layout",
             preamble.header.trailing_bytes
         ));
@@ -195,7 +183,7 @@ fn scan_file(data: &[u8]) -> FileReport {
             Ok((_, trailing)) => {
                 oodle_ok = true;
                 if trailing != 0 {
-                    notes.push(format!(
+                    problems.push(format!(
                         "replay data: {trailing} payload bytes no reader consumed"
                     ));
                 }
@@ -211,7 +199,6 @@ fn scan_file(data: &[u8]) -> FileReport {
         branch,
         oodle_ok,
         problems,
-        notes,
         events,
         event_rows,
         unknown_event_groups,
@@ -243,7 +230,6 @@ fn parse_all_vrf_files() {
     let mut branches: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut oodle_ok = 0u32;
     let mut failures: Vec<(String, String)> = Vec::new();
-    let mut notes: Vec<(String, String)> = Vec::new();
     let mut event_rows = 0u64;
     let mut unknown_event_groups = 0u64;
     let mut event_observations = 0u64;
@@ -292,9 +278,6 @@ fn parse_all_vrf_files() {
         for problem in report.problems {
             failures.push((filename.clone(), problem));
         }
-        for note in report.notes {
-            notes.push((filename.clone(), note));
-        }
     }
 
     // Print summary
@@ -320,21 +303,6 @@ fn parse_all_vrf_files() {
     eprintln!("Event tag cardinality by known group:");
     for (group, tags) in &event_tags {
         eprintln!("  {group}: {} distinct tag(s) {tags:?}", tags.len());
-    }
-    // Measured, not asserted. Both counts are new; if either is ever non-zero
-    // that is the evidence needed to decide whether it should be a failure.
-    // `notes.len()` is a note count, not a file count -- one file can push a
-    // header note and a ReplayData note both -- so the file count is the
-    // distinct set of names instead.
-    let notes_files: std::collections::BTreeSet<&str> =
-        notes.iter().map(|(file, _)| file.as_str()).collect();
-    eprintln!(
-        "Unaccounted trailing bytes: {} note(s) across {} file(s)",
-        notes.len(),
-        notes_files.len()
-    );
-    for (file, note) in &notes {
-        eprintln!("  {file}: {note}");
     }
     if !failures.is_empty() {
         eprintln!("Failures ({}):", failures.len());
