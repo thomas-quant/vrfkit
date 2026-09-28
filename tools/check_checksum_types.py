@@ -149,8 +149,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 if __package__:
+    from . import overlay_mirror
     from .export_scan import is_generated_sibling
 else:  # direct script execution
+    import overlay_mirror
     from export_scan import is_generated_sibling
 
 REPO = Path(__file__).resolve().parents[1]
@@ -432,82 +434,21 @@ def spec_for(field_type: str) -> FieldTypeSpec:
 # --------------------------------------------------------------------------
 # The generated tables, and the resolution order they are read in
 
-_LIT = r'"((?:[^"\\]|\\.)*)"'
-_TYPE = r"(FieldType::\w+(?:\s*\{[^}]*\})?)"
-ENTRY_RE = re.compile(r"OverlayEntry \{\s*group_path: " + _LIT + r",\s*field_name: "
-                      + _LIT + r",\s*field_type: " + _TYPE, re.S)
-HANDLE_RE = re.compile(r"OverlayHandleEntry \{\s*group_path: " + _LIT
-                       + r",\s*handle: (\d+),\s*field_name: " + _LIT, re.S)
-SCOPED_RE = re.compile(r"\(\s*" + _LIT + r",\s*" + _LIT + r",\s*(\d+),\s*" + _TYPE
-                       + r",?\s*\)", re.S)
-CHECKSUM_RE = re.compile(r"\((\d+), " + _TYPE + r"\),", re.S)
-
-
-def unescape(raw: str) -> str:
-    """Undo the escaping the generators write into a Rust string literal."""
-    return re.sub(r"\\\r?\n\s*", "", raw).replace('\\"', '"').replace("\\\\", "\\")
-
-
-class TableError(Exception):
-    """A generated table or a resolution constant could not be read whole."""
-
-
-def _declared_len(src: str, static: str) -> int:
-    m = re.search(r"pub(?:\(crate\))? static " + static + r": \[[^;]+; (\d+)\]", src)
-    if not m:
-        raise TableError(f"no length declared for {static}")
-    return int(m.group(1))
+#: A generated table, a resolution constant or an input that cannot be read
+#: whole (exit 2). overlay_mirror raises it for the tables.
+TableError = overlay_mirror.ParseError
 
 
 def parse_overlay_table(src: str):
-    """`({(group, name): type}, {(group, handle): name})` from `table.rs`.
-
-    Refuses a table it cannot read whole: the declared array length must equal
-    the entries parsed, or an entry the pattern missed would never be checked.
-    """
-    entries = {(unescape(g), unescape(n)): canonical_type(t) for g, n, t in ENTRY_RE.findall(src)}
-    handles = {(unescape(g), int(h)): unescape(n) for g, h, n in HANDLE_RE.findall(src)}
-    for static, got in (("OVERLAY_TABLE", len(entries)), ("OVERLAY_HANDLE_TABLE", len(handles))):
-        want = _declared_len(src, static)
-        if got != want:
-            raise TableError(f"table.rs {static}: declares {want} entries, parsed {got}")
-    return entries, handles
-
-
-def parse_scoped_types(src: str) -> dict:
-    scoped = {(unescape(n), unescape(g), int(c)): canonical_type(t)
-              for n, g, c, t in SCOPED_RE.findall(src)}
-    want = _declared_len(src, "SCOPED_TYPES")
-    if len(scoped) != want:
-        raise TableError(f"scoped_types.rs: declares {want} entries, parsed {len(scoped)}")
-    return scoped
-
-
-def parse_checksum_table(src: str) -> dict:
-    table = {int(c): canonical_type(t) for c, t in CHECKSUM_RE.findall(src)}
-    want = _declared_len(src, "CHECKSUM_TYPES")
-    if len(table) != want:
-        raise TableError(f"checksum_table.rs: declares {want} entries, parsed {len(table)}")
-    return table
+    """`({(group, name): type}, {(group, handle): name})` from `table.rs`."""
+    return ({(g, n): canonical_type(t) for g, n, t in overlay_mirror.overlay_entries(src)},
+            {(g, h): n for g, h, n in overlay_mirror.handle_entries(src)})
 
 
 def parse_resolution_constants(src: str):
     """`(GROUP_ALIASES, ENGINE_OBJECT_REFS)` from `overlay.rs`."""
-    m = re.search(r"const GROUP_ALIASES: &\[\(&str, &str\)\] = &\[(.*?)\n\];", src, re.S)
-    if not m:
-        raise TableError("overlay.rs: GROUP_ALIASES not found")
-    body = m.group(1)
-    pairs = re.findall(r"\(\s*" + _LIT + r",\s*" + _LIT + r",?\s*\)", body, re.S)
-    if len(pairs) != body.count("("):
-        raise TableError("overlay.rs: a GROUP_ALIASES entry did not parse")
-    aliases = {unescape(a): unescape(b) for a, b in pairs}
-    m = re.search(r"const ENGINE_OBJECT_REFS: \[&str; (\d+)\] = \[(.*?)\];", src, re.S)
-    if not m:
-        raise TableError("overlay.rs: ENGINE_OBJECT_REFS not found")
-    refs = tuple(re.findall(_LIT, m.group(2)))
-    if len(refs) != int(m.group(1)):
-        raise TableError("overlay.rs: ENGINE_OBJECT_REFS length and entries disagree")
-    return aliases, refs
+    return (dict(overlay_mirror.group_aliases(src)),
+            tuple(overlay_mirror.engine_object_refs(src)))
 
 
 def parse_field_type_variants(src: str) -> tuple:
@@ -525,64 +466,25 @@ def parse_field_type_variants(src: str) -> tuple:
     return variants
 
 
-def is_unresolved_fname_index(name: str) -> bool:
-    """`overlay::is_unresolved_fname_index`: a bare decimal names nothing."""
-    return bool(name) and name.isascii() and name.isdigit()
+is_unresolved_fname_index = overlay_mirror.is_fname_index
 
 
-class Resolver:
-    """Python port of `overlay::resolve_entry` over the parsed tables."""
+class Resolver(overlay_mirror.Resolver):
+    """`overlay::resolve_entry` over the parsed tables, in canonical type
+    spellings: `resolve` gives `(FieldType, source)` or `(None, None)`."""
 
-    def __init__(self, entries, handles, scoped, checksums, aliases, engine_refs):
-        self.entries, self.handles = entries, handles
-        self.scoped, self.checksums = scoped, checksums
-        self.aliases, self.engine_refs = aliases, engine_refs
+    engine_value = "ObjectNetGuid"
 
     @classmethod
     def from_repo(cls) -> "Resolver":
-        entries, handles = parse_overlay_table(TABLE_RS.read_text(encoding="utf-8"))
-        aliases, refs = parse_resolution_constants(OVERLAY_RS.read_text(encoding="utf-8"))
-        return cls(entries, handles, parse_scoped_types(SCOPED_RS.read_text(encoding="utf-8")),
-                   parse_checksum_table(CHECKSUM_RS.read_text(encoding="utf-8")), aliases, refs)
-
-    def _in_group(self, group, name, handle):
-        """Name, then `b` + name, then handle -- and the handle refusal."""
-        if name is not None:
-            for probe in (name, "b" + name):
-                field_type = self.entries.get((group, probe))
-                if field_type is not None:
-                    return field_type, "name" if probe == name else "b-prefix"
-        if handle is None:
-            return None, None
-        descriptor_name = self.handles.get((group, handle))
-        if descriptor_name is None:
-            return None, None
-        if name is not None and name != descriptor_name and not is_unresolved_fname_index(name):
-            return None, None  # refused: the wire declares something else here
-        field_type = self.entries.get((group, descriptor_name))
-        return (field_type, "handle") if field_type is not None else (None, None)
-
-    def resolve(self, group, name, handle, checksum):
-        """`(FieldType, source)` as vrfkit resolves it, or `(None, None)`."""
-        field_type, how = self._in_group(group, name, handle)
-        if field_type is not None:
-            return field_type, how
-        aliased = self.aliases.get(group)
-        if aliased is not None:
-            field_type, how = self._in_group(aliased, name, handle)
-            if field_type is not None:
-                return field_type, "alias " + how
-        if name is None:
-            return None, None
-        if checksum is not None:
-            field_type = self.scoped.get((name, group, checksum))
-            if field_type is not None:
-                return field_type, "scoped"
-        if name in self.engine_refs:
-            return "ObjectNetGuid", "engine reference"
-        if checksum is not None and checksum in self.checksums:
-            return self.checksums[checksum], "checksum table"
-        return None, None
+        read = lambda path: path.read_text(encoding="utf-8")  # noqa: E731
+        entries, handles = parse_overlay_table(read(TABLE_RS))
+        aliases, refs = parse_resolution_constants(read(OVERLAY_RS))
+        scoped = {(n, g, c): canonical_type(t)
+                  for n, g, c, t in overlay_mirror.scoped_entries(read(SCOPED_RS))}
+        checksums = {c: canonical_type(t)
+                     for c, t in overlay_mirror.checksum_entries(read(CHECKSUM_RS))}
+        return cls(entries, handles, scoped, checksums, aliases, refs)
 
 
 # --------------------------------------------------------------------------

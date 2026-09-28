@@ -191,9 +191,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 if __package__:
+    from . import overlay_mirror as mirror
     from .check_component_remaps import remap_entries, table_source, unparsed_entries
     from .export_scan import is_generated_sibling
 else:  # direct script execution
+    import overlay_mirror as mirror
     from check_component_remaps import remap_entries, table_source, unparsed_entries
     from export_scan import is_generated_sibling
 
@@ -227,28 +229,13 @@ KINDS = ("table", "handle", "scoped", "checksum", "route", "remap", "alias")
 GROUP_ONLY = ("remap", "alias")
 
 BUILD_RE = re.compile(r"release-(\d+)\.(\d+)\Z")
-#: A Rust string literal's body. `\\.` also takes a backslash-newline
-#: continuation, which `unescape` then removes.
-STR = r'"((?:[^"\\]|\\.)*)"'
-FIELD_TYPE = r"(FieldType::\w+(?:\s*\{[^}]*\})?)"
-
-
-class EntryParseError(ValueError):
-    """A Rust table did not parse completely: fail rather than check fewer."""
+STR, unescape, is_fname_index = mirror.STR, mirror.unescape, mirror.is_fname_index
+#: A Rust table did not parse completely: fail rather than check fewer.
+EntryParseError = mirror.ParseError
 
 
 class InputError(ValueError):
     """An export that cannot be judged, or no export at all."""
-
-
-def unescape(raw: str) -> str:
-    """The value of a Rust string literal body.
-
-    A backslash before a newline drops the newline and the next line's leading
-    whitespace -- `GROUP_ALIASES` splits its paths that way.
-    """
-    raw = re.sub(r"\\\n\s*", "", raw)
-    return raw.replace('\\"', '"').replace("\\\\", "\\")
 
 
 def normalize_type(text: str) -> str:
@@ -296,101 +283,12 @@ class Entry:
 # Parsing the Rust sources
 # --------------------------------------------------------------------------
 
-def _array_body(src: str, header: str, what: str) -> tuple[int, str]:
-    """`(declared length, body)` of a `[T; N] = [ ... ];` array literal."""
-    m = re.search(header, src)
-    if m is None:
-        raise EntryParseError(f"{what}: array header not found")
-    end = src.find("\n];", m.end())
-    if end < 0:
-        raise EntryParseError(f"{what}: array end not found")
-    return int(m.group(1)), src[m.end():end]
-
-
-def _check_count(what: str, declared: int, literal: int, parsed: int) -> None:
-    if not declared == literal == parsed:
-        raise EntryParseError(
-            f"{what}: the source declares {declared} entries and holds {literal} "
-            f"literals, but {parsed} parsed -- the rest would go unchecked")
-
-
 def parse_overlay_table(src: str) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"pub static OVERLAY_TABLE: \[OverlayEntry; (\d+)\] = \[", "OVERLAY_TABLE")
-    pattern = re.compile(
-        r"OverlayEntry \{\s*group_path: " + STR + r",\s*field_name: " + STR
-        + r",\s*field_type: " + FIELD_TYPE + r",?\s*\}", re.S)
-    entries = [Entry("table", unescape(g), unescape(n), ftype=normalize_type(t))
-               for g, n, t in pattern.findall(body)]
-    _check_count("OVERLAY_TABLE", declared, body.count("OverlayEntry {"), len(entries))
-    return entries
+    return [Entry("table", g, n, ftype=normalize_type(t))
+            for g, n, t in mirror.overlay_entries(src)]
 
 
-def parse_handle_table(src: str, table: list[Entry]) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"pub static OVERLAY_HANDLE_TABLE: \[OverlayHandleEntry; (\d+)\] = \[",
-        "OVERLAY_HANDLE_TABLE")
-    pattern = re.compile(
-        r"OverlayHandleEntry \{\s*group_path: " + STR + r",\s*handle: (\d+),\s*"
-        r"field_name: " + STR + r",?\s*\}", re.S)
-    types = {(e.group, e.name): e.ftype for e in table}
-    entries = []
-    for g, h, n in pattern.findall(body):
-        group, name = unescape(g), unescape(n)
-        entries.append(Entry("handle", group, name, handle=int(h),
-                             ftype=types.get((group, name))))
-    _check_count("OVERLAY_HANDLE_TABLE", declared, body.count("OverlayHandleEntry {"),
-                 len(entries))
-    return entries
-
-
-def parse_scoped_types(src: str) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"static SCOPED_TYPES: \[\(&str, &str, u32, FieldType\); (\d+)\] = \[",
-        "SCOPED_TYPES")
-    pattern = re.compile(
-        r"\(\s*" + STR + r",\s*" + STR + r",\s*(\d+),\s*" + FIELD_TYPE + r",?\s*\)", re.S)
-    entries = [Entry("scoped", unescape(g), unescape(n), int(c), ftype=normalize_type(t))
-               for n, g, c, t in pattern.findall(body)]
-    _check_count("SCOPED_TYPES", declared, body.count("FieldType::"), len(entries))
-    return entries
-
-
-def parse_checksum_types(src: str) -> list[Entry]:
-    declared, body = _array_body(
-        src, r"pub static CHECKSUM_TYPES: \[\(u32, FieldType\); (\d+)\] = \[",
-        "CHECKSUM_TYPES")
-    pattern = re.compile(r"\(\s*(\d+),\s*" + FIELD_TYPE + r",?\s*\)", re.S)
-    entries = [Entry("checksum", checksum=int(c), ftype=normalize_type(t))
-               for c, t in pattern.findall(body)]
-    _check_count("CHECKSUM_TYPES", declared, body.count("FieldType::"), len(entries))
-    return entries
-
-
-def parse_group_aliases(src: str) -> list[tuple[str, str]]:
-    start = src.find("const GROUP_ALIASES: &[(&str, &str)] = &[")
-    if start < 0:
-        raise EntryParseError("GROUP_ALIASES: not found")
-    end = src.find("\n];", start)
-    body = src[start:end]
-    body = body[body.index("= &[") + 4:]
-    pairs = [(unescape(a), unescape(b)) for a, b in re.findall(
-        r"\(\s*" + STR + r",\s*" + STR + r",?\s*\)", body, re.S)]
-    literals = len(re.findall(STR, body, re.S))
-    _check_count("GROUP_ALIASES", len(pairs), literals // 2 if literals % 2 == 0 else -1,
-                 len(pairs))
-    if not pairs:
-        raise EntryParseError("GROUP_ALIASES: parsed no pair")
-    return pairs
-
-
-def parse_engine_object_refs(src: str) -> list[str]:
-    m = re.search(r"const ENGINE_OBJECT_REFS: \[&str; (\d+)\] = \[([^\]]*)\];", src)
-    if m is None:
-        raise EntryParseError("ENGINE_OBJECT_REFS: not found")
-    names = [unescape(n) for n in re.findall(STR, m.group(2))]
-    _check_count("ENGINE_OBJECT_REFS", int(m.group(1)), len(names), len(names))
-    return names
+parse_group_aliases = mirror.group_aliases
 
 
 def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
@@ -404,7 +302,8 @@ def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
     if m is None:
         raise EntryParseError("MeasuredArrayRoute::ALL: not found")
     variants = re.findall(r"Self::(\w+)", m.group(2))
-    _check_count("MeasuredArrayRoute::ALL", int(m.group(1)), len(variants), len(set(variants)))
+    mirror.check_count("MeasuredArrayRoute::ALL", int(m.group(1)), len(variants),
+                       len(set(variants)))
 
     start = blobs.find("fn measured_array_route(")
     end = blobs.find("\n}\n", start)
@@ -414,8 +313,8 @@ def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
     arms = re.findall(
         r"\(\s*" + STR + r",\s*" + STR + r",\s*Some\(([\d_]+)\),?\s*\)\s*=>\s*\{?\s*"
         r"MeasuredArrayRoute::(\w+)", body, re.S)
-    _check_count("measured_array_route", body.count("MeasuredArrayRoute::"),
-                 body.count("MeasuredArrayRoute::"), len(arms))
+    mirror.check_count("measured_array_route", body.count("MeasuredArrayRoute::"),
+                       body.count("MeasuredArrayRoute::"), len(arms))
     found = {v: Entry("route", unescape(g), unescape(n), int(c.replace("_", "")))
              for g, n, c, v in arms}
 
@@ -484,9 +383,15 @@ class Catalog:
 
 def load_catalog(sources: Sources) -> Catalog:
     table = parse_overlay_table(sources.table)
+    types = {(e.group, e.name): e.ftype for e in table}
     aliases = parse_group_aliases(sources.overlay)
-    entries = (table + parse_handle_table(sources.table, table)
-               + parse_scoped_types(sources.scoped) + parse_checksum_types(sources.checksum)
+    entries = (table
+               + [Entry("handle", g, n, handle=h, ftype=types.get((g, n)))
+                  for g, h, n in mirror.handle_entries(sources.table)]
+               + [Entry("scoped", g, n, c, ftype=normalize_type(t))
+                  for n, g, c, t in mirror.scoped_entries(sources.scoped)]
+               + [Entry("checksum", checksum=c, ftype=normalize_type(t))
+                  for c, t in mirror.checksum_entries(sources.checksum)]
                + parse_routes(sources.blobs, sources.rpc, sources.routes)
                + parse_remap_targets(sources.paths)
                + [Entry("alias", src) for src, _ in aliases])
@@ -494,17 +399,12 @@ def load_catalog(sources: Sources) -> Catalog:
     dupes = [k for k, n in seen.items() if n > 1]
     if dupes:
         raise EntryParseError(f"{len(dupes)} duplicate entry key(s), e.g. {dupes[0]}")
-    return Catalog(entries, aliases, parse_engine_object_refs(sources.overlay))
+    return Catalog(entries, aliases, mirror.engine_object_refs(sources.overlay))
 
 
 # --------------------------------------------------------------------------
 # The resolution order, mirrored
 # --------------------------------------------------------------------------
-
-def is_fname_index(name: str | None) -> bool:
-    """`is_unresolved_fname_index` in overlay.rs: a non-empty ASCII-digit name."""
-    return bool(name) and all("0" <= ch <= "9" for ch in name)
-
 
 @dataclass(frozen=True)
 class Resolution:
@@ -514,14 +414,17 @@ class Resolution:
     ftype: str
 
 
+#: overlay_mirror's resolution steps, as the kinds this report counts.
+STEP_KINDS = {"name": "table", "b-prefix": "table", "handle": "table", "scoped": "scoped",
+              "checksum table": "checksum"}
+
+
 class Overlay:
-    """`resolve_entry` in overlay.rs, over the parsed entries."""
+    """`resolve_entry` in overlay.rs (overlay_mirror.Resolver), over the parsed entries."""
 
     def __init__(self, catalog: Catalog):
         kinds = catalog.by_kind()
         self.table = {(e.group, e.name): e for e in kinds["table"]}
-        self.stripped = {(e.group, e.name[1:]): e for e in kinds["table"]
-                         if e.name.startswith("b")}
         self.handles = {(e.group, e.handle): e for e in kinds["handle"]}
         self.aliases = dict(catalog.aliases)
         self.scoped = {(e.name, e.group, e.checksum): e for e in kinds["scoped"]}
@@ -530,43 +433,21 @@ class Overlay:
         self.remaps = {e.group: e for e in kinds["remap"]}
         self.alias_entries = {e.group: e for e in kinds["alias"]}
         self.engine_refs = frozenset(catalog.engine_refs)
-
-    def in_group(self, group, name, handle) -> tuple[Entry | None, Entry | None, bool]:
-        """`(table entry, handle entry used, refused)` for one group."""
-        if name is not None:
-            hit = self.table.get((group, name)) or self.stripped.get((group, name))
-            if hit is not None:
-                return hit, None, False
-        if handle is None:
-            return None, None, False
-        via = self.handles.get((group, handle))
-        if via is None:
-            return None, None, False
-        if name is not None and name != via.name and not is_fname_index(name):
-            return None, None, True
-        hit = self.table.get((group, via.name))
-        return hit, (via if hit is not None else None), False
+        self.mirror = mirror.Resolver(
+            self.table, {key: e.name for key, e in self.handles.items()}, self.scoped,
+            self.checksums, self.aliases, self.engine_refs)
 
     def resolve(self, group, name, checksum, handle) -> Resolution | None:
-        hit, via, _ = self.in_group(group, name, handle)
-        if hit is not None:
-            return Resolution("table", hit, via, hit.ftype)
-        target = self.aliases.get(group)
-        if target is not None:
-            hit, via, _ = self.in_group(target, name, handle)
-            if hit is not None:
-                return Resolution("alias", hit, via, hit.ftype)
-        if name is None:
+        hit, step = self.mirror.resolve(group, name, handle, checksum)
+        if step is None:
             return None
-        if checksum is not None and (name, group, checksum) in self.scoped:
-            scoped = self.scoped[(name, group, checksum)]
-            return Resolution("scoped", scoped, None, scoped.ftype)
-        if name in self.engine_refs:
+        if step == "engine reference":
             return Resolution("engine", None, None, OBJECT_NET_GUID)
-        if checksum is not None and checksum in self.checksums:
-            learned = self.checksums[checksum]
-            return Resolution("checksum", learned, None, learned.ftype)
-        return None
+        aliased = step.startswith("alias ")
+        via = None
+        if step.endswith("handle"):
+            via = self.handles[(self.aliases[group] if aliased else group, handle)]
+        return Resolution("alias" if aliased else STEP_KINDS[step], hit, via, hit.ftype)
 
     def handle_state(self, group, name, handle) -> tuple[Entry | None, str]:
         """`(handle entry, state)` for a declaration at an explicit handle.
@@ -589,7 +470,7 @@ class Overlay:
                 continue
             if name is None or is_fname_index(name) or name == via.name:
                 return via, "hit"
-            direct = self.table.get((g, name)) or self.stripped.get((g, name))
+            direct = self.mirror.in_group(g, name, None)[0]
             if direct is None:
                 return via, "conflict"
             return via, "hit" if direct.name == via.name else "other"

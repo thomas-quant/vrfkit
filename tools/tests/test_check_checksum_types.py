@@ -274,6 +274,16 @@ class ParseTests(unittest.TestCase):
         entries, handles = cct.parse_overlay_table(whole)
         self.assertEqual(len(entries), 2)
 
+    def test_a_repeated_entry_is_refused(self):
+        """Counting cannot see it -- the literal is declared, held and parsed
+        twice -- and a dict would keep one silently."""
+        entry = ('    OverlayEntry {\n        group_path: "/G.A",\n        field_name: "X",\n'
+                 '        field_type: FieldType::Float,\n    },\n')
+        src = ('pub static OVERLAY_TABLE: [OverlayEntry; 2] = [\n' + entry * 2 + '];\n'
+               'pub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; 0] = [];\n')
+        with self.assertRaises(cct.TableError):
+            cct.parse_overlay_table(src)
+
     def test_resolution_constants_are_read_from_overlay_rs(self):
         src = ('const GROUP_ALIASES: &[(&str, &str)] = &[\n    (\n        "/G/A\\\n/B.B_C",\n'
                '        "/G/C.C_C",\n    ),\n];\nconst ENGINE_OBJECT_REFS: [&str; 2] = ["Owner", "Controller"];\n')
