@@ -115,7 +115,7 @@ pub fn brute_force_function_count(payload: &[u8], bit_count: u32) -> Option<Brut
     // rather than the only reading. See `ambiguous_with`.
     let mut chosen: Option<BruteForceResult> = None;
     for fc in 2..=MAX_FC {
-        let Some(rpcs) = walk_cnc(payload, bit_count, fc) else {
+        let Some(rpcs) = decode_cnc_payload(payload, bit_count, fc) else {
             continue;
         };
         match &mut chosen {
@@ -156,67 +156,36 @@ fn same_structure(a: &[CncRpc], b: &[CncRpc]) -> bool {
 ///
 /// This is the per-payload decode used after the function_count has been
 /// determined (e.g. by [`brute_force_function_count`] on a representative
-/// sample, or by a hardcoded constant for a known group). Returns `None` when
-/// the walk is not clean -- the caller should keep the preservation row in that
-/// case.
+/// sample, or by a hardcoded constant for a known group). Mirrors
+/// `parse_class_net_cache` in `vrf-net` but returns the RPC list instead of
+/// driving a sink. Returns `None` when the walk is not clean -- a malformed
+/// read or no RPC at all -- rather than partial results; the caller should
+/// keep the preservation row in that case.
 #[must_use]
 pub fn decode_cnc_payload(
     payload: &[u8],
     bit_count: u32,
     function_count: u32,
 ) -> Option<Vec<CncRpc>> {
-    walk_cnc(payload, bit_count, function_count)
-}
-
-/// Walk a ClassNetCache stream with a given `function_count`.
-///
-/// Mirrors `parse_class_net_cache` in `vrf-net` but returns the RPC list
-/// instead of driving a sink, and returns `None` when the walk is not clean
-/// (residual bits or malformed reads) rather than partial results.
-fn walk_cnc(payload: &[u8], bit_count: u32, function_count: u32) -> Option<Vec<CncRpc>> {
     let mut reader = BitReader::with_bit_len(payload, u64::from(bit_count)).ok()?;
     let handle_max = function_count.max(2);
     let mut rpcs = Vec::new();
-
+    // Every read fails rather than run past the window, so the loop leaves
+    // only with the window consumed exactly (a sub-byte tail fails the next
+    // read). That exactness is what separates a decode from a payload of
+    // another format that merely parses into something plausible.
     while !reader.at_end() {
         let handle = reader.read_serialized_int(handle_max).ok()?;
-
-        // `parse_class_net_cache` requires at least 8 bits for the payload
-        // length IntPacked read; fewer means a malformed tail.
-        if reader.bits_remaining() < 8 {
-            return None;
-        }
-
         let payload_bits = reader.read_int_packed().ok()?;
-
-        if u64::from(payload_bits) > reader.bits_remaining() {
-            return None;
-        }
-
         let payload_offset = reader.position();
-        // Advance past the payload.
-        let Ok(mut sub) = reader.sub_reader(u64::from(payload_bits)) else {
-            return None;
-        };
-        sub.skip_remaining();
-
+        reader.skip_bits(u64::from(payload_bits)).ok()?;
         rpcs.push(CncRpc {
             handle,
             payload_bits,
             payload_offset,
         });
     }
-
-    // A clean walk leaves zero residual bits. Sub-byte padding would be
-    // ignored by `at_end()` but cannot carry an element, so we also reject it
-    // -- a payload that is not this format usually parses into something
-    // plausible and then leaves a tail, and the zero-residual check is what
-    // separates "decoded" from "decoded into a plausible-looking structure".
-    if reader.bits_remaining() != 0 || rpcs.is_empty() {
-        return None;
-    }
-
-    Some(rpcs)
+    (!rpcs.is_empty()).then_some(rpcs)
 }
 
 /// Decoded inner structure of an `AbilitiesAndBuffsComponent` ClassNetCache
