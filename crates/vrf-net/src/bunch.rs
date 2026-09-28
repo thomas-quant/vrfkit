@@ -5,49 +5,37 @@ use crate::types::ChannelCloseReason;
 
 /// Maximum simultaneously active partial-bunch assemblies.
 ///
-/// A normal replay measured 0 and Unreal can only advance each one with a
-/// packet-sized fragment. 4,096 leaves ample protocol headroom while bounding
-/// a stream that sends one initial fragment on each new channel forever.
+/// Bounds a stream that sends one initial fragment on each new channel
+/// forever, with ample headroom: Unreal advances each assembly only by
+/// packet-sized fragments. For scale, 02d4d478 completes 56 assemblies from
+/// 131 fragments (`validate` at 061155a); its simultaneous peak is not measured.
 pub const MAX_ACTIVE_PARTIAL_BUNCHES: usize = 4_096;
 
 /// Maximum raw bits retained across all partial-bunch assemblies (64 MiB).
 pub const MAX_BUFFERED_PARTIAL_BITS: usize = 64 * 1024 * 1024 * 8;
 
-/// Parsed bunch header -- all fields that describe one bunch within a packet.
-///
-/// See `RawPacketReader::parse_bunch_header` in [`crate::packet`] for the bit
-/// layout that produces these fields.
+/// Parsed bunch header: every field that describes one bunch within a packet,
+/// in the bit layout `RawPacketReader::parse_bunch_header` ([`crate::packet`])
+/// documents.
 #[derive(Debug, Clone, Default)]
 pub struct RawBunchHeader {
-    /// Packet this bunch belongs to.
     pub packet_id: i32,
-    /// Channel index.
     pub ch_index: u32,
-    /// Channel is being opened.
     pub b_open: bool,
-    /// Channel is being closed.
     pub b_close: bool,
     /// Close reason implies dormancy (actor still alive).
     pub b_dormant: bool,
-    /// Replication is paused for this channel.
     pub b_is_replication_paused: bool,
-    /// Bunch is reliable (has sequence guarantees).
     pub b_reliable: bool,
-    /// Bunch is part of a multi-fragment sequence.
     pub b_partial: bool,
-    /// First fragment of a partial bunch.
     pub b_partial_initial: bool,
-    /// Last fragment of a partial bunch.
     pub b_partial_final: bool,
-    /// Bunch carries package-map export data.
     pub b_has_package_map_exports: bool,
-    /// Bunch carries must-be-mapped GUIDs.
     pub b_has_must_be_mapped_guids: bool,
-    /// Sequence number (reliable or packet-derived).
+    /// Sequence number: the channel's reliable sequence, or for an unreliable
+    /// partial the packet id.
     pub ch_sequence: i32,
-    /// Reason the channel was closed.
     pub close_reason: ChannelCloseReason,
-    /// Payload size in bits.
     pub payload_bit_count: i32,
     /// Bit offset where the payload begins within the packet.
     pub payload_bit_offset: i64,
@@ -63,13 +51,10 @@ pub struct RawBunchHeader {
     pub has_channel_limit_error: bool,
 }
 
-/// Partial bunch accumulator: reassembles multi-fragment bunches.
-///
-/// Each non-final fragment must be byte-aligned (bit count % 8 == 0).
-/// Fragments are concatenated into a growable buffer; on completion
-/// the stitched payload is returned for content-block framing.
+/// Reassembles multi-fragment bunches: each channel's fragments are
+/// concatenated and the stitched payload is handed back for framing. Every
+/// non-final fragment must be byte-aligned.
 pub struct PartialBunchAccumulator {
-    /// Per-channel fragment state.
     fragments: std::collections::HashMap<u32, AccumulatorState>,
     total_buffered_bits: usize,
     max_active: usize,
@@ -129,7 +114,6 @@ pub enum PartialResourceLimit {
 }
 
 impl PartialBunchAccumulator {
-    /// Create a new empty accumulator.
     #[must_use]
     pub fn new() -> Self {
         Self::with_limits(MAX_ACTIVE_PARTIAL_BUNCHES, MAX_BUFFERED_PARTIAL_BITS)
@@ -156,10 +140,8 @@ impl PartialBunchAccumulator {
         self.total_buffered_bits
     }
 
-    /// Add a fragment. Returns whether the bunch is now complete.
-    ///
-    /// `payload_bits` / `payload_data` are the raw bits from the bunch payload.
-    /// For non-final fragments, the bit count must be byte-aligned.
+    /// Add one fragment and report the outcome: whether a completed payload is
+    /// ready (`should_process`) and every bit and payload this call discarded.
     #[allow(clippy::too_many_arguments)]
     pub fn add_fragment(
         &mut self,
@@ -206,11 +188,7 @@ impl PartialBunchAccumulator {
         }
 
         if payload_bit_count == 0 {
-            // A zero-payload fragment is still a fragment that arrived: the
-            // non-empty path below always counts one here, unconditionally,
-            // before it looks at `b_partial_final`. Skipping it on this path
-            // undercounted a bunch that took two fragments to complete as
-            // having received only one.
+            // Still a fragment that arrived, counted as the non-empty path does.
             *stats_partial_fragments += 1;
             if !header.b_partial_final {
                 return PartialBunchResult {
@@ -223,13 +201,8 @@ impl PartialBunchAccumulator {
                     displaced,
                 };
             }
-            // Final with zero payload. The same rule as the non-empty path
-            // below: an errored header -- an overlapping initial that is also
-            // final -- is not a completion. Marking it complete counted a
-            // `partial_completed` that `should_process` (false for an errored
-            // header) immediately contradicted, and left the complete-but-untaken
-            // state in the map until end of stream. The assembly that header
-            // just started holds no bits, so retiring it loses nothing.
+            // An errored final is not a completion (see the non-empty path).
+            // The assembly it just started holds no bits: retiring loses none.
             if header.has_partial_error {
                 self.retire_channel(ch_index);
             } else if let Some(state) = self.fragments.get_mut(&ch_index) {
@@ -248,13 +221,10 @@ impl PartialBunchAccumulator {
             };
         }
 
-        // Refuse the fragment after the sequence checks passed: retire the
-        // channel's assembly and report it after whatever `validate_sequence`
-        // displaced. For an initial, that assembly is the empty one
-        // `validate_sequence` started for this fragment. It is retired but not
-        // a displaced payload: it holds no bits, and the caller already
-        // reports the fragment itself, so returning it wrote a phantom 0-bit
-        // row beside that one.
+        // Refuse the fragment: retire the channel's assembly and report it
+        // after whatever `validate_sequence` displaced -- unless this is an
+        // initial, whose assembly is the empty one just started for it: no
+        // bits, and the caller reports the fragment itself.
         let mut refuse = |acc: &mut Self,
                           mut header: RawBunchHeader,
                           mut displaced: Vec<(PreservedPartial, PartialDiscardCause)>,
@@ -290,7 +260,6 @@ impl PartialBunchAccumulator {
             return refuse(self, header, displaced, cause);
         }
 
-        // Append bits to accumulator.
         if let Some(state) = self.fragments.get(&ch_index) {
             let new_state_bits = state.bit_count.checked_add(payload_bit_count);
             let new_total_bits = self.total_buffered_bits.checked_add(payload_bit_count);
@@ -323,18 +292,11 @@ impl PartialBunchAccumulator {
 
             *stats_partial_fragments += 1;
 
-            // Not `if header.b_partial_final` alone: `has_partial_error` can
-            // already be set here (e.g. an overlapping `b_partial_initial`
-            // that `validate_sequence` flagged but still let through with a
-            // freshly-inserted state -- exactly what a header carrying both
-            // `b_partial_initial` and `b_partial_final` produces). Marking
-            // that state complete would be a lie `should_process` below
-            // immediately contradicts (it is `false` for an errored header),
-            // so the caller never calls `take_completed` for it -- and
-            // `drain_unfinished` at stream end skips anything already marked
-            // complete. The buffered bits would then reach no counter at all
-            // while `partial_completed` reported a success that never
-            // happened.
+            // Not `b_partial_final` alone: an overlapping initial that is also
+            // final arrives here already errored. Marked complete, it would be
+            // neither taken (`should_process` is false, so no `take_completed`)
+            // nor drained (`drain_unfinished` skips complete entries): its bits
+            // would reach no counter while `partial_completed` claimed success.
             if header.b_partial_final && !header.has_partial_error {
                 state.is_complete = true;
                 header.is_partial_completed = true;
@@ -381,16 +343,10 @@ impl PartialBunchAccumulator {
 
     /// Drop every partial bunch still awaiting fragments and return them.
     ///
-    /// Called once at the end of a replay. Until the stream stops there is
-    /// nothing to distinguish an abandoned reassembly from one still in
-    /// progress, so this state cannot be judged any earlier -- which is exactly
-    /// why it used to go out with the accumulator unremarked: `partial_errors`
-    /// stayed zero because no sequence rule was broken, and `partial_fragments`
-    /// had already counted the fragments as received.
-    ///
-    /// A bunch already marked complete is not counted: it was handed to the
-    /// caller by [`Self::take_completed`] only if the caller asked, and a
-    /// complete-but-untaken entry is the caller's choice, not a loss here.
+    /// Called once at end of stream: until then an abandoned assembly cannot
+    /// be told from one in progress, and no sequence rule was broken, so no
+    /// earlier counter covers it. A complete but untaken entry is the
+    /// caller's choice ([`Self::take_completed`]), not a loss, and is skipped.
     pub fn drain_unfinished(&mut self) -> Vec<PreservedPartial> {
         self.total_buffered_bits = 0;
         self.fragments
@@ -518,10 +474,9 @@ fn append_bits(dst: &mut Vec<u8>, dst_bit_offset: usize, src: &[u8], src_bit_cou
     }
 
     if dst_bit_offset % 8 == 0 {
-        // Every append `add_fragment` makes lands here: it refuses a non-final
-        // fragment that is not byte-aligned, and nothing is appended after a
-        // final. Whole bytes are copied, and the last one's unused high bits
-        // are cleared, as the bit loop below leaves them.
+        // Every `add_fragment` append lands here (it refuses unaligned
+        // non-final fragments; nothing follows a final): copy whole bytes and
+        // clear the last one's unused high bits, as the bit loop leaves them.
         dst.resize(dst_bit_offset / 8, 0);
         dst.extend_from_slice(&src[..src_bit_count.div_ceil(8)]);
         let tail_bits = src_bit_count % 8;
@@ -647,11 +602,8 @@ mod tests {
         assert_eq!(acc.total_buffered_bits(), 0);
     }
 
-    /// A zero-payload final fragment still took two fragments to complete the
-    /// bunch, and `partial_fragments` must say so -- not just
-    /// `partial_completed`. Before the fix, the zero-payload path never
-    /// touched `partial_fragments` at all, so this reported `fragments: 1,
-    /// completed: 1` for a bunch that arrived in two pieces.
+    /// A zero-payload final is still the second fragment: `partial_fragments`
+    /// counts it, not only `partial_completed`.
     #[test]
     fn a_zero_payload_final_fragment_still_counts_as_a_fragment() {
         let mut acc = PartialBunchAccumulator::new();
@@ -670,14 +622,9 @@ mod tests {
         );
     }
 
-    /// A final fragment that arrives already carrying an error (here: it
-    /// re-declares `b_partial_initial` over an incomplete in-flight
-    /// reassembly, which `validate_sequence` flags but still lets through
-    /// with a freshly-inserted state) must not be reported as a completion.
-    /// Before the fix, `partial_completed` moved for it anyway, and the
-    /// buffered bits reached neither `take_completed` (`should_process` is
-    /// false) nor `drain_unfinished` (which skips anything already marked
-    /// complete) -- a leak with no counter.
+    /// A final that arrives already errored (it re-declares `b_partial_initial`
+    /// over an in-flight assembly) is not a completion, and its buffered bits
+    /// are reported discarded rather than leaked.
     #[test]
     fn an_error_flagged_final_fragment_is_not_reported_as_a_completion() {
         let mut acc = PartialBunchAccumulator::new();
@@ -809,11 +756,9 @@ mod tests {
         );
     }
 
-    /// A refused initial displaces nothing of its own. `validate_sequence`
-    /// starts an empty assembly for every initial before the alignment and
-    /// budget checks run, so a refusal retires that assembly -- it held no bits
-    /// and belongs to the current fragment, which the caller reports itself --
-    /// rather than handing it back as a displaced payload.
+    /// A refused initial displaces nothing of its own: the empty assembly
+    /// `validate_sequence` started for it before the alignment and budget
+    /// checks is retired, not handed back as a displaced payload.
     #[test]
     fn a_refused_initial_displaces_nothing_of_its_own() {
         let displaced_bits = |result: &PartialBunchResult| {
@@ -868,9 +813,8 @@ mod tests {
             result.error_kind,
             Some(PartialSequenceKind::NonByteAlignedFragment)
         );
-        // Both causes stand: `overlapping_initial` and `error_kind` above, and
-        // two errors counted. The one displaced payload is the 8-bit assembly
-        // the initial replaced; the empty one it started is not a payload.
+        // Both causes stand, two errors counted. The one displaced payload is
+        // the 8-bit assembly replaced; the empty one started is not a payload.
         assert_eq!(result.displaced.len(), 1);
         assert_eq!(
             result.displaced[0].1,
@@ -892,9 +836,8 @@ mod tests {
             result.resource_limit,
             Some(PartialResourceLimit::BufferedBits)
         );
-        // Both causes stand: `overlapping_initial` and `resource_limit` above,
-        // and two errors counted. The one displaced payload is the 8-bit
-        // assembly the initial replaced; the empty one it started is not.
+        // Both causes stand, two errors counted; only the replaced 8-bit
+        // assembly is a displaced payload.
         assert_eq!(result.displaced.len(), 1);
         assert_eq!(
             result.displaced[0].1,
