@@ -412,7 +412,16 @@ def _f32_shortest(value):
     packed = _struct.unpack("f", _struct.pack("f", value))[0]
     for digits in range(1, 10):
         candidate = float(f"{packed:.{digits}g}")
-        if _struct.unpack("f", _struct.pack("f", candidate))[0] == packed:
+        # Rounding up can carry a candidate past the float32 range: FLT_MAX at
+        # four digits is 3.403e+38. Such a candidate cannot round-trip, so it
+        # is not the answer. Python 3.12 packs it as inf and the comparison
+        # below rejects it; Python 3.13 raises OverflowError instead, which
+        # must mean the same thing here rather than abort the conversion.
+        try:
+            back = _struct.unpack("f", _struct.pack("f", candidate))[0]
+        except OverflowError:
+            continue
+        if back == packed:
             return int(candidate) if candidate.is_integer() else candidate
     return int(packed) if float(packed).is_integer() else packed
 

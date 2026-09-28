@@ -319,6 +319,34 @@ class MovementTextRuleTests(unittest.TestCase):
             per_value_text(TEXT_RULE_EDGES, shorten=False),
         )
 
+    def test_a_candidate_rounded_past_float32_is_skipped_on_every_python(self):
+        # Python 3.13 made struct.pack("f", x) raise OverflowError where 3.12
+        # returned inf. Shortening FLT_MAX tries 3.403e+38 on the way, so the
+        # search must treat that as "does not round-trip" on both. Emulate
+        # 3.13 here so the property is checked whichever Python runs it.
+        real = bundle._struct
+
+        class Strict:
+            unpack = staticmethod(real.unpack)
+
+            @staticmethod
+            def pack(fmt, *values):
+                out = real.pack(fmt, *values)
+                if fmt.endswith("f") and any(
+                        math.isfinite(v) and math.isinf(real.unpack(fmt, real.pack(fmt, v))[0])
+                        for v in values):
+                    raise OverflowError("float too large to pack with f format")
+                return out
+
+        flt_max = 3.4028234663852886e38
+        with mock.patch.object(bundle, "_struct", Strict):
+            self.assertEqual(bundle._f32_shortest(flt_max), 3.4028235e38)
+            self.assertEqual(bundle._f32_shortest(-flt_max), -3.4028235e38)
+            self.assertEqual(
+                column_text(TEXT_RULE_EDGES, shorten=True),
+                per_value_text(TEXT_RULE_EDGES, shorten=True),
+            )
+
     def test_non_finite_values_are_spelled_by_the_encoder(self):
         """Spelled out too, so a failure names the three values that broke."""
         for shorten in (True, False):
