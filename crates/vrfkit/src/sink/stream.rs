@@ -1,8 +1,6 @@
-//! The `vrf-net` callbacks: what the sink does with each decoded event.
-//!
-//! `FieldSink` receives replicated properties and RPCs; `ReplicationSink`
-//! receives actor lifecycle, content-block framing and the two failure paths.
-//! Everything these produce goes through `ExportSink::push_field`, so the six
+//! The `vrf-net` callbacks: `FieldSink` takes replicated properties and RPCs,
+//! `ReplicationSink` actor lifecycle, content-block framing and the failure
+//! paths. Every row goes through `ExportSink::push_field`, so the six
 //! block-context columns are stamped in exactly one place.
 
 use std::sync::Arc;
@@ -95,26 +93,20 @@ impl ExportSink<'_> {
         });
     }
 
-    /// Resolve a field or function name from the current block's group, plus
-    /// the handle's `compatible_checksum`.
-    ///
-    /// Interned: 429,637 property rows and 342,735 RPC rows on the reference
-    /// replay each used to clone the group's `String` name.
-    ///
-    /// One schema walk yields both. The checksum feeds the overlay's last-resort
-    /// lookup, and asking for it separately would double the cost of the hottest
-    /// loop in the export.
+    /// The current group's name and `compatible_checksum` for `handle`, from one
+    /// schema walk (the checksum feeds the overlay's last-resort lookup; asking
+    /// separately would double the hottest loop's cost). Interned: 429,637
+    /// property rows and 342,735 RPC rows on the reference replay each cloned
+    /// the group's `String` name before.
     fn resolve_field_name_and_checksum(&mut self, handle: u32) -> (Option<Arc<str>>, Option<u32>) {
-        // Destructured so the immutable borrow of `cache` that produces the
-        // name and the mutable borrow of `channel_state` that pools it are
-        // seen as the disjoint fields they are.
+        // Destructured: borrowing `cache` and pooling into `channel_state` are
+        // disjoint field borrows.
         let Self {
             cache,
             channel_state,
             current_group_path,
             ..
         } = self;
-        // The replay's own export group names the handle when it can.
         if let Some(group) = cache.get_group_by_path(current_group_path) {
             if let Some(field) = group.get_field(handle) {
                 return (
@@ -123,10 +115,8 @@ impl ExportSink<'_> {
                 );
             }
         }
-        // Some groups (e.g. `MagazineAmmo`) are declared without field names, so
-        // a handle the wire leaves unnamed falls back to the overlay's handle
-        // table -- without this the row keeps field_name None even though the
-        // overlay resolved and typed it.
+        // Groups declared without field names (e.g. `MagazineAmmo`) fall back to
+        // the overlay's handle table, or the row stays unnamed though typed.
         let Some(name) = TABLE.lookup_handle(current_group_path, handle) else {
             return (None, None);
         };
@@ -139,36 +129,30 @@ impl FieldSink for ExportSink<'_> {
         let (field_name, field_checksum) = self.resolve_field_name_and_checksum(handle);
         let raw_bits = copy_raw_bits(reader, bit_count);
 
-        // Additive pass 1: a known DynamicArray is flattened into one row per
-        // leaf. The parent row with the whole payload is still emitted below.
+        // Additive passes; the parent row with the whole payload is still
+        // emitted below. 1: a known DynamicArray, one row per leaf.
         if self.is_known_array_field(field_name.as_deref(), field_checksum) {
             if let Some(ref raw) = raw_bits {
                 self.emit_flattened_array(field_name.as_deref(), field_checksum, raw, bit_count);
             }
         }
 
-        // Additive pass 2: a struct blob with a dedicated decoder
-        // (RoundResults, TeamEconomy, RoundInfos). Its sub-fields are extra
-        // rows; the raw_bits parent row is still emitted below.
+        // 2: a struct blob with a dedicated decoder.
         if self.is_struct_blob_field(field_name.as_deref()) {
             // The `Arc` is cloned, not the string: `decode_struct_blob` takes
-            // `&mut self` and the name would otherwise still be borrowed from
-            // the local it lives in.
+            // `&mut self` while the name is still borrowed.
             if let (Some(raw), Some(name)) = (raw_bits.as_deref(), field_name.clone()) {
                 self.decode_struct_blob(&name, raw, bit_count);
             }
         }
 
-        // Additive pass 3: `MultiItemSlot.MultiContents` -- a dynamic array of
-        // item actor references. Each decoded NetGUID is an extra row; the
-        // raw_bits parent row is still emitted below.
+        // 3: `MultiItemSlot.MultiContents`, one row per item NetGUID.
         if self.is_multi_contents_field(field_name.as_deref()) {
             if let Some(raw) = raw_bits.as_deref() {
                 self.emit_multi_contents(raw, bit_count);
             }
         }
 
-        // Apply the type overlay: decode raw_bits into a typed value if possible.
         let (value_i64, value_f64, value_bool, value_str) = match apply_overlay_with_checksum(
             &TABLE,
             &self.current_group_path,
@@ -211,14 +195,11 @@ impl FieldSink for ExportSink<'_> {
         if field_name.as_deref() == Some(MOVEMENT_RPC) && bit_count > 0 {
             let fallback_reader = reader.clone();
             let failed = self.decode_movement_rpc(reader);
-            // Clean batches are represented row-for-row in movement.parquet.
-            // A failed or partial batch is different: its missing rows cannot
-            // reproduce the input, so retain the entire RPC payload here.
-            // One exception is counted rather than retained: a movement
-            // section that stops with bits of its window unread leaves the
-            // batch "clean" here, so those bits reach no row. They are
-            // tallied (`movement_*_section_tail*`) until measurement says
-            // whether they are loss; see `RpcDecodeResult::sized_section_tails`.
+            // A clean batch is movement.parquet row for row; a failed or partial
+            // one cannot reproduce its input, so the whole payload is kept here.
+            // Bits a section leaves unread in a "clean" batch reach no row: they
+            // are only tallied (`movement_*_section_tail*`) until measurement
+            // says whether they are loss (`RpcDecodeResult::sized_section_tails`).
             self.push_field(FieldValues {
                 handle,
                 field_name,
@@ -229,12 +210,6 @@ impl FieldSink for ExportSink<'_> {
                 ..FieldValues::default()
             });
         } else if bit_count > 0 {
-            // Try to parse RPC parameters as a RepLayout field stream.
-            // The parameter group path is `<ClassPath>:<FunctionName>` where
-            // ClassPath = current_group_path minus `_ClassNetCache` suffix.
-            //
-            // We clone the reader before attempting the parse so we can fall
-            // back to raw_bits emission if parsing yields nothing.
             let fallback_reader = reader.clone();
             let parsed = self.try_parse_rpc_params(handle, reader, field_name.as_deref());
             if !parsed {
@@ -249,7 +224,7 @@ impl FieldSink for ExportSink<'_> {
                 });
             }
         } else {
-            // Zero-bit RPC -- just emit a marker row.
+            // A zero-bit RPC: one marker row.
             self.push_field(FieldValues {
                 handle,
                 field_name,
@@ -260,18 +235,24 @@ impl FieldSink for ExportSink<'_> {
     }
 }
 
-/// Bomb-mode PlayerState. Its `Subject` (account UUID, FString) and
-/// `SpawnedCharacter` (character actor NetGUID == movement.character_net_guid)
-/// are captured per actor into the manifest `players` array.
+/// Bomb-mode PlayerState, whose `Subject` and `SpawnedCharacter` feed the
+/// manifest `players` array (see `PlayerIdentity`).
 const BOMB_PLAYER_STATE: &str = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C";
 
-/// The ClassNetCache function_count for `AbilitiesAndBuffsComponent`.
+/// The ClassNetCache function count for `AbilitiesAndBuffsComponent`, whose
+/// `_ClassNetCache` group no VALORANT replay declares.
 ///
-/// This group's `_ClassNetCache` export is never declared in VALORANT replays,
-/// so the handle width for the RPC stream is unknown at decode time. The value
-/// was determined by brute-forcing fc 2-256 against 9,274 payloads from a
-/// reference replay: fc=34 is the minimum that walks every payload cleanly
-/// (9274/9274). See [`ExportSink::emit_brute_forced_cnc_rpcs`].
+/// Brute-forced over fc 2-256 against 9,274 payloads of a reference replay: 34
+/// is the minimum that walks every payload cleanly (9,274/9,274), each one RPC
+/// at handle 1, and every fc in 34-65 gives handle 1 the same 6-bit width and
+/// so the same walk. One constant for all payloads, not a per-payload search:
+/// simple payloads also walk under smaller fc values, with garbage handles. A
+/// clean outer walk proves neither the width nor the undeclared group; the
+/// stronger evidence is the inner FastArray custom-delta framing, validated on
+/// 2,882,152 inner windows over 714 accepted exports (the separate
+/// `extract_fastarray_observations.py` recovers replication keys, item IDs and
+/// field boundaries). An update can fail or accidentally fit this walk, so
+/// consumers must keep the raw parent and validate the inner structure.
 const ABILITIES_AND_BUFFS_FC: u32 = 34;
 
 impl ExportSink<'_> {
@@ -310,12 +291,9 @@ impl ExportSink<'_> {
         failed
     }
 
-    /// Resolve the `(class_path, archetype_path)` an actor channel should be
-    /// labelled with.
-    ///
-    /// Shared by open and close so the two cannot drift: a channel that opened
-    /// as one class and closed as another would be a join key that silently
-    /// does not join.
+    /// The `(class_path, archetype_path)` an actor channel is labelled with,
+    /// shared by open and close so the two cannot drift into a join key that
+    /// silently does not join.
     fn actor_paths(&self, archetype: Option<NetworkGuid>) -> (Option<String>, Option<String>) {
         let Some(archetype) = archetype.filter(|g| g.is_valid()) else {
             return (None, None);
@@ -326,23 +304,17 @@ impl ExportSink<'_> {
         (combined.or(outer), arch_path)
     }
 
-    /// Capture BombPlayerState identity for the manifest `players` array.
-    /// `Subject` is the account UUID; `SpawnedCharacter` is the character actor
-    /// NetGUID, equal to `movement.character_net_guid`. Together they let any
-    /// actor-keyed table join to a stable account identity -- the link
-    /// `playerLoadouts`' `characterId` cannot provide when two players share an
-    /// agent.
+    /// Capture one `PlayerIdentity` field of the current BombPlayerState actor.
     fn record_player_identity(
         &mut self,
         field_name: Option<&str>,
         subject: Option<&str>,
         character: Option<i64>,
     ) {
-        // Through `canonical_group`, not a bare comparison: Swiftplay replicates
-        // these same fields under `Swiftplay_EoRCredits_PlayerState_C`, and the
-        // overlay already treats that as the Bomb class. Comparing the raw path
-        // left `manifest.players` empty on 4 of 64 demo replays whose `Subject`
-        // was present on all ten actors.
+        // Through `canonical_group`: Swiftplay replicates these fields under
+        // `Swiftplay_EoRCredits_PlayerState_C`, and the raw path left
+        // `manifest.players` empty on 4 of 64 demo replays whose `Subject` was
+        // present on all ten actors.
         if vrf_decode::canonical_group(&self.current_group_path) != BOMB_PLAYER_STATE {
             return;
         }
@@ -360,11 +332,9 @@ impl ExportSink<'_> {
                     entry.subject = Some(s.to_owned());
                 }
             }
-            // Last *non-zero* write wins, not last write. The field is
-            // replicated again as 0 when the player disconnects, and plain
-            // last-write-wins threw the real GUID away -- 9 players across 5
-            // of 69 demos. 0 is not a NetGUID, so there is nothing to lose by
-            // ignoring it.
+            // Last *non-zero* write wins: a disconnect replicates it again as
+            // 0, which is not a NetGUID, and last-write-wins lost the real GUID
+            // for 9 players across 5 of 69 demos.
             "SpawnedCharacter" => {
                 if let Some(c) = character.filter(|c| *c != 0) {
                     entry.character_net_guid = Some(c as u32);
@@ -376,33 +346,11 @@ impl ExportSink<'_> {
         }
     }
 
-    /// Attempt to decode the ClassNetCache RPC stream for an unresolved
-    /// `AbilitiesAndBuffsComponent` payload and emit one row per RPC.
-    ///
-    /// Gated on `AbilitiesAndBuffsComponent`, whose `_ClassNetCache` export
-    /// group is never declared in VALORANT replays. The function_count was
-    /// determined empirically by brute-forcing fc 2-256 across 9,274 payloads
-    /// from a reference replay: fc=34 is the minimum that walks **every**
-    /// payload cleanly, and each payload contains exactly one RPC at handle 1.
-    /// The inner payload follows FastArray custom-delta framing, validated on
-    /// 2,882,152 inner windows across 714 accepted exports. The separate
-    /// `extract_fastarray_observations.py` tool recovers replication keys,
-    /// item IDs and raw field boundaries. CNC framing can carry custom-delta
-    /// properties as well as RPCs; this legacy method name does not establish
-    /// an ability cast. This sink retains the inner bits without typing them.
-    ///
-    /// A per-payload brute-force (trying each fc independently) was rejected
-    /// because simple payloads can walk cleanly under smaller fc values,
-    /// producing garbage handles. Using a single constant fc avoids that: every
-    /// payload gets the same handle width. The clean outer walk alone does
-    /// not prove that width or the unknown group's declaration; the subsequent
-    /// independent inner-grammar checks provide stronger evidence. An update
-    /// can fail this walk or accidentally fit it, so consumers must retain the
-    /// raw parent and independently validate the inner structure.
-    ///
-    /// Several adjacent fc values (34-65) produce the same 6-bit handle width
-    /// for handle 1 and therefore identical walks. The constant is the minimum
-    /// of that range.
+    /// Walk an unresolved `AbilitiesAndBuffsComponent` payload's ClassNetCache
+    /// stream at [`ABILITIES_AND_BUFFS_FC`] and emit one `_cnc_h{N}` row per RPC
+    /// beside the preservation row. The framing can carry custom-delta
+    /// properties as well as RPCs, so this legacy name does not establish an
+    /// ability cast; the inner bits are kept, not typed.
     fn emit_brute_forced_cnc_rpcs(&mut self, payload: &[u8], bit_count: u32) {
         if !self
             .current_group_path
@@ -421,12 +369,10 @@ impl ExportSink<'_> {
 
         let total_len = u64::from(bit_count);
         for rpc in &rpcs {
-            // Extract the RPC's payload bits from the buffer. The brute-force
-            // already validated that each payload fits, so the read cannot
-            // fail on well-formed input; on a malformed tail the payload is
-            // dropped (the preservation row still carries the full blob).
-            // A zero-bit RPC keeps an empty blob here, where `copy_raw_bits`
-            // gives null. None has been observed; switching changes output.
+            // The walk validated that each payload fits; on a malformed tail the
+            // payload is dropped (the preservation row keeps the blob). A
+            // zero-bit RPC keeps an empty blob here, where `copy_raw_bits` gives
+            // null; none has been observed, and switching would change output.
             let raw_bits =
                 BitReader::with_bit_len(payload, total_len)
                     .ok()
@@ -504,11 +450,8 @@ impl ReplicationSink for ExportSink<'_> {
     }
     fn on_actor_open(&mut self, state: &ActorChannelState) {
         self.stats.actor_opens += 1;
-        // Track archetype GUID per channel so ClassNetCache path resolution can
-        // walk archetype -> outer path -> class name.
-        // Stamped with the actor it belongs to: channel numbers are recycled,
-        // and an entry left behind by the previous occupant would otherwise be
-        // read as this actor's. See `paths::ChannelArchetype`.
+        // Stamped with its actor, because channel numbers are recycled; see
+        // `paths::ChannelArchetype`.
         if state.archetype_net_guid.is_valid() {
             set_channel_archetype(
                 self.channel_state,
@@ -518,29 +461,19 @@ impl ReplicationSink for ExportSink<'_> {
             );
         }
 
-        // Resolve class_path from the archetype GUID's outer path.
-        //
-        // A static actor has no archetype: NewActorSerializer.cs:29 returns
-        // before reading the spawn block for anything that is not dynamic, so
-        // the reference leaves both ReplicationClassPath and ArchetypePath
-        // null. This used to fall back to the actor GUID's own path, on the
-        // stated premise that "for static actors the actor GUID path itself is
-        // the class". It is not -- that path is the level's instance name.
-        // 27 opens on 02d4d478 shipped `Ascent_C_0`, `AresWorldSettings`,
-        // `WindowShieldA1` and the like as replication class paths.
-        //
-        // Nothing is lost by dropping it: all 27 paths are byte-identical to
-        // the `path` column net_guids.parquet already carries for the same
-        // GUID, so a consumer that wants the instance name can join for it.
+        // A static actor has no archetype, so no class_path: the reference
+        // (NewActorSerializer.cs:29) reads no spawn block for it and leaves
+        // ReplicationClassPath and ArchetypePath null. Its GUID path is the
+        // level's instance name, not a class: as a fallback it put `Ascent_C_0`,
+        // `AresWorldSettings` and the like on 27 opens of 02d4d478, each
+        // byte-identical to net_guids.parquet's `path` for the same GUID.
         let (class_path, archetype_path) = self.actor_paths(Some(state.archetype_net_guid));
 
-        // Spawn location (only for dynamic actors that have it).
         let (spawn_x, spawn_y, spawn_z) = match state.spawn_location {
             Some(loc) => (Some(loc.x as f32), Some(loc.y as f32), Some(loc.z as f32)),
             None => (None, None, None),
         };
 
-        // Spawn rotation.
         let (spawn_pitch, spawn_yaw, spawn_roll) = match state.spawn_rotation {
             Some(rot) => (Some(rot.pitch), Some(rot.yaw), Some(rot.roll)),
             None => (None, None, None),
@@ -566,29 +499,16 @@ impl ReplicationSink for ExportSink<'_> {
     fn on_actor_close(&mut self, channel_index: u32, actor_net_guid: NetworkGuid, dormant: bool) {
         self.stats.actor_closes += 1;
 
-        // Resolve class_path from the channel's archetype (same logic as
-        // open, and the same absence for a static actor: no archetype means
-        // no class_path, full stop). The actor's own GUID path used to fill
-        // this gap, but that path is the level's instance name, not a class --
-        // exactly the fallback `on_actor_open` above dropped, for the same
-        // reason. Keeping it here meant the open row for a static actor
-        // shipped `class_path = NULL` while its close row shipped an instance
-        // name in the same column.
+        // As in `on_actor_open`, a static actor gets no class_path, so its open
+        // and close rows agree.
         let archetype = channel_archetype(self.channel_state, channel_index, actor_net_guid);
         let (class_path, archetype_path) = self.actor_paths(archetype);
 
-        // `ChannelCloseReason::Dormancy` means the server stopped replicating an
-        // actor that is still alive; every other reason is the actor going
-        // away. Both were written as "close", so a persistent effect settling
-        // into dormancy was exported as a despawn -- a lifetime that ends
-        // early, followed by a wake-up re-open that reads as a second spawn of
-        // the same object. The flag was already on the wire and already parsed
-        // (`packet.rs` sets `b_dormant` from the close reason); it just did not
-        // reach the row.
-        //
-        // Both events are still emitted, so no row and no timestamp is lost --
-        // only the label changes, and only for the closes that were never
-        // despawns.
+        // `ChannelCloseReason::Dormancy` (vrf-net's `b_dormant`) stops
+        // replication of a live actor; every other reason is the actor going
+        // away. As "close", a settling persistent effect read as a despawn and
+        // its wake-up as a second spawn. Both still emit a row; only the label
+        // differs.
         let event = if dormant { "dormant" } else { "close" };
 
         self.records.actors.push(ActorRecord {
@@ -619,19 +539,13 @@ impl ReplicationSink for ExportSink<'_> {
     ) -> u32 {
         self.current_channel = channel_index;
         self.current_actor_guid = actor_net_guid.0;
-        // Actor blocks describe the actor itself and carry no subobject GUID.
-        // For subobject blocks it identifies *which* subobject, which is the
-        // only way to tell one of a character's inventory item slots from
-        // another; merging them makes a player look like they hold one item.
-        //
-        // A subobject GUID of 0 is kept as `Some(0)`, not folded to `None`. The
-        // reference reads it unconditionally (`ContentBlockFramer.cs:436-437`)
-        // and branches on `!header.ObjectNetGuid.IsValid`
-        // (`ContentBlockPathResolver.cs:100`), so it treats the invalid GUID as
-        // reachable rather than impossible. `None` is not a safe stand-in for
-        // it: downstream `None` means "actor block", the adapter substitutes
-        // the actor GUID, and the block collapses onto the actor -- the merge
-        // cf97ecf existed to undo.
+        // An actor block carries no subobject GUID; a subobject block's GUID
+        // tells a character's inventory slots apart (merged, a player seems to
+        // hold one item). A GUID of 0 stays `Some(0)`: the reference reads it
+        // unconditionally (`ContentBlockFramer.cs:436-437`) and branches on its
+        // validity (`ContentBlockPathResolver.cs:100`), while downstream `None`
+        // means "actor block", the adapter substitutes the actor GUID, and the
+        // block collapses onto the actor -- the merge cf97ecf undid.
         self.current_object_guid = if header.is_actor {
             None
         } else {
@@ -659,10 +573,10 @@ impl ReplicationSink for ExportSink<'_> {
         };
 
         if self.current_is_abilities_and_buffs {
-            // 34 is the minimum compatible capacity in the measured 34..=65
-            // band, not a declared function count. It is safe only with the
-            // direct pre-remap component identity above and the strict shape
-            // checks below: one handle-1 RPC, exact end, set body flag.
+            // 34 is the minimum of the measured 34..=65 band, not a declared
+            // count: safe only with the direct pre-remap component identity
+            // above and the strict checks below (one handle-1 RPC, exact end,
+            // set body flag).
             if let Some(rpcs) = decode_cnc_payload(&raw_tail, bit_count, ABILITIES_AND_BUFFS_FC) {
                 if let [rpc] = rpcs.as_slice() {
                     let raw_body = (|| {
@@ -755,21 +669,12 @@ impl ReplicationSink for ExportSink<'_> {
             ..FieldValues::default()
         });
 
-        // Additive pass: brute-force the ClassNetCache function_count for
-        // groups whose RPC stream is well-formed but whose export group is
-        // never declared. The preservation row above stays regardless; each
-        // decoded RPC is an extra row.
+        // Additive: the fc=34 walk adds RPC rows; the row above stays.
         self.emit_brute_forced_cnc_rpcs(payload, failure.bit_count);
     }
 
-    /// Sample the decoded bytes of a block whose inner stream failed to walk.
-    ///
-    /// Framing calls this beside `on_stream_failure` for the same block (just
-    /// before or just after it, by failure path) whenever the decoded bytes
-    /// exist, so the aggregate's samples for the
-    /// real-loss shapes carry the payload that actually failed -- the
-    /// evidence a cause hypothesis needs. Bounded like every sample: the
-    /// first few per cell, payloads truncated.
+    /// Sample the payload of a block whose inner stream failed to walk; framing
+    /// calls it beside that block's `on_stream_failure` (before or after it).
     fn on_stream_failure_payload(&mut self, failure: StreamFailure, payload: &[u8]) {
         if let Some(failures) = self.channel_state.failures.as_mut() {
             failures.note_payload(&failure, Arc::clone(&self.current_group_path), payload);
@@ -780,20 +685,15 @@ impl ReplicationSink for ExportSink<'_> {
         self.channel_state.failure_aggregate_enabled()
     }
 
-    /// Attach the resolved group path to a stream failure.
-    ///
-    /// The replication layer knows the bit offsets but not the names; this is the
-    /// only place both are available, and the group path is what identifies the
-    /// class to investigate. Note `function_count`: zero names an unresolved
-    /// group, while a wrong non-zero count can still select the wrong handle
-    /// width. Counts 1 and 2 both use the parser's required minimum of 2 and are
-    /// therefore not distinguishable from this diagnostic alone.
-    ///
-    /// When diagnostics are enabled, the failure is also recorded into the
-    /// bounded [`FailureAggregate`](super::failure_stats::FailureAggregate), which makes population counts available
-    /// per group. `failure.payload_preserved` is the authoritative flag for
-    /// whether the failed stream reached a whole-payload raw row, including
-    /// unresolved ClassNetCache blocks and unparsed post-RepLayout tails.
+    /// Attach the resolved group path to a stream failure: the only place both
+    /// the bit offsets and the class to investigate are known. `function_count`
+    /// 0 names an unresolved group, a wrong non-zero count can still pick the
+    /// wrong handle width, and 1 and 2 both read at the parser's minimum of 2,
+    /// so this diagnostic cannot tell them apart. With diagnostics on, the
+    /// failure also goes to the bounded
+    /// [`FailureAggregate`](super::failure_stats::FailureAggregate) for per-group
+    /// population counts; `failure.payload_preserved` says whether the stream
+    /// reached a whole-payload raw row.
     fn on_stream_failure(&mut self, failure: StreamFailure) {
         let line = format!(
             "{:?} actor={} bits={} function_count={} consumed={} skipped={} group={}",
@@ -838,17 +738,8 @@ mod tests {
         sink.current_object_guid
     }
 
-    /// A subobject block whose object GUID is 0 must record `Some(0)`.
-    ///
-    /// The reference reads the field unconditionally
-    /// (`ContentBlockFramer.cs:436-437`) and then branches on
-    /// `!header.ObjectNetGuid.IsValid` in `ContentBlockPathResolver.cs:100`,
-    /// so it treats an invalid object GUID as a state that occurs rather than
-    /// one that cannot. Folding it to `None` here is not a no-op: `None` means
-    /// "actor block, no subobject at all", the adapter substitutes the actor
-    /// GUID for it, and every such block collapses back onto the actor -- the
-    /// exact merge cf97ecf existed to undo. `FieldRecord::object_net_guid`
-    /// documents the same distinction ("Kept distinct from `Some(0)`").
+    /// A subobject block whose object GUID is 0 records `Some(0)`, not `None`;
+    /// see `on_content_block` and `FieldRecord::object_net_guid`.
     #[test]
     fn a_subobject_block_keeps_a_zero_object_guid_distinct_from_none() {
         assert_eq!(
@@ -1258,11 +1149,9 @@ mod tests {
         assert_eq!(sink.stats.rep_layout_cnc_tails_preserved, 2);
     }
 
-    /// A truncated RPC payload -- the first parameter declares more bits than
-    /// the stream carries -- must bump `truncated_rpcs`. No parameter row lands
-    /// (the break fires before the field push), so the caller's raw_bits
-    /// fallback still fires; the counter is the only thing that distinguishes
-    /// this from a payload that simply had no parameters.
+    /// A first parameter declaring more bits than remain bumps `truncated_rpcs`:
+    /// no row lands, so the counter alone tells this from a payload with no
+    /// parameters.
     #[test]
     fn a_truncated_rpc_payload_increments_truncated_rpcs() {
         let mut bits = Vec::new();
@@ -1283,9 +1172,8 @@ mod tests {
         assert_eq!(sink.stats.truncated_rpcs, 1);
     }
 
-    /// A well-formed RPC payload -- one parameter then the zero-handle
-    /// terminator -- must leave `truncated_rpcs` at zero. This is the
-    /// byte-identical-output invariant on valid input.
+    /// One parameter then the zero-handle terminator leaves `truncated_rpcs` at
+    /// zero.
     #[test]
     fn a_completed_rpc_payload_leaves_truncated_rpcs_at_zero() {
         let mut bits = Vec::new();
@@ -1562,19 +1450,8 @@ mod tests {
         bits
     }
 
-    /// Bits left over after the zero-handle terminator must be counted.
-    ///
-    /// The terminator ended the walk without asking what was still in the
-    /// payload. Because a parameter had already been emitted, the caller's
-    /// whole-payload fallback row was suppressed too -- so the suffix reached
-    /// no row, no `truncated_rpcs`, and not even `skipped_bits`. Every leaf's
-    /// payload in this crate is checked for full consumption; the container's
-    /// was not.
-    ///
-    /// This counts rather than rejects. The rows already parsed are good, and
-    /// discarding them to punish a tail nobody has yet seen would lose data to
-    /// make a point. The counter is what turns "this cannot happen" into a
-    /// measurement.
+    /// Bits after the zero-handle terminator are counted, not rejected, and the
+    /// rows already parsed stay (see `ExportStats::rpc_suffix_bits_dropped`).
     #[test]
     fn bits_after_the_rpc_terminator_are_counted_not_discarded() {
         let bits = rpc_payload_with_suffix(16);
@@ -1833,12 +1710,8 @@ mod tests {
         }
     }
 
-    /// The one permitted leftover stays silent.
-    ///
-    /// `FunctionParameters` grammar allows a single trailing alignment bit
-    /// (`BitsRemaining == 1 -> SkipBits(1)`). Counting that would make the new
-    /// counter fire on well-formed payloads, which is how a real signal gets
-    /// ignored.
+    /// The one trailing alignment bit the grammar allows stays uncounted, or
+    /// the counter would fire on every well-formed payload.
     #[test]
     fn a_single_alignment_bit_after_the_rpc_terminator_is_not_a_drop() {
         for suffix in [0, 1] {
@@ -1966,18 +1839,9 @@ mod tests {
     }
 
     /// An `AbilitiesAndBuffsComponent` payload the fc=34 walk cannot fit is
-    /// counted, not dropped in silence.
-    ///
-    /// The walk used to end in `let Some(rpcs) = .. else { return; }`, which
-    /// moved nothing. `cnc_rpcs_emitted` counts successes only (and RepLayout
-    /// tail decodes as well), so a build whose handle width changed would
-    /// shrink `CNC RPC rows` with no line on the summary and no key in the
-    /// manifest naming a failure. The fc=34 constant is empirical; its own doc
-    /// says an update "can fail this walk".
-    ///
-    /// The payload declares 64 payload bits and carries 32, the shape a
-    /// misread handle width leaves behind. The preservation row still carries
-    /// every bit; what was missing is the count.
+    /// counted in `cnc_bruteforce_payloads_unwalked`. It declares 64 payload bits
+    /// and carries 32, the shape a misread handle width leaves; the preservation
+    /// row still carries every bit.
     #[test]
     fn unresolved_abilities_and_buffs_that_does_not_walk_is_counted() {
         let mut bits = Vec::new();
@@ -2020,16 +1884,10 @@ mod tests {
     }
 
     /// An unresolved payload for a group OTHER than AbilitiesAndBuffsComponent
-    /// must not produce CNC rows -- the brute-force is gated.
-    ///
-    /// The payload is the exact one
-    /// `unresolved_abilities_and_buffs_emits_cnc_rpc_row` proves walks cleanly
-    /// under fc=34 -- deliberately, not `[0xFF; 8]` (which
-    /// `decode_cnc_payload(&[0xFF; 8], 64, 34)` returns `None` for, i.e. it
-    /// does not walk at all). With a non-walking payload this test would stay
-    /// green even if the `current_group_path.contains("AbilitiesAndBuffsComponent")`
-    /// guard above were deleted, because `decode_cnc_payload` alone would
-    /// still refuse it -- so it would not be testing the gate.
+    /// produces no CNC rows: the brute force is gated. The payload is the one
+    /// `unresolved_abilities_and_buffs_emits_cnc_rpc_row` proves walks under
+    /// fc=34, not `[0xFF; 8]`, which `decode_cnc_payload` refuses by itself --
+    /// with that, deleting the group-path guard would leave this test green.
     #[test]
     fn unresolved_payload_for_other_group_emits_no_cnc_rows() {
         // Same construction as the fc=34 walking test: handle=1, 6 bits;
@@ -2069,20 +1927,8 @@ mod tests {
         assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 0);
         assert_eq!(sink.stats.cnc_bruteforce_payloads_unwalked, 0);
     }
-    /// A dormancy close is not a despawn, and must not be exported as one.
-    ///
-    /// `vrf-net` reads the channel close reason and hands the sink a `dormant`
-    /// flag; the sink took the flag as `_dormant` and wrote `"close"` for every
-    /// close there is. Dormancy means the server stopped replicating an actor
-    /// that is still alive -- exactly what a persistent effect does when it
-    /// settles -- so `actors.parquet` reported a despawn that never happened.
-    /// A consumer pairing `open` with `close` for lifetime ends the effect
-    /// early, and the wake-up re-open then reads as a second spawn of the same
-    /// thing.
-    ///
-    /// The fix is the flag reaching the row, not a filter: both events are
-    /// still emitted, so nothing is lost and the row count is unchanged. Only
-    /// the label stops lying.
+    /// A dormancy close is exported as `dormant`, not as a despawn; both still
+    /// emit a row and count as closes.
     #[test]
     fn a_dormancy_close_is_not_recorded_as_a_despawn() {
         let mut cache = NetGuidCache::new();
@@ -2106,14 +1952,11 @@ mod tests {
         assert_eq!(sink.stats.actor_closes, 2);
     }
 
-    /// A deleted block and a live one are both content blocks to the sink,
-    /// as they are to vrf-net.
-    ///
-    /// `NetStats::content_blocks` counts both kinds beside the callback it
-    /// makes, and `tools/verify_build_corpus.py` fails a replay whose
-    /// `sink_content_blocks` differs from it. A replay without deleted blocks
-    /// -- the 13.06 one this check was first measured on has none -- cannot
-    /// notice `on_deleted_block` forgetting its count, so it is pinned here.
+    /// Deleted and live blocks are both content blocks, as in vrf-net's
+    /// `NetStats::content_blocks`, which `tools/verify_build_corpus.py` checks
+    /// `sink_content_blocks` against. Pinned here because a replay without
+    /// deleted blocks (the 13.06 one first measured has none) cannot notice
+    /// `on_deleted_block` forgetting its count.
     #[test]
     fn deleted_and_live_blocks_both_advance_the_sink_block_tally() {
         let mut cache = NetGuidCache::new();
@@ -2150,11 +1993,8 @@ mod tests {
         assert_eq!(sink.records.fields.len(), 2);
     }
 
-    /// A static actor (no archetype) must not get its class_path filled in
-    /// from its own GUID path on close, the same way `on_actor_open` already
-    /// refuses to: that path is the level's instance name, not a class, and
-    /// filling it in only on close made the open and close rows for the same
-    /// static actor disagree.
+    /// A static actor's close row, like its open row, gets no class_path from
+    /// its own GUID path (the level's instance name, not a class).
     #[test]
     fn a_static_actors_close_row_does_not_fabricate_a_class_path_from_its_own_guid() {
         let mut cache = NetGuidCache::new();
@@ -2201,14 +2041,8 @@ mod tests {
         );
     }
 
-    /// Player identity has to survive a game mode that is not Bomb.
-    ///
-    /// Swiftplay replicates the same fields under
-    /// `Swiftplay_EoRCredits_PlayerState_C`. The overlay already handles that
-    /// through `GROUP_ALIASES`, but this capture compared the raw path against
-    /// `BombPlayerState` and so recorded nothing -- 4 of 64 demo replays came
-    /// out with an empty `manifest.players` while their `Subject` field was
-    /// present on all ten actors.
+    /// Player identity survives Swiftplay's `Swiftplay_EoRCredits_PlayerState_C`
+    /// through `canonical_group` (`GROUP_ALIASES`).
     #[test]
     fn player_identity_is_captured_on_a_swiftplay_player_state() {
         const SWIFT: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
@@ -2232,16 +2066,12 @@ mod tests {
         }
     }
 
-    /// A disconnect must not erase the character link.
-    ///
-    /// `SpawnedCharacter` is replicated twice: the real GUID about 60 ms in,
-    /// and then 0 when the player leaves. Last-write-wins kept the 0, so
-    /// `manifest.players.character_net_guid` was 0 for 9 players across 5 of
-    /// 69 demo replays -- and every one of those was a character that *did*
-    /// spawn, still reachable through its pawn's `PlayerState`. The cost was
-    /// paid downstream: spike custody went `unknown`, two planters went
-    /// unattributed, and the worst replay attributed only 73.2% of its
-    /// movement rows to a player.
+    /// A disconnect does not erase the character link. `SpawnedCharacter`
+    /// arrives about 60 ms in and again as 0 when the player leaves; keeping the
+    /// 0 made `manifest.players.character_net_guid` 0 for 9 spawned players
+    /// across 5 of 69 demo replays, which left spike custody `unknown`, two
+    /// planters unattributed, and the worst replay only 73.2% of its movement
+    /// rows attributed to a player.
     #[test]
     fn a_disconnect_does_not_erase_the_character_link() {
         let mut cache = NetGuidCache::new();
@@ -2279,11 +2109,8 @@ mod tests {
         }
     }
 
-    /// The 32-line failure window is a display buffer, and the aggregate must
-    /// not inherit its cap: a replay that fails 100 blocks keeps all 100 in
-    /// the aggregate while the line list stops at the usual 32. This is the
-    /// property the 2026-09-07 corpus lacked -- 714 saturated windows, no
-    /// population counts.
+    /// The aggregate does not inherit the 32-line window's cap: 100 failed
+    /// blocks stay 100 in the aggregate while the line list stops at 32.
     #[test]
     fn failures_past_the_line_cap_are_all_aggregated() {
         let mut cache = NetGuidCache::new();
