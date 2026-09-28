@@ -25,11 +25,12 @@
 //! `NetGuidCache::schema_generation`, `NetGuidCache::guid_generation` and
 //! `ChannelState::resolution_generation` -- none of which covers another:
 //! `schema_generation` explicitly does not track field or GUID mutations, and
-//! `resolution_generation` is bumped only from this crate's own
-//! `register_path`/`on_actor_open`, not from the frame-level ExportData
-//! section that also calls `NetGuidCache::set_net_guid_path` directly. A
-//! change in any one of the three discards the whole memo, so a hit is
-//! indistinguishable from a recomputation.
+//! `resolution_generation` moves only with the archetype map
+//! (`on_actor_open`/`on_actor_close`). GUID mappings arrive both through this
+//! crate's `register_path` and from the frame-level ExportData section, which
+//! calls `NetGuidCache::set_net_guid_path` directly; `guid_generation` is the
+//! one stamp that sees both. A change in any one of the three discards the
+//! whole memo, so a hit is indistinguishable from a recomputation.
 //!
 //! The value is the pair `(group path, function count)` rather than just the
 //! path, because `resolve_function_count` can *replace* the resolved path (the
@@ -447,12 +448,12 @@ pub(super) struct BlockPathMemo {
     schema_generation: u64,
     /// `ChannelState::resolution_generation` when `entries` was last valid.
     resolution_generation: u64,
-    /// `NetGuidCache::guid_generation` when `entries` was last valid. Needed
-    /// separately from `resolution_generation`: the frame-level ExportData
-    /// section (`vrf_frame::read_export_data` -> `NetGuidCache::set_net_guid_path`)
-    /// mutates the cache's GUID -> path / GUID -> outer maps directly, once per
-    /// frame, without going through `ExportSink::register_path` -- the only
-    /// place `resolution_generation` is bumped for a GUID registration.
+    /// `NetGuidCache::guid_generation` when `entries` was last valid. The only
+    /// stamp that covers the cache's GUID -> path / GUID -> outer maps: the
+    /// frame-level ExportData section (`vrf_frame::read_export_data` ->
+    /// `NetGuidCache::set_net_guid_path`) mutates them directly, once per
+    /// frame, without going through `ExportSink::register_path`, and a
+    /// `register_path` write moves this stamp and no other.
     guid_generation: u64,
     entries: FxHashMap<BlockKey, (Arc<str>, u32, &'static str, &'static str)>,
 }
@@ -1615,9 +1616,10 @@ mod tests {
     ///
     /// This drives the exact staleness the generation stamps exist to prevent:
     /// the same key resolved twice, with a GUID -> path registration in
-    /// between. Without `note_resolution_input_changed` in `register_path` the
-    /// second call returns the first call's answer, which is byte movement no
-    /// other test in this crate would catch.
+    /// between. The registration moves only `NetGuidCache::guid_generation`,
+    /// so without that stamp in `BlockPathMemo::get` the second call returns
+    /// the first call's answer. The next test pins the same stamp for a write
+    /// that bypasses `register_path`.
     #[test]
     fn a_guid_path_registration_invalidates_the_memo() {
         use vrf_net::net_guid::GuidPathSink;

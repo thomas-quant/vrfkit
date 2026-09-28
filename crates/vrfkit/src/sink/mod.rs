@@ -103,11 +103,12 @@ pub struct ChannelState {
     block_paths: BlockPathMemo,
     /// See [`NameInterner`].
     names: NameInterner,
-    /// Bumped whenever an input to group-path resolution that
-    /// `NetGuidCache::schema_generation` does NOT cover changes: the cache's
-    /// GUID -> path and GUID -> outer maps, and this struct's archetype map.
-    /// [`BlockPathMemo`] stamps itself with this and the schema generation
-    /// together; between them they cover every input the resolution reads.
+    /// Bumped whenever this struct's archetype map changes: the one input to
+    /// group-path resolution that lives here rather than in the cache.
+    /// [`BlockPathMemo`] stamps itself with this, the cache's
+    /// `schema_generation` (declared group paths) and its `guid_generation`
+    /// (GUID -> path and GUID -> outer maps); only the three together cover
+    /// every input the resolution reads.
     resolution_generation: u64,
     /// One line per content block that framed and decoded but whose inner stream
     /// could not be walked.
@@ -179,11 +180,13 @@ impl ChannelState {
 
     /// Declare that something group-path resolution reads has changed.
     ///
-    /// Call sites are deliberately few -- the GUID registration in
-    /// [`GuidPathSink::register_path`] and the archetype assignment in
-    /// `on_actor_open` -- because every one of them is a place the memo could
-    /// go stale. Adding a resolution input without a call here is silent byte
-    /// movement, not a test failure.
+    /// Call sites are deliberately few -- the archetype assignment and
+    /// retirement in `paths` (`set_channel_archetype` from `on_actor_open`,
+    /// `retire_channel_archetype` from `on_actor_close`) -- because every one
+    /// of them is a place the memo could go stale. The cache's GUID maps are
+    /// not among them: `NetGuidCache::guid_generation` stamps those. Adding a
+    /// resolution input that no stamp covers is silent byte movement, not a
+    /// test failure.
     fn note_resolution_input_changed(&mut self) {
         self.resolution_generation = self.resolution_generation.wrapping_add(1);
     }
@@ -710,13 +713,14 @@ fn empty_group_path() -> Arc<str> {
 impl GuidPathSink for ExportSink<'_> {
     /// Record a GUID -> path mapping the wire declared inline.
     ///
-    /// The write is skipped when it would change nothing. That is not only an
-    /// allocation saving: [`BlockPathMemo`] keys on a generation counter that
-    /// must move whenever a resolution input moves, and the cache's GUID -> path
-    /// and GUID -> outer maps are two of those inputs. Deciding "did this
-    /// change" here is what lets the memo stay exactly equivalent to
-    /// recomputing, instead of being invalidated by every re-declaration of a
-    /// mapping the cache already held.
+    /// The write is skipped when it would change nothing, which saves the
+    /// `path.to_string()` allocation. The memo does not rely on the skip:
+    /// `set_net_guid_path` makes the same comparison (a zero outer is `None`
+    /// in both) and moves `NetGuidCache::guid_generation`, the stamp
+    /// [`BlockPathMemo`] reads for the cache's GUID -> path and GUID -> outer
+    /// maps, only when something changed. So nothing needs bumping here: any
+    /// call that gets past the check moves that stamp inside
+    /// `set_net_guid_path`.
     ///
     /// Both halves of the state are compared, not just the path. A repeat call
     /// carrying the same path but an invalid outer *removes* the outer in
@@ -735,7 +739,6 @@ impl GuidPathSink for ExportSink<'_> {
             return;
         }
         self.cache.set_net_guid_path(guid, path.to_string(), outer);
-        self.channel_state.note_resolution_input_changed();
     }
 
     fn path_for_guid(&self, guid: u32) -> Option<&str> {
