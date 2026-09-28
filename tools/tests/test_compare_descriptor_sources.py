@@ -141,11 +141,9 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
             self.assertEqual((after_head, after_status), (before_head, before_status))
 
     def test_git_revision_input_does_not_depend_on_the_tar_on_path(self):
-        """A revision is unpacked in-process. It used to shell out to the first
-        `tar` on PATH, which on Windows is GNU tar under Git Bash (it refuses a
-        `C:\\` destination) and bsdtar elsewhere, so the same command passed or
-        failed by shell. A tar that always fails, placed first on PATH, must not
-        matter."""
+        """A revision is unpacked in-process, so a tar that always fails,
+        placed first on PATH, must not matter (Git Bash's GNU tar refuses a
+        `C:\\` destination)."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = root / "repo"
@@ -170,9 +168,8 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
             self.assertTrue(output.exists())
 
     def test_a_localized_git_failure_keeps_its_message(self):
-        """git on a Korean-locale Windows writes cp949. Its stderr was decoded
-        as strict UTF-8, so a failing git call surfaced as a UnicodeDecodeError
-        naming a byte instead of the message git printed."""
+        """git on a Korean-locale Windows writes cp949; a failing call must
+        surface git's message, not a UnicodeDecodeError naming a byte."""
         localized = "fatal: \uc798\ubabb\ub41c \uac1c\uccb4 \uc774\ub984".encode("cp949")
         real_run = subprocess.run
 

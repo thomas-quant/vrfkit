@@ -6,8 +6,8 @@ The first nine cases are every executable example currently in
 one-byte empty arrays.  The Rust module is a format specification only; this
 script deliberately calls the Python decoder that produces the valplay bundle.
 
-The two ``reference_*`` cases use the C# reference bundle at
-``valplay/pipeline/exports/02d4d478-1dfb-4412-9a77-29ca29105a9d/events.ndjson``:
+The two ``reference_*`` cases come from the C# reference bundle's
+``events.ndjson`` for replay 02d4d478:
 
 * packet 39959, ``FloatValues``: adds ``FiringState.BurstShotNumber``;
 * packet 15347, ``ObjectValues``: adds a singleton ``FXC.EffectContext``.

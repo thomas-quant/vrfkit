@@ -59,8 +59,8 @@ PATH_GROUP = "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:Multi
 
 class Bits:
     def __init__(self, data: bytes, length: int):
-        # A ValueError, which main() reports per row; an assert escaped it as
-        # a traceback, and `python -O` removes it.
+        # A ValueError, which main() reports per row, not an assert: that
+        # escapes as a traceback, and `python -O` removes it.
         if len(data) * 8 < length:
             raise ValueError(f"raw_bits holds {len(data) * 8} bits, bit_count says {length}")
         self.data = data

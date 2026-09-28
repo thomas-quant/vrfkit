@@ -57,10 +57,8 @@ SINK_ZERO = (
 #: Each sink event tally the manifest publishes, and the NetStats counter it
 #: must equal. vrf-net calls the sink right beside its own increment for each
 #: of these events, so the two are one count taken twice; a difference means
-#: the sink's bookkeeping (a missing or extra `+= 1`) is broken. The export
-#: summary printed both sides as `Sink tally` for exactly this comparison, and
-#: nothing performed it. The sink's `fields_emitted` has no pair: it counts
-#: emitted rows, not framed properties.
+#: the sink's bookkeeping (a missing or extra `+= 1`) is broken. The sink's
+#: `fields_emitted` has no pair: it counts emitted rows, not framed properties.
 SINK_NET_EQUAL = (
     ("sink_rpcs_emitted", "rpcs"),
     ("sink_actor_opens", "actor_opens"),

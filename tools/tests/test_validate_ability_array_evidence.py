@@ -84,9 +84,8 @@ class AbilityArrayEvidenceTests(unittest.TestCase):
                 evidence.inspect(row, spec)
 
     def test_a_payload_shorter_than_its_bit_count_is_a_reported_failure(self):
-        """main() reports each row's ValueError and moves on. This check was an
-        `assert`: an AssertionError escaped that handler as a traceback, and
-        under `python -O` it vanished and the read ran off the payload."""
+        """main() reports each row's ValueError and moves on; an `assert` would
+        escape that handler, and vanish under `python -O`."""
         key = next(key for key in evidence.ROUTES if key[1] == "ActiveBlinds")
         row = {"field_name": key[1], "raw_bits": b"\x02", "bit_count": 16}
         with self.assertRaisesRegex(ValueError, "bit_count"):
@@ -94,7 +93,7 @@ class AbilityArrayEvidenceTests(unittest.TestCase):
 
     def test_an_int_packed_fifth_byte_past_32_bits_is_refused(self):
         """Only four bits of the fifth byte fit in a u32, the limit vrf-bitio
-        and validate_type_evidence enforce; a larger chunk was accepted."""
+        and validate_type_evidence enforce."""
         self.assertEqual(evidence.Bits(b"\xff\xff\xff\xff\x1e", 40).packed(), 0xFFFFFFFF)
         with self.assertRaisesRegex(ValueError, "IntPacked"):
             evidence.Bits(b"\xff\xff\xff\xff\x20", 40).packed()

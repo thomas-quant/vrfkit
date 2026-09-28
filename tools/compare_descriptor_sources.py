@@ -47,8 +47,7 @@ TYPE_MARKER = "field_type:"
 
 def run_git(repo: Path, *args: str) -> str:
     # errors="replace": git's messages follow the locale (cp949 on a Korean
-    # Windows). Strict UTF-8 turned a failing call into a decode error, or on
-    # Windows a None stderr, instead of git's message.
+    # Windows), and strict UTF-8 would lose git's message to a decode error.
     result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
                             text=True, encoding="utf-8", errors="replace", check=False)
     if result.returncode:
@@ -154,13 +153,10 @@ def extract_table(source_dir: Path, output: Path) -> tuple[dict[tuple[str, str],
 
 
 def record_csharp_source_changes(baseline_dir: Path, candidate_dir: Path) -> list[dict[str, object]]:
-    """Keep an extractor blind spot visible instead of calling it no change.
-
-    The generator deliberately accepts only C# shapes it understands.  A newly
-    added descriptor using a path constant can therefore add no overlay row;
-    hashing the input files makes that fact reviewable without pretending the
-    source addition was a parsed schema entry.
-    """
+    """Keep an extractor blind spot visible instead of calling it no change:
+    the generator accepts only C# shapes it understands, so a new descriptor
+    using a path constant adds no overlay row, and hashing the input files
+    makes that reviewable."""
     def files(root: Path) -> dict[str, str]:
         return {path.relative_to(root).as_posix():
                 hashlib.sha256(path.read_bytes()).hexdigest()
@@ -220,11 +216,10 @@ def source_from_spec(spec: str, workspace: Path) -> tuple[Path, dict[str, object
                          f"{archive.stderr.decode(errors='replace').strip()}")
     unpacked = workspace / f"source-{len(list(workspace.iterdir()))}"
     unpacked.mkdir()
-    # Unpacked in-process, not with whatever `tar` is first on PATH. On Windows
-    # that is Git for Windows' GNU tar inside Git Bash, which reads the drive
-    # colon in `-C C:\...` as a remote host and refuses, and System32's bsdtar
-    # everywhere else -- so the same command passed from PowerShell and failed
-    # from Git Bash. The `data` filter refuses absolute and escaping members.
+    # Unpacked in-process, not with the first `tar` on PATH: Git Bash's GNU tar
+    # reads the drive colon in `-C C:\...` as a remote host, so the result
+    # depended on the shell. The `data` filter refuses absolute and escaping
+    # members.
     try:
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
             tar.extractall(unpacked, filter="data")
