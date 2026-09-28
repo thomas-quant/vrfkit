@@ -133,7 +133,10 @@ errors.
 The same investigation measured `AuthInitialRandomSeed`: 1,752,939 main rows
 and 567,321 checkpoint rows, all exactly 32 bits. None sets the high bit, so
 signed and unsigned interpretations give the same numbers. No explicit local
-property type declaration was found. Its signedness remains unestablished.
+property type declaration was found, and no upstream declaration at `b51d674`
+or in its pull requests settles it, `InputEventData`'s actions or
+`StopEffectType` either ([2026-09-09 recheck](archive/UPSTREAM_VALUE_RESEARCH.md)).
+Its signedness remains unestablished.
 
 Every main Initial row has an exactly matching Current seed at the same actor,
 object, time and packet. Checkpoints contain 434,312 equal and 133,009 differing

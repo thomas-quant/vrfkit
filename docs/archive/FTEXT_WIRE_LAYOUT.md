@@ -1,4 +1,4 @@
-# `FText` wire-layout research
+# `FText` wire-layout research [ARCHIVED -- HISTORICAL]
 
 Research snapshot: `vrfkit` commit `922ac1c46d52f0e642cb78ccefc9517792c266d9` (2026-09-08 investigation).
 
