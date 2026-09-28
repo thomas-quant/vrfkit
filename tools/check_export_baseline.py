@@ -737,8 +737,11 @@ def main() -> int:
     ap.add_argument("--update", action="store_true",
                     help="rewrite the baseline from the current numbers")
     ap.add_argument("--checkpoints", action="store_true",
-                    help="run the optional Checkpoint pass and pin its counters "
-                         "and checkpoint_fields.parquet too")
+                    help="also run the optional Checkpoint pass: pin its summary "
+                         "counters and every checkpoint_*.parquet table, require "
+                         "its manifest block (no dropped actor rows, GUID path "
+                         "counts that add up and match the summary), and "
+                         "cross-check its GUID paths against net_guids.parquet")
     ap.add_argument("--require-input", action="store_true",
                     help="fail instead of skipping when the replay is absent")
     args = ap.parse_args()
