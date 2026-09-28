@@ -2,7 +2,7 @@
 
 An inventory of raw/untyped wire rows, not a decoder or a semantic claim. A
 row is untyped only when all four ``value_*`` columns are null (0, ``False``
-and "" are typed); ``raw_bit_sum`` sums their declared ``bit_count``, not
+and "" are typed); every ``*_bit_sum`` sums their declared ``bit_count``, not
 payload values. Inputs are exports or parents of exports, read-only; the
 output directory gets a summary and a deterministic JSON catalog, with main
 and checkpoint entries apart because they are different decode paths.
