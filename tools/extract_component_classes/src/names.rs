@@ -40,43 +40,37 @@ pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
     for (i, h) in headers.chunks_exact(2).enumerate() {
         let wide = h[0] & 0x80 != 0;
         let len = (usize::from(h[0] & 0x7f) << 8) | usize::from(h[1]);
-        if wide {
-            // Not aligned: a UTF-16 name starts wherever the previous name
-            // ended, odd offsets included. Aligning it to two bytes -- which
-            // looks natural for UTF-16 -- misread 26 packages of the 13.06
-            // containers, every one holding a Chinese texture name at an odd
-            // offset, and every later name in the batch with it.
-            let end = p + len * 2;
-            if end > strings.len() {
-                return fail(format!(
-                    "name batch at offset {at}: name {i} ({len} UTF-16 units) overruns the {}-byte string block",
-                    strings.len()
-                ));
-            }
-            let units: Vec<u16> = strings[p..end]
+        // Not aligned: a UTF-16 name starts wherever the previous name
+        // ended, odd offsets included. Aligning it to two bytes -- which
+        // looks natural for UTF-16 -- misread 26 packages of the 13.06
+        // containers, every one holding a Chinese texture name at an odd
+        // offset, and every later name in the batch with it.
+        let (end, unit) = if wide {
+            (p + len * 2, "UTF-16 units")
+        } else {
+            (p + len, "bytes")
+        };
+        if end > strings.len() {
+            return fail(format!(
+                "name batch at offset {at}: name {i} ({len} {unit}) overruns the {}-byte string block",
+                strings.len()
+            ));
+        }
+        let raw = &strings[p..end];
+        out.push(if wide {
+            let units: Vec<u16> = raw
                 .chunks_exact(2)
                 .map(|u| u16::from_le_bytes([u[0], u[1]]))
                 .collect();
-            match String::from_utf16(&units) {
-                Ok(s) => out.push(s),
-                Err(_) => {
-                    return fail(format!(
-                        "name batch at offset {at}: name {i} is not valid UTF-16"
-                    ));
-                }
-            }
-            p = end;
+            String::from_utf16(&units).or_else(|_| {
+                fail(format!(
+                    "name batch at offset {at}: name {i} is not valid UTF-16"
+                ))
+            })?
         } else {
-            let end = p + len;
-            if end > strings.len() {
-                return fail(format!(
-                    "name batch at offset {at}: name {i} ({len} bytes) overruns the {}-byte string block",
-                    strings.len()
-                ));
-            }
-            out.push(latin1(&strings[p..end]));
-            p = end;
-        }
+            latin1(raw)
+        });
+        p = end;
     }
     if p != strings.len() {
         return fail(format!(
