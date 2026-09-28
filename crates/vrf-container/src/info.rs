@@ -21,7 +21,7 @@
 use vrf_bitio::BitReader;
 
 use crate::error::ContainerError;
-use crate::io::{read_fstring, read_i32, read_u32};
+use crate::io::{read_fstring, read_guid, read_i32, read_i64, read_u32};
 use crate::limits::{
     EXPECTED_FILE_VERSION, FILE_MAGIC, LOCAL_REPLAY_GUID, LOCAL_REPLAY_VERSION,
     MAX_CUSTOM_VERSION_COUNT, MAX_ENCRYPTION_KEY_BYTES, MAX_FRIENDLY_NAME_BYTES,
@@ -188,31 +188,4 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
         },
         bytes_consumed,
     ))
-}
-
-// --- Helpers ------------------------------------------------------------------
-fn read_i64(reader: &mut BitReader<'_>, context: &'static str) -> Result<i64, ContainerError> {
-    // 4, not 8: this arm fires when the LOW word alone could not be read, and
-    // every other Truncated in this crate reports the width of the read that
-    // actually failed. Reporting the whole i64 here made a 4-byte shortfall
-    // look like an 8-byte one in the error text.
-    let lo = reader.read_u32().map_err(|_| ContainerError::Truncated {
-        context,
-        needed: 4,
-        available: (reader.bits_remaining() / 8) as usize,
-    })?;
-    let hi = reader.read_u32().map_err(|_| ContainerError::Truncated {
-        context,
-        needed: 4,
-        available: (reader.bits_remaining() / 8) as usize,
-    })?;
-    Ok(i64::from(lo) | (i64::from(hi) << 32))
-}
-/// Read an Unreal GUID: four u32 values stored as 16 little-endian bytes.
-fn read_guid(reader: &mut BitReader<'_>) -> Result<[u32; 4], ContainerError> {
-    let a = read_u32(reader, "guid")?;
-    let b = read_u32(reader, "guid")?;
-    let c = read_u32(reader, "guid")?;
-    let d = read_u32(reader, "guid")?;
-    Ok([a, b, c, d])
 }

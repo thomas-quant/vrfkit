@@ -36,7 +36,7 @@
 use vrf_bitio::BitReader;
 
 use crate::error::ContainerError;
-use crate::io::{read_fstring, read_i32, read_u32};
+use crate::io::{read_f32, read_fstring, read_guid, read_i32, read_u16, read_u32};
 use crate::limits::{
     CUSTOM_VERSION_ENTRY_BYTES, EXPECTED_ENGINE_NET_PROTO_VERSION, EXPECTED_NETWORK_VERSION,
     MAX_CUSTOM_VERSION_COUNT, MAX_FSTRING_BYTES, MAX_GAME_SPECIFIC_DATA, MAX_LEVEL_NAMES_AND_TIMES,
@@ -158,12 +158,7 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
     let game_network_protocol_version = read_u32(&mut reader, "game net proto version")?;
 
     // --- GUID -------------------------------------------------------------
-    let guid = [
-        read_u32(&mut reader, "guid")?,
-        read_u32(&mut reader, "guid")?,
-        read_u32(&mut reader, "guid")?,
-        read_u32(&mut reader, "guid")?,
-    ];
+    let guid = read_guid(&mut reader)?;
 
     // --- Replay version ---------------------------------------------------
     let major = read_u16(&mut reader, "replay version major")?;
@@ -289,22 +284,5 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         build_config,
         build_target_type,
         trailing_bytes,
-    })
-}
-
-// --- Helpers ------------------------------------------------------------------
-fn read_u16(reader: &mut BitReader<'_>, context: &'static str) -> Result<u16, ContainerError> {
-    reader.read_u16().map_err(|_| ContainerError::Truncated {
-        context,
-        needed: 2,
-        available: (reader.bits_remaining() / 8) as usize,
-    })
-}
-
-fn read_f32(reader: &mut BitReader<'_>, context: &'static str) -> Result<f32, ContainerError> {
-    reader.read_f32().map_err(|_| ContainerError::Truncated {
-        context,
-        needed: 4,
-        available: (reader.bits_remaining() / 8) as usize,
     })
 }
