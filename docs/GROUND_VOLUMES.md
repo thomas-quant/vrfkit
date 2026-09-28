@@ -29,9 +29,10 @@ one cell: an integer grid position `X`/`Y`, a polygon of world-space points
 (`ConvexHullPoints`), per-point ceilings and travel distances, a floor, a
 ceiling, a mean travel distance, a 3-bit `Status`, a `bIsActive` bit, the
 item value the replay names `253`, and `ExteriorSegments` index pairs into the
-polygon. Every name here is the one the replay itself declares. Two of them
-are not the game's own: `253` is the member `ID`, and `X`/`Y` are the members
-of `GridPos`, as the declared checksums show ([Types](#types)).
+polygon. Every name here is the one the replay itself declares. Two need a
+note, both shown by the declared checksums ([Types](#types)): `253` is the
+engine's name index for the member `ID`, and `X`/`Y` are the members of
+`GridPos`, not of the cell itself.
 
 On the whole corpus:
 
