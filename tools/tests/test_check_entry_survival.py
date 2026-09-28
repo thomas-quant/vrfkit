@@ -486,14 +486,12 @@ class LoadTests(unittest.TestCase):
         self.assertEqual([p.name for p in stats.skipped], [".a.vrfkit-staging-12-3"])
 
     def test_main_reads_the_real_tables_and_the_committed_expected_list(self):
-        """End to end: `TeamEconomy` leaving BombGameState in 13.02 is the
-        listed item, so it reads `expected`; with an empty list it fails."""
-        bomb = "/Game/GameModes/Bomb/BombGameState.BombGameState_C"
+        """End to end: every committed item names a finding this input
+        reproduces through the real tables, so each reads `expected`; with an
+        empty list the run fails."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "exports"
-            for i in range(12):
-                write_export(root / f"a{i}", "13.01", {bomb: [("TeamEconomy", 338800366, 52)]})
-                write_export(root / f"b{i}", "13.02", {bomb: [("TeamStates", 929598027, 52)]})
+            write_committed_findings(root)
             empty = Path(tmp) / "empty.json"
             empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
             report = Path(tmp) / "report.json"
@@ -506,10 +504,70 @@ class LoadTests(unittest.TestCase):
             data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(listed, 0, out.getvalue())
         self.assertEqual(unlisted, 1)
-        self.assertIn("FAILED", err.getvalue())
+        self.assertIn("FAILED: 2 entr(y/ies)", err.getvalue())
+        self.assertEqual(data["stale_expected"], [])
         economy = [f for f in data["findings"] if f["entry"].endswith("|TeamEconomy")]
         self.assertEqual([(f["category"], f["evidenced"], f["expected"]) for f in economy],
                          [("field-missing", True, True)])
+        # 13.02 judges the old group again (12 + 12 replays do not fill the
+        # reference window), as vanished and weak; only 13.01 is the move.
+        stopped = [f for f in data["findings"]
+                   if f["entry"] == f"table|{CAGE_OLD}|HasStopped" and f["build"] == "13.01"]
+        self.assertEqual([(f["category"], f["coverage"], f["evidenced"], f["expected"])
+                          for f in stopped], [("moved", "lost", True, True)])
+        self.assertEqual(stopped[0]["successors"][0]["group"], CAGE_NEW)
+        self.assertEqual(stopped[0]["coverage_detail"], "the successor does not declare HasStopped")
+        self.assertRegex(out.getvalue(), r"expected\s+lost\s+table\s+HasStopped: the successor "
+                                         r"does not declare HasStopped")
+        self.assertEqual(sum(f["fails"] for f in data["findings"]), 0)
+
+    def test_each_committed_item_is_needed(self):
+        """Drop either committed item and its finding fails the run by name --
+        the list honours HasStopped only while the item is there."""
+        items = json.loads(guard.EXPECTED_JSON.read_text(encoding="utf-8"))["expected"]
+        self.assertEqual(sorted(i["entry"].rsplit("|", 1)[1] for i in items),
+                         ["HasStopped", "TeamEconomy"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "exports"
+            write_committed_findings(root)
+            for dropped in items:
+                name = dropped["entry"].rsplit("|", 1)[1]
+                with self.subTest(dropped=name):
+                    path = Path(tmp) / "partial.json"
+                    path.write_text(json.dumps({"expected": [i for i in items if i is not dropped]}),
+                                    encoding="utf-8")
+                    with contextlib.redirect_stdout(io.StringIO()) as out, \
+                            contextlib.redirect_stderr(io.StringIO()) as err:
+                        code = guard.main(["--root", str(root), "--expected", str(path)])
+                    self.assertEqual(code, 1)
+                    self.assertIn("FAILED: 1 entr(y/ies)", err.getvalue())
+                    self.assertNotIn("STALE", err.getvalue())
+                    self.assertRegex(out.getvalue(), rf"FAIL\s.*\b{name}\b")
+
+
+#: Cypher's cage-trap projectile before and after the 13.01 move, with the
+#: fields, handles and checksums declaration corpus r3 has for them: the old
+#: group adds HasStopped, the successor never declares it.
+CAGE_OLD = ("/Game/Characters/Gumshoe/S0/Ability_4/Projectile_Gumshoe_4_CageTrap."
+            "Projectile_Gumshoe_4_CageTrap_C")
+CAGE_NEW = ("/Game/Characters/Gumshoe/S0/Ability_Q/Projectile_Gumshoe_Q_CageTrap."
+            "Projectile_Gumshoe_Q_CageTrap_C")
+CAGE_FIELDS = [("216", 4109980037, 3), ("ReplicatedMovement", 2749104612, 10),
+               ("Owner", 1022089157, 11), ("215", 1710918439, 12), ("Instigator", 220456479, 13)]
+HAS_STOPPED = ("HasStopped", 3667634484, 15)
+
+
+def write_committed_findings(root: Path):
+    """Exports that reproduce both committed findings through the real
+    tables, 12 replays a build: the cage projectile declared with HasStopped
+    in 12.08 and moved without it in 13.01; `TeamEconomy` declared in 13.01
+    and replaced by `TeamStates` in 13.02."""
+    bomb = "/Game/GameModes/Bomb/BombGameState.BombGameState_C"
+    for i in range(12):
+        write_export(root / f"c{i}", "12.08", {CAGE_OLD: CAGE_FIELDS + [HAS_STOPPED]})
+        write_export(root / f"a{i}", "13.01", {bomb: [("TeamEconomy", 338800366, 52)],
+                                               CAGE_NEW: CAGE_FIELDS})
+        write_export(root / f"b{i}", "13.02", {bomb: [("TeamStates", 929598027, 52)]})
 
 
 if __name__ == "__main__":
