@@ -28,24 +28,16 @@ SCHEMA_VERSION = 2
 #: Every route's rows carry handle 1. A selected row with another handle is
 #: rejected as `route_identity`, so it is counted rather than skipped.
 ROUTE_HANDLE = 1
-#: route -> exact (group_path, field_name) as the parser exports it. Both name
-#: the handle-1 payload of an AbilitiesAndBuffsComponent ClassNetCache stream,
-#: sliced payload_offset..+payload_bits after the same fc=34 outer walk
-#: (decode_cnc_payload), so both windows start at the FastArray support bit and
-#: decode() reads them unchanged. In crates/vrfkit/src/sink/stream.rs:
-#:
-#:   cnc_h1          emit_brute_forced_cnc_rpcs: whole unresolved CNC payloads.
-#:                   The row keeps the group AbilitiesAndBuffsComponent.
-#:   chained_cnc_h1  on_rep_layout_tail: a CNC tail after a RepLayout prefix.
-#:                   It is emitted only for the pre-remap AbilitiesAndBuffs
-#:                   identity, exactly one handle-1 RPC and a set first bit.
-#:                   That bit is checked on a clone, so it stays in raw_bits.
-#:                   The row takes the remapped group
-#:                   /Script/ShooterGame.AresAbilitySystemComponent.
-#:
-#: These are pairs, not a cross product. Until 2026-09-28 the tool matched the
-#: group AbilitiesAndBuffsComponent with either name. No export carries the
-#: chained name under that group, so the chained route never selected a row.
+#: route -> the exact (group_path, field_name) pair, not a cross product. Both
+#: are the handle-1 payload of an AbilitiesAndBuffs ClassNetCache stream after
+#: the same fc=34 outer walk (decode_cnc_payload), starting at the FastArray
+#: support bit. In crates/vrfkit/src/sink/stream.rs:
+#:   cnc_h1          emit_brute_forced_cnc_rpcs: whole unresolved CNC payloads,
+#:                   group AbilitiesAndBuffsComponent.
+#:   chained_cnc_h1  on_rep_layout_tail: a CNC tail after a RepLayout prefix,
+#:                   only for the pre-remap identity, exactly one handle-1 RPC
+#:                   and a set first bit (checked on a clone, so it stays in
+#:                   raw_bits); group /Script/ShooterGame.AresAbilitySystemComponent.
 ROUTES = {
     "cnc_h1": ("AbilitiesAndBuffsComponent", "_cnc_h1"),
     "chained_cnc_h1": ("/Script/ShooterGame.AresAbilitySystemComponent",
@@ -59,38 +51,23 @@ def _builds(*versions: str) -> frozenset[str]:
     return frozenset(f"++Ares-Core+release-{v}" for v in versions)
 
 
-#: (route, stream) -> builds whose windows on that route and stream were all
-#: walked exactly. This is a measured list, not a supported-builds list. A row
-#: from any other build is rejected with `unvalidated_build`. A route and
-#: stream with no measured build at all rejects every row with
-#: `unvalidated_checkpoint_route`, or `unvalidated_main_route` on the main
-#: stream. Any of these keeps the exit nonzero until someone measures that
-#: combination.
-#:
-#: 2026-09-09: cnc_h1 main rows of 13.01, 13.02, 13.04 and 13.05 -- 2,882,152
-#: windows in 714 exports; see docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md.
-#:
-#: 2026-09-28: every export of the 1,018-replay common audit made by parser
-#: 259ed10. Both field tables were scanned for each route's exact group and
-#: field name, with any handle. Every window was read by decode() and by an
-#: independent reader, and the two agreed on every header word, ID and field
-#: boundary.
-#:
-#:   cnc_h1: 3,999,493 of 3,999,493 windows exact, all main rows with handle 1.
-#:     No checkpoint row carries this group, so its checkpoint stream stays
-#:     unvalidated. 12.10 and 12.11 have no rows on this route. 13.00 is thin:
-#:     six windows in one replay. Only one of them tells this variant apart
-#:     from the one-flag-bit-per-item variant (ChecksumMode::Present in
-#:     crates/vrf-decode/src/fastarray.rs); every other build has at least
-#:     6,302 such windows.
-#:   chained_cnc_h1: 250,053 main and 181,108 checkpoint windows, all exact,
-#:     all handle 1. Every one of the 24 builds has windows in both streams,
-#:     all exact, and at least five that the one-flag-bit variant rejects.
-#:     12.10, 12.11 and 13.00 are thin here as well: 5 to 7 windows per
-#:     stream. 120,275 checkpoint windows carry neither deletions nor changes.
-#:
-#: Every changed item on both routes carries the same fifteen handle numbers
-#: in the same order. That checks bit alignment; it is not a property schema.
+#: (route, stream) -> builds whose windows were all walked exactly: measured,
+#: not supported. Another build rejects as `unvalidated_build`, an empty set as
+#: `unvalidated_checkpoint_route`/`unvalidated_main_route`; each keeps the exit
+#: nonzero until measured. 2026-09-28, parser 259ed10, 1,018 exports, each
+#: route's pair scanned in both tables with any handle; decode() and an
+#: independent reader agreed on every header word, ID and field boundary
+#: (more, and the 2026-09-09 first run: docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md):
+#:   cnc_h1: 3,999,493 of 3,999,493 windows exact, all main, handle 1; none on
+#:     12.10/12.11 or in checkpoints. 13.00 is thin: six windows in one replay,
+#:     one telling this variant from the one-flag-bit-per-item one
+#:     (ChecksumMode::Present, crates/vrf-decode/src/fastarray.rs), against at
+#:     least 6,302 on every other build.
+#:   chained_cnc_h1: 250,053 main and 181,108 checkpoint windows exact, handle
+#:     1, both streams of all 24 builds, each with at least five the
+#:     one-flag-bit variant rejects (12.10, 12.11, 13.00: 5 to 7 per stream).
+#: The same fifteen handles on every changed item of both routes is an
+#: alignment check, not a property schema.
 _LEGACY = ("11.06", "11.07", "11.08", "11.09", "11.10", "11.11", "12.00", "12.01",
            "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09")
 ACCEPTED_BUILDS = {
@@ -151,10 +128,8 @@ class Bits:
 def decode(raw: bytes, bit_count: int) -> dict:
     """Fully consume the measured no-checksum-item variant, or raise.
 
-    Returned field offsets are relative to the original inner window. The
-    numeric handle is encoded_handle - 1. IDs and replication keys are signed
-    i32 wire values, not actor GUIDs. No monotonicity or key arithmetic is
-    required: a serialized delta can span updates missing from this stream.
+    IDs and replication keys are signed i32 wire values, not actor GUIDs, and
+    need no monotonicity: a delta can span updates missing from this stream.
     """
     reader = Bits(raw, bit_count)
     if reader.read(1) != 1:
@@ -216,11 +191,11 @@ def selected_rows(path: Path, checkpoint: bool):
 
 
 def unselected_route_name_rows(path: Path) -> int:
-    """Rows that carry a route's field name under a group no route pairs it with.
+    """Rows carrying a route's field name under a group no route pairs it with.
 
-    Diagnostic only: these rows are neither selected nor decoded. The chained
-    route went unselected on every export because nothing counted this case.
-    On the 2026-09-28 corpus the count is 0 in both streams.
+    Diagnostic only, neither selected nor decoded: a route once went
+    unselected on every export because nothing counted this. On the
+    2026-09-28 corpus the count is 0 in both streams.
     """
     route_names = pa.array(sorted({name for _, name in ROUTES.values()}))
     total = 0
@@ -244,7 +219,6 @@ def observation(row: dict, ordinal: int, population: str, build: str) -> dict:
             raise WireError("route_identity")
         accepted = ACCEPTED_BUILDS[(route, population)]
         if not accepted:
-            # No build has a measured window on this route and stream.
             raise WireError("unvalidated_checkpoint_route" if population == "checkpoint_fields"
                             else "unvalidated_main_route")
         if build not in accepted:

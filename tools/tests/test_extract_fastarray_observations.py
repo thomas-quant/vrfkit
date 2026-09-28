@@ -349,8 +349,7 @@ class FastArrayTests(unittest.TestCase):
                 fast.extract(source, source / "forbidden")
 
     def test_the_receipt_is_written_with_lf_line_endings(self):
-        """Text mode wrote receipt.json with CRLF on Windows, while
-        observations.ndjson was LF on every platform."""
+        """LF on every platform, like observations.ndjson (not CRLF on Windows)."""
         raw, count = payload([1, 3])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); out = root / "result"
