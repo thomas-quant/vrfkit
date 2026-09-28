@@ -1656,12 +1656,56 @@ mod tests {
         }
     }
 
+    /// The same holds for a GUID -> path change that never passes through
+    /// `register_path`.
+    ///
+    /// The frame-level ExportData section (`vrf_frame::read_export_data` ->
+    /// `NetGuidCache::set_net_guid_path`) writes the cache directly, ahead of
+    /// the frame's packets and so between one packet's sink and the next.
+    /// Nothing in this crate sees that write: `NetGuidCache::guid_generation`
+    /// is the only stamp that moves, and without it in `BlockPathMemo::get`
+    /// the second sink is answered from the first one's entry.
+    #[test]
+    fn a_frame_level_guid_registration_invalidates_the_memo() {
+        let mut cache = NetGuidCache::new();
+        cache.add_export_group(vrf_schema::NetFieldExportGroup::new(
+            "/Script/ShooterGame.AresWorldSettings".to_owned(),
+            1,
+            4,
+        ));
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+
+        let header = ContentBlockHeader {
+            has_rep_layout: true,
+            is_actor: true,
+            ..ContentBlockHeader::default()
+        };
+
+        {
+            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            sink.on_content_block(3, NetworkGuid(42), &header);
+            assert_eq!(&*sink.current_group_path, "<unknown:42>");
+        }
+        // The frame-level write: straight into the cache, with no sink alive.
+        cache.set_net_guid_path(42, "AresWorldSettings".to_owned(), None);
+        {
+            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            sink.on_content_block(3, NetworkGuid(42), &header);
+            assert_eq!(
+                &*sink.current_group_path, "/Script/ShooterGame.AresWorldSettings",
+                "the memo answered with a resolution a frame-level GUID write had invalidated"
+            );
+        }
+    }
+
     /// A repeat registration that changes nothing must not invalidate the memo.
     ///
-    /// The whole memo depends on the generation staying still while the replay
+    /// The whole memo depends on its stamps staying still while the replay
     /// re-declares mappings the cache already holds; if every `register_path`
-    /// bumped it, the hit rate would collapse to zero and the memo would be
-    /// pure overhead.
+    /// moved one, the hit rate would collapse to zero and the memo would be
+    /// pure overhead. The assertions read the memo's own hit flag rather than
+    /// a stamp, so they hold whichever stamp a real change moves.
     #[test]
     fn a_redundant_registration_leaves_the_memo_alone() {
         use vrf_net::net_guid::GuidPathSink;
@@ -1671,14 +1715,31 @@ mod tests {
         let mut records = RecordBuffers::default();
         let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
 
+        let header = ContentBlockHeader {
+            has_rep_layout: true,
+            is_actor: true,
+            ..ContentBlockHeader::default()
+        };
+
         sink.register_path(42, "AresWorldSettings", NetworkGuid(7));
-        let after_first = sink.channel_state.resolution_generation;
+        sink.on_content_block(3, NetworkGuid(42), &header);
+        assert!(!sink.current_resolution_memo_hit, "a first resolution hit");
         sink.register_path(42, "AresWorldSettings", NetworkGuid(7));
-        assert_eq!(sink.channel_state.resolution_generation, after_first);
+        sink.on_content_block(3, NetworkGuid(42), &header);
+        assert!(
+            sink.current_resolution_memo_hit,
+            "an unchanged re-declaration invalidated the memo"
+        );
 
         // A different outer for the same path is a real change: `outer_net_guid`
-        // is a column of net_guids.parquet and an input to resolution.
+        // is a column of net_guids.parquet and an input to resolution. An
+        // invalid outer removes the one the cache held.
         sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
-        assert_ne!(sink.channel_state.resolution_generation, after_first);
+        sink.on_content_block(3, NetworkGuid(42), &header);
+        assert!(
+            !sink.current_resolution_memo_hit,
+            "a changed outer left the memo standing"
+        );
+        assert_eq!(sink.cache.get_outer_guid(42), None);
     }
 }
