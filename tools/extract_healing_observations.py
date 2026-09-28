@@ -1,18 +1,18 @@
 """Extract conservative healing observations from one vrfkit export."""
 
 from __future__ import annotations
-import argparse, collections, hashlib, json, math, re, struct, sys
+import argparse, collections, json, math, re, struct, sys
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import aliases, atomic_write_text, sha256_file
+    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
     from .extract_kill_observations import InputError, parse_array, exact_ref
     from .player_identity import load_player_bodies
 else:
-    from atomic_io import aliases, atomic_write_text, sha256_file
+    from atomic_io import aliases, atomic_write_text, sha256_file as sha
     from extract_kill_observations import InputError, parse_array, exact_ref
     from player_identity import load_player_bodies
 SCHEMA_VERSION = 1
@@ -41,6 +41,9 @@ MEMBERS = {
     4: "DeltaLife",
     5: "bAliveAfterChange",
 }
+MEMBER_HANDLES = {name: handle for handle, name in MEMBERS.items()}
+#: The optional top-level references, by their declared handle.
+OPTIONAL = {name: handle for name, (handle, _) in TOP.items() if handle >= 7}
 RX = re.compile(
     r"^MulticastNotifyHeal\.LifeChangeBySection\[(\d+)\]\.(ChangedComponent|LifeResult|DeltaLife|bAliveAfterChange)$"
 )
@@ -77,9 +80,6 @@ HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py", "player_identity
 
 class IntegrityError(InputError):
     pass
-
-
-sha = sha256_file
 
 
 def iter_rows(path, columns):
@@ -238,8 +238,6 @@ def active_instance(rows, guid, event):
             if active is None:
                 return None, "actor_close_without_open"
             active = None
-        else:
-            return None, "unknown_actor_lifecycle_event"
     return (active, "active") if active is not None else (None, "actor_closed")
 
 
@@ -315,24 +313,21 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
         capacity, elements, leaves = parse_array(
             parent["raw_bits"], parent["bit_count"], set(MEMBERS)
         )
-        emitted = {}
+        # (source row, element index, member handle, row) per emitted child.
+        children = []
         for name, q in by.items():
             m = RX.match(name or "")
             if m:
                 if len(q) != 1:
                     raise InputError("duplicate emitted child")
-                emitted[
-                    (
-                        int(m.group(1)),
-                        next(h for h, v in MEMBERS.items() if v == m.group(2)),
-                    )
-                ] = q[0][1]
+                children.append(
+                    (q[0][0], int(m.group(1)), MEMBER_HANDLES[m.group(2)], q[0][1])
+                )
+        emitted = {(i, h): r for _, i, h, r in children}
         parsed = {(i, h): (w, raw) for i, h, w, raw in leaves}
         if len(parsed) != len(leaves) or set(parsed) != set(emitted):
             raise InputError("parent/child leaf set mismatch")
-        child_ordinals = sorted(
-            q[0][0] for name, q in by.items() if RX.match(name or "")
-        )
+        child_ordinals = sorted(o for o, _, _, _ in children)
         if child_ordinals and (
             child_ordinals
             != list(range(child_ordinals[0], child_ordinals[0] + len(child_ordinals)))
@@ -341,18 +336,7 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
             raise InputError(
                 "emitted children are not contiguous immediately before parent"
             )
-        emitted_order = []
-        for name, q in sorted(by.items(), key=lambda item: item[1][0][0]):
-            match = RX.match(name or "")
-            if match:
-                emitted_order.append(
-                    (
-                        int(match.group(1)),
-                        next(
-                            h for h, value in MEMBERS.items() if value == match.group(2)
-                        ),
-                    )
-                )
+        emitted_order = [(i, h) for _, i, h, _ in sorted(children, key=lambda c: c[0])]
         if emitted_order != [(index, handle) for index, handle, _, _ in leaves]:
             raise InputError("emitted child order differs from parent wire order")
         grouped = collections.defaultdict(dict)
@@ -580,16 +564,11 @@ def extract(export):
         if n in ("Owner", "Instigator"):
             refs[r["actor_net_guid"]].append((o, r))
         if n.startswith("MulticastNotifyHeal."):
-            optional = {
-                "MulticastNotifyHeal.EventInstigator": 7,
-                "MulticastNotifyHeal.EventInstigatorPawn": 8,
-                "MulticastNotifyHeal.HealCauser": 9,
-            }
             if (
-                n in optional
+                n in OPTIONAL
                 and r["group_path"] == OUTER_GROUP
                 and r["handle"] == 6
-                and optional[n] not in declared
+                and OPTIONAL[n] not in declared
             ):
                 raise IntegrityError("observed optional heal row lacks its declaration")
             selected.append((o, r))
