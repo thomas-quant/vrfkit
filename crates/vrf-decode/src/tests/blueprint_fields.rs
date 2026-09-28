@@ -10,9 +10,9 @@
 //! through its full identity, and that a real payload decodes to the value the
 //! independent reader gave it.
 
+use super::overlay::{apply_scoped, resolve};
 use crate::decode::FieldType;
-use crate::overlay::{OverlayStats, OverlayTable, group_hash_state};
-use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
+use crate::overlay::OverlayStats;
 
 const REVEAL_BOLT: &str = "/Game/Characters/Hunter/S0/Ability_Q/\
 Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C";
@@ -102,9 +102,60 @@ const TWO_D: [(&str, &str, u32, FieldType); 14] = [
     ),
 ];
 
-fn resolve(group: &str, field: &str, checksum: Option<u32>) -> Option<FieldType> {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    crate::resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
+/// The four value columns, in `OverlayResult` order.
+type Values = (Option<i64>, Option<f64>, Option<bool>, Option<String>);
+
+/// (group, field, checksum, payload, bit count, the independent values).
+type Case<'a> = (&'a str, &'a str, u32, &'a [u8], u32, Values);
+
+const NO_VALUE: Values = (None, None, None, None);
+
+fn int(value: i64) -> Values {
+    (Some(value), None, None, None)
+}
+
+fn float(value: f64) -> Values {
+    (None, Some(value), None, None)
+}
+
+fn bool_(value: bool) -> Values {
+    (None, None, Some(value), None)
+}
+
+fn string(value: &str) -> Values {
+    (None, None, None, Some(value.to_owned()))
+}
+
+/// Decode one real payload through the whole overlay path, as the export
+/// does, returning its four value columns.
+fn decode(
+    stats: &mut OverlayStats,
+    group: &str,
+    field: &str,
+    checksum: u32,
+    raw: &[u8],
+    bits: u32,
+) -> Values {
+    let result = apply_scoped(stats, group, field, 15, checksum, raw, bits);
+    (
+        result.value_i64,
+        result.value_f64,
+        result.value_bool,
+        result.value_str,
+    )
+}
+
+/// Decode every case, requiring its values and that the neighbouring checksum
+/// resolves nothing. Returns the stats for the caller's count check.
+fn decode_cases(cases: &[Case<'_>]) -> OverlayStats {
+    let mut stats = OverlayStats::default();
+    for (group, field, checksum, raw, bits, want) in cases {
+        let other = resolve(group, field, Some(checksum ^ 1));
+        assert_eq!(other, None, "{group} {field}");
+        let got = decode(&mut stats, group, field, *checksum, raw, *bits);
+        assert_eq!(got, *want, "{group} {field}");
+    }
+    stats
 }
 
 /// The name alone, a neighbouring checksum or another class resolves to
@@ -125,145 +176,77 @@ fn two_d_blueprint_fields_resolve_only_at_their_exact_identity() {
     }
 }
 
-/// Decode one real payload through the whole overlay path, as the export
-/// does, returning its four value columns.
-fn decode(
-    stats: &mut OverlayStats,
-    group: &str,
-    field: &str,
-    checksum: u32,
-    raw: &[u8],
-    bits: u32,
-) -> (Option<i64>, Option<f64>, Option<bool>, Option<String>) {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    let result = crate::apply_overlay_with_checksum(
-        &table,
-        group,
-        group_hash_state(group),
-        Some(field),
-        15,
-        Some(checksum),
-        Some(raw),
-        bits,
-        stats,
-    )
-    .expect("a scoped identity is attempted");
-    (
-        result.value_i64,
-        result.value_f64,
-        result.value_bool,
-        result.value_str,
-    )
-}
-
 /// Real 13.06 payloads, and the values an independent reader
 /// (`struct.unpack` / an IntPacked loop) gave them in the corpus audit.
 #[test]
 fn two_d_blueprint_payloads_decode_to_the_independent_values() {
-    let mut stats = OverlayStats::default();
     // Sova's recon bolt: three little-endian doubles, a world position.
     let trail = [
         0x00, 0x00, 0x00, 0x60, 0x6c, 0xc8, 0xba, 0x40, 0x00, 0x00, 0x00, 0xe0, 0x07, 0x9c, 0xbe,
         0xc0, 0x00, 0x00, 0x00, 0xc0, 0x81, 0xc2, 0x7c, 0x40,
     ];
-    assert_eq!(
-        decode(
-            &mut stats,
+    let charge = [0x9a, 0x99, 0x99, 0x99, 0x99, 0x99, 0xb9, 0x3f];
+    let stats = decode_cases(&[
+        (
             REVEAL_BOLT,
             "TrailPosition",
             3_110_715_024,
             &trail,
-            192
-        )
-        .3,
-        Some("(6856.42333984375,-7836.03076171875,460.15667724609375)".to_owned())
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+            192,
+            string("(6856.42333984375,-7836.03076171875,460.15667724609375)"),
+        ),
+        (
             POSSESSABLE,
             "IsPossessed",
             1_066_899_736,
             &[1],
-            1
-        )
-        .2,
-        Some(true)
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+            1,
+            bool_(true),
+        ),
+        (
             CYPHER_CAMERA,
             "Possessed",
             2_181_339_745,
             &[0],
-            1
-        )
-        .2,
-        Some(false)
-    );
-    // IntPacked: 0x7d continues with 62, 0x3a stops with 29 -> 62 + 29 * 128.
-    assert_eq!(
-        decode(
-            &mut stats,
+            1,
+            bool_(false),
+        ),
+        // IntPacked: 0x7d continues with 62, 0x3a stops with 29 -> 62 + 29 * 128.
+        (
             KJ_TURRET,
             "DeployedActor",
             2_740_089_937,
             &[0x7d, 0x3a],
-            16
-        )
-        .0,
-        Some(3_774)
-    );
-    // The 8-bit null reference is GUID 0, a value, not a failure.
-    assert_eq!(
-        decode(
-            &mut stats,
-            KJ_ALARMBOT,
-            "DeployedActor",
-            2_740_089_937,
-            &[0],
-            8
-        )
-        .0,
-        Some(0)
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+            16,
+            int(3_774),
+        ),
+        // The 8-bit null reference is GUID 0, a value, not a failure.
+        (KJ_ALARMBOT, "DeployedActor", 2_740_089_937, &[0], 8, int(0)),
+        (
             CHARGED,
             "CurrentCharge",
             1_908_355_023,
-            &[0x9a, 0x99, 0x99, 0x99, 0x99, 0x99, 0xb9, 0x3f],
-            64
-        )
-        .1,
-        Some(0.1)
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+            &charge,
+            64,
+            float(0.1),
+        ),
+        (
             BOMB_GS,
             "CurrentLossStreak",
             1_863_385_026,
             &[1, 0, 0, 0],
-            32
-        )
-        .0,
-        Some(1)
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+            32,
+            int(1),
+        ),
+        (
             SWIFT_GS,
             "LossStreakTeam",
             22_256_526,
             &[0x75, 0x06],
-            16
-        )
-        .0,
-        Some(58 + 3 * 128)
-    );
+            16,
+            int(58 + 3 * 128),
+        ),
+    ]);
     assert_eq!((stats.decoded_ok, stats.decoded_err), (8, 0));
 }
 
@@ -272,40 +255,25 @@ fn two_d_blueprint_payloads_decode_to_the_independent_values() {
 /// would be a different property, not a shorter reading of this one.
 #[test]
 fn two_d_blueprint_fields_refuse_another_width() {
-    let mut stats = OverlayStats::default();
-    assert_eq!(
-        decode(
-            &mut stats,
+    let stats = decode_cases(&[
+        (
             SHOCK_BOLT,
             "TrailPosition",
             3_110_715_024,
             &[0; 12],
-            96
+            96,
+            NO_VALUE,
         ),
-        (None, None, None, None)
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
-            POSSESSABLE,
-            "IsPossessed",
-            1_066_899_736,
-            &[1],
-            2
-        ),
-        (None, None, None, None)
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+        (POSSESSABLE, "IsPossessed", 1_066_899_736, &[1], 2, NO_VALUE),
+        (
             CHARGED,
             "CurrentCharge",
             1_908_355_023,
             &[0; 4],
-            32
+            32,
+            NO_VALUE,
         ),
-        (None, None, None, None)
-    );
+    ]);
     assert_eq!((stats.decoded_ok, stats.decoded_err), (0, 3));
 }
 
@@ -316,7 +284,7 @@ fn two_d_blueprint_fields_refuse_another_width() {
 /// both, so the identity is typed `FTextTree`, the full-tree reader.
 #[test]
 fn match_timer_text_decodes_both_observed_histories() {
-    let mut stats = OverlayStats::default();
+    const CHECKSUM: u32 = 4_004_484_071;
     let empty = [0, 0, 0, 0, 0xff, 0, 0, 0, 0];
     let number = [
         0x01, 0x00, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00, 0x00, 0x80, 0x5f, 0x3a, 0x2f, 0x40, 0x01,
@@ -324,34 +292,33 @@ fn match_timer_text_decodes_both_observed_histories() {
         0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00,
     ];
+    let mut cases = Vec::new();
     for group in [BOMB_GS, SWIFT_GS] {
         assert_eq!(
-            resolve(group, "OverrideMatchTimerText", Some(4_004_484_071)),
-            Some(FieldType::FTextTree)
+            resolve(group, "OverrideMatchTimerText", None),
+            None,
+            "{group}"
         );
-        for other in [None, Some(4_004_484_071 ^ 1)] {
-            assert_eq!(resolve(group, "OverrideMatchTimerText", other), None);
-        }
-        assert_eq!(
-            decode(
-                &mut stats,
-                group,
-                "OverrideMatchTimerText",
-                4_004_484_071,
-                &empty,
-                72
-            )
-            .3,
-            Some(r#"{"flags":0,"history":255,"kind":"empty"}"#.to_owned())
-        );
-        assert_eq!(
-            decode(&mut stats, group, "OverrideMatchTimerText", 4_004_484_071, &number, 376).3,
-            Some(
-                r#"{"flags":1,"history":4,"kind":"as_number","source":{"tag":3,"double":15.614009857177734},"format":{"always_sign":false,"use_grouping":true,"rounding_mode":0,"minimum_integral_digits":2,"maximum_integral_digits":2,"minimum_fractional_digits":2,"maximum_fractional_digits":2},"culture":""}"#
-                    .to_owned()
-            )
-        );
+        cases.push((
+            group,
+            "OverrideMatchTimerText",
+            CHECKSUM,
+            &empty[..],
+            72,
+            string(r#"{"flags":0,"history":255,"kind":"empty"}"#),
+        ));
+        cases.push((
+            group,
+            "OverrideMatchTimerText",
+            CHECKSUM,
+            &number[..],
+            376,
+            string(
+                r#"{"flags":1,"history":4,"kind":"as_number","source":{"tag":3,"double":15.614009857177734},"format":{"always_sign":false,"use_grouping":true,"rounding_mode":0,"minimum_integral_digits":2,"maximum_integral_digits":2,"minimum_fractional_digits":2,"maximum_fractional_digits":2},"culture":""}"#,
+            ),
+        ));
     }
+    let mut stats = decode_cases(&cases);
     assert_eq!((stats.decoded_ok, stats.decoded_err), (4, 0));
     // The same bits under the legacy reader: both refused.
     for (raw, bits) in [(&empty[..], 72), (&number[..], 376)] {
@@ -361,17 +328,15 @@ fn match_timer_text_decodes_both_observed_histories() {
     // rejected decode, not a guess.
     let mut unknown = number;
     unknown[4] = 5;
-    assert_eq!(
-        decode(
-            &mut stats,
-            BOMB_GS,
-            "OverrideMatchTimerText",
-            4_004_484_071,
-            &unknown,
-            376
-        ),
-        (None, None, None, None)
+    let got = decode(
+        &mut stats,
+        BOMB_GS,
+        "OverrideMatchTimerText",
+        CHECKSUM,
+        &unknown,
+        376,
     );
+    assert_eq!(got, NO_VALUE);
     assert_eq!(stats.decoded_err, 1);
 }
 
@@ -395,12 +360,12 @@ GameObject_Breach_E_SweetSpotFissure.GameObject_Breach_E_SweetSpotFissure_C";
 /// `test_compatible_checksum_facts.py` holds every entry to its checksum.
 #[test]
 fn other_blueprint_payloads_decode_to_the_independent_values() {
-    let mut stats = OverlayStats::default();
     let fissure = [
         0x00, 0x00, 0x00, 0x80, 0x23, 0x3b, 0x91, 0xc0, 0x00, 0x00, 0x00, 0xa0, 0xf9, 0x30, 0xac,
         0xc0, 0x00, 0x00, 0x00, 0x80, 0x66, 0x02, 0x79, 0x40,
     ];
-    let cases: [Case<'_>; 10] = [
+    let float_raw = [0x00, 0x00, 0x00, 0x00, 0x54, 0x00, 0xc4, 0x3f];
+    let stats = decode_cases(&[
         (
             DEFAULT_CEREMONY,
             "bShouldDisplayCeremony",
@@ -439,7 +404,7 @@ fn other_blueprint_payloads_decode_to_the_independent_values() {
             FLOAT_CONTEXT,
             "Float",
             3_878_297_219,
-            &[0x00, 0x00, 0x00, 0x00, 0x54, 0x00, 0xc4, 0x3f],
+            &float_raw,
             64,
             float(0.15626001358032227),
         ),
@@ -483,41 +448,8 @@ fn other_blueprint_payloads_decode_to_the_independent_values() {
             1,
             bool_(false),
         ),
-    ];
-    for (group, field, checksum, raw, bits, want) in cases {
-        assert_eq!(
-            resolve(group, field, Some(checksum ^ 1)),
-            None,
-            "{group} {field}"
-        );
-        assert_eq!(
-            decode(&mut stats, group, field, checksum, raw, bits),
-            want,
-            "{group} {field}"
-        );
-    }
+    ]);
     assert_eq!((stats.decoded_ok, stats.decoded_err), (10, 0));
-}
-
-type Values = (Option<i64>, Option<f64>, Option<bool>, Option<String>);
-
-/// (group, field, checksum, payload, bit count, the independent values).
-type Case<'a> = (&'a str, &'a str, u32, &'a [u8], u32, Values);
-
-fn int(value: i64) -> Values {
-    (Some(value), None, None, None)
-}
-
-fn float(value: f64) -> Values {
-    (None, Some(value), None, None)
-}
-
-fn bool_(value: bool) -> Values {
-    (None, None, Some(value), None)
-}
-
-fn string(value: &str) -> Values {
-    (None, None, None, Some(value.to_owned()))
 }
 
 const PROTOTYPE_BOLT: &str = "/Game/Characters/Hunter/S0/Ability_4/AnimationUpdatePrototype/\
@@ -534,53 +466,35 @@ NetTossRemovableDebuff.NetTossRemovableDebuff_C";
 /// current class that carries the same property.
 #[test]
 fn pre_rename_blueprint_paths_decode_at_their_own_identities() {
-    let mut stats = OverlayStats::default();
     let trail = [
         0x00, 0x00, 0x00, 0x80, 0x0e, 0xa4, 0xa9, 0x40, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xcb, 0x7c,
         0xc0, 0x00, 0x00, 0x00, 0xa0, 0x65, 0x72, 0x95, 0x40,
     ];
-    assert_eq!(
-        decode(
-            &mut stats,
+    let stats = decode_cases(&[
+        (
             PROTOTYPE_BOLT,
             "TrailPosition",
             3_110_715_024,
             &trail,
-            192
-        )
-        .3,
-        Some("(3282.0283203125,-460.695068359375,1372.5992431640625)".to_owned())
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+            192,
+            string("(3282.0283203125,-460.695068359375,1372.5992431640625)"),
+        ),
+        (
             OLD_CYPHER_CAMERA,
             "Possessed",
             2_181_339_745,
             &[1],
-            1
-        )
-        .2,
-        Some(true)
-    );
-    assert_eq!(
-        decode(
-            &mut stats,
+            1,
+            bool_(true),
+        ),
+        (
             NET_TOSS_DEBUFF,
             "Target",
             2_924_225_553,
             &[0x99, 0x0e],
-            16
-        )
-        .0,
-        Some(972)
-    );
+            16,
+            int(972),
+        ),
+    ]);
     assert_eq!((stats.decoded_ok, stats.decoded_err), (3, 0));
-    for (group, field, checksum) in [
-        (PROTOTYPE_BOLT, "TrailPosition", 3_110_715_024),
-        (OLD_CYPHER_CAMERA, "Possessed", 2_181_339_745),
-        (NET_TOSS_DEBUFF, "Target", 2_924_225_553),
-    ] {
-        assert_eq!(resolve(group, field, Some(checksum ^ 1)), None, "{group}");
-    }
 }
