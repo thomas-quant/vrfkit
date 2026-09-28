@@ -122,11 +122,6 @@ PAIR_RE = re.compile(
     r'\(\s*"([^"]+)",\s*"(/[^"]+)",\s*GroupKind::(\w+)\s*,?\s*\)', re.S
 )
 
-#: Share of the target group's rows the bare leaf may still hold, for the
-#: ClassNetCache pairs only; a RepLayout pair may hold none (see the module
-#: docstring). A renamed component once measured 15.6%.
-BARE_SHARE_LIMIT = 0.05
-
 #: Field names that mark a ClassNetCache block rather than a RepLayout property.
 #: Two of the remaps are RepLayout-only by design, so their RPC stream stays bare
 #: and must not be read as the remap failing. For a ClassNetCache pair these are
@@ -210,45 +205,36 @@ def class_net_cache_verdict(leaf, native, rows_by_group, cnc_bare) -> Verdict:
                    "no ClassNetCache rows in this replay" + note)
 
 
-def verdicts(pairs, rows_by_group, kinds=None, cnc_bare=None) -> list[Verdict]:
+def verdicts(pairs, rows_by_group, kinds, cnc_bare=None) -> list[Verdict]:
     """Classify each pair against a `{group_path: row count}` map.
 
     `kinds` maps a leaf to its `GroupKind`. A `RepLayout` pair is judged
     strictly on RepLayout rows; a `ClassNetCache` pair strictly on the
     ClassNetCache rows `cnc_bare` holds for its leaf (see
-    `class_net_cache_verdict`); a pair with no kind given by the ratio.
+    `class_net_cache_verdict`). Any other kind, or none, raises ValueError:
+    a `GroupKind` added in paths.rs has no rule here, and a lenient default
+    would pass its pairs unjudged.
     """
-    kinds = kinds or {}
     cnc_bare = cnc_bare or {}
     out = []
     for leaf, native in pairs:
-        if kinds.get(leaf) == "ClassNetCache":
+        kind = kinds.get(leaf)
+        if kind == "ClassNetCache":
             out.append(class_net_cache_verdict(leaf, native, rows_by_group, cnc_bare))
             continue
+        if kind != "RepLayout":
+            raise ValueError(f"{leaf} has GroupKind {kind!r}, which no verdict rule covers")
         native_rows = rows_by_group.get(native, 0)
         bare_rows = rows_by_group.get(leaf, 0)
         if not native_rows and not bare_rows:
             out.append(Verdict(leaf, native, "absent", "not in this replay"))
-            continue
-        if kinds.get(leaf) == "RepLayout":
-            if bare_rows:
-                out.append(Verdict(
-                    leaf, native, "broken",
-                    f"{bare_rows} RepLayout rows still bare ({native_rows} on the "
-                    f"class group); a working RepLayout remap leaves none"))
-            else:
-                out.append(Verdict(leaf, native, "ok",
-                                   f"{native_rows} rows, 0 still bare"))
-            continue
-        share = bare_rows / native_rows if native_rows else float("inf")
-        if share > BARE_SHARE_LIMIT:
-            detail = (f"{bare_rows} rows still bare against {native_rows} on the "
-                      f"native group")
-            out.append(Verdict(leaf, native, "broken", detail))
-        else:
+        elif bare_rows:
             out.append(Verdict(
-                leaf, native, "ok",
-                f"{native_rows} rows, {bare_rows} still bare ({share:.1%})"))
+                leaf, native, "broken",
+                f"{bare_rows} RepLayout rows still bare ({native_rows} on the "
+                f"class group); a working RepLayout remap leaves none"))
+        else:
+            out.append(Verdict(leaf, native, "ok", f"{native_rows} rows, 0 still bare"))
     return out
 
 
@@ -374,7 +360,11 @@ def main() -> int:
 
     rows, cnc_bare = row_counts(args.export)
     kinds = remap_kinds(table)
-    results = verdicts(pairs, rows, kinds, cnc_bare)
+    try:
+        results = verdicts(pairs, rows, kinds, cnc_bare)
+    except ValueError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
     tally = collections.Counter(v.state for v in results)
 
     for v in results:
