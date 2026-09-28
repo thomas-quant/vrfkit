@@ -70,10 +70,8 @@ jobs:
             & cargo @cargoArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: standalone probe tool
-        run: cargo +1.86.0 check --manifest-path tools/probe_offset/Cargo.toml --locked
-      # Standalone like probe_offset, so none of the workspace steps above
-      # format, lint or test it.
+      # Standalone (not a workspace member), so none of the workspace steps
+      # above format, lint or test it.
       - name: standalone component class tool
         shell: pwsh
         run: |

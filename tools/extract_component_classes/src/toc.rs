@@ -1,17 +1,13 @@
-//! The `.utoc` table of contents.
+//! The `.utoc` table of contents. Layout, in file order: a 144-byte header; a
+//! 12-byte chunk id and a 10-byte offset/length per chunk; perfect-hash seeds
+//! and the overflow list; a 12-byte entry per compression block; the method
+//! names; the signature block if signed; the directory index; a 33-byte meta
+//! record per chunk.
 //!
-//! Layout, in file order: a 144-byte header; one 12-byte chunk id and one
-//! 10-byte offset/length per chunk; the perfect-hash seeds and the overflow
-//! list; one 12-byte entry per compression block; the compression method
-//! names; the signature block when the container is signed; the directory
-//! index; and one 33-byte meta record per chunk.
-//!
-//! Only TOC version 5 is accepted, because it is the only one this was checked
-//! against: the shipped 13.06 containers are all version 5, and every one of
-//! their files is consumed exactly to the last byte by the layout above. A
-//! different version is an error naming the version, not a best effort -- a
-//! later version changes the meta record size, and an earlier one lacks the
-//! overflow list, so reading either with this layout would misplace the
+//! Only TOC version 5 is accepted: every 13.06 container is version 5 and is
+//! consumed exactly to its last byte by this layout. Any other version is an
+//! error naming it, not a best effort: version 8 changes the meta size and
+//! versions below 5 lack the overflow list, either of which would misplace the
 //! directory index without failing.
 
 use crate::reader::{Cursor, Result, fail};
@@ -20,8 +16,7 @@ pub const TOC_MAGIC: &[u8; 16] = b"-==--==--==--==-";
 pub const SUPPORTED_TOC_VERSION: u8 = 5;
 const TOC_HEADER_SIZE: u32 = 144;
 const COMPRESSED_BLOCK_ENTRY_SIZE: u32 = 12;
-/// `FIoStoreTocEntryMeta` before TOC version 8: a 32-byte chunk hash and a flag
-/// byte.
+/// `FIoStoreTocEntryMeta` before TOC version 8: a 32-byte hash and a flag byte.
 const META_SIZE: usize = 33;
 
 pub const FLAG_ENCRYPTED: u8 = 2;
@@ -32,31 +27,13 @@ pub const FLAG_INDEXED: u8 = 8;
 pub const CHUNK_EXPORT_BUNDLE_DATA: u8 = 1;
 pub const CHUNK_SCRIPT_OBJECTS: u8 = 5;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TocHeader {
-    pub version: u8,
-    pub entry_count: u32,
-    pub compressed_block_count: u32,
-    pub compression_method_count: u32,
-    pub compression_method_length: u32,
-    pub compression_block_size: u32,
-    pub directory_index_size: u32,
-    pub partition_count: u32,
-    pub container_id: u64,
-    pub container_flags: u8,
-    pub perfect_hash_seed_count: u32,
-    pub partition_size: u64,
-    pub chunks_without_perfect_hash: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct ChunkId {
     pub id: u64,
-    pub index: u16,
     pub chunk_type: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct OffsetLength {
     pub offset: u64,
     pub length: u64,
@@ -74,7 +51,9 @@ pub struct CompressedBlock {
 
 #[derive(Debug, Clone)]
 pub struct Toc {
-    pub header: TocHeader,
+    pub container_id: u64,
+    /// Bytes of the uncompressed stream per compression block.
+    pub block_size: u32,
     pub chunk_ids: Vec<ChunkId>,
     pub chunks: Vec<OffsetLength>,
     pub blocks: Vec<CompressedBlock>,
@@ -125,7 +104,7 @@ pub fn parse_toc(bytes: &[u8]) -> Result<Toc> {
     let container_flags = c.u8()?;
     c.skip(3)?;
     let perfect_hash_seed_count = c.u32()?;
-    let partition_size = c.u64()?;
+    let _partition_size = c.u64()?;
     let chunks_without_perfect_hash = c.u32()?;
     c.skip(4 + 5 * 8)?;
     if header_size != TOC_HEADER_SIZE || c.pos() != TOC_HEADER_SIZE as usize {
@@ -153,34 +132,14 @@ pub fn parse_toc(bytes: &[u8]) -> Result<Toc> {
         return fail("utoc: compression block size 0");
     }
 
-    let header = TocHeader {
-        version,
-        entry_count,
-        compressed_block_count,
-        compression_method_count,
-        compression_method_length,
-        compression_block_size,
-        directory_index_size,
-        partition_count,
-        container_id,
-        container_flags,
-        perfect_hash_seed_count,
-        partition_size,
-        chunks_without_perfect_hash,
-    };
-
     let n = entry_count as usize;
     let mut chunk_ids = Vec::with_capacity(n.min(c.remaining() / 12));
     for _ in 0..n {
         let id = c.u64()?;
-        let index = c.be_uint(2)? as u16;
+        let _index = c.be_uint(2)?;
         c.skip(1)?;
         let chunk_type = c.u8()?;
-        chunk_ids.push(ChunkId {
-            id,
-            index,
-            chunk_type,
-        });
+        chunk_ids.push(ChunkId { id, chunk_type });
     }
     let mut chunks = Vec::with_capacity(n.min(c.remaining() / 10));
     for _ in 0..n {
@@ -242,7 +201,8 @@ pub fn parse_toc(bytes: &[u8]) -> Result<Toc> {
     }
 
     let toc = Toc {
-        header,
+        container_id,
+        block_size: compression_block_size,
         chunk_ids,
         chunks,
         blocks,
@@ -275,8 +235,8 @@ pub(crate) mod tests {
 
     const FLAG_COMPRESSED: u8 = 1;
 
-    /// A synthetic version-5 TOC. Every structure the parser reads is present,
-    /// so a test that breaks one field breaks exactly that field.
+    /// A synthetic version-5 TOC with every structure the parser reads, so a
+    /// test that breaks one field breaks exactly that field.
     pub struct TocSpec {
         pub flags: u8,
         pub chunks: Vec<(ChunkId, OffsetLength)>,
@@ -328,8 +288,7 @@ pub(crate) mod tests {
         assert_eq!(out.len(), TOC_HEADER_SIZE as usize);
         for (id, _) in &spec.chunks {
             out.extend_from_slice(&id.id.to_le_bytes());
-            out.extend_from_slice(&id.index.to_be_bytes());
-            out.push(0);
+            out.extend_from_slice(&[0, 0, 0]); // chunk index, padding
             out.push(id.chunk_type);
         }
         for (_, ol) in &spec.chunks {
@@ -367,7 +326,6 @@ pub(crate) mod tests {
                 (
                     ChunkId {
                         id: 0xDEAD_BEEF,
-                        index: 0,
                         chunk_type: CHUNK_EXPORT_BUNDLE_DATA,
                     },
                     OffsetLength {
@@ -378,7 +336,6 @@ pub(crate) mod tests {
                 (
                     ChunkId {
                         id: 7,
-                        index: 0x0102,
                         chunk_type: 6,
                     },
                     OffsetLength {
@@ -410,9 +367,9 @@ pub(crate) mod tests {
     fn a_synthetic_toc_parses_field_for_field() {
         let spec = two_chunk_spec();
         let toc = parse_toc(&build_toc(&spec)).unwrap();
-        assert_eq!(toc.header.container_id, 0x1122_3344_5566_7788);
+        assert_eq!(toc.container_id, 0x1122_3344_5566_7788);
         assert_eq!(toc.chunk_ids.len(), 2);
-        assert_eq!(toc.chunk_ids[1].index, 0x0102);
+        assert_eq!((toc.chunk_ids[1].id, toc.chunk_ids[1].chunk_type), (7, 6));
         assert_eq!(toc.chunk_ids[0].chunk_type, CHUNK_EXPORT_BUNDLE_DATA);
         assert_eq!(toc.chunks[1].offset, 0x40000);
         assert_eq!(toc.blocks, spec.blocks);
@@ -437,8 +394,7 @@ pub(crate) mod tests {
     fn a_wrong_signature_size_misplaces_the_index_and_is_caught() {
         let spec = two_chunk_spec();
         let mut bytes = build_toc(&spec);
-        // The signature size sits right after the method names; claim 4
-        // bytes more than were written.
+        // The signature size follows the method names; claim 4 bytes too many.
         let at = bytes.len()
             - spec.chunks.len() * META_SIZE
             - spec.directory_index.len()

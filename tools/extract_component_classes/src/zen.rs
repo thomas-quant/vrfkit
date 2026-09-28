@@ -1,18 +1,13 @@
-//! A cooked package's header, as IoStore stores it (`FZenPackageSummary`).
-//!
-//! The summary is 52 bytes: versioning flag, header size, package name,
-//! package flags, cooked header size, and seven offsets -- imported public
-//! export hashes, import map, export map, export bundle entries, dependency
-//! bundle headers, dependency bundle entries, imported package names. The
-//! package's name batch follows it directly, then an `i64` bulk data map size
-//! and that many bytes of bulk data map.
-//!
-//! Engine versions before the dependency-bundle change wrote a 44-byte summary
-//! with five offsets. The two are told apart by where the name batch's hash
-//! version lands: on the shipped 13.06 containers it is at byte 52 + 8, which
-//! only the 52-byte layout puts it at. Every region below is then checked to
-//! end exactly where the next offset begins, so a package in the other layout
-//! fails here instead of being read at the wrong offsets.
+//! A cooked package's header, as IoStore stores it (`FZenPackageSummary`): a
+//! 52-byte summary (versioning flag, header size, package name, package flags,
+//! cooked header size, seven region offsets), the name batch, then an `i64` bulk
+//! data map size and that many bytes. The 44-byte summary (five offsets) of
+//! engines before the dependency-bundle change is told apart by where the name
+//! batch's hash version lands: byte 52 + 8 on the shipped 13.06 containers.
+//! The offsets must be in order and inside the header; the name and bulk data
+//! maps must end exactly at the first region; the public-hash, import and export
+//! maps must hold whole records; the imported names must end exactly at the
+//! header end. The bundle and dependency regions are only order-checked.
 
 use crate::names::{MappedName, read_name_batch, with_number};
 use crate::reader::{Cursor, Result, fail};
@@ -20,15 +15,13 @@ use crate::reader::{Cursor, Result, fail};
 pub const SUMMARY_SIZE: usize = 52;
 pub const EXPORT_ENTRY_SIZE: usize = 72;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExportEntry {
     pub object_name: MappedName,
     pub outer_index: u64,
     pub class_index: u64,
     pub super_index: u64,
-    pub template_index: u64,
     pub public_export_hash: u64,
-    pub object_flags: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -146,9 +139,9 @@ pub fn parse_package_header(bytes: &[u8]) -> Result<PackageHeader> {
         let outer_index = ec.u64()?;
         let class_index = ec.u64()?;
         let super_index = ec.u64()?;
-        let template_index = ec.u64()?;
+        let _template_index = ec.u64()?;
         let public_export_hash = ec.u64()?;
-        let object_flags = ec.u32()?;
+        let _object_flags = ec.u32()?;
         let _filter_flags = ec.u8()?;
         ec.skip(3)?;
         object_name.base(&names)?;
@@ -157,9 +150,7 @@ pub fn parse_package_header(bytes: &[u8]) -> Result<PackageHeader> {
             outer_index,
             class_index,
             super_index,
-            template_index,
             public_export_hash,
-            object_flags,
         });
     }
 
@@ -336,8 +327,9 @@ pub(crate) mod tests {
     }
 
     /// The older 44-byte summary puts the name batch eight bytes earlier. Read
-    /// with this layout, its hash version is not where it belongs and the
-    /// package is refused rather than misread.
+    /// with this layout, the batch's first two words become the last two
+    /// offsets and the order check refuses the package before the hash version
+    /// is read; `names::tests::a_wrong_hash_version_is_an_error` covers that.
     #[test]
     fn a_summary_of_the_other_width_is_refused() {
         let bytes = build_package(&sample());
@@ -359,9 +351,26 @@ pub(crate) mod tests {
         assert!(parse_package_header(&bytes).is_err());
     }
 
-    /// Nothing after the name map is read from the cursor -- every later
-    /// region is found through its own offset -- so a bulk data map of the
-    /// wrong size would go unnoticed without the explicit position check.
+    /// An offset past the header end is refused by the order check. Without
+    /// it `u64_array`'s `&bytes[..end]` panics, and `std::thread::scope`
+    /// re-raises a scan worker's panic, so no row and no summary is written.
+    #[test]
+    fn an_offset_past_the_header_end_is_refused_not_a_panic() {
+        let mut bytes = build_package(&sample());
+        let header_size = declared_header_size(&bytes).unwrap() as i32;
+        // The import map offset, second of the seven, moved by a multiple of 8
+        // so only the order check stands between it and an out-of-range slice.
+        let at = 28;
+        let v = i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let past = v + 8 * (header_size / 8 + 1);
+        bytes[at..at + 4].copy_from_slice(&past.to_le_bytes());
+        let err = parse_package_header(&bytes).unwrap_err();
+        assert!(err.0.contains("import map offset"), "{err}");
+    }
+
+    /// Every region after the name map is found through its own offset, so a
+    /// bulk data map of the wrong size would go unnoticed without the explicit
+    /// position check.
     #[test]
     fn a_bulk_data_map_that_overruns_the_next_region_is_refused() {
         let spec = sample();

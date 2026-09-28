@@ -1,14 +1,11 @@
-//! Bounds-checked little-endian reads over a byte slice.
-//!
-//! Every structure this tool reads comes out of a file the game can change on
-//! any patch, so no read here trusts a length it was handed: each one checks
-//! the buffer first and names what it was reading when it runs out. A short
-//! buffer is an error with an offset in it, never a zero.
+//! Bounds-checked little-endian reads over a byte slice. The game can change
+//! any structure on a patch, so no read trusts a length: a short buffer is an
+//! error naming the structure and the offset, never a zero.
 
 use std::fmt;
 
 /// A parse or I/O failure, with enough context to find the byte that caused it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Error(pub String);
 
 impl fmt::Display for Error {
@@ -17,17 +14,13 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
-
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Shorthand for an `Err(Error)` built from a message.
 pub fn fail<T>(msg: impl Into<String>) -> Result<T> {
     Err(Error(msg.into()))
 }
 
-/// A read position over a borrowed buffer. `what` names the structure being
-/// read, so an overrun reports which one ran out.
+/// A read position over a borrowed buffer; `what` names the structure in errors.
 #[derive(Debug, Clone)]
 pub struct Cursor<'a> {
     buf: &'a [u8],
@@ -108,15 +101,13 @@ impl<'a> Cursor<'a> {
         Ok(be(self.take(n)?))
     }
 
-    /// An unsigned little-endian integer `n` bytes wide (`n <= 8`).
     pub fn le_uint(&mut self, n: usize) -> Result<u64> {
         debug_assert!(n <= 8);
         Ok(le(self.take(n)?))
     }
 
     /// An element count that must fit what is left of the buffer at
-    /// `elem_size` bytes each. A negative or oversized count is an error here,
-    /// before anything is allocated for it.
+    /// `elem_size` bytes each, refused before anything is allocated for it.
     pub fn count(&mut self, elem_size: usize) -> Result<usize> {
         let at = self.pos;
         let n = self.i32()?;
@@ -136,11 +127,8 @@ impl<'a> Cursor<'a> {
     }
 
     /// An Unreal `FString`: an `i32` length that counts the terminating NUL,
-    /// positive for one byte per character and negative for UTF-16.
-    ///
-    /// The terminator is required rather than tolerated: a string whose last
-    /// unit is not NUL means the length was read from the wrong place, and the
-    /// bytes after it would be misread too.
+    /// positive for one byte per character and negative for UTF-16. A missing
+    /// NUL means the length was read from the wrong place, so it is an error.
     pub fn fstring(&mut self) -> Result<String> {
         let at = self.pos;
         let len = self.i32()?;
@@ -183,8 +171,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Decode one-byte-per-character text the way Unreal's ANSI strings are
-/// stored: each byte is its own code point.
+/// Unreal's one-byte-per-character text: each byte is its own code point.
 pub fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }

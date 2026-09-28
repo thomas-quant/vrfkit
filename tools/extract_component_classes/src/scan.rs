@@ -1,22 +1,12 @@
-//! Walk every package in every container and pick out component templates.
-//!
-//! Two export shapes carry a component's instance name:
-//!
-//! - `gen_variable`: a Blueprint-added component. Its template is an export
-//!   named `<Name>_GEN_VARIABLE`, and the component spawned from it is named
-//!   `<Name>` -- the bare string the replay sends. Inherited-component
-//!   overrides in child Blueprints reuse the same name and class.
-//! - `cdo_subobject`: a component the class creates in C++. It has no
-//!   `_GEN_VARIABLE` template; it appears as a subobject of the Blueprint's
-//!   class default object (`Default__<Class>`), under its instance name.
-//!
-//! Each row's class comes from the export's `ClassIndex`:
-//!
-//! - a script import is looked up in `global.ucas` -- a `/Script/...` class;
-//! - a package import names a public export of another package, which the
-//!   second pass resolves to that package's class and then walks up its super
-//!   chain to the first native class;
-//! - anything that cannot be resolved is `?`, never a guess.
+//! Walk every package and pick out component templates in the two export
+//! shapes of docs/DATA.md ("Reading component classes out of the game", steps
+//! 3-4): `gen_variable`, a `<Name>_GEN_VARIABLE` template spawned as `<Name>`,
+//! the bare string the replay sends (child Blueprints' overrides reuse name and
+//! class); and `cdo_subobject`, a C++-created component, a subobject of
+//! `Default__<Class>` under its instance name and the only shape five 13.06
+//! components have. A class resolves through `global.ucas`, or to another
+//! package's class and up its super chain to the first native one; anything
+//! unresolvable is `?`, never a guess.
 
 use std::collections::HashMap;
 
@@ -32,8 +22,7 @@ use crate::zen::{PackageHeader, declared_header_size, parse_package_header};
 pub const GEN_VARIABLE_SUFFIX: &str = "_GEN_VARIABLE";
 pub const CDO_PREFIX: &str = "Default__";
 
-/// One package to read: a container, a TOC entry, and the file name the
-/// directory index gives it (if any).
+/// One package to read; `file` is the directory index's name for it, if any.
 #[derive(Debug, Clone)]
 pub struct Job {
     pub container: usize,
@@ -64,13 +53,13 @@ pub struct Candidate {
     pub outer: String,
     pub class: ClassRef,
     /// A `_GEN_VARIABLE` export whose FName carries an instance number. The
-    /// component name that would spawn from it is not established, so these
-    /// are counted and listed with the number kept on the export name.
+    /// instance takes the number too (`X_GEN_VARIABLE` number 3 is listed as
+    /// `X_2`), though the name that would spawn from it is not established.
+    /// Counted in `gen_variable_numbered`; no output column flags the row.
     pub numbered: bool,
 }
 
-/// A class defined by some package, keyed elsewhere by `(package id, public
-/// export hash)`.
+/// A class defined by some package (see [`ClassTable`] for its key).
 #[derive(Debug, Clone)]
 pub struct ClassExport {
     pub path: String,
@@ -88,7 +77,6 @@ pub struct PackageScan {
     pub classes: Vec<(u64, ClassExport)>,
 }
 
-/// Decode `index` as it appears in `pkg`'s export map.
 pub fn class_ref(pkg: &PackageHeader, package_id: u64, index: u64) -> ClassRef {
     match index_kind(index) {
         KIND_NULL => ClassRef::Null,
@@ -120,9 +108,8 @@ pub fn class_ref(pkg: &PackageHeader, package_id: u64, index: u64) -> ClassRef {
     }
 }
 
-/// True for a class object: its own class is a native class whose name ends
-/// in `Class` (`/Script/Engine.BlueprintGeneratedClass`,
-/// `/Script/CoreUObject.Class`, `/Script/UMG.WidgetBlueprintGeneratedClass`).
+/// A heuristic for a class object: its own class is native and named `*Class`
+/// (`/Script/Engine.BlueprintGeneratedClass`, `/Script/CoreUObject.Class`).
 fn is_class_object(script: &ScriptObjects, class_index: u64) -> bool {
     if index_kind(class_index) != KIND_SCRIPT_IMPORT {
         return false;
@@ -134,7 +121,6 @@ fn is_class_object(script: &ScriptObjects, class_index: u64) -> bool {
     })
 }
 
-/// Pick the component templates and class objects out of one parsed package.
 pub fn scan_header(
     pkg: &PackageHeader,
     package_id: u64,
@@ -187,14 +173,12 @@ pub fn scan_header(
             });
             continue;
         }
-        let is_cdo_child = outer
-            .map(|o| {
-                o.object_name
-                    .base(&pkg.names)
-                    .unwrap_or("")
-                    .starts_with(CDO_PREFIX)
-            })
-            .unwrap_or(false);
+        let is_cdo_child = outer.is_some_and(|o| {
+            o.object_name
+                .base(&pkg.names)
+                .unwrap_or("")
+                .starts_with(CDO_PREFIX)
+        });
         if is_cdo_child {
             candidates.push(Candidate {
                 kind: "cdo_subobject",
@@ -209,7 +193,6 @@ pub fn scan_header(
     (candidates, classes)
 }
 
-/// Read and scan one package chunk.
 pub fn scan_package(
     container: &Container,
     ucas: &mut std::fs::File,
@@ -227,7 +210,7 @@ pub fn scan_package(
         ));
     }
     let chunk = toc.chunks[job.entry];
-    let block_size = u64::from(toc.header.compression_block_size);
+    let block_size = u64::from(toc.block_size);
     let first_block = block_size - chunk.offset % block_size;
     let mut data = container.read_chunk(ucas, job.entry, first_block)?;
     let header_size = u64::from(declared_header_size(&data)?);
@@ -260,11 +243,12 @@ pub fn scan_package(
 }
 
 /// Every class object seen, keyed by `(package id, public export hash)`.
+/// `scan_header` records public classes only, so no key has hash 0 and a
+/// non-public `ClassRef::Local` finds nothing here.
 pub type ClassTable = HashMap<(u64, u64), ClassExport>;
 
-/// The resolved class of a candidate: `(class path, how it resolved, first
-/// native class, what the index pointed at)`. Unresolvable parts are `?`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A candidate's resolved class; any part that cannot be resolved is `?`.
+#[derive(Debug, Clone)]
 pub struct Resolved {
     pub class: String,
     pub class_kind: &'static str,
@@ -272,68 +256,56 @@ pub struct Resolved {
     pub class_ref: String,
 }
 
+impl Resolved {
+    fn unresolved(class_kind: &'static str, class_ref: String) -> Self {
+        Resolved {
+            class: "?".to_owned(),
+            class_kind,
+            native_class: "?".to_owned(),
+            class_ref,
+        }
+    }
+}
+
 pub fn resolve(class: &ClassRef, script: &ScriptObjects, classes: &ClassTable) -> Resolved {
+    // A class some package defines, under `kind` when found and
+    // `unresolved_kind` when no package read defines it.
+    let defined = |key, kind, unresolved_kind, class_ref| match classes.get(&key) {
+        Some(found) => Resolved {
+            class: found.path.clone(),
+            class_kind: kind,
+            native_class: native_ancestor(&found.super_ref, script, classes),
+            class_ref,
+        },
+        None => Resolved::unresolved(unresolved_kind, class_ref),
+    };
     match class {
-        ClassRef::Script(index) => match script.path_of(*index) {
-            Some(path) => Resolved {
-                class: path.clone(),
-                class_kind: "script_import",
-                native_class: path,
-                class_ref: format!("script:{index:#018x}"),
-            },
-            None => Resolved {
-                class: "?".to_owned(),
-                class_kind: "script_import_unresolved",
-                native_class: "?".to_owned(),
-                class_ref: format!("script:{index:#018x}"),
-            },
-        },
-        ClassRef::Package(id, name, hash) => {
-            let reference = format!("package:{name}#{hash:#018x}");
-            match classes.get(&(*id, *hash)) {
-                Some(found) => Resolved {
-                    class: found.path.clone(),
-                    class_kind: "package_import",
-                    native_class: native_ancestor(&found.super_ref, script, classes),
-                    class_ref: reference,
+        ClassRef::Script(index) => {
+            let class_ref = format!("script:{index:#018x}");
+            match script.path_of(*index) {
+                Some(path) => Resolved {
+                    class: path.clone(),
+                    class_kind: "script_import",
+                    native_class: path,
+                    class_ref,
                 },
-                None => Resolved {
-                    class: "?".to_owned(),
-                    class_kind: "package_import_unresolved",
-                    native_class: "?".to_owned(),
-                    class_ref: reference,
-                },
+                None => Resolved::unresolved("script_import_unresolved", class_ref),
             }
         }
-        ClassRef::Local(id, hash, name) => {
-            let reference = format!("export:{name}");
-            match classes.get(&(*id, *hash)).filter(|_| *hash != 0) {
-                Some(found) => Resolved {
-                    class: found.path.clone(),
-                    class_kind: "export",
-                    native_class: native_ancestor(&found.super_ref, script, classes),
-                    class_ref: reference,
-                },
-                None => Resolved {
-                    class: "?".to_owned(),
-                    class_kind: "export_unresolved",
-                    native_class: "?".to_owned(),
-                    class_ref: reference,
-                },
-            }
-        }
-        ClassRef::Null => Resolved {
-            class: "?".to_owned(),
-            class_kind: "null",
-            native_class: "?".to_owned(),
-            class_ref: "null".to_owned(),
-        },
-        ClassRef::Bad(why) => Resolved {
-            class: "?".to_owned(),
-            class_kind: "bad_index",
-            native_class: "?".to_owned(),
-            class_ref: why.clone(),
-        },
+        ClassRef::Package(id, name, hash) => defined(
+            (*id, *hash),
+            "package_import",
+            "package_import_unresolved",
+            format!("package:{name}#{hash:#018x}"),
+        ),
+        ClassRef::Local(id, hash, name) => defined(
+            (*id, *hash),
+            "export",
+            "export_unresolved",
+            format!("export:{name}"),
+        ),
+        ClassRef::Null => Resolved::unresolved("null", "null".to_owned()),
+        ClassRef::Bad(why) => Resolved::unresolved("bad_index", why.clone()),
     }
 }
 
@@ -347,7 +319,7 @@ fn native_ancestor(start: &ClassRef, script: &ScriptObjects, classes: &ClassTabl
                 return script.path_of(index).unwrap_or_else(|| "?".to_owned());
             }
             ClassRef::Package(id, _, hash) | ClassRef::Local(id, hash, _) => {
-                match classes.get(&(id, hash)).filter(|_| hash != 0) {
+                match classes.get(&(id, hash)) {
                     Some(found) => at = found.super_ref.clone(),
                     None => return "?".to_owned(),
                 }
@@ -500,8 +472,7 @@ mod tests {
         assert_eq!(cands[2].outer, "Default__BP_Agent_C");
     }
 
-    /// A package import whose target package was never read stays `?` -- the
-    /// row is kept, with the reference it could not follow.
+    /// The row is kept, with the reference it could not follow.
     #[test]
     fn an_unreadable_import_is_a_visible_absence() {
         let script = script();

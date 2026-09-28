@@ -1,15 +1,13 @@
-//! The directory index inside a `.utoc`: the file names of the chunks.
-//!
-//! Serialized as a mount point, a directory table, a file table and a string
-//! table. Directories and files form singly linked lists by index (first child
-//! / next sibling, first file / next file); a file's user data is the TOC
-//! entry it names. `u32::MAX` ends a list or marks "no name".
+//! The directory index inside a `.utoc`, which names the chunks: a mount point,
+//! then directory, file and string tables. Directories and files are singly
+//! linked by index (first child / next sibling, first file / next file), a
+//! file's user data is its TOC entry, and `u32::MAX` ends a list or means no name.
 
 use crate::reader::{Cursor, Result, fail};
 
 const NONE: u32 = u32::MAX;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 struct DirEntry {
     name: u32,
     first_child: u32,
@@ -17,7 +15,7 @@ struct DirEntry {
     first_file: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 struct FileEntry {
     name: u32,
     next_file: u32,
@@ -26,14 +24,12 @@ struct FileEntry {
 
 #[derive(Debug, Clone)]
 pub struct DirectoryIndex {
-    pub mount_point: String,
+    mount_point: String,
     dirs: Vec<DirEntry>,
     files: Vec<FileEntry>,
     strings: Vec<String>,
 }
 
-/// Parse a directory index. Every byte must be used; anything left over means
-/// one of the tables was sized wrong.
 pub fn parse_directory_index(bytes: &[u8]) -> Result<DirectoryIndex> {
     let mut c = Cursor::new(bytes, "directory index");
     let mount_point = c.fstring()?;

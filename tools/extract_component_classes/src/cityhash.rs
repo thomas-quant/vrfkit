@@ -1,17 +1,9 @@
-//! CityHash64 (v1.1), the hash Unreal keys IoStore objects and packages by.
-//!
-//! This is here as a check, not as a lookup. The game already hands over every
-//! hash this tool needs to match: an export's class index is compared with a
-//! script object's global index by plain equality. What the hash adds is a
-//! second, independent answer to "did the path come out right": a script
-//! object's global index is `CityHash64` of its lowercased path, and a
-//! package's chunk id is `CityHash64` of its lowercased name. Rebuilding those
-//! from the strings this tool decoded and getting the game's own number back is
-//! evidence the name batch, the outer walk and the separators are all right --
-//! a wrong separator or an off-by-one name index changes the hash.
-//!
-//! Unreal hashes `TCHAR` text, which on Windows is UTF-16, so callers hash the
-//! UTF-16LE bytes of the string (see [`hash_path`]).
+//! CityHash64 (v1.1), used only as a self-check: class indices already match by
+//! plain equality. A script object's global index is the hash of its lowercased
+//! path and a package's chunk id that of its lowercased name, both as UTF-16LE
+//! (Unreal hashes `TCHAR` text). Rebuilding them from decoded strings and getting
+//! the game's numbers back proves the name batch and the outer walk. Not the
+//! separators: the path hash folds `.` and `:` alike into `/`, as the engine does.
 
 const K0: u64 = 0xc3a5_c85c_97cb_3127;
 const K1: u64 = 0xb492_b66f_be98_f273;
@@ -149,7 +141,6 @@ fn weak_hash_len32_with_seeds(s: &[u8], at: usize, a: u64, b: u64) -> (u64, u64)
     (a.wrapping_add(z), b.wrapping_add(c))
 }
 
-/// CityHash64 of `s`, as Unreal's `CityHash64` computes it.
 pub fn city_hash64(s: &[u8]) -> u64 {
     let len = s.len();
     if len <= 32 {
@@ -211,9 +202,8 @@ pub fn city_hash64(s: &[u8]) -> u64 {
 /// The 62 bits an `FPackageObjectIndex` keeps of a hash.
 pub const INDEX_MASK: u64 = (1u64 << 62) - 1;
 
-/// Unreal's object-path hash: lowercase, `.` and `:` become `/`, hashed as
-/// UTF-16LE, top two bits cleared. This is what a script object's global
-/// index is.
+/// Unreal's object-path hash, a script object's global index: lowercase, `.`
+/// and `:` become `/`, hashed as UTF-16LE, top two bits cleared.
 pub fn hash_path(path: &str) -> u64 {
     let mut bytes = Vec::with_capacity(path.len() * 2);
     for ch in path.chars() {
@@ -243,10 +233,9 @@ pub fn hash_package_name(name: &str) -> u64 {
     city_hash64(&bytes)
 }
 
-/// One-to-one lowercasing. A character whose lowercase form is not a single
-/// character is left alone rather than expanded, so the UTF-16 length never
-/// changes; the hash then disagrees and the caller counts a mismatch instead of
-/// matching by accident.
+/// One-to-one lowercasing: a character whose lowercase form is several is left
+/// alone, so the UTF-16 length never changes and a wrong guess shows as a
+/// counted hash mismatch, never an accidental match.
 fn lower(ch: char) -> char {
     if ch.is_ascii() {
         return ch.to_ascii_lowercase();
@@ -262,19 +251,17 @@ fn lower(ch: char) -> char {
 mod tests {
     use super::*;
 
-    /// The empty input returns the constant `k2` in every CityHash version, so
-    /// it pins the constant and the dispatch without depending on anything
-    /// this tool reads.
+    /// Every CityHash version returns `k2` for empty input: a pin independent
+    /// of anything this tool reads.
     #[test]
     fn empty_input_is_k2() {
         assert_eq!(city_hash64(b""), K2);
     }
 
-    /// Reference values taken from the game rather than from this code: each
-    /// is the global index a 13.06 `global.ucas` stores for that public engine
-    /// path, or the chunk id a 13.06 container stores for that package. They
-    /// cover the 17-32, 33-64 and over-64 byte paths (UTF-16 doubles the
-    /// length), which is every class a real path reaches.
+    /// Reference values from the game, not from this code: the global index a
+    /// 13.06 `global.ucas` stores for each engine path, and the chunk id a 13.06
+    /// container stores for the package. They cover the 17-32, 33-64 and
+    /// over-64 byte classes (UTF-16 doubles the length), all a real path reaches.
     #[test]
     fn engine_paths_hash_to_the_indices_the_game_stores() {
         for (path, stored) in [
@@ -295,11 +282,10 @@ mod tests {
         );
     }
 
-    /// Every length class takes a different code path, and real paths never
-    /// reach the short ones. These values were produced by this implementation
-    /// after it reproduced all 80,800 script object hashes and all 289,267
-    /// package ids of the 13.06 containers, so they pin that verified behaviour
-    /// against later edits rather than proving it.
+    /// Each length class takes its own code path, and real paths never reach
+    /// the short ones. These values come from this implementation after it
+    /// reproduced all 80,800 script object hashes and 289,267 package ids of
+    /// the 13.06 containers: they pin that behaviour, they do not prove it.
     #[test]
     fn each_length_class_is_pinned() {
         let text = b"/script/shootergame/equippablestatemachinecomponent/abcdefghijklmnopqrstuvwxyz0123456789";

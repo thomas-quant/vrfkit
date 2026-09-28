@@ -24,37 +24,12 @@
 //! +-------------------------------------------+
 //! ```
 //!
-//! # Module map
+//! # Entry points
 //!
-//! | Module | Responsibility |
-//! |--------|----------------|
-//! | `limits` | Every magic number and bound, each traced to its C# source |
-//! | `chunk` | [`ChunkType`], [`RawChunk`], [`ChunkIterator`] -- the framing layer |
-//! | `info` | The leading replay-info section |
-//! | `header` | The Header chunk's payload |
-//! | `preamble` | Info + Header together, the usual entry point |
-//! | `oodle` | ReplayData framing and archive decompression |
-//! | `event` | Event chunks: the server's own labelled timeline |
-//! | `checkpoint` | Checkpoint chunks: full-state snapshots |
-//!
-//! # Chunk iteration
-//!
-//! Use [`ChunkIterator`] to walk chunks lazily without buffering the whole file.
-//! For the common case (parse info + header, then iterate data chunks), see
-//! [`parse_preamble`] which returns both the parsed preamble and the offset for
-//! the remaining chunks.
-//!
-//! # Oodle decompression
-//!
-//! ReplayData chunk payloads are compressed with Oodle (Kraken/Mermaid/Selkie).
-//! Use [`decompress_replay_data`] to decode a raw chunk payload into plaintext
-//! bytes suitable for packet framing.
-//!
-//! # Event chunks
-//!
-//! Event chunk payloads are uncompressed and carry the server's own labelled
-//! game timeline. Use [`parse_event_chunk`] to read one into an [`EventChunk`];
-//! its inner payload is handed back raw, for the reason documented there.
+//! [`parse_preamble`] reads the info and the Header chunk and returns the offset
+//! where the chunk stream resumes; [`ChunkIterator`] walks it lazily from there.
+//! [`decompress_replay_data_with_trailing`] inflates a ReplayData chunk, and
+//! `parse_event_chunk` and `parse_checkpoint_chunk` read the other two kinds.
 //!
 //! # Cargo features
 //!
@@ -64,12 +39,10 @@
 //! | Feature | Turns off |
 //! |---------|-----------|
 //! | `oodle` | The `oozextract` dependency. Plaintext chunks still parse; a compressed archive reports [`ContainerError::OodleUnsupported`] |
-//! | `event` | [`parse_event_chunk`] and [`EventChunk`] |
-//! | `checkpoint` | [`parse_checkpoint_chunk`], [`decompress_checkpoint`] and [`CheckpointChunk`] |
+//! | `event` | `parse_event_chunk` and `EventChunk` |
+//! | `checkpoint` | `parse_checkpoint_chunk`, `decompress_checkpoint`, `decompress_checkpoint_with_trailing` and `CheckpointChunk` |
 //!
-//! The info, header and chunk-iteration layers are **not** gated: every reader
-//! of the format needs them to find anything at all, so a flag over them would
-//! only offer a build that cannot open a file.
+//! Info, header and chunk iteration are never gated: nothing can be read without them.
 
 #![forbid(unsafe_code)]
 
@@ -98,7 +71,10 @@ pub use oodle::{
 pub use preamble::{Preamble, parse_preamble};
 
 #[cfg(feature = "checkpoint")]
-pub use checkpoint::{CheckpointChunk, decompress_checkpoint, parse_checkpoint_chunk};
+pub use checkpoint::{
+    CheckpointChunk, decompress_checkpoint, decompress_checkpoint_with_trailing,
+    parse_checkpoint_chunk,
+};
 #[cfg(feature = "event")]
 pub use event::{
     EVENT_PAYLOAD_TIME_TOLERANCE_MS, EventChunk, EventPayload, KNOWN_EVENT_GROUPS, KnownEventGroup,

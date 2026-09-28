@@ -1,11 +1,10 @@
 //! The script object map in `global.ucas`: native (`/Script/...`) objects by
-//! their `FPackageObjectIndex`.
-//!
-//! The chunk is a name batch, an `i32` count, and that many 32-byte
-//! `FScriptObjectEntry` records: a mapped name, the object's own global index,
-//! its outer's global index, and its CDO class index. Paths are rebuilt by
-//! walking outers to the package: the first step below a package joins with
-//! `.`, deeper ones with `:` -- `/Script/ShooterGame.AresInventory`.
+//! `FPackageObjectIndex`. The chunk is a name batch, an `i32` count, and that
+//! many 32-byte `FScriptObjectEntry` records (mapped name, own global index,
+//! outer's global index, CDO class index). Paths are rebuilt by walking outers
+//! and joined as UE's `GetPathName` joins them: `:` before an object whose
+//! outer is a top-level object (one outered to the package), `.` everywhere
+//! else (`/Script/Pkg.Object:Subobject.Inner`).
 
 use std::collections::HashMap;
 
@@ -33,13 +32,13 @@ struct ScriptObject {
     outer: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScriptObjects {
     objects: HashMap<u64, ScriptObject>,
 }
 
 /// What the self-check found; printed on every run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ScriptCheck {
     pub objects: usize,
     pub paths_resolved: usize,
@@ -105,17 +104,17 @@ impl ScriptObjects {
         for (depth, obj) in chain.iter().rev().enumerate() {
             match depth {
                 0 => {}
-                1 => path.push('.'),
-                _ => path.push(':'),
+                2 => path.push(':'),
+                _ => path.push('.'),
             }
             path.push_str(&obj.name);
         }
         Some(path)
     }
 
-    /// Rebuild every path and hash it the way the engine does; the result must
-    /// be the object's own global index. This is the check on the walk, the
-    /// separators and the name table together.
+    /// Rebuild every path and hash it as the engine does; the result must be the
+    /// object's own global index. This proves the names and the outer walk, not
+    /// the separators, which the hash folds alike into `/`.
     pub fn verify(&self) -> ScriptCheck {
         let mut check = ScriptCheck {
             objects: self.objects.len(),
@@ -145,8 +144,8 @@ pub(crate) mod tests {
         (KIND_SCRIPT_IMPORT << 62) | hash_path(path)
     }
 
-    /// A script object chunk for `(name index, number, path)` triples; each
-    /// object's outer is the path with its last segment removed.
+    /// A script object chunk for `(name index, number, path, outer path)`
+    /// entries; an outer of `None` is null, as a package's is.
     pub fn build_script_objects(
         names: &[&str],
         objects: &[(u32, u32, &str, Option<&str>)],
@@ -166,7 +165,7 @@ pub(crate) mod tests {
 
     fn sample() -> Vec<u8> {
         build_script_objects(
-            &["/Script/ShooterGame", "AresInventory", "Inner"],
+            &["/Script/ShooterGame", "AresInventory", "Inner", "Deeper"],
             &[
                 (0, 0, "/Script/ShooterGame", None),
                 (
@@ -181,12 +180,20 @@ pub(crate) mod tests {
                     "/Script/ShooterGame.AresInventory:Inner",
                     Some("/Script/ShooterGame.AresInventory"),
                 ),
+                (
+                    3,
+                    0,
+                    "/Script/ShooterGame.AresInventory:Inner.Deeper",
+                    Some("/Script/ShooterGame.AresInventory:Inner"),
+                ),
             ],
         )
     }
 
+    /// Depth 3 is where the rule shows: below the first subobject UE joins
+    /// with `.` again.
     #[test]
-    fn paths_join_the_first_step_with_a_dot_and_deeper_ones_with_a_colon() {
+    fn paths_use_a_colon_only_below_a_top_level_object() {
         let objs = parse_script_objects(&sample()).unwrap();
         assert_eq!(
             objs.path_of(script_index("/Script/ShooterGame.AresInventory"))
@@ -198,16 +205,22 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("/Script/ShooterGame.AresInventory:Inner")
         );
+        assert_eq!(
+            objs.path_of(script_index(
+                "/Script/ShooterGame.AresInventory:Inner.Deeper"
+            ))
+            .as_deref(),
+            Some("/Script/ShooterGame.AresInventory:Inner.Deeper")
+        );
         assert_eq!(objs.path_of(script_index("/Script/Nope.Missing")), None);
         let check = objs.verify();
-        assert_eq!(check.objects, 3);
-        assert_eq!(check.hash_matches, 3);
+        assert_eq!(check.objects, 4);
+        assert_eq!(check.hash_matches, 4);
         assert_eq!(check.hash_mismatches, 0);
     }
 
-    /// The hash check is what catches a wrong separator: an object stored under
-    /// the hash of a `.`-joined nested path, which this walk renders with `:`,
-    /// still hashes the same (both become `/`), but a renamed object does not.
+    /// The hash check catches a renamed object; a mis-separated path would
+    /// still match, since `.` and `:` both hash as `/`.
     #[test]
     fn a_name_that_does_not_hash_to_its_index_is_counted() {
         let bytes = build_script_objects(

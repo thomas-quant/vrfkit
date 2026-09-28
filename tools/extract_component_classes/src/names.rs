@@ -1,23 +1,17 @@
-//! Name batches and `FMappedName`.
-//!
-//! Unreal 5 writes every name table in IoStore -- a package's own name map, its
-//! imported package names, and the global script object names in
-//! `global.ucas` -- as one "name batch": a count, a string byte total, a hash
-//! algorithm version, one 64-bit hash per name, one two-byte header per name,
-//! and then the string bytes back to back.
+//! Name batches and `FMappedName`. Every IoStore name table (a package's name
+//! map, its imported package names, the script object names in `global.ucas`)
+//! is a name batch: a count, a string-byte total, a hash algorithm version, a
+//! u64 hash and a two-byte header per name, then the strings back to back.
 
 use crate::reader::{Cursor, Result, fail, latin1};
 
-/// The hash algorithm version the shipped game writes into every batch. It is
-/// checked rather than skipped because it is the one fixed value in the
-/// layout: finding it where it belongs is what says the batch starts where the
-/// caller thinks it does (it is how the 52-byte package summary was told apart
-/// from the older 44-byte one -- see `zen.rs`).
+/// The hash algorithm version the shipped game writes into every batch.
+/// Checked because it is the layout's one fixed value: finding it confirms the
+/// batch starts where the caller thinks (`zen.rs` tells summary widths apart by it).
 pub const NAME_HASH_VERSION: u64 = 0xC164_0000;
 
-/// Read one name batch. The string block must be consumed exactly: a length
-/// header that runs past it, or string bytes left over at the end, is an
-/// error rather than a shorter table.
+/// Read one name batch, consuming its string block exactly: a header that runs
+/// past it, or bytes left over, is an error rather than a shorter table.
 pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
     let at = c.pos();
     let num = c.u32()? as usize;
@@ -40,43 +34,35 @@ pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
     for (i, h) in headers.chunks_exact(2).enumerate() {
         let wide = h[0] & 0x80 != 0;
         let len = (usize::from(h[0] & 0x7f) << 8) | usize::from(h[1]);
-        if wide {
-            // Not aligned: a UTF-16 name starts wherever the previous name
-            // ended, odd offsets included. Aligning it to two bytes -- which
-            // looks natural for UTF-16 -- misread 26 packages of the 13.06
-            // containers, every one holding a Chinese texture name at an odd
-            // offset, and every later name in the batch with it.
-            let end = p + len * 2;
-            if end > strings.len() {
-                return fail(format!(
-                    "name batch at offset {at}: name {i} ({len} UTF-16 units) overruns the {}-byte string block",
-                    strings.len()
-                ));
-            }
-            let units: Vec<u16> = strings[p..end]
+        // Not aligned: a UTF-16 name starts wherever the previous one ended.
+        // Two-byte alignment misread 26 packages of the 13.06 containers, each
+        // with a Chinese texture name at an odd offset, and every later name.
+        let (end, unit) = if wide {
+            (p + len * 2, "UTF-16 units")
+        } else {
+            (p + len, "bytes")
+        };
+        if end > strings.len() {
+            return fail(format!(
+                "name batch at offset {at}: name {i} ({len} {unit}) overruns the {}-byte string block",
+                strings.len()
+            ));
+        }
+        let raw = &strings[p..end];
+        out.push(if wide {
+            let units: Vec<u16> = raw
                 .chunks_exact(2)
                 .map(|u| u16::from_le_bytes([u[0], u[1]]))
                 .collect();
-            match String::from_utf16(&units) {
-                Ok(s) => out.push(s),
-                Err(_) => {
-                    return fail(format!(
-                        "name batch at offset {at}: name {i} is not valid UTF-16"
-                    ));
-                }
-            }
-            p = end;
+            String::from_utf16(&units).or_else(|_| {
+                fail(format!(
+                    "name batch at offset {at}: name {i} is not valid UTF-16"
+                ))
+            })?
         } else {
-            let end = p + len;
-            if end > strings.len() {
-                return fail(format!(
-                    "name batch at offset {at}: name {i} ({len} bytes) overruns the {}-byte string block",
-                    strings.len()
-                ));
-            }
-            out.push(latin1(&strings[p..end]));
-            p = end;
-        }
+            latin1(raw)
+        });
+        p = end;
     }
     if p != strings.len() {
         return fail(format!(
@@ -90,10 +76,9 @@ pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
 
 /// An `FMappedName`: a 30-bit index into some name table (the top two bits are
 /// the table kind), and the FName instance number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct MappedName {
     pub index: u32,
-    pub kind: u32,
     pub number: u32,
 }
 
@@ -103,7 +88,6 @@ impl MappedName {
         let number = c.u32()?;
         Ok(MappedName {
             index: raw & 0x3fff_ffff,
-            kind: raw >> 30,
             number,
         })
     }
@@ -184,8 +168,7 @@ pub(crate) mod tests {
     }
 
     /// The shape that broke the first real run: a UTF-16 name right after an
-    /// odd-length ANSI one. With two-byte alignment the wide name reads one
-    /// byte late and the batch no longer adds up.
+    /// odd-length ANSI one, which two-byte alignment reads one byte late.
     #[test]
     fn a_wide_name_at_an_odd_offset_is_read_where_it_starts() {
         let wide = "~\u{8d34}\u{56fe} #5";
@@ -232,17 +215,12 @@ pub(crate) mod tests {
     #[test]
     fn the_instance_number_is_part_of_the_name() {
         let names = vec!["AresAttributeSet".to_owned()];
-        let n = |number| MappedName {
-            index: 0,
-            kind: 0,
-            number,
-        };
+        let n = |number| MappedName { index: 0, number };
         assert_eq!(n(0).render(&names).unwrap(), "AresAttributeSet");
         assert_eq!(n(1).render(&names).unwrap(), "AresAttributeSet_0");
         assert_eq!(n(2).render(&names).unwrap(), "AresAttributeSet_1");
         let bad = MappedName {
             index: 1,
-            kind: 0,
             number: 0,
         };
         assert!(bad.render(&names).is_err());

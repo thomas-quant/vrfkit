@@ -1,28 +1,15 @@
-//! Read component classes out of an installed game's IoStore containers.
+//! Read component classes out of an installed game's IoStore containers. A
+//! replay names a Blueprint component only by its instance name
+//! (`ZoomStateMachine`), and its class is not derivable from that name; the
+//! cooked game says what it is. This prints every component template's
+//! instance name, owning package and class, and is the source of
+//! `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs` (procedure
+//! and what the output establishes: docs/DATA.md, "Reading component classes
+//! out of the game").
 //!
-//! A replay names a Blueprint component only by its instance name
-//! (`ZoomStateMachine`), and the class it replicates under -- the group the
-//! replay declares -- is not derivable from that name. The cooked game says
-//! what it is. For every component template in every package this prints the
-//! instance name, the package that owns it, and its class, resolved through
-//! the script object map in `global.ucas` to a `/Script/...` path.
-//!
-//! This is what `KNOWN_SUBOBJECT_CLASS_PATHS` in
-//! `crates/vrfkit/src/sink/paths.rs` is derived from. docs/DATA.md ("Reading
-//! component classes out of the game") has the procedure and what the output
-//! does and does not establish.
-//!
-//! Read-only: files are opened for reading, shared with every other handle,
-//! and nothing is written anywhere except `--out`.
-//!
-//! Usage:
-//!   extract-component-classes <PAKS_DIR> [--format tsv|json] [--kind all|gen_variable|cdo_subobject]
-//!                             [--name NAME]... [--jobs N] [--out FILE]
-//!
-//! Exit status: 0 when every package was read and every self-check held; 1
-//! when anything could not be read or a check failed (the rows that could be
-//! read are still written, and the summary says what is missing); 2 for a
-//! usage or setup error.
+//! Exit status: 0 when every package was read and every self-check held; 1 when
+//! anything could not be read or a check failed (readable rows are still
+//! written, and the summary says what is missing); 2 for a usage or setup error.
 
 #![forbid(unsafe_code)]
 
@@ -52,7 +39,7 @@ use toc::{CHUNK_EXPORT_BUNDLE_DATA, CHUNK_SCRIPT_OBJECTS};
 const USAGE: &str = "usage: extract-component-classes <PAKS_DIR> [--format tsv|json] \
 [--kind all|gen_variable|cdo_subobject] [--name NAME]... [--jobs N] [--out FILE]";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 enum Format {
     Tsv,
     Json,
@@ -128,7 +115,6 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// One output row.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Row {
     instance: String,
@@ -143,15 +129,16 @@ struct Row {
     container: String,
 }
 
-/// Every counter the run keeps. All of them are printed, zeros included: a
-/// line that appears only when nonzero cannot tell "nothing went wrong" from
-/// "this code never ran".
+/// Every counter the run keeps; all are printed, zeros included.
 #[derive(Debug, Default)]
 struct Counts {
     containers: usize,
     legacy_paks_not_read: usize,
     toc_entries: usize,
     indexed_files: usize,
+    /// Directory-index files naming a TOC entry past the end of the TOC, or
+    /// one a later file also names: neither can be attached to a chunk.
+    indexed_files_dropped: usize,
     package_chunks: usize,
     package_chunks_unindexed: usize,
     package_files_not_package_chunks: usize,
@@ -176,8 +163,8 @@ struct Provenance {
     container_id: u64,
     toc_entries: usize,
     package_chunks: usize,
-    utoc_bytes: u64,
-    ucas_bytes: u64,
+    utoc_bytes: Option<u64>,
+    ucas_bytes: Option<u64>,
     ucas_modified: String,
 }
 
@@ -210,11 +197,13 @@ fn run(args: &Args) -> Result<i32, String> {
     if !global_path.is_file() {
         return Err(format!("{}: not found", global_path.display()));
     }
-    let script = load_script_objects(&global_path)?;
+    let (script, global) = load_script_objects(&global_path)?;
     counts.script = script.verify();
 
     let mut containers = Vec::new();
-    let mut provenance = Vec::new();
+    // Listed although it holds no package this tool reads: every `/Script`
+    // path in the output comes from it.
+    let mut provenance = vec![provenance_of(&global, &global_path, 0)];
     let mut jobs = Vec::new();
     for utoc in &utocs {
         if utoc
@@ -235,7 +224,11 @@ fn run(args: &Args) -> Result<i32, String> {
                 .map_err(|e| format!("{}: {e}", container.name))?;
             counts.indexed_files += index.len();
             for (path, entry) in index {
-                by_entry.insert(entry, path);
+                if entry as usize >= container.toc.chunk_ids.len()
+                    || by_entry.insert(entry, path).is_some()
+                {
+                    counts.indexed_files_dropped += 1;
+                }
             }
         }
         let mut packages_here = 0usize;
@@ -258,15 +251,7 @@ fn run(args: &Args) -> Result<i32, String> {
             });
         }
         counts.package_chunks += packages_here;
-        provenance.push(Provenance {
-            name: container.name.clone(),
-            container_id: container.toc.header.container_id,
-            toc_entries: container.toc.chunk_ids.len(),
-            package_chunks: packages_here,
-            utoc_bytes: file_len(utoc),
-            ucas_bytes: file_len(&container.ucas_path),
-            ucas_modified: modified(&container.ucas_path),
-        });
+        provenance.push(provenance_of(&container, utoc, packages_here));
         containers.push(container);
     }
     if containers.is_empty() {
@@ -419,7 +404,20 @@ fn discover(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     Ok((utocs, paks))
 }
 
-fn load_script_objects(global: &Path) -> Result<ScriptObjects, String> {
+/// Which files a run read, so its output can be matched to them.
+fn provenance_of(container: &Container, utoc: &Path, package_chunks: usize) -> Provenance {
+    Provenance {
+        name: container.name.clone(),
+        container_id: container.toc.container_id,
+        toc_entries: container.toc.chunk_ids.len(),
+        package_chunks,
+        utoc_bytes: file_len(utoc),
+        ucas_bytes: file_len(&container.ucas_path),
+        ucas_modified: modified(&container.ucas_path),
+    }
+}
+
+fn load_script_objects(global: &Path) -> Result<(ScriptObjects, Container), String> {
     let container = Container::open(global).map_err(|e| e.to_string())?;
     let entries: Vec<usize> = container
         .toc
@@ -440,7 +438,8 @@ fn load_script_objects(global: &Path) -> Result<ScriptObjects, String> {
     let bytes = container
         .read_chunk(&mut ucas, entries[0], u64::MAX)
         .map_err(|e| e.to_string())?;
-    parse_script_objects(&bytes).map_err(|e| format!("{}: {e}", global.display()))
+    let script = parse_script_objects(&bytes).map_err(|e| format!("{}: {e}", global.display()))?;
+    Ok((script, container))
 }
 
 type Scanned = Vec<(Job, PackageScan)>;
@@ -468,18 +467,11 @@ fn scan_all(
                     let Some(job) = jobs.get(i) else { break };
                     let container = &containers[job.container];
                     let outcome = match &mut handles[job.container] {
-                        Some(file) => {
-                            scan_package(container, file, job, script).map_err(|e| e.to_string())
-                        }
-                        slot => match container.open_ucas() {
-                            Ok(file) => {
-                                let file = slot.insert(file);
-                                scan_package(container, file, job, script)
-                                    .map_err(|e| e.to_string())
-                            }
-                            Err(e) => Err(e.to_string()),
-                        },
-                    };
+                        Some(file) => Ok(file),
+                        slot => container.open_ucas().map(|file| slot.insert(file)),
+                    }
+                    .and_then(|file| scan_package(container, file, job, script))
+                    .map_err(|e| e.to_string());
                     local.push((i, outcome));
                 }
                 results
@@ -502,8 +494,18 @@ fn scan_all(
     (ok, failed)
 }
 
-fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+/// A file's size, `None` when its metadata cannot be read: printed as `?` and
+/// as JSON `null`, never as a plausible 0.
+fn file_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).map(|m| m.len()).ok()
+}
+
+fn size_text(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "?".to_owned(), |n| n.to_string())
+}
+
+fn json_size(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "null".to_owned(), |n| n.to_string())
 }
 
 fn modified(path: &Path) -> String {
@@ -630,7 +632,11 @@ fn render_json(rows: &[Row], counts: &Counts, provenance: &[Provenance], paks: &
             out,
             ", \"container_id\": \"{:#018x}\", \"toc_entries\": {}, \"package_chunks\": {}, \
              \"utoc_bytes\": {}, \"ucas_bytes\": {}, \"ucas_modified\": ",
-            p.container_id, p.toc_entries, p.package_chunks, p.utoc_bytes, p.ucas_bytes
+            p.container_id,
+            p.toc_entries,
+            p.package_chunks,
+            json_size(p.utoc_bytes),
+            json_size(p.ucas_bytes)
         );
         json_string(&mut out, &p.ucas_modified);
         out.push('}');
@@ -665,6 +671,7 @@ fn count_pairs(c: &Counts) -> Vec<(String, usize)> {
         ("legacy_paks_not_read".into(), c.legacy_paks_not_read),
         ("toc_entries".into(), c.toc_entries),
         ("indexed_files".into(), c.indexed_files),
+        ("indexed_files_dropped".into(), c.indexed_files_dropped),
         ("package_chunks".into(), c.package_chunks),
         (
             "package_chunks_unindexed".into(),
@@ -723,7 +730,12 @@ fn report(
         let _ = writeln!(
             err,
             "  {:<32} id {:#018x}  {:>7} chunks  {:>6} packages  ucas {:>12} bytes  modified {}",
-            p.name, p.container_id, p.toc_entries, p.package_chunks, p.ucas_bytes, p.ucas_modified
+            p.name,
+            p.container_id,
+            p.toc_entries,
+            p.package_chunks,
+            size_text(p.ucas_bytes),
+            p.ucas_modified
         );
     }
     for pak in legacy {
@@ -772,6 +784,107 @@ mod tests {
         assert_eq!(civil_from_days(20_354), (2025, 9, 23));
         let t = UNIX_EPOCH + std::time::Duration::from_secs(1_758_591_394);
         assert_eq!(utc_timestamp(t), "2025-09-23T01:36:34Z");
+    }
+
+    /// A one-chunk TOC over stored (uncompressed) bytes.
+    fn stored_toc(len: usize, chunk_type: u8, directory_index: Vec<u8>) -> Vec<u8> {
+        use crate::toc::tests::{TocSpec, build_toc};
+        use crate::toc::{ChunkId, CompressedBlock, FLAG_INDEXED, OffsetLength};
+        build_toc(&TocSpec {
+            flags: FLAG_INDEXED,
+            block_size: 0x10000,
+            methods: vec![],
+            chunks: vec![(
+                ChunkId { id: 1, chunk_type },
+                OffsetLength {
+                    offset: 0,
+                    length: len as u64,
+                },
+            )],
+            blocks: vec![CompressedBlock {
+                offset: 0,
+                compressed_size: len as u32,
+                uncompressed_size: len as u32,
+                method: 0,
+            }],
+            directory_index,
+            ..crate::toc::tests::TocSpec::default()
+        })
+    }
+
+    /// Run the tool with `--format json` over a synthetic Paks directory: a
+    /// global container and one `other` whose single chunk is not a package,
+    /// so the run fails but still reports. Returns the exit code and the JSON.
+    fn run_synthetic(test: &str, other_index: Vec<u8>) -> (Result<i32, String>, String) {
+        use crate::script::tests::build_script_objects;
+        let dir = std::env::temp_dir().join(format!("ecc-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = build_script_objects(&["/Script/A"], &[(0, 0, "/Script/A", None)]);
+        let global = stored_toc(script.len(), CHUNK_SCRIPT_OBJECTS, Vec::new());
+        std::fs::write(dir.join("global.utoc"), global).unwrap();
+        std::fs::write(dir.join("global.ucas"), &script).unwrap();
+        std::fs::write(dir.join("other.utoc"), stored_toc(4, 2, other_index)).unwrap();
+        std::fs::write(dir.join("other.ucas"), [0u8; 4]).unwrap();
+        let out = dir.join("out.json");
+        let args = Args {
+            paks: dir.clone(),
+            format: Format::Json,
+            kind: None,
+            names: BTreeSet::new(),
+            jobs: 1,
+            out: Some(out.clone()),
+        };
+        let code = run(&args);
+        let json = std::fs::read_to_string(&out);
+        std::fs::remove_dir_all(&dir).unwrap();
+        (code, json.unwrap())
+    }
+
+    #[test]
+    fn provenance_lists_the_global_container() {
+        let (code, json) = run_synthetic("provenance", Vec::new());
+        assert_eq!(code, Ok(1));
+        let names: Vec<&str> = json
+            .match_indices("\"name\": \"")
+            .map(|(at, key)| {
+                let rest = &json[at + key.len()..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect();
+        assert_eq!(names, ["global", "other"]);
+    }
+
+    #[test]
+    fn directory_index_files_that_name_no_entry_of_their_own_are_counted() {
+        use crate::dirindex::tests::build_index;
+        const NONE: u32 = u32::MAX;
+        // One directory holding three files, for TOC entries 0, 0 and 9; the
+        // TOC has one entry.
+        let index = build_index(
+            "../../../",
+            &[(NONE, NONE, NONE, 0)],
+            &[(0, 1, 0), (1, 2, 0), (2, NONE, 9)],
+            &["a.ubulk", "b.ubulk", "c.ubulk"],
+        );
+        let (code, json) = run_synthetic("dropped", index);
+        assert_eq!(code, Ok(1));
+        assert!(json.contains("\"indexed_files\": 3,"), "{json}");
+        assert!(json.contains("\"indexed_files_dropped\": 2,"), "{json}");
+        let (_, json) = run_synthetic("none-dropped", Vec::new());
+        assert!(json.contains("\"indexed_files_dropped\": 0,"), "{json}");
+    }
+
+    #[test]
+    fn a_size_that_cannot_be_read_is_absent_not_zero() {
+        let missing = Path::new("no such dir/no such file.ucas");
+        assert_eq!(file_len(missing), None);
+        assert_eq!(size_text(file_len(missing)), "?");
+        assert_eq!(json_size(file_len(missing)), "null");
+        // Tests run from the package root.
+        let here = Path::new("Cargo.toml");
+        let len = std::fs::metadata(here).unwrap().len();
+        assert_eq!(size_text(file_len(here)), len.to_string());
     }
 
     #[test]

@@ -787,9 +787,9 @@ python tools/check_docs.py --fast    # skip the count comparison
 
 ### Reading the installed game
 
-`tools/extract_component_classes/` is a standalone Rust tool -- like
-`tools/probe_offset/`, not a workspace member, with its own lockfile -- and the
-only thing in this repo that reads game files rather than replays. It lists the
+`tools/extract_component_classes/` is a standalone Rust tool -- not a
+workspace member, with its own lockfile -- and the only thing in this repo that
+reads game files rather than replays. It lists the
 class of every component template in an installed game's IoStore containers,
 which is where `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs`
 comes from. It opens the files for reading only, shares them with every other
