@@ -4,7 +4,7 @@
 //! the slot the overlay writes it to. `decode_field` is what checks that the
 //! payload was fully consumed, so nothing here needs to.
 
-use vrf_bitio::BitReader;
+use vrf_bitio::{BitError, BitReader};
 
 use super::{DecodeError, DecodedValue};
 
@@ -227,16 +227,30 @@ const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 /// The bytes are hex-encoded as they are read rather than collected first: the
 /// previous shape ran `format!("{b:02x}")` per byte, which is one heap
 /// allocation and one formatting machine per byte of payload.
+///
+/// A count the payload cannot hold is refused before a byte is read, the way
+/// `read_fstring` refuses a string's: the prefix is what is wrong, so it is
+/// `InvalidLength` and the error report prints `Malformed`. The byte loop
+/// used to find out by running into `Eof`, which printed `EOF` for the cause
+/// an FString's prefix prints as `Malformed`. The table's cap is checked
+/// first and keeps its own variant.
 pub(super) fn decode_byte_array(
     r: &mut BitReader<'_>,
     max_bytes: u32,
 ) -> Result<DecodedValue, DecodeError> {
+    let start = r.position();
     let count = r.read_int_packed()?;
     if count > max_bytes {
         return Err(DecodeError::ByteArrayLengthCapExceeded {
             declared: count,
             max: max_bytes,
         });
+    }
+    if u64::from(count) * 8 > r.bits_remaining() {
+        return Err(DecodeError::BitIo(BitError::InvalidLength {
+            position: start,
+            length: i64::from(count),
+        }));
     }
     let mut hex = String::with_capacity(count as usize * 2);
     for _ in 0..count {

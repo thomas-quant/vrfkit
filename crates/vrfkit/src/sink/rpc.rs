@@ -832,11 +832,11 @@ fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
     match err {
         EffectBlobError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
         // The bits ran out before the structure did: the window ended before
-        // the terminator, a declared field runs past the window, or a
-        // member's type read past the end of its own field.
-        EffectBlobError::MissingTerminator { .. }
-        | EffectBlobError::PayloadTooLarge { .. }
-        | EffectBlobError::PayloadOverread { .. } => DecodeErrorKind::Eof,
+        // the terminator, or a member's type read past the end of its own
+        // field.
+        EffectBlobError::MissingTerminator { .. } | EffectBlobError::PayloadOverread { .. } => {
+            DecodeErrorKind::Eof
+        }
         // Bits the structure did not account for, after the terminator or
         // inside a field whose type read short of it.
         EffectBlobError::ResidualBits { .. } | EffectBlobError::PayloadUnderread { .. } => {
@@ -847,8 +847,13 @@ fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
         EffectBlobError::ArrayCountTooLarge { .. } | EffectBlobError::NonFiniteFloat { .. } => {
             DecodeErrorKind::Rejected
         }
-        // The bits break a rule of this framing.
-        EffectBlobError::IndexOutOfBounds { .. }
+        // The bits break a rule of this framing. `PayloadTooLarge` is a field
+        // header whose declared width is longer than the window or than the
+        // decoder's 64 Kib cap, refused before a bit of the payload is read:
+        // a length prefix the payload cannot hold, which is `Malformed` for an
+        // overlay string or byte array too, not a reader running out.
+        EffectBlobError::PayloadTooLarge { .. }
+        | EffectBlobError::IndexOutOfBounds { .. }
         | EffectBlobError::TooManyFields { .. }
         | EffectBlobError::BitLengthExceedsBuffer { .. }
         | EffectBlobError::UnexpectedPayloadWidth { .. }
@@ -861,6 +866,8 @@ fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use vrf_bitio::BitError;
 
     use super::{EffectBlobError, effect_error_kind};
@@ -869,8 +876,46 @@ mod tests {
     /// so the same cause must print the same label. Every `BitIo` error used
     /// to print `EOF`, and every other failure `Residual` -- the label that
     /// means leftover bits -- whether bits were left over or not.
+    ///
+    /// Every variant has a case, and the test checks that itself against the
+    /// list the variant match below is generated from. That match has no
+    /// wildcard, so a new variant does not compile until it is listed, and a
+    /// listed variant with no case fails here. The cases used to be a
+    /// hand-picked eleven, and the seven variants they left out could go back
+    /// to `Residual` with every test green.
     #[test]
     fn effect_failures_print_the_label_of_their_cause() {
+        // Generated from one list, so the list and the match cannot disagree.
+        macro_rules! variants {
+            ($($variant:ident),+ $(,)?) => {
+                (
+                    [$(stringify!($variant)),+],
+                    |err: &EffectBlobError| -> &'static str {
+                        match err {
+                            $(EffectBlobError::$variant { .. } => stringify!($variant),)+
+                        }
+                    },
+                )
+            };
+        }
+        let (every_variant, variant_of) = variants!(
+            BitIo,
+            ArrayCountTooLarge,
+            IndexOutOfBounds,
+            PayloadTooLarge,
+            TooManyFields,
+            BitLengthExceedsBuffer,
+            ResidualBits,
+            NonFiniteFloat,
+            UnexpectedPayloadWidth,
+            ElementFieldCount,
+            NonAdjacentHandles,
+            InconsistentHandleBase,
+            PayloadOverread,
+            PayloadUnderread,
+            MissingTerminator,
+            NonZeroTerminator,
+        );
         let cases = [
             (
                 EffectBlobError::BitIo(BitError::Eof {
@@ -917,6 +962,52 @@ mod tests {
             ),
             (EffectBlobError::NonZeroTerminator { value: 1 }, "Malformed"),
             (EffectBlobError::ElementFieldCount { found: 3 }, "Malformed"),
+            // A declared width past the window is an overlong length prefix,
+            // `Malformed` like an overlay string's, not an EOF.
+            (
+                EffectBlobError::PayloadTooLarge {
+                    bits: 64,
+                    remaining: 32,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::IndexOutOfBounds { index: 2, count: 2 },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::TooManyFields { context: "element" },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::BitLengthExceedsBuffer {
+                    bits: 64,
+                    available: 32,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::UnexpectedPayloadWidth {
+                    context: "float value",
+                    expected: 32,
+                    found: 16,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::NonAdjacentHandles {
+                    first: 1,
+                    second: 3,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::InconsistentHandleBase {
+                    expected: 1,
+                    found: 3,
+                },
+                "Malformed",
+            ),
         ];
         let printed: Vec<(String, String)> = cases
             .iter()
@@ -927,5 +1018,12 @@ mod tests {
             .map(|(err, want)| (format!("{err:?}"), (*want).to_owned()))
             .collect();
         assert_eq!(printed, wanted);
+
+        let reached: BTreeSet<&str> = cases.iter().map(|(err, _)| variant_of(err)).collect();
+        assert_eq!(
+            reached,
+            every_variant.into_iter().collect::<BTreeSet<_>>(),
+            "every EffectBlobError needs a case"
+        );
     }
 }

@@ -1,8 +1,10 @@
 //! The overlay table's resolution order, and the hash index's agreement
 //! with the binary search it replaced.
 
+use std::collections::BTreeSet;
+
 use crate::checksum_table::CHECKSUM_TYPES;
-use crate::decode::FieldType;
+use crate::decode::{DecodeError, FieldType, decode_field};
 use crate::overlay::{
     OverlayEntry, OverlayHandleEntry, OverlayStats, OverlayTable, apply_overlay,
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
@@ -1161,6 +1163,16 @@ fn apply_overlay_graceful_on_decode_failure() {
 /// `Residual`, the label that means leftover bits.
 ///
 /// Asserted on the printed label, because that is what reaches the operator.
+///
+/// Every `DecodeError` variant the overlay can meet has a case, and the test
+/// checks that itself: `decode_field` is asked which variant each fixture
+/// fails with, and the variants reached are compared with the list the
+/// variant match below is generated from. That match has no wildcard, so a
+/// new variant does not compile until it is listed, and a listed variant
+/// with no case fails here. The cases used to be a hand-picked subset, and
+/// four of the refusals (`UnsupportedTextHistory`, `NonFiniteComponent`,
+/// `InvalidQuantizationScale`, `InvalidFNameNumber`) could go back to
+/// `Residual` with this test still green.
 #[test]
 fn the_error_report_names_the_cause_of_each_failure() {
     const fn entry(field_name: &'static str, field_type: FieldType) -> OverlayEntry {
@@ -1170,44 +1182,187 @@ fn the_error_report_names_the_cause_of_each_failure() {
             field_type,
         }
     }
-    static ENTRIES: [OverlayEntry; 8] = [
+    /// A field payload: its bytes and its bit count.
+    type Payload = (Vec<u8>, u32);
+    /// The payload of `fields`, each `(value, width)` written least
+    /// significant bit first, the order `BitReader` reads them in.
+    fn packed_bits(fields: &[(u64, u32)]) -> Payload {
+        let mut bytes = Vec::new();
+        let mut len = 0u32;
+        for &(value, width) in fields {
+            for bit in 0..width {
+                if len % 8 == 0 {
+                    bytes.push(0);
+                }
+                if (value >> bit) & 1 != 0 {
+                    bytes[(len / 8) as usize] |= 1 << (len % 8);
+                }
+                len += 1;
+            }
+        }
+        (bytes, len)
+    }
+    // Generated from one list, so the list and the match cannot disagree.
+    macro_rules! variants {
+        ($($variant:ident),+ $(,)?) => {
+            (
+                [$(stringify!($variant)),+],
+                |err: &DecodeError| -> &'static str {
+                    match err {
+                        $(DecodeError::$variant { .. } => stringify!($variant),)+
+                    }
+                },
+            )
+        };
+    }
+    let (every_variant, variant_of) = variants!(
+        BitIo,
+        NotFullyConsumed,
+        RawOrSkip,
+        UnsignedOverflow,
+        NonFiniteComponent,
+        InvalidQuantizationScale,
+        InvalidFNameNumber,
+        UnsupportedTextHistory,
+        ByteArrayLengthCapExceeded,
+    );
+    static ENTRIES: [OverlayEntry; 13] = [
         entry("BadUtf8", FieldType::FString),
         entry("ByteArrayOverCap", FieldType::ByteArray { max_bytes: 1 }),
+        entry(
+            "ByteArrayOverlongPrefix",
+            FieldType::ByteArray { max_bytes: 8 },
+        ),
         entry("LongInt", FieldType::Int32),
+        entry("MistypedFText", FieldType::FText),
+        entry("NaNVector", FieldType::VectorNetQuantize { scale: 100 }),
+        entry("NegativeFNameNumber", FieldType::FName),
         entry("OverlongPrefix", FieldType::FString),
         entry("RunawayIntPacked", FieldType::ObjectNetGuid),
         entry("ShortInt", FieldType::Int32),
         entry("U64PastI64", FieldType::UInt64),
+        entry(
+            "ZeroQuantizeScale",
+            FieldType::VectorNetQuantize { scale: 0 },
+        ),
         entry("ZeroSerializedIntMax", FieldType::SerializedInt { max: 0 }),
     ];
-    let cases: &[(&str, &[u8], u32, &str)] = &[
+    // An inline FName (hardcoded bit clear), "Source" with its null, then
+    // instance number -1.
+    let mut fname = vec![(0, 1), (7, 32)];
+    fname.extend(b"Source\0".iter().map(|&byte| (u64::from(byte), 8)));
+    fname.push((u64::from(-1i32 as u32), 32));
+    let fname = packed_bits(&fname);
+    // A 7-bit SerializedInt(128) header of 0 -- no component bits, no extra
+    // info -- takes the raw-f32 fallback, and the first word is a NaN.
+    let nan_vector = packed_bits(&[
+        (0, 7),
+        (0x7fc0_0000, 32),
+        (u64::from(1.0f32.to_bits()), 32),
+        (u64::from(2.0f32.to_bits()), 32),
+    ]);
+    let bytes = |data: &[u8]| (data.to_vec(), data.len() as u32 * 8);
+    // (field, payload, variant decode_field fails with, printed label)
+    let cases: Vec<(&str, Payload, &str, &str)> = vec![
         // The payload is shorter than the type: a real EOF.
-        ("ShortInt", &[0x01, 0x00], 16, "EOF"),
+        ("ShortInt", bytes(&[0x01, 0x00]), "BitIo", "EOF"),
         // The type finished with bits to spare.
-        ("LongInt", &[0x01, 0, 0, 0, 0], 40, "Residual"),
+        (
+            "LongInt",
+            bytes(&[0x01, 0, 0, 0, 0]),
+            "NotFullyConsumed",
+            "Residual",
+        ),
         // Length 3, then three bytes that are not UTF-8: consumed exactly,
         // nothing ran out.
         (
             "BadUtf8",
-            &[0x03, 0, 0, 0, 0xff, 0xfe, 0x00],
-            56,
+            bytes(&[0x03, 0, 0, 0, 0xff, 0xfe, 0x00]),
+            "BitIo",
             "Malformed",
         ),
         // A length prefix of 100 with one byte behind it.
-        ("OverlongPrefix", &[0x64, 0, 0, 0, 0x41], 40, "Malformed"),
+        (
+            "OverlongPrefix",
+            bytes(&[0x64, 0, 0, 0, 0x41]),
+            "BitIo",
+            "Malformed",
+        ),
+        // The same cause in a byte array: a count of 4, within the cap of 8,
+        // with one byte behind it. It used to print `EOF`, because the byte
+        // loop ran into the end instead of the prefix being checked.
+        (
+            "ByteArrayOverlongPrefix",
+            bytes(&[0x08, 0xaa]),
+            "BitIo",
+            "Malformed",
+        ),
+        // Three declared where the table allows one, and no byte behind
+        // them: the cap is checked first, so the table constant is what the
+        // report names.
+        (
+            "ByteArrayOverCap",
+            bytes(&[0x06]),
+            "ByteArrayLengthCapExceeded",
+            "Rejected",
+        ),
         // Five IntPacked bytes that never clear the continuation bit.
-        ("RunawayIntPacked", &[0xff; 5], 40, "Malformed"),
+        ("RunawayIntPacked", bytes(&[0xff; 5]), "BitIo", "Malformed"),
         // Two bytes declared where the table allows one: the constant needs
         // raising, which is why this variant was split from NotFullyConsumed.
-        ("ByteArrayOverCap", &[0x04, 0xaa, 0xbb], 24, "Rejected"),
+        (
+            "ByteArrayOverCap",
+            bytes(&[0x04, 0xaa, 0xbb]),
+            "ByteArrayLengthCapExceeded",
+            "Rejected",
+        ),
         // Reads fine; the value has no i64 spelling.
-        ("U64PastI64", &[0, 0, 0, 0, 0, 0, 0, 0x80], 64, "Rejected"),
+        (
+            "U64PastI64",
+            bytes(&[0, 0, 0, 0, 0, 0, 0, 0x80]),
+            "UnsignedOverflow",
+            "Rejected",
+        ),
         // A table parameter no value can be read against. No bit is wrong.
-        ("ZeroSerializedIntMax", &[0x00], 8, "Rejected"),
+        ("ZeroSerializedIntMax", bytes(&[0x00]), "BitIo", "Rejected"),
+        // The same for a quantized vector's divisor.
+        (
+            "ZeroQuantizeScale",
+            bytes(&[0x00]),
+            "InvalidQuantizationScale",
+            "Rejected",
+        ),
+        // The 8 bits after the first 33 are not the selector this reader
+        // knows (5). A mistyped FText -- this repo's costliest bug shape --
+        // lands here, so it must not read as leftover bits.
+        (
+            "MistypedFText",
+            (vec![0; 6], 41),
+            "UnsupportedTextHistory",
+            "Rejected",
+        ),
+        // Read in full; the value has no JSON spelling.
+        ("NaNVector", nan_vector, "NonFiniteComponent", "Rejected"),
+        // Read in full; a negative instance number has no display spelling.
+        (
+            "NegativeFNameNumber",
+            fname,
+            "InvalidFNameNumber",
+            "Rejected",
+        ),
     ];
     let table = OverlayTable::new(&ENTRIES);
     let mut printed = Vec::new();
-    for &(field, data, bits, _) in cases {
+    for (field, (data, bits), variant, _) in &cases {
+        let field_type = ENTRIES
+            .iter()
+            .find(|entry| entry.field_name == *field)
+            .map(|entry| entry.field_type)
+            .unwrap_or_else(|| panic!("{field}: no entry"));
+        let err = decode_field(field_type, data, *bits)
+            .expect_err(&format!("{field}: the fixture must not decode"));
+        assert_eq!(variant_of(&err), *variant, "{field}: {err:?}");
+
         let mut stats = OverlayStats::default();
         let result = apply_overlay(
             &table,
@@ -1215,23 +1370,38 @@ fn the_error_report_names_the_cause_of_each_failure() {
             group_hash_state("/test"),
             Some(field),
             Some(data),
-            bits,
+            *bits,
             &mut stats,
         );
         assert!(
-            result.is_some_and(|r| r.value_i64.is_none() && r.value_str.is_none()),
+            result.is_some_and(|r| r.value_i64.is_none()
+                && r.value_f64.is_none()
+                && r.value_bool.is_none()
+                && r.value_str.is_none()),
             "{field}: must fail to decode"
         );
         assert_eq!(stats.decoded_err, 1, "{field}");
         let rows = stats.error_report.top_n(2);
         assert_eq!(rows.len(), 1, "{field}: one bucket");
-        printed.push((field, rows[0].error_kind.to_string()));
+        printed.push((*field, rows[0].error_kind.to_string()));
     }
     let wanted: Vec<(&str, String)> = cases
         .iter()
-        .map(|&(field, _, _, want)| (field, want.to_owned()))
+        .map(|(field, _, _, want)| (*field, (*want).to_owned()))
         .collect();
     assert_eq!(printed, wanted);
+
+    // `Raw` and `Skip` return before `decode_field` is reached, so its
+    // `RawOrSkip` arm cannot fire from the overlay and has no case.
+    let reached: BTreeSet<&str> = cases.iter().map(|(_, _, variant, _)| *variant).collect();
+    let expected: BTreeSet<&str> = every_variant
+        .into_iter()
+        .filter(|variant| *variant != "RawOrSkip")
+        .collect();
+    assert_eq!(
+        reached, expected,
+        "every DecodeError the overlay can meet needs a case"
+    );
 }
 
 /// Byte-sized properties nested inside replicated arrays are written with
