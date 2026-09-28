@@ -123,7 +123,7 @@ fn rep_movement_bits(
 }
 
 /// The whole JSON of a payload with every flag clear. Whole-string asserts, not
-/// substrings: the null members are the ones a substring check cannot miss.
+/// substrings: the null members are what a substring check misses.
 fn flags_clear_json(location: &str, rotation: &str) -> String {
     format!(
         concat!(

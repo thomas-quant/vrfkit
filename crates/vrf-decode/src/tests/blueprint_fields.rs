@@ -1,14 +1,11 @@
-//! Blueprint properties typed by exact group, name and checksum.
-//!
-//! Every identity here is an entry of `tools/fixtures/scoped_type_evidence.json`
-//! (generated into `scoped_types.rs`): a Blueprint class the C# descriptors
-//! never described, whose property type three independent sources agree on --
-//! the 13.06 class definition, the replay's own `compatible_checksum`
-//! (recomputed in `tools/tests/test_compatible_checksum_facts.py`), and exact
-//! decoding of every corpus row by an independent reader. The fixture carries
-//! the measurements; these tests pin that the overlay reaches each type only
-//! through its full identity, and that a real payload decodes to the value the
-//! independent reader gave it.
+//! Blueprint properties typed by exact group, name and checksum: entries of
+//! `tools/fixtures/scoped_type_evidence.json` (generated into
+//! `scoped_types.rs`) for classes the C# descriptors never described, typed on
+//! three independent legs -- the 13.06 class definition, the replay's
+//! `compatible_checksum` (recomputed in
+//! `tools/tests/test_compatible_checksum_facts.py`) and an independent reader of
+//! every corpus row. The fixture carries the measurements; these tests pin each
+//! type to its full identity and a real payload to that reader's value.
 
 use super::overlay::{apply_scoped, resolve};
 use crate::decode::FieldType;
@@ -126,8 +123,7 @@ fn string(value: &str) -> Values {
     (None, None, None, Some(value.to_owned()))
 }
 
-/// Decode one real payload through the whole overlay path, as the export
-/// does, returning its four value columns.
+/// One real payload through the whole overlay path, as its four value columns.
 fn decode(
     stats: &mut OverlayStats,
     group: &str,
@@ -356,8 +352,7 @@ GameObject_Breach_E_SweetSpotFissure.GameObject_Breach_E_SweetSpotFissure_C";
 
 /// A sample of the other Blueprint identities, one per type and payload
 /// shape, each a real 13.06 payload with the value the independent reader
-/// gave it. The full list and its evidence are in the fixture;
-/// `test_compatible_checksum_facts.py` holds every entry to its checksum.
+/// gave it; the full list and its evidence are in the fixture.
 #[test]
 fn other_blueprint_payloads_decode_to_the_independent_values() {
     let fissure = [

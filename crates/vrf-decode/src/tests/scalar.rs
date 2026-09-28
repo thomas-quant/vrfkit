@@ -26,16 +26,9 @@ fn fstring_reads_unreal_string() {
 
 #[test]
 fn fname_hardcoded_reads_a_packed_index() {
-    // FArchive.ReadFNameCore: when the leading bit is set the name is a
-    // hardcoded table index sent as IntPacked, and the reference renders
-    // it as the decimal index -- there is no FString to read.
-    //
-    // Ignoring that branch is why MulticastNotifyDamage_Point.DamagedBone
-    // had to be forced to Raw: 177 of its 581 payloads on 02d4d478 are
-    // 9 bits (1 flag + one IntPacked byte), far too short for the
-    // FString path, which read past the end and produced mojibake.
-    //
-    // 9-bit payload: bit0 = 1 (hardcoded), then IntPacked 0 = byte 0x00.
+    // A set leading bit makes the name a hardcoded table index, sent as
+    // IntPacked and rendered as its decimal (see `decode_fname` for the
+    // DamagedBone rows). 9 bits: bit0 = 1, then IntPacked 0 = byte 0x00.
     let result = decode_field(FieldType::FName, &[0x01, 0x00], 9).unwrap();
     assert_eq!(result, str_value("0"));
 }
@@ -59,12 +52,8 @@ fn fname_reads_inline_name() {
     assert_eq!(result, str_value("Bomb"));
 }
 
-/// The FName instance number is part of the name's identity, so two fields that
-/// differ only in it must not decode to the same string.
-///
-/// Unreal stores the number as `displayed suffix + 1`: 0 means the bare name,
-/// and N != 0 displays as `Name_{N-1}`. Discarding it made `Source_1` and
-/// `Source_2` both read as `Source`.
+/// The FName instance number is part of the name: `N != 0` displays as
+/// `Name_{N-1}`, so names differing only in it must not decode alike.
 #[test]
 fn fname_inline_numbers_do_not_collide() {
     for (number, want) in [(1, "Source_0"), (2, "Source_1")] {
@@ -95,9 +84,8 @@ fn byte_array_reads_packed_count_and_bytes() {
     assert_eq!(result, str_value("102030"));
 }
 
-/// A declared count over the table's `max_bytes` is refused with a dedicated
-/// variant, not `NotFullyConsumed` -- no payload byte has been read yet at
-/// this point, so a "bits left over after decode" label would be meaningless.
+/// A count over the table's `max_bytes` is refused from the count alone, with
+/// its own variant (no payload byte has been read).
 #[test]
 fn byte_array_over_the_length_cap_is_refused_distinctly() {
     // IntPacked 10 = byte (10 << 1) = 0x14. No payload bytes needed: the
@@ -133,9 +121,7 @@ fn serialized_int_reads_value_using_known_maximum() {
     assert_eq!(result, DecodedValue::I64(5));
 }
 
-/// A `UInt64` with its sign bit set cannot fit in the `i64` the overlay stores
-/// without a silent wrap to a negative number. It must be rejected loudly
-/// instead. Values at or below `i64::MAX` decode exactly as before.
+/// `UInt64` past `i64::MAX` is `UnsignedOverflow`, not a wrap; up to it, exact.
 #[test]
 fn uint64_above_i64_max_is_rejected_not_wrapped() {
     // High bit set: i64::MAX + 1 = 0x8000_0000_0000_0000.
@@ -152,11 +138,9 @@ fn uint64_above_i64_max_is_rejected_not_wrapped() {
     }
 }
 
-/// `Int64` reads the same 64 bits as `UInt64` but as two's complement: the
-/// pattern `UInt64` refuses is a negative number here, not an error, and a
-/// value below `i64::MAX` is the same either way -- which is why retyping the
-/// effect IDs changes no exported value on data that never sets bit 63.
-/// Anything but exactly 64 bits is refused like every fixed-width read.
+/// `Int64` reads `UInt64`'s 64 bits as two's complement: what `UInt64` refuses
+/// is a negative number here, and below `i64::MAX` both agree (so retyping the
+/// effect IDs changed no exported value). Only exactly 64 bits decode.
 #[test]
 fn int64_reads_eight_byte_twos_complement() {
     for value in [0x0102030405060708i64, -2, i64::MIN] {
@@ -172,19 +156,10 @@ fn int64_reads_eight_byte_twos_complement() {
     assert!(decode_field(FieldType::Int64, &data, 32).is_err());
 }
 
-/// `EnumRemainingBits` reads the whole payload, up to and including 32 bits.
-///
-/// A payload too wide for the type must not come back as its low 32 bits.
-///
-/// `decode_enum_remaining_bits` read `min(bits_left, 32)` and returned, and
-/// `decode_field` exempted this one type from the not-fully-consumed check --
-/// so the bits above 32 were dropped without reaching any counter, any error,
-/// or the `skipped_bits` tally. The C# reference throws here. This follows
-/// `UnsignedOverflow`'s rule instead: a value that cannot be represented is an
-/// error, not a plausible wrong number.
-///
-/// Latent on this corpus -- handles 215/216 reach 47 at most across 71
-/// replays, so nothing triggers it today. That is exactly why it needs a test.
+/// `EnumRemainingBits` reads the whole payload up to 32 bits; a wider one is
+/// an error (the C# reference throws), not its low 32 bits. Latent when fixed
+/// (d5c35c6): nothing in the data of the time triggered it, which is why it
+/// needs a test.
 #[test]
 fn enum_remaining_bits_reads_the_payload_and_refuses_over_32() {
     // 3 bits = value 3 (low 3 bits of 0b011)
@@ -235,20 +210,12 @@ fn object_net_guid_reads_int_packed() {
     assert_eq!(result, DecodedValue::I64(0x3F));
 }
 
-/// `FText` decodes to the statistic's name, which nothing else in the export
-/// carries.
-///
-/// `LocalizedStat` was typed `FString` once and produced null on every row,
-/// because the wire is an `FText`. It was left untyped on the reasoning that
-/// the sibling `Statistic` enum already said the same thing -- but `Statistic`
-/// decodes to a bare integer and this repository ships no table mapping those
-/// integers to names. It has them only in a comment. So this is in fact the
-/// only machine-readable source of `EnemiesBlinded` and the other 28.
-///
-/// The layout, confirmed on 4,341 of 4,341 rows with zero residual bits: 41
-/// header bits ending in a history-type discriminator of 5, then the string
-/// table's asset path as an `FString`, then that `FName`'s numeric suffix,
-/// then the key. The key is the statistic name.
+/// `FText` (`LocalizedStat`) decodes to the statistic's name, the only
+/// machine-readable source of `EnemiesBlinded` and the other 28: the sibling
+/// `Statistic` enum is a bare integer. Confirmed on 4,341 of 4,341 rows with
+/// zero residual bits: 32 flag bits, history byte 11 and the inline-FName bit
+/// (41 bits, which the legacy reader sees as selector 5), then the string
+/// table's path as an `FString`, the `FName` number, and the key.
 #[test]
 fn ftext_decodes_a_string_table_entry_to_its_key() {
     let vectors: [(u32, &[u8], &str); 3] = [
@@ -310,18 +277,14 @@ fn ftext_decodes_a_string_table_entry_to_its_key() {
     }
 }
 
-/// A history type the layout was never observed under is refused, not guessed.
-///
-/// Every sample carries 5. Another value means a different `ETextHistory`
-/// variant with a different payload after the header, and reading it as this
-/// one would produce a plausible wrong string -- the failure this type was
-/// removed for in the first place.
+/// A selector other than the observed 5 means another text history with
+/// another payload, so it is refused rather than read as a plausible wrong
+/// string.
 #[test]
 fn ftext_refuses_an_unobserved_history_type() {
-    // Zeroed except the history-type discriminator, so if the guard were
-    // removed the rest of the layout would decode cleanly (empty table path,
-    // number 0, empty key) rather than erroring out on a short buffer -- the
-    // guard is the only thing standing between this input and `Ok`.
+    // Zeroed except the selector (the error's `history_type`), so without
+    // the guard the rest decodes cleanly to an empty key: the guard is the
+    // only thing between this input and `Ok`.
     let mut raw = vec![0u8; 18];
     raw[4] = 0x0C; // shifts a history type of 6 into place, not 5
     let err = decode_field(FieldType::FText, &raw, 137).unwrap_err();
