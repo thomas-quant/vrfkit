@@ -95,15 +95,11 @@ impl ExportSink<'_> {
         });
     }
 
-    /// Resolve a field or function name from the current block's group.
+    /// Resolve a field or function name from the current block's group, plus
+    /// the handle's `compatible_checksum`.
     ///
     /// Interned: 429,637 property rows and 342,735 RPC rows on the reference
     /// replay each used to clone the group's `String` name.
-    fn resolve_field_name(&mut self, handle: u32) -> Option<Arc<str>> {
-        self.resolve_field_name_and_checksum(handle).0
-    }
-
-    /// [`Self::resolve_field_name`] plus the handle's `compatible_checksum`.
     ///
     /// One schema walk yields both. The checksum feeds the overlay's last-resort
     /// lookup, and asking for it separately would double the cost of the hottest
@@ -210,7 +206,7 @@ impl FieldSink for ExportSink<'_> {
     }
 
     fn on_rpc(&mut self, handle: u32, bit_count: u32, reader: BitReader<'_>) {
-        let field_name = self.resolve_field_name(handle);
+        let field_name = self.resolve_field_name_and_checksum(handle).0;
 
         if field_name.as_deref() == Some(MOVEMENT_RPC) && bit_count > 0 {
             let fallback_reader = reader.clone();
@@ -406,7 +402,7 @@ impl ExportSink<'_> {
     fn emit_brute_forced_cnc_rpcs(&mut self, payload: &[u8], bit_count: u32) {
         if !self
             .current_group_path
-            .contains("AbilitiesAndBuffsComponent")
+            .contains(ABILITIES_AND_BUFFS_COMPONENT)
         {
             return;
         }

@@ -114,7 +114,7 @@ impl ExportSink<'_> {
         }
 
         let mut emitted_any = false;
-        // Set on the four malformed-read break paths below, so the caller can
+        // Set on the three malformed-read break paths below, so the caller can
         // tell a completed walk from one that ran out of bits. The normal exits
         // (clean end-of-stream, the trailing alignment bit, the zero-handle
         // terminator) leave it `false`.
@@ -158,13 +158,7 @@ impl ExportSink<'_> {
                 break;
             };
 
-            if u64::from(payload_bits) > rpc_reader.bits_remaining() {
-                // Malformed: more bits declared than available. Stop parsing
-                // but keep what we have (emitted_any may be true).
-                truncated = true;
-                break;
-            }
-
+            // Fails when more bits are declared than remain.
             let Ok(sub) = rpc_reader.sub_reader(u64::from(payload_bits)) else {
                 truncated = true;
                 break;
@@ -694,7 +688,7 @@ impl ExportSink<'_> {
         let suffix = format!(":{function_name}");
         let mut found: Option<&str> = None;
         for group in cache.groups() {
-            if group.path.ends_with(&suffix) && group.path.contains(':') {
+            if group.path.ends_with(&suffix) {
                 if found.is_some() {
                     // Ambiguous: multiple groups match this function name.
                     return None;

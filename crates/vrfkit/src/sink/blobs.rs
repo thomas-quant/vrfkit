@@ -129,10 +129,7 @@ pub(super) fn strict_nested_array_preflight(raw: &[u8], bit_count: u32, allowed:
             let Ok(payload_bits) = reader.read_int_packed() else {
                 return false;
             };
-            if payload_bits == 0 || u64::from(payload_bits) > reader.bits_remaining() {
-                return false;
-            }
-            if reader.sub_reader(u64::from(payload_bits)).is_err() {
+            if payload_bits == 0 || reader.skip_bits(u64::from(payload_bits)).is_err() {
                 return false;
             }
         }
@@ -883,7 +880,6 @@ impl ExportSink<'_> {
             .iter()
             .map(|f| {
                 if measured
-                    && matches!(parent_name, "SelectedV2" | "KillData")
                     && matches!(
                         (parent_name, f.handle),
                         ("SelectedV2", 13) | ("KillData", 6)
