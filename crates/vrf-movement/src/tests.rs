@@ -646,6 +646,79 @@ fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
     }
 }
 
+/// `(envelope trailer streams, envelope trailer bits)`.
+fn trailers(result: &crate::types::RpcDecodeResult) -> (u32, u64) {
+    (
+        result.envelope_trailer_streams,
+        result.envelope_trailer_bits,
+    )
+}
+
+#[test]
+fn every_envelope_and_the_bits_after_it_are_tallied_per_stream() {
+    // The real shape: 24 bits after the envelope, never read.
+    let real = build_component_data_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)]);
+    let (result, moves) = decode(&build_rpc_payload(77, &real));
+    assert_eq!(moves.len(), 1);
+    assert_eq!(result.error_count, 0, "a tally, not an error");
+    assert_eq!(trailers(&result), (1, u64::from(ENVELOPE_TRAILER_BITS)));
+
+    // Two streams in one batch, the second with a 13-bit trailer: summed per
+    // stream, not taken from the last one.
+    let short = byte_wrapped(
+        &open_section_payload(&[build_move(false, 9, 4.0, 5.0, 6.0)]),
+        13,
+    );
+    let mut array = BitWriter::new();
+    array.write_int_packed(2); // updateCount
+    array.write_int_packed(1); // index 0
+    array.write_other(&update_with_stream(1111, &real));
+    array.write_int_packed(2); // index 1
+    array.write_other(&update_with_stream(2222, &short));
+    array.write_int_packed(0);
+    let (result, moves) = decode(&wrap_updates_array(&array));
+    assert_eq!(moves.len(), 2);
+    assert_eq!(result.error_count, 0);
+    assert_eq!(
+        trailers(&result),
+        (2, u64::from(ENVELOPE_TRAILER_BITS) + 13)
+    );
+}
+
+#[test]
+fn an_envelope_with_nothing_after_it_is_still_a_counted_stream() {
+    // A trailer that vanishes must read as bits short of 24 per stream, which
+    // a shape check can fail on; a stream left uncounted would pass it.
+    let bare = byte_wrapped(
+        &open_section_payload(&[build_move(true, 7, 1.0, 2.0, 3.0)]),
+        0,
+    );
+    let (result, moves) = decode(&build_rpc_payload(77, &bare));
+    assert_eq!(moves.len(), 1);
+    assert_eq!(trailers(&result), (1, 0));
+}
+
+#[test]
+fn a_trailer_is_tallied_even_when_its_envelope_fails_to_decode() {
+    // Cut out before the section is parsed: its bits go unread either way.
+    let mut bad_magic = BitWriter::new();
+    bad_magic.write_u16(0);
+    bad_magic.write_u8(0x00); // not MOVEMENT_MAGIC
+    let stream = byte_wrapped(&bad_magic, ENVELOPE_TRAILER_BITS);
+    let (result, moves) = decode(&build_rpc_payload(77, &stream));
+    assert!(moves.is_empty());
+    assert_eq!(result.error_count, 1);
+    assert_eq!(trailers(&result), (1, u64::from(ENVELOPE_TRAILER_BITS)));
+}
+
+#[test]
+fn the_direct_form_has_no_envelope_to_tally() {
+    let stream = build_direct_component_data_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)]);
+    let (result, moves) = decode(&build_rpc_payload(77, &stream));
+    assert_eq!(moves.len(), 1);
+    assert_eq!(trailers(&result), (0, 0));
+}
+
 // --- QuantizedVector component widths ---------------------------------------
 
 /// A QuantizedVector: the `SerializedInt(128)` header, then three components.

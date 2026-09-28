@@ -191,6 +191,10 @@ fn decode_component_data_stream(
     if byte_count > 0 && reader.bits_remaining() >= byte_count * 8 {
         // Wrapped: the envelope's payload starts with its own movementBitCount.
         let mut inner = reader.sub_reader(byte_count * 8)?;
+        // What follows the envelope is never read; tallied here, before the
+        // section can fail, with the stream counted even when nothing follows.
+        result.envelope_trailer_streams += 1;
+        result.envelope_trailer_bits += reader.bits_remaining();
         let bit_count = read_u16_checked(&mut inner)?;
         parse_movement_with_bit_count(&mut inner, bit_count, shooter_guid, result, emit)
     } else {

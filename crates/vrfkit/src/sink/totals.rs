@@ -60,8 +60,13 @@ pub(crate) struct SinkTotals {
     pub movement_sized_section_tail_bits: u64,
     pub movement_open_section_tails: u64,
     pub movement_open_section_tail_bits: u64,
+    /// See `ExportStats::movement_envelope_trailers`.
+    pub movement_envelope_trailers: u64,
+    pub movement_envelope_trailer_bits: u64,
     pub array: ArrayDecodeStats,
     pub tracked_rewards_opaque_empty_variants: u64,
+    /// See `ExportStats::active_blinds_empty_trailers`.
+    pub active_blinds_empty_trailers: u64,
     pub array_leaf_decode_errors: u64,
     pub targeting_world_locations_decoded: u64,
     pub truncated_rpcs: u64,
@@ -95,6 +100,7 @@ impl SinkTotals {
             overlay,
             array,
             tracked_rewards_opaque_empty_variants,
+            active_blinds_empty_trailers,
             effect_blobs_decoded,
             struct_blobs_decoded,
             multi_contents_items_emitted,
@@ -111,6 +117,8 @@ impl SinkTotals {
             movement_sized_section_tail_bits,
             movement_open_section_tails,
             movement_open_section_tail_bits,
+            movement_envelope_trailers,
+            movement_envelope_trailer_bits,
             truncated_rpcs,
             rpc_suffix_bits_dropped,
             array_leaf_decode_errors,
@@ -137,8 +145,11 @@ impl SinkTotals {
         self.movement_sized_section_tail_bits += *movement_sized_section_tail_bits;
         self.movement_open_section_tails += *movement_open_section_tails;
         self.movement_open_section_tail_bits += *movement_open_section_tail_bits;
+        self.movement_envelope_trailers += *movement_envelope_trailers;
+        self.movement_envelope_trailer_bits += *movement_envelope_trailer_bits;
         self.array.merge_from(array);
         self.tracked_rewards_opaque_empty_variants += *tracked_rewards_opaque_empty_variants;
+        self.active_blinds_empty_trailers += *active_blinds_empty_trailers;
         self.array_leaf_decode_errors += *array_leaf_decode_errors;
         self.targeting_world_locations_decoded += *targeting_world_locations_decoded;
         self.truncated_rpcs += *truncated_rpcs;
@@ -203,6 +214,7 @@ mod tests {
                 implicit_terminations: next(),
             },
             tracked_rewards_opaque_empty_variants: next(),
+            active_blinds_empty_trailers: next(),
             effect_blobs_decoded: next(),
             struct_blobs_decoded: next(),
             multi_contents_items_emitted: next(),
@@ -219,6 +231,8 @@ mod tests {
             movement_sized_section_tail_bits: next(),
             movement_open_section_tails: next(),
             movement_open_section_tail_bits: next(),
+            movement_envelope_trailers: next(),
+            movement_envelope_trailer_bits: next(),
             truncated_rpcs: next(),
             rpc_suffix_bits_dropped: next(),
             array_leaf_decode_errors: next(),
@@ -265,6 +279,8 @@ mod tests {
             movement_sized_section_tail_bits,
             movement_open_section_tails,
             movement_open_section_tail_bits,
+            movement_envelope_trailers,
+            movement_envelope_trailer_bits,
             array:
                 ArrayDecodeStats {
                     elements_decoded,
@@ -276,6 +292,7 @@ mod tests {
                     implicit_terminations,
                 },
             tracked_rewards_opaque_empty_variants,
+            active_blinds_empty_trailers,
             array_leaf_decode_errors,
             targeting_world_locations_decoded,
             truncated_rpcs,
@@ -314,6 +331,8 @@ mod tests {
             movement_sized_section_tail_bits = sent.movement_sized_section_tail_bits,
             movement_open_section_tails = sent.movement_open_section_tails,
             movement_open_section_tail_bits = sent.movement_open_section_tail_bits,
+            movement_envelope_trailers = sent.movement_envelope_trailers,
+            movement_envelope_trailer_bits = sent.movement_envelope_trailer_bits,
             elements_decoded = array.elements_decoded,
             array_fields_emitted = array.fields_emitted,
             truncations = array.truncations,
@@ -322,6 +341,7 @@ mod tests {
             unconsumed_root_bits = array.unconsumed_root_bits,
             implicit_terminations = array.implicit_terminations,
             tracked_rewards_opaque_empty_variants = sent.tracked_rewards_opaque_empty_variants,
+            active_blinds_empty_trailers = sent.active_blinds_empty_trailers,
             array_leaf_decode_errors = sent.array_leaf_decode_errors,
             targeting_world_locations_decoded = sent.targeting_world_locations_decoded,
             truncated_rpcs = sent.truncated_rpcs,

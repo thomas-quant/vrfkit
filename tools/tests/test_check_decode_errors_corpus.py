@@ -18,7 +18,8 @@ import check_decode_errors_corpus as guard  # noqa: E402
 #: The main-pass sink lines summary.rs prints unconditionally, failure counters
 #: at zero; every main-pass fixture carries them because the gate requires each
 #: line. Values from a real 13.02 `--checkpoints` export log, except the `CNC
-#: brute force` and `Movement tails` lines, which are illustrative.
+#: brute force`, `Movement tails`, `Envelope trailers` and `ActiveBlinds
+#: trailers` lines, which are illustrative.
 CLEAN_SINK = """
 Movement rows:     2407298
 Movement errors:   0
@@ -28,6 +29,8 @@ Array leaf errs:   0
 Truncated RPCs:    0
 CNC brute force:   454 attempted / 0 unwalked
 Movement tails:    0 sized (0 bits) / 0 open (0 bits)
+Envelope trailers: 2380000 streams / 57120000 bits
+ActiveBlinds trailers: 3 empty deltas
 """
 
 #: A healthy export summary, labels as driver/summary.rs prints them.
@@ -261,6 +264,8 @@ CLEAN_WITH_CHECKPOINTS = LIVE_EXPORT + """
   Checkpoint reward opaque: 7 empty variants
   Checkpoint movement: 0 failures
   Checkpoint movement tails: 0 sized (0 bits) / 0 open (0 bits)
+  Checkpoint envelope trailers: 0 streams / 0 bits
+  Checkpoint ActiveBlinds trailers: 1 empty deltas
   Checkpoint CNC:   3 RPC rows
   Checkpoint CNC brute force: 0 attempted / 0 unwalked
 """
@@ -606,7 +611,7 @@ class SinkFailureTests(unittest.TestCase):
     def test_every_new_main_pass_line_is_required(self):
         for label in ("Movement errors:", "Array decode:", "Array residual:",
                       "Array leaf errs:", "Truncated RPCs:", "CNC brute force:",
-                      "Movement tails:"):
+                      "Movement tails:", "Envelope trailers:", "ActiveBlinds trailers:"):
             with self.subTest(label=label):
                 counters, err = guard.read_counters(drop_line(CLEAN, label), 0)
                 self.assertIsNone(counters)
@@ -614,7 +619,9 @@ class SinkFailureTests(unittest.TestCase):
 
     def test_every_new_checkpoint_line_is_required(self):
         for label in ("Checkpoint array:", "Checkpoint leaf:",
-                      "Checkpoint CNC brute force:", "Checkpoint movement tails:"):
+                      "Checkpoint CNC brute force:", "Checkpoint movement tails:",
+                      "Checkpoint envelope trailers:",
+                      "Checkpoint ActiveBlinds trailers:"):
             with self.subTest(label=label):
                 counters, err = guard.read_counters(
                     drop_line(CLEAN_WITH_CHECKPOINTS, label), 0,
@@ -643,7 +650,9 @@ class SinkFailureTests(unittest.TestCase):
         `Checkpoint array:` must not be satisfied by `Array decode:`."""
         for label in ("Movement errors:", "Truncated RPCs:", "Array decode:",
                       "Checkpoint array:", "CNC brute force:", "Movement tails:",
-                      "Checkpoint CNC brute force:", "Checkpoint movement tails:"):
+                      "Checkpoint CNC brute force:", "Checkpoint movement tails:",
+                      "Envelope trailers:", "Checkpoint envelope trailers:",
+                      "ActiveBlinds trailers:", "Checkpoint ActiveBlinds trailers:"):
             with self.subTest(label=label):
                 counters, err = guard.read_counters(
                     drop_line(CLEAN_WITH_CHECKPOINTS, label), 0,
@@ -673,6 +682,9 @@ SINK_FORMATS = (
     ("movement_sized_tail_bits", "Movement tails:", 1),
     ("movement_open_tails", "Movement tails:", 2),
     ("movement_open_tail_bits", "Movement tails:", 3),
+    ("movement_envelope_trailers", "Envelope trailers:", 0),
+    ("movement_envelope_trailer_bits", "Envelope trailers:", 1),
+    ("active_blinds_empty_trailers", "ActiveBlinds trailers:", 0),
     ("checkpoint_array_elements", "Checkpoint array:", 0),
     ("checkpoint_array_fields", "Checkpoint array:", 1),
     ("checkpoint_array_truncations", "Checkpoint array:", 2),
@@ -686,6 +698,9 @@ SINK_FORMATS = (
     ("checkpoint_movement_sized_tail_bits", "Checkpoint movement tails:", 1),
     ("checkpoint_movement_open_tails", "Checkpoint movement tails:", 2),
     ("checkpoint_movement_open_tail_bits", "Checkpoint movement tails:", 3),
+    ("checkpoint_movement_envelope_trailers", "Checkpoint envelope trailers:", 0),
+    ("checkpoint_movement_envelope_trailer_bits", "Checkpoint envelope trailers:", 1),
+    ("checkpoint_active_blinds_empty_trailers", "Checkpoint ActiveBlinds trailers:", 0),
 )
 
 
@@ -868,6 +883,8 @@ Array leaf errs:   0
 Truncated RPCs:    0
 CNC brute force:   4 attempted / 0 unwalked
 Movement tails:    0 sized (0 bits) / 0 open (0 bits)
+Envelope trailers: 5 streams / 120 bits
+ActiveBlinds trailers: 2 empty deltas
 """
 
 # Printed only when the gate passed --checkpoints on, as vrfkit does.
@@ -880,6 +897,8 @@ CHECKPOINTS = """
   Checkpoint leaf:  0 typed decode errors
   Checkpoint reward opaque: 0 empty variants
   Checkpoint movement tails: 0 sized (0 bits) / 0 open (0 bits)
+  Checkpoint envelope trailers: 0 streams / 0 bits
+  Checkpoint ActiveBlinds trailers: 1 empty deltas
   Checkpoint CNC brute force: 0 attempted / 0 unwalked
 """
 
@@ -1100,11 +1119,15 @@ class MainWiringTests(unittest.TestCase):
             "truncated RPCs    : 0",
             "cnc brute force   : 4 attempted / 0 unwalked",
             "movement tails    : 0 sized (0 bits) / 0 open (0 bits)",
+            "envelope trailers : 5 streams / 120 bits",
+            "blinds trailers   : 2 empty deltas",
             "checkpoint array  : 30 elements / 90 fields / 0 truncations / "
             "0 root bits / 0 nested bits / 0 implicit ends",
             "checkpoint leaf   : 0 typed decode errors",
             "checkpoint cnc brute force: 0 attempted / 0 unwalked",
             "checkpoint movement tails: 0 sized (0 bits) / 0 open (0 bits)",
+            "checkpoint envelope trailers: 0 streams / 0 bits",
+            "checkpoint blinds trailers: 1 empty deltas",
         ):
             with self.subTest(line=line):
                 self.assertRegex(output, rf"(?m)^{re.escape(line)}$")

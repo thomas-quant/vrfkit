@@ -116,7 +116,9 @@ def time_export(exe: Path, replay: Path, repeats: int,
             cmd.append("--checkpoints")
         try:
             start = time.perf_counter()
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            # "replace": stderr is only shown to a person when the export fails.
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
             elapsed = time.perf_counter() - start
             if result.returncode != 0:
                 raise SystemExit(

@@ -18,8 +18,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use vrf_container::{
-    ChunkIterator, ChunkType, decompress_checkpoint, decompress_replay_data_with_trailing,
-    parse_checkpoint_chunk, parse_preamble,
+    ChunkIterator, ChunkType, decompress_checkpoint_with_trailing,
+    decompress_replay_data_with_trailing, parse_checkpoint_chunk, parse_preamble,
 };
 use vrf_decode::OverlayErrorReport;
 use vrf_frame::{FrameSkips, walk_demo_frames};
@@ -37,7 +37,11 @@ struct DiagCheckpointStats {
     frames: u64,
     /// Section bytes the snapshot frames stepped over.
     frame_skips: FrameSkips,
+    /// Snapshot frames with a NaN or infinite time, read as 0 ms.
+    non_finite_frame_times: u64,
     packets: u64,
+    /// As `driver::checkpoints::CheckpointStats::trailing_bytes`: framing
+    /// residual after each archive plus archive bytes the codec never read.
     trailing_bytes: u64,
     guid_entries: u64,
     group_records: u64,
@@ -79,6 +83,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut replay_data_chunks: u64 = 0;
     let mut replay_data_frames: u64 = 0;
     let mut replay_data_frame_skips = FrameSkips::default();
+    let mut replay_data_non_finite_frame_times: u64 = 0;
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut sink_totals = SinkTotals::default();
@@ -132,6 +137,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                     })?;
                 replay_data_frames += u64::from(walk.frames);
                 replay_data_frame_skips.absorb(walk.skipped);
+                replay_data_non_finite_frame_times += u64::from(walk.non_finite_times);
             }
             ChunkType::Header | ChunkType::Unknown(_) => {}
         }
@@ -169,6 +175,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(", \"replay_data_trailing_bytes\": ");
     json.push_str(&replay_data_trailing_bytes.to_string());
     push_frame_skips(&mut json, "replay_data_", &replay_data_frame_skips);
+    json.push_str(", \"replay_data_non_finite_frame_times\": ");
+    json.push_str(&replay_data_non_finite_frame_times.to_string());
     json.push_str("},\n");
 
     json.push_str("  \"net_main\": ");
@@ -186,6 +194,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(", \"trailing_bytes\": ");
     json.push_str(&cp_stats.trailing_bytes.to_string());
     push_frame_skips(&mut json, "", &cp_stats.frame_skips);
+    json.push_str(", \"non_finite_frame_times\": ");
+    json.push_str(&cp_stats.non_finite_frame_times.to_string());
     json.push_str(", \"guid_entries\": ");
     json.push_str(&cp_stats.guid_entries.to_string());
     json.push_str(", \"group_records\": ");
@@ -340,8 +350,9 @@ fn process_checkpoint_chunk(
     cp: &mut DiagCheckpointStats,
 ) -> Result<(), CliError> {
     let cp_chunk = parse_checkpoint_chunk(payload)?;
-    cp.trailing_bytes += cp_chunk.trailing_bytes as u64;
-    let plain = decompress_checkpoint(cp_chunk.archive, compressed, encrypted)?;
+    let (plain, unread) =
+        decompress_checkpoint_with_trailing(cp_chunk.archive, compressed, encrypted)?;
+    cp.trailing_bytes += (cp_chunk.trailing_bytes + unread) as u64;
 
     let mut cache = NetGuidCache::new();
     let tables = read_checkpoint_tables(&plain, &mut cache)
@@ -376,6 +387,7 @@ fn process_checkpoint_chunk(
     cp.chunks += 1;
     cp.frames += u64::from(walk.frames);
     cp.frame_skips.absorb(walk.skipped);
+    cp.non_finite_frame_times += u64::from(walk.non_finite_times);
     cp.packets += packet_count;
     cp.guid_entries += u64::from(tables.guid_count);
     cp.group_records += u64::from(tables.group_count);
@@ -564,6 +576,11 @@ fn push_sink_totals(out: &mut String, s: &SinkTotals) {
                 "movement_open_section_tail_bits",
                 s.movement_open_section_tail_bits,
             ),
+            ("movement_envelope_trailers", s.movement_envelope_trailers),
+            (
+                "movement_envelope_trailer_bits",
+                s.movement_envelope_trailer_bits,
+            ),
             ("array_elements_decoded", s.array.elements_decoded),
             ("array_fields_emitted", s.array.fields_emitted),
             ("array_truncations", s.array.truncations),
@@ -582,6 +599,10 @@ fn push_sink_totals(out: &mut String, s: &SinkTotals) {
             (
                 "tracked_rewards_opaque_empty_variants",
                 s.tracked_rewards_opaque_empty_variants,
+            ),
+            (
+                "active_blinds_empty_trailers",
+                s.active_blinds_empty_trailers,
             ),
             ("truncated_rpcs", s.truncated_rpcs),
             ("rpc_suffix_bits_dropped", s.rpc_suffix_bits_dropped),
@@ -841,6 +862,8 @@ mod tests {
             movement_sized_section_tail_bits: next(),
             movement_open_section_tails: next(),
             movement_open_section_tail_bits: next(),
+            movement_envelope_trailers: next(),
+            movement_envelope_trailer_bits: next(),
             array: ArrayDecodeStats {
                 elements_decoded: next(),
                 fields_emitted: next(),
@@ -851,6 +874,7 @@ mod tests {
                 implicit_terminations: next(),
             },
             tracked_rewards_opaque_empty_variants: next(),
+            active_blinds_empty_trailers: next(),
             array_leaf_decode_errors: next(),
             targeting_world_locations_decoded: next(),
             truncated_rpcs: next(),

@@ -34,6 +34,9 @@ pub(crate) struct RunTotals {
     /// Length-prefixed, so no other number moves when a build starts sending
     /// them; `Frame skips:` contains no label read unanchored.
     pub frame_skips: FrameSkips,
+    /// Those frames whose time was NaN or infinite, read as 0 ms
+    /// (`vrf_frame::FrameWalk::non_finite_times`); printed as `Frame times:`.
+    pub non_finite_frame_times: u64,
     pub total_packets: u32,
     pub export_groups: usize,
     pub movement_rows: u64,
@@ -82,6 +85,10 @@ pub(super) fn print(
         "  Frame skips:      {}",
         report::frame_skips(&totals.frame_skips)
     );
+    eprintln!(
+        "  Frame times:      {} non-finite",
+        totals.non_finite_frame_times
+    );
     eprintln!("  Packets:          {}", totals.total_packets);
     eprintln!("  Export groups:    {}", totals.export_groups);
     eprintln!("  Content blocks:   {}", net_stats.content_blocks);
@@ -118,9 +125,7 @@ pub(super) fn print(
         net_stats.malformed_content_blocks,
         net_stats.transform_failures,
         net_stats.field_stream_failures,
-        net_stats
-            .rpc_stream_failures
-            .saturating_sub(net_stats.unresolved_rpc_payloads_preserved),
+        net_stats.rpc_payloads_lost(),
         net_stats.unresolved_rpc_payloads_preserved
     );
     // Blocks whose header or `content_bits` could not be read, a depth before
@@ -194,15 +199,22 @@ pub(super) fn print(
     if let Some(err) = &totals.sink.movement_first_error {
         eprintln!("  Movement err:     {err}");
     }
-    // Sections that stopped with unread bits beyond the grammar's padding: a
-    // tally, not an error. Sized and open windows stay apart; see
-    // `RpcDecodeResult::sized_section_tails`.
+    // Sections that stopped with bits unread before their measured end (a
+    // `000` terminator and 8 to 23 bits after the last move): a tally, not an
+    // error. Sized and open windows stay apart; see
+    // `RpcDecodeResult::sized_section_tails` and `open_section_tails`.
     eprintln!(
         "  Movement tails:   {} sized ({} bits) / {} open ({} bits)",
         totals.sink.movement_sized_section_tails,
         totals.sink.movement_sized_section_tail_bits,
         totals.sink.movement_open_section_tails,
         totals.sink.movement_open_section_tail_bits
+    );
+    // Every byte-wrapped movement stream and the bits after its envelope,
+    // which nothing reads: 24 per stream on every measured replay.
+    eprintln!(
+        "  Envelope trailers: {} streams / {} bits",
+        totals.sink.movement_envelope_trailers, totals.sink.movement_envelope_trailer_bits
     );
     // Non-zero errors or truncations: bits abandoned mid-element, leaves lost.
     eprintln!(
@@ -229,6 +241,11 @@ pub(super) fn print(
     eprintln!(
         "  Reward opaque:    {} empty variants",
         totals.sink.tracked_rewards_opaque_empty_variants
+    );
+    // Its sibling tolerance: empty deltas whose trailing zero byte was spared.
+    eprintln!(
+        "  ActiveBlinds trailers: {} empty deltas",
+        totals.sink.active_blinds_empty_trailers
     );
     eprintln!("  Truncated RPCs:   {}", totals.sink.truncated_rpcs);
     eprintln!(
@@ -278,10 +295,6 @@ pub(super) fn print(
 }
 
 fn print_checkpoints(cp: &CheckpointStats) {
-    let rpc_payloads_lost = cp
-        .net
-        .rpc_stream_failures
-        .saturating_sub(cp.net.unresolved_rpc_payloads_preserved);
     eprintln!();
     eprintln!("=== Checkpoints ===");
     eprintln!("  Checkpoints:      {}", cp.chunks);
@@ -302,6 +315,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
     eprintln!(
         "  Checkpoint frame skips: {}",
         report::frame_skips(&cp.frame_skips)
+    );
+    eprintln!(
+        "  Checkpoint frame times: {} non-finite",
+        cp.non_finite_frame_times
     );
     eprintln!("  Checkpoint rows:  {}", cp.field_rows);
     eprintln!("  Checkpoint actors:{} rows", cp.actor_rows_written);
@@ -332,7 +349,7 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.net.malformed_content_blocks,
         cp.net.transform_failures,
         cp.net.field_stream_failures,
-        rpc_payloads_lost,
+        cp.net.rpc_payloads_lost(),
         cp.net.unfinished_partials,
         cp.net.unfinished_partial_bits,
         cp.net.skipped_bits
@@ -439,6 +456,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.tracked_rewards_opaque_empty_variants
     );
     eprintln!(
+        "  Checkpoint ActiveBlinds trailers: {} empty deltas",
+        cp.sink.active_blinds_empty_trailers
+    );
+    eprintln!(
         "  Checkpoint movement: {} failures",
         cp.sink.movement_rpc_errors
     );
@@ -451,6 +472,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.movement_sized_section_tail_bits,
         cp.sink.movement_open_section_tails,
         cp.sink.movement_open_section_tail_bits
+    );
+    eprintln!(
+        "  Checkpoint envelope trailers: {} streams / {} bits",
+        cp.sink.movement_envelope_trailers, cp.sink.movement_envelope_trailer_bits
     );
     eprintln!(
         "  Checkpoint suffix:{} RPC bits",

@@ -195,6 +195,27 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
                     self.assertIn(message, str(caught.exception))
                     self.assertIn("fatal:", str(caught.exception))
 
+    def test_a_localized_extractor_failure_keeps_its_message(self):
+        """extract_descriptors.py is a Python child: on a Korean-locale Windows
+        without PYTHONUTF8 its piped stderr is cp949. A failing extraction must
+        surface that message, not a UnicodeDecodeError naming a byte."""
+        localized = "ERROR: \uc798\ubabb\ub41c \uc124\uba85\uc790".encode("cp949")
+        real_run = subprocess.run
+
+        def fake_extractor(cmd, *args, **kwargs):
+            # A real process, so the tool's own text/encoding/errors arguments
+            # do the decoding.
+            stub = f"import sys; sys.stderr.buffer.write({localized!r}); sys.exit(1)"
+            return real_run([sys.executable, "-c", stub], *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(audit.subprocess, "run", fake_extractor):
+            with self.assertRaises(ValueError) as caught:
+                audit.extract_table(Path(temp), Path(temp) / "table.rs")
+        self.assertNotIsInstance(caught.exception, UnicodeDecodeError)
+        self.assertIn("descriptor extraction failed", str(caught.exception))
+        self.assertIn("ERROR:", str(caught.exception))
+
     def test_invalid_source_fails_without_writing_output(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

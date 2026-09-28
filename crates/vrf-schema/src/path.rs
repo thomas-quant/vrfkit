@@ -206,6 +206,23 @@ mod tests {
         );
     }
 
+    /// Only a path starting with `Default__` and holding `/_Core/` has both
+    /// aliases, so only it shows their order: `Default__` first, then
+    /// `/_Core/`, and where both spellings are keys the `Default__` one wins.
+    #[test]
+    fn the_default_alias_is_tried_before_the_core_alias() {
+        let path = "Default__/Game/Characters/_Core/Jett/Jett_C";
+        let default_alias = "/Game/Characters/_Core/Jett/Jett_C";
+        let core_alias = "Default__/Game/Characters/Jett/Jett_C";
+        assert_eq!(replay_keys(path), [path, default_alias, core_alias]);
+        let hit = find_replay_path_key(path, |key| {
+            [default_alias, core_alias]
+                .contains(&key)
+                .then(|| key.to_owned())
+        });
+        assert_eq!(hit.as_deref(), Some(default_alias));
+    }
+
     #[test]
     fn no_alias_for_qualified_path_without_core() {
         assert_eq!(

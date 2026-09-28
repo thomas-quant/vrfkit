@@ -9,7 +9,7 @@
 
 use std::io::Write;
 
-use vrf_container::{decompress_checkpoint, parse_checkpoint_chunk};
+use vrf_container::{decompress_checkpoint_with_trailing, parse_checkpoint_chunk};
 use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     CheckpointActorRecord, CheckpointActorWriter, CheckpointBlockWriter,
@@ -33,9 +33,11 @@ use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 #[derive(Debug, Default)]
 pub(crate) struct CheckpointStats {
     pub chunks: u64,
-    /// Sum of [`CheckpointChunk::trailing_bytes`](vrf_container::CheckpointChunk::trailing_bytes):
-    /// 0 on every corpus checkpoint measured, counted so bytes a format change
-    /// leaves after the archive are not dropped unseen.
+    /// Checkpoint bytes no reader consumed: each chunk's
+    /// [`CheckpointChunk::trailing_bytes`](vrf_container::CheckpointChunk::trailing_bytes)
+    /// after its archive, plus the archive bytes the Oodle codec never read
+    /// ([`decompress_checkpoint_with_trailing`]). Both are 0 on every corpus
+    /// checkpoint measured; counted so a format change is not dropped unseen.
     pub trailing_bytes: u64,
     pub guid_entries: u64,
     pub literal_paths: u64,
@@ -48,6 +50,8 @@ pub(crate) struct CheckpointStats {
     pub frames: u64,
     /// Section bytes the snapshot frames stepped over, as in the main pass.
     pub frame_skips: FrameSkips,
+    /// Snapshot frames with a NaN or infinite time, as in the main pass.
+    pub non_finite_frame_times: u64,
     pub packets: u64,
     pub field_rows: u64,
     pub actor_rows_written: u64,
@@ -214,8 +218,9 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     partial_writer: &mut PartialWriter<P>,
 ) -> Result<(), CliError> {
     let cp = parse_checkpoint_chunk(payload)?;
-    stats.trailing_bytes += cp.trailing_bytes as u64;
-    let plain = decompress_checkpoint(cp.archive, ctx.compressed, ctx.encrypted)?;
+    let (plain, unread) =
+        decompress_checkpoint_with_trailing(cp.archive, ctx.compressed, ctx.encrypted)?;
+    stats.trailing_bytes += (cp.trailing_bytes + unread) as u64;
 
     let actor_rows_before = stats.actor_rows_written;
     let checkpoint_index = u32::try_from(stats.chunks)
@@ -365,6 +370,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.exported_fields += u64::from(tables.exported_fields);
     stats.frames += u64::from(walk.frames);
     stats.frame_skips.absorb(walk.skipped);
+    stats.non_finite_frame_times += u64::from(walk.non_finite_times);
     stats.packets += packet_count;
     Ok(())
 }

@@ -39,9 +39,11 @@ counter. A counter that stops being printed must not read as zero
 (docs/archive/PROJECT_STATUS.md 5-O), and one that cannot move must not read
 as success (`dead_counters`). `FAILURES` are verify_build_corpus.py's
 SINK_ZERO read off the summary, pinned by test_check_decode_errors_corpus.py.
-As there, only counts are gated: CNC `attempted` and the movement tails' bit
-totals are printed, not failed on, and `RPC suffix bits` stays ungated because
-verify_build_corpus.py records `rpc_suffix_bits_dropped` as a limitation.
+As there, only counts are gated: CNC `attempted`, the movement tails' bit
+totals and the envelope and ActiveBlinds trailer counts are printed, not failed
+on (verify_build_corpus.py checks the trailers' 24 bits per stream), and `RPC
+suffix bits` stays ungated because verify_build_corpus.py records
+`rpc_suffix_bits_dropped` as a limitation.
 
 Every failure gate is either backed in `MUST_MOVE` / `CHECKPOINT_MUST_MOVE` by
 the work counter whose movement makes its zero evidence, or listed in
@@ -127,6 +129,10 @@ MOVEMENT_SIZED_TAILS = _movement_tails_field("Movement tails:", 0)
 MOVEMENT_SIZED_TAIL_BITS = _movement_tails_field("Movement tails:", 1)
 MOVEMENT_OPEN_TAILS = _movement_tails_field("Movement tails:", 2)
 MOVEMENT_OPEN_TAIL_BITS = _movement_tails_field("Movement tails:", 3)
+ENVELOPE_TRAILER_UNITS = ("streams", "bits")
+ENVELOPE_TRAILERS = _line_field("Envelope trailers:", ENVELOPE_TRAILER_UNITS, 0)
+ENVELOPE_TRAILER_BITS = _line_field("Envelope trailers:", ENVELOPE_TRAILER_UNITS, 1)
+ACTIVE_BLINDS_TRAILERS = _line_field("ActiveBlinds trailers:", ("empty deltas",), 0)
 
 
 #: `(key, regex, label)` for every counter read off the export summary. All
@@ -165,6 +171,9 @@ COUNTERS = (
     ("movement_sized_tail_bits", MOVEMENT_SIZED_TAIL_BITS, "Movement tails ... sized bits"),
     ("movement_open_tails", MOVEMENT_OPEN_TAILS, "Movement tails ... open"),
     ("movement_open_tail_bits", MOVEMENT_OPEN_TAIL_BITS, "Movement tails ... open bits"),
+    ("movement_envelope_trailers", ENVELOPE_TRAILERS, "Envelope trailers ... streams"),
+    ("movement_envelope_trailer_bits", ENVELOPE_TRAILER_BITS, "Envelope trailers ... bits"),
+    ("active_blinds_empty_trailers", ACTIVE_BLINDS_TRAILERS, "ActiveBlinds trailers"),
 )
 
 #: Main-pass counters that must be zero on every replay, with the label a
@@ -269,6 +278,10 @@ CHECKPOINT_CNC_BRUTEFORCE = re.compile(
 CHECKPOINT_MOVEMENT_TAILS = re.compile(
     r"(?m)^\s*Checkpoint movement tails:\s+(\d+) sized \((\d+) bits\) / "
     r"(\d+) open \((\d+) bits\)\s*$")
+CHECKPOINT_ENVELOPE_TRAILERS = re.compile(
+    r"(?m)^\s*Checkpoint envelope trailers:\s+(\d+) streams / (\d+) bits\s*$")
+CHECKPOINT_ACTIVE_BLINDS_TRAILERS = re.compile(
+    r"(?m)^\s*Checkpoint ActiveBlinds trailers:\s+(\d+) empty deltas\s*$")
 
 #: `(key, regex, group, label)`, all required as `COUNTERS` are: driver/mod.rs
 #: (`with_checkpoints.then_some(&cp_stats)`) prints the whole checkpoint
@@ -316,6 +329,12 @@ CHECKPOINT_COUNTERS = (
      "Checkpoint movement tails ... open"),
     ("checkpoint_movement_open_tail_bits", CHECKPOINT_MOVEMENT_TAILS, 4,
      "Checkpoint movement tails ... open bits"),
+    ("checkpoint_movement_envelope_trailers", CHECKPOINT_ENVELOPE_TRAILERS, 1,
+     "Checkpoint envelope trailers ... streams"),
+    ("checkpoint_movement_envelope_trailer_bits", CHECKPOINT_ENVELOPE_TRAILERS, 2,
+     "Checkpoint envelope trailers ... bits"),
+    ("checkpoint_active_blinds_empty_trailers", CHECKPOINT_ACTIVE_BLINDS_TRAILERS, 1,
+     "Checkpoint ActiveBlinds trailers"),
 )
 
 #: `FAILURES` for the checkpoint pass: the same thirteen quantities, read off the
@@ -601,6 +620,9 @@ def main() -> int:
           f"({totals['movement_sized_tail_bits']:,} bits) / "
           f"{totals['movement_open_tails']:,} open "
           f"({totals['movement_open_tail_bits']:,} bits)")
+    print(f"envelope trailers : {totals['movement_envelope_trailers']:,} streams / "
+          f"{totals['movement_envelope_trailer_bits']:,} bits")
+    print(f"blinds trailers   : {totals['active_blinds_empty_trailers']:,} empty deltas")
     print(f"unbacked gates    : {unbacked_line(UNBACKED)}")
     if args.checkpoints:
         # Unconditional, zeros included, for the same reason.
@@ -632,6 +654,11 @@ def main() -> int:
               f"({totals['checkpoint_movement_sized_tail_bits']:,} bits) / "
               f"{totals['checkpoint_movement_open_tails']:,} open "
               f"({totals['checkpoint_movement_open_tail_bits']:,} bits)")
+        print("checkpoint envelope trailers: "
+              f"{totals['checkpoint_movement_envelope_trailers']:,} streams / "
+              f"{totals['checkpoint_movement_envelope_trailer_bits']:,} bits")
+        print("checkpoint blinds trailers: "
+              f"{totals['checkpoint_active_blinds_empty_trailers']:,} empty deltas")
         print("checkpoint reward opaque: "
               f"{totals['checkpoint_tracked_rewards_opaque_empty_variants']:,} "
               "empty variants")

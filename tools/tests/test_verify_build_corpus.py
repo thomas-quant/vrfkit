@@ -41,6 +41,8 @@ def manifest():
                 cnc_bruteforce_payloads_attempted=6, cnc_bruteforce_payloads_unwalked=0,
                 movement_sized_section_tails=0, movement_sized_section_tail_bits=0,
                 movement_open_section_tails=0, movement_open_section_tail_bits=0,
+                movement_envelope_trailers=3, movement_envelope_trailer_bits=72,
+                active_blinds_empty_trailers=1,
                 sink_rpcs_emitted=40, sink_actor_opens=7, sink_actor_closes=5,
                 sink_content_blocks=100)
     quality = dict.fromkeys(("content_blocks_lost", "event_trailing_bytes",
@@ -109,6 +111,43 @@ class ManifestTests(unittest.TestCase):
                 del data["quality"]["checkpoints"]["sink"][key]
                 with self.assertRaises(KeyError):
                     audit.manifest_counts(data)
+
+    def test_envelope_trailers_and_blinds_trailers_are_recorded_and_required(self):
+        counts, failures = audit.manifest_counts(manifest())
+        self.assertEqual(failures, [])
+        for scope in ("main", "checkpoint"):
+            self.assertEqual(counts[f"{scope}_movement_envelope_trailers"], 3)
+            self.assertEqual(counts[f"{scope}_movement_envelope_trailer_bits"], 72)
+            self.assertEqual(counts[f"{scope}_active_blinds_empty_trailers"], 1)
+            for key in ("movement_envelope_trailers", "movement_envelope_trailer_bits",
+                        "active_blinds_empty_trailers"):
+                with self.subTest(scope=scope, key=key):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    del target["sink"][key]
+                    with self.assertRaises(KeyError):
+                        audit.manifest_counts(data)
+
+    def test_envelope_trailer_bits_must_be_24_per_stream_in_each_pass(self):
+        """A trailer that grew, shrank or vanished (bits short of 24 per stream,
+        down to 0) fails the replay; 0 streams with 0 bits -- a pass with no
+        movement RPC, like every checkpoint pass measured -- does not."""
+        for scope in ("main", "checkpoint"):
+            for streams, bits in ((3, 71), (3, 73), (3, 0), (0, 24)):
+                with self.subTest(scope=scope, streams=streams, bits=bits):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    target["sink"].update(movement_envelope_trailers=streams,
+                                          movement_envelope_trailer_bits=bits)
+                    self.assertIn(
+                        f"{scope}_movement_envelope_trailer_bits={bits} != 24 x "
+                        f"{scope}_movement_envelope_trailers={streams}",
+                        audit.manifest_counts(data)[1])
+            data = manifest()
+            target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+            target["sink"].update(movement_envelope_trailers=0,
+                                  movement_envelope_trailer_bits=0)
+            self.assertEqual(audit.manifest_counts(data)[1], [], scope)
 
     def test_unwalked_cnc_payloads_and_movement_tails_fail_the_audit(self):
         """Named here, not read from SINK_ZERO: the generic test above iterates
@@ -319,7 +358,7 @@ class CheckExportTests(unittest.TestCase):
     cross-check's wiring; the check itself is tested with the baseline guard.
     """
 
-    def run_check_export(self, crosscheck_result):
+    def run_check_export(self, crosscheck_result, failing=None):
         with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
             directory = Path(temp)
             for name in audit.baseline.PARQUET_FILES + audit.baseline.CHECKPOINT_PARQUET_FILES:
@@ -330,8 +369,10 @@ class CheckExportTests(unittest.TestCase):
             stack.enter_context(patch.dict(audit.baseline.CHECKPOINT_COUNTERS, clear=True))
             for name in ("cross_checks", "checkpoint_manifest_errors",
                          "reward_opaque_manifest_errors", "targeting_manifest_errors",
-                         "frame_skip_manifest_errors"):
-                stack.enter_context(patch.object(audit.baseline, name, return_value=[]))
+                         "sink_tally_manifest_errors", "frame_skip_manifest_errors"):
+                stack.enter_context(patch.object(
+                    audit.baseline, name,
+                    return_value=[f"{name} failed"] if name == failing else []))
             crosscheck = stack.enter_context(patch.object(
                 audit.baseline, "checkpoint_guid_crosscheck", return_value=crosscheck_result))
             try:
@@ -344,6 +385,12 @@ class CheckExportTests(unittest.TestCase):
         tables, returned = self.run_check_export((counts, []))
         self.assertEqual(returned, counts)
         self.assertEqual(tables["checkpoint_guid_entries"]["rows"], 1)
+
+    def test_a_sink_tally_disagreement_fails_the_export(self):
+        counts = guid_counts(indexed_joined=7, indexed_path_equal=7)
+        with self.assertRaises(ValueError) as raised:
+            self.run_check_export((counts, []), failing="sink_tally_manifest_errors")
+        self.assertIn("sink_tally_manifest_errors failed", str(raised.exception))
 
     def test_failing_crosscheck_fails_the_export_and_keeps_its_counts(self):
         counts = guid_counts(indexed_joined=7, indexed_path_equal=5, indexed_path_differs=2)

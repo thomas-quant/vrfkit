@@ -531,9 +531,10 @@ fn ability_fuel_fields_are_typed() {
 /// `Ping` on BombPlayerState is a 16-bit LE unsigned integer that behaves like
 /// latency in milliseconds (min ~6, p50 ~15, p90 ~19, max ~473 on 02d4d478),
 /// typed `SerializedInt{65536}` (exactly 16 bits LSB-first). No descriptor
-/// declares it; the encoding is docs/archive/PROJECT_STATUS.md 18-A/18-B, and
-/// why it is typed despite that section's "not typed" is the
-/// `BombPlayerState.Ping` ADDITIONS note in tools/apply_type_corrections.py.
+/// declares it; the encoding is docs/archive/PROJECT_STATUS.md 18-A/18-B.
+/// Why it is typed despite that section's "not typed": the ADDITIONS note in
+/// tools/apply_type_corrections.py that opens
+/// "Ping, which no descriptor declares".
 #[test]
 fn ping_latency_is_typed() {
     assert_typed(

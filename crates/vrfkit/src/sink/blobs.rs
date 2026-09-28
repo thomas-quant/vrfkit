@@ -307,9 +307,12 @@ fn blind_member_width_valid(handle: u32, width: u32) -> bool {
 }
 
 /// The array bits minus the one extra zero IntPacked an empty ActiveBlinds delta
-/// may carry after its index terminator (57 windows in 13.01/13.02/13.04/13.05);
-/// the parent keeps its original bits. Populated arrays, nonzero tails and other
-/// trailers keep the exact-window checks.
+/// may carry after its index terminator: 57 windows in 13.01/13.02/13.04/13.05
+/// among the 986 replays of the 2026-09-25 audit that prompted it, and 60 in 41
+/// of the 1,018 corpus replays on 2026-09-29, 3 of them in 13.06, all in the
+/// main pass. The parent keeps its original bits, and each spared byte is
+/// counted (`ExportStats::active_blinds_empty_trailers`). Populated arrays,
+/// nonzero tails and other trailers keep the exact-window checks.
 fn active_blind_array_bits(raw: &[u8], bit_count: u32) -> u32 {
     let without_empty_trailer = (|| {
         let mut reader = BitReader::with_bit_len(raw, u64::from(bit_count)).ok()?;
@@ -696,6 +699,9 @@ impl ExportSink<'_> {
         } else {
             bit_count
         };
+        if array_bits != bit_count {
+            self.stats.active_blinds_empty_trailers += 1;
+        }
         if measured
             && parent_name == "ActiveBlinds"
             && !strict_nested_array_preflight(raw, array_bits, &[3, 4, 5, 6, 7, 8, 9, 10, 11])
@@ -2160,10 +2166,18 @@ mod tests {
             let (_, control) =
                 export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(control.array.errors, 0);
+            assert_eq!(
+                control.active_blinds_empty_trailers, 0,
+                "no trailer to spare"
+            );
             packed(&mut bits, 0);
             let (records, stats) =
                 export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 0, "capacity {capacity}");
+            assert_eq!(
+                stats.active_blinds_empty_trailers, 1,
+                "the tolerance must be seen firing"
+            );
             assert_eq!(stats.array.unconsumed_root_bits, 0);
             assert_eq!(stats.array_leaf_decode_errors, 0);
             assert_eq!(
@@ -2224,6 +2238,7 @@ mod tests {
             let (records, stats) =
                 export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 1);
+            assert_eq!(stats.active_blinds_empty_trailers, 0, "refused, not spared");
             assert_eq!(records.fields.len(), 1);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
@@ -2261,6 +2276,7 @@ mod tests {
             stats.array.errors, 1,
             "only empty deltas admit the zero trailer"
         );
+        assert_eq!(stats.active_blinds_empty_trailers, 0);
         assert!(
             !strict_nested_array_preflight(&[2, 0, 0], 24, &[11]),
             "other array routes retain the exact-window contract"
@@ -2329,6 +2345,7 @@ mod tests {
             let (records, stats) =
                 export_array_with_declarations(BLINDS, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 1, "trailer {trailer}");
+            assert_eq!(stats.active_blinds_empty_trailers, 0, "trailer {trailer}");
             assert_eq!(records.fields.len(), 1);
         }
     }

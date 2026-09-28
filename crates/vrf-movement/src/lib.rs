@@ -52,6 +52,7 @@
 //!   byteCount         : u16  (> 0, and fits in remaining bits)
 //!   [byteCount*8 bits]: inner ComponentPayload
 //!   trailer           : the rest of the stream, unread (24 bits in every one)
+//!                       and tallied (`RpcDecodeResult::envelope_trailer_bits`)
 //!
 //! Option B: direct (never seen)
 //!   (falls through to ComponentPayload)
@@ -133,8 +134,8 @@
 //!   bits after them are not all zero. Nothing reads them; the C# reference
 //!   (`MaxMovementPaddingBits`) stops at the same place.
 //! - Exactly 24 bits follow the envelope in every stream (3,753,771,600 bits in
-//!   all). The decoder skips them unread, as the C# reference does; what they
-//!   carry is not established.
+//!   all). The decoder skips them unread, as the C# reference does, and
+//!   tallies them per stream; what they carry is not established.
 //! - Implemented after the C# reference but never seen: the direct form, a
 //!   sized movement window, the updates array's trailing 8-bit IntPacked,
 //!   variant-0 moves, and the f32 and f64 QuantizedVector forms.

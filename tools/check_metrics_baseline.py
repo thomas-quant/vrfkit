@@ -109,7 +109,19 @@ def _resolve_replay(raw: str) -> Path:
 
 
 def _sum(d: dict, field: str) -> int:
-    return sum(p.get(field) or 0 for p in d.values())
+    """One per-player counter summed over `d`'s players. A player without the
+    key, or with a value that is not a count, raises: `.get(field) or 0` read a
+    counter valplay renamed as a plausible 0. A present 0 stays 0."""
+    total = 0
+    for player, values in d.items():
+        if field not in values:
+            raise ValueError(f"per-player counter {field!r} is missing for player {player}")
+        value = values[field]
+        if type(value) is not int:
+            raise ValueError(f"per-player counter {field!r} of player {player} is "
+                             f"{value!r}, not a count")
+        total += value
+    return total
 
 
 def extract(m: dict) -> dict:
@@ -217,7 +229,11 @@ def run_one(build: str, replay: Path, exe: Path) -> tuple[str, dict | None, str]
         mj = metrics_path
         if not mj.exists():
             return build, None, "metrics.json was not written"
-        return build, extract(json.loads(mj.read_text(encoding="utf-8"))), ""
+        try:
+            values = extract(json.loads(mj.read_text(encoding="utf-8")))
+        except ValueError as exc:
+            return build, None, f"metrics.json: {exc}"
+        return build, values, ""
     except subprocess.TimeoutExpired:
         return build, None, "timeout"
     finally:

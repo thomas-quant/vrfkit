@@ -408,7 +408,8 @@ ADDITIONS = [
     # 15, p90 19, p99 25, max 473, 57 distinct).
     # SerializedInt{65536} reads exactly those 16 bits, LSB-first, and passes
     # decode_field's full-consumption guard.
-    # Typed despite PROJECT_STATUS 18-D: it passed Money's gate; per-player latency is now wanted.
+    # Typed despite PROJECT_STATUS 18-D: it passed Money's gate; per-player
+    # latency is now wanted.
     ("/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
      "Ping", "FieldType::SerializedInt { max: 65536 }"),
     # BasicCombatStatsComponent, the cumulative scoreboard K/D/A: on
@@ -428,8 +429,8 @@ ADDITIONS = [
     ("/Script/ShooterGame.PlayerScoreComponent", "Score", "FieldType::Int32"),
     # Comp_Actor_Concussable, a generic component under
     # /Game/Characters/Components/ that no descriptor declares. On the 98605b1b
-    # Demos export: 9 actors spanning eight agents (Phoenix, Breach, Smonk,
-    # Clay, Guide, Wushu, Terra, Pandemic, Deadeye) plus Guide's
+    # Demos export: 9 actors, eight agents (Phoenix, Breach, Smonk, Clay,
+    # Guide, Terra, Pandemic, Deadeye; the match's Wushu has none) plus Guide's
     # PossessableScout pawn, with the same names and widths on each. All 375
     # rows: Start/EndTime 32 bits on 39 rows each, Float game-seconds ~2.5 s
     # apart (389.5/392.0 .. 1916.7/1919.2); Level 64 bits on 297 rows, a Double
@@ -449,8 +450,14 @@ ADDITIONS = [
      "CurrentFuel", "FieldType::Double"),
     ("/Game/Characters/Components/Comp_AbilityFuelSystem.Comp_AbilityFuelSystem_C",
      "IsFuelDraining", "FieldType::Bool"),
-    # LongestActiveBlindDuration: Float 0.0..2.1 s, agent-common
+    # LongestActiveBlindDuration: Float seconds, agent-common
     # (blind_duration_is_typed in crates/vrf-decode/src/tests/overlay.rs).
+    # 2026-09-29, 25 replays exported with --checkpoints by 061155a (one per
+    # build 11.06-13.06, 13.02 twice), rows of this group and name: 1,727
+    # main rows in 17 builds and 2,431 checkpoint rows, every one 32 bits and
+    # a finite Float. Main 0.0..3.0 s (857 at 0; 1.5 s x176, 2.25 s x67);
+    # checkpoint 0.0 but for two 1.5 s. No row in the 12.05, 12.10, 12.11,
+    # 13.00, 13.01, 13.04 and 13.05 replays.
     ("/Script/ShooterGame.BlindManagerComponent",
      "LongestActiveBlindDuration", "FieldType::Float"),
     # ZoomMultiplierComponent, the ADS/scope FOV transition; no descriptor

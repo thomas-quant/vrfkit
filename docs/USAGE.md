@@ -152,7 +152,9 @@ vrfkit diag match.vrf --json failure-samples.json --include-payloads
 JSON schema version 3 separates main/checkpoint counters and aggregates by
 stream kind, cause, resolved group, function count, handle and consumed bits.
 `chunks` and `checkpoint_meta` also carry the ExternalData blobs and bytes and
-the GameSpecificFrameData bytes the DemoFrame walk skipped undecoded.
+the GameSpecificFrameData bytes the DemoFrame walk skipped undecoded, and the
+frames whose time was NaN or infinite (`replay_data_non_finite_frame_times` in
+`chunks`, `non_finite_frame_times` in `checkpoint_meta`).
 Totals include every failure. Distinct cells are bounded; an explicit overflow
 bucket accounts for additional keys. Check overflow before treating the listed
 groups as a complete distribution. Whole RPC payloads preserved by the parser
@@ -631,8 +633,11 @@ Every loss and fallback counter for the run, including the checkpoint pass when
 | `event_payloads_decoded` | Event payloads whose exact known arity, tag, public enum name and time relation populated the structural overlay. |
 | `event_payload_unknown_groups` | Event groups outside that measured vocabulary; their raw payload remains preserved. |
 | `event_layout_mismatches` | Known groups that failed any structural guard; all nullable overlay columns remain empty. |
+| `movement_envelope_trailers`, `movement_envelope_trailer_bits` | In each `sink` block: byte-wrapped movement streams and the bits after their envelopes, which nothing reads. Printed as `Envelope trailers:` (`Checkpoint envelope trailers:`); 24 bits per stream on every measured replay, which `verify_build_corpus.py` requires. |
+| `active_blinds_empty_trailers` | In each `sink` block: empty `ActiveBlinds` deltas whose one trailing zero byte the strict array walker was spared; the parent row keeps it. Printed as `ActiveBlinds trailers:` (`Checkpoint ActiveBlinds trailers:`). |
+| `frame_non_finite_times` | DemoFrames whose time was NaN or infinite; their packets carry 0 ms, as in the reference. `checkpoints.checkpoint_frame_non_finite_times` counts the snapshot frames. Printed as `Frame times:` (`Checkpoint frame times:`), and by `validate`. |
 
-It is `malformed_content_blocks + transform_failures + field_stream_failures +
+`content_blocks_lost` is `malformed_content_blocks + transform_failures + field_stream_failures +
 max(0, rpc_stream_failures - unresolved_rpc_payloads_preserved)`, computed by
 `NetStats::lost_content_blocks` and shared with `validate`'s summary so the two
 cannot drift.
@@ -757,7 +762,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `compare_rpc_params.py` | RPC parameters and records against the C# export, with its listed expected differences |
 | `compare_with_csharp.py` | Diff against the C# parser |
 | `check_effect_decoder.py` | Effect decoder (12 cases) |
-| `check_ascii.py` | Rust source ASCII sweep (161 files) |
+| `check_ascii.py` | Rust source ASCII sweep (162 files) |
 | `check_docs.py` | This document itself (below) |
 | `atomic_io.py` | Internal containment, recursive-removal and atomic-replacement helpers shared by mutating tools |
 
@@ -1216,12 +1221,12 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 793 passing
+cargo +1.86.0 test --workspace --locked                              # 805 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
-python -W error tools/check_ascii.py --check                         # 161 files
+python -W error tools/check_ascii.py --check                         # 162 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1291 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1306 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 219 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
@@ -1546,7 +1551,8 @@ Each replay receives `validate`, `export --checkpoints`, required-counter
 and Parquet row-count checks, and independent Python comparisons for the
 observed fields in `public_fixture_type_evidence.json`. Missing counters,
 nonzero framing/transform/array/type failures and changed inputs fail the
-strict audit. Every build must also show positive checkpoint block and
+strict audit, as does a movement envelope trailer total that is not 24 bits
+per stream. Every build must also show positive checkpoint block and
 decoded-value counts; otherwise `build_errors` makes the command fail. Unknown
 RPCs preserved whole are counted separately from loss.
 Unobserved evidence fields are reported as absent, never as verified values.

@@ -227,6 +227,21 @@ class AdditionsTests(unittest.TestCase):
         # OVERLAY_TABLE's closing bracket is still present exactly once.
         self.assertEqual(out.count("];\n"), 1)
 
+    def test_a_new_tail_closes_the_overlay_table_not_the_handle_table(self):
+        """With OVERLAY_HANDLE_TABLE after it, as in the committed file, the
+        final split block holds both slices' `];`. The tail goes before the
+        first; spliced before the last it would put OverlayEntry rows inside
+        the handle slice (str.find -> str.rfind survived every other test)."""
+        earlier = [("/AAAAA.First", "Field", "FieldType::Int32")]
+        source = render_table(earlier, handles=[("/AAAAA.First", 3, "Field")])
+        out, n = atc.apply_additions(source)
+        self.assertEqual(n, len(atc.ADDITIONS))
+        marker = "pub static OVERLAY_HANDLE_TABLE"
+        table, handles = out.split(marker, 1)
+        self.assertEqual(table.count("    OverlayEntry {"), 1 + len(atc.ADDITIONS))
+        self.assertEqual(handles, source.split(marker, 1)[1],
+                         "the handle table must come through untouched")
+
 
 class RetypeTests(unittest.TestCase):
     """`retype` keys on each block's OWN entry, never on text elsewhere: the

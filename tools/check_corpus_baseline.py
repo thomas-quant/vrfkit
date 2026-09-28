@@ -131,6 +131,15 @@ def main() -> int:
 
     stored = json.loads(args.baseline.read_text(encoding="utf-8")) \
         if args.baseline.exists() else {}
+    # A new baseline pins --corpus as given, never the path resolved below:
+    # a path would put one machine's directory into a committed file.
+    if args.update and not stored.get("corpus") and args.corpus is not None \
+            and args.corpus.anchor:
+        print(f"FAILED: --update would write the path {args.corpus} into "
+              f"{args.baseline.name}; a baseline names its corpus relative to "
+              f"VRFKIT_CORPUS_DIR. Set VRFKIT_CORPUS_DIR to {args.corpus.parent} and "
+              f"pass --corpus {args.corpus.name}.", file=sys.stderr)
+        return 2
     # Decided on the text, not the Path: Path("") is Path("."), which exists,
     # so a baseline naming no corpus walked and pinned the working directory.
     named = args.corpus or os.path.expandvars(stored.get("corpus", ""))
@@ -169,7 +178,7 @@ def main() -> int:
             print("  Fix the run first; a baseline of zeros is matched by the "
                   "same failure next time.", file=sys.stderr)
             return 1
-        payload = {"corpus": stored.get("corpus") or str(corpus), **current}
+        payload = {"corpus": stored.get("corpus") or str(args.corpus), **current}
         atomic_write_text(args.baseline, json.dumps(payload, indent=1) + "\n")
         n = len(current["per_file"])
         print(f"wrote {args.baseline} ({n} replays, "

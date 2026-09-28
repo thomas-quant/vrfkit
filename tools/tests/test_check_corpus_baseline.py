@@ -153,6 +153,50 @@ class RequiredInputTests(unittest.TestCase):
         self.assertNotIn("SKIP:", output.getvalue())
 
 
+class UpdateCorpusNameTests(unittest.TestCase):
+    """--update must not pin a resolved corpus path (an absolute --corpus, or
+    VRFKIT_CORPUS_DIR joined to a relative one) into a new baseline: it would
+    put one machine's directory into a committed file. check_export_baseline.py
+    refuses the same for --replay."""
+
+    def run_update(self, root: Path, corpus: str, corpus_dir: str | None):
+        argv = ["check_corpus_baseline.py", "--baseline", str(root / "baseline.json"),
+                "--exe", sys.executable, "--corpus", corpus, "--update"]
+        output = io.StringIO()
+        with mock.patch.dict(os.environ), mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(guard, "measure",
+                                  return_value=measurement({"a.vrf": CLEAN_ENTRY})) as measured, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            os.environ.pop("VRFKIT_CORPUS_DIR", None)
+            os.environ.pop("VRFKIT_REQUIRE_CORPUS", None)
+            if corpus_dir is not None:
+                os.environ["VRFKIT_CORPUS_DIR"] = corpus_dir
+            code = guard.main()
+        return code, output.getvalue(), measured
+
+    def test_an_absolute_corpus_is_refused_before_the_oracle_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "build_9999").mkdir()
+            code, output, measured = self.run_update(root, str(root / "build_9999"), None)
+            self.assertEqual(code, 2, output)
+            self.assertIn("VRFKIT_CORPUS_DIR", output)
+            self.assertIn("--corpus build_9999", output)
+            measured.assert_not_called()
+            self.assertFalse((root / "baseline.json").exists())
+
+    def test_a_relative_corpus_is_pinned_as_given_not_as_resolved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "build_9999").mkdir()
+            code, output, measured = self.run_update(root, "build_9999", str(root))
+            self.assertEqual(code, 0, output)
+            measured.assert_called_once()
+            self.assertEqual(measured.call_args.args[1], root / "build_9999")
+            stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["corpus"], "build_9999")
+
+
 class NoCorpusNamedTests(unittest.TestCase):
     """A baseline that names no corpus is missing input, not the working
     directory: `Path("")` is `Path(".")`, which exists, and `--update` would
