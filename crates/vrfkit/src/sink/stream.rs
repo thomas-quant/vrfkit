@@ -813,6 +813,7 @@ impl ReplicationSink for ExportSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::test_fixtures::{bits_from_bytes, bytes, channel_open, packed};
     use crate::sink::{ChannelState, ExportStats, RecordBuffers};
     use vrf_schema::NetGuidCache;
 
@@ -1079,40 +1080,10 @@ mod tests {
         assert_eq!(sink.stats.overlay.no_field_name, 0);
     }
 
-    /// Encode `value` as Unreal's `IntPacked` into `bits`, LSB-first.
-    /// Mirrors the reference wire encoder in `vrf-net`'s field tests.
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    /// Pack a LSB-first bit list into bytes.
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
-
     fn one_h1_cnc_tail(body: &[bool]) -> Vec<bool> {
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 1, ABILITIES_AND_BUFFS_FC);
-        write_int_packed(&mut bits, body.len() as u32);
+        packed(&mut bits, body.len() as u32);
         bits.extend_from_slice(body);
         bits
     }
@@ -1121,7 +1092,7 @@ mod tests {
     fn verified_abilities_tail_emits_one_raw_structural_h1_row() {
         let body = [true, false, true, false, true, false, true, false, true];
         let tail = one_h1_cnc_tail(&body);
-        let tail_bytes = bits_to_bytes(&tail);
+        let tail_bytes = bytes(&tail);
         let mut cache = NetGuidCache::new();
         cache.set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
         let mut channel_state = ChannelState::new();
@@ -1147,10 +1118,7 @@ mod tests {
         assert_eq!(row.handle, 1);
         assert_eq!(row.field_name.as_deref(), Some(CHAINED_CNC_H1_FIELD_NAME));
         assert_eq!(row.bit_count, body.len() as u32);
-        assert_eq!(
-            row.raw_bits.as_deref(),
-            Some(bits_to_bytes(&body).as_slice())
-        );
+        assert_eq!(row.raw_bits.as_deref(), Some(bytes(&body).as_slice()));
         assert!(row.compatible_checksum.is_none());
         assert!(row.value_i64.is_none());
         assert!(row.value_f64.is_none());
@@ -1164,7 +1132,7 @@ mod tests {
     fn matching_tail_shape_without_raw_component_provenance_stays_whole_and_raw() {
         let body = [true, false, true, false, true, false, true, false, true];
         let tail = one_h1_cnc_tail(&body);
-        let tail_bytes = bits_to_bytes(&tail);
+        let tail_bytes = bytes(&tail);
         let mut cache = NetGuidCache::new();
         cache.set_net_guid_path(145, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
         let mut channel_state = ChannelState::new();
@@ -1241,11 +1209,11 @@ mod tests {
         sink.on_content_block(3, NetworkGuid(89), &header);
 
         for tail in [&two_rpcs, &false_flag] {
-            let bytes = bits_to_bytes(tail);
+            let raw = bytes(tail);
             let outcome = sink.on_rep_layout_tail(
                 NetworkGuid(89),
                 tail.len() as u32,
-                BitReader::with_bit_len(&bytes, tail.len() as u64).unwrap(),
+                BitReader::with_bit_len(&raw, tail.len() as u64).unwrap(),
             );
             assert_eq!(
                 outcome,
@@ -1259,7 +1227,7 @@ mod tests {
                 Some(UNPARSED_REP_LAYOUT_TAIL_FIELD_NAME)
             );
             assert_eq!(row.bit_count, tail.len() as u32);
-            assert_eq!(row.raw_bits.as_deref(), Some(bytes.as_slice()));
+            assert_eq!(row.raw_bits.as_deref(), Some(raw.as_slice()));
         }
         assert_eq!(sink.stats.rep_layout_cnc_tails_decoded, 0);
         assert_eq!(sink.stats.rep_layout_cnc_tails_preserved, 2);
@@ -1274,10 +1242,10 @@ mod tests {
     fn a_truncated_rpc_payload_increments_truncated_rpcs() {
         let mut bits = Vec::new();
         bits.push(false); // property checksum
-        write_int_packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
-        write_int_packed(&mut bits, 100); // payload_bits = 100 (exceeds remaining)
+        packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
+        packed(&mut bits, 100); // payload_bits = 100 (exceeds remaining)
         // No payload data follows: the walker breaks here.
-        let data = bits_to_bytes(&bits);
+        let data = bytes(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
         let mut cache = NetGuidCache::new();
@@ -1297,11 +1265,11 @@ mod tests {
     fn a_completed_rpc_payload_leaves_truncated_rpcs_at_zero() {
         let mut bits = Vec::new();
         bits.push(false); // property checksum
-        write_int_packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
-        write_int_packed(&mut bits, 8); // payload_bits = 8
+        packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
+        packed(&mut bits, 8); // payload_bits = 8
         bits.extend(std::iter::repeat_n(false, 8)); // 8 bits of payload data
-        write_int_packed(&mut bits, 0); // terminator handle
-        let data = bits_to_bytes(&bits);
+        packed(&mut bits, 0); // terminator handle
+        let data = bytes(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
         let mut cache = NetGuidCache::new();
@@ -1341,17 +1309,17 @@ mod tests {
             ));
         }
         let mut rpc_bits = vec![false];
-        write_int_packed(&mut rpc_bits, parent_handle + 1);
-        write_int_packed(&mut rpc_bits, array_bits.len() as u32);
+        packed(&mut rpc_bits, parent_handle + 1);
+        packed(&mut rpc_bits, array_bits.len() as u32);
         rpc_bits.extend_from_slice(array_bits);
-        write_int_packed(&mut rpc_bits, 0);
-        let bytes = bits_to_bytes(&rpc_bits);
+        packed(&mut rpc_bits, 0);
+        let raw = bytes(&rpc_bits);
         let mut channel_state = ChannelState::new();
         let mut records = RecordBuffers::default();
         let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
         assert!(sink.try_parse_rpc_params(
             3,
-            BitReader::with_bit_len(&bytes, rpc_bits.len() as u64).unwrap(),
+            BitReader::with_bit_len(&raw, rpc_bits.len() as u64).unwrap(),
             Some("MulticastRespondToValidMapClick"),
         ));
         let stats = sink.stats.clone();
@@ -1360,26 +1328,22 @@ mod tests {
     }
 
     fn append_world_location(bits: &mut Vec<bool>, values: [f64; 3]) {
-        let payload = values.into_iter().flat_map(|value| {
-            value
-                .to_le_bytes()
-                .into_iter()
-                .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0))
-        });
-        write_int_packed(bits, 2);
-        write_int_packed(bits, 192);
-        bits.extend(payload);
+        packed(bits, 2);
+        packed(bits, 192);
+        for value in values {
+            bits.extend(bits_from_bytes(&value.to_le_bytes()));
+        }
     }
 
     fn world_locations(values: &[[f64; 3]]) -> Vec<bool> {
         let mut bits = Vec::new();
-        write_int_packed(&mut bits, values.len() as u32);
+        packed(&mut bits, values.len() as u32);
         for (index, values) in values.iter().copied().enumerate() {
-            write_int_packed(&mut bits, index as u32 + 1);
+            packed(&mut bits, index as u32 + 1);
             append_world_location(&mut bits, values);
-            write_int_packed(&mut bits, 0);
+            packed(&mut bits, 0);
         }
-        write_int_packed(&mut bits, 0);
+        packed(&mut bits, 0);
         bits
     }
 
@@ -1422,7 +1386,7 @@ mod tests {
         );
         assert_eq!(
             records.fields[1].raw_bits.as_deref(),
-            Some(bits_to_bytes(&array).as_slice())
+            Some(bytes(&array).as_slice())
         );
         assert_eq!(stats.targeting_world_locations_decoded, 1);
 
@@ -1537,11 +1501,11 @@ mod tests {
         let wrong_handle = {
             let mut bits = Vec::new();
             for value in [1, 1, 3, 192] {
-                write_int_packed(&mut bits, value);
+                packed(&mut bits, value);
             }
             bits.extend(std::iter::repeat_n(false, 192));
-            write_int_packed(&mut bits, 0);
-            write_int_packed(&mut bits, 0);
+            packed(&mut bits, 0);
+            packed(&mut bits, 0);
             bits
         };
         let (records, stats) = targeting_rpc(
@@ -1559,11 +1523,11 @@ mod tests {
         let wrong_width = {
             let mut bits = Vec::new();
             for value in [1, 1, 2, 191] {
-                write_int_packed(&mut bits, value);
+                packed(&mut bits, value);
             }
             bits.extend(std::iter::repeat_n(false, 191));
-            write_int_packed(&mut bits, 0);
-            write_int_packed(&mut bits, 0);
+            packed(&mut bits, 0);
+            packed(&mut bits, 0);
             bits
         };
         let (records, stats) = targeting_rpc(
@@ -1592,12 +1556,12 @@ mod tests {
         assert!(stats.array_leaf_decode_errors > 0);
 
         let mut duplicate_member = Vec::new();
-        write_int_packed(&mut duplicate_member, 1);
-        write_int_packed(&mut duplicate_member, 1);
+        packed(&mut duplicate_member, 1);
+        packed(&mut duplicate_member, 1);
         append_world_location(&mut duplicate_member, [1.0, 2.0, 3.0]);
         append_world_location(&mut duplicate_member, [4.0, 5.0, 6.0]);
-        write_int_packed(&mut duplicate_member, 0);
-        write_int_packed(&mut duplicate_member, 0);
+        packed(&mut duplicate_member, 0);
+        packed(&mut duplicate_member, 0);
         let (records, stats) = targeting_rpc(
             group,
             0,
@@ -1633,10 +1597,10 @@ mod tests {
     fn rpc_payload_with_suffix(suffix_bits: usize) -> Vec<bool> {
         let mut bits = Vec::new();
         bits.push(false); // property checksum
-        write_int_packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
-        write_int_packed(&mut bits, 8); // payload_bits = 8
+        packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
+        packed(&mut bits, 8); // payload_bits = 8
         bits.extend(std::iter::repeat_n(false, 8)); // payload
-        write_int_packed(&mut bits, 0); // terminator handle
+        packed(&mut bits, 0); // terminator handle
         bits.extend(std::iter::repeat_n(true, suffix_bits));
         bits
     }
@@ -1657,7 +1621,7 @@ mod tests {
     #[test]
     fn bits_after_the_rpc_terminator_are_counted_not_discarded() {
         let bits = rpc_payload_with_suffix(16);
-        let data = bits_to_bytes(&bits);
+        let data = bytes(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
         let mut cache = NetGuidCache::new();
@@ -1684,13 +1648,13 @@ mod tests {
     fn a_partially_parsed_truncated_rpc_retains_the_whole_payload() {
         let mut bits = Vec::new();
         bits.push(false); // property checksum
-        write_int_packed(&mut bits, 1);
-        write_int_packed(&mut bits, 8);
+        packed(&mut bits, 1);
+        packed(&mut bits, 8);
         bits.extend(std::iter::repeat_n(false, 8)); // one complete parameter
-        write_int_packed(&mut bits, 2);
-        write_int_packed(&mut bits, 100); // second parameter overruns
+        packed(&mut bits, 2);
+        packed(&mut bits, 100); // second parameter overruns
         bits.extend(std::iter::repeat_n(true, 8));
-        let data = bits_to_bytes(&bits);
+        let data = bytes(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut cache = NetGuidCache::new();
         let mut channel_state = ChannelState::new();
@@ -1709,28 +1673,28 @@ mod tests {
     #[test]
     fn a_failed_movement_decode_retains_the_whole_rpc_payload() {
         let mut update = Vec::new();
-        write_int_packed(&mut update, 3); // shooter GUID handle 2
-        write_int_packed(&mut update, 32);
+        packed(&mut update, 3); // shooter GUID handle 2
+        packed(&mut update, 32);
         for bit in 0..32 {
             update.push((4321u32 & (1 << bit)) != 0);
         }
-        write_int_packed(&mut update, 4); // component stream handle 3
-        write_int_packed(&mut update, 8);
+        packed(&mut update, 4); // component stream handle 3
+        packed(&mut update, 8);
         update.extend(std::iter::repeat_n(false, 8)); // short u16 header
-        write_int_packed(&mut update, 0);
+        packed(&mut update, 0);
 
         let mut array = Vec::new();
-        write_int_packed(&mut array, 1);
-        write_int_packed(&mut array, 1);
+        packed(&mut array, 1);
+        packed(&mut array, 1);
         array.extend(update);
-        write_int_packed(&mut array, 0);
+        packed(&mut array, 0);
 
         let mut bits = vec![false]; // top-level ignored bit
-        write_int_packed(&mut bits, 2); // updates-array handle 1
-        write_int_packed(&mut bits, array.len() as u32);
+        packed(&mut bits, 2); // updates-array handle 1
+        packed(&mut bits, array.len() as u32);
         bits.extend(array);
-        write_int_packed(&mut bits, 0);
-        let data = bits_to_bytes(&bits);
+        packed(&mut bits, 0);
+        let data = bytes(&bits);
 
         let path = "/Script/Test.Movement_ClassNetCache";
         let mut cache = NetGuidCache::new();
@@ -1783,8 +1747,8 @@ mod tests {
             ("nan_elapsed", f32::NAN, false, false, 0, 0, 1),
         ] {
             let mut array = Vec::new();
-            write_int_packed(&mut array, 1); // one path point
-            write_int_packed(&mut array, 1); // index zero
+            packed(&mut array, 1); // one path point
+            packed(&mut array, 1); // index zero
             for (handle, payload) in [
                 (1, elapsed.to_le_bytes().to_vec()),
                 (2, vec![0; 24]),
@@ -1793,28 +1757,24 @@ mod tests {
                 if omit_velocity && handle == 3 {
                     continue;
                 }
-                write_int_packed(&mut array, handle + 1);
-                write_int_packed(&mut array, (payload.len() * 8) as u32);
-                array.extend(
-                    payload
-                        .iter()
-                        .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0)),
-                );
+                packed(&mut array, handle + 1);
+                packed(&mut array, (payload.len() * 8) as u32);
+                array.extend(bits_from_bytes(&payload));
             }
             if extra_zero_width {
-                write_int_packed(&mut array, 5); // unknown handle 4
-                write_int_packed(&mut array, 0);
+                packed(&mut array, 5); // unknown handle 4
+                packed(&mut array, 0);
             }
-            write_int_packed(&mut array, 0); // element terminator
-            write_int_packed(&mut array, 0); // array terminator
-            let array_raw = bits_to_bytes(&array);
+            packed(&mut array, 0); // element terminator
+            packed(&mut array, 0); // array terminator
+            let array_raw = bytes(&array);
 
             let mut rpc = vec![false]; // FunctionParameters checksum bit
-            write_int_packed(&mut rpc, 1); // parameter handle zero
-            write_int_packed(&mut rpc, array.len() as u32);
+            packed(&mut rpc, 1); // parameter handle zero
+            packed(&mut rpc, array.len() as u32);
             rpc.extend_from_slice(&array);
-            write_int_packed(&mut rpc, 0); // parameter terminator
-            let rpc_raw = bits_to_bytes(&rpc);
+            packed(&mut rpc, 0); // parameter terminator
+            let rpc_raw = bytes(&rpc);
 
             let mut cache = NetGuidCache::new();
             cache
@@ -1888,29 +1848,25 @@ mod tests {
         const PARENT: &str = "MulticastSetPath.NetworkedProjectilePath";
 
         let mut array = Vec::new();
-        write_int_packed(&mut array, 1); // one path point
-        write_int_packed(&mut array, 1); // index zero
+        packed(&mut array, 1); // one path point
+        packed(&mut array, 1); // index zero
         for (handle, payload) in [
             (1, 2.5f32.to_le_bytes().to_vec()),
             (2, vec![0; 24]),
             (3, vec![0; 24]),
         ] {
-            write_int_packed(&mut array, handle + 1);
-            write_int_packed(&mut array, (payload.len() * 8) as u32);
-            array.extend(
-                payload
-                    .iter()
-                    .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0)),
-            );
+            packed(&mut array, handle + 1);
+            packed(&mut array, (payload.len() * 8) as u32);
+            array.extend(bits_from_bytes(&payload));
         }
-        write_int_packed(&mut array, 0); // element terminator
-        write_int_packed(&mut array, 0); // array terminator
+        packed(&mut array, 0); // element terminator
+        packed(&mut array, 0); // array terminator
         let mut rpc = vec![false]; // FunctionParameters checksum bit
-        write_int_packed(&mut rpc, 1); // parameter handle zero
-        write_int_packed(&mut rpc, array.len() as u32);
+        packed(&mut rpc, 1); // parameter handle zero
+        packed(&mut rpc, array.len() as u32);
         rpc.extend_from_slice(&array);
-        write_int_packed(&mut rpc, 0); // parameter terminator
-        let rpc_raw = bits_to_bytes(&rpc);
+        packed(&mut rpc, 0); // parameter terminator
+        let rpc_raw = bytes(&rpc);
 
         for (branch, want_children) in [
             ("++Ares-Core+release-11.06", 0),
@@ -1977,7 +1933,7 @@ mod tests {
     fn a_single_alignment_bit_after_the_rpc_terminator_is_not_a_drop() {
         for suffix in [0, 1] {
             let bits = rpc_payload_with_suffix(suffix);
-            let data = bits_to_bytes(&bits);
+            let data = bytes(&bits);
             let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
             let mut cache = NetGuidCache::new();
@@ -2044,10 +2000,10 @@ mod tests {
         // of all 1s (to prevent false-positive walks at lower fc values).
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 1, 34); // handle=1, 6 bits
-        write_int_packed(&mut bits, 32); // payload_bits=32
+        packed(&mut bits, 32); // payload_bits=32
         bits.extend(std::iter::repeat_n(true, 32)); // 32 bits of 1s payload
 
-        let data = bits_to_bytes(&bits);
+        let data = bytes(&bits);
         let bit_count = bits.len() as u32;
 
         let mut cache = NetGuidCache::new();
@@ -2127,9 +2083,9 @@ mod tests {
     fn unresolved_abilities_and_buffs_that_does_not_walk_is_counted() {
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 1, 34); // handle=1, 6 bits
-        write_int_packed(&mut bits, 64); // declares 64 payload bits ...
+        packed(&mut bits, 64); // declares 64 payload bits ...
         bits.extend(std::iter::repeat_n(true, 32)); // ... but carries 32
-        let data = bits_to_bytes(&bits);
+        let data = bytes(&bits);
         let bit_count = bits.len() as u32;
         assert!(
             decode_cnc_payload(&data, bit_count, ABILITIES_AND_BUFFS_FC).is_none(),
@@ -2192,9 +2148,9 @@ mod tests {
         // payload_bits=32; 32 bits of 1s.
         let mut bits = Vec::new();
         write_serialized_int(&mut bits, 1, 34);
-        write_int_packed(&mut bits, 32);
+        packed(&mut bits, 32);
         bits.extend(std::iter::repeat_n(true, 32));
-        let data = bits_to_bytes(&bits);
+        let data = bytes(&bits);
         let bit_count = bits.len() as u32;
 
         let mut cache = NetGuidCache::new();
@@ -2334,19 +2290,7 @@ mod tests {
 
         // No archetype: `NetworkGuid(0)` is invalid, so `on_actor_open` never
         // registers a channel archetype for it.
-        sink.on_actor_open(&ActorChannelState {
-            channel_index: 3,
-            is_open: true,
-            is_dormant: false,
-            actor_net_guid: NetworkGuid(42),
-            archetype_net_guid: NetworkGuid(0),
-            level_guid: NetworkGuid(0),
-            spawn_location: None,
-            spawn_rotation: None,
-            spawn_scale: None,
-            spawn_velocity: None,
-            open_packet_id: 0,
-        });
+        sink.on_actor_open(&channel_open(3, 42, 0));
         sink.on_actor_close(3, NetworkGuid(42), false);
 
         assert_eq!(sink.records.actors[0].class_path, None, "open row");
@@ -2363,22 +2307,9 @@ mod tests {
         let mut channel_state = ChannelState::new();
         let mut records = RecordBuffers::default();
         let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let opened = |channel_index, actor, archetype| ActorChannelState {
-            channel_index,
-            is_open: true,
-            is_dormant: false,
-            actor_net_guid: NetworkGuid(actor),
-            archetype_net_guid: NetworkGuid(archetype),
-            level_guid: NetworkGuid(0),
-            spawn_location: None,
-            spawn_rotation: None,
-            spawn_scale: None,
-            spawn_velocity: None,
-            open_packet_id: 0,
-        };
 
-        sink.on_actor_open(&opened(3, 42, 8));
-        sink.on_actor_open(&opened(4, 43, 9));
+        sink.on_actor_open(&channel_open(3, 42, 8));
+        sink.on_actor_open(&channel_open(4, 43, 9));
         sink.on_actor_close(3, NetworkGuid(42), false);
         sink.on_actor_close(4, NetworkGuid(43), true);
 

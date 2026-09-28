@@ -920,7 +920,8 @@ mod tests {
 
     use super::*;
     use crate::sink::RecordBuffers;
-    use vrf_net::pipeline::{ActorChannelState, ReplicationSink};
+    use crate::sink::test_fixtures::channel_open;
+    use vrf_net::pipeline::ReplicationSink;
     use vrf_schema::NetGuidCache;
 
     /// Build a cache holding `groups` as declared export groups and mapping
@@ -1221,23 +1222,6 @@ mod tests {
             ),
             "AresWorldSettings",
         );
-    }
-
-    /// Build an `ActorChannelState` for one channel open.
-    fn channel_open(channel_index: u32, actor: u32, archetype: u32) -> ActorChannelState {
-        ActorChannelState {
-            channel_index,
-            is_open: true,
-            is_dormant: false,
-            actor_net_guid: NetworkGuid(actor),
-            archetype_net_guid: NetworkGuid(archetype),
-            level_guid: NetworkGuid(0),
-            spawn_location: None,
-            spawn_rotation: None,
-            spawn_scale: None,
-            spawn_velocity: None,
-            open_packet_id: 0,
-        }
     }
 
     /// A reused channel must not decode its new actor under the old one's

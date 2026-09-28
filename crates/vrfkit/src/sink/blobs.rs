@@ -1318,6 +1318,7 @@ fn decode_array_leaf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::test_fixtures::{bits_from_bytes, bytes, packed};
     use crate::sink::{ChannelState, ExportStats, MeasuredArrayRoutes, RecordBuffers};
     use std::sync::Arc;
     use vrf_net::field::FieldSink;
@@ -1334,31 +1335,6 @@ mod tests {
     const KILL_PARENT: &str = "KillData";
     const KILL_CHECKSUM: u32 = 1_493_759_848;
     const MEASURED_BUILD: &str = "++Ares-Core+release-13.05";
-
-    fn packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let byte = ((value & 127) << 1) | u32::from(value > 127);
-            bits.extend((0..8).map(|bit| byte & (1 << bit) != 0));
-            value >>= 7;
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn bytes(bits: &[bool]) -> Vec<u8> {
-        let mut raw = vec![0; bits.len().div_ceil(8)];
-        for (index, bit) in bits.iter().enumerate() {
-            raw[index / 8] |= u8::from(*bit) << (index % 8);
-        }
-        raw
-    }
-
-    fn bits_from_bytes(raw: &[u8]) -> Vec<bool> {
-        raw.iter()
-            .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0))
-            .collect()
-    }
 
     fn one_leaf(handle: u32, payload: &[bool]) -> Vec<bool> {
         let mut bits = Vec::new();
