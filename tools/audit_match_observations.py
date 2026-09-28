@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
 """Audit whether ammo-decrease observations have independently scoped RPC evidence.
 
-``extract_match_observations.py`` intentionally describes an ammo decrease as
-a replicated-property transition and gives it only a *global* EffectID timing
-hint.  This tool does not turn that hint into a shot count.  It measures the
-stronger join available in current exports: a gun-scoped
-``MulticastPlayContinuousEffectFromClient`` RPC whose actor GUID is the same
-weapon GUID as the ammo component's ``outer_net_guid``.
-
-The result retains the failure modes of the join.  In particular, a missing
-or non-unique RPC is not guessed into a shot, and a first ammo sample is
-reported as left-censored rather than treated as a transition.
-
-Usage:
-    python tools/audit_match_observations.py --export out/replay --out audit.json
-    python tools/audit_match_observations.py --exports out/exports --out audit.json
+``extract_match_observations.py`` gives an ammo decrease only a global
+EffectID timing hint; this never turns it into a shot count. It measures the
+stronger join: a gun-scoped ``MulticastPlayContinuousEffectFromClient`` RPC
+whose actor GUID is the ammo component's ``outer_net_guid``. A missing or
+non-unique RPC is not guessed into a shot, and a first ammo sample is
+left-censored, not a transition.
 """
 
 from __future__ import annotations
@@ -47,13 +39,8 @@ GUN_PATH_PREFIX = "/Game/Equippables/Guns/"
 
 
 def _read_relevant_fields(path: Path):
-    """Yield only target rows without retaining a whole fields table.
-
-    The retained corpus has exports with more than a million flattened field
-    rows.  Parquet's dictionary predicate reduces the output, but not every
-    writer can use it to skip a row group.  Batching therefore bounds this
-    audit's memory when it scans the whole corpus.
-    """
+    """Yield only target rows, in batches: exports exceed a million field rows,
+    and the dictionary predicate cannot always skip a row group."""
     columns = ["time_ms", "packet_id", "actor_net_guid", "object_net_guid",
                "group_path", "field_name", "value_i64"]
     for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=65_536, use_threads=False):
@@ -102,10 +89,8 @@ def audit_export(export_dir: Path, *, window_ms: int = 300) -> dict:
     status = Counter()
     offset_ms = Counter()
     ambiguous_ammo_packets = 0
-    # Streams whose every packet carries conflicting values: no sample can
-    # open a transition. Counted instead of the streams that have a
-    # determinate sample, which was every other stream -- that count equalled
-    # magazine_streams on every export measured, so it could not move.
+    # Streams whose every packet carries conflicting values, so no sample can
+    # open a transition (the complement equalled magazine_streams everywhere).
     all_ambiguous_streams = 0
     events_examined = 0
     for component, samples in magazines.items():
@@ -120,9 +105,7 @@ def audit_export(export_dir: Path, *, window_ms: int = 300) -> dict:
             if after >= before:
                 continue
             events_examined += 1
-            # Dynamic actor GUIDs can be introduced by actor opens without a
-            # net_guids row. The RPC itself supplies the matching actor GUID;
-            # lack of a static path registration does not make it unresolved.
+            # A dynamic actor GUID needs no net_guids row: the RPC supplies it.
             if not weapon or (weapon in identities and weapon not in stable):
                 status["identity_unresolved"] += 1
                 continue
@@ -139,8 +122,7 @@ def audit_export(export_dir: Path, *, window_ms: int = 300) -> dict:
                 if effect_packet == packet_id:
                     status["corroborated_same_packet"] += 1
 
-    # These are always emitted, including zeroes, so a report distinguishes a
-    # measured absence from a code path that did not run.
+    # Emitted with their zeros: a measured absence, not a path that never ran.
     return {
         "schema_version": 1,
         "source": str(export_dir.resolve()),
@@ -188,15 +170,10 @@ def audit_exports(exports_dir: Path, *, window_ms: int = 300,
                   sample_size: int | None = None, jobs: int = 1) -> dict:
     """Audit direct export children and aggregate only additive counters.
 
-    A sample is evenly spaced through sorted export names, which makes it
-    reproducible and prevents a quick check from only describing the earliest
-    files in a corpus directory.
-
-    The staging and backup directories `vrfkit export` leaves beside an
-    interrupted export are never candidates; they are listed under
-    `skipped_generated_dirs` (see `export_scan.py`). A candidate without
-    `manifest.json` -- which vrfkit writes last -- is a counted failure, not
-    an export.
+    A sample is evenly spaced over sorted export names: reproducible, and not
+    just the earliest files. An interrupted export's leftovers are skipped
+    and listed (export_scan.py); a candidate without `manifest.json`, which
+    vrfkit writes last, is a counted failure.
     """
     records = []
     failures = []

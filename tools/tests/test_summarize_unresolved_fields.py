@@ -96,11 +96,8 @@ class RawPriorityTests(unittest.TestCase):
         self.assertIn("bit_count must be uint32", report["errors"][0]["error"])
 
     def test_export_leftovers_beside_an_export_are_not_counted(self):
-        """A `previous` sibling carries its own manifest, so the manifest
-        check at processing time does not catch it. Measured at 259ed10 with
-        only that sibling beside `pub2`: export_count 2, physical_rows 2
-        instead of 1, complete, exit 0. A killed export's footerless staging
-        table alongside at least failed the run."""
+        """A `previous` sibling carries its own manifest, so only discovery
+        can skip it (the 259ed10 measurements are export_scan.py's)."""
         rows = [field("/A", "raw", 9, 8, b"\x01")]
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as out:
             parent = Path(td)
@@ -122,8 +119,7 @@ class RawPriorityTests(unittest.TestCase):
         self.assertEqual(summary["skipped_generated_dirs"], expected_skipped)
 
     def test_both_reports_are_replaced_atomically_with_lf_line_endings(self):
-        """They were written in text mode, so CRLF on Windows, through a
-        temp-and-rename of their own with no fsync."""
+        """Through atomic_io, LF on every platform (not CRLF on Windows)."""
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as out:
             parent = Path(td)
             self.write_export(parent / "one", [field("/A", "raw", 9, 8, b"\x01")])
