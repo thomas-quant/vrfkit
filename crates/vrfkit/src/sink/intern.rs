@@ -48,14 +48,7 @@ pub struct NameInterner {
 impl NameInterner {
     /// Pool `s` and return the shared handle.
     pub fn intern(&mut self, s: &str) -> Arc<str> {
-        if let Some(existing) = self.pool.get(s) {
-            return Arc::clone(existing);
-        }
-        let interned: Arc<str> = Arc::from(s);
-        if self.pool.len() < MAX_POOLED_NAMES {
-            self.pool.insert(Arc::clone(&interned));
-        }
-        interned
+        pooled(&mut self.pool, s)
     }
 
     /// Build a name with `f` into the internal scratch buffer, then pool it.
@@ -70,14 +63,7 @@ impl NameInterner {
         let Self { pool, scratch } = self;
         scratch.clear();
         f(scratch);
-        if let Some(existing) = pool.get(scratch.as_str()) {
-            return Arc::clone(existing);
-        }
-        let interned: Arc<str> = Arc::from(scratch.as_str());
-        if pool.len() < MAX_POOLED_NAMES {
-            pool.insert(Arc::clone(&interned));
-        }
-        interned
+        pooled(pool, scratch)
     }
 
     /// `intern_fmt` for the common `"{a}{sep}{b}"` shape.
@@ -97,6 +83,19 @@ impl NameInterner {
     pub fn len(&self) -> usize {
         self.pool.len()
     }
+}
+
+/// The pooled handle for `s`, pooled now if it is new and the pool is under
+/// [`MAX_POOLED_NAMES`].
+fn pooled(pool: &mut FxHashSet<Arc<str>>, s: &str) -> Arc<str> {
+    if let Some(existing) = pool.get(s) {
+        return Arc::clone(existing);
+    }
+    let interned: Arc<str> = Arc::from(s);
+    if pool.len() < MAX_POOLED_NAMES {
+        pool.insert(Arc::clone(&interned));
+    }
+    interned
 }
 
 /// Write `args` into `out`. `write!` into a `String` cannot fail, and the
