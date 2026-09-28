@@ -1,47 +1,19 @@
 //! Checkpoint chunk parser.
 //!
-//! A Checkpoint chunk carries a full-state snapshot of the match at one
-//! instant: the server's own NetGUID cache, its net-field export map, and a
-//! single DemoFrame that re-opens every actor alive at that moment and re-sends
-//! its complete replicated state.
+//! A Checkpoint chunk is a full-state snapshot at one instant: the server's
+//! NetGUID cache, its net-field export map, and one DemoFrame that re-opens
+//! every live actor with its complete replicated state. It is not redundant
+//! with ReplayData: 6-11% of a checkpoint's RepLayout values differ from what
+//! ReplayData carried at the same timestamp, and 1.0-2.2% of its keys were
+//! never sent there (docs/archive/PROJECT_STATUS.md 22-I; byte layout in
+//! docs/archive/CHECKPOINT_SPEC.md).
 //!
-//! # Why this exists
-//!
-//! It was long assumed these chunks duplicate what the ReplayData stream
-//! already carries, and the assumption was measured and found false: 6-11% of a
-//! checkpoint's RepLayout field values disagree with what ReplayData carried at
-//! the same timestamp, and 1.0-2.2% are keys ReplayData never sent at all. See
-//! docs/archive/PROJECT_STATUS.md 22-I for the measurement and
-//! docs/archive/CHECKPOINT_SPEC.md for the byte-level derivation.
-//!
-//! # Chunk layout
-//!
-//! The six-field header is byte-identical to an Event chunk's:
-//!
-//! | Offset | Type | Field |
-//! |--------|------|-------|
-//! | 0 | FString | Id, e.g. `checkpoint0` |
-//! | ... | FString | Group, always `checkpoint` |
-//! | ... | FString | Metadata, a 1-based counter |
-//! | ... | u32 | Time1 |
-//! | ... | u32 | Time2 |
-//! | ... | i32 | SizeInBytes |
-//! | ... | [u8; SizeInBytes] | Oodle archive |
-//!
-//! The archive body uses the same framing as a ReplayData chunk's --
-//! `[i32 decompressed_size][i32 compressed_size][oodle bytes]` -- but with no
-//! `MemorySizeInBytes` ahead of it, so the archive's own `decompressed_size` is
-//! the only statement of the output length.
-//!
-//! Verified over the 215-replay corpus: 4,024 checkpoints, every one consumed
-//! exactly by this layout, `compressed_size + 8 == SizeInBytes` in all of them,
-//! and `Time1 == Time2` in all of them.
-//!
-//! # What is inside the archive
-//!
-//! [`decompress_checkpoint`] returns the plaintext. Its structure -- the guid
-//! cache, the export-group map, and where the DemoFrame begins -- is a schema
-//! concern, not a container one, and lives in `vrf_schema::checkpoint`.
+//! The same six-field header as an Event chunk, then an Oodle archive framed
+//! like a ReplayData chunk's but with no `MemorySizeInBytes` ahead of it. Over
+//! the 215-replay 13.01 corpus all 4,024 checkpoints were consumed exactly by
+//! this layout, with `compressed_size + 8 == SizeInBytes` and `Time1 == Time2`
+//! in every one. The plaintext's structure (GUID cache, export-group map,
+//! DemoFrame start) is a schema concern: `vrf_schema::checkpoint`.
 
 use vrf_bitio::BitReader;
 
@@ -61,32 +33,28 @@ pub struct CheckpointChunk<'a> {
     /// Snapshot time in milliseconds. Equal to the enclosed DemoFrame's own
     /// frame time in all 4,024 corpus checkpoints.
     pub time1: u32,
-    /// Second timestamp. Equal to `time1` in every corpus file; both are kept
-    /// because the format keeps them separate.
+    /// Second timestamp in milliseconds.
     pub time2: u32,
     /// Declared archive size. Validated non-negative and within the chunk.
     pub size_in_bytes: i32,
     /// The Oodle archive, exactly `size_in_bytes` bytes.
     pub archive: &'a [u8],
-    /// Bytes after the archive this layout does not account for. Zero for all
-    /// 4,024 corpus checkpoints; summed into
-    /// `driver::checkpoints::CheckpointStats::trailing_bytes` and printed
-    /// unconditionally in the checkpoint summary, so a format change is
-    /// counted rather than discarded in silence.
+    /// Bytes after the archive this layout does not account for. 0 in all
+    /// 19,166 checkpoints of 1,014 replays, 11.06-13.06 (census, 2026-09-28);
+    /// vrfkit sums it into `CheckpointStats::trailing_bytes` and prints that
+    /// unconditionally, so a format change is counted, not dropped.
     pub trailing_bytes: usize,
 }
 
-/// Parse a Checkpoint chunk payload.
-///
-/// `payload` is the region `data[chunk.data_offset .. + chunk.size_in_bytes]`
-/// from a [`RawChunk`](crate::RawChunk) of type
+/// Parse a Checkpoint chunk: the region `data[chunk.data_offset .. + chunk.size_in_bytes]`
+/// of a [`RawChunk`](crate::RawChunk) of type
 /// [`ChunkType::Checkpoint`](crate::ChunkType::Checkpoint).
 ///
 /// # Errors
 ///
-/// [`ContainerError::Truncated`] if any field runs past the end of the chunk,
-/// and [`ContainerError::InvalidCheckpointArchiveSize`] if `SizeInBytes` is
-/// negative.
+/// [`ContainerError::FString`] if a string runs past the chunk,
+/// [`ContainerError::Truncated`] if another field or the archive does, and
+/// [`ContainerError::InvalidCheckpointArchiveSize`] if `SizeInBytes` is negative.
 pub fn parse_checkpoint_chunk(payload: &[u8]) -> Result<CheckpointChunk<'_>, ContainerError> {
     let mut reader = BitReader::new(payload);
 
@@ -121,23 +89,17 @@ pub fn parse_checkpoint_chunk(payload: &[u8]) -> Result<CheckpointChunk<'_>, Con
     })
 }
 
-/// Decompress a checkpoint's Oodle archive into its plaintext snapshot.
-///
-/// `archive` is [`CheckpointChunk::archive`]. Unlike a ReplayData chunk there
-/// is no `MemorySizeInBytes` to check the output length against, so the
-/// archive's own `decompressed_size` is authoritative and is the only bound on
-/// the allocation -- it is range-checked before use.
+/// Decompress a checkpoint's Oodle archive ([`CheckpointChunk::archive`]) into
+/// its plaintext snapshot, **dropping** the count
+/// [`decompress_checkpoint_with_trailing`] returns. With no `MemorySizeInBytes`
+/// to check against, the archive's own `decompressed_size` is the only bound on
+/// the allocation, so it is range-checked. An uncompressed replay returns the
+/// archive bytes unchanged.
 ///
 /// # Errors
 ///
 /// [`ContainerError::EncryptedNotSupported`] when `encrypted`, and the same
-/// Oodle error variants a ReplayData chunk produces. An uncompressed replay
-/// returns the archive bytes unchanged.
-///
-/// # Unread bytes
-///
-/// This form **drops** the count [`decompress_checkpoint_with_trailing`]
-/// returns, as [`decompress_replay_data`](crate::decompress_replay_data) does.
+/// Oodle error variants a ReplayData chunk produces.
 pub fn decompress_checkpoint(
     archive: &[u8],
     compressed: bool,
@@ -146,14 +108,11 @@ pub fn decompress_checkpoint(
     decompress_checkpoint_with_trailing(archive, compressed, encrypted).map(|(plain, _)| plain)
 }
 
-/// As [`decompress_checkpoint`], also reporting the archive bytes the codec
-/// never read.
-///
-/// The codec stops once its output is full and never checks that its input is
-/// used up, so bytes after the last block it reads would otherwise vanish with
-/// no error and no tally. The archive has no residual past its declared size:
-/// [`CheckpointChunk::archive`] is cut to exactly `SizeInBytes`, and anything
-/// after that is [`CheckpointChunk::trailing_bytes`]. Expected to be zero.
+/// As [`decompress_checkpoint`], also returning the archive bytes the codec
+/// never read (it stops once its output is full). The archive is cut to exactly
+/// `SizeInBytes`, so bytes after it are [`CheckpointChunk::trailing_bytes`]
+/// instead. 0 in all 19,166 checkpoint archives of 1,014 replays, 11.06-13.06
+/// (census, 2026-09-28).
 pub fn decompress_checkpoint_with_trailing(
     archive: &[u8],
     compressed: bool,
@@ -163,17 +122,12 @@ pub fn decompress_checkpoint_with_trailing(
         return Err(ContainerError::EncryptedNotSupported);
     }
     if !compressed {
-        // No corpus file takes this path -- every observed replay is
-        // compressed -- so it is deliberately the trivial one rather than a
-        // guess at a framing nothing can be checked against.
+        // Deliberately trivial: every corpus replay is compressed, so no
+        // framing guess here could be checked against a real file.
         return Ok((archive.to_vec(), 0));
     }
-    // `decompress_oodle_archive` takes the declared size as an i32. Real
-    // callers pass a checkpoint archive whose size is already validated as an
-    // i32, so this never fires on supported input; the checked conversion is
-    // here so a >2 GiB slice is rejected loudly rather than silently truncated
-    // by `as i32`. `Truncated` is the one variant that takes `usize` fields,
-    // so it can carry the real length without itself losing precision.
+    // A >2 GiB slice is rejected loudly, not truncated by `as i32`; `Truncated`
+    // has `usize` fields, so it carries the real length.
     let declared_size = i32::try_from(archive.len()).map_err(|_| ContainerError::Truncated {
         context: "checkpoint archive length",
         needed: archive.len(),
@@ -182,7 +136,6 @@ pub fn decompress_checkpoint_with_trailing(
     crate::oodle::decompress_oodle_archive(archive, declared_size, None, "checkpoint archive")
 }
 
-// --- Helpers ------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,8 +169,7 @@ mod tests {
         assert_eq!(cp.trailing_bytes, 0);
     }
 
-    /// Bytes the layout does not reach are counted, not dropped. Zero across
-    /// the corpus, so this is the only place the branch is exercised.
+    /// Zero across the corpus, so this is the only place the branch runs.
     #[test]
     fn trailing_bytes_are_reported_not_discarded() {
         let chunk = build(&[9; 3], 4);
@@ -248,8 +200,8 @@ mod tests {
         ));
     }
 
-    /// A checkpoint archive states its own output length and nothing outside
-    /// bounds it, so a corrupt header must not become a huge allocation.
+    /// Nothing outside bounds the archive's own output length, so a corrupt
+    /// header must not become a huge allocation.
     #[test]
     fn an_out_of_range_decompressed_size_is_rejected() {
         let mut archive = Vec::new();
