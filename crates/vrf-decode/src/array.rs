@@ -1405,24 +1405,79 @@ mod tests {
         assert_eq!(stats.errors, 0, "{stats:?}");
     }
 
+    /// `n` fields at handle 0 with an empty payload: headers, no payload bits.
+    fn zero_width_fields(bits: &mut BitWriter, n: u32) {
+        for _ in 0..n {
+            bits.int_packed(1).int_packed(0);
+        }
+    }
+
+    /// The zero handle arriving exactly at the field limit closes the element,
+    /// so the next element is still read: reported as unclosed, it would be
+    /// dropped with every counter still at zero.
     #[test]
     fn exactly_max_fields_followed_by_a_terminator_is_not_truncated() {
         let mut bits = BitWriter::new();
-        bits.int_packed(1);
-        bits.int_packed(1);
-        for _ in 0..MAX_FIELDS_PER_ELEMENT {
-            bits.int_packed(1); // handle 0
-            bits.int_packed(0); // valid empty payload
-        }
+        bits.int_packed(2); // elementCount
+        bits.int_packed(1); // encodedIndex -> index 0
+        zero_width_fields(&mut bits, MAX_FIELDS_PER_ELEMENT);
+        bits.int_packed(0); // element terminator, read by the limit check
+        bits.int_packed(2); // encodedIndex -> index 1
+        bits.int_packed(4).int_packed(32).repeat(true, 32); // handle 3, 32 bits
         bits.int_packed(0); // element terminator
         bits.int_packed(0); // array terminator
         let (data, bit_count) = bits.finish();
         let mut stats = ArrayDecodeStats::default();
 
-        let _ = decode_struct_array(&data, bit_count, None, &[], &mut stats);
+        let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
-        assert_eq!(stats.truncations, 0, "{stats:?}");
-        assert_eq!(stats.errors, 0, "{stats:?}");
+        assert_eq!(stats.elements_decoded, 2, "{stats:?}");
+        let paths: Vec<&str> = fields.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["[1]._h3"]);
+        assert_eq!(anomalies(&stats), [0; 5], "{stats:?}");
+    }
+
+    /// A 129th field is one truncation: the rest of the window, from that
+    /// field's handle on, is kept as one raw leaf, and the array stops there.
+    #[test]
+    fn a_field_past_the_field_limit_is_one_truncation() {
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount
+        bits.int_packed(1); // encodedIndex -> index 0
+        zero_width_fields(&mut bits, MAX_FIELDS_PER_ELEMENT + 1);
+        bits.int_packed(0); // element terminator
+        bits.int_packed(0); // array terminator
+        let (data, bit_count) = bits.finish();
+        let mut stats = ArrayDecodeStats::default();
+
+        let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
+
+        assert_eq!(anomalies(&stats), [0, 1, 0, 0, 0], "{stats:?}");
+        // The 129th field's 16-bit header and both terminators: the limit
+        // check read that header without consuming it.
+        let raw: Vec<(&str, u32)> = fields
+            .iter()
+            .map(|f| (f.path.as_str(), f.bit_count))
+            .collect();
+        assert_eq!(raw, [("[0]._raw", 32)]);
+    }
+
+    /// A read that fails at the field limit is one error: the array loop must
+    /// not read the same bits again as an index, nor leave them as residual.
+    #[test]
+    fn a_failed_read_at_the_field_limit_is_one_error() {
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount
+        bits.int_packed(1); // encodedIndex -> index 0
+        zero_width_fields(&mut bits, MAX_FIELDS_PER_ELEMENT);
+        bits.repeat(true, 3); // too few bits for the next handle
+        let (data, bit_count) = bits.finish();
+        let mut stats = ArrayDecodeStats::default();
+
+        let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
+
+        assert!(fields.is_empty(), "{fields:?}");
+        assert_eq!(anomalies(&stats), [1, 0, 0, 0, 0], "{stats:?}");
     }
 
     #[test]
