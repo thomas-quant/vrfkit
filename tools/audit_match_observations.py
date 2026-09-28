@@ -121,13 +121,17 @@ def audit_export(export_dir: Path, *, window_ms: int = 300) -> dict:
     status = Counter()
     offset_ms = Counter()
     ambiguous_ammo_packets = 0
-    left_censored_streams = 0
+    # Streams whose every packet carries conflicting values: no sample can
+    # open a transition. Counted instead of the streams that have a
+    # determinate sample, which was every other stream -- that count equalled
+    # magazine_streams on every export measured, so it could not move.
+    all_ambiguous_streams = 0
     events_examined = 0
     for component, samples in magazines.items():
         compact, ambiguous = _collapse(samples)
         ambiguous_ammo_packets += ambiguous
-        if any(value is not None for _, _, value in compact):
-            left_censored_streams += 1
+        if all(value is None for _, _, value in compact):
+            all_ambiguous_streams += 1
         weapon = outer_of.get(component)
         for (before_time, _before_packet, before), (time_ms, packet_id, after) in zip(compact, compact[1:]):
             if before is None or after is None:
@@ -184,7 +188,7 @@ def audit_export(export_dir: Path, *, window_ms: int = 300) -> dict:
         ],
         "counts": {
             "magazine_streams": len(magazines),
-            "left_censored_magazine_streams": left_censored_streams,
+            "all_ambiguous_magazine_streams": all_ambiguous_streams,
             "weapon_scoped_rpc_rows": sum(len(rows) for rows in effects.values()),
             "ammo_decreases_examined": events_examined,
             "corroborated_unique_rpc": status["corroborated_unique_rpc"],

@@ -66,7 +66,8 @@ class MatchObservationAuditTests(unittest.TestCase):
             result = audit.audit_export(root, window_ms=30)
         self.assertEqual(result["counts"]["ambiguous_multiple_rpc"], 1)
         self.assertEqual(result["counts"]["unmatched"], 1)
-        self.assertEqual(result["counts"]["left_censored_magazine_streams"], 1)
+        self.assertEqual(result["counts"]["magazine_streams"], 1)
+        self.assertEqual(result["counts"]["all_ambiguous_magazine_streams"], 0)
 
     def test_conflicting_ammo_packet_is_counted_not_ordered(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -80,6 +81,33 @@ class MatchObservationAuditTests(unittest.TestCase):
             result = audit.audit_export(root)
         self.assertEqual(result["counts"]["ambiguous_ammo_packets"], 1)
         self.assertEqual(result["counts"]["ammo_decreases_examined"], 0)
+
+    def test_a_stream_with_no_determinate_sample_is_counted(self):
+        """Every packet of stream 11 carries two values, so none of its samples
+        can open a transition. The counter this replaces,
+        left_censored_magazine_streams, counted the streams that did have a
+        determinate sample -- every stream but this kind -- so it equalled
+        magazine_streams on every export measured."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root, [
+                (100, 10, 20, 10, self.ammo_group, audit.AMMO_FIELD, 30),
+                (120, 12, 20, 10, self.ammo_group, audit.AMMO_FIELD, 29),
+                (100, 10, 20, 11, self.ammo_group, audit.AMMO_FIELD, 30),
+                (100, 10, 20, 11, self.ammo_group, audit.AMMO_FIELD, 25),
+                (130, 13, 20, 11, self.ammo_group, audit.AMMO_FIELD, 24),
+                (130, 13, 20, 11, self.ammo_group, audit.AMMO_FIELD, 23),
+            ])
+            pq.write_table(pa.table({
+                "net_guid": [10, 11, 20],
+                "path": ["MagazineAmmo", "MagazineAmmo",
+                         "/Game/Equippables/Guns/Rifles/Test.Test_C"],
+                "outer_net_guid": [20, 20, None]}), root / "net_guids.parquet")
+            counts = audit.audit_export(root)["counts"]
+        self.assertEqual(counts["magazine_streams"], 2)
+        self.assertEqual(counts["all_ambiguous_magazine_streams"], 1)
+        self.assertEqual(counts["ambiguous_ammo_packets"], 2)
+        self.assertNotIn("left_censored_magazine_streams", counts)
 
     def test_corpus_failure_and_empty_population_do_not_report_success(self):
         with tempfile.TemporaryDirectory() as temp:
