@@ -416,6 +416,183 @@ class ReportTests(unittest.TestCase):
         self.assertEqual([(c, n, s) for c, _, n, s, _ in bad], [(count, "Count", "uint32")])
 
 
+def siblings_for(checker_=None):
+    objects = checker_.objects if checker_ is not None else ()
+    return cct.SiblingSeeds(cct.spelling_universe(objects))
+
+
+class SiblingSeedTests(unittest.TestCase):
+    """Tier 2: a parent's checksum recovered from the members that share it."""
+
+    PARENT = 0x5EED1234
+
+    def member(self, name, truth, parent=None):
+        return cct.compatible_checksum(name, truth, 0, self.PARENT if parent is None else parent)
+
+    def test_implied_parent_inverts_the_formula(self):
+        rng = random.Random(7)
+        for _ in range(300):
+            name = "".join(rng.choice("abcXYZ_0123") for _ in range(rng.randint(1, 30)))
+            cpp = rng.choice(cct.ALTERNATIVE_TYPES)
+            index, parent = rng.randrange(8), rng.randrange(2 ** 32)
+            declared = cct.compatible_checksum(name, cpp, index, parent)
+            self.assertEqual(cct.implied_parent(declared, name, cpp, index), parent)
+
+    def test_the_transform_seed_is_recovered_from_its_members(self):
+        """Translation and Scale3D alone give back `Transform:FTransform`."""
+        found = siblings_for().establish([("Translation", 2235276067, ("FVector",)),
+                                          ("Scale3D", 2983776962, ("FVector",))])
+        self.assertEqual(list(found.established), [cct.chain_checksum(TRANSFORM)])
+
+    def test_right_types_with_different_name_lengths_establish_a_seed(self):
+        s = siblings_for()
+        found = s.establish([("Health", self.member("Health", "float"), ("float",)),
+                             ("SourceID", self.member("SourceID", "FName"), ("FName",))])
+        self.assertEqual(list(found.established), [self.PARENT])
+        self.assertGreater(s.comparisons, 0)
+        # top-level members agree on 0, which is known already, not recovered
+        top = s.establish([("Health", cct.compatible_checksum("Health", "float"), ("float",)),
+                           ("SourceID", cct.compatible_checksum("SourceID", "FName"), ("FName",))])
+        self.assertEqual((top.established, top.refused), ({}, {}))
+
+    def test_equal_name_lengths_under_one_wrong_spelling_are_refused(self):
+        """The systematic false agreement: `A` and `B` are int32, both read as
+        uint8 -- their implied parents agree, at a wrong seed."""
+        members = [(n, self.member(n, "int32"), ("uint8",)) for n in ("A", "B")]
+        s = siblings_for()
+        found = s.establish(members)
+        self.assertEqual(found.established, {})
+        self.assertEqual(len(found.refused), 1)
+        self.assertNotIn(self.PARENT, found.refused)  # it agreed on a WRONG parent
+        self.assertEqual(s.stats["refused: same name length, same spelling"], 1)
+
+    def test_rule_a_does_not_depend_on_the_truth_being_known(self):
+        """The same shape with a truth no universe holds is refused too."""
+        members = [(n, self.member(n, "Zzzzz"), ("uint8",)) for n in ("A", "B")]
+        found = siblings_for().establish(members)
+        self.assertEqual((found.established, len(found.refused)), ({}, 1))
+
+    def test_different_name_lengths_under_one_wrong_spelling_do_not_agree(self):
+        members = [(n, self.member(n, "int32"), ("uint8",)) for n in ("A", "Bb")]
+        s = siblings_for()
+        found = s.establish(members)
+        self.assertEqual((found.established, found.refused), ({}, {}))
+        self.assertEqual(s.stats["candidate agreements"], 0)
+
+    def test_a_compensating_misplacement_is_refused(self):
+        """`uint32` read as `uint64` beside `int32` read as `int64`, names one
+        character apart: wrong in the same place and the same way."""
+        members = [("Abc", self.member("Abc", "uint32"), ("uint64",)),
+                   ("Defg", self.member("Defg", "int32"), ("int64",))]
+        s = siblings_for()
+        found = s.establish(members)
+        self.assertEqual(found.established, {})
+        self.assertEqual(s.stats["refused: an alternative pair deviates identically"], 1)
+
+    def test_a_sibling_seed_decides_what_the_known_seeds_could_not(self):
+        """No chains: 249 is untestable in tier 1, and a mismatch once its
+        siblings give back the parent."""
+        c = checker(chains=())
+        s = siblings_for(c)
+        ids = {("/S.T:Fn", n, h, ck): identity("/S.T:Fn", n, h, ck) for n, h, ck in (
+            ("249", 0, 747197698), ("Translation", 1, 2235276067), ("Scale3D", 2, 2983776962))}
+        r = resolver(entries={("/S.T:Fn", n): "VectorDouble" for n in ("249", "Translation", "Scale3D")})
+        tier1 = cct.check_identities(ids, r, checker(chains=()))
+        self.assertEqual(tier1.by_verdict["untestable"], 3)
+        report = cct.check_identities(ids, r, c, s)
+        self.assertEqual((report.by_verdict["match"], report.by_verdict["mismatch"]), (2, 1))
+        (bad,) = report.mismatches
+        self.assertEqual((bad["name"], bad["detail"]), ("249", "FQuat"))
+        self.assertTrue(bad["seed"].startswith(f"sibling seed {cct.chain_checksum(TRANSFORM)} "))
+
+    def test_a_sibling_seed_never_turns_untestable_into_a_match(self):
+        c = checker(chains=())
+        ids = {("/S.T", n, h, ck): identity("/S.T", n, h, ck) for n, h, ck in (
+            ("Health", 1, self.member("Health", "float")),
+            ("SourceID", 2, self.member("SourceID", "FName")),
+            ("Mode", 3, self.member("Mode", "TEnumAsByte<EMode>")))}
+        r = resolver(entries={("/S.T", "Health"): "Float", ("/S.T", "SourceID"): "FName",
+                              ("/S.T", "Mode"): "EnumByte"})
+        report = cct.check_identities(ids, r, c, siblings_for(c))
+        self.assertEqual((report.by_verdict["match"], report.by_verdict["untestable"]), (2, 1))
+
+    def test_the_chains_are_re_derived_and_a_disagreement_is_counted(self):
+        """With the chains known, the sibling tier -- which never sees them --
+        must find the same parent. Then plant a pair that makes a chain
+        member imply ANOTHER established parent: that must be counted."""
+        c = checker()
+        ids = {("/S.T:Fn", n, h, ck): identity("/S.T:Fn", n, h, ck) for n, h, ck in (
+            ("Translation", 1, 2235276067), ("Scale3D", 2, 2983776962))}
+        r = resolver(entries={("/S.T:Fn", n): "VectorDouble" for n in ("Translation", "Scale3D")})
+        report = cct.check_identities(ids, r, c, siblings_for(c))
+        self.assertEqual(report.chain_rederived["re-derived"], 1)
+        # the chain decided them first, and keeps them
+        self.assertEqual({row["seed"] for row in report.rows}, {"Transform:FTransform"})
+
+        # `bFlag` is a bool under the Transform chain; read as uint8 it implies
+        # parent `other`, and two unrelated floats are made to agree on it.
+        seed = cct.chain_checksum(TRANSFORM)
+        flag = cct.compatible_checksum("bFlag", "bool", 0, seed)
+        other = cct.implied_parent(flag, "bFlag", "uint8")
+        ids = {("/S.U", n, h, ck): identity("/S.U", n, h, ck) for n, h, ck in (
+            ("bFlag", 1, flag),
+            ("Health", 2, cct.compatible_checksum("Health", "float", 0, other)),
+            ("SourceID", 3, cct.compatible_checksum("SourceID", "float", 0, other)))}
+        r = resolver(entries={("/S.U", "bFlag"): "Bool", ("/S.U", "Health"): "Float",
+                              ("/S.U", "SourceID"): "Float"})
+        report = cct.check_identities(ids, r, c, siblings_for(c))
+        self.assertEqual(report.chain_rederived["DISAGREE: a sibling seed other than the chain's"], 1)
+
+    def test_one_property_declared_twice_is_one_witness(self):
+        """`bFlag` as a bool in one build and a uint8 bitfield in another,
+        under one parent: both declarations imply it, but they are one
+        property, not two members, so they establish nothing."""
+        members = [("bFlag", self.member("bFlag", "bool"), ("bool", "uint8")),
+                   ("bFlag", self.member("bFlag", "uint8"), ("bool", "uint8"))]
+        found = siblings_for().establish(members)
+        self.assertEqual((found.established, found.refused), ({}, {}))
+
+        # Beside a second member, its two declarations still never pair with
+        # each other: here every two-name pair is refused, so nothing is left.
+        class RefuseAcrossNames(cct.SiblingSeeds):
+            def ambiguous(self, first, second):
+                return "refused for the test" if first[0] != second[0] else None
+
+        members.append(("Health", self.member("Health", "float"), ("float",)))
+        found = RefuseAcrossNames(()).establish(members)
+        self.assertEqual(found.established, {})
+        self.assertEqual(list(found.refused), [self.PARENT])
+
+    def test_a_disagreement_between_the_tiers_fails_the_run(self):
+        report = cct.Report(identities=1)
+        self.assertEqual(cct.exit_status(report, [])[0], 0)
+        report.chain_rederived[cct.DISAGREE] = 1
+        code, message = cct.exit_status(report, [])
+        self.assertEqual(code, 1)
+        self.assertIn("disagree", message)
+        self.assertEqual(cct.exit_status(cct.Report(), [])[0], 1)
+
+    def test_the_ambiguity_universe_holds_every_spelling_the_tool_can_claim(self):
+        """An agreement is weighed against every spelling the mismatch search
+        itself could report; a smaller universe would let an agreement stand
+        that one of the tool's own alternatives explains."""
+        objects = cct.object_spellings(("Actor", "Foo_C"))
+        universe = set(cct.spelling_universe(objects))
+        claimable = set(cct.ALTERNATIVE_TYPES) | set(objects)
+        for spec in cct.CPP_TYPES.values():
+            claimable |= set(spec.expected)
+        claimable |= set(cct.QUANTIZE_SPELLINGS.values()) | set(cct.SERIALIZED_INT_SPELLINGS.values())
+        self.assertEqual(claimable - universe, set())
+        s = cct.SiblingSeeds(cct.spelling_universe(objects))
+        self.assertIn("afoo_c*", s.universe)
+
+    def test_deviation_names_where_and_how(self):
+        self.assertEqual(cct.deviation(3, "uint64", "uint32"), (7, (ord("6") ^ ord("3"), ord("4") ^ ord("2"))))
+        self.assertEqual(cct.deviation(4, "int64", "int32"), (7, (ord("6") ^ ord("3"), ord("4") ^ ord("2"))))
+        self.assertIsNone(cct.deviation(3, "int32", "uint32"))
+        self.assertIsNone(cct.deviation(3, "FVector", "fvector"))
+
+
 def write_export(root: Path, name: str, groups, build="++Ares-Core+release-13.06"):
     d = root / name
     d.mkdir()

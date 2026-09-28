@@ -6,8 +6,8 @@ the replay declares for every field. Unreal computes it from the property's name
 and its C++ type, so recomputing it from the type vrfkit decodes either
 reproduces the declared value or it does not.
 
-Every figure below was measured on 2026-09-28 at `9f92756` (the tables this
-branch starts from) unless it says otherwise.
+Every figure below was measured on 2026-09-28 against the tables at `9f92756`
+unless it says otherwise.
 
 ## The formula
 
@@ -42,9 +42,9 @@ tool re-implements it; it does not import that code. Two cross-checks:
   bytes the way `FCrc::StrCrc32` does. It and the tool agree on 2,000 random
   inputs and on 29 checksums declared by real replays (top-level fields,
   `FTransform` members, struct members two to four levels deep, an array and
-  its element, a bitfield bool). Dropping the lower-casing, the UTF-32 width,
-  the index or the parent breaks them; no alternative type string reproduces
-  any of them.
+  its element, a bitfield bool). Each step -- the lower-casing, the UTF-32
+  width, the index, the parent -- breaks every vector it touches when dropped,
+  and no alternative type string reproduces any of them.
 
 **Across builds.** The formula was measured on 13.06 declarations. On the
 1,018-replay corpus it reproduces declared checksums on every one of the 24
@@ -60,9 +60,11 @@ property keeps its checksum across all of them -- `249` in the effect RPCs is
 2. Resolves the `FieldType` vrfkit gives it by parsing `table.rs`,
    `scoped_types.rs`, `checksum_table.rs` and the resolution constants in
    `overlay.rs`, in `overlay::resolve_entry`'s order.
-3. Recomputes the checksum from the C++ spellings that `FieldType` can stand
-   for (`CPP_TYPES`), under every known parent seed: 0, and the struct chains
-   in `PARENT_CHAINS`.
+3. **Tier 1.** Recomputes the checksum from the C++ spellings that `FieldType`
+   can stand for (`CPP_TYPES`), under every known parent seed: 0, and the
+   struct chains in `PARENT_CHAINS`.
+4. **Tier 2.** Recovers further parent seeds from each group's own members
+   (below) and re-tests what tier 1 left untestable under them.
 
 | verdict | meaning |
 |---|---|
@@ -72,7 +74,7 @@ property keeps its checksum across all of them -- `249` in the effect RPCs is
 
 Every recomputation is a 1-in-2^32 chance of an accidental reproduction, so the
 tool counts them and prints `trials / 2^32`, the number of chance reproductions
-to expect. On the corpus that is 0.0010.
+to expect. On the corpus that is 0.0032 (13,685,166 recomputations).
 
 It checks `checksum_table.rs` too. The table maps a checksum to a type with no
 name, so each entry is recomputed under every name that declares its checksum.
@@ -95,7 +97,7 @@ The resolution is a Python port, so it was checked against the Rust:
   ClassNetCache function rows carries a checksum or a value, which is why the
   tool counts those groups' fields as function slots rather than properties.
 
-## Parent chains
+## Parent chains (tier 1)
 
 A member of a flattened struct cannot be recomputed without its parent's
 checksum. `PARENT_CHAINS` names the struct properties above the members vrfkit
@@ -119,6 +121,48 @@ and the tool prints how many typed identities each one decided.
 `Rotation`) the same way: UE 5.3 `UnrealNames.inl`, indices read back from the
 13.06 executable.
 
+## Sibling seeds (tier 2)
+
+CRC-32 runs backwards: given the hashed suffix, the state it started from is
+unique. So each member's (name, checksum) and a type for it imply exactly one
+parent checksum (`implied_parent`). Members of one struct, each typed right,
+imply the same parent; two differently named members implying the same one by
+accident is a 1-in-2^32 event. That recovers a parent without knowing its name
+or type, from the replay alone.
+
+**The systematic false agreement.** A wrong type of the right length shifts the
+implied parent by an amount fixed by where in the hashed string it is wrong and
+how -- not by the name, not by the true parent. Two members wrong in the same
+place and the same way still agree, at a wrong parent. The corpus has the
+textbook case: `BombPlayerState`'s four GUID words `A`, `B`, `C`, `D` imply one
+common parent under `int32`, `uint8`, `float` and `FName` alike -- every
+five-character spelling -- because the names are all one character long. So
+`SiblingSeeds` lets an agreement establish a parent only through a pair of
+members that is
+
+- **not** two names of one length given one spelling (refused whatever the
+  truth is, since any truth of that length would agree the same way), and
+- **not** wrong in the same place and the same way under any two spellings
+  the tool knows -- every alternative, every `FieldType` spelling and every
+  object pointer candidate (`deviation` keys may not intersect). This catches
+  the second shape, `uint32` read as `uint64` beside `int32` read as `int64`
+  with names one character apart.
+
+A spelling of a different length cannot agree systematically at all: its shift
+depends on the name's own CRC. Object references never establish a parent --
+thousands of candidate spellings each would make an agreement a lottery -- but
+are tested at the parents others establish. The residual blind spot is two
+truths outside the tool's spelling universe that deviate identically from
+their hypotheses at aligned offsets.
+
+Tier 2 never sees `PARENT_CHAINS`, so it is also a cross-check of them. On the
+corpus it re-derives 17 of the 247 chain seeds in use (one per group); 229 have
+fewer than two members that agree -- `AttachmentReplication`'s members are
+mostly `AttachParent` alone, an object reference -- and 1 group has fewer than
+two hashable members. **0 disagree**: no member a chain decided implies a
+different parent that siblings established. A disagreement fails the run,
+because one of the two tiers would then be wrong about that member.
+
 ## Corpus result (1,018 replays, 24 builds)
 
 `python tools/check_checksum_types.py --corpus <declaration corpus>`, where each
@@ -130,17 +174,19 @@ child holds one export's `manifest.json` and checkpoint declaration tables:
 | ClassNetCache function slots | 1,084 |
 | not typed by vrfkit (no resolution / Raw / Skip) | 6,631 / 172 / 4 |
 | **typed (group, name, checksum, FieldType)** | **4,242** |
-| match | 1,940 |
-| mismatch | 17 |
-| untestable | 2,285 |
+| match (top level 1,658, parent chain 282, sibling seed 388) | 2,328 |
+| mismatch (all under a parent chain) | 17 |
+| untestable | 1,897 |
 
-Matches by rule: 369 exact spellings, 106 `Bool` as `uint8`, 1,465 object
+Matches by rule: 742 exact spellings, 106 `Bool` as `uint8`, 1,480 object
 references with their class. Untestable by reason: 1,597 enum-capable types,
-437 with no known parent seed, 251 object references whose class is not among
-the candidates. `checksum_table.rs`: 458 checksums -- 117 match, 6 mismatch,
-335 untestable, 0 without a carrier in the corpus.
+236 object references whose class is not among the candidates (or nested
+without a seed), 64 with no known parent seed. Tier 2 examined 792 groups:
+124 candidate agreements, 124 established, 0 refused, from 47,604 implied-parent
+comparisons (0.0000 chance agreements expected). `checksum_table.rs`: 458
+checksums -- 344 match, 6 mismatch, 108 untestable, 0 without a carrier.
 
-**The mismatches** -- every one on all the builds that declare it:
+**The mismatches** -- each on every build that declares it:
 
 | identity | vrfkit | the checksum says |
 |---|---|---|
@@ -165,7 +211,12 @@ allowlist that let it pass would be a check that cannot fail.
 - **Object classes.** An object reference hashes as `A<Class>*` / `U<Class>*`.
   The candidates are the classes the input declares groups for plus
   `ENGINE_CLASSES`; a reference to anything else (a data asset) is untestable.
-- **Nested members without a chain.** Their parent seed is unknown.
+- **Nested members without a seed.** No chain, and fewer than two siblings
+  that agree unambiguously: the parent is unknown. `A`/`B`/`C`/`D` above are
+  this case -- under vrfkit's `UInt32` they imply four different parents,
+  which rules `uint32` out for the four together, but the five-character
+  truth they share cannot be told apart, so they stay untestable rather
+  than becoming a mismatch with no named alternative.
 - **`Bool` as `uint8`.** A bitfield bool hashes as its storage type, the same
   string as a byte; only the wire width separates them.
 - **Format, scale and meaning.** A match says the declaration hashed this name

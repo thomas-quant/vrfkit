@@ -37,17 +37,26 @@ in this repo contributed. This tool turns it into a check of the overlay:
     `resolve_field_type_with_checksum`, and on 7 exports (11.06-13.06, main
     and checkpoint) the identities this calls typed are exactly the ones
     whose rows carry a `value_*` (see docs/CHECKSUM_TYPES.md).
- 3. Map the `FieldType` to the C++ spellings it can stand for (`CPP_TYPES`)
-    and recompute the checksum under every KNOWN parent seed: 0, and the
-    struct chains in `PARENT_CHAINS` -- short name-level facts, each with its
-    provenance.
+ 3. Tier 1: map the `FieldType` to the C++ spellings it can stand for
+    (`CPP_TYPES`) and recompute the checksum under every KNOWN parent seed:
+    0, and the struct chains in `PARENT_CHAINS` -- short name-level facts,
+    each with its provenance.
+ 4. Tier 2: recover more parent seeds from the replay itself. CRC-32 runs
+    backwards, so each member's (name, checksum) and vrfkit's type for it
+    imply exactly one parent checksum (`implied_parent`); two differently
+    named members of one group implying the same parent are siblings typed
+    right, bar a 1-in-2^32 chance -- and bar the systematic false agreement
+    `SiblingSeeds` refuses. What tier 1 left untestable in that group is
+    then re-tested under the recovered seeds. Tier 2 never sees
+    `PARENT_CHAINS`, so it also re-derives their seeds independently, and a
+    chain seed it contradicts fails the run.
 
 Each typed identity lands in exactly one of three buckets:
 
     match       vrfkit's type reproduces the declared checksum
     mismatch    vrfkit's type does not, but another C++ spelling in
                 `ALTERNATIVE_TYPES` (or an object pointer) does, under the
-                same known seeds -- the checksum names a different type
+                same seeds -- the checksum names a different type
     untestable  nothing reproduces it, so the checksum says nothing here
 
 `untestable` is never a match. The reasons are counted separately:
@@ -62,7 +71,11 @@ Each typed identity lands in exactly one of three buckets:
     itself declares groups for plus `ENGINE_CLASSES`, so a reference to an
     undeclared class (a data asset, say) cannot be spelled.
   * members of a flattened struct or array whose parent chain is not in
-    `PARENT_CHAINS`: the parent seed is unknown, so no spelling reproduces.
+    `PARENT_CHAINS` and whose siblings do not give it back (fewer than two
+    testable members, or only an ambiguous agreement): the parent seed is
+    unknown, so no spelling reproduces. Object references never establish a
+    parent themselves -- thousands of candidate spellings each would turn
+    the agreement into a lottery -- but are tested at parents others do.
   * a bare FName index (`"108"`) not in `HARDCODED_FNAMES`, a non-ASCII name,
     or a declared checksum of 0.
 
@@ -82,10 +95,15 @@ It also checks every `checksum_table.rs` entry the same way: the table has no
 names, so each entry is recomputed under every name that declares its checksum
 in the input. Entries no input declaration carries are counted, not failed.
 
-Counters are printed with their zeros. Exit status: 0 when nothing
-mismatches, 1 when anything does or nothing was checked, 2 when an input or
-a generated table cannot be read completely (an entry that does not parse,
-or a `FieldType` variant `CPP_TYPES` does not classify).
+Counters are printed with their zeros, and so is the price of every
+recomputation: each is a 1-in-2^32 chance of an accidental reproduction, and
+each comparison of two implied parents a 1-in-2^32 chance of an accidental
+agreement, so the expected number of each is printed beside the verdicts.
+
+Exit status: 0 when nothing mismatches, 1 when anything does, when nothing
+was checked, or when a parent chain and the sibling tier disagree; 2 when an
+input or a generated table cannot be read completely (an entry that does not
+parse, or a `FieldType` variant `CPP_TYPES` does not classify).
 
 Usage:
     python tools/check_checksum_types.py --export out/probe [--export ...]
@@ -262,6 +280,7 @@ class FieldTypeSpec:
 
 NOT_REPRODUCED = "not reproduced under any known seed (nested member, static array element or spelling outside the candidates)"
 ENUM_CAPABLE = "enum-capable type not reproduced as uint8 (C++ enum spellings do not reproduce)"
+OBJECT_UNREPRODUCED = "object class not among the candidates, or a nested member"
 
 #: One entry per `FieldType` variant in `decode.rs`. A variant that is not
 #: here stops the run (exit 2): it would otherwise be silently untestable.
@@ -281,7 +300,7 @@ CPP_TYPES = {
     "FString": FieldTypeSpec(("FString",), NOT_REPRODUCED),
     "FText": FieldTypeSpec(("FText",), NOT_REPRODUCED),
     "FName": FieldTypeSpec(("FName",), NOT_REPRODUCED),
-    "ObjectNetGuid": FieldTypeSpec(("UClass*",), "object class not among the candidates, or a nested member", True),
+    "ObjectNetGuid": FieldTypeSpec(("UClass*",), OBJECT_UNREPRODUCED, True),
     "Guid": FieldTypeSpec(("FGuid",), NOT_REPRODUCED),
     "GameplayTag": FieldTypeSpec(("FGameplayTag",), NOT_REPRODUCED),
     "VectorFloat": FieldTypeSpec(("FVector3f",), NOT_REPRODUCED),
@@ -325,6 +344,19 @@ ALTERNATIVE_TYPES = (
 MAX_STATIC_INDEX = 15
 
 VERDICTS = ("match", "mismatch", "untestable")
+
+
+def spelling_universe(objects=()) -> tuple:
+    """Every C++ spelling this tool knows: the alternatives, each FieldType's
+    own, and the object pointers -- what `SiblingSeeds` weighs an agreement
+    against."""
+    spellings = list(ALTERNATIVE_TYPES)
+    for spec in CPP_TYPES.values():
+        spellings.extend(spec.expected)
+    spellings.extend(QUANTIZE_SPELLINGS.values())
+    spellings.extend(SERIALIZED_INT_SPELLINGS.values())
+    spellings.extend(objects)
+    return tuple(dict.fromkeys(spellings))
 
 
 def parse_field_type(text: str) -> tuple[str, dict]:
@@ -704,8 +736,9 @@ class Checker:
             tails = self._encoded[key] = [(i, body + struct.pack("<I", i)) for i in indices]
         return tails
 
-    def _find(self, name, checksum, spellings, indices, states):
-        """Every `Hit` among `spellings` x `states` x `indices`."""
+    def _find(self, checksum, spellings, indices, states):
+        """Every `Hit` among `spellings` x `states` x `indices`, where each
+        state is the CRC after the name under one labelled seed."""
         hits = []
         for label, state in states:
             for spelling in spellings:
@@ -716,45 +749,251 @@ class Checker:
         return hits
 
     def classify(self, field_type: str, name: str, checksum: int) -> Verdict:
+        """The verdict under the known seeds: 0 and `PARENT_CHAINS`."""
         key = (field_type, name, checksum)
         verdict = self._memo.get(key)
         if verdict is None:
-            verdict = self._memo[key] = self._classify(field_type, name, checksum)
+            spec = spec_for(field_type)
+            hashed, early = hashable_name(name, checksum)
+            if early is not None:
+                verdict = early
+            else:
+                states = self._states(hashed)
+                # An object pointer as the alternative at the top level only:
+                # the candidates run to thousands, and the chain seeds would
+                # multiply them.
+                verdict = self._against(spec, checksum, states, states[:1])
+            self._memo[key] = verdict
         return verdict
 
-    def _classify(self, field_type, name, checksum):
+    def reclassify(self, field_type: str, name: str, checksum: int, seeds) -> Verdict:
+        """The same test under other `(label, seed)` pairs -- the sibling
+        seeds one group established (see `SiblingSeeds`)."""
         spec = spec_for(field_type)
-        if is_unresolved_fname_index(name):
-            if name not in HARDCODED_FNAMES:
-                return Verdict("untestable", f"bare FName index {name} not in HARDCODED_FNAMES")
-            name = HARDCODED_FNAMES[name]
-        if not name.isascii():
-            return Verdict("untestable", "non-ASCII name")
-        if checksum == 0:
-            return Verdict("untestable", "declared checksum is 0")
-        states = self._states(name)
-        # vrfkit's own spellings: every seed, static indices 0..MAX; object
-        # pointers at index 0 only, since there are thousands of them.
-        hits = self._find(name, checksum, spec.expected, tuple(range(MAX_STATIC_INDEX + 1)), states)
+        hashed, early = hashable_name(name, checksum)
+        if early is not None:
+            return early
+        encoded = hashed.lower().encode("utf-32-le")
+        states = [(label, zlib.crc32(encoded, seed)) for label, seed in seeds]
+        return self._against(spec, checksum, states, states)
+
+    def _against(self, spec, checksum, states, object_alternative_states):
+        # vrfkit's own spellings: static indices 0..MAX; object pointers at
+        # index 0 only, since there are thousands of them.
+        hits = self._find(checksum, spec.expected, tuple(range(MAX_STATIC_INDEX + 1)), states)
         if spec.objects:
-            hits += self._find(name, checksum, self.objects, (0,), states)
+            hits += self._find(checksum, self.objects, (0,), states)
         if hits:
             return Verdict("match", hits[0].cpp_type, hits[0])
         if not spec.alternatives:
             return Verdict("untestable", spec.unreproduced)
         alternatives = tuple(t for t in ALTERNATIVE_TYPES if t not in spec.expected)
-        hits = self._find(name, checksum, alternatives, (0,), states)
+        hits = self._find(checksum, alternatives, (0,), states)
         if not spec.objects:
-            # An object pointer as the alternative, at the top level only: the
-            # candidates run to thousands and the chain seeds would multiply them.
-            hits += self._find(name, checksum, self.objects, (0,), states[:1])
+            hits += self._find(checksum, self.objects, (0,), object_alternative_states)
         if hits:
             return Verdict("mismatch", hits[0].cpp_type, hits[0])
         return Verdict("untestable", spec.unreproduced)
 
 
+def hashable_name(name: str, checksum: int):
+    """`(name the checksum hashed, None)`, or `(None, untestable Verdict)`."""
+    if is_unresolved_fname_index(name):
+        if name not in HARDCODED_FNAMES:
+            return None, Verdict("untestable", f"bare FName index {name} not in HARDCODED_FNAMES")
+        name = HARDCODED_FNAMES[name]
+    if not name.isascii():
+        return None, Verdict("untestable", "non-ASCII name")
+    if checksum == 0:
+        return None, Verdict("untestable", "declared checksum is 0")
+    return name, None
+
+
+# --------------------------------------------------------------------------
+# Sibling seeds: a parent's checksum recovered from its members
+
+
+def _crc_table():
+    table = []
+    for byte in range(256):
+        crc = byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xEDB88320 if crc & 1 else crc >> 1
+        table.append(crc)
+    return tuple(table)
+
+
+_CRC_TABLE = _crc_table()
+#: The reflected CRC-32 table's top bytes are a permutation of 0..255, which
+#: is what lets a CRC run backwards one byte at a time.
+_BY_TOP_BYTE = {entry >> 24: index for index, entry in enumerate(_CRC_TABLE)}
+
+
+def implied_parent(checksum: int, name: str, cpp_type: str, static_index: int = 0) -> int:
+    """The one `parent` for which `compatible_checksum(name, cpp_type,
+    static_index, parent) == checksum`.
+
+    CRC-32 is invertible over a known suffix: run backwards through the
+    hashed bytes and the state that remains is the seed. So each hypothesis
+    `cpp_type` about a nested member implies exactly one parent checksum --
+    and members of one struct, each hypothesised correctly, imply the same.
+    """
+    data = (name.lower().encode("utf-32-le") + cpp_type.lower().encode("utf-32-le")
+            + struct.pack("<I", static_index))
+    state = checksum ^ 0xFFFFFFFF
+    for byte in reversed(data):
+        index = _BY_TOP_BYTE[state >> 24]
+        state = (((state ^ _CRC_TABLE[index]) << 8) & 0xFFFFFFFF) | (index ^ byte)
+    return state ^ 0xFFFFFFFF
+
+
+def deviation(name_length: int, hypothesis: str, truth: str):
+    """Where and how `truth` differs from `hypothesis` in the hashed string:
+    `(character offset of the first difference, the XOR of the differing
+    run)`, or None when the two differ in length or not at all.
+
+    A wrong hypothesis of the truth's length shifts the implied parent by an
+    amount that depends on exactly this and nothing else -- not on the name,
+    not on the true parent. See `SiblingSeeds`.
+    """
+    if len(hypothesis) != len(truth):
+        return None
+    xor = [ord(a) ^ ord(b) for a, b in zip(hypothesis.lower(), truth.lower())]
+    nonzero = [i for i, x in enumerate(xor) if x]
+    if not nonzero:
+        return None
+    return name_length + nonzero[0], tuple(xor[nonzero[0]:nonzero[-1] + 1])
+
+
+class SiblingSeeds:
+    """Parent seeds recovered from a group's own declarations.
+
+    Members of one flattened struct continue from the same parent checksum.
+    `implied_parent` turns each member's (name, checksum) and vrfkit's type
+    for it into the parent that type would require; two members with
+    different names implying the SAME parent is a 1-in-2^32 coincidence
+    unless both types are right -- with one exception this class exists to
+    refuse.
+
+    **The systematic false agreement.** A hypothesis of the truth's length
+    that is wrong shifts the implied parent by an amount fixed by WHERE in
+    the hashed string it is wrong and HOW (`deviation`). Two members wrong in
+    the same place and the same way shift by the same amount and still
+    agree -- at a wrong parent. It happens whenever:
+
+      A. both names have the same length and both are given the same wrong
+         spelling of the same wrong truth. The corpus has it: the four 1-char
+         GUID words `A`/`B`/`C`/`D` of `BombPlayerState` imply one parent
+         under `int32`, `uint8`, `float` and `FName` alike, or
+      B. the name lengths differ by exactly as much as the misplaced part
+         of the spellings (`uint32` read as `uint64` beside `int32` read as
+         `int64`, names one character apart).
+
+    So an agreement establishes a parent only through a pair of members that
+    is neither A (checked directly, whatever the truth) nor B for any two
+    spellings in the tool's universe -- every alternative and object pointer
+    it knows (`deviation` keys must not intersect). An alternative of a
+    different length than the hypothesis cannot agree systematically at all:
+    its shift depends on the name's own CRC.
+
+    What remains is chance: every pair of implied parents compared is a
+    1-in-2^32 lottery ticket, counted in `comparisons`. And one residual
+    blind spot: two truths OUTSIDE the universe that deviate identically
+    from their hypotheses, at offsets B aligns, would be taken for right.
+    """
+
+    def __init__(self, universe):
+        self.universe = tuple(dict.fromkeys(t.lower() for t in universe))
+        self.stats = collections.Counter()
+        self.comparisons = 0
+        self._keys: dict = {}
+
+    def _deviations(self, name_length, hypothesis):
+        key = (name_length, hypothesis.lower())
+        keys = self._keys.get(key)
+        if keys is None:
+            keys = self._keys[key] = {d for t in self.universe
+                                      if (d := deviation(name_length, hypothesis, t)) is not None}
+        return keys
+
+    def ambiguous(self, first, second) -> str | None:
+        """Why the agreement of two `(name, spelling)` members proves nothing,
+        or None when it establishes their parent."""
+        (name_a, type_a), (name_b, type_b) = first, second
+        if len(name_a) == len(name_b) and type_a.lower() == type_b.lower():
+            return "same name length, same spelling"
+        if self._deviations(len(name_a), type_a) & self._deviations(len(name_b), type_b):
+            return "an alternative pair deviates identically"
+        return None
+
+    def establish(self, members) -> "Agreements":
+        """The parents one group's members agree on.
+
+        `members` are `(hashed name, checksum, spellings)`; each spelling is
+        one hypothesis. Seed 0 is the top level, known already, and skipped.
+        """
+        implied = collections.defaultdict(list)
+        carriers = collections.defaultdict(set)
+        count = 0
+        for name, checksum, spellings in members:
+            for spelling in spellings:
+                seed = implied_parent(checksum, name, spelling)
+                implied[seed].append((name, spelling))
+                carriers[seed].add((name, checksum))
+                count += 1
+        self.comparisons += count * (count - 1) // 2
+        result = Agreements({}, {}, {})
+        for seed, who in implied.items():
+            result.implied_by[seed] = carriers[seed]
+            if seed == 0 or len({name for name, _ in who}) < 2:
+                continue
+            self.stats["candidate agreements"] += 1
+            reasons = []
+            pair = None
+            for i, first in enumerate(who):
+                for second in who[i + 1:]:
+                    if first[0] == second[0]:
+                        continue
+                    reason = self.ambiguous(first, second)
+                    if reason is None:
+                        pair = first + second
+                        break
+                    reasons.append(reason)
+                if pair is not None:
+                    break
+            if pair is not None:
+                result.established[seed] = pair
+                self.stats["established"] += 1
+            else:
+                result.refused[seed] = sorted(set(reasons))
+                self.stats["refused"] += 1
+                for reason in set(reasons):
+                    self.stats[f"refused: {reason}"] += 1
+        return result
+
+
+class Agreements(NamedTuple):
+    """What `SiblingSeeds.establish` found in one group."""
+    #: parent seed -> the (name, spelling, name, spelling) pair that proves it
+    established: dict
+    #: parent seed -> why every pair implying it was refused
+    refused: dict
+    #: parent seed -> every (hashed name, checksum) implying it
+    implied_by: dict
+
+
 # --------------------------------------------------------------------------
 # The run
+
+
+SEED_SOURCES = ("top level", "parent chain", "sibling seed")
+CHAIN_CROSS_CHECK = (
+    "re-derived",
+    "not re-derived: fewer than two hashable members",
+    "not re-derived: fewer than two members agree",
+    "not re-derived: agreement refused as ambiguous",
+    "DISAGREE: a sibling seed other than the chain's",  # == DISAGREE
+)
 
 
 @dataclass
@@ -769,7 +1008,14 @@ class Report:
     not_checked: collections.Counter = field(default_factory=collections.Counter)
     by_build: dict = field(default_factory=lambda: collections.defaultdict(collections.Counter))
     by_source: collections.Counter = field(default_factory=collections.Counter)
+    by_seed_source: collections.Counter = field(default_factory=collections.Counter)
     chain_hits: collections.Counter = field(default_factory=collections.Counter)
+    #: Groups the sibling tier examined, and each group's established seeds.
+    sibling_groups: int = 0
+    sibling_seeds: dict = field(default_factory=dict)
+    #: Parent-chain seeds in use in a group, against the seeds the sibling
+    #: tier recovered for the same group without ever seeing the chains.
+    chain_rederived: collections.Counter = field(default_factory=collections.Counter)
     mismatches: list = field(default_factory=list)
     rows: list = field(default_factory=list)
 
@@ -785,8 +1031,93 @@ def match_rule(field_type: str, hit: Hit) -> str:
     return "exact spelling"
 
 
-def check_identities(ids: dict, resolver: Resolver, checker: Checker) -> Report:
-    """Resolve and classify every declared identity."""
+def seed_source(label):
+    """`top level`, `parent chain` or `sibling seed` for a seed label."""
+    if label is None:
+        return None
+    if label == "top level":
+        return "top level"
+    return "sibling seed" if label.startswith("sibling seed") else "parent chain"
+
+
+def _row(ident, field_type, source, verdict):
+    return {"group": ident.group, "name": ident.name, "checksum": ident.checksum,
+            "handle": ident.handle, "field_type": field_type, "source": source,
+            "verdict": verdict.verdict, "detail": verdict.detail,
+            "seed": verdict.hit.seed if verdict.hit else None,
+            "static_index": verdict.hit.static_index if verdict.hit else None,
+            "builds": set(ident.builds)}
+
+
+def sibling_members(rows):
+    """`(hashed name, checksum, spellings)` a group offers `SiblingSeeds`:
+    vrfkit's own non-object spellings of every typed member it can hash."""
+    members = collections.defaultdict(set)
+    for row in rows:
+        hashed, early = hashable_name(row["name"], row["checksum"])
+        spellings = spec_for(row["field_type"]).expected
+        if early is None and spellings:
+            members[(hashed, row["checksum"])].update(spellings)
+    return [(name, checksum, tuple(sorted(spellings)))
+            for (name, checksum), spellings in sorted(members.items())]
+
+
+def apply_sibling_seeds(report: Report, checker: Checker, siblings) -> None:
+    """Tier 2: recover parent seeds from each group's own members, re-test
+    what the known seeds left untestable, and set the result beside the
+    parent chains.
+
+    It runs on every typed member of a group, those a parent chain already
+    decided included, so the seeds it recovers owe nothing to
+    `PARENT_CHAINS` -- which is what makes re-deriving a chain's seed
+    evidence for the chain, and a chain seed it cannot find a question.
+    """
+    by_group = collections.defaultdict(list)
+    for row in report.rows:
+        by_group[row["group"]].append(row)
+    chain_value = dict(checker.seeds.named)
+    for group, rows in sorted(by_group.items()):
+        members = sibling_members(rows)
+        facts = collections.defaultdict(set)  # chain seed -> (name, checksum) it decided
+        for row in rows:
+            if seed_source(row["seed"]) == "parent chain":
+                hashed = HARDCODED_FNAMES.get(row["name"], row["name"])
+                facts[chain_value[row["seed"]]].add((hashed, row["checksum"]))
+        if len({name for name, _, _ in members}) < 2:
+            report.chain_rederived["not re-derived: fewer than two hashable members"] += len(facts)
+            continue
+        report.sibling_groups += 1
+        found = siblings.establish(members)
+        established = found.established
+        for seed, names in facts.items():
+            # A sibling seed that one of the chain's own members implies, other
+            # than the chain's: the two tiers disagree about that member.
+            if any(other != seed and found.implied_by[other] & names
+                   for other in established):
+                report.chain_rederived[DISAGREE] += 1
+            elif seed in established:
+                report.chain_rederived["re-derived"] += 1
+            elif seed in found.refused:
+                report.chain_rederived["not re-derived: agreement refused as ambiguous"] += 1
+            else:
+                report.chain_rederived["not re-derived: fewer than two members agree"] += 1
+        if not established:
+            continue
+        seeds = [(f"sibling seed {seed} ({a}:{ta} + {b}:{tb})", seed)
+                 for seed, (a, ta, b, tb) in sorted(established.items())]
+        report.sibling_seeds[group] = seeds
+        for row in rows:
+            if row["verdict"] != "untestable":
+                continue
+            verdict = checker.reclassify(row["field_type"], row["name"], row["checksum"], seeds)
+            if verdict.verdict != "untestable":
+                row.update(verdict=verdict.verdict, detail=verdict.detail, seed=verdict.hit.seed,
+                           static_index=verdict.hit.static_index)
+
+
+def check_identities(ids: dict, resolver: Resolver, checker: Checker, siblings=None) -> Report:
+    """Resolve and classify every declared identity: tier 1 under the known
+    seeds, then -- given `siblings` -- tier 2 under each group's own."""
     report = Report()
     seen: dict = {}
     for key in sorted(ids):
@@ -810,15 +1141,11 @@ def check_identities(ids: dict, resolver: Resolver, checker: Checker) -> Report:
         if identity in seen:
             seen[identity]["builds"] |= ident.builds
             continue
-        verdict = checker.classify(field_type, ident.name, ident.checksum)
-        row = {"group": ident.group, "name": ident.name, "checksum": ident.checksum,
-               "handle": ident.handle, "field_type": field_type, "source": source,
-               "verdict": verdict.verdict, "detail": verdict.detail,
-               "seed": verdict.hit.seed if verdict.hit else None,
-               "static_index": verdict.hit.static_index if verdict.hit else None,
-               "builds": set(ident.builds)}
-        seen[identity] = row
+        row = seen[identity] = _row(ident, field_type, source,
+                                    checker.classify(field_type, ident.name, ident.checksum))
         report.rows.append(row)
+    if siblings is not None:
+        apply_sibling_seeds(report, checker, siblings)
     types_of = collections.defaultdict(set)
     for row in report.rows:
         types_of[(row["group"], row["name"], row["checksum"])].add(row["field_type"])
@@ -831,39 +1158,49 @@ def check_identities(ids: dict, resolver: Resolver, checker: Checker) -> Report:
             report.by_build[build][row["verdict"]] += 1
         if row["verdict"] == "untestable":
             report.by_reason[row["detail"]] += 1
-        elif row["verdict"] == "match":
+        else:
+            report.by_seed_source[(seed_source(row["seed"]), row["verdict"])] += 1
+        if row["verdict"] == "match":
             hit = Hit(row["detail"], row["seed"], row["static_index"])
             report.match_rules[match_rule(row["field_type"], hit)] += 1
-        if row["seed"] is not None and row["seed"] != "top level":
+        if seed_source(row["seed"]) == "parent chain":
             report.chain_hits[row["seed"]] += 1
         if row["verdict"] == "mismatch":
             report.mismatches.append(row)
     return report
 
 
-def check_checksum_table(ids: dict, resolver: Resolver, checker: Checker):
+def check_checksum_table(ids: dict, resolver: Resolver, checker: Checker, sibling_seeds=None):
     """`(counts, mismatch rows)` for every `checksum_table.rs` entry.
 
     The table maps a checksum to a type with no name, so each entry is
-    recomputed under every name that declares its checksum in the input.
-    An entry is a mismatch if any carrier reproduces a different spelling,
-    a match if any carrier reproduces the entry's own, else untestable;
-    entries nothing in the input declares are counted apart.
+    recomputed under every name that declares its checksum in the input --
+    under the known seeds, then under the sibling seeds of the groups that
+    carry it. An entry is a mismatch if any carrier reproduces a different
+    spelling, a match if any carrier reproduces the entry's own, else
+    untestable; entries nothing in the input declares are counted apart.
     """
-    carriers = collections.defaultdict(set)
+    carriers = collections.defaultdict(lambda: collections.defaultdict(set))
     for ident in ids.values():
         if not ident.group.endswith(CLASS_NET_CACHE):
-            carriers[ident.checksum].add(ident.name)
+            carriers[ident.checksum][ident.name].add(ident.group)
+    sibling_seeds = sibling_seeds or {}
     counts = collections.Counter()
     bad = []
     for checksum, field_type in sorted(resolver.checksums.items()):
-        names = sorted(carriers.get(checksum, ()))
+        names = carriers.get(checksum, {})
         if not names:
             counts["no carrier in the input"] += 1
             continue
         if len(names) > 1:
             counts["of which carried by more than one name"] += 1
-        verdicts = [(n, checker.classify(field_type, n, checksum)) for n in names]
+        verdicts = []
+        for name, groups in sorted(names.items()):
+            verdict = checker.classify(field_type, name, checksum)
+            seeds = [s for g in sorted(groups) for s in sibling_seeds.get(g, ())]
+            if verdict.verdict == "untestable" and seeds:
+                verdict = checker.reclassify(field_type, name, checksum, seeds)
+            verdicts.append((name, verdict))
         kinds = {v.verdict for _, v in verdicts}
         verdict = "mismatch" if "mismatch" in kinds else "match" if "match" in kinds else "untestable"
         counts[verdict] += 1
@@ -874,7 +1211,7 @@ def check_checksum_table(ids: dict, resolver: Resolver, checker: Checker):
 
 
 def print_report(report: Report, table_counts, table_bad, checker: Checker, declared_counts,
-                 skipped, n_ids) -> None:
+                 skipped, n_ids, siblings=None) -> None:
     p = print
     p(f"inputs: {declared_counts['exports']} export(s), {declared_counts['main declarations']} main "
       f"declarations, {declared_counts['checkpoint declarations']} checkpoint declarations "
@@ -891,13 +1228,17 @@ def print_report(report: Report, table_counts, table_bad, checker: Checker, decl
         p(f"  {report.by_verdict[verdict]:>7}  {verdict}")
     p(f"  {report.handle_dependent:>7}  (group, name, checksum) typed differently at different "
       f"handles, each counted once per type")
+    p("match / mismatch, by the seed that decided it:")
+    for source in SEED_SOURCES:
+        p(f"  {report.by_seed_source[(source, 'match')]:>7} / "
+          f"{report.by_seed_source[(source, 'mismatch')]:<5} {source}")
     p("match, by rule:")
     for rule in ("exact spelling", "Bool as uint8 (bitfield bool or byte; the width decides)",
                  "ObjectNetGuid with its class", "ObjectNetGuid as UClass*",
                  "static-array element (index > 0)"):
         p(f"  {report.match_rules[rule]:>7}  {rule}")
     p("untestable, by reason:")
-    reasons = sorted(set(report.by_reason) | {NOT_REPRODUCED, ENUM_CAPABLE},
+    reasons = sorted(set(report.by_reason) | {NOT_REPRODUCED, ENUM_CAPABLE, OBJECT_UNREPRODUCED},
                      key=lambda r: (-report.by_reason[r], r))
     for reason in reasons:
         p(f"  {report.by_reason[reason]:>7}  {reason}")
@@ -912,8 +1253,23 @@ def print_report(report: Report, table_counts, table_bad, checker: Checker, decl
     p("parent chains (typed identities whose verdict came from that seed):")
     for label, _ in checker.seeds.named[1:]:
         p(f"  {report.chain_hits[label]:>7}  {label}")
+    if siblings is not None:
+        stats = siblings.stats
+        p("sibling seeds (a parent checksum two differently named members imply):")
+        p(f"  {report.sibling_groups:>7}  groups with two or more hashable members")
+        for key in ("candidate agreements", "established", "refused",
+                    "refused: same name length, same spelling",
+                    "refused: an alternative pair deviates identically"):
+            p(f"  {stats[key]:>7}  {key}")
+        p(f"  {siblings.comparisons / 2 ** 32:>7.4f}  expected chance agreements "
+          f"({siblings.comparisons} implied-parent comparisons / 2^32)")
+        p("parent-chain seeds in use, one per group, against the sibling tier's (which never "
+          "sees the chains):")
+        p(f"  {sum(report.chain_rederived.values()):>7}  in use")
+        for key in CHAIN_CROSS_CHECK:
+            p(f"  {report.chain_rederived[key]:>7}  {key}")
     partition = ("match", "mismatch", "untestable", "no carrier in the input")
-    p(f"\nchecksum_table.rs: {sum(table_counts[k] for k in partition)} entries")
+    p(f"\nchecksum_table.rs: {sum(table_counts[k] for k in partition)} checksums")
     for key in partition + ("of which carried by more than one name",):
         p(f"  {table_counts[key]:>7}  {key}")
     p(f"\nchecksum trials: {checker.trials}; expected chance reproductions "
@@ -926,6 +1282,31 @@ def print_report(report: Report, table_counts, table_bad, checker: Checker, decl
     for checksum, field_type, name, spelling, seed in table_bad:
         p(f"  MISMATCH checksum_table.rs {checksum} -> {field_type}: carrier {name} "
           f"reproduces {spelling} under {seed}")
+
+
+DISAGREE = "DISAGREE: a sibling seed other than the chain's"
+
+
+def exit_status(report: Report, table_bad) -> tuple[int, str]:
+    """`(exit code, closing line)`: 1 for nothing checked, a tier
+    disagreement or any mismatch, else 0."""
+    if report.identities == 0:
+        return 1, ("\nFAILED: nothing checked -- no declared identity is typed by vrfkit, so "
+                   "this input is empty or not an export")
+    disagreements = report.chain_rederived[DISAGREE]
+    if disagreements:
+        return 1, (f"\nFAILED: {disagreements} parent-chain seed(s) disagree with the seed the "
+                   f"group's own members imply. One of the two tiers is wrong about those "
+                   f"members, and no verdict resting on either can be trusted until it is found.")
+    if report.mismatches or table_bad:
+        return 1, (f"\nFAILED: {len(report.mismatches)} typed identit"
+                   f"{'y' if len(report.mismatches) == 1 else 'ies'} and {len(table_bad)} "
+                   f"checksum_table.rs carrier(s) hash as a different C++ type than vrfkit "
+                   f"decodes. Each line above names the spelling that reproduces the replay's "
+                   f"own checksum.")
+    return 0, (f"\nOK: {report.by_verdict['match']} typed identities reproduce their checksum, "
+               f"none reproduces a different type; {report.by_verdict['untestable']} are "
+               f"untestable and say nothing either way.")
 
 
 def main(argv=None) -> int:
@@ -975,9 +1356,10 @@ def main(argv=None) -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2
     checker = Checker(Seeds(), object_spellings(class_candidates({i.group for i in ids.values()})))
-    report = check_identities(ids, resolver, checker)
-    table_counts, table_bad = check_checksum_table(ids, resolver, checker)
-    print_report(report, table_counts, table_bad, checker, declared_counts, skipped, len(ids))
+    siblings = SiblingSeeds(spelling_universe(checker.objects))
+    report = check_identities(ids, resolver, checker, siblings)
+    table_counts, table_bad = check_checksum_table(ids, resolver, checker, report.sibling_seeds)
+    print_report(report, table_counts, table_bad, checker, declared_counts, skipped, len(ids), siblings)
 
     if args.json is not None:
         rows = [{**r, "builds": sorted(r["builds"])} for r in report.rows]
@@ -985,21 +1367,9 @@ def main(argv=None) -> int:
             {"checksum": c, "field_type": t, "name": n, "reproduces": s, "seed": seed}
             for c, t, n, s, seed in table_bad]}, indent=1), encoding="utf-8")
 
-    if report.identities == 0:
-        print("\nFAILED: nothing checked -- no declared identity is typed by vrfkit, so this "
-              "input is empty or not an export", file=sys.stderr)
-        return 1
-    if report.mismatches or table_bad:
-        print(f"\nFAILED: {len(report.mismatches)} typed identit"
-              f"{'y' if len(report.mismatches) == 1 else 'ies'} and {len(table_bad)} "
-              f"checksum_table.rs carrier(s) hash as a different C++ type than vrfkit "
-              f"decodes. Each line above names the spelling that reproduces the replay's "
-              f"own checksum.", file=sys.stderr)
-        return 1
-    print(f"\nOK: {report.by_verdict['match']} typed identities reproduce their checksum, "
-          f"none reproduces a different type; {report.by_verdict['untestable']} are "
-          f"untestable and say nothing either way.")
-    return 0
+    code, message = exit_status(report, table_bad)
+    print(message, file=sys.stderr if code else sys.stdout)
+    return code
 
 
 if __name__ == "__main__":
