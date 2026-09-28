@@ -228,15 +228,11 @@ fn internal_load_object(
     Ok(net_guid)
 }
 
+/// Byte encoders for the tests of both archive readers.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -- Test helpers mirroring the C# test's byte-building functions ----------
-
-    /// Encode a u32 as Unreal's IntPacked format (7 payload bits per byte,
-    /// continuation in low bit).
-    fn encode_int_packed(mut value: u32) -> Vec<u8> {
+pub(crate) mod wire {
+    /// IntPacked: seven payload bits per byte, low bit set when more follow.
+    pub(crate) fn int_packed(mut value: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         loop {
             let mut next_byte = ((value & 0x7F) << 1) as u8;
@@ -246,47 +242,34 @@ mod tests {
             }
             bytes.push(next_byte);
             if value == 0 {
-                break;
+                return bytes;
             }
         }
-        bytes
     }
 
-    /// Encode an FString: i32 length (including null) + UTF-8 bytes + null.
-    fn encode_fstring(s: &str) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let len = (s.len() + 1) as i32; // +1 for null terminator
-        bytes.extend_from_slice(&len.to_le_bytes());
+    /// FString in UTF-8: i32 length including the null, the bytes, the null.
+    pub(crate) fn fstring(s: &str) -> Vec<u8> {
+        let mut bytes = ((s.len() + 1) as i32).to_le_bytes().to_vec();
         bytes.extend_from_slice(s.as_bytes());
         bytes.push(0);
         bytes
     }
 
-    /// Encode an FName (non-hardcoded): isHardcoded=0, FString, number=0.
-    fn encode_fname(s: &str) -> Vec<u8> {
-        encode_fname_numbered(s, 0)
-    }
-
-    /// Encode an FName with an explicit instance number.
-    fn encode_fname_numbered(s: &str, number: i32) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.push(0); // isHardcoded = false
-        bytes.extend(encode_fstring(s));
-        bytes.extend_from_slice(&number.to_le_bytes());
+    /// A string FName: kind 0 (not hardcoded), the FString, the number.
+    pub(crate) fn fname(s: &str, number: i32) -> Vec<u8> {
+        let mut bytes = vec![0];
+        bytes.extend(fstring(s));
+        bytes.extend(number.to_le_bytes());
         bytes
     }
+}
 
-    /// Encode a u32 as 4 little-endian bytes.
-    fn encode_u32(v: u32) -> Vec<u8> {
-        v.to_le_bytes().to_vec()
-    }
+#[cfg(test)]
+mod tests {
+    use super::wire::{fname, fstring, int_packed};
+    use super::*;
 
-    /// Encode an i32 as 4 little-endian bytes.
-    fn encode_i32(v: i32) -> Vec<u8> {
-        v.to_le_bytes().to_vec()
-    }
-
-    /// Build a full net-field export command for a new group with an optional field.
+    /// A net-field export command declaring a group, with an optional field.
     fn build_new_group(
         path_name_index: u32,
         path: &str,
@@ -294,40 +277,45 @@ mod tests {
         field: Option<(u32, &str)>,
     ) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(encode_int_packed(path_name_index));
-        bytes.extend(encode_int_packed(1)); // isExported = true
-        bytes.extend(encode_fstring(path));
-        bytes.extend(encode_int_packed(num_fields));
+        bytes.extend(int_packed(path_name_index));
+        bytes.extend(int_packed(1)); // isExported = true
+        bytes.extend(fstring(path));
+        bytes.extend(int_packed(num_fields));
         if let Some((handle, name)) = field {
             bytes.push(1); // isFieldExported = true
-            bytes.extend(encode_int_packed(handle));
-            bytes.extend(encode_u32(0xAABBCCDD));
-            bytes.extend(encode_fname(name));
+            bytes.extend(int_packed(handle));
+            bytes.extend(0xAABBCCDDu32.to_le_bytes());
+            bytes.extend(fname(name, 0));
         } else {
             bytes.push(0); // isFieldExported = false
         }
         bytes
     }
 
-    /// Build a reference to an existing group + add a field.
-    fn build_existing_group_field(path_name_index: u32, handle: u32, name: &str) -> Vec<u8> {
+    /// A reference to an existing group that adds one field.
+    fn build_existing_group_field(
+        path_name_index: u32,
+        handle: u32,
+        name: &str,
+        number: i32,
+    ) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(encode_int_packed(path_name_index));
-        bytes.extend(encode_int_packed(0)); // isExported = false (reference)
+        bytes.extend(int_packed(path_name_index));
+        bytes.extend(int_packed(0)); // isExported = false (reference)
         bytes.push(1); // isFieldExported = true
-        bytes.extend(encode_int_packed(handle));
-        bytes.extend(encode_u32(0xAABBCCDD));
-        bytes.extend(encode_fname(name));
+        bytes.extend(int_packed(handle));
+        bytes.extend(0xAABBCCDDu32.to_le_bytes());
+        bytes.extend(fname(name, number));
         bytes
     }
 
-    /// Build an export-GUID payload (single object, no outer, with HasPath).
+    /// An export-GUID payload: one object with HasPath and no outer.
     fn build_guid_payload(net_guid: u32, path: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(encode_int_packed(net_guid));
+        bytes.extend(int_packed(net_guid));
         bytes.push(ExportFlags::HAS_PATH.0); // flags
-        bytes.extend(encode_int_packed(0)); // outer guid = 0 (invalid, terminates recursion)
-        bytes.extend(encode_fstring(path));
+        bytes.extend(int_packed(0)); // outer guid 0: invalid, ends the recursion
+        bytes.extend(fstring(path));
         bytes
     }
 
@@ -335,8 +323,7 @@ mod tests {
 
     #[test]
     fn registers_exported_group() {
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1)); // 1 export
+        let mut data = int_packed(1); // 1 export
         data.extend(build_new_group(11, "/Game/Test.Test_C", 3, None));
 
         let mut reader = BitReader::new(&data);
@@ -352,8 +339,7 @@ mod tests {
 
     #[test]
     fn live_group_rejects_field_count_above_checkpoint_protocol_limit() {
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1));
+        let mut data = int_packed(1);
         data.extend(build_new_group(11, "/Game/Test.Test_C", 65_537, None));
 
         let mut reader = BitReader::new(&data);
@@ -370,8 +356,7 @@ mod tests {
 
     #[test]
     fn stores_export_by_handle() {
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1));
+        let mut data = int_packed(1);
         data.extend(build_new_group(
             11,
             "/Game/Test.Test_C",
@@ -392,10 +377,9 @@ mod tests {
 
     #[test]
     fn existing_path_index_updates_group() {
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(2)); // 2 exports
+        let mut data = int_packed(2); // 2 exports
         data.extend(build_new_group(11, "/Game/Test.Test_C", 3, None));
-        data.extend(build_existing_group_field(11, 1, "LaterField"));
+        data.extend(build_existing_group_field(11, 1, "LaterField", 0));
 
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
@@ -409,28 +393,19 @@ mod tests {
     fn re_exported_group_expands_without_losing_existing_fields() {
         // First export: group with capacity 2, field at handle 1.
         // Second export: same path re-exported with capacity 4, field at handle 3.
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(2)); // 2 exports
-
-        // First: group(capacity=2) + field at handle 1
-        data.extend(encode_int_packed(11)); // pathNameIndex
-        data.extend(encode_int_packed(1)); // isExported
-        data.extend(encode_fstring("/Game/Test.Test_C"));
-        data.extend(encode_int_packed(2)); // numExports
-        data.push(1); // isFieldExported
-        data.extend(encode_int_packed(1)); // handle
-        data.extend(encode_u32(0xAABBCCDD));
-        data.extend(encode_fname("ExistingField"));
-
-        // Second: same path re-exported with larger capacity + field at handle 3
-        data.extend(encode_int_packed(11));
-        data.extend(encode_int_packed(1)); // isExported again
-        data.extend(encode_fstring("/Game/Test.Test_C"));
-        data.extend(encode_int_packed(4)); // numExports (larger)
-        data.push(1); // isFieldExported
-        data.extend(encode_int_packed(3)); // handle
-        data.extend(encode_u32(0xAABBCCDD));
-        data.extend(encode_fname("ExpandedField"));
+        let mut data = int_packed(2); // 2 exports
+        data.extend(build_new_group(
+            11,
+            "/Game/Test.Test_C",
+            2,
+            Some((1, "ExistingField")),
+        ));
+        data.extend(build_new_group(
+            11,
+            "/Game/Test.Test_C",
+            4,
+            Some((3, "ExpandedField")),
+        ));
 
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
@@ -445,10 +420,9 @@ mod tests {
     #[test]
     fn unknown_path_index_returns_error() {
         // Reference a path_name_index (42) that was never registered.
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1)); // 1 export
-        data.extend(encode_int_packed(42)); // pathNameIndex
-        data.extend(encode_int_packed(0)); // isExported = false (reference)
+        let mut data = int_packed(1); // 1 export
+        data.extend(int_packed(42)); // pathNameIndex
+        data.extend(int_packed(0)); // isExported = false (reference)
         // The error fires before isFieldExported is read (the C# reference also
         // throws immediately here), so these minimal bytes are enough.
 
@@ -472,8 +446,7 @@ mod tests {
     #[test]
     fn out_of_range_handle_is_dropped_and_counted() {
         // Group has capacity 1, field handle is 2 (out of range).
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1));
+        let mut data = int_packed(1);
         data.extend(build_new_group(
             11,
             "/Game/Test.Test_C",
@@ -497,8 +470,7 @@ mod tests {
     /// counter that moved on every field would pass the drop test.
     #[test]
     fn in_range_handle_is_placed_and_not_counted() {
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1));
+        let mut data = int_packed(1);
         data.extend(build_new_group(
             11,
             "/Game/Test.Test_C",
@@ -526,28 +498,17 @@ mod tests {
     /// bare and 1 renders `_0`.
     #[test]
     fn fname_numbers_disambiguate_two_fields_with_one_base_name() {
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(3)); // 3 exports
-
-        // Group with three slots; handle 0 has number 0, handle 1 number 1,
-        // handle 2 number 2. All three are the base string "Value".
-        data.extend(encode_int_packed(11));
-        data.extend(encode_int_packed(1)); // isExported
-        data.extend(encode_fstring("/Game/Test.Test_C"));
-        data.extend(encode_int_packed(3)); // numExports
-        data.push(1); // isFieldExported
-        data.extend(encode_int_packed(0));
-        data.extend(encode_u32(0));
-        data.extend(encode_fname_numbered("Value", 0));
-
-        for (handle, number) in [(1u32, 1i32), (2, 2)] {
-            data.extend(encode_int_packed(11));
-            data.extend(encode_int_packed(0)); // reference the existing group
-            data.push(1); // isFieldExported
-            data.extend(encode_int_packed(handle));
-            data.extend(encode_u32(0));
-            data.extend(encode_fname_numbered("Value", number));
-        }
+        // Three slots, all the base string "Value": handle 0 has number 0,
+        // handle 1 number 1, handle 2 number 2.
+        let mut data = int_packed(3); // 3 exports
+        data.extend(build_new_group(
+            11,
+            "/Game/Test.Test_C",
+            3,
+            Some((0, "Value")),
+        ));
+        data.extend(build_existing_group_field(11, 1, "Value", 1));
+        data.extend(build_existing_group_field(11, 2, "Value", 2));
 
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
@@ -564,9 +525,8 @@ mod tests {
     #[test]
     fn export_guid_registers_path() {
         let payload = build_guid_payload(17, "/Game/Test.Test_C");
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1)); // 1 guid
-        data.extend(encode_i32(payload.len() as i32));
+        let mut data = int_packed(1); // 1 guid
+        data.extend((payload.len() as i32).to_le_bytes());
         data.extend(&payload);
 
         let mut reader = BitReader::new(&data);
@@ -578,9 +538,8 @@ mod tests {
 
     #[test]
     fn export_guid_negative_size_returns_error() {
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1));
-        data.extend(encode_i32(-1));
+        let mut data = int_packed(1);
+        data.extend((-1i32).to_le_bytes());
 
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
@@ -592,9 +551,8 @@ mod tests {
     fn export_guid_trailing_data_returns_error() {
         let mut payload = build_guid_payload(17, "/Game/Test.Test_C");
         payload.push(0xFF); // trailing byte
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(1));
-        data.extend(encode_i32(payload.len() as i32));
+        let mut data = int_packed(1);
+        data.extend((payload.len() as i32).to_le_bytes());
         data.extend(&payload);
 
         let mut reader = BitReader::new(&data);
@@ -607,7 +565,7 @@ mod tests {
     #[test]
     fn truncated_net_field_exports_returns_bitio_error() {
         // Just the count, then nothing.
-        let data = encode_int_packed(5); // says 5 exports, but no data follows.
+        let data = int_packed(5); // says 5 exports, but no data follows.
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
         let err = read_net_field_exports(&mut reader, &mut cache).unwrap_err();
@@ -617,7 +575,7 @@ mod tests {
     #[test]
     fn truncated_export_guids_returns_bitio_error() {
         // Count says 1 but no payload size follows.
-        let data = encode_int_packed(1);
+        let data = int_packed(1);
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
         let err = read_export_guids(&mut reader, &mut cache).unwrap_err();
@@ -626,7 +584,7 @@ mod tests {
 
     #[test]
     fn zero_exports_is_valid() {
-        let data = encode_int_packed(0);
+        let data = int_packed(0);
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
         let n = read_net_field_exports(&mut reader, &mut cache).unwrap();
@@ -635,7 +593,7 @@ mod tests {
 
     #[test]
     fn zero_guids_is_valid() {
-        let data = encode_int_packed(0);
+        let data = int_packed(0);
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
         let n = read_export_guids(&mut reader, &mut cache).unwrap();
@@ -645,17 +603,16 @@ mod tests {
     #[test]
     fn roundtrip_multiple_groups_multiple_fields() {
         // Register 2 groups each with 2 fields, then verify all survive.
-        let mut data = Vec::new();
-        data.extend(encode_int_packed(4)); // 4 export commands total
+        let mut data = int_packed(4); // 4 export commands total
 
         // Group A: path_name_index=1, capacity=3, field at handle 0
         data.extend(build_new_group(1, "/Game/A.A_C", 3, Some((0, "Alpha"))));
         // Group A: add field at handle 2
-        data.extend(build_existing_group_field(1, 2, "Gamma"));
+        data.extend(build_existing_group_field(1, 2, "Gamma", 0));
         // Group B: path_name_index=2, capacity=2, field at handle 1
         data.extend(build_new_group(2, "/Game/B.B_C", 2, Some((1, "Beta"))));
         // Group B: add field at handle 0
-        data.extend(build_existing_group_field(2, 0, "Delta"));
+        data.extend(build_existing_group_field(2, 0, "Delta", 0));
 
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
