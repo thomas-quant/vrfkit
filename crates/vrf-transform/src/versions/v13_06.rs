@@ -1,13 +1,9 @@
 //! `++Ares-Core+release-13.06`
 
 use super::SeededTransform;
-use crate::helpers::{
-    reverse_bits64_without_final_16bit_swap, substitute_bytes_u32, substitute_bytes_u64,
-    swap_adjacent_bits_u8, swap_adjacent_bits_u32, swap_adjacent_bits_u64,
-};
-use crate::sbox::{SBOX_8, SBOX_32, SBOX_64};
+use crate::helpers::*;
+use crate::sbox::*;
 
-/// `++Ares-Core+release-13.06`
 pub struct V13_06;
 
 impl SeededTransform for V13_06 {

@@ -1,9 +1,8 @@
 //! `++Ares-Core+release-12.10`
 
 use super::SeededTransform;
-use crate::helpers::{swap_adjacent_bits_u8, swap_adjacent_bits_u32, swap_adjacent_bits_u64};
+use crate::helpers::*;
 
-/// `++Ares-Core+release-12.10`
 pub struct V12_10;
 
 impl SeededTransform for V12_10 {

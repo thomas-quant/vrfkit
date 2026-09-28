@@ -1,13 +1,9 @@
 //! `++Ares-Core+release-11.09`, recovered from the native seeded reader.
 
 use super::SeededTransform;
-use crate::helpers::{
-    substitute_bytes_u32, substitute_bytes_u64, swap_adjacent_bits_u8, swap_adjacent_bits_u32,
-    swap_adjacent_bits_u64,
-};
-use crate::sbox::{SBOX_8, SBOX_32, SBOX_64};
+use crate::helpers::*;
+use crate::sbox::*;
 
-/// `++Ares-Core+release-11.09`
 pub struct V11_09;
 
 impl SeededTransform for V11_09 {

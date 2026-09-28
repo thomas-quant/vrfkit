@@ -3,7 +3,6 @@
 use super::SeededTransform;
 use crate::helpers::reverse_bits64_without_final_16bit_swap;
 
-/// `++Ares-Core+release-12.06`
 pub struct V12_06;
 
 impl SeededTransform for V12_06 {
@@ -20,8 +19,7 @@ impl SeededTransform for V12_06 {
         v = reverse_bits64_without_final_16bit_swap(v);
         v = v.rotate_left(state.rotate_right(3) % 63 + 1);
         v = reverse_bits64_without_final_16bit_swap(v);
-        v = v.wrapping_sub(u64::from(state.rotate_right(1)));
-        v
+        v.wrapping_sub(u64::from(state.rotate_right(1)))
     }
 
     fn word32(mut v: u32, state: u32) -> u32 {
@@ -31,8 +29,7 @@ impl SeededTransform for V12_06 {
         v = v.reverse_bits();
         v = v.rotate_left(state.rotate_left(3) % 31 + 1);
         v = v.reverse_bits();
-        v = v.wrapping_sub(state.rotate_left(1));
-        v
+        v.wrapping_sub(state.rotate_left(1))
     }
 
     fn byte(mut v: u8, state: u32) -> u8 {
@@ -42,7 +39,6 @@ impl SeededTransform for V12_06 {
         v = v.reverse_bits();
         v = v.rotate_left(state.wrapping_mul(0x00000533) % 7 + 1);
         v = v.reverse_bits();
-        v = v.wrapping_sub(state.wrapping_mul(0x0000000b) as u8);
-        v
+        v.wrapping_sub(state.wrapping_mul(0x0000000b) as u8)
     }
 }

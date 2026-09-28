@@ -1,13 +1,9 @@
 //! `++Ares-Core+release-12.02`, recovered from the native seeded reader.
 
 use super::SeededTransform;
-use crate::helpers::{
-    reverse_bits64_without_final_16bit_swap, substitute_bytes_u32, substitute_bytes_u64,
-    swap_adjacent_bits_u8, swap_adjacent_bits_u32, swap_adjacent_bits_u64,
-};
-use crate::sbox::{SBOX_8, SBOX_32, SBOX_64};
+use crate::helpers::*;
+use crate::sbox::*;
 
-/// `++Ares-Core+release-12.02`
 pub struct V12_02;
 
 impl SeededTransform for V12_02 {
@@ -25,8 +21,7 @@ impl SeededTransform for V12_02 {
         v = substitute_bytes_u64(v, &SBOX_64);
         v = reverse_bits64_without_final_16bit_swap(v);
         v = v.wrapping_sub(u64::from(state.rotate_right(2)));
-        v = reverse_bits64_without_final_16bit_swap(v);
-        v
+        reverse_bits64_without_final_16bit_swap(v)
     }
 
     fn word32(mut v: u32, state: u32) -> u32 {
@@ -37,8 +32,7 @@ impl SeededTransform for V12_02 {
         v = substitute_bytes_u32(v, &SBOX_32);
         v = v.reverse_bits();
         v = v.wrapping_sub(state.rotate_left(2));
-        v = v.reverse_bits();
-        v
+        v.reverse_bits()
     }
 
     fn byte(mut v: u8, state: u32) -> u8 {
@@ -49,7 +43,6 @@ impl SeededTransform for V12_02 {
         v = SBOX_8[v as usize];
         v = v.reverse_bits();
         v = v.wrapping_sub(state.wrapping_mul(0x00000079) as u8);
-        v = v.reverse_bits();
-        v
+        v.reverse_bits()
     }
 }

@@ -4,9 +4,8 @@
 //! the transform the golden vectors exercise most heavily.
 
 use super::SeededTransform;
-use crate::helpers::{swap_adjacent_bits_u8, swap_adjacent_bits_u32, swap_adjacent_bits_u64};
+use crate::helpers::*;
 
-/// `++Ares-Core+release-13.01`
 pub struct V13_01;
 
 impl SeededTransform for V13_01 {

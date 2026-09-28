@@ -2,7 +2,6 @@
 
 use super::SeededTransform;
 
-/// `++Ares-Core+release-13.05`
 pub struct V13_05;
 
 impl SeededTransform for V13_05 {

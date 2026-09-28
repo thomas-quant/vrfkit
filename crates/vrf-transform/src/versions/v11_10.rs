@@ -1,12 +1,9 @@
 //! `++Ares-Core+release-11.10`, recovered from the native seeded reader.
 
 use super::SeededTransform;
-use crate::helpers::{
-    reverse_bits64_without_final_16bit_swap, substitute_bytes_u32, substitute_bytes_u64,
-};
-use crate::sbox::{SBOX_8, SBOX_32, SBOX_64};
+use crate::helpers::*;
+use crate::sbox::*;
 
-/// `++Ares-Core+release-11.10`
 pub struct V11_10;
 
 impl SeededTransform for V11_10 {
@@ -23,8 +20,7 @@ impl SeededTransform for V11_10 {
         v = v.wrapping_sub(u64::from(state.rotate_right(4)));
         v = reverse_bits64_without_final_16bit_swap(v);
         v = substitute_bytes_u64(v, &SBOX_64);
-        v = !v;
-        v
+        !v
     }
 
     fn word32(mut v: u32, state: u32) -> u32 {
@@ -35,8 +31,7 @@ impl SeededTransform for V11_10 {
         v = v.wrapping_sub(state.rotate_left(4));
         v = v.reverse_bits();
         v = substitute_bytes_u32(v, &SBOX_32);
-        v = !v;
-        v
+        !v
     }
 
     fn byte(mut v: u8, state: u32) -> u8 {
@@ -47,7 +42,6 @@ impl SeededTransform for V11_10 {
         v = v.wrapping_sub(state.wrapping_mul(0x00003931) as u8);
         v = v.reverse_bits();
         v = SBOX_8[v as usize];
-        v = !v;
-        v
+        !v
     }
 }
