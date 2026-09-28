@@ -50,7 +50,6 @@ pub struct PacketReadResult {
 struct PartialState {
     ch_sequence: i32,
     reliable: bool,
-    is_complete: bool,
 }
 
 /// Stateful packet reader that tracks partial bunches and reliable sequences.
@@ -108,63 +107,43 @@ impl RawPacketReader {
     where
         F: FnMut(&mut RawBunchHeader, BitReader<'_>),
     {
-        // These three early-outs share the same all-zero counters and differ
-        // only in `is_malformed`: nothing has been parsed yet in any of them.
-        let empty_result = |is_malformed: bool| PacketReadResult {
+        let mut result = PacketReadResult {
             bunch_count: 0,
-            is_malformed,
+            is_malformed: false,
             partial_error_count: 0,
             channel_limit_count: 0,
         };
 
-        if packet_data.is_empty() {
-            return empty_result(false);
-        }
-
-        let last_byte = packet_data[packet_data.len() - 1];
+        let Some(&last_byte) = packet_data.last() else {
+            return result;
+        };
         if last_byte == 0 {
-            return empty_result(true);
+            result.is_malformed = true;
+            return result;
         }
 
         let bit_size = compute_bit_size(packet_data, last_byte);
         let Ok(mut reader) = BitReader::with_bit_len(packet_data, bit_size as u64) else {
-            return empty_result(true);
+            result.is_malformed = true;
+            return result;
         };
 
-        let mut bunch_count = 0u32;
-        let mut partial_error_count = 0u32;
-        let mut channel_limit_count = 0u32;
-
         while !reader.at_end() {
-            let header = self.parse_bunch_header(&mut reader, packet_id);
-            let header = match header {
-                Ok(h) => h,
-                Err(_) => {
-                    return PacketReadResult {
-                        bunch_count,
-                        is_malformed: true,
-                        partial_error_count,
-                        channel_limit_count,
-                    };
-                }
+            let Ok(mut header) = self.parse_bunch_header(&mut reader, packet_id) else {
+                result.is_malformed = true;
+                return result;
             };
-
-            let mut header = header;
             if header.has_channel_limit_error {
-                channel_limit_count += 1;
+                result.channel_limit_count += 1;
             }
 
             if header.payload_bit_count as u64 > reader.bits_remaining() {
-                return PacketReadResult {
-                    bunch_count,
-                    is_malformed: true,
-                    partial_error_count,
-                    channel_limit_count,
-                };
+                result.is_malformed = true;
+                return result;
             }
 
             if !header.has_channel_limit_error {
-                self.track_partial_bunch(&mut header, &mut partial_error_count);
+                self.track_partial_bunch(&mut header, &mut result.partial_error_count);
             }
 
             let payload = reader
@@ -172,18 +151,13 @@ impl RawPacketReader {
                 .expect("bounds already checked");
 
             callback(&mut header, payload);
-            bunch_count += 1;
+            result.bunch_count += 1;
             if header.b_close && !header.b_dormant {
                 self.retire_channel(header.ch_index);
             }
         }
 
-        PacketReadResult {
-            bunch_count,
-            is_malformed: false,
-            partial_error_count,
-            channel_limit_count,
-        }
+        result
     }
 
     /// Parse a single bunch header from the bit stream.
@@ -304,10 +278,7 @@ impl RawPacketReader {
         }
 
         if header.b_partial_initial {
-            let overlapping = self
-                .partial_bunches
-                .get(&header.ch_index)
-                .is_some_and(|existing| !existing.is_complete);
+            let overlapping = self.partial_bunches.contains_key(&header.ch_index);
 
             // An initial that is also final is a whole bunch: nothing is left in
             // flight, so no state is admitted or kept for it. This branch used
@@ -341,29 +312,24 @@ impl RawPacketReader {
                 PartialState {
                     ch_sequence: header.ch_sequence,
                     reliable: header.b_reliable,
-                    is_complete: false,
                 },
             );
             return;
         }
 
         // Continuation or final
-        let error = self.validate_continuation(header);
-        if let Some(kind) = error {
+        if let Some(kind) = self.validate_continuation(header) {
             *partial_error_count += 1;
             header.has_partial_error = true;
             if kind == PartialSequenceKind::MismatchedContinuation {
                 self.partial_bunches.remove(&header.ch_index);
             }
-            let _ = kind; // consumed for the count
             return;
         }
 
         if let Some(state) = self.partial_bunches.get_mut(&header.ch_index) {
             state.ch_sequence = header.ch_sequence;
-
             if header.b_partial_final {
-                state.is_complete = true;
                 header.is_partial_completed = true;
             }
         }
@@ -377,10 +343,6 @@ impl RawPacketReader {
             None => return Some(PartialSequenceKind::MissingInitial),
             Some(s) => s,
         };
-
-        if state.is_complete {
-            return Some(PartialSequenceKind::MissingInitial);
-        }
 
         if state.reliable != header.b_reliable {
             return Some(PartialSequenceKind::MismatchedContinuation);
