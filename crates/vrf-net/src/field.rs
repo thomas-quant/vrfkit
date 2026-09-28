@@ -56,9 +56,10 @@ pub trait FieldSink {
 /// What the parsers track about the record they are currently inside, so the
 /// caller can attach the failing record's identity to a `StreamFailure`.
 ///
-/// Diagnostics only. The ordinary parser entry points do not update it;
-/// callers explicitly choose the `_tracked` variants when a diagnostic sink
-/// requests the extra per-record work.
+/// Diagnostics only. The untracked entry points leave it alone; a caller that
+/// wants the failing record passes one in -- the `_tracked` variants take it,
+/// and the pipeline hands one to its content-block walks when the sink's
+/// `wants_stream_failure_details` asks for the extra per-record work.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WalkContext {
     /// Bit offset inside the block where the current record begins. Set before
@@ -109,6 +110,16 @@ impl<R> WalkOutcome<R> {
     }
 }
 
+/// Run a record walk written with `?`, keeping the count of records it
+/// emitted before any error.
+fn walk<R>(body: impl FnOnce(&mut u32) -> Result<R>) -> WalkOutcome<R> {
+    let mut count = 0;
+    match body(&mut count) {
+        Ok(remainder) => WalkOutcome::Complete { count, remainder },
+        Err(error) => WalkOutcome::Failed { count, error },
+    }
+}
+
 /// Parse a RepLayout property stream, emitting every field to the sink.
 ///
 /// Returns the number of fields emitted and the count of bits the stream
@@ -150,93 +161,60 @@ fn parse_rep_layout_impl(
     mut ctx: Option<&mut WalkContext>,
     retain_class_net_cache_tail: bool,
 ) -> WalkOutcome<RepLayoutRemainder> {
-    // Property checksum bit -- always present, always ignored.
-    if let Err(error) = reader.read_bit() {
-        return WalkOutcome::Failed {
-            count: 0,
-            error: error.into(),
-        };
-    }
+    walk(|field_count| {
+        // Property checksum bit -- always present, always ignored.
+        reader.read_bit()?;
 
-    let mut field_count = 0u32;
-    let mut remainder = RepLayoutRemainder::None;
-
-    while !reader.at_end() {
-        // Where this record starts. The handle and length reads below are
-        // consumed before an overrun can be detected, and they die with the
-        // record they described, so they are part of what was abandoned.
-        // Counting only `bits_remaining` reported less loss than occurred.
-        let record_start = reader.position();
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.record_offset = record_start;
-            ctx.last_handle = None;
-        }
-        let encoded_handle = match reader.read_int_packed() {
-            Ok(handle) => handle,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: field_count,
-                    error: error.into(),
-                };
+        let mut remainder = RepLayoutRemainder::None;
+        while !reader.at_end() {
+            // Where this record starts. The handle and length reads below are
+            // consumed before an overrun can be detected, and they die with the
+            // record they described, so they are part of what was abandoned.
+            // Counting only `bits_remaining` reported less loss than occurred.
+            let record_start = reader.position();
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.record_offset = record_start;
+                ctx.last_handle = None;
             }
-        };
-        if encoded_handle == 0 {
-            // `FObjectReplicator::ReceivedBunch` may place a ClassNetCache
-            // stream after the RepLayout terminator in this same window.
-            let leftover = reader.bits_remaining();
-            if leftover != 0 {
-                remainder = RepLayoutRemainder::ClassNetCache(leftover);
-                if !retain_class_net_cache_tail {
-                    reader.skip_remaining();
+            let encoded_handle = reader.read_int_packed()?;
+            if encoded_handle == 0 {
+                // `FObjectReplicator::ReceivedBunch` may place a ClassNetCache
+                // stream after the RepLayout terminator in this same window.
+                let leftover = reader.bits_remaining();
+                if leftover != 0 {
+                    remainder = RepLayoutRemainder::ClassNetCache(leftover);
+                    if !retain_class_net_cache_tail {
+                        reader.skip_remaining();
+                    }
                 }
+                break;
             }
-            break;
-        }
 
-        let handle = encoded_handle - 1;
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.last_handle = Some(handle);
-        }
-        // A zero-bit payload is valid (an empty field) and is emitted like any
-        // other: `sub_reader(0)` yields an empty window and the overrun test
-        // below is trivially false for it, so it needs no special case.
-        let payload_bits = match reader.read_int_packed() {
-            Ok(bits) => bits,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: field_count,
-                    error: error.into(),
-                };
+            let handle = encoded_handle - 1;
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.last_handle = Some(handle);
             }
-        };
+            // A zero-bit payload is valid (an empty field) and is emitted like
+            // any other: `sub_reader(0)` yields an empty window and the overrun
+            // test below is trivially false for it, so it needs no special case.
+            let payload_bits = reader.read_int_packed()?;
 
-        if payload_bits as u64 > reader.bits_remaining() {
-            // Malformed: declared more bits than available. Hand the abandoned
-            // remainder back to the caller so it lands in `skipped_bits`
-            // rather than vanishing from every counter.
-            let abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-            remainder = RepLayoutRemainder::Malformed(abandoned_bits);
-            reader.skip_remaining();
-            break;
-        }
-
-        let sub = match reader.sub_reader(payload_bits as u64) {
-            Ok(sub) => sub,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: field_count,
-                    error: error.into(),
-                };
+            if payload_bits as u64 > reader.bits_remaining() {
+                // Malformed: declared more bits than available. Hand the
+                // abandoned remainder back to the caller so it lands in
+                // `skipped_bits` rather than vanishing from every counter.
+                let abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
+                remainder = RepLayoutRemainder::Malformed(abandoned_bits);
+                reader.skip_remaining();
+                break;
             }
-        };
-        sink.on_field(handle, payload_bits, sub);
-        field_count += 1;
-    }
 
-    WalkOutcome::Complete {
-        count: field_count,
-        remainder,
-    }
+            let sub = reader.sub_reader(payload_bits as u64)?;
+            sink.on_field(handle, payload_bits, sub);
+            *field_count += 1;
+        }
+        Ok(remainder)
+    })
 }
 
 /// Parse a ClassNetCache RPC stream, emitting every invocation to the sink.
@@ -307,95 +285,66 @@ fn parse_class_net_cache_impl(
     sink: &mut dyn FieldSink,
     mut ctx: Option<&mut WalkContext>,
 ) -> WalkOutcome<u64> {
-    if function_count == 0 {
-        // Zero does not mean "a class with no functions", it means the export
-        // group could not be resolved, so the handle width is unknown and the
-        // records cannot be walked. Returning Ok here would drop the whole
-        // payload without it appearing in any counter, leaving the oracle to
-        // report a clean run over data it silently threw away. Fail instead:
-        // the caller counts the bits and names the group.
-        return WalkOutcome::Failed {
-            count: 0,
-            error: NetError::UnresolvedFunctionCount,
-        };
-    }
-
-    // Unreal clamps the serialized-int maximum to at least 2 so that even a
-    // single-export group consumes exactly 1 bit for the handle on the wire.
-    // Without this, read_serialized_int(1) consumes 0 bits and the stream
-    // desyncs by 1 bit. Capacities >= 2 are unchanged (max(N, 2) == N), and
-    // zero is already rejected above.
-    let handle_max = function_count.max(2);
-
-    let mut rpc_count = 0u32;
-    let mut abandoned_bits = 0u64;
-
-    while !reader.at_end() {
-        // Where this record starts, so the abandon paths below can account the
-        // handle they have already consumed. Without it a block of exactly one
-        // bit -- the handle, and nothing after it -- returned `Ok((0, 0))`:
-        // zero RPCs, zero abandoned bits, no error, which is the same signal a
-        // perfectly parsed empty block gives.
-        let record_start = reader.position();
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.record_offset = record_start;
-            ctx.last_handle = None;
+    walk(|rpc_count| {
+        if function_count == 0 {
+            // Zero does not mean "a class with no functions", it means the
+            // export group could not be resolved, so the handle width is
+            // unknown and the records cannot be walked. Returning Ok here would
+            // drop the whole payload without it appearing in any counter,
+            // leaving the oracle to report a clean run over data it silently
+            // threw away. Fail instead: the caller counts the bits and names
+            // the group.
+            return Err(NetError::UnresolvedFunctionCount);
         }
-        let handle = match reader.read_serialized_int(handle_max) {
-            Ok(handle) => handle,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: rpc_count,
-                    error: error.into(),
-                };
+
+        // Unreal clamps the serialized-int maximum to at least 2 so that even a
+        // single-export group consumes exactly 1 bit for the handle on the
+        // wire. Without this, read_serialized_int(1) consumes 0 bits and the
+        // stream desyncs by 1 bit. Capacities >= 2 are unchanged
+        // (max(N, 2) == N), and zero is already rejected above.
+        let handle_max = function_count.max(2);
+
+        let mut abandoned_bits = 0u64;
+        while !reader.at_end() {
+            // Where this record starts, so the abandon paths below can account
+            // the handle they have already consumed. Without it a block of
+            // exactly one bit -- the handle, and nothing after it -- returned
+            // `Ok((0, 0))`: zero RPCs, zero abandoned bits, no error, which is
+            // the same signal a perfectly parsed empty block gives.
+            let record_start = reader.position();
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.record_offset = record_start;
+                ctx.last_handle = None;
             }
-        };
-        if let Some(ctx) = ctx.as_deref_mut() {
-            ctx.last_handle = Some(handle);
-        }
-
-        if reader.bits_remaining() < 8 {
-            // Not enough bits for a payload length -- malformed tail. Account
-            // the abandoned remainder, plus the handle that came out of the
-            // same doomed record, so neither is silently dropped.
-            abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-            reader.skip_remaining();
-            break;
-        }
-
-        let payload_bits = match reader.read_int_packed() {
-            Ok(bits) => bits,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: rpc_count,
-                    error: error.into(),
-                };
+            let handle = reader.read_serialized_int(handle_max)?;
+            if let Some(ctx) = ctx.as_deref_mut() {
+                ctx.last_handle = Some(handle);
             }
-        };
 
-        if payload_bits as u64 > reader.bits_remaining() {
-            abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-            reader.skip_remaining();
-            break;
-        }
-
-        let sub = match reader.sub_reader(payload_bits as u64) {
-            Ok(sub) => sub,
-            Err(error) => {
-                return WalkOutcome::Failed {
-                    count: rpc_count,
-                    error: error.into(),
-                };
+            if reader.bits_remaining() < 8 {
+                // Not enough bits for a payload length -- malformed tail.
+                // Account the abandoned remainder, plus the handle that came
+                // out of the same doomed record, so neither is silently
+                // dropped.
+                abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
+                reader.skip_remaining();
+                break;
             }
-        };
-        sink.on_rpc(handle, payload_bits, sub);
-        rpc_count += 1;
-    }
 
-    WalkOutcome::Complete {
-        count: rpc_count,
-        remainder: abandoned_bits,
-    }
+            let payload_bits = reader.read_int_packed()?;
+
+            if payload_bits as u64 > reader.bits_remaining() {
+                abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
+                reader.skip_remaining();
+                break;
+            }
+
+            let sub = reader.sub_reader(payload_bits as u64)?;
+            sink.on_rpc(handle, payload_bits, sub);
+            *rpc_count += 1;
+        }
+        Ok(abandoned_bits)
+    })
 }
 
 #[cfg(test)]
