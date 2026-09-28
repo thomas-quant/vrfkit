@@ -22,8 +22,10 @@ use super::CHECKPOINT_TABLES;
 use super::checkpoints::CheckpointStats;
 use crate::sink::SinkTotals;
 
-/// Everything the run counted that is not in [`NetStats`].
-pub(super) struct RunTotals {
+/// Everything the run counted that is not in [`NetStats`]. The manifest reads
+/// the same struct, so it and this summary cannot report different values.
+#[derive(Default)]
+pub(crate) struct RunTotals {
     pub chunks_processed: u32,
     /// DemoFrames walked in the ReplayData stream.
     ///

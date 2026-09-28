@@ -17,7 +17,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::time::Duration;
 
 use vrf_container::Preamble;
 use vrf_decode::OverlayErrorReport;
@@ -25,6 +24,7 @@ use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 use vrf_schema::NetGuidCache;
 
+use crate::driver::RunTotals;
 use crate::driver::checkpoints::CheckpointStats;
 use crate::error::CliError;
 use crate::sink::SinkTotals;
@@ -32,42 +32,22 @@ use crate::sink::SinkTotals;
 /// Every run-level value needed to judge whether the published tables are
 /// complete and how much typed decoding fell back to preserved raw data.
 pub(crate) struct ManifestQuality<'a> {
-    pub chunks_processed: u32,
-    pub export_groups: usize,
-    pub movement_rows: u64,
-    pub net_guid_rows: usize,
-    pub event_rows: u64,
-    pub partial_rows: u64,
-    pub partial_bits: u64,
-    pub event_trailing_bytes: u64,
-    pub replay_data_trailing_bytes: u64,
-    /// ExternalData and GameSpecificFrameData bytes the ReplayData frames
-    /// stepped over. Published so a corpus guard can see them move; the
-    /// sections are length-prefixed, so nothing else would.
-    pub frame_skips: FrameSkips,
-    pub event_layout_mismatches: u64,
-    pub event_first_layout_mismatch: Option<&'a str>,
-    pub event_payloads_decoded: u64,
-    pub event_payload_unknown_groups: u64,
+    pub run: &'a RunTotals,
     pub net: &'a NetStats,
-    pub sink: &'a SinkTotals,
     pub error_report: &'a OverlayErrorReport,
     pub checkpoints: Option<&'a CheckpointStats>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn write_manifest(
     path: &Path,
     source_file: &str,
     file_size: usize,
     preamble: &Preamble,
     cache: &NetGuidCache,
-    stats: &NetStats,
-    total_packets: u32,
-    elapsed: Duration,
     players: &[(u32, Option<String>, Option<u32>)],
     quality: &ManifestQuality<'_>,
 ) -> Result<(), CliError> {
+    let stats = quality.net;
     let header = &preamble.header;
     let ver = &header.replay_version;
     let info = &preamble.info;
@@ -92,7 +72,7 @@ pub fn write_manifest(
             ),
             ("replay_changelist", ver.changelist.to_string()),
             ("duration_ms", info.length_in_ms.to_string()),
-            ("elapsed_ms", elapsed.as_millis().to_string()),
+            ("elapsed_ms", quality.run.elapsed.as_millis().to_string()),
             ("friendly_name", json_str(&info.friendly_name)),
             ("is_live", json_bool(info.is_live).to_owned()),
             ("compressed", json_bool(info.compressed).to_owned()),
@@ -160,7 +140,7 @@ pub fn write_manifest(
     wkvs(
         &mut out,
         &[
-            ("packet_count", total_packets.to_string()),
+            ("packet_count", quality.run.total_packets.to_string()),
             ("bunch_count", stats.bunches.to_string()),
             (
                 "malformed_packet_count",
@@ -311,6 +291,7 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
     // Zero is printed, not omitted. A line that appears only when non-zero
     // cannot distinguish "nothing was lost" from "this code stopped running".
     let q = quality;
+    let run = q.run;
     wkvs(
         &mut out,
         &[
@@ -318,40 +299,40 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
                 "content_blocks_lost",
                 q.net.lost_content_blocks().to_string(),
             ),
-            ("chunks_processed", q.chunks_processed.to_string()),
-            ("export_groups", q.export_groups.to_string()),
-            ("movement_rows", q.movement_rows.to_string()),
-            ("net_guid_rows", q.net_guid_rows.to_string()),
-            ("event_rows", q.event_rows.to_string()),
-            ("partial_rows", q.partial_rows.to_string()),
-            ("partial_bits", q.partial_bits.to_string()),
-            ("event_trailing_bytes", q.event_trailing_bytes.to_string()),
+            ("chunks_processed", run.chunks_processed.to_string()),
+            ("export_groups", run.export_groups.to_string()),
+            ("movement_rows", run.movement_rows.to_string()),
+            ("net_guid_rows", run.net_guid_rows.to_string()),
+            ("event_rows", run.event_rows.to_string()),
+            ("partial_rows", run.partial_rows.to_string()),
+            ("partial_bits", run.partial_bits.to_string()),
+            ("event_trailing_bytes", run.event_trailing_bytes.to_string()),
             (
                 "replay_data_trailing_bytes",
-                q.replay_data_trailing_bytes.to_string(),
+                run.replay_data_trailing_bytes.to_string(),
             ),
         ],
         2,
     );
-    write_frame_skips(&mut out, "frame_", &q.frame_skips, 2);
+    write_frame_skips(&mut out, "frame_", &run.frame_skips, 2);
     wkvs(
         &mut out,
         &[
             (
                 "event_layout_mismatches",
-                q.event_layout_mismatches.to_string(),
+                run.event_layout_mismatches.to_string(),
             ),
             (
                 "event_first_layout_mismatch",
-                json_option(q.event_first_layout_mismatch),
+                json_option(run.event_first_layout_mismatch.as_deref()),
             ),
             (
                 "event_payloads_decoded",
-                q.event_payloads_decoded.to_string(),
+                run.event_payloads_decoded.to_string(),
             ),
             (
                 "event_payload_unknown_groups",
-                q.event_payload_unknown_groups.to_string(),
+                run.event_payload_unknown_groups.to_string(),
             ),
             (
                 "overlay_error_buckets",
@@ -369,7 +350,7 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
         2,
     );
     write_net_quality(&mut out, "net", quality.net, 2, true);
-    write_sink_quality(&mut out, "sink", quality.sink, 2, true);
+    write_sink_quality(&mut out, "sink", &run.sink, 2, true);
 
     match quality.checkpoints {
         Some(checkpoints) => {
@@ -792,33 +773,10 @@ mod tests {
 
     #[test]
     fn quality_json_names_every_load_bearing_counter() {
-        let net = NetStats::default();
-        let sink = SinkTotals::default();
-        let checkpoints = CheckpointStats::default();
-        let errors = OverlayErrorReport::default();
-        let json = quality_json(&ManifestQuality {
-            chunks_processed: 0,
-            export_groups: 0,
-            movement_rows: 0,
-            net_guid_rows: 0,
-            event_rows: 0,
-            partial_rows: 0,
-            partial_bits: 0,
-            event_trailing_bytes: 0,
-            replay_data_trailing_bytes: 0,
-            frame_skips: FrameSkips::default(),
-            event_layout_mismatches: 0,
-            event_first_layout_mismatch: None,
-            event_payloads_decoded: 0,
-            event_payload_unknown_groups: 0,
-            net: &net,
-            sink: &sink,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-
-        for key in [
-            // Every NetStats scalar and bounded-diagnostic size.
+        // Every NetStats scalar and bounded-diagnostic size, and every
+        // SinkTotals/OverlayStats/ArrayDecodeStats counter: once at the top
+        // level and once in `checkpoints`.
+        const NET_AND_SINK_KEYS: &[&str] = &[
             "packets",
             "malformed_packets",
             "bunches",
@@ -856,7 +814,6 @@ mod tests {
             "must_be_mapped_guids",
             "diagnostics_retained",
             "diagnostics_dropped",
-            // Every SinkTotals/OverlayStats/ArrayDecodeStats counter.
             "sink_rpcs_emitted",
             "sink_actor_opens",
             "sink_actor_closes",
@@ -867,8 +824,6 @@ mod tests {
             "overlay_not_in_table",
             "overlay_no_field_name",
             "overlay_handle_conflicts_refused",
-            "overlay_error_buckets",
-            "overlay_errors_reported",
             "effect_blobs_decoded",
             "struct_blobs_decoded",
             "struct_blobs_failed",
@@ -896,7 +851,12 @@ mod tests {
             "cnc_bruteforce_payloads_unwalked",
             "rep_layout_cnc_tails_decoded",
             "rep_layout_cnc_tails_preserved",
-            // Run-level completeness and checkpoint-only accounting.
+        ];
+        // The overlay error report, run-level completeness and
+        // checkpoint-only accounting: once each.
+        const RUN_KEYS: &[&str] = &[
+            "overlay_error_buckets",
+            "overlay_errors_reported",
             "content_blocks_lost",
             "chunks_processed",
             "export_groups",
@@ -934,95 +894,26 @@ mod tests {
             "checkpoint_export_field_rows_written",
             "checkpoint_actor_rows_dropped",
             "checkpoint_movement_rows_dropped",
-        ] {
-            let needle = format!("\"{key}\":");
-            let expected = if [
-                "packets",
-                "malformed_packets",
-                "bunches",
-                "partial_errors",
-                "partial_fragments",
-                "partial_completed",
-                "unfinished_partials",
-                "unfinished_partial_bits",
-                "bunch_header_failures",
-                "content_blocks",
-                "rep_layout_blocks",
-                "class_net_cache_blocks",
-                "deleted_blocks",
-                "fields",
-                "rpcs",
-                "skipped_bits",
-                "content_block_framing_failures",
-                "malformed_content_blocks",
-                "transform_failures",
-                "field_stream_failures",
-                "rpc_stream_failures",
-                "unresolved_rpc_payloads_preserved",
-                "actor_opens",
-                "actor_closes",
-                "channel_reopens_while_open",
-                "actor_opens_missing_spawn",
-                "failed_reopens_while_open",
-                "bunches_on_unopened_channel",
-                "unopened_channel_bits",
-                "channel_state_limit_failures",
-                "partial_resource_limit_failures",
-                "package_map_exports",
-                "rep_layout_export_bunches",
-                "exported_guids",
-                "must_be_mapped_guids",
-                "diagnostics_retained",
-                "diagnostics_dropped",
-                "sink_rpcs_emitted",
-                "sink_actor_opens",
-                "sink_actor_closes",
-                "sink_content_blocks",
-                "overlay_decoded_ok",
-                "overlay_decoded_err",
-                "overlay_raw_or_skip",
-                "overlay_not_in_table",
-                "overlay_no_field_name",
-                "overlay_handle_conflicts_refused",
-                "effect_blobs_decoded",
-                "struct_blobs_decoded",
-                "struct_blobs_failed",
-                "struct_blob_first_error",
-                "multi_contents_items_emitted",
-                "movement_rpc_errors",
-                "movement_first_error",
-                "movement_sized_section_tails",
-                "movement_sized_section_tail_bits",
-                "movement_open_section_tails",
-                "movement_open_section_tail_bits",
-                "array_elements_decoded",
-                "array_fields_emitted",
-                "array_truncations",
-                "array_errors",
-                "array_unconsumed_nested_bits",
-                "array_unconsumed_root_bits",
-                "array_implicit_terminations",
-                "array_leaf_decode_errors",
-                "tracked_rewards_opaque_empty_variants",
-                "truncated_rpcs",
-                "rpc_suffix_bits_dropped",
-                "cnc_rpcs_emitted",
-                "cnc_bruteforce_payloads_attempted",
-                "cnc_bruteforce_payloads_unwalked",
-                "rep_layout_cnc_tails_decoded",
-                "rep_layout_cnc_tails_preserved",
-            ]
-            .contains(&key)
-            {
-                2
-            } else {
-                1
-            };
-            assert_eq!(
-                json.matches(&needle).count(),
-                expected,
-                "quality manifest omitted or duplicated {key}: {json}"
-            );
+        ];
+        let net = NetStats::default();
+        let checkpoints = CheckpointStats::default();
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            run: &RunTotals::default(),
+            net: &net,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+
+        for (keys, expected) in [(NET_AND_SINK_KEYS, 2), (RUN_KEYS, 1)] {
+            for key in keys {
+                let needle = format!("\"{key}\":");
+                assert_eq!(
+                    json.matches(&needle).count(),
+                    expected,
+                    "quality manifest omitted or duplicated {key}: {json}"
+                );
+            }
         }
     }
 
@@ -1042,22 +933,11 @@ mod tests {
         checkpoints.resolved_path_indices = 11;
         let errors = OverlayErrorReport::default();
         let json = quality_json(&ManifestQuality {
-            chunks_processed: 0,
-            export_groups: 0,
-            movement_rows: 0,
-            net_guid_rows: 0,
-            event_rows: 0,
-            partial_rows: 0,
-            partial_bits: 0,
-            event_trailing_bytes: 0,
-            replay_data_trailing_bytes: 0,
-            frame_skips: FrameSkips::default(),
-            event_layout_mismatches: 0,
-            event_first_layout_mismatch: None,
-            event_payloads_decoded: 0,
-            event_payload_unknown_groups: 0,
+            run: &RunTotals {
+                sink,
+                ..RunTotals::default()
+            },
             net: &net,
-            sink: &sink,
             error_report: &errors,
             checkpoints: Some(&checkpoints),
         });
@@ -1096,22 +976,11 @@ mod tests {
         checkpoints.sink.movement_open_section_tail_bits = 54;
         let errors = OverlayErrorReport::default();
         let json = quality_json(&ManifestQuality {
-            chunks_processed: 0,
-            export_groups: 0,
-            movement_rows: 0,
-            net_guid_rows: 0,
-            event_rows: 0,
-            partial_rows: 0,
-            partial_bits: 0,
-            event_trailing_bytes: 0,
-            replay_data_trailing_bytes: 0,
-            frame_skips: FrameSkips::default(),
-            event_layout_mismatches: 0,
-            event_first_layout_mismatch: None,
-            event_payloads_decoded: 0,
-            event_payload_unknown_groups: 0,
+            run: &RunTotals {
+                sink,
+                ..RunTotals::default()
+            },
             net: &net,
-            sink: &sink,
             error_report: &errors,
             checkpoints: Some(&checkpoints),
         });
@@ -1152,22 +1021,11 @@ mod tests {
         checkpoints.sink.content_blocks = 34;
         let errors = OverlayErrorReport::default();
         let json = quality_json(&ManifestQuality {
-            chunks_processed: 0,
-            export_groups: 0,
-            movement_rows: 0,
-            net_guid_rows: 0,
-            event_rows: 0,
-            partial_rows: 0,
-            partial_bits: 0,
-            event_trailing_bytes: 0,
-            replay_data_trailing_bytes: 0,
-            frame_skips: FrameSkips::default(),
-            event_layout_mismatches: 0,
-            event_first_layout_mismatch: None,
-            event_payloads_decoded: 0,
-            event_payload_unknown_groups: 0,
+            run: &RunTotals {
+                sink,
+                ..RunTotals::default()
+            },
             net: &net,
-            sink: &sink,
             error_report: &errors,
             checkpoints: Some(&checkpoints),
         });
@@ -1201,22 +1059,11 @@ mod tests {
         checkpoints.sink.cnc_bruteforce_payloads_unwalked = 3;
         let errors = OverlayErrorReport::default();
         let json = quality_json(&ManifestQuality {
-            chunks_processed: 0,
-            export_groups: 0,
-            movement_rows: 0,
-            net_guid_rows: 0,
-            event_rows: 0,
-            partial_rows: 0,
-            partial_bits: 0,
-            event_trailing_bytes: 0,
-            replay_data_trailing_bytes: 0,
-            frame_skips: FrameSkips::default(),
-            event_layout_mismatches: 0,
-            event_first_layout_mismatch: None,
-            event_payloads_decoded: 0,
-            event_payload_unknown_groups: 0,
+            run: &RunTotals {
+                sink,
+                ..RunTotals::default()
+            },
             net: &net,
-            sink: &sink,
             error_report: &errors,
             checkpoints: Some(&checkpoints),
         });
@@ -1236,7 +1083,6 @@ mod tests {
     #[test]
     fn frame_skips_publish_measured_values_for_both_passes() {
         let net = NetStats::default();
-        let sink = SinkTotals::default();
         let errors = OverlayErrorReport::default();
         let mut main = FrameSkips::default();
         main.external_data_blobs = 2;
@@ -1247,22 +1093,11 @@ mod tests {
         checkpoints.frame_skips.external_data_bytes = 11;
         checkpoints.frame_skips.game_specific_bytes = 13;
         let json = quality_json(&ManifestQuality {
-            chunks_processed: 0,
-            export_groups: 0,
-            movement_rows: 0,
-            net_guid_rows: 0,
-            event_rows: 0,
-            partial_rows: 0,
-            partial_bits: 0,
-            event_trailing_bytes: 0,
-            replay_data_trailing_bytes: 0,
-            frame_skips: main,
-            event_layout_mismatches: 0,
-            event_first_layout_mismatch: None,
-            event_payloads_decoded: 0,
-            event_payload_unknown_groups: 0,
+            run: &RunTotals {
+                frame_skips: main,
+                ..RunTotals::default()
+            },
             net: &net,
-            sink: &sink,
             error_report: &errors,
             checkpoints: Some(&checkpoints),
         });
@@ -1300,25 +1135,10 @@ mod tests {
         };
         assert_eq!(net.lost_content_blocks(), 15);
 
-        let sink = SinkTotals::default();
         let errors = OverlayErrorReport::default();
         let json = quality_json(&ManifestQuality {
-            chunks_processed: 0,
-            export_groups: 0,
-            movement_rows: 0,
-            net_guid_rows: 0,
-            event_rows: 0,
-            partial_rows: 0,
-            partial_bits: 0,
-            event_trailing_bytes: 0,
-            replay_data_trailing_bytes: 0,
-            frame_skips: FrameSkips::default(),
-            event_layout_mismatches: 0,
-            event_first_layout_mismatch: None,
-            event_payloads_decoded: 0,
-            event_payload_unknown_groups: 0,
+            run: &RunTotals::default(),
             net: &net,
-            sink: &sink,
             error_report: &errors,
             checkpoints: None,
         });
