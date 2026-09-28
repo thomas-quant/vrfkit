@@ -27,6 +27,14 @@ event = []
 # its archive just cannot be inflated.
 checkpoint = []
 
+# The corpus smoke test parses Event chunks and inflates ReplayData, so it
+# needs both. Cargo silently skips a target whose required features are off:
+# a reduced feature set runs the unit tests only, never the corpus body, even
+# with VRFKIT_REQUIRE_CORPUS set.
+[[test]]
+name = "corpus"
+required-features = ["event", "oodle"]
+
 [dependencies]
 vrf-bitio = { workspace = true }
 thiserror = { workspace = true }
