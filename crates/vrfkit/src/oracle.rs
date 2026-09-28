@@ -425,22 +425,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     if total_with_content == 0 {
         println!("  No content blocks found - cannot validate.");
     } else {
-        // `failed` (`lost_content_blocks()`) is not a subset of
-        // `total_with_content`: a content-block framing failure (header or
-        // `content_bits` unreadable) is counted as lost without the block ever
-        // reaching `rep_layout_blocks`/`class_net_cache_blocks`, since framing
-        // failed before classification. So `failed` can exceed
-        // `total_with_content`, and the passed-block count is saturated at 0
-        // rather than wrapping to u64::MAX on the `- failed` a release build's
-        // disabled overflow checks would not catch.
-        let passed = total_with_content.saturating_sub(failed);
-        let pass_rate = 1.0 - (failed as f64 / total_with_content as f64);
-        println!(
-            "  ORACLE PASS RATE:     {:.6}% ({} / {} blocks passed)",
-            pass_rate * 100.0,
-            passed,
-            total_with_content
-        );
+        println!("{}", pass_rate_line(total_with_content, failed));
         if stats.skipped_bits > 0 {
             println!("  (skipped_bits counter: {} bits)", stats.skipped_bits);
         }
@@ -538,6 +523,29 @@ fn partial_reassembly_scope_note(partial_errors: u64) -> Option<String> {
             "{partial_errors} partial reassembly {rejection} discarded before content-block framing - excluded from the block score and verdict"
         )
     })
+}
+
+/// The `ORACLE PASS RATE` line for `failed` of `total_with_content` blocks.
+///
+/// `failed` (`lost_content_blocks()`) is not a subset of
+/// `total_with_content`: a content-block framing failure (header or
+/// `content_bits` unreadable) is counted as lost without the block ever
+/// reaching `rep_layout_blocks`/`class_net_cache_blocks`, since framing
+/// failed before classification. So `failed` can exceed
+/// `total_with_content`, and the passed-block count is saturated at 0
+/// rather than wrapping to u64::MAX on the `- failed` a release build's
+/// disabled overflow checks would not catch. The rate saturates with it,
+/// and stays `1 - failed / total` rather than `passed / total`, whose last
+/// bit can differ.
+fn pass_rate_line(total_with_content: u64, failed: u64) -> String {
+    let passed = total_with_content.saturating_sub(failed);
+    let pass_rate = 1.0 - (failed.min(total_with_content) as f64 / total_with_content as f64);
+    format!(
+        "  ORACLE PASS RATE:     {:.6}% ({} / {} blocks passed)",
+        pass_rate * 100.0,
+        passed,
+        total_with_content
+    )
 }
 
 /// The one-line conclusion printed under `VERDICT:`.
@@ -652,7 +660,8 @@ fn print_diagnostic_event(index: usize, ev: &DiagnosticEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Verdict, checkpoint_scope_note, partial_reassembly_scope_note, verdict_from_stats,
+        Verdict, checkpoint_scope_note, partial_reassembly_scope_note, pass_rate_line,
+        verdict_from_stats,
     };
     use vrf_net::stats::NetStats;
 
@@ -691,6 +700,26 @@ mod tests {
         assert!(
             note.contains("excluded from the block score and verdict"),
             "the note must state the scoring consequence: {note}"
+        );
+    }
+
+    /// The rate saturates at 0 like the passed count beside it. It went
+    /// negative instead -- "-50.000000% (0 / 2 blocks passed)" -- which the
+    /// corpus sweeps' `([\d.]+)%` cannot read, so they reported that the
+    /// oracle printed no rate at all.
+    #[test]
+    fn the_pass_rate_saturates_like_the_passed_count() {
+        assert_eq!(
+            pass_rate_line(2, 3),
+            "  ORACLE PASS RATE:     0.000000% (0 / 2 blocks passed)"
+        );
+        assert_eq!(
+            pass_rate_line(4, 1),
+            "  ORACLE PASS RATE:     75.000000% (3 / 4 blocks passed)"
+        );
+        assert_eq!(
+            pass_rate_line(4, 0),
+            "  ORACLE PASS RATE:     100.000000% (4 / 4 blocks passed)"
         );
     }
 
