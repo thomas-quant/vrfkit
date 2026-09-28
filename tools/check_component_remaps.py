@@ -48,13 +48,14 @@ the same zero, on the rows they route. They used to keep the ratio over
 RepLayout rows -- the leaf's against the class's RepLayout group -- and neither
 of those is what the pairs remap, so the verdict was wrong both ways. Over the
 1,018 exports of the 2026-09-28 build audit, `LocationalEffectManager` read
-`absent` on all 1,018 and `DamageHandlerComponent` on 1,008 while their
-`_ClassNetCache` groups took 119.9M and 72.2M rows; and `DamageHandlerComponent`
-read `broken` on the other 10 (12.03, 12.06, three 13.01, 13.02, four 13.05)
-over one or two stray RepLayout rows, for a pair that does not remap RepLayout
-blocks at all. A scratch build with that pair's target renamed moved 89,843
-rows off `DamageableComponent_ClassNetCache` on a 13.05 export and left 4,563
-payloads bare under the leaf, and this check's output did not change by a byte.
+`absent` on all 1,018 and `DamageHandlerComponent` on 1,008, although their
+`_ClassNetCache` groups held rows on every one of the 1,018 (119.9M and
+72.2M in all); and `DamageHandlerComponent` read `broken` on the other 10
+(12.03, 12.06, three 13.01, 13.02, four 13.05) over one or two stray
+RepLayout rows, for a pair that does not remap RepLayout blocks at all. A
+scratch build with that pair's target renamed moved 89,843 rows off
+`DamageableComponent_ClassNetCache` on a 13.05 export and left 4,563 payloads
+bare under the leaf, and this check's output did not change by a byte.
 
 What a ClassNetCache remap that did not fire leaves is exactly those payloads:
 with no function table the block is kept whole under the leaf, as a

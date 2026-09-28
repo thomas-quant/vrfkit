@@ -884,11 +884,11 @@ ratio over RepLayout rows, which is not what they remap, and it was wrong both
 ways. Over the 1,018 exports of the 2026-09-28 build audit it read
 `DamageHandlerComponent` `broken` on 10 healthy ones (12.03, 12.06, three 13.01,
 13.02, four 13.05) over one or two stray RepLayout rows, and `absent` on the
-rest while `DamageableComponent_ClassNetCache` took 72.2M rows; and a scratch
-build that broke the pair's remap -- 89,843 rows gone from that group and 4,563
-payloads bare under the leaf on a 13.05 export -- left its output unchanged byte
-for byte. RepLayout rows under a ClassNetCache-only leaf are now a printed
-count, not a failure.
+rest, although `DamageableComponent_ClassNetCache` held rows on all 1,018
+(72.2M in all); and a scratch build that broke the pair's remap -- 89,843
+rows gone from that group and 4,563 payloads bare under the leaf on a 13.05
+export -- left its output unchanged byte for byte. RepLayout rows under a
+ClassNetCache-only leaf are now a printed count, not a failure.
 
 What the checker cannot see is a rename itself: the old leaf simply vanishes.
 The renamed component arrives under its new name, which is why the checker

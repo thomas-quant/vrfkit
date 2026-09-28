@@ -158,8 +158,9 @@ class ClassNetCachePairTests(unittest.TestCase):
     remap. Over the 1,018 exports of the 2026-09-28 audit that read
     `DamageHandlerComponent` `broken` on 10 healthy exports (one or two stray
     RepLayout rows, 0 on `DamageableComponent`) and `absent` on the other
-    1,008 while `DamageableComponent_ClassNetCache` took 72.2M rows; and a
-    scratch build with the pair's target renamed printed byte-identical output.
+    1,008, although `DamageableComponent_ClassNetCache` held rows on all
+    1,018 (72.2M in all); and a scratch build with the pair's target renamed
+    printed byte-identical output.
     The row counts below are those exports'.
     """
 
