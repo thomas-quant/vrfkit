@@ -2,34 +2,19 @@
 //!
 //! # Design: no skipping
 //!
-//! Every field/RPC is emitted, even if we cannot resolve the group path or field
-//! name. In that case we emit `group_path = "<unknown:{guid}>"` and
-//! `field_name = None`. When an unresolved ClassNetCache function table makes
-//! the block unsplittable, its whole payload is emitted as one explicitly
-//! marked preservation row instead of fabricated fields. This keeps the
-//! Parquet output a **lossless** representation of the stream.
+//! Every field and RPC is emitted, even when its group path or field name does
+//! not resolve: then `group_path = "<unknown:{guid}>"` and `field_name = None`.
+//! A block an unresolved ClassNetCache function table leaves unsplittable is
+//! emitted whole as one marked preservation row, never as fabricated fields, so
+//! the Parquet output stays a **lossless** representation of the stream.
 //!
-//! # Layout
-//!
-//! - [`intern`] -- the `Arc<str>` pool behind the two name columns.
-//! - [`paths`] -- content-block group-path resolution and its memo.
-//! - [`rpc`] -- the ClassNetCache RPC parameter walker.
-//! - [`blobs`] -- the struct-blob and flattened-array decoders.
-//! - [`measured_routes`] -- which structured-array routes each build admits.
-//! - [`stream`] -- the `vrf-net` trait impls that drive all of the above.
-//! - [`totals`] -- the per-run sum of every packet sink's counters, shared by
-//!   `export` (both passes) and `diag`.
-//!
-//! This module holds what all of them but [`totals`] share: the sink, the
-//! per-packet record buffers, and the state that must outlive a packet.
+//! This module holds the sink, the per-packet record buffers and the state that
+//! must outlive a packet; each submodule holds one concern.
 //!
 //! # What the sink costs
 //!
 //! `vrfkit validate` runs this whole path and writes no file, so it measures
-//! the sink alone.
-//!
-//! Sink cost before/after the memo+pool change, reference replay:
-//! docs/PERFORMANCE_NOTES.md#what-the-whole-sink-costs.
+//! the sink alone: docs/PERFORMANCE_NOTES.md#what-the-whole-sink-costs.
 
 mod blobs;
 mod failure_stats;
@@ -69,66 +54,46 @@ static TABLE: OverlayTable = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY
 /// How many stream-failure lines to retain. See [`ChannelState::stream_failures`].
 const MAX_STREAM_FAILURE_RECORDS: usize = 32;
 
-/// One BombPlayerState actor's identity, accumulated from its `Subject` and
-/// `SpawnedCharacter` fields for the manifest `players` array.
-///
-/// `Subject` is the account UUID (a `String`); `SpawnedCharacter` is the
-/// character actor NetGUID, which equals `movement.character_net_guid`. Together
-/// they let every actor-keyed table join to a stable account identity -- the
-/// one piece `playerLoadouts`' `characterId` cannot give when two players pick
-/// the same agent.
+/// One BombPlayerState actor's identity for the manifest `players` array:
+/// `Subject`, the account UUID, and `SpawnedCharacter`, the character actor
+/// NetGUID (equal to `movement.character_net_guid`). Together they join every
+/// actor-keyed table to a stable account -- what `playerLoadouts`'
+/// `characterId` cannot do when two players pick the same agent.
 #[derive(Debug, Clone, Default)]
 pub struct PlayerIdentity {
     pub subject: Option<String>,
     pub character_net_guid: Option<u32>,
 }
 
-/// Persistent per-channel state that must survive across packets and chunks.
-///
-/// The replay pipeline creates a fresh `ExportSink` for every packet (to
-/// satisfy borrow-checker constraints around `NetGuidCache` mutability). This
-/// struct holds the state that *must* persist across those boundaries -- the
-/// archetype GUID assigned when a channel is opened, which is needed later to
-/// resolve ClassNetCache export groups when content blocks arrive, plus the two
-/// memos and the name pool, none of which would ever warm up if they were
-/// rebuilt half a million times.
+/// State that must outlive a packet, across packets and chunks. `ExportSink` is
+/// rebuilt for every packet (it borrows the `NetGuidCache` mutably), so the
+/// channel archetypes later ClassNetCache blocks resolve through, the two memos
+/// and the name pool live here; rebuilt half a million times they would never
+/// warm up.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelState {
-    /// channel_index -> the archetype and the actor it was read for. The actor
-    /// half is load-bearing; see [`ChannelArchetype`].
+    /// channel_index -> archetype, stamped with its actor ([`ChannelArchetype`]).
     archetypes: FxHashMap<u32, ChannelArchetype>,
-    /// See [`RpcParamGroupMemo`].
     rpc_param_groups: RpcParamGroupMemo,
-    /// See [`BlockPathMemo`].
     block_paths: BlockPathMemo,
-    /// See [`NameInterner`].
     names: NameInterner,
-    /// Bumped whenever this struct's archetype map changes: the one input to
-    /// group-path resolution that lives here rather than in the cache.
-    /// [`BlockPathMemo`] stamps itself with this, the cache's
-    /// `schema_generation` (declared group paths) and its `guid_generation`
-    /// (GUID -> path and GUID -> outer maps); only the three together cover
-    /// every input the resolution reads.
+    /// Bumped when the archetype map changes, the one resolution input that
+    /// lives here rather than in the cache: one of [`BlockPathMemo`]'s three
+    /// stamps (see [`paths`]).
     resolution_generation: u64,
-    /// One line per content block that framed and decoded but whose inner stream
-    /// could not be walked.
-    ///
-    /// Lives here rather than on the sink because the sink is rebuilt for every
-    /// packet, so anything recorded on it is lost immediately. Capped: a build
-    /// whose transform is wrong would fail on essentially every block, and the
-    /// first few dozen say everything the later million would.
+    /// One line per block that framed and decoded but whose inner stream did not
+    /// walk, kept here because the sink dies with its packet. Capped at
+    /// [`MAX_STREAM_FAILURE_RECORDS`]: a wrong transform fails nearly every
+    /// block and the first few dozen say it all; the population is in `failures`.
     stream_failures: Vec<String>,
     /// Failure aggregation is opt-in for `diag`; ordinary decode and export
     /// paths keep this as `None` and pay no map or payload-sampling cost.
     failures: Option<FailureAggregate>,
-    /// BombPlayerState identity capture for the manifest `players` array. Keyed
-    /// by the PlayerState actor's NetGUID; filled in `on_field` as `Subject`
-    /// and `SpawnedCharacter` arrive, drained once at the end of the replay.
+    /// PlayerState actor NetGUID -> [`PlayerIdentity`], filled by `on_field`.
     players: FxHashMap<u32, PlayerIdentity>,
 }
 
 impl ChannelState {
-    /// Create an empty channel state.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -141,7 +106,6 @@ impl ChannelState {
         }
     }
 
-    /// Retained stream-failure lines.
     #[must_use]
     pub fn stream_failures(&self) -> &[String] {
         &self.stream_failures
@@ -152,41 +116,32 @@ impl ChannelState {
         self.failures = Some(FailureAggregate::new(retain_payloads));
     }
 
-    /// Whether the current pass requested detailed failure positions and
-    /// optional payload callbacks from the replication layer.
+    /// Whether this pass asks the replication layer for failure details and
+    /// payload callbacks.
     pub fn failure_aggregate_enabled(&self) -> bool {
         self.failures.is_some()
     }
 
-    /// Take the failure aggregate out, leaving it empty. The checkpoint pass
-    /// builds one channel state per chunk, so its totals are gathered by
-    /// draining each chunk's aggregate into the caller's.
+    /// Take the failure aggregate out, leaving it empty: the checkpoint pass
+    /// drains each chunk's channel state into the caller's totals.
     #[must_use]
     pub fn take_failure_aggregate(&mut self) -> FailureAggregate {
         self.failures.take().unwrap_or_default()
     }
 
-    /// Captured player identities (PlayerState actor NetGUID -> identity), for
-    /// the manifest `players` array.
-    ///
-    /// Gated with its only caller: the manifest is written by `driver`, which
-    /// is itself `export`-only, so without the feature this is dead code and
-    /// the build says so.
+    /// Captured player identities, for the manifest `players` array. Gated like
+    /// its only caller, the `export`-only `driver`, or it is dead code without.
     #[cfg(feature = "export")]
     #[must_use]
     pub fn players(&self) -> &FxHashMap<u32, PlayerIdentity> {
         &self.players
     }
 
-    /// Declare that something group-path resolution reads has changed.
-    ///
-    /// Call sites are deliberately few -- the archetype assignment and
-    /// retirement in `paths` (`set_channel_archetype` from `on_actor_open`,
-    /// `retire_channel_archetype` from `on_actor_close`) -- because every one
-    /// of them is a place the memo could go stale. The cache's GUID maps are
-    /// not among them: `NetGuidCache::guid_generation` stamps those. Adding a
-    /// resolution input that no stamp covers is silent byte movement, not a
-    /// test failure.
+    /// Declare that something group-path resolution reads has changed. The
+    /// only callers are `set_channel_archetype` and `retire_channel_archetype`
+    /// in `paths` (the cache's GUID maps have `NetGuidCache::guid_generation`);
+    /// a resolution input no stamp covers is silent byte movement, not a test
+    /// failure.
     fn note_resolution_input_changed(&mut self) {
         self.resolution_generation = self.resolution_generation.wrapping_add(1);
     }
@@ -205,34 +160,26 @@ pub struct ExportStats {
     /// Exact 24-bit `TrackedRewards` windows with the measured opaque zero
     /// byte. They preserve their parent raw row and emit no child rows.
     pub tracked_rewards_opaque_empty_variants: u64,
-    /// EffectContainer blobs turned into a `value_str` JSON array.
-    ///
-    /// Counted because nothing else moves when this decoder works. The overlay
-    /// buckets are filled before the additive pass runs, so a successful effect
-    /// decode leaves `decoded_ok`, `not_in_table` and the rest exactly where
-    /// they were, and the only trace is a larger `fields.parquet`. A silent
-    /// improvement is the same failure as a silent loss: the next session
-    /// diffs two summaries, sees every counter identical, and concludes
-    /// nothing changed. Failures already land in `overlay.decoded_err`.
+    /// EffectContainer blobs turned into a `value_str` JSON array: the only
+    /// signal this decoder worked, since the overlay buckets are filled before
+    /// the additive pass and a success moves no other counter (a silent
+    /// improvement misleads like a silent loss). Failures land in
+    /// `overlay.decoded_err`.
     pub effect_blobs_decoded: u64,
 
     /// Struct-blob (`RoundResults`, `TeamEconomy`, `RoundInfos`) parent rows
     /// whose dedicated decoder produced elements.
     pub struct_blobs_decoded: u64,
 
-    /// Item NetGUID rows emitted by the `MultiItemSlot.MultiContents` decoder.
-    /// One per item actor reference in a multi-item slot. Surfaced separately
-    /// for the same reason [`Self::effect_blobs_decoded`] is: these rows are
-    /// already counted under `not_in_table` (the parent stays `Raw`) and under
-    /// `fields_emitted`, so this counter is the only signal that the additive
-    /// decoder produced typed leaves rather than silently no-op-ing.
+    /// Item NetGUID rows from the `MultiItemSlot.MultiContents` decoder, one per
+    /// item reference. The parent stays `Raw` (`not_in_table`), so as with
+    /// [`Self::effect_blobs_decoded`] this is the decoder's only signal.
     pub multi_contents_items_emitted: u64,
 
-    /// RPC rows emitted by the ClassNetCache brute-force decoder for
-    /// unresolved groups (currently `AbilitiesAndBuffsComponent`). The
-    /// preservation row stays, and each decoded RPC is an extra row; this
-    /// counter is the only signal that the additive decoder produced RPC
-    /// structure rather than silently leaving the opaque blob.
+    /// RPC rows from the fc=34 ClassNetCache decoder for
+    /// `AbilitiesAndBuffsComponent` -- extra rows beside an unresolved
+    /// payload's preservation row, and verified RepLayout-tail bodies. The only
+    /// signal that decoder produced RPC structure.
     pub cnc_rpcs_emitted: u64,
 
     /// Unresolved `AbilitiesAndBuffsComponent` payloads offered to that
@@ -240,16 +187,10 @@ pub struct ExportStats {
     /// have, since that counter also counts RepLayout-tail decodes.
     pub cnc_bruteforce_payloads_attempted: u64,
 
-    /// Of those, payloads the fc=34 walk did not fit, so no RPC row was
-    /// emitted and only the whole-payload preservation row remains.
-    ///
-    /// This exit used to be `let Some(..) else { return; }` with no counter,
-    /// while only successes were counted -- the shape `struct_blobs_failed`
-    /// was added to remove. The constant 34 is empirical and its doc says an
-    /// update can fail the walk; if one does, `CNC RPC rows` shrinks and this
-    /// is the line that says why. No bits are lost either way: the
-    /// preservation row carries the payload whole. Zero on the replays
-    /// measured when it was added.
+    /// Of those, payloads the fc=34 walk did not fit: no RPC row, only the
+    /// preservation row, which keeps every bit. 34 is empirical, so if an update
+    /// breaks the walk `CNC RPC rows` shrinks and this says why. Zero on the
+    /// replays measured when it was added.
     pub cnc_bruteforce_payloads_unwalked: u64,
 
     /// Post-RepLayout ClassNetCache tails decoded under verified component
@@ -260,103 +201,62 @@ pub struct ExportStats {
     /// was not sufficient for the verified decoder.
     pub rep_layout_cnc_tails_preserved: u64,
 
-    /// Struct-blob decodes that returned an error.
-    ///
-    /// These used to be `let Ok(..) else { return false }` -- discarded with no
-    /// counter and no line. That is how build 13.02 moving `RoundResults` from
-    /// handle 93 to 81 read as a completely clean export: every counter on the
-    /// summary was identical to a good run and the match score simply was not
-    /// in the Parquet. The decoders are additive, so a failure still costs no
-    /// rows and no bits; it must not also cost the operator the knowledge that
-    /// it happened.
+    /// Struct-blob decodes that returned an error. Additive, so a failure costs
+    /// no rows or bits, but it must be seen: uncounted, 13.02 moving
+    /// `RoundResults` from handle 93 to 81 exported as a clean run with no
+    /// match score in the Parquet.
     pub struct_blobs_failed: u64,
 
-    /// The first failure verbatim, so the summary can name the member and the
-    /// handle instead of only admitting that something went wrong.
+    /// The first failure verbatim, so the summary can name the member and handle.
     pub struct_blob_first_error: Option<String>,
 
     /// Movement-decode problems: per-update soft errors
-    /// (`RpcDecodeResult.error_count`) plus hard `Err` failures, summed.
-    /// `decode_movement_rpc` used to drop its `Result` wholesale, so a build
-    /// that changed the movement section format would silently shorten
-    /// `movement.parquet` with every other counter reading clean.
+    /// (`RpcDecodeResult.error_count`) plus hard `Err`s. Without it a changed
+    /// section format shortens `movement.parquet` with every counter clean.
     pub movement_rpc_errors: u64,
 
     /// The first movement-decode problem verbatim, for the summary to name.
     pub movement_first_error: Option<String>,
 
-    /// Movement sections, in a window sized by `movementBitCount`, that
-    /// stopped with bits of it unread -- see
-    /// `vrf_movement::RpcDecodeResult::sized_section_tails`. A soft tally:
-    /// it does not make a batch count as failed, so it moves no Parquet row.
+    /// Sections in a `movementBitCount`-sized window that stopped with bits
+    /// unread, and those bits (`vrf_movement::RpcDecodeResult::sized_section_tails`).
+    /// A soft tally: the batch still counts as clean, so no Parquet row moves.
     pub movement_sized_section_tails: u64,
-    /// Bits those sections left unread.
     pub movement_sized_section_tail_bits: u64,
-    /// The same for sections whose window ran to the end of the component
-    /// stream, where what follows may be other component data; kept apart so
-    /// the two readings are never summed into one number.
+    /// The same for windows that ran to the end of the component stream, where
+    /// what follows may be other data: kept apart, never summed with the above.
     pub movement_open_section_tails: u64,
-    /// Bits those sections left unread.
     pub movement_open_section_tail_bits: u64,
 
-    /// RPC payloads whose RepLayout parameter loop broke on a malformed read
-    /// before the terminating zero handle.
-    ///
-    /// `try_parse_rpc_params` keeps whatever rows it already parsed and returns
-    /// `true`, so a truncated RPC reads as success: fewer parameter rows than
-    /// declared, no other counter moves, and `rpcs_emitted` ticks up exactly as
-    /// it does for a clean parse. This is the one signal that distinguishes
-    /// "completed" from "abandoned mid-stream". Zero on valid replays; a non-zero
-    /// value means the wire declared more parameters than the bits could carry.
+    /// RPC payloads whose parameter loop broke on a malformed read before the
+    /// zero-handle terminator. The walk keeps its rows and reports success, so
+    /// this is the only signal of an abandoned walk. Zero on valid replays.
     pub truncated_rpcs: u64,
 
-    /// Bits left in an RPC payload after its zero-handle terminator, beyond the
-    /// one trailing alignment bit the `FunctionParameters` grammar permits.
+    /// Bits after an RPC's zero-handle terminator beyond the one trailing
+    /// alignment bit `FunctionParameters` allows. Counted, not rejected, and not
+    /// lost: such a payload also gets a whole-payload row under the function's
+    /// name, so every counted bit is in `raw_bits`.
     ///
-    /// The terminator used to end the walk without asking what remained. Any
-    /// parameter already emitted set `emitted_any`, which suppressed the
-    /// caller's whole-payload fallback row, so the tail reached no row, no
-    /// [`Self::truncated_rpcs`] and not even `skipped_bits`. Every *leaf*
-    /// payload in this crate is checked for full consumption
-    /// (`decode_field` returns `NotFullyConsumed`); the *container's* was not,
-    /// which is the same omission one level up.
-    ///
-    /// Counted rather than rejected, and not lost. The parameters that parsed
-    /// keep their rows, and a payload with a suffix also gets a whole-payload
-    /// row under the function's name (`try_parse_rpc_params`, or the caller's
-    /// raw row when no parameter parsed), so every counted bit is still in
-    /// `raw_bits`.
-    ///
-    /// It is not zero on real replays. In the 259ed10 corpus audit (1,018
-    /// unique replays, exported with `--checkpoints`) the main-pass total is
-    /// nonzero in 21 of 24 builds -- from 26,766 bits (12.07, 3 replays) to
-    /// 9,329,665 (13.05, 401 replays) -- and zero only in the three builds
-    /// with a single public fixture (12.10, 12.11, 13.00); some individual
-    /// replays read zero too. The checkpoint pass is zero in every build.
-    ///
-    /// Every counted bit had one source: the handle named
-    /// `ActiveGameplayEffects` under
-    /// `/Script/ShooterGame.AresAbilitySystemComponent_ClassNetCache`, whose
-    /// payload walks as parameters up to a zero handle and then continues.
-    /// ClassNetCache framing carries custom-delta properties as well as RPCs
-    /// (see `ActiveGameplayEffects` in docs/DATA.md), so this counts the part
-    /// of that payload the RPC parameter grammar does not describe; what those
-    /// bits encode is not established here. A suffix on any other handle would
-    /// be new, and would mean the grammar no longer describes that payload.
-    ///
-    /// Method (2026-09-28): a separate Python re-walk of the grammar --
-    /// checksum bit, IntPacked handle and length pairs to a zero handle, one
-    /// trailing bit allowed -- over every bare-named ClassNetCache row with a
-    /// payload in `fields.parquet` and `checkpoint_fields.parquet` reproduced
-    /// this counter exactly in 90 of 90 (export, stream) pairs: two exports
-    /// per build, one for each single-fixture build. In another 40 exports,
-    /// 1,416 of 32,391 such rows carried a suffix, every one of them
-    /// `ActiveGameplayEffects`, from 128 to 1,239 bits each.
+    /// 259ed10 corpus audit (1,018 unique replays, `--checkpoints`): the main
+    /// pass is nonzero in 21 of 24 builds, 26,766 bits (12.07, 3 replays) to
+    /// 9,329,665 (13.05, 401 replays), and zero in the three single-fixture
+    /// builds (12.10, 12.11, 13.00) and on some replays; the checkpoint pass is
+    /// zero in every build. One source: `ActiveGameplayEffects` under
+    /// `/Script/ShooterGame.AresAbilitySystemComponent_ClassNetCache`, a
+    /// payload that continues past its zero handle (ClassNetCache framing also
+    /// carries custom-delta properties; see `ActiveGameplayEffects` in
+    /// docs/DATA.md). What those bits encode is not established; a suffix on
+    /// any other handle would be new. Method (2026-09-28): a Python re-walk of
+    /// the grammar over every bare-named ClassNetCache row with a payload in
+    /// `fields.parquet` and `checkpoint_fields.parquet` matched this counter in
+    /// 90 of 90 (export, stream) pairs (two exports per build, one per
+    /// single-fixture build); in 40 more exports 1,416 of 32,391 such rows had a
+    /// suffix, all `ActiveGameplayEffects`, 128 to 1,239 bits each.
     pub rpc_suffix_bits_dropped: u64,
 
-    /// Flattened array leaves with a resolved type whose payload failed that
-    /// decoder. Their raw leaf rows are still emitted; this counts the typed
-    /// values that could not be recovered.
+    /// Flattened array leaves whose resolved type failed to decode; the raw leaf
+    /// rows are still emitted, this counts the typed values lost.
     pub array_leaf_decode_errors: u64,
 
     /// Typed world-location children emitted from the guarded map-click array.
@@ -364,10 +264,8 @@ pub struct ExportStats {
 }
 
 impl ExportStats {
-    /// Record a movement-RPC decode outcome so a silent failure cannot read
-    /// as success. Soft per-update errors (caught and counted by the decoder
-    /// in `RpcDecodeResult.error_count`) and hard `Err`s both land here; the
-    /// first is kept verbatim for the summary.
+    /// Record a movement-RPC decode outcome: soft per-update errors and hard
+    /// `Err`s both count, and the first is kept verbatim for the summary.
     pub fn record_movement_decode(
         &mut self,
         result: Result<&vrf_movement::RpcDecodeResult, &vrf_movement::MovementError>,
@@ -444,10 +342,8 @@ mod movement_stats_tests {
         })
     }
 
-    /// Section tails are a soft tally: they are summed from every decode that
-    /// returned `Ok`, with or without soft errors, and they never count as a
-    /// movement error -- a nonzero error count is what makes the sink keep a
-    /// batch's whole payload as a raw row.
+    /// Section tails are summed from every `Ok` decode, soft errors or not, and
+    /// never count as a movement error (which would keep the batch as a raw row).
     #[test]
     fn section_tails_are_summed_from_every_ok_decode_and_are_not_errors() {
         let mut s = ExportStats::default();
@@ -494,49 +390,30 @@ mod movement_stats_tests {
     }
 }
 
-/// The record buffers a sink fills for one packet.
-///
-/// These live outside the sink and are lent to it. The buffers are empty at
-/// the end of every packet, so keeping their capacity across packets costs
-/// one allocation for the entire run.
-///
-/// Construct-and-drop cost avoided by reuse, reference replay:
-/// docs/PERFORMANCE_NOTES.md#recordbuffers-are-lent-not-owned.
-///
-/// [`ExportSink::new`] clears them, so a sink always starts empty no matter what
-/// the previous holder did. That is what stops a caller which never drains them
-/// -- the validation oracle is one -- from accumulating every record in the
-/// replay.
+/// The record buffers a sink fills for one packet, lent to it so their capacity
+/// survives the packet: one allocation for the whole run
+/// (docs/PERFORMANCE_NOTES.md#recordbuffers-are-lent-not-owned).
+/// [`ExportSink::new`] clears them, so a caller that never drains them -- the
+/// validation oracle -- does not accumulate the whole replay.
 #[derive(Debug, Default)]
 pub struct RecordBuffers {
-    /// Field records to be drained by the driver.
     pub fields: Vec<FieldRecord>,
-    /// Movement records to be drained by the driver.
     pub movement: Vec<MovementRecord>,
-    /// Actor lifecycle records to be drained by the driver.
     pub actors: Vec<ActorRecord>,
     pub partials: Vec<PartialRecord>,
     pub checkpoint_blocks: Vec<CheckpointBlockRecord>,
 }
 
-/// The export sink. Receives decoded events from `vrf-net` and produces records
-/// for the Parquet writers.
-///
-/// The sink borrows the `NetGuidCache` mutably because `vrf-net` calls
-/// `GuidPathSink::register_path` during packet processing (for package-map
-/// export bunches that declare new GUID->path mappings inline).
+/// The export sink: turns `vrf-net` events into records for the Parquet
+/// writers. It borrows the `NetGuidCache` mutably because `vrf-net` calls
+/// `GuidPathSink::register_path` mid-packet, for package-map export bunches
+/// that declare GUID -> path mappings inline.
 pub struct ExportSink<'a> {
-    /// Schema cache -- mutable because in-packet path registrations need it.
     pub cache: &'a mut NetGuidCache,
-    /// Persistent per-channel state (archetype mappings survive across packets).
     channel_state: &'a mut ChannelState,
-    /// Current frame time in milliseconds.
     pub time_ms: u32,
-    /// Current packet index.
     pub packet_id: u32,
-    /// Output buffers for this packet. See [`RecordBuffers`].
     records: &'a mut RecordBuffers,
-    /// Stats.
     pub stats: ExportStats,
     /// The checksum-gated structured-array routes this replay's branch admits.
     /// See [`measured_routes`]; empty until `enable_measured_array_routes`.
@@ -551,21 +428,13 @@ pub struct ExportSink<'a> {
     /// True only when the replay's direct, pre-remap object path is exactly the
     /// measured component that carries the chained fc=34 ClassNetCache stream.
     current_is_abilities_and_buffs: bool,
-    /// Interned, so a block's rows share one allocation instead of each
-    /// carrying its own copy of the path. See [`intern`].
+    /// Interned: a block's rows share one allocation of the path ([`intern`]).
     current_group_path: Arc<str>,
     /// The half-finished overlay key hash for [`current_group_path`](Self::current_group_path).
-    ///
-    /// A content block probes the overlay ~2M times per replay with the same
-    /// group path for every field in it, and the group path is long
-    /// (`/Game/Characters/.../AggroBot_PC.AggroBot_PC_C`) while the field names
-    /// are short. Caching the group-path fold and finishing only the field-name
-    /// half per probe is the saving. Refreshed by `set_current_group_path`.
-    ///
-    /// A stale value is a performance and typing regression, not a wrong-value
-    /// bug: the slot tag and the full string equality check still reject a
-    /// mismatching key, so the field degrades to `raw_bits` instead of decoding
-    /// to a wrong type.
+    /// Overlay probes run ~2M times per replay, each block's with one long group
+    /// path and short field names, so only the name half is hashed per probe.
+    /// A stale value turns hits into misses (`raw_bits` only), never a wrong
+    /// type: the slot tag and full string equality still reject the key.
     current_group_hash: GroupHashState,
     current_group_resolution_source: &'static str,
     current_function_count_source: &'static str,
@@ -573,11 +442,7 @@ pub struct ExportSink<'a> {
 }
 
 impl<'a> ExportSink<'a> {
-    /// Build a sink for one packet over caller-owned record buffers.
-    ///
-    /// The buffers are cleared here rather than trusted to arrive empty: that is
-    /// what makes it safe to lend the same buffers to every packet regardless of
-    /// whether the caller drains them.
+    /// Build a sink for one packet; clears `records` (see [`RecordBuffers`]).
     pub fn new(
         cache: &'a mut NetGuidCache,
         channel_state: &'a mut ChannelState,
@@ -611,8 +476,7 @@ impl<'a> ExportSink<'a> {
         }
     }
 
-    /// Admit the structured-array routes measured for `branch`. The table,
-    /// and why each build admits what it does, is in [`measured_routes`].
+    /// Admit the structured-array routes measured for `branch` ([`measured_routes`]).
     pub(super) fn enable_measured_array_routes(&mut self, branch: &str) {
         self.measured_array_routes = MeasuredArrayRoutes::for_branch(branch);
     }
@@ -632,25 +496,18 @@ impl<'a> ExportSink<'a> {
         self.checkpoint_block_scope = Some((checkpoint, field_row_offset, block_index_offset));
     }
 
-    /// Set `current_group_path` and refresh its cached overlay hash in one step.
-    ///
-    /// Every assignment to [`current_group_path`](Self::current_group_path) must
-    /// go through here, or the cached [`current_group_hash`](Self::current_group_hash)
-    /// goes stale. The three sites are all in [`paths`]: the memo-hit return, the
-    /// fresh resolution, and the bare-instance-name ClassNetCache replacement.
-    /// The hash is a common-subexpression optimisation: a stale value turns
-    /// overlay hits into misses (fields degrade to `raw_bits`), never a wrong
-    /// value -- the slot tag plus full string equality still guard every hit.
+    /// Set `current_group_path` and refresh its cached hash together. Every
+    /// assignment goes through here (the three are in [`paths`]: memo hit, fresh
+    /// resolution, instance-name replacement), or
+    /// [`current_group_hash`](Self::current_group_hash) goes stale.
     fn set_current_group_path(&mut self, path: Arc<str>) {
         self.current_group_hash = group_hash_state(&path);
         self.current_group_path = path;
     }
 
-    /// Push one field row, stamped with the current block context.
-    ///
-    /// Every `FieldRecord` this crate produces is built here. Six of the
-    /// fifteen columns are block context that no call site should be able to
-    /// get wrong, and before this they were spelled out at seven of them.
+    /// Push one field row, stamped with the current block context. Every
+    /// `FieldRecord` this crate produces is built here, so no call site can get
+    /// the six block-context columns wrong.
     fn push_field(&mut self, row: FieldValues) {
         self.records.fields.push(FieldRecord {
             time_ms: self.time_ms,
@@ -679,16 +536,13 @@ impl<'a> ExportSink<'a> {
     }
 }
 
-/// The part of a field row that is not block context. See
-/// [`ExportSink::push_field`].
+/// A field row minus its block context; see [`ExportSink::push_field`].
 #[derive(Debug, Default)]
 struct FieldValues {
     handle: u32,
     field_name: Option<Arc<str>>,
-    /// The replay's declared `compatible_checksum` for this handle, when there
-    /// is one. Defaults to `None`, which is the honest answer for every path
-    /// that addresses a value inside a payload rather than by a declared
-    /// handle -- array leaves and struct blobs have no checksum to carry.
+    /// The replay's declared checksum for this handle; `None` (the default) for
+    /// rows addressed inside a payload, such as array leaves and struct blobs.
     compatible_checksum: Option<u32>,
     bit_count: u32,
     raw_bits: Option<SmallVec<[u8; 16]>>,
@@ -698,12 +552,10 @@ struct FieldValues {
     value_str: Option<String>,
 }
 
-/// The group path a sink starts with, before any content block has been seen.
-///
-/// A fresh `Arc` per sink would be 530,401 allocations of an empty string over a
-/// replay, so this hands out clones of one process-wide value. It is only ever
-/// observable if a field arrives before its content block, which the framer
-/// does not do.
+/// The group path a sink starts with: clones of one process-wide empty `Arc`,
+/// not the 530,401 fresh allocations one per sink would cost over a replay.
+/// Observable only if a field arrived before its content block, which the
+/// framer never does.
 fn empty_group_path() -> Arc<str> {
     use std::sync::OnceLock;
     static EMPTY: OnceLock<Arc<str>> = OnceLock::new();
@@ -713,20 +565,14 @@ fn empty_group_path() -> Arc<str> {
 impl GuidPathSink for ExportSink<'_> {
     /// Record a GUID -> path mapping the wire declared inline.
     ///
-    /// The write is skipped when it would change nothing, which saves the
-    /// `path.to_string()` allocation. The memo does not rely on the skip:
-    /// `set_net_guid_path` makes the same comparison (a zero outer is `None`
-    /// in both) and moves `NetGuidCache::guid_generation`, the stamp
-    /// [`BlockPathMemo`] reads for the cache's GUID -> path and GUID -> outer
-    /// maps, only when something changed. So nothing needs bumping here: any
-    /// call that gets past the check moves that stamp inside
-    /// `set_net_guid_path`.
-    ///
-    /// Both halves of the state are compared, not just the path. A repeat call
-    /// carrying the same path but an invalid outer *removes* the outer in
-    /// `set_net_guid_path`; skipping that on a path match alone would preserve a
-    /// stale outer, which changes resolved group paths and the `outer_net_guid`
-    /// column of `net_guids.parquet`.
+    /// A write that would change nothing is skipped, saving the `to_string`
+    /// allocation. The memo does not rely on the skip: `set_net_guid_path` makes
+    /// the same comparison (a zero outer is `None` in both) and moves
+    /// `NetGuidCache::guid_generation`, [`BlockPathMemo`]'s stamp for the GUID
+    /// maps, only on a real change, so nothing is bumped here. The outer is
+    /// compared too: a repeat with the same path and an invalid outer *removes*
+    /// the outer, and skipping it would keep a stale one in resolved group paths
+    /// and in `net_guids.parquet`'s `outer_net_guid` column.
     fn register_path(&mut self, guid: u32, path: &str, outer_guid: NetworkGuid) {
         let outer = if outer_guid.0 != 0 {
             Some(vrf_schema::NetworkGuid(outer_guid.0))
