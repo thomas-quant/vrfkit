@@ -71,3 +71,15 @@ checkpoints.
   errors; the missing-initial conclusion before it was a header-order error.
   Physical typed coverage then read 70.8088% main and 78.2028% checkpoint
   ([`../PARTIAL_HEADER_CORRECTION.md`](../PARTIAL_HEADER_CORRECTION.md)).
+
+## Raw-property inventory, 527 replays, 2026-08-31
+
+`analyze_raw_properties.py --all` over the 527 replays of 2026-08-31: 269,994,556
+non-ClassNetCache replicated-property rows. Of 59,291,880 raw-only rows,
+57,318,004 kept a wire name and 1,973,876 did not. Every unnamed row kept
+exact-length `raw_bits` (missing, typed, wrong-length, checksum-attributed and
+sentinel-handle violations all zero); 90.6005% carried a non-zero payload and
+11.6311% were not byte-aligned. The anonymous inventory found 1,699 field
+signatures and 1,029 update layouts. 13.04 had a larger genuinely new shape
+tail: 73.71% of its unnamed rows used a cross-build signature and 77.78% of its
+unnamed updates a cross-build layout, against about 100% for 13.01 and 13.02.
