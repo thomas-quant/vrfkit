@@ -718,6 +718,7 @@ otherwise reports a 999-round reserve.
 | Per-round team economy | `TeamEconomy` (13.01) / `BaseTeamState` (13.02) | ✅ |
 | Round-loss streak | `BombGameState_C.CurrentLossStreak` / `LossStreakTeam` (Swiftplay's game state carries `LossStreakTeam` too) | ✅ exact identity since 2026-09-28: Int32, 0..2 on every observed row; ObjectNetGuid, GUID 0 or the `RedTeam` / `BlueTeam` object in `net_guids` |
 | Match-timer override flag | `BombGameState_C.ShouldOverrideMatchTimer` (and Swiftplay's) | ✅ Bool, exact identity. Always sent in the same packet as `OverrideMatchTimerText`: true with its formatted-number form, false with its empty form, on every observed row |
+| Match-timer override text | `BombGameState_C.OverrideMatchTimerText` (and Swiftplay's) | ✅ `FTextTree`, exact identity: the FText history tree as JSON in `value_str` -- the empty history 255 (`{"flags":0,"history":255,"kind":"empty"}`) or history 4, a number the game formats itself (`kind: "as_number"`, a `source.double`, the `format` options -- always two integral and two fractional digits here -- and a `culture`). Observed source values 0.01..36.95. What the number counts down is not established. See [TEXT_HISTORY_EXPANSION.md](TEXT_HISTORY_EXPANSION.md#history-4-a-formatted-number) |
 
 ## Spike & objective
 

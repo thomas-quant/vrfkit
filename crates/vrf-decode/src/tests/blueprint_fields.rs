@@ -308,3 +308,69 @@ fn two_d_blueprint_fields_refuse_another_width() {
     );
     assert_eq!((stats.decoded_ok, stats.decoded_err), (0, 3));
 }
+
+/// `OverrideMatchTimerText` is an `FText` (its checksum reproduces with
+/// `FText`), and what it sends is two histories: the 72-bit empty form while
+/// the timer is not overridden and a 376-bit history 4 (`AsNumber`) while it
+/// is. The legacy `FText` reader keeps only string-table keys and refuses
+/// both, so the identity is typed `FTextTree`, the full-tree reader.
+#[test]
+fn match_timer_text_decodes_both_observed_histories() {
+    let mut stats = OverlayStats::default();
+    let empty = [0, 0, 0, 0, 0xff, 0, 0, 0, 0];
+    let number = [
+        0x01, 0x00, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00, 0x00, 0x80, 0x5f, 0x3a, 0x2f, 0x40, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+    for group in [BOMB_GS, SWIFT_GS] {
+        assert_eq!(
+            resolve(group, "OverrideMatchTimerText", Some(4_004_484_071)),
+            Some(FieldType::FTextTree)
+        );
+        for other in [None, Some(4_004_484_071 ^ 1)] {
+            assert_eq!(resolve(group, "OverrideMatchTimerText", other), None);
+        }
+        assert_eq!(
+            decode(
+                &mut stats,
+                group,
+                "OverrideMatchTimerText",
+                4_004_484_071,
+                &empty,
+                72
+            )
+            .3,
+            Some(r#"{"flags":0,"history":255,"kind":"empty"}"#.to_owned())
+        );
+        assert_eq!(
+            decode(&mut stats, group, "OverrideMatchTimerText", 4_004_484_071, &number, 376).3,
+            Some(
+                r#"{"flags":1,"history":4,"kind":"as_number","source":{"tag":3,"double":15.614009857177734},"format":{"always_sign":false,"use_grouping":true,"rounding_mode":0,"minimum_integral_digits":2,"maximum_integral_digits":2,"minimum_fractional_digits":2,"maximum_fractional_digits":2},"culture":""}"#
+                    .to_owned()
+            )
+        );
+    }
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (4, 0));
+    // The same bits under the legacy reader: both refused.
+    for (raw, bits) in [(&empty[..], 72), (&number[..], 376)] {
+        assert!(crate::decode_field(FieldType::FText, raw, bits).is_err());
+    }
+    // A history the tree reader has never seen laid out is a counted,
+    // rejected decode, not a guess.
+    let mut unknown = number;
+    unknown[4] = 5;
+    assert_eq!(
+        decode(
+            &mut stats,
+            BOMB_GS,
+            "OverrideMatchTimerText",
+            4_004_484_071,
+            &unknown,
+            376
+        ),
+        (None, None, None, None)
+    );
+    assert_eq!(stats.decoded_err, 1);
+}

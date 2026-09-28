@@ -57,6 +57,14 @@ class ScopedTypeGenerationTests(unittest.TestCase):
                 self.assertTrue(head.startswith("FieldType::"))
                 self.assertIn(head.removeprefix("FieldType::").split(" ")[0], variants)
 
+    def test_every_type_name_has_an_independent_decoder(self):
+        # The module docs require it before an entry may use a type, and
+        # nothing checked it: VectorDouble had scoped entries and no reader in
+        # validate_type_evidence.py until 2026-09-28.
+        import validate_type_evidence
+        missing = sorted(set(gen.TYPES) - set(validate_type_evidence.TYPED_COLUMNS))
+        self.assertEqual(missing, [])
+
     def test_rotator_quantization_import_only_when_an_entry_needs_it(self):
         base = {"group": "/G.G_C", "field": "ReplicatedMovement", "checksum": 2749104612,
                 "observed_builds": ["b"], "evidence": "e",

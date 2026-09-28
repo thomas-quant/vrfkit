@@ -13,9 +13,9 @@ Usage:
 ``fields.parquet`` and ``checkpoint_fields.parquet`` are inspected when present.
 The JSON shape is ``[{"group": "...", "field": "...", "type": "Bool"}]``.
 Supported types are Bool, Byte, Int32, UInt32, Float, Double, VectorDouble,
-FString, ObjectNetGuid, EnumByte, EnumRemainingBits, FName, RotationShort,
-VectorNetQuantize100, RepMovementByte and RepMovementShort -- among them
-every non-primitive name ``generate_scoped_types.py`` accepts. UInt32 is
+FString, ObjectNetGuid, EnumByte, EnumRemainingBits, FName, FTextTree,
+RotationShort, VectorNetQuantize100, RepMovementByte and RepMovementShort --
+among them every type name ``generate_scoped_types.py`` accepts. UInt32 is
 read unsigned, so a value with the high bit set must be exported positive;
 an Int32 reading of the same bits would pass the width check and still be
 wrong. VectorDouble is an ``FVector`` sent as three little-endian doubles,
@@ -35,6 +35,11 @@ byte multiples and some of them do not even start on a byte boundary:
   (rendered as its decimal string) or an inline FString plus an i32 instance
   number (0 renders the bare name, ``N`` renders ``name_{N-1}``). Everything
   after the flag bit is one bit off byte alignment.
+* ``FTextTree`` -- an ``FText``: u32 flags, a history byte and the history
+  body, for the histories the Rust tree reader accepts (255 empty, 11 string
+  table, 3 argument format, 4 as-number with a double source). With
+  ``--compare-typed`` the exported JSON is parsed and must equal the
+  independent read key for key; the double is compared exactly.
 * ``RotationShort`` -- one presence bit per rotator component, each followed
   by 16 bits when set.
 * ``VectorNetQuantize100`` -- a bounded ``SerializeInt(128)`` header whose low
@@ -179,6 +184,98 @@ def _fname(reader: _Bits) -> str:
     return name if number == 0 else f"{name}_{number - 1}"
 
 
+#: Nesting limit shared with the Rust tree reader; deeper input is refused.
+FTEXT_MAX_DEPTH = 16
+#: A format history's argument count must lie in 0..=this, as in Rust.
+FTEXT_MAX_ARGUMENTS = 128
+#: The seven `FNumberFormattingOptions` members, in wire order after the two
+#: bools and the rounding byte.
+FTEXT_DIGITS = ("minimum_integral_digits", "maximum_integral_digits",
+                "minimum_fractional_digits", "maximum_fractional_digits")
+
+
+def _ftext_bool(reader: _Bits) -> bool:
+    """An archive bool: a whole u32 that must be 0 or 1."""
+    value = reader.bits(32)
+    if value not in (0, 1):
+        raise ValueError(f"FText bool is {value}, not 0 or 1")
+    return bool(value)
+
+
+def _ftext_tree(reader: _Bits, depth: int = 0) -> dict:
+    """``FText`` serialization: u32 flags, a history byte, then the history.
+
+    Only the histories the Rust tree reader accepts, written from the Unreal
+    layouts rather than from ``ftext.rs``:
+
+    * 255 (none): zero flags and a zero u32 (no culture-invariant string);
+    * 11 (string table): an inline-name bit that must be clear, the table's
+      FName (FString + i32 number) and the key FString;
+    * 3 (argument format): a nested source text, an i32 argument count, and
+      per argument its name, a type byte and a value -- 0 an int64 kept as
+      its unsigned bits, 4 a nested text;
+    * 4 (as number): a type byte that must be 3 (double), the double, an
+      archive bool, the seven ``FNumberFormattingOptions`` members when it is
+      set, and the target culture FString.
+
+    Returned in the shape the exporter's JSON takes, so ``--compare-typed``
+    compares parsed JSON with this dict.
+    """
+    if depth >= FTEXT_MAX_DEPTH:
+        raise ValueError("FText nesting exceeds the depth limit")
+    flags = reader.bits(32)
+    history = reader.bits(8)
+    if history == 255:
+        if flags != 0 or reader.bits(32) != 0:
+            raise ValueError("FText empty history must have zero flags and zero length")
+        return {"flags": flags, "history": 255, "kind": "empty"}
+    if history == 11:
+        if reader.bit():
+            raise ValueError("FText string table name is not inline")
+        name = reader.fstring()
+        number = _signed(reader.bits(32), 32)
+        if number < 0:
+            raise ValueError("negative FText table name number")
+        key = reader.fstring()
+        return {"flags": flags, "history": 11, "kind": "string_table",
+                "table": {"name": name, "number": number}, "key": key}
+    if history == 3:
+        source = _ftext_tree(reader, depth + 1)
+        count = _signed(reader.bits(32), 32)
+        if not 0 <= count <= FTEXT_MAX_ARGUMENTS:
+            raise ValueError(f"FText argument count {count}")
+        arguments = []
+        for _ in range(count):
+            name = reader.fstring()
+            tag = reader.bits(8)
+            if tag == 0:
+                value = {"bits_u64": str(reader.bits(64))}
+            elif tag == 4:
+                value = _ftext_tree(reader, depth + 1)
+            else:
+                raise ValueError(f"FText argument tag {tag}")
+            arguments.append({"name": name, "tag": tag, "value": value})
+        return {"flags": flags, "history": 3, "kind": "format", "source": source,
+                "arguments": arguments}
+    if history == 4:
+        tag = reader.bits(8)
+        if tag != 3:
+            raise ValueError(f"FText number source tag {tag}")
+        number = struct.unpack("<d", reader.bits(64).to_bytes(8, "little"))[0]
+        if not math.isfinite(number):
+            raise ValueError("FText number is non-finite")
+        options = None
+        if _ftext_bool(reader):
+            options = {"always_sign": _ftext_bool(reader), "use_grouping": _ftext_bool(reader),
+                       "rounding_mode": _signed(reader.bits(8), 8)}
+            for member in FTEXT_DIGITS:
+                options[member] = _signed(reader.bits(32), 32)
+        culture = reader.fstring()
+        return {"flags": flags, "history": 4, "kind": "as_number",
+                "source": {"tag": 3, "double": number}, "format": options, "culture": culture}
+    raise ValueError(f"FText history {history}")
+
+
 def _packed_vector(reader: _Bits) -> dict:
     """``ReadPackedVector``: a SerializeInt(128) header whose low six bits are
     the component width and whose seventh says "scaled"; width 0 falls back to
@@ -282,7 +379,8 @@ def _exported_rep_movement(text: str) -> dict:
 
 #: Types read with `_Bits`, and the column their typed value is exported in.
 BIT_LEVEL_TYPES = {"EnumByte": "value_i64", "EnumRemainingBits": "value_i64",
-                   "FName": "value_str", "RotationShort": "value_str",
+                   "FName": "value_str", "FTextTree": "value_str",
+                   "RotationShort": "value_str",
                    "VectorNetQuantize100": "value_str",
                    "RepMovementByte": "value_str", "RepMovementShort": "value_str"}
 
@@ -302,6 +400,8 @@ def _decode_bits(raw: bytes, bit_count: int, type_name: str):
         value = reader.bits(bit_count)
     elif type_name == "FName":
         value = _fname(reader)
+    elif type_name == "FTextTree":
+        value = _ftext_tree(reader)
     elif type_name == "RotationShort":
         value = _rotator(reader, 16)
     elif type_name == "VectorNetQuantize100":
@@ -454,6 +554,13 @@ def exported_matches(type_name: str, exported, decoded) -> bool:
         return rep_movement_location_scale(decoded, exported) is not None
     if type_name in {"VectorNetQuantize100", "VectorDouble"}:
         return _parse_triple(exported, "(") == decoded
+    if type_name == "FTextTree":
+        if not isinstance(exported, str):
+            return False
+        try:
+            return json.loads(exported) == decoded
+        except ValueError:
+            return False
     if type_name == "RotationShort":
         parsed = _parse_triple(exported, "rot(")
         return parsed is not None and all(

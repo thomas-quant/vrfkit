@@ -1706,6 +1706,50 @@
         "++Ares-Core+release-13.06"
       ],
       "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Swiftplay_EoRCredits_GameState_C declares ShouldOverrideMatchTimer as a replicated (CPF_Net) BoolProperty, inherited from BombGameState_C; the declared compatible checksum 2889152318 reproduces as (ShouldOverrideMatchTimer, bool) and not as uint8 (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 105 main plus 114 checkpoint rows in 32 replays on 5 builds, every one exactly 1 bit; an independent reader (exactly one bit) consumed every payload, 0 failures, none typed before. Values: 105 true, 114 false. Every row arrives in the same packet as an OverrideMatchTimerText row of the same actor: true with its 376-bit formatted-number form on every one, false with its 72-bit empty form on every one. Scoped entries do not follow the Swiftplay class alias, so this group has its own. Re-exported by this change: all 219 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+      "field": "OverrideMatchTimerText",
+      "checksum": 4004484071,
+      "type": "FTextTree",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): BombGameState_C declares OverrideMatchTimerText as a replicated (CPF_Net) TextProperty; the declared compatible checksum 4004484071 reproduces as (OverrideMatchTimerText, FText) and not as FString (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 6,991 main plus 13,894 checkpoint rows in 913 replays on 21 builds, 13,891 of 72 and 6,994 of 376 bits; an independent reader (flags u32, history byte, then the measured history body, ending exactly at the payload end) consumed every payload, 0 failures, none typed before. Forms: 13,891 the 72-bit empty history 255, 6,994 the 376-bit history 4 (AsNumber) with a double source 0.009999999776482582..36.94549560546875, format options always_sign false, use_grouping true, rounding mode 0, integral and fractional digits 2..2, an empty culture and flags 1; nothing else. Every row arrives in the same packet as a ShouldOverrideMatchTimer row of the same actor: the number form with true on every one, the empty form with false on every one. The legacy FText reader keeps only string-table keys and refuses both forms, so the type is FTextTree. Re-exported by this change: all 20,885 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
+    },
+    {
+      "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+      "field": "OverrideMatchTimerText",
+      "checksum": 4004484071,
+      "type": "FTextTree",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28. Game files (the 13.06 install, read-only): Swiftplay_EoRCredits_GameState_C declares OverrideMatchTimerText as a replicated (CPF_Net) TextProperty, inherited from BombGameState_C; the declared compatible checksum 4004484071 reproduces as (OverrideMatchTimerText, FText) and not as FString (tools/tests/test_compatible_checksum_facts.py). Corpus: exports of all 1,018 unique replays (11.06-13.06) by the parent build f776246, main and checkpoint field tables, rows selected by exact group, name and checksum: 105 main plus 114 checkpoint rows in 32 replays on 5 builds, 114 of 72 and 105 of 376 bits; an independent reader (flags u32, history byte, then the measured history body, ending exactly at the payload end) consumed every payload, 0 failures, none typed before. Forms: 114 the 72-bit empty history 255, 105 the 376-bit history 4 (AsNumber) with a double source 1.0495529174804688..32.68332290649414, format options always_sign false, use_grouping true, rounding mode 0, integral and fractional digits 2..2, an empty culture and flags 1; nothing else. Every row arrives in the same packet as a ShouldOverrideMatchTimer row of the same actor: the number form with true on every one, the empty form with false on every one. Scoped entries do not follow the Swiftplay class alias, so this group has its own. Re-exported by this change: all 219 rows typed, each equal to the independent read; outside these rows the field tables are unchanged."
     }
   ]
 }

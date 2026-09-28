@@ -149,6 +149,10 @@ SCOPED_FACTS = [
      "FieldType::ObjectNetGuid", "BombGameState_C, Swiftplay_EoRCredits_GameState_C"),
     (2889152318, "ShouldOverrideMatchTimer", "bool", ["uint8"], "FieldType::Bool",
      "BombGameState_C, Swiftplay_EoRCredits_GameState_C"),
+    # A TextProperty: typed with the full-tree reader, because the legacy
+    # FText one keeps only string-table keys and refuses both forms it sends.
+    (4004484071, "OverrideMatchTimerText", "FText", ["FString", "FName"],
+     "FieldType::FTextTree", "BombGameState_C, Swiftplay_EoRCredits_GameState_C"),
 ]
 
 #: The C++ leaf type each checksum-table FieldType above stands for.
@@ -157,6 +161,7 @@ FIELD_TYPE_OF = {
     "uint32": "FieldType::UInt32",
     "int32": "FieldType::Int32",
     "double": "FieldType::Double",
+    "FText": "FieldType::FTextTree",
     "bool": "FieldType::Bool",
     # Three doubles on this wire (UE5 large world coordinates); FQuat sends
     # X/Y/Z only, W implied.

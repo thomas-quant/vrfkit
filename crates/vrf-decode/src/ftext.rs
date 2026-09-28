@@ -14,6 +14,21 @@ const MAX_FORMAT_ARGUMENTS: i32 = 128;
 /// A complete measured FText history tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FTextTree {
+    /// History 4 (`AsNumber`): a number the game formats when it displays the
+    /// text. `BombGameState_C.OverrideMatchTimerText` sends it whenever the
+    /// match timer is overridden; a double source (argument type 3) is the
+    /// only one observed, and the only one read.
+    AsNumber {
+        flags: u32,
+        /// The source double's bits: exact and comparable (`f64` is not
+        /// `Eq`). Always finite -- a non-finite value is refused while
+        /// decoding, because JSON has no spelling for it.
+        source_bits: u64,
+        /// `FNumberFormattingOptions`, when the text carries its own.
+        format: Option<FTextNumberFormat>,
+        /// The target culture's name; empty for the current culture.
+        culture: String,
+    },
     /// History 11 string-table form.
     StringTable {
         flags: u32,
@@ -28,6 +43,18 @@ pub enum FTextTree {
     },
     /// Observed history-255, zero-flags, zero-length empty form.
     Empty { flags: u32 },
+}
+/// `FNumberFormattingOptions` in wire order: two archive bools (whole u32s,
+/// 0 or 1), the rounding mode as a signed byte, then four i32 digit limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FTextNumberFormat {
+    pub always_sign: bool,
+    pub use_grouping: bool,
+    pub rounding_mode: i8,
+    pub minimum_integral_digits: i32,
+    pub maximum_integral_digits: i32,
+    pub minimum_fractional_digits: i32,
+    pub maximum_fractional_digits: i32,
 }
 /// Inline FName from a string-table history.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,10 +102,16 @@ pub enum FTextTreeError {
     NodeLimit { limit: u16 },
     #[error("FText payload has {remaining} unconsumed bits")]
     TrailingBits { remaining: u64 },
+    /// An archive bool is a whole u32; anything but 0 or 1 is not one.
+    #[error("FText archive bool must be 0 or 1, got {value}")]
+    InvalidBool { value: u32 },
+    /// A history-4 source double that is NaN or infinite has no JSON spelling.
+    #[error("FText number is not finite")]
+    NonFiniteNumber,
 }
 
 /// Decode an exact bit window containing only measured FText histories 11, 3,
-/// and the observed 255 empty form. Raw u64 argument bits remain unsigned.
+/// 4 and the observed 255 empty form. Raw u64 argument bits remain unsigned.
 pub fn decode_ftext_tree(data: &[u8], bit_count: u32) -> Result<FTextTree, FTextTreeError> {
     let mut r = BitReader::with_bit_len(data, u64::from(bit_count))?;
     let mut nodes = 0;
@@ -89,6 +122,13 @@ pub fn decode_ftext_tree(data: &[u8], bit_count: u32) -> Result<FTextTree, FText
         });
     }
     Ok(value)
+}
+/// [`decode_ftext_tree`] on a reader already at the payload, for
+/// `FieldType::FTextTree`. The trailing-bit check is the caller's:
+/// `decode_field` refuses leftover bits for every type alike.
+pub(crate) fn decode_ftext_tree_from(r: &mut BitReader<'_>) -> Result<FTextTree, FTextTreeError> {
+    let mut nodes = 0;
+    decode_tree(r, 0, &mut nodes)
 }
 impl FTextTree {
     /// JSON for additive `value_str`; it retains flags, history and wire values.
@@ -140,6 +180,39 @@ impl FTextTree {
             }
             Self::Empty { flags } => {
                 write!(s, r#"{{"flags":{flags},"history":255,"kind":"empty"}}"#)
+            }
+            Self::AsNumber {
+                flags,
+                source_bits,
+                format,
+                culture,
+            } => {
+                // `{}` prints an f64 in the shortest spelling that parses back
+                // to the same bits, and never in exponent form; finiteness was
+                // checked while decoding.
+                write!(
+                    s,
+                    r#"{{"flags":{flags},"history":4,"kind":"as_number","source":{{"tag":3,"double":{}}},"format":"#,
+                    f64::from_bits(*source_bits)
+                )?;
+                match format {
+                    Some(f) => write!(
+                        s,
+                        r#"{{"always_sign":{},"use_grouping":{},"rounding_mode":{},"minimum_integral_digits":{},"maximum_integral_digits":{},"minimum_fractional_digits":{},"maximum_fractional_digits":{}}}"#,
+                        f.always_sign,
+                        f.use_grouping,
+                        f.rounding_mode,
+                        f.minimum_integral_digits,
+                        f.maximum_integral_digits,
+                        f.minimum_fractional_digits,
+                        f.maximum_fractional_digits
+                    )?,
+                    None => s.push_str("null"),
+                }
+                s.push_str(r#","culture":"#);
+                json_string(s, culture)?;
+                s.push('}');
+                Ok(())
             }
         }
     }
@@ -218,6 +291,39 @@ fn decode_tree(
                 arguments,
             })
         }
+        4 => {
+            // `FFormatArgumentValue`: a type byte, then the value. Only a
+            // double (3) has been observed; any other type is refused rather
+            // than read with a guessed width.
+            let tag = r.read_bits(8)? as u8;
+            if tag != 3 {
+                return Err(FTextTreeError::UnsupportedArgumentTag { tag });
+            }
+            let source = r.read_f64()?;
+            if !source.is_finite() {
+                return Err(FTextTreeError::NonFiniteNumber);
+            }
+            let format = if read_archive_bool(r)? {
+                Some(FTextNumberFormat {
+                    always_sign: read_archive_bool(r)?,
+                    use_grouping: read_archive_bool(r)?,
+                    rounding_mode: r.read_bits(8)? as u8 as i8,
+                    minimum_integral_digits: r.read_i32()?,
+                    maximum_integral_digits: r.read_i32()?,
+                    minimum_fractional_digits: r.read_i32()?,
+                    maximum_fractional_digits: r.read_i32()?,
+                })
+            } else {
+                None
+            };
+            let culture = read_string(r)?;
+            Ok(FTextTree::AsNumber {
+                flags,
+                source_bits: source.to_bits(),
+                format,
+                culture,
+            })
+        }
         255 => {
             if flags != 0 || r.read_i32()? != 0 {
                 Err(FTextTreeError::InvalidEmptyForm)
@@ -228,6 +334,14 @@ fn decode_tree(
         _ => Err(FTextTreeError::UnsupportedHistory {
             discriminator: history,
         }),
+    }
+}
+/// An archive `bool`: Unreal serializes it as a whole u32.
+fn read_archive_bool(r: &mut BitReader<'_>) -> Result<bool, FTextTreeError> {
+    match r.read_u32()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(FTextTreeError::InvalidBool { value }),
     }
 }
 fn read_string(r: &mut BitReader<'_>) -> Result<String, FTextTreeError> {
@@ -459,6 +573,158 @@ mod tests {
         assert!(matches!(
             decode_ftext_tree(&raw, count),
             Err(FTextTreeError::TrailingBits { .. })
+        ));
+    }
+
+    /// A real `OverrideMatchTimerText` payload (13.06, 376 bits): flags 1,
+    /// history 4, a double source, format options present, empty culture.
+    const TIMER_TEXT: [u8; 47] = [
+        0x01, 0x00, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00, 0x00, 0x80, 0x5f, 0x3a, 0x2f, 0x40, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+
+    #[test]
+    fn as_number_keeps_the_measured_timer_text_exact() {
+        let tree = decode_ftext_tree(&TIMER_TEXT, 376).unwrap();
+        let FTextTree::AsNumber {
+            flags,
+            source_bits,
+            format,
+            ref culture,
+        } = tree
+        else {
+            panic!("history 4: {tree:?}");
+        };
+        assert_eq!(
+            (flags, f64::from_bits(source_bits)),
+            (1, 15.614009857177734)
+        );
+        assert_eq!(
+            format,
+            Some(FTextNumberFormat {
+                always_sign: false,
+                use_grouping: true,
+                rounding_mode: 0,
+                minimum_integral_digits: 2,
+                maximum_integral_digits: 2,
+                minimum_fractional_digits: 2,
+                maximum_fractional_digits: 2,
+            })
+        );
+        assert_eq!(culture, "");
+        assert_eq!(
+            tree.to_json(),
+            r#"{"flags":1,"history":4,"kind":"as_number","source":{"tag":3,"double":15.614009857177734},"format":{"always_sign":false,"use_grouping":true,"rounding_mode":0,"minimum_integral_digits":2,"maximum_integral_digits":2,"minimum_fractional_digits":2,"maximum_fractional_digits":2},"culture":""}"#
+        );
+        // One byte short is a truncation, one byte over is residue.
+        assert!(matches!(
+            decode_ftext_tree(&TIMER_TEXT[..46], 368),
+            Err(FTextTreeError::BitIo(_))
+        ));
+        let mut long = TIMER_TEXT.to_vec();
+        long.push(0);
+        assert!(matches!(
+            decode_ftext_tree(&long, 384),
+            Err(FTextTreeError::TrailingBits { remaining: 8 })
+        ));
+    }
+
+    #[test]
+    fn as_number_reads_the_no_options_branch_and_a_culture() {
+        let mut bits = Bits::new();
+        bits.bits(0, 32);
+        bits.bits(4, 8);
+        bits.bits(3, 8);
+        bits.bits((-2.5f64).to_bits(), 64);
+        bits.bits(0, 32);
+        bits.string("ko-KR");
+        let (raw, count) = bits.finish();
+        assert_eq!(
+            decode_ftext_tree(&raw, count).unwrap().to_json(),
+            r#"{"flags":0,"history":4,"kind":"as_number","source":{"tag":3,"double":-2.5},"format":null,"culture":"ko-KR"}"#
+        );
+    }
+
+    /// The option members in Unreal's `FNumberFormattingOptions` order. The
+    /// corpus cannot pin it -- every observed digit limit is 2 -- so distinct
+    /// values do, and a negative rounding byte stays signed.
+    #[test]
+    fn as_number_format_options_keep_their_wire_order() {
+        let mut bits = Bits::new();
+        bits.bits(0, 32);
+        bits.bits(4, 8);
+        bits.bits(3, 8);
+        bits.bits(1.0f64.to_bits(), 64);
+        bits.bits(1, 32);
+        bits.bits(1, 32);
+        bits.bits(0, 32);
+        bits.bits(0xff, 8);
+        for limit in [1, 2, 3, 4] {
+            bits.i32(limit);
+        }
+        bits.i32(0);
+        let (raw, count) = bits.finish();
+        let FTextTree::AsNumber { format, .. } = decode_ftext_tree(&raw, count).unwrap() else {
+            panic!("history 4");
+        };
+        assert_eq!(
+            format,
+            Some(FTextNumberFormat {
+                always_sign: true,
+                use_grouping: false,
+                rounding_mode: -1,
+                minimum_integral_digits: 1,
+                maximum_integral_digits: 2,
+                minimum_fractional_digits: 3,
+                maximum_fractional_digits: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn as_number_refuses_other_sources_bad_bools_and_non_finite_values() {
+        let number = |tag: u64, value: f64, has_format: u64, always_sign: u64| {
+            let mut bits = Bits::new();
+            bits.bits(1, 32);
+            bits.bits(4, 8);
+            bits.bits(tag, 8);
+            bits.bits(value.to_bits(), 64);
+            bits.bits(has_format, 32);
+            if has_format == 1 {
+                bits.bits(always_sign, 32);
+                bits.bits(1, 32);
+                bits.bits(0, 8);
+                for _ in 0..4 {
+                    bits.i32(2);
+                }
+            }
+            bits.i32(0);
+            bits.finish()
+        };
+        let (raw, count) = number(3, 1.5, 1, 0);
+        assert!(decode_ftext_tree(&raw, count).is_ok());
+        // A float source (2) is four bytes, not eight: refused, not misread.
+        let (raw, count) = number(2, 1.5, 1, 0);
+        assert!(matches!(
+            decode_ftext_tree(&raw, count),
+            Err(FTextTreeError::UnsupportedArgumentTag { tag: 2 })
+        ));
+        let (raw, count) = number(3, f64::NAN, 1, 0);
+        assert!(matches!(
+            decode_ftext_tree(&raw, count),
+            Err(FTextTreeError::NonFiniteNumber)
+        ));
+        let (raw, count) = number(3, 1.5, 2, 0);
+        assert!(matches!(
+            decode_ftext_tree(&raw, count),
+            Err(FTextTreeError::InvalidBool { value: 2 })
+        ));
+        let (raw, count) = number(3, 1.5, 1, 7);
+        assert!(matches!(
+            decode_ftext_tree(&raw, count),
+            Err(FTextTreeError::InvalidBool { value: 7 })
         ));
     }
 

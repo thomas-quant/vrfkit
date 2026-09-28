@@ -6,7 +6,7 @@ use crate::decode::FieldType;
 use crate::types::{RotatorQuantization, VectorQuantization};
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 84] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 86] = [
     (
         "A",
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -372,6 +372,18 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 84] = [
         "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
         22256526,
         FieldType::ObjectNetGuid,
+    ),
+    (
+        "OverrideMatchTimerText",
+        "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+        4004484071,
+        FieldType::FTextTree,
+    ),
+    (
+        "OverrideMatchTimerText",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+        4004484071,
+        FieldType::FTextTree,
     ),
     (
         "Possessed",

@@ -455,6 +455,59 @@ class DecodeExactTests(unittest.TestCase):
             "VectorDouble", exported.replace("6856.", "6857."), decoded))
         self.assertFalse(exported_matches("VectorDouble", None, decoded))
 
+    #: Real 13.06 `OverrideMatchTimerText` payloads: the 72-bit empty history
+    #: 255, and a 376-bit history 4 (AsNumber) with a double source.
+    TIMER_EMPTY = ("00000000ff00000000", 72)
+    TIMER_NUMBER = ("010000000403000000805f3a2f40010000000000000001000000000200000002000000"
+                    "020000000200000000000000", 376)
+    TIMER_NUMBER_JSON = (
+        '{"flags":1,"history":4,"kind":"as_number","source":{"tag":3,"double":15.614009857177734},'
+        '"format":{"always_sign":false,"use_grouping":true,"rounding_mode":0,'
+        '"minimum_integral_digits":2,"maximum_integral_digits":2,"minimum_fractional_digits":2,'
+        '"maximum_fractional_digits":2},"culture":""}')
+
+    def test_ftext_tree_reads_the_observed_histories(self):
+        empty = decode_exact(bytes.fromhex(self.TIMER_EMPTY[0]), self.TIMER_EMPTY[1], "FTextTree")
+        self.assertEqual(empty, {"flags": 0, "history": 255, "kind": "empty"})
+        number = decode_exact(bytes.fromhex(self.TIMER_NUMBER[0]), self.TIMER_NUMBER[1], "FTextTree")
+        self.assertEqual(number["source"], {"tag": 3, "double": 15.614009857177734})
+        self.assertEqual(number["format"]["maximum_fractional_digits"], 2)
+        # History 11, one bit off byte alignment after the history byte: a
+        # string-table entry, here the table path and key "Kills".
+        raw, bits = pack_bits((0, 32), (11, 8), (0, 1), *self._fstring("/T/S.S"), (0, 32),
+                              *self._fstring("Kills"))
+        self.assertEqual(decode_exact(raw, bits, "FTextTree"),
+                         {"flags": 0, "history": 11, "kind": "string_table",
+                          "table": {"name": "/T/S.S", "number": 0}, "key": "Kills"})
+
+    @staticmethod
+    def _fstring(text):
+        data = text.encode() + b"\0"
+        return [(len(data), 32)] + [(byte, 8) for byte in data]
+
+    def test_ftext_tree_refuses_unseen_forms_and_residue(self):
+        raw = bytearray(bytes.fromhex(self.TIMER_NUMBER[0]))
+        for index, value, message in ((4, 5, "history 5"), (5, 2, "tag 2"), (14, 2, "bool is 2")):
+            mutant = bytearray(raw)
+            mutant[index] = value
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                decode_exact(bytes(mutant), 376, "FTextTree")
+        nan = bytearray(raw)
+        nan[6:14] = struct.pack("<d", float("nan"))
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            decode_exact(bytes(nan), 376, "FTextTree")
+        with self.assertRaisesRegex(ValueError, "residual"):
+            decode_exact(bytes(raw) + b"\0", 384, "FTextTree")
+
+    def test_ftext_tree_compares_the_exported_json_exactly(self):
+        decoded = decode_exact(bytes.fromhex(self.TIMER_NUMBER[0]), 376, "FTextTree")
+        self.assertTrue(exported_matches("FTextTree", self.TIMER_NUMBER_JSON, decoded))
+        for wrong in (self.TIMER_NUMBER_JSON.replace("15.614009857177734", "15.61"),
+                      self.TIMER_NUMBER_JSON.replace('"culture":""', '"culture":"","extra":1'),
+                      self.TIMER_NUMBER_JSON[:-1], None):
+            with self.subTest(wrong=wrong):
+                self.assertFalse(exported_matches("FTextTree", wrong, decoded))
+
     def test_non_finite_float_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "non-finite"):
             decode_exact(struct.pack("<f", float("nan")), 32, "Float")

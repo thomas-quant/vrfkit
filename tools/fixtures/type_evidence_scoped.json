@@ -160,5 +160,17 @@
   "field": "ShouldOverrideMatchTimer",
   "checksum": 2889152318,
   "type": "Bool"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+  "field": "OverrideMatchTimerText",
+  "checksum": 4004484071,
+  "type": "FTextTree"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+  "field": "OverrideMatchTimerText",
+  "checksum": 4004484071,
+  "type": "FTextTree"
  }
 ]

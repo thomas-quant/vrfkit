@@ -754,7 +754,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `compare_rpc_params.py` | RPC parameters and records against the C# export, with its listed expected differences |
 | `compare_with_csharp.py` | Diff against the C# parser |
 | `check_effect_decoder.py` | Effect decoder (12 cases) |
-| `check_ascii.py` | Rust source ASCII sweep (159 files) |
+| `check_ascii.py` | Rust source ASCII sweep (160 files) |
 | `check_docs.py` | This document itself (below) |
 | `atomic_io.py` | Internal containment, recursive-removal and atomic-replacement helpers shared by mutating tools |
 
@@ -851,10 +851,11 @@ leftovers of an interrupted export are skipped and listed
 `tools/fixtures/scoped_type_evidence.json`. These types require the exact
 group, field name and compatible checksum. They never propagate to an
 unobserved class alias or globally by checksum, and they are not checksum
-donors. Besides the primitives, the fixture accepts `EnumRemainingBits`,
-`RotationShort`, `VectorNetQuantize100`, `RepMovementByte` and
-`RepMovementShort`, each with an independent decoder in
-`validate_type_evidence.py`. A `RepMovement` entry must also state its
+donors. Besides the primitives, the fixture accepts `VectorDouble`,
+`FTextTree`, `EnumRemainingBits`, `RotationShort`, `VectorNetQuantize100`,
+`RepMovementByte` and `RepMovementShort`, each with an independent decoder in
+`validate_type_evidence.py` (`test_generate_scoped_types.py` fails on a type
+name without one). A `RepMovement` entry must also state its
 location level, `location_quantization` (`RoundWholeNumber`, `RoundOneDecimal`
 or `RoundTwoDecimals`), measured by the spawn join in
 [DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level):
@@ -1023,10 +1024,11 @@ meaning. Use it before adding overlay types and when comparing their emitted
 values after export (`--compare-typed`). Besides the byte-aligned primitives (`UInt32`
 read unsigned, and `VectorDouble` as exactly 192 bits of three finite
 little-endian doubles, compared by parsing the exported `(x,y,z)` back into
-doubles) it reads seven bit-level types -- `EnumByte` (a 1..8-bit
-payload), `EnumRemainingBits`, `FName`, `RotationShort`, `VectorNetQuantize100`,
-`RepMovementByte` and `RepMovementShort` -- with its own LSB-first reader rather
-than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
+doubles) it reads eight bit-level types -- `EnumByte` (a 1..8-bit
+payload), `EnumRemainingBits`, `FName`, `FTextTree` (the full FText history
+tree, compared by parsing the exported JSON), `RotationShort`,
+`VectorNetQuantize100`, `RepMovementByte` and `RepMovementShort` -- with its own
+LSB-first reader rather than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
 `ReplicatedMovement` value is compared by parsing the exported JSON, so `1` and
 `1.0` are the same number there. Its `location` is compared at either scale the
 packed integers allow -- divided by 100 or in whole units -- and the report
@@ -1210,7 +1212,7 @@ field meaning; the analyzer deliberately performs no type inference.
 cargo +1.86.0 test --workspace --locked                              # 819 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
-python -W error tools/check_ascii.py --check                         # 159 files
+python -W error tools/check_ascii.py --check                         # 160 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
 python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1133 tests
 python -W error tools/check_docs.py --fast

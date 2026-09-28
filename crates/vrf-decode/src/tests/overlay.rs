@@ -1353,8 +1353,10 @@ fn the_error_report_names_the_cause_of_each_failure() {
         InvalidFNameNumber,
         UnsupportedTextHistory,
         ByteArrayLengthCapExceeded,
+        FTextTree,
     );
-    static ENTRIES: [OverlayEntry; 13] = [
+    static ENTRIES: [OverlayEntry; 15] = [
+        entry("BadTextBool", FieldType::FTextTree),
         entry("BadUtf8", FieldType::FString),
         entry("ByteArrayOverCap", FieldType::ByteArray { max_bytes: 1 }),
         entry(
@@ -1369,6 +1371,7 @@ fn the_error_report_names_the_cause_of_each_failure() {
         entry("RunawayIntPacked", FieldType::ObjectNetGuid),
         entry("ShortInt", FieldType::Int32),
         entry("U64PastI64", FieldType::UInt64),
+        entry("UnseenTextHistory", FieldType::FTextTree),
         entry(
             "ZeroQuantizeScale",
             FieldType::VectorNetQuantize { scale: 0 },
@@ -1468,6 +1471,21 @@ fn the_error_report_names_the_cause_of_each_failure() {
             (vec![0; 6], 41),
             "UnsupportedTextHistory",
             "Rejected",
+        ),
+        // The full-tree reader's own causes, sorted the same way: a history
+        // it has never seen laid out is refused ...
+        (
+            "UnseenTextHistory",
+            bytes(&[0, 0, 0, 0, 5]),
+            "FTextTree",
+            "Rejected",
+        ),
+        // ... and an archive bool that is neither 0 nor 1 breaks the framing.
+        (
+            "BadTextBool",
+            bytes(&[1, 0, 0, 0, 4, 3, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f, 2, 0, 0, 0]),
+            "FTextTree",
+            "Malformed",
         ),
         // Read in full; the value has no JSON spelling.
         ("NaNVector", nan_vector, "NonFiniteComponent", "Rejected"),
