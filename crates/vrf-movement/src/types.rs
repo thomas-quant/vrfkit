@@ -1,9 +1,5 @@
-//! The values the decoder produces.
-//!
-//! Kept separate from the decoding logic because these cross the crate
-//! boundary: the exporter builds Parquet columns directly from
-//! [`MovementMove`]'s fields, so their names and units are part of the
-//! contract, not an implementation detail.
+//! The values the decoder produces. The exporter builds Parquet columns
+//! straight from [`MovementMove`], so its field names and units are a contract.
 
 /// A single decoded movement sample (one "move" from one character update).
 #[derive(Debug, Clone, Copy)]
@@ -32,10 +28,8 @@ pub struct MovementMove {
     pub move_type: u8,
 }
 
-/// A single character update descriptor (carries moves).
-///
-/// Retained for callers that construct this public descriptor, even though
-/// the decoder currently emits moves directly through its callback.
+/// A single character update descriptor. The decoder never builds one (moves
+/// go out through its callback); kept for callers that construct it.
 #[derive(Debug, Clone)]
 pub struct MovementUpdate {
     /// Index within the batch.
@@ -47,59 +41,44 @@ pub struct MovementUpdate {
 }
 
 /// Result of decoding the full RPC payload.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RpcDecodeResult {
     /// Total moves decoded across all updates.
     pub total_moves: u32,
     /// Number of character updates in the batch.
     pub update_count: u32,
-    /// Number of decode problems that cost data, counted per occurrence.
-    ///
-    /// An update that fails mid-parse leaves the bit cursor at an
-    /// indeterminate position, so the rest of its array is skipped rather than
-    /// guessed at. The count is what makes that skip visible instead of silent.
-    ///
-    /// It covers the framing anomalies too, and for the same reason: an update
-    /// index past the declared count, a field declaring more bits than its
-    /// window holds, a shooter-GUID field too narrow to hold a `u32`, a
-    /// component stream with no GUID to attribute it to, and a trailing
-    /// padding byte that does not parse. None of those can be recovered from
-    /// mid-stream, so each one still discards what follows it -- but every one
-    /// of them used to return `Ok` with this field at zero, which is
-    /// bit-for-bit the shape of a batch of well-formed empty updates. What is
-    /// counted here is loss, not severity: one update may contribute more than
-    /// one.
+    /// Decode problems that cost data, counted per occurrence (loss, not
+    /// severity: one update may add several). A failed component stream loses
+    /// only itself, being length-delimited; a failed framing read loses the
+    /// rest of its updates array, since the cursor is then lost. The framing
+    /// anomalies each discard what follows them: an index past the declared
+    /// count, a field longer than its window, a shooter-GUID field under 32
+    /// bits, a stream with no GUID, a trailing padding byte that does not
+    /// parse. Uncounted, any of these looks like well-formed empty updates.
     pub error_count: u32,
-    /// Movement sections whose window was sized by `movementBitCount` and
-    /// that stopped with bits of that window unread.
+    /// Sections in a window sized by `movementBitCount` that stopped with bits
+    /// of it unread: at a zero marker with bits behind it, or in a window too
+    /// short for the 8-bit magic or the first marker. A drifted cursor that
+    /// reads `000` stops here and loses every move after it.
     ///
-    /// A section ends at a 3-bit zero marker, or when at most 31 bits remain
-    /// after a move -- the padding the grammar allows, which is not counted
-    /// here. Every other stop used to return `Ok` with no trace: a zero
-    /// marker read with bits still behind it, a window too short for the
-    /// 8-bit magic, or one too short for the first marker. A cursor that has
-    /// drifted and happens to read `000` takes the first of those exits, and
-    /// every move after it is gone -- the shape `decode_movement_rpc` already
-    /// counts one layer up as an early terminator.
+    /// Not counted: an empty window (the C# reference reports "Missing
+    /// movement magic"; this counts unread bits), and the end at most 31 bits
+    /// after a move. Those bits are not padding but a `000` terminator and 8
+    /// to 23 bits that are not all zero, so a zero tally means no section
+    /// stopped anywhere else, not that every section was read to its last
+    /// bit. No measured stream has a sized window at all (crate docs,
+    /// "Measured on real replays").
     ///
-    /// A tally, not an error, and deliberately not part of `error_count`: a
-    /// batch with a nonzero `error_count` keeps its whole payload as a raw
-    /// row, and how often a tail is legitimate has not been measured. A
-    /// window with no bits at all is not counted; the C# reference still
-    /// reports "Missing movement magic" for it, but this counts unread bits,
-    /// not missing fields.
+    /// A tally, not part of `error_count`: a nonzero `error_count` keeps the
+    /// batch's whole payload as a raw row.
     pub sized_section_tails: u32,
-    /// Bits left unread by the sections counted in
-    /// [`Self::sized_section_tails`].
+    /// Bits left unread by the sections counted in [`Self::sized_section_tails`].
     pub sized_section_tail_bits: u64,
     /// The same, for sections whose window ran to the end of the component
-    /// stream because `movementBitCount` was 0 or larger than what remained.
-    ///
-    /// Kept apart from [`Self::sized_section_tails`] because the two cannot be
-    /// read the same way: after a zero marker in an open window, the rest may
-    /// be component data that is not movement at all, rather than lost moves.
+    /// stream (`movementBitCount` 0 or larger than what remained). Kept apart:
+    /// after a zero marker in an open window, the rest may be component data
+    /// rather than lost moves.
     pub open_section_tails: u32,
-    /// Bits left unread by the sections counted in
-    /// [`Self::open_section_tails`].
+    /// Bits left unread by the sections counted in [`Self::open_section_tails`].
     pub open_section_tail_bits: u64,
 }

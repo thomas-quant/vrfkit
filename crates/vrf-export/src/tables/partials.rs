@@ -1,3 +1,4 @@
+use super::columns::batch;
 use crate::schema::partials_schema_ref;
 use crate::writer::{Table, TableWriter};
 use crate::{ExportError, PartialRecord};
@@ -14,11 +15,9 @@ pub type PartialWriter<W> = TableWriter<PartialsTable, W>;
 impl Table for PartialsTable {
     type Row = PartialRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
-    // NOT measured: every replay in the 45-replay sample behind
-    // `Table::DICTIONARY_COLUMNS` wrote zero partial rows. The four string
-    // columns are listed by the every-string-column rule; every other column,
-    // `raw_bits` payloads included, takes the writer's PLAIN default without a
-    // measurement behind it. Re-measure once a replay produces rows here.
+    // NOT measured: all 45 replays of the `Table::DICTIONARY_COLUMNS` sample
+    // wrote zero partial rows. The strings are listed by rule; every other
+    // column, raw_bits included, is PLAIN unmeasured. Re-measure once rows appear.
     const DICTIONARY_COLUMNS: &'static [&'static str] =
         &["source", "checkpoint_id", "payload_kind", "reason"];
     const MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
@@ -38,7 +37,7 @@ impl Table for PartialsTable {
         let b = |f: fn(&PartialRecord) -> bool| -> ArrayRef {
             Arc::new(BooleanArray::from_iter(r.iter().map(f)))
         };
-        RecordBatch::try_new(
+        batch(
             partials_schema_ref(),
             vec![
                 s(|x| x.source),
@@ -84,7 +83,6 @@ impl Table for PartialsTable {
                 )),
             ],
         )
-        .map_err(|e| ExportError::Parquet(e.into()))
     }
 }
 

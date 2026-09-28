@@ -17,14 +17,14 @@ SCRIPT = (
 
 class ExactFixtureSelectionTests(unittest.TestCase):
     @staticmethod
-    def run_script(temp: Path, configured: Path | None = None):
+    def run_script(temp: Path, configured: Path | None = None, *args: str):
         env = os.environ.copy()
         env.update({"TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp)})
         env.pop("VRFKIT_INTEROP_DIR", None)
         if configured is not None:
             env["VRFKIT_INTEROP_DIR"] = str(configured)
         return subprocess.run(
-            [sys.executable, str(SCRIPT)],
+            [sys.executable, str(SCRIPT), *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -48,19 +48,40 @@ class ExactFixtureSelectionTests(unittest.TestCase):
         self.assertIn("explicit interop directory required", output.lower())
         self.assertNotIn(str(stale), output)
 
-    def test_environment_selects_one_exact_fixture_directory(self):
+    def test_environment_names_the_rust_root_and_selects_its_interop_child(self):
+        # VRFKIT_INTEROP_DIR is the root the Rust write_interop_files test
+        # is given, and that test writes its files to `<root>/interop`. The
+        # script used to read the variable as the fixture directory itself,
+        # so the documented setting found nothing.
         with tempfile.TemporaryDirectory() as temp_raw:
             temp = Path(temp_raw)
-            exact = temp / "selected" / "interop"
-            exact.mkdir(parents=True)
+            root = temp / "selected"
+            (root / "interop").mkdir(parents=True)
+            expected = (root / "interop").resolve()
 
-            result = self.run_script(temp, exact)
+            result = self.run_script(temp, root)
 
-        output = result.stdout + result.stderr
+        output = (result.stdout + result.stderr).lower()
         self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn("interop dir:", output.lower())
-        self.assertIn(str(Path("selected") / "interop").lower(), output.lower())
-        self.assertIn("interop parquet files not found", output.lower())
+        self.assertIn(f"interop dir: {expected}".lower(), output)
+        self.assertIn("interop parquet files not found", output)
+
+    def test_an_argument_is_the_exact_fixture_directory(self):
+        # CI and CONTRIBUTING pass the `interop` child itself; nothing is
+        # appended to it, and it wins over the variable.
+        with tempfile.TemporaryDirectory() as temp_raw:
+            temp = Path(temp_raw)
+            exact = temp / "passed" / "interop"
+            exact.mkdir(parents=True)
+            expected = exact.resolve()
+
+            result = self.run_script(temp, temp / "ignored", str(exact))
+
+        output = (result.stdout + result.stderr).lower()
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn(f"interop dir: {expected}".lower(), output)
+        self.assertNotIn("ignored", output)
+        self.assertIn("interop parquet files not found", output)
 
 
 if __name__ == "__main__":
