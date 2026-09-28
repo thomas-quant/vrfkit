@@ -246,11 +246,11 @@ member and handle by name.
 #### Reading the `Typed` ratio
 
 ```
-  Typed:            83.0% (properties + RPC parameters)
+  Typed:            83.1% (properties + RPC parameters)
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 820,885 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 822,185 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -269,13 +269,13 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 12,684,760 | |
+| `fields.parquet` | 1,296,660 | 12,691,368 | |
 | `movement.parquet` | 1,844,147 | 19,984,802 | |
 | `actors.parquet` | 3,827 | 68,243 | |
 | `net_guids.parquet` | 16,167 | 114,423 | |
 | `events.parquet` | 195 | 12,455 | |
 | `partials.parquet` | 0 | 2,505 | main-only; with checkpoints: 0 rows, 2,505 bytes |
-| `checkpoint_fields.parquet` | 352,089 | 1,188,830 | requires `--checkpoints` |
+| `checkpoint_fields.parquet` | 352,089 | 1,190,437 | requires `--checkpoints` |
 | `checkpoint_actors.parquet` | 3,014 | 24,345 | requires `--checkpoints` |
 | `checkpoint_net_guids.parquet` | 74,270 | 175,916 | requires `--checkpoints` |
 | `checkpoint_blocks.parquet` | 22,247 | 112,649 | requires `--checkpoints` |
@@ -1209,12 +1209,12 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 819 passing
+cargo +1.86.0 test --workspace --locked                              # 829 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 160 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1133 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1142 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 219 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
