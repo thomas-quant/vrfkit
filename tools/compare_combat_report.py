@@ -9,25 +9,18 @@ their addresses.
 
 Restricted to the fields valplay actually derives metrics from.
 
-The two sides no longer spell these leaves the same way. `fields.parquet` now
-labels each array leaf with the name the REPLAY declares for its handle, which
-for six of the ten shapes below is not what the C# reference calls it: the wire
-says `DamageRecieved` and `HitsRecieved` (Riot's typos), `bDidKill`,
+`fields.parquet` labels each array leaf with the name the REPLAY declares for
+its handle, which for six of the ten shapes below is not the C# reference's:
+the wire says `DamageRecieved` and `HitsRecieved` (Riot's typos), `bDidKill`,
 `bIsWallPen`, and `ParticipantSubject`. So our side is relabelled through the
-same handle -> reference-name table the bundle adapter uses before the shapes
-are compared. Sharing that table is deliberate -- a second copy could drift, and
-this comparison is what would then quietly stop testing anything.
+bundle adapter's own handle -> reference-name table before the shapes are
+compared; sharing it is deliberate, since a second copy could drift and this
+comparison would quietly stop testing anything. `INTERESTING` stays in the C#
+spelling, as the reference's own `events.ndjson` has it.
 
-`INTERESTING` stays in the C# spelling because the C# side of this comparison is
-read straight from the reference's own `events.ndjson`.
-
-The reference is CliReader's `export` of the 13.01 reference replay,
-kept machine-local like the corpus baselines because it carries per-player
-values; docs/USAGE.md section 6 has the commands that produce it. It used to be
-read from a slimmed C# export under valplay's pipeline/exports, which no longer
-holds it -- and valplay now builds its bundles from vrfkit's own output
-(tools/to_valplay_bundle.py), so a bundle at that path would not be an
-independent reference any more.
+The reference is CliReader's `export` of the 13.01 reference replay, kept
+machine-local because it carries per-player values; docs/USAGE.md section 6
+has the commands that produce it.
 
 Usage:
     python tools/compare_combat_report.py [--reference EVENTS] [--ours PARQUET]
@@ -94,10 +87,8 @@ def shape(path):
     return "".join(out)
 
 
-#: Decimal places floats are rounded to before the multisets are compared.
-#: `IDENTICAL multiset` therefore means identical to this precision and no
-#: further -- a real tolerance, which the verdict line now states rather than
-#: leaving the reader to find it here.
+#: Decimal places floats are rounded to before the multisets are compared:
+#: `IDENTICAL multiset` means identical to this precision and no further.
 FLOAT_PLACES = 3
 
 
@@ -157,21 +148,12 @@ def load_ours(parquet=DEFAULT_OURS):
 
 
 def compare(cs, ours, interesting):
-    """`(printable rows, everything matched)`.
-
-    Split out from the printing so the verdict can be asserted on. It could
-    not be before: the whole comparison ran at import, which is why the script
-    had no way to report failure to anything but a reader.
-    """
+    """`(printable rows, everything matched)`."""
     rows, all_match = [], True
     for s in sorted(interesting):
         a, b = cs.get(s, collections.Counter()), ours.get(s, collections.Counter())
-        # Emptiness is tested FIRST. Two empty counters satisfy `a == b`, so
-        # this arm sat below the equality test and could never be reached --
-        # every shape of a replay carrying none of them read `IDENTICAL
-        # multiset`. `all_match` is deliberately left alone: per shape that is
-        # still not a disagreement. What it is not is a comparison, and that is
-        # what `compared_shapes` answers.
+        # Emptiness first, because empty Counters are ==; `all_match` stays
+        # True (no disagreement), and `compared_shapes` says it was no comparison.
         if not a and not b:
             verdict = "absent both sides"
         elif a == b:
@@ -188,13 +170,9 @@ def compare(cs, ours, interesting):
 
 
 def compared_shapes(cs, ours, interesting) -> int:
-    """How many of the interesting shapes actually had something to compare.
-
-    `compare` reports every shape absent from both sides as a match, which per
-    shape is true and useless. Without this the whole run could compare nothing
-    -- a wrong parquet path, the wrong reference bundle, a CombatReport decoder
-    that stopped emitting -- and still print `ALL INTERESTING SHAPES MATCH`.
-    """
+    """How many of the interesting shapes actually had something to compare:
+    without it a run that compared nothing (a wrong parquet path or reference,
+    a CombatReport decoder that stopped emitting) would read as a match."""
     return sum(1 for s in interesting
                if cs.get(s, collections.Counter()) or ours.get(s, collections.Counter()))
 
@@ -211,14 +189,10 @@ def parse_args(argv=None):
 
 
 def main(cs=None, ours=None, interesting=None, argv=None):
-    """Exit 0 only if every interesting shape matches and every one was there.
-
-    A mismatch here means the CombatReport decoder disagrees with the C#
-    reference on values, not just on how they are addressed -- the one thing
-    this comparison exists to catch. Returning 0 regardless made it a report.
-    A run in which any interesting shape carried nothing on either side exits
-    2: that shape was not compared, and a run that compared nothing at all used
-    to report agreement. Every shape is present in the reference replay.
+    """Exit 0 only if every interesting shape matches and every one was there;
+    1 when the CombatReport decoder disagrees with the C# reference on values;
+    2 when a shape carried nothing on either side and so was not compared
+    (every shape is present in the reference replay).
     """
     if cs is None or ours is None:
         args = parse_args(argv)
