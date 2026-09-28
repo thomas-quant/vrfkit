@@ -350,6 +350,24 @@ class TestCountTests(unittest.TestCase):
         self.assertEqual(
             guard.stale_test_counts("we recover 2,387 intermediate moves", self.LIVE), [])
 
+    def test_a_count_that_names_its_suite_is_read(self):
+        """README's highlight puts the suite between the number and the noun;
+        it went stale twice while only "N tests" was read."""
+        text = "- **355 Rust tests** plus a layered validation suite"
+        self.assertEqual(guard.stale_test_counts(text, self.LIVE), [(1, "355")])
+        self.assertEqual(guard.stale_test_counts("**387 Rust tests**", self.LIVE), [])
+
+    def test_a_count_that_names_its_suite_must_be_that_suites(self):
+        by_suite = {"Rust": {"387"}, "Python": {"120"}}
+        self.assertEqual(guard.stale_test_counts(
+            "**120 Rust tests**\n**387 Python tests**\n387 passing\n120 tests",
+            self.LIVE, by_suite), [(1, "120"), (2, "387")])
+
+    def test_the_shipped_readme_highlight_is_read(self):
+        claims = [suite for line in guard.read(guard.README).splitlines()
+                  for _count, suite in guard.TEST_COUNT_RE.findall(line)]
+        self.assertIn("Rust", claims)
+
 
 class TableSizeClaimTests(unittest.TestCase):
     """Every number that claims to BE a table size must be the live one, even
@@ -434,6 +452,11 @@ class ContradictingCountTests(unittest.TestCase):
     def test_one_count_everywhere_is_not_a_contradiction(self):
         docs = {"README.md": "394 tests", "USAGE.md": "394 passing"}
         self.assertEqual(guard.contradicting_test_counts(docs), [])
+
+    def test_a_stale_highlight_is_a_third_count(self):
+        docs = {"README.md": "- **390 Rust tests** plus\n394 passing",
+                "USAGE.md": "# 133 passing"}
+        self.assertIn("390", " ".join(guard.contradicting_test_counts(docs)))
 
     def test_the_report_names_every_site_so_the_stale_one_can_be_found(self):
         docs = {"README.md": "394 tests\n355 passing", "USAGE.md": "133 passing"}

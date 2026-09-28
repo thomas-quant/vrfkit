@@ -267,22 +267,26 @@ def check_source_table_size() -> list[str]:
 
 
 #: The phrase the docs use to state a suite size, narrow enough that a match
-#: is always a claim about one of the two suites.
-TEST_COUNT_RE = re.compile(r"(\d[\d,]*)\s+(?:tests|passing)\b")
+#: is always a claim about one of the two suites. The suite may be named
+#: between the number and the noun, as README's highlight does ("793 Rust
+#: tests"); that line went stale twice while only the plain form was read.
+TEST_COUNT_RE = re.compile(r"(\d[\d,]*)\s+(?:(Rust|Python)\s+)?(?:tests|passing)\b")
 
 
-def stale_test_counts(text: str, live: set[str]) -> list[tuple[int, str]]:
+def stale_test_counts(text: str, live: set[str],
+                      by_suite: dict[str, set[str]] | None = None) -> list[tuple[int, str]]:
     """`(line number, quoted count)` for every suite-size claim not in `live`.
 
     Presence is not agreement: README carried `387 tests` and `355 passing` at
     once for twelve commits, and a check asking whether the live number
     appears somewhere passed on the first. `live` holds both suite counts in
-    both spellings, and every claim must be one of them.
+    both spellings, and every claim must be one of them; a claim that names
+    its suite must be that suite's, when `by_suite` gives it.
     """
     return [(i, quoted)
             for i, line in enumerate(text.splitlines(), 1)
-            for quoted in TEST_COUNT_RE.findall(line)
-            if quoted not in live]
+            for quoted, suite in TEST_COUNT_RE.findall(line)
+            if quoted not in ((by_suite or {}).get(suite) or live)]
 
 
 def contradicting_test_counts(docs: dict[str, str]) -> list[str]:
@@ -297,7 +301,7 @@ def contradicting_test_counts(docs: dict[str, str]) -> list[str]:
         (name, i, quoted)
         for name, text in docs.items()
         for i, line in enumerate(text.splitlines(), 1)
-        for quoted in TEST_COUNT_RE.findall(line)
+        for quoted, _suite in TEST_COUNT_RE.findall(line)
     ]
     distinct = {quoted.replace(",", "") for _, _, quoted in seen}
     if len(distinct) <= 2:
@@ -889,11 +893,14 @@ def main() -> int:
                 if str(count) not in text:
                     run_problems.append(
                         f"{name}: {label} test count is {count}, not quoted")
-        live = {s for c in (rust, tools_n) for s in (str(c), f"{c:,}")}
+        by_suite = {suite: {str(c), f"{c:,}"}
+                    for suite, c in (("Rust", rust), ("Python", tools_n))}
+        live = by_suite["Rust"] | by_suite["Python"]
         for name, text in every.items():
             run_problems += [
-                f"{name}:{i}: says {quoted}; the suites are {rust} and {tools_n}"
-                for i, quoted in stale_test_counts(text, live)]
+                f"{name}:{i}: says {quoted}; the suites are {rust} (Rust) "
+                f"and {tools_n} (Python)"
+                for i, quoted in stale_test_counts(text, live, by_suite)]
         print(f"tests: rust {rust}, tools {tools_n}")
         checks.append(run_problems)
     problems = [p for found in checks for p in found]
