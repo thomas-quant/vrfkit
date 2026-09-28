@@ -564,6 +564,11 @@ fn push_sink_totals(out: &mut String, s: &SinkTotals) {
                 "movement_open_section_tail_bits",
                 s.movement_open_section_tail_bits,
             ),
+            ("movement_envelope_trailers", s.movement_envelope_trailers),
+            (
+                "movement_envelope_trailer_bits",
+                s.movement_envelope_trailer_bits,
+            ),
             ("array_elements_decoded", s.array.elements_decoded),
             ("array_fields_emitted", s.array.fields_emitted),
             ("array_truncations", s.array.truncations),
@@ -841,6 +846,8 @@ mod tests {
             movement_sized_section_tail_bits: next(),
             movement_open_section_tails: next(),
             movement_open_section_tail_bits: next(),
+            movement_envelope_trailers: next(),
+            movement_envelope_trailer_bits: next(),
             array: ArrayDecodeStats {
                 elements_decoded: next(),
                 fields_emitted: next(),

@@ -554,6 +554,14 @@ fn write_sink_quality(
             "movement_open_section_tail_bits",
             sink.movement_open_section_tail_bits,
         ),
+        (
+            "movement_envelope_trailers",
+            sink.movement_envelope_trailers,
+        ),
+        (
+            "movement_envelope_trailer_bits",
+            sink.movement_envelope_trailer_bits,
+        ),
         ("array_elements_decoded", sink.array.elements_decoded),
         ("array_fields_emitted", sink.array.fields_emitted),
         ("array_truncations", sink.array.truncations),
@@ -792,6 +800,8 @@ mod tests {
             "movement_sized_section_tail_bits",
             "movement_open_section_tails",
             "movement_open_section_tail_bits",
+            "movement_envelope_trailers",
+            "movement_envelope_trailer_bits",
             "array_elements_decoded",
             "array_fields_emitted",
             "array_truncations",
@@ -947,6 +957,37 @@ mod tests {
             "\"movement_sized_section_tail_bits\": 52",
             "\"movement_open_section_tails\": 53",
             "\"movement_open_section_tail_bits\": 54",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    #[test]
+    fn movement_envelope_trailers_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            movement_envelope_trailers: 61,
+            movement_envelope_trailer_bits: 62,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.movement_envelope_trailers = 71;
+        checkpoints.sink.movement_envelope_trailer_bits = 72;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            run: &RunTotals {
+                sink,
+                ..RunTotals::default()
+            },
+            net: &net,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"movement_envelope_trailers\": 61",
+            "\"movement_envelope_trailer_bits\": 62",
+            "\"movement_envelope_trailers\": 71",
+            "\"movement_envelope_trailer_bits\": 72",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }

@@ -204,6 +204,12 @@ pub(super) fn print(
         totals.sink.movement_open_section_tails,
         totals.sink.movement_open_section_tail_bits
     );
+    // Every byte-wrapped movement stream and the bits after its envelope,
+    // which nothing reads: 24 per stream on every measured replay.
+    eprintln!(
+        "  Envelope trailers: {} streams / {} bits",
+        totals.sink.movement_envelope_trailers, totals.sink.movement_envelope_trailer_bits
+    );
     // Non-zero errors or truncations: bits abandoned mid-element, leaves lost.
     eprintln!(
         "  Array decode:     {} elements / {} fields / {} errors / {} truncations",
@@ -451,6 +457,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.movement_sized_section_tail_bits,
         cp.sink.movement_open_section_tails,
         cp.sink.movement_open_section_tail_bits
+    );
+    eprintln!(
+        "  Checkpoint envelope trailers: {} streams / {} bits",
+        cp.sink.movement_envelope_trailers, cp.sink.movement_envelope_trailer_bits
     );
     eprintln!(
         "  Checkpoint suffix:{} RPC bits",

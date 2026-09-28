@@ -81,4 +81,14 @@ pub struct RpcDecodeResult {
     pub open_section_tails: u32,
     /// Bits left unread by the sections counted in [`Self::open_section_tails`].
     pub open_section_tail_bits: u64,
+    /// Byte-wrapped component streams, each counted once its envelope is cut
+    /// out, before the section inside is parsed (a failed section still
+    /// counts). Counted whether or not bits follow the envelope, so a trailer
+    /// that vanished reads as [`Self::envelope_trailer_bits`] short of 24 per
+    /// stream, not as streams that were never wrapped.
+    pub envelope_trailer_streams: u32,
+    /// Bits after those envelopes, which nothing reads (the C# reference seeks
+    /// past them too): exactly 24 per stream on every measured replay (crate
+    /// docs, "Measured on real replays"). A tally like the section tails.
+    pub envelope_trailer_bits: u64,
 }

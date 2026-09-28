@@ -227,6 +227,11 @@ pub struct ExportStats {
     /// what follows may be other data: kept apart, never summed with the above.
     pub movement_open_section_tails: u64,
     pub movement_open_section_tail_bits: u64,
+    /// Byte-wrapped movement streams and the bits after their envelopes,
+    /// which nothing reads (`vrf_movement::RpcDecodeResult::envelope_trailer_bits`):
+    /// 24 per stream on every measured replay. A soft tally like the tails.
+    pub movement_envelope_trailers: u64,
+    pub movement_envelope_trailer_bits: u64,
 
     /// RPC payloads whose parameter loop broke on a malformed read before the
     /// zero-handle terminator. The walk keeps its rows and reports success, so
@@ -282,11 +287,15 @@ impl ExportStats {
                     sized_section_tail_bits,
                     open_section_tails,
                     open_section_tail_bits,
+                    envelope_trailer_streams,
+                    envelope_trailer_bits,
                 } = *r;
                 self.movement_sized_section_tails += u64::from(sized_section_tails);
                 self.movement_sized_section_tail_bits += sized_section_tail_bits;
                 self.movement_open_section_tails += u64::from(open_section_tails);
                 self.movement_open_section_tail_bits += open_section_tail_bits;
+                self.movement_envelope_trailers += u64::from(envelope_trailer_streams);
+                self.movement_envelope_trailer_bits += envelope_trailer_bits;
                 if error_count > 0 {
                     self.movement_rpc_errors = self
                         .movement_rpc_errors
@@ -319,10 +328,7 @@ mod movement_stats_tests {
             total_moves,
             update_count,
             error_count,
-            sized_section_tails: 0,
-            sized_section_tail_bits: 0,
-            open_section_tails: 0,
-            open_section_tail_bits: 0,
+            ..Default::default()
         })
     }
 
@@ -339,7 +345,45 @@ mod movement_stats_tests {
             sized_section_tail_bits: sized.1,
             open_section_tails: open.0,
             open_section_tail_bits: open.1,
+            ..Default::default()
         })
+    }
+
+    fn with_trailers(
+        error_count: u32,
+        streams: u32,
+        bits: u64,
+    ) -> Result<RpcDecodeResult, MovementError> {
+        Ok(RpcDecodeResult {
+            total_moves: 1,
+            update_count: streams,
+            error_count,
+            envelope_trailer_streams: streams,
+            envelope_trailer_bits: bits,
+            ..Default::default()
+        })
+    }
+
+    /// Envelope trailers are summed from every `Ok` decode like the tails, and
+    /// never count as a movement error.
+    #[test]
+    fn envelope_trailers_are_summed_from_every_ok_decode_and_are_not_errors() {
+        let mut s = ExportStats::default();
+        s.record_movement_decode(with_trailers(0, 3, 72).as_ref());
+        s.record_movement_decode(with_trailers(1, 2, 37).as_ref());
+        assert_eq!(s.movement_envelope_trailers, 5);
+        assert_eq!(s.movement_envelope_trailer_bits, 109);
+        assert_eq!(s.movement_rpc_errors, 1, "only the soft error");
+        assert_eq!(
+            (
+                s.movement_sized_section_tails,
+                s.movement_open_section_tails
+            ),
+            (0, 0),
+            "not read as section tails"
+        );
+        s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
+        assert_eq!(s.movement_envelope_trailers, 5, "an Err carries no tally");
     }
 
     /// Section tails are summed from every `Ok` decode, soft errors or not, and
