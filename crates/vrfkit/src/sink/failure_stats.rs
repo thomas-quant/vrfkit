@@ -70,6 +70,16 @@ pub struct FailureCell {
     pub samples: Vec<FailureSample>,
 }
 
+impl FailureCell {
+    /// Add `other`'s count and sums; samples are the caller's business.
+    fn add(&mut self, other: &Self) {
+        self.count += other.count;
+        self.bit_count_total += other.bit_count_total;
+        self.consumed_bits_total += other.consumed_bits_total;
+        self.abandoned_bits_total += other.abandoned_bits_total;
+    }
+}
+
 /// One representative failure. Everything except `payload_hex` is exact for
 /// that event; `payload_hex` is the block's decoded leading bytes, present
 /// only where the caller had the payload and it fit the caps.
@@ -113,6 +123,20 @@ pub struct FailureKey {
     pub consumed_bits: u64,
     /// Whether every bit in the failed stream reached a raw preservation row.
     pub payload_preserved: bool,
+}
+
+impl FailureKey {
+    fn new(failure: &StreamFailure, group_path: Arc<str>) -> Self {
+        Self {
+            kind: failure.kind,
+            cause: failure.cause,
+            group_path,
+            function_count: failure.function_count,
+            record_handle: failure.record_handle,
+            consumed_bits: failure.consumed_bits,
+            payload_preserved: failure.payload_preserved,
+        }
+    }
 }
 
 /// The bounded aggregate for one pass (main ReplayData or checkpoint).
@@ -164,22 +188,8 @@ impl FailureAggregate {
     /// preservation row is carried by `failure` so the aggregate key and
     /// reconciled counter cannot disagree.
     pub fn note_failure(&mut self, failure: &StreamFailure, group_path: Arc<str>) {
-        let key = FailureKey {
-            kind: failure.kind,
-            cause: failure.cause,
-            group_path,
-            function_count: failure.function_count,
-            record_handle: failure.record_handle,
-            consumed_bits: failure.consumed_bits,
-            payload_preserved: failure.payload_preserved,
-        };
-        let cell = if let Some(cell) = self.cells.get_mut(&key) {
-            cell
-        } else if self.cells.len() < MAX_FAILURE_CELLS {
-            self.cells.entry(key).or_default()
-        } else {
-            &mut self.overflow
-        };
+        let key = FailureKey::new(failure, group_path);
+        let cell = Self::cell(&mut self.cells, key).unwrap_or(&mut self.overflow);
         cell.count += 1;
         cell.bit_count_total += u64::from(failure.bit_count);
         cell.consumed_bits_total += failure.consumed_bits;
@@ -199,41 +209,15 @@ impl FailureAggregate {
         if !self.retain_payloads {
             return;
         }
-        let key = FailureKey {
-            kind: failure.kind,
-            cause: failure.cause,
-            group_path,
-            function_count: failure.function_count,
-            record_handle: failure.record_handle,
-            consumed_bits: failure.consumed_bits,
-            payload_preserved: failure.payload_preserved,
-        };
-        let cell = if let Some(cell) = self.cells.get_mut(&key) {
-            cell
-        } else if self.cells.len() < MAX_FAILURE_CELLS {
-            self.cells.entry(key).or_default()
-        } else {
+        let Some(cell) = Self::cell(&mut self.cells, FailureKey::new(failure, group_path)) else {
             return;
         };
         if cell.samples.len() >= MAX_SAMPLES_PER_CELL {
             return;
         }
-        if payload.len() as u64 > MAX_SAMPLE_PAYLOAD_BLOCK_BITS / 8 {
-            // Too big to represent honestly with a prefix; record the event's
-            // shape without a payload instead.
-            cell.samples.push(FailureSample {
-                actor_net_guid: failure.actor_net_guid.0,
-                bit_count: failure.bit_count,
-                consumed_bits: failure.consumed_bits,
-                payload_preserved: failure.payload_preserved,
-                abandoned_bits: failure.remaining_bits,
-                record_offset: failure.record_offset,
-                payload_hex: None,
-                payload_truncated: false,
-            });
-            return;
-        }
-        let truncated = payload.len() > MAX_SAMPLE_PAYLOAD_BYTES;
+        // Too big to represent honestly with a prefix; record the event's
+        // shape without a payload instead.
+        let oversized = payload.len() as u64 > MAX_SAMPLE_PAYLOAD_BLOCK_BITS / 8;
         let take = payload.len().min(MAX_SAMPLE_PAYLOAD_BYTES);
         cell.samples.push(FailureSample {
             actor_net_guid: failure.actor_net_guid.0,
@@ -242,9 +226,22 @@ impl FailureAggregate {
             payload_preserved: failure.payload_preserved,
             abandoned_bits: failure.remaining_bits,
             record_offset: failure.record_offset,
-            payload_hex: Some(hex(&payload[..take])),
-            payload_truncated: truncated,
+            payload_hex: (!oversized).then(|| hex(&payload[..take])),
+            payload_truncated: !oversized && payload.len() > MAX_SAMPLE_PAYLOAD_BYTES,
         });
+    }
+
+    /// The cell for `key`, created while the map is under the distinct-cell
+    /// cap; `None` for a new key once it is full.
+    fn cell(
+        cells: &mut FxHashMap<FailureKey, FailureCell>,
+        key: FailureKey,
+    ) -> Option<&mut FailureCell> {
+        if cells.len() < MAX_FAILURE_CELLS || cells.contains_key(&key) {
+            Some(cells.entry(key).or_default())
+        } else {
+            None
+        }
     }
 
     /// Merge another pass's aggregate in (checkpoint chunks are walked one
@@ -253,28 +250,15 @@ impl FailureAggregate {
     pub fn absorb(&mut self, other: &mut Self) {
         self.total_failures += other.total_failures;
         self.preserved_unresolved += other.preserved_unresolved;
-        self.overflow.count += other.overflow.count;
-        self.overflow.bit_count_total += other.overflow.bit_count_total;
-        self.overflow.consumed_bits_total += other.overflow.consumed_bits_total;
-        self.overflow.abandoned_bits_total += other.overflow.abandoned_bits_total;
+        self.overflow.add(&other.overflow);
         let mut other_cells: Vec<_> = other.cells.drain().collect();
         other_cells.sort_by(|(a, _), (b, _)| compare_keys(a, b));
         for (key, mut other_cell) in other_cells {
-            let cell = if let Some(cell) = self.cells.get_mut(&key) {
-                cell
-            } else if self.cells.len() < MAX_FAILURE_CELLS {
-                self.cells.entry(key).or_default()
-            } else {
-                self.overflow.count += other_cell.count;
-                self.overflow.bit_count_total += other_cell.bit_count_total;
-                self.overflow.consumed_bits_total += other_cell.consumed_bits_total;
-                self.overflow.abandoned_bits_total += other_cell.abandoned_bits_total;
+            let Some(cell) = Self::cell(&mut self.cells, key) else {
+                self.overflow.add(&other_cell);
                 continue;
             };
-            cell.count += other_cell.count;
-            cell.bit_count_total += other_cell.bit_count_total;
-            cell.consumed_bits_total += other_cell.consumed_bits_total;
-            cell.abandoned_bits_total += other_cell.abandoned_bits_total;
+            cell.add(&other_cell);
             let take = if self.retain_payloads {
                 MAX_SAMPLES_PER_CELL
                     .saturating_sub(cell.samples.len())
@@ -283,7 +267,6 @@ impl FailureAggregate {
                 0
             };
             cell.samples.extend(other_cell.samples.drain(..take));
-            other_cell.samples.clear();
         }
     }
 
@@ -357,13 +340,7 @@ fn cause_rank(cause: StreamFailureCause) -> u8 {
 
 /// Lowercase hex without separators.
 fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 0xF) as usize] as char);
-    }
-    out
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
