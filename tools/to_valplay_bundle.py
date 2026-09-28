@@ -826,18 +826,26 @@ class _BitReader:
         return self._pos
 
     def read_bit(self) -> int:
-        if self._pos >= self._bit_len:
-            raise EOFError
-        byte_idx = self._pos >> 3
-        bit_idx = self._pos & 7
-        self._pos += 1
-        return (self._data[byte_idx] >> bit_idx) & 1
+        return self.read_bits(1)
 
     def read_bits(self, n: int) -> int:
-        val = 0
-        for i in range(n):
-            val |= self.read_bit() << i
-        return val
+        """Read `n` bits LSB first from one slice, as a per-bit loop would.
+
+        That loop made 2.8M calls on one replay's shot blobs. Its contract is
+        kept: a short read leaves the position at the end and raises EOFError,
+        and a declared length past the buffer raises IndexError -- aborting
+        the conversion -- where a slice alone would silently pad with zeros.
+        """
+        start = self._pos
+        stop = min(start + n, self._bit_len)
+        if stop > start and stop > len(self._data) * 8:
+            raise IndexError("index out of range")
+        if start + n > self._bit_len:
+            self._pos = self._bit_len
+            raise EOFError
+        self._pos = start + n
+        chunk = self._data[start >> 3:(start + n + 7) >> 3]
+        return (int.from_bytes(chunk, "little") >> (start & 7)) & ((1 << n) - 1)
 
     def read_int_packed(self) -> int:
         """Read a UE4 IntPacked value (7-bit variable-length, LSB first)."""
@@ -861,10 +869,7 @@ class _BitReader:
         return _struct.unpack('<f', _struct.pack('<I', bits))[0]
 
     def read_f64(self) -> float:
-        lo = self.read_bits(32)
-        hi = self.read_bits(32)
-        raw = lo | (hi << 32)
-        return _struct.unpack('<d', _struct.pack('<Q', raw))[0]
+        return _struct.unpack('<d', _struct.pack('<Q', self.read_bits(64)))[0]
 
     def skip_bits(self, n: int):
         self._pos = min(self._pos + n, self._bit_len)
