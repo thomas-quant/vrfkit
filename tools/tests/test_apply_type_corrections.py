@@ -1,4 +1,4 @@
-﻿"""Guards for the ADDITIONS pass in apply_type_corrections.py.
+"""Guards for the ADDITIONS pass in apply_type_corrections.py.
 
 The corrections in that script rewrite entries that already exist; the
 additions pass INSERTS entries the C# descriptors cannot declare. Insertion has
@@ -40,67 +40,82 @@ BOOKENDS = [
 GROUPS = sorted(BOOKENDS + [(g, f) for g, f, _t in atc.ADDITIONS])
 
 
-def formatted(pairs):
-    """The rustfmt'd layout, which is what is committed."""
-    body = "".join(
-        "    OverlayEntry {\n"
-        f'        group_path: "{g}",\n'
-        f'        field_name: "{f}",\n'
-        "        field_type: FieldType::Int32,\n"
-        "    },\n"
-        for g, f in pairs
-    )
-    return (
-        "// 0 entries from 0 groups.\n"
-        "// Raw/Custom: 0, Skip: 0, Typed: 0.\n"
-        f"pub static OVERLAY_TABLE: [OverlayEntry; {len(pairs)}] = [\n"
-        f"{body}"
-        "];\n"
-    )
+def rustfmt_type(field_type):
+    """A braced type the way rustfmt lays it out inside an entry: one field
+    per line, each with a trailing comma. A bare variant comes back as is."""
+    if "{" not in field_type:
+        return field_type
+    head, _brace, rest = field_type.partition("{")
+    fields = [part.strip() for part in rest.rstrip("} ").split(",") if part.strip()]
+    inner = "".join(f"            {part},\n" for part in fields)
+    return f"{head.rstrip()} {{\n{inner}        }}"
 
 
-def formatted_typed(rows):
-    """`formatted`, but each row carries its own field_type.
+def render_table(rows, one_line=False, braced_multiline=False, handles=None):
+    """A table.rs holding `rows`, each `(group, field, full FieldType)`.
 
-    `formatted` pins every entry to Int32, which is exactly the type that
-    cannot show a wrong-type bug -- the substring check it has to expose is
-    `"Int32" in "FieldType::UInt32"`.
+    The default layout is the rustfmt'd one that is committed; `one_line` is
+    the one extract_descriptors.py emits, before cargo fmt. Rows carry their
+    own type because an Int32-only table cannot show a wrong-type bug -- the
+    substring check it has to expose is `"Int32" in "FieldType::UInt32"`.
+
+    `braced_multiline` lays braced types (`RepMovement { .. }`) out over
+    several lines, the way the committed, rustfmt'd table.rs has them. Without
+    it the formatted layout keeps them on one line, where a pass that replaces
+    the one-line type literal still matches although the real file would not.
+
+    With `handles` (`(group, handle, field)` rows, possibly none) the file is
+    complete: both generated header lines and both slice lengths are written
+    truthfully, and OVERLAY_HANDLE_TABLE follows the last entry as it does in
+    the real file. Without it the header lines are placeholders and the file
+    ends with OVERLAY_TABLE.
     """
-    body = "".join(
-        "    OverlayEntry {\n"
-        f'        group_path: "{g}",\n'
-        f'        field_name: "{f}",\n'
-        f"        field_type: {t},\n"
-        "    },\n"
-        for g, f, t in rows
-    )
+    if one_line:
+        body = "".join(
+            f'    OverlayEntry {{ group_path: "{g}", field_name: "{f}", '
+            f"field_type: {t} }},\n"
+            for g, f, t in rows
+        )
+        handle_body = "".join(
+            f'    OverlayHandleEntry {{ group_path: "{g}", handle: {h}, '
+            f'field_name: "{f}" }},\n'
+            for g, h, f in handles or ()
+        )
+    else:
+        body = "".join(
+            "    OverlayEntry {\n"
+            f'        group_path: "{g}",\n'
+            f'        field_name: "{f}",\n'
+            f"        field_type: {rustfmt_type(t) if braced_multiline else t},\n"
+            "    },\n"
+            for g, f, t in rows
+        )
+        handle_body = "".join(
+            "    OverlayHandleEntry {\n"
+            f'        group_path: "{g}",\n'
+            f"        handle: {h},\n"
+            f'        field_name: "{f}",\n'
+            "    },\n"
+            for g, h, f in handles or ()
+        )
+    table = f"pub static OVERLAY_TABLE: [OverlayEntry; {len(rows)}] = [\n{body}];\n"
+    if handles is None:
+        return "// 0 entries from 0 groups.\n// Raw/Custom: 0, Skip: 0, Typed: 0.\n" + table
+    raw = sum(1 for _g, _f, t in rows if t == "FieldType::Raw")
+    skip = sum(1 for _g, _f, t in rows if t == "FieldType::Skip")
     return (
-        "// 0 entries from 0 groups.\n"
-        "// Raw/Custom: 0, Skip: 0, Typed: 0.\n"
-        f"pub static OVERLAY_TABLE: [OverlayEntry; {len(rows)}] = [\n"
-        f"{body}"
-        "];\n"
-    )
-
-
-def one_line(pairs):
-    """The layout extract_descriptors.py emits, before cargo fmt."""
-    body = "".join(
-        f'    OverlayEntry {{ group_path: "{g}", field_name: "{f}", '
-        "field_type: FieldType::Int32 },\n"
-        for g, f in pairs
-    )
-    return (
-        "// 0 entries from 0 groups.\n"
-        "// Raw/Custom: 0, Skip: 0, Typed: 0.\n"
-        f"pub static OVERLAY_TABLE: [OverlayEntry; {len(pairs)}] = [\n"
-        f"{body}"
+        "// GENERATED by tools/extract_descriptors.py -- do not edit by hand.\n"
+        f"// {len(rows)} entries from {len({g for g, _f, _t in rows})} groups.\n"
+        f"// Raw/Custom: {raw}, Skip: {skip}, Typed: {len(rows) - raw - skip}.\n"
+        f"\n{table}\n"
+        f"pub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; {len(handles)}] = [\n"
+        f"{handle_body}"
         "];\n"
     )
 
 
 ADDED_KEYS = {(g, f) for g, f, _t in atc.ADDITIONS}
-WITHOUT = [p for p in GROUPS if p not in ADDED_KEYS]
+WITHOUT = [(g, f, "FieldType::Int32") for g, f in GROUPS if (g, f) not in ADDED_KEYS]
 N_ADDED = len(atc.ADDITIONS)
 
 
@@ -282,36 +297,36 @@ class AdditionsTests(unittest.TestCase):
         return keys
 
     def test_inserts_into_the_formatted_layout(self):
-        out, n = atc.apply_additions(formatted(WITHOUT))
+        out, n = atc.apply_additions(render_table(WITHOUT))
         self.assertEqual(n, N_ADDED)
         self._assert_inserted_in_order(out)
 
     def test_inserts_into_the_freshly_generated_one_line_layout(self):
         """The layout the script actually meets when run in documented order."""
-        out, n = atc.apply_additions(one_line(WITHOUT))
+        out, n = atc.apply_additions(render_table(WITHOUT, one_line=True))
         self.assertEqual(n, N_ADDED)
         self._assert_inserted_in_order(out)
 
     def test_is_idempotent(self):
-        once, n1 = atc.apply_additions(formatted(WITHOUT))
+        once, n1 = atc.apply_additions(render_table(WITHOUT))
         twice, n2 = atc.apply_additions(once)
         self.assertEqual((n1, n2), (N_ADDED, 0))
         self.assertEqual(once, twice)
 
     def test_verify_reports_a_missing_addition(self):
-        problems = atc.verify(formatted(WITHOUT))
+        problems = atc.verify(render_table(WITHOUT))
         self.assertTrue(
             any("LoadoutValue" in p and "BaseTeamState" in p for p in problems),
             problems,
         )
 
     def test_verify_passes_once_added(self):
-        out, _ = atc.apply_additions(formatted(WITHOUT))
+        out, _ = atc.apply_additions(render_table(WITHOUT))
         remaining = [p for p in atc.verify(out) if "BaseTeamState" in p]
         self.assertEqual(remaining, [])
 
     def test_declared_length_is_resynced(self):
-        out, _ = atc.apply_additions(formatted(WITHOUT))
+        out, _ = atc.apply_additions(render_table(WITHOUT))
         out = atc.resync_table_len(out)
         self.assertIn(
             f"[OverlayEntry; {len(WITHOUT) + len(atc.ADDITIONS)}]", out
@@ -326,7 +341,7 @@ class AdditionsTests(unittest.TestCase):
         committed table said "1185 entries from 171 groups" above a bucket line
         that summed to 1188, over a slice declared 1188 long.
         """
-        out, _ = atc.apply_additions(formatted(WITHOUT))
+        out, _ = atc.apply_additions(render_table(WITHOUT))
         out, lines = atc.rewrite_header(out)
         n_groups = len({g for g, _f in GROUPS})
         self.assertEqual(lines[0],
@@ -339,7 +354,7 @@ class AdditionsTests(unittest.TestCase):
                       atc.resync_table_len(out))
 
     def test_rewriting_the_header_is_idempotent(self):
-        out, _ = atc.apply_additions(formatted(WITHOUT))
+        out, _ = atc.apply_additions(render_table(WITHOUT))
         once, lines1 = atc.rewrite_header(out)
         twice, lines2 = atc.rewrite_header(once)
         self.assertEqual((once, lines1), (twice, lines2))
@@ -347,7 +362,7 @@ class AdditionsTests(unittest.TestCase):
     def test_a_missing_header_line_is_a_hard_failure(self):
         """Not a silent skip: a table without the line was not generated by
         extract_descriptors.py, and recounting it would say nothing."""
-        out, _ = atc.apply_additions(formatted(WITHOUT))
+        out, _ = atc.apply_additions(render_table(WITHOUT))
         with self.assertRaises(SystemExit):
             atc.rewrite_header(out.replace("// 0 entries from 0 groups.\n", ""))
 
@@ -364,8 +379,8 @@ class AdditionsTests(unittest.TestCase):
         because the ZoomMultiplier additions sort past the synthetic tail
         bookend.
         """
-        earlier = [("/AAAAA.First", "Field")]
-        out, n = atc.apply_additions(formatted(earlier))
+        earlier = [("/AAAAA.First", "Field", "FieldType::Int32")]
+        out, n = atc.apply_additions(render_table(earlier))
         self.assertEqual(n, len(atc.ADDITIONS))
         keys = [(g, f) for g, f, _ in atc.parse_entries(out)]
         self.assertEqual(keys, sorted(keys), "table must stay sorted after append")
@@ -385,7 +400,7 @@ class RetypeExactTests(unittest.TestCase):
     GROUP = "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation"
 
     def table(self, last_type):
-        body = formatted_typed([
+        body = render_table([
             (self.GROUP, "AllianceFilter", "FieldType::EnumRemainingBits"),
             (self.GROUP, "AllianceFilterX", "FieldType::EnumRemainingBits"),
             ("/Script/ShooterGame.ZzzTailComponent", "Stripes", last_type),
@@ -461,17 +476,6 @@ WEAPON_ROWS = [
 ]
 
 
-def rustfmt_type(field_type):
-    """A braced type the way rustfmt lays it out inside an entry: one field
-    per line, each with a trailing comma. A bare variant comes back as is."""
-    if "{" not in field_type:
-        return field_type
-    head, _brace, rest = field_type.partition("{")
-    fields = [part.strip() for part in rest.rstrip("} ").split(",") if part.strip()]
-    inner = "".join(f"            {part},\n" for part in fields)
-    return f"{head.rstrip()} {{\n{inner}        }}"
-
-
 def whole_table(overrides=None, drop=(), one_line=False, braced_multiline=False,
                 extra=(), handles=()):
     """A complete table.rs that satisfies every correction, minus `overrides`.
@@ -479,14 +483,9 @@ def whole_table(overrides=None, drop=(), one_line=False, braced_multiline=False,
     Derived from EXPECTED rather than hand-written, so it cannot go stale as
     corrections are added. `overrides` maps an EXPECTED key to the type the
     file should carry INSTEAD, which is how "regenerated but never corrected"
-    is expressed. The two generated header lines and both slice lengths are
-    written truthfully, so `main()` fails for the reason under test and not
-    because the fixture is malformed.
-
-    `braced_multiline` lays braced types (`RepMovement { .. }`) out over
-    several lines, the way the committed, rustfmt'd table.rs has them. Without
-    it the formatted layout keeps them on one line, where a pass that replaces
-    the one-line type literal still matches although the real file would not.
+    is expressed, and `drop` leaves keys out. The two generated header lines
+    and both slice lengths are written truthfully, so `main()` fails for the
+    reason under test and not because the fixture is malformed.
 
     `extra` adds `(group, field, type)` rows and `handles` fills
     OVERLAY_HANDLE_TABLE with `(group, handle, field)` entries, the text the
@@ -498,50 +497,7 @@ def whole_table(overrides=None, drop=(), one_line=False, braced_multiline=False,
         for g, f, t in list(atc.EXPECTED) + WEAPON_ROWS
         if (g, f) not in drop
     ] + list(extra)
-    rows.sort()
-    raw = sum(1 for _g, _f, t in rows if t == "FieldType::Raw")
-    skip = sum(1 for _g, _f, t in rows if t == "FieldType::Skip")
-    if one_line:
-        body = "".join(
-            f'    OverlayEntry {{ group_path: "{g}", field_name: "{f}", '
-            f"field_type: {t} }},\n"
-            for g, f, t in rows
-        )
-        handle_body = "".join(
-            f'    OverlayHandleEntry {{ group_path: "{g}", handle: {h}, '
-            f'field_name: "{f}" }},\n'
-            for g, h, f in handles
-        )
-    else:
-        body = "".join(
-            "    OverlayEntry {\n"
-            f'        group_path: "{g}",\n'
-            f'        field_name: "{f}",\n'
-            f"        field_type: {rustfmt_type(t) if braced_multiline else t},\n"
-            "    },\n"
-            for g, f, t in rows
-        )
-        handle_body = "".join(
-            "    OverlayHandleEntry {\n"
-            f'        group_path: "{g}",\n'
-            f"        handle: {h},\n"
-            f'        field_name: "{f}",\n'
-            "    },\n"
-            for g, h, f in handles
-        )
-    return (
-        "// GENERATED by tools/extract_descriptors.py -- do not edit by hand.\n"
-        f"// {len(rows)} entries from {len({g for g, _f, _t in rows})} groups.\n"
-        f"// Raw/Custom: {raw}, Skip: {skip}, Typed: {len(rows) - raw - skip}.\n"
-        "\n"
-        f"pub static OVERLAY_TABLE: [OverlayEntry; {len(rows)}] = [\n"
-        f"{body}"
-        "];\n"
-        "\n"
-        f"pub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; {len(handles)}] = [\n"
-        f"{handle_body}"
-        "];\n"
-    )
+    return render_table(sorted(rows), one_line, braced_multiline, list(handles))
 
 
 #: The two mutations below are deliberately BUCKET-NEUTRAL -- they swap one
@@ -837,7 +793,7 @@ class VerifyMatchesTheWholeTypeTests(unittest.TestCase):
 
     def _wrong_type(self, group, field, wrong):
         """One-entry table declaring a real EXPECTED key at the wrong type."""
-        return formatted_typed([(group, field, wrong)])
+        return render_table([(group, field, wrong)])
 
     @staticmethod
     def _about(problems, field):
