@@ -752,7 +752,7 @@ impl ReplicationReader {
     /// run of path declarations while every bit counter read zero.
     ///
     /// The whole window, not `bits_remaining()`, for the reason
-    /// [`super::framing::abandoned_on_error`] already spells out: a failing
+    /// [`framing::decode_and_parse_rep_layout`] spells out for a stream: a failing
     /// `read_int_packed` consumes its chunks *before* discovering the value runs
     /// off the end, so a header stage that expires exactly at the payload end
     /// leaves `bits_remaining() == 0` and charged nothing for a bunch that lost
@@ -2532,8 +2532,14 @@ mod tests {
             rep_layout_tail_outcome: Some(RepLayoutTailOutcome::Decoded { rpc_count: 1 }),
             ..TestSink::default()
         };
-        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, sink);
+        let Run {
+            transformed,
+            stats,
+            sink,
+            ..
+        } = decode_bits(&decoded_bits, None, sink);
 
+        assert!(transformed, "the block's transform ran");
         assert!(sink.fields.is_empty());
         assert_eq!(sink.rep_layout_tails, vec![(13, vec![0x55, 0x15])]);
         assert!(sink.stream_failures.is_empty());
@@ -2782,7 +2788,7 @@ mod tests {
     /// A header that fails to read has already consumed what it read. The
     /// abort charged `bits_remaining()`, which is 0 here, so
     /// `content_block_framing_failures` moved with no bit tally behind it --
-    /// the undercount `abandoned_on_error` and `abandon_bunch` already fixed
+    /// the undercount the stream `Err` arms and `abandon_bunch` already fixed
     /// one depth down and one depth up.
     #[test]
     fn a_truncated_block_header_charges_the_bits_it_consumed() {

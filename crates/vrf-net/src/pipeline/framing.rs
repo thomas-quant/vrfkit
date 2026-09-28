@@ -23,8 +23,8 @@
 //!
 //! The first two charge [`abandoned_from`] -- the failing block's first bit to
 //! the end of the bunch -- to `skipped_bits`, never what the reader happened
-//! to have left. That is the rule [`abandoned_on_error`] applies one depth
-//! down and `abandon_bunch` one depth up.
+//! to have left. That is the rule the stream `Err` arms apply one depth down
+//! (see [`decode_and_parse_rep_layout`]) and `abandon_bunch` one depth up.
 
 use vrf_bitio::BitReader;
 use vrf_transform::TransformVersion;
@@ -224,9 +224,36 @@ fn decode_into_scratch(
     Some(byte_count)
 }
 
-/// Bits to charge to `skipped_bits` when an inner-stream parser returns `Err`.
+/// Bits to charge to `skipped_bits` when block framing aborts the bunch: from
+/// the failing block's first bit to the end of the bunch window.
 ///
-/// The whole block, not the reader's `bits_remaining()`.
+/// Not `bits_remaining()`, for the reason [`decode_and_parse_rep_layout`]
+/// gives one depth down and `abandon_bunch` one depth up. The header reader consumes its
+/// flags and GUIDs before the read that fails, and `read_int_packed` consumes
+/// its bytes before discovering the value runs off the end, so a block whose
+/// header or `content_bits` expires at the window's end left
+/// `bits_remaining() == 0` and charged nothing: `content_block_framing_failures`
+/// moved with no bit tally behind it. The overrun arm has read both too, and
+/// they framed nothing. `payload` is the bunch-payload window (see
+/// `abandon_bunch`), so `len_bits()` is its end; blocks that framed before
+/// this one keep their bits out of the charge.
+fn abandoned_from(payload: &BitReader<'_>, block_start: u64) -> u64 {
+    payload.len_bits() - block_start
+}
+
+/// Decode one RepLayout block payload and walk its field stream.
+///
+/// Returns `false` only when the payload transform failed. That failure is
+/// already counted (`transform_failures`, `skipped_bits`); the caller records
+/// its `ParseFailure` event, because only the caller holds the block's header
+/// and position. Every other outcome, a stream failure included, is reported
+/// here and returns `true`.
+///
+/// # A stream `Err` charges the whole block
+///
+/// When the walk returns `Err`, this function and its ClassNetCache twin
+/// charge the block's `bit_count` to `skipped_bits`, not the reader's
+/// `bits_remaining()`.
 ///
 /// `bits_remaining()` is what the reader had not yet reached, which is not what
 /// the failure lost. `read_int_packed` consumes its chunks *before* discovering
@@ -255,34 +282,6 @@ fn decode_into_scratch(
 /// holds and does not return on `Err`. Charging the block whose loss is already
 /// declared one counter over is the error this file prefers, because the
 /// direction it errs in is loud.
-fn abandoned_on_error(bit_count: usize) -> u64 {
-    bit_count as u64
-}
-
-/// Bits to charge to `skipped_bits` when block framing aborts the bunch: from
-/// the failing block's first bit to the end of the bunch window.
-///
-/// Not `bits_remaining()`, for the reason [`abandoned_on_error`] gives one
-/// depth down and `abandon_bunch` one depth up. The header reader consumes its
-/// flags and GUIDs before the read that fails, and `read_int_packed` consumes
-/// its bytes before discovering the value runs off the end, so a block whose
-/// header or `content_bits` expires at the window's end left
-/// `bits_remaining() == 0` and charged nothing: `content_block_framing_failures`
-/// moved with no bit tally behind it. The overrun arm has read both too, and
-/// they framed nothing. `payload` is the bunch-payload window (see
-/// `abandon_bunch`), so `len_bits()` is its end; blocks that framed before
-/// this one keep their bits out of the charge.
-fn abandoned_from(payload: &BitReader<'_>, block_start: u64) -> u64 {
-    payload.len_bits() - block_start
-}
-
-/// Decode one RepLayout block payload and walk its field stream.
-///
-/// Returns `false` only when the payload transform failed. That failure is
-/// already counted (`transform_failures`, `skipped_bits`); the caller records
-/// its `ParseFailure` event, because only the caller holds the block's header
-/// and position. Every other outcome, a stream failure included, is reported
-/// here and returns `true`.
 pub(super) fn decode_and_parse_rep_layout(
     payload: &mut BitReader<'_>,
     bit_count: usize,
@@ -319,6 +318,11 @@ pub(super) fn decode_and_parse_rep_layout(
     let mut walk = field::WalkContext::default();
     let context = if detailed { Some(&mut walk) } else { None };
     let result = field::parse_rep_layout_content_block(&mut field_reader, sink, context);
+    let (record_handle, record_offset) = if detailed {
+        (walk.last_handle, Some(walk.record_offset))
+    } else {
+        (None, None)
+    };
     match result {
         field::WalkOutcome::Complete {
             count,
@@ -332,38 +336,36 @@ pub(super) fn decode_and_parse_rep_layout(
         } => {
             stage.stats.fields += u64::from(count);
             let tail_reader = field_reader.clone();
-            match sink.on_rep_layout_tail(actor_net_guid, tail_bits as u32, tail_reader.clone()) {
+            let outcome =
+                sink.on_rep_layout_tail(actor_net_guid, tail_bits as u32, tail_reader.clone());
+            let (cause, payload_preserved) = match outcome {
                 RepLayoutTailOutcome::Decoded { rpc_count } => {
                     stage.stats.rpcs += u64::from(rpc_count);
+                    return true;
                 }
-                outcome => {
-                    let (cause, payload_preserved) = match outcome {
-                        RepLayoutTailOutcome::Preserved { cause } => (cause, true),
-                        RepLayoutTailOutcome::Unpreserved { cause } => (cause, false),
-                        RepLayoutTailOutcome::Decoded { .. } => unreachable!(),
-                    };
-                    let failure = StreamFailure {
-                        kind: StreamKind::Rpc,
-                        actor_net_guid,
-                        bit_count: tail_bits as u32,
-                        function_count: 0,
-                        consumed_bits: 0,
-                        remaining_bits: tail_bits,
-                        cause,
-                        record_handle: None,
-                        record_offset: None,
-                        payload_preserved,
-                    };
-                    if detailed {
-                        sink.on_rep_layout_tail_failure_payload(failure, tail_reader);
-                    }
-                    sink.on_stream_failure(failure);
-                    stage.stats.rpc_stream_failures += 1;
-                    stage.stats.skipped_bits += tail_bits;
-                    if payload_preserved {
-                        stage.stats.unresolved_rpc_payloads_preserved += 1;
-                    }
-                }
+                RepLayoutTailOutcome::Preserved { cause } => (cause, true),
+                RepLayoutTailOutcome::Unpreserved { cause } => (cause, false),
+            };
+            let failure = StreamFailure {
+                kind: StreamKind::Rpc,
+                actor_net_guid,
+                bit_count: tail_bits as u32,
+                function_count: 0,
+                consumed_bits: 0,
+                remaining_bits: tail_bits,
+                cause,
+                record_handle: None,
+                record_offset: None,
+                payload_preserved,
+            };
+            if detailed {
+                sink.on_rep_layout_tail_failure_payload(failure, tail_reader);
+            }
+            sink.on_stream_failure(failure);
+            stage.stats.rpc_stream_failures += 1;
+            stage.stats.skipped_bits += tail_bits;
+            if payload_preserved {
+                stage.stats.unresolved_rpc_payloads_preserved += 1;
             }
         }
         field::WalkOutcome::Complete {
@@ -379,12 +381,8 @@ pub(super) fn decode_and_parse_rep_layout(
                 consumed_bits: (bit_count as u64).saturating_sub(abandoned_bits),
                 remaining_bits: abandoned_bits,
                 cause: StreamFailureCause::AbandonedTail,
-                record_handle: if detailed { walk.last_handle } else { None },
-                record_offset: if detailed {
-                    Some(walk.record_offset)
-                } else {
-                    None
-                },
+                record_handle,
+                record_offset,
                 payload_preserved: false,
             };
             sink.on_stream_failure(failure);
@@ -405,12 +403,8 @@ pub(super) fn decode_and_parse_rep_layout(
                 consumed_bits: field_reader.position(),
                 remaining_bits: remaining,
                 cause: StreamFailureCause::ReadError,
-                record_handle: if detailed { walk.last_handle } else { None },
-                record_offset: if detailed {
-                    Some(walk.record_offset)
-                } else {
-                    None
-                },
+                record_handle,
+                record_offset,
                 payload_preserved: false,
             };
             sink.on_stream_failure(failure);
@@ -418,15 +412,17 @@ pub(super) fn decode_and_parse_rep_layout(
                 sink.on_stream_failure_payload(failure, &stage.scratch[..byte_count]);
             }
             stage.stats.field_stream_failures += 1;
-            stage.stats.skipped_bits += abandoned_on_error(bit_count);
+            // The whole block, not what the reader has left; see this
+            // function's doc.
+            stage.stats.skipped_bits += bit_count as u64;
         }
     }
     true
 }
 
 /// Decode one ClassNetCache block payload and walk its RPC stream. Returns
-/// `false` only when the payload transform failed, as
-/// `decode_and_parse_rep_layout` does.
+/// `false` only when the payload transform failed, and charges a stream `Err`
+/// the whole block, as [`decode_and_parse_rep_layout`] does.
 pub(super) fn decode_and_parse_class_net_cache(
     payload: &mut BitReader<'_>,
     bit_count: usize,
@@ -463,6 +459,11 @@ pub(super) fn decode_and_parse_class_net_cache(
     let context = if detailed { Some(&mut walk) } else { None };
     let result =
         field::parse_class_net_cache_content_block(&mut rpc_reader, function_count, sink, context);
+    let (record_handle, record_offset) = if detailed {
+        (walk.last_handle, Some(walk.record_offset))
+    } else {
+        (None, None)
+    };
     match result {
         field::WalkOutcome::Complete {
             count,
@@ -478,12 +479,8 @@ pub(super) fn decode_and_parse_class_net_cache(
                     consumed_bits: (bit_count as u64).saturating_sub(abandoned_bits),
                     remaining_bits: abandoned_bits,
                     cause: StreamFailureCause::AbandonedTail,
-                    record_handle: if detailed { walk.last_handle } else { None },
-                    record_offset: if detailed {
-                        Some(walk.record_offset)
-                    } else {
-                        None
-                    },
+                    record_handle,
+                    record_offset,
                     payload_preserved: false,
                 };
                 sink.on_stream_failure(failure);
@@ -511,12 +508,8 @@ pub(super) fn decode_and_parse_class_net_cache(
                 consumed_bits: rpc_reader.position(),
                 remaining_bits: remaining,
                 cause,
-                record_handle: if detailed { walk.last_handle } else { None },
-                record_offset: if detailed {
-                    Some(walk.record_offset)
-                } else {
-                    None
-                },
+                record_handle,
+                record_offset,
                 payload_preserved: unresolved,
             };
             if unresolved {
@@ -527,7 +520,8 @@ pub(super) fn decode_and_parse_class_net_cache(
             }
             sink.on_stream_failure(failure);
             stage.stats.rpc_stream_failures += 1;
-            stage.stats.skipped_bits += abandoned_on_error(bit_count);
+            // The whole block, as in `decode_and_parse_rep_layout`.
+            stage.stats.skipped_bits += bit_count as u64;
         }
     }
     true
@@ -536,9 +530,10 @@ pub(super) fn decode_and_parse_class_net_cache(
 /// Diagnostic-event construction, compiled out entirely without the
 /// `diagnostics` feature.
 ///
-/// Each function has a no-op twin with the same signature so the framing loop
-/// above reads the same either way; the arguments are all scalars the loop
-/// already holds, so the no-op build optimises them away.
+/// Without the feature each function keeps its signature and loses its one
+/// statement, so the framing loop above reads the same either way; the
+/// arguments are all scalars the loop already holds, so the empty call
+/// optimises away.
 mod diagnostics {
     use super::{BunchContext, ContentBlockHeader, NetStats, NetworkGuid};
 
@@ -591,7 +586,7 @@ mod diagnostics {
         }
     }
 
-    #[cfg(feature = "diagnostics")]
+    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn header_read_error(
         stats: &mut NetStats,
@@ -603,6 +598,7 @@ mod diagnostics {
         remaining_bits: u64,
         bits_skipped: u64,
     ) {
+        #[cfg(feature = "diagnostics")]
         stats.record_diagnostic(|| {
             base(
                 ctx,
@@ -616,7 +612,7 @@ mod diagnostics {
         });
     }
 
-    #[cfg(feature = "diagnostics")]
+    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn content_bits_read_error(
         stats: &mut NetStats,
@@ -629,6 +625,7 @@ mod diagnostics {
         bits_skipped: u64,
         header: &ContentBlockHeader,
     ) {
+        #[cfg(feature = "diagnostics")]
         stats.record_diagnostic(|| DiagnosticEvent {
             reason: SkipReason::ContentBitsReadError,
             content_block_header: Some(ContentBlockHeaderSnapshot::from(header)),
@@ -644,7 +641,7 @@ mod diagnostics {
         });
     }
 
-    #[cfg(feature = "diagnostics")]
+    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn content_bits_overrun(
         stats: &mut NetStats,
@@ -658,6 +655,7 @@ mod diagnostics {
         header: &ContentBlockHeader,
         content_bits: u32,
     ) {
+        #[cfg(feature = "diagnostics")]
         stats.record_diagnostic(|| DiagnosticEvent {
             reason: SkipReason::ContentBitsOverrun {
                 declared_content_bits: content_bits,
@@ -681,7 +679,7 @@ mod diagnostics {
     /// the block's `content_bits`, what `decode_into_scratch` added to
     /// `skipped_bits`; `consumed_bits` and `remaining_bits` are taken where
     /// the block's payload begins, the point the overrun event reports too.
-    #[cfg(feature = "diagnostics")]
+    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn parse_failure(
         stats: &mut NetStats,
@@ -694,6 +692,7 @@ mod diagnostics {
         header: &ContentBlockHeader,
         content_bits: u32,
     ) {
+        #[cfg(feature = "diagnostics")]
         stats.record_diagnostic(|| DiagnosticEvent {
             reason: SkipReason::ParseFailure,
             content_block_header: Some(ContentBlockHeaderSnapshot::from(header)),
@@ -708,66 +707,6 @@ mod diagnostics {
                 u64::from(content_bits),
             )
         });
-    }
-
-    #[cfg(not(feature = "diagnostics"))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn header_read_error(
-        _stats: &mut NetStats,
-        _ctx: &BunchContext<'_>,
-        _ch_index: u32,
-        _actor_net_guid: NetworkGuid,
-        _block_index: u32,
-        _consumed_bits: u64,
-        _remaining_bits: u64,
-        _bits_skipped: u64,
-    ) {
-    }
-
-    #[cfg(not(feature = "diagnostics"))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn content_bits_read_error(
-        _stats: &mut NetStats,
-        _ctx: &BunchContext<'_>,
-        _ch_index: u32,
-        _actor_net_guid: NetworkGuid,
-        _block_index: u32,
-        _consumed_bits: u64,
-        _remaining_bits: u64,
-        _bits_skipped: u64,
-        _header: &ContentBlockHeader,
-    ) {
-    }
-
-    #[cfg(not(feature = "diagnostics"))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn content_bits_overrun(
-        _stats: &mut NetStats,
-        _ctx: &BunchContext<'_>,
-        _ch_index: u32,
-        _actor_net_guid: NetworkGuid,
-        _block_index: u32,
-        _consumed_bits: u64,
-        _remaining_bits: u64,
-        _bits_skipped: u64,
-        _header: &ContentBlockHeader,
-        _content_bits: u32,
-    ) {
-    }
-
-    #[cfg(not(feature = "diagnostics"))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn parse_failure(
-        _stats: &mut NetStats,
-        _ctx: &BunchContext<'_>,
-        _ch_index: u32,
-        _actor_net_guid: NetworkGuid,
-        _block_index: u32,
-        _consumed_bits: u64,
-        _remaining_bits: u64,
-        _header: &ContentBlockHeader,
-        _content_bits: u32,
-    ) {
     }
 }
 
