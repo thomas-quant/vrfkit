@@ -25,12 +25,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from validate_corpus import parse_oracle_output  # noqa: E402
+from validate_corpus import _run_one, parse_oracle_output  # noqa: E402
 from corpus_scan import find_replays  # noqa: E402
 
 if __package__:
@@ -51,25 +50,11 @@ def measure(exe: Path, root: Path) -> dict:
 
     for f in files:
         name = f.relative_to(root).as_posix()
-        try:
-            r = subprocess.run(
-                [str(exe), "validate", str(f)],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=300,
-            )
-        except subprocess.TimeoutExpired:
-            per_file[name] = {"error": "timeout"}
-            continue
-        except OSError as exc:
-            per_file[name] = {"error": f"could not start oracle: {exc}"}
-            continue
-        out = (r.stdout or "") + (r.stderr or "")
-        if r.returncode != 0:
-            per_file[name] = {"error": f"exit {r.returncode}"}
-            continue
-        got, parse_error = parse_oracle_output(out)
-        if parse_error is not None:
-            per_file[name] = {"error": parse_error}
+        error, out = _run_one(exe, f)
+        if error is None:
+            got, error = parse_oracle_output(out)
+        if error is not None:
+            per_file[name] = {"error": error}
             continue
         branch = got["branch"].group(1)
         branches[branch] = branches.get(branch, 0) + 1

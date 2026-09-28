@@ -1,7 +1,7 @@
 """Guards for the corpus baseline pinner.
 
 `--update` wrote whatever the run produced, including runs where the oracle
-failed. `measure` records a failed replay as `{"error": "exit 1"}` and skips it
+failed. `measure` records a failed replay as `{"error": "exit 1: ..."}` and skips it
 when summing, so pinning such a run stored zeros -- and a later run that failed
 in exactly the same way then MATCHED the baseline and reported OK.
 

@@ -100,6 +100,8 @@ def _run_one(exe: Path, path: Path) -> tuple[str | None, str]:
         )
     except subprocess.TimeoutExpired:
         return "timeout", ""
+    except OSError as exc:
+        return f"could not start oracle: {exc}", ""
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0:
         tail = " | ".join(l for l in out.splitlines()[-3:] if l.strip())
