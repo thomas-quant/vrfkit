@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """Extract conservative, joined match observations from a vrfkit export.
 
-This is an analytical view over the exported Parquet tables.  It deliberately
-publishes observations and their evidence rather than declaring game metrics
-where the replay cannot support one.  In particular, PurchasedItemComponent
-rows are snapshots; only Money decreases are economic events -- except those
-replicated between `switchTeams` and the next `roundStarted`, when no buy
-phase is open. Those are the team-switch credit reset and are published as
-`money_decreases_in_team_switch_window`, never as purchase evidence.
-
-Usage:
-    python tools/extract_match_observations.py --export out/<replay> --out observations.json
+Publishes observations and their evidence, never a game metric the replay
+cannot support. PurchasedItemComponent rows are snapshots; only Money
+decreases are economic events, except those between `switchTeams` and the
+next `roundStarted` (no buy phase is open): the team-switch credit reset,
+published as `money_decreases_in_team_switch_window`, never as purchases.
 """
 
 from __future__ import annotations
@@ -48,10 +43,9 @@ PURCHASE_FIELDS = {
 def _collapse(samples):
     """Keep value changes from one replicated scalar stream.
 
-    Source row ordinal breaks real `(time_ms, packet_id)` ties. A packet that
-    carries conflicting values has no observable wire ordering in this table,
-    so it becomes an explicit unknown boundary rather than being sorted by
-    value and turned into an invented transition.
+    The source row ordinal breaks `(time_ms, packet_id)` ties. Conflicting
+    values in one packet have no observable order, so they become an explicit
+    unknown boundary, never a value-sorted invented transition.
     """
     result = []
     ambiguous = 0
@@ -89,21 +83,18 @@ def _changes(samples):
 def _team_switch_windows(switches: list[int], round_starts: list[int]) -> list[tuple]:
     """`[switchTeams, first roundStarted after it)` per switch; end None = end of stream.
 
-    A side switch resets every player's credits (800 at half time, 5000 in
-    overtime), and the reset replicates as an ordinary `Money` write -- a
-    decrease for anyone holding more. Measured on the 1,018-export audit
-    corpus (parser 259ed10, 2026-09-28): 5,616 decreases fall inside these
-    windows, all 7-10 ms after the switch; 5,551 land on 800, 50 on 5000, 12
-    on 0 and 3 on 6200 (every 0 and 6200 follows an overtime switch, the
-    second or later of its match). No buy phase is open before the round
-    starts, so none is a purchase.
+    A side switch resets credits (800 at half time, 5000 in overtime) with an
+    ordinary `Money` write, a decrease for anyone holding more, and no buy
+    phase is open before the round starts. On the 1,018-export corpus (parser
+    259ed10, 2026-09-28; docs/FOLLOWUP.md) 5,616 decreases fall inside, all
+    7-10 ms after the switch: 5,551 to 800, 50 to 5000, 12 to 0 and 3 to 6200
+    (each 0 and 6200 after a second or later overtime switch).
 
-    The window is the decrease's own time, not its collapsed interval. A
-    player already on 800 gets no `Money` sample for the reset, so the first
-    buy's `[before_ms, time_ms]` spans the switch; a rule on that interval
-    took 105 real buys out of the same corpus. A switch with no later
-    `roundStarted` -- 11 overtime replays that end seconds after it -- is open
-    to the end of the stream, and the reset is still written 8 ms after it.
+    Keyed on the decrease's own time, not its collapsed interval: a player
+    already on 800 gets no reset sample, so the first buy's interval spans the
+    switch, and an interval rule took 105 real buys. With no later
+    `roundStarted` (11 overtime replays end seconds after the switch) the
+    window runs to the end of the stream; the reset still comes 8 ms after.
     """
     windows = []
     for switch in switches:
@@ -152,9 +143,7 @@ def _reject_input_overwrite(export_dir: Path, output_path: Path) -> None:
 def _read_columns(path: Path, columns: list[str], *, observation_fields=False) -> dict[str, list]:
     table = pq.read_table(path, columns=columns)
     if observation_fields:
-        # Most physical rows are movement/input payloads. Filter while Arrow
-        # still owns the columns, before expanding millions of Python objects.
-        # Row order within the retained fields remains unchanged.
+        # Filtered in Arrow before millions of Python objects; order is kept.
         names = pc.cast(table.column("field_name"), pa.string())
         scalar_names = pa.array(sorted(PURCHASE_FIELDS | {
             "AuthResourceAmount", "CurrentEquippable", "NewCurrentEquippable",
@@ -194,9 +183,8 @@ def build(export_dir: Path) -> dict:
 
     net = _read_columns(export_dir / "net_guids.parquet",
                         ["net_guid", "path", "outer_net_guid"])
-    # A duplicate NetGUID with conflicting metadata is not a join key.  The
-    # replay table is normally consistent, but choosing the last physical row
-    # would make a reload/ammo relation depend on Parquet order.
+    # A NetGUID with conflicting metadata is not a join key: taking the last
+    # row would make a reload/ammo relation depend on Parquet order.
     path_values = defaultdict(set)
     outer_values = defaultdict(set)
     for guid, path, outer in zip(net["net_guid"], net["path"], net["outer_net_guid"]):
@@ -253,19 +241,12 @@ def build(export_dir: Path) -> dict:
                 magazine[obj].append((time_ms, packet_id, row, integer))
         elif group.endswith("AresInventory") and name in ("CurrentEquippable", "NewCurrentEquippable"):
             if integer is not None:
-                # Current and New are distinct replicated fields. Their order
-                # inside a packet is not a documented transition order.
-                # AresInventory replicates as the object (component) below
-                # its containing actor. Both domains are retained; using the
-                # actor as the component would make an outer join point at
-                # the wrong level.
+                # Current and New have no documented order inside a packet.
+                # Keyed by component AND actor: the actor alone joins wrong.
                 inventory[(obj, actor, name)].append((time_ms, packet_id, row, integer))
         elif group.endswith("EquippableStateMachineComponent") and name == "CurrentState":
             if integer is not None:
-                # The component is the object being replicated. Actor is its
-                # containing equippable in the observed exports and can own
-                # several state machines, so it cannot identify one scalar
-                # state stream.
+                # By component: an equippable actor can own several.
                 state_machine[obj].append((time_ms, packet_id, row, integer))
         elif group.endswith("MoneyManagementComponent") and name == "Money" and integer is not None:
             money[obj].append((time_ms, packet_id, row, integer))
@@ -334,16 +315,14 @@ def build(export_dir: Path) -> dict:
                 "delta": delta,
                 "kind": "decrease" if delta < 0 else "increase",
                 "round_start_within_150ms": _near(round_starts, time_ms, 150),
-                # This is deliberately global timing evidence. The EffectID
-                # row has no demonstrated weapon join at this seam.
+                # Global timing only: EffectID has no demonstrated weapon join.
                 "global_effect_id_within_300ms": (
                     _near(shot_times, time_ms, 300) if delta < 0 else None
                 ),
             })
 
-    # Positive magazine transitions are raw counter observations.  They are
-    # joined to reload *state intervals* below only through one non-null weapon
-    # outer GUID; they never make a completed-reload or shot event.
+    # Raw counter observations, joined to reload state intervals only through
+    # one non-null weapon outer GUID; never a completed reload or a shot.
     positive_magazine_by_weapon = defaultdict(list)
     for component, samples in magazine.items():
         weapon = outer_of.get(component)
@@ -412,9 +391,8 @@ def build(export_dir: Path) -> dict:
             open_start = open_state = None
 
         for time_ms, packet_id, state in compact:
-            # Round events have no packet identity. At equal timestamps their
-            # order relative to a state update is unknown, so reset the entry
-            # evidence before considering the update.
+            # Round events have no packet id, so their order against an update
+            # at the same time is unknown: reset the entry evidence first.
             while next_reset < len(round_starts) and round_starts[next_reset] <= time_ms:
                 close_interval(round_starts[next_reset], None, "round_reset")
                 prior_boundary = "after_round_reset"
@@ -489,8 +467,7 @@ def build(export_dir: Path) -> dict:
                 "after_seconds": after,
                 "delta_seconds": delta,
                 "kind": "increase" if delta > 0 else "decrease",
-                # Completion is represented below by the replay event. A
-                # progress threshold is deliberately never promoted to truth.
+                # Completion is the replay event below, never a threshold.
                 "authoritative_completion": False,
             })
 
@@ -592,9 +569,8 @@ def build(export_dir: Path) -> dict:
             while end < len(ordered) and ordered[end][:2] == (time_ms, packet_id):
                 end += 1
             packet_updates = ordered[index:end]
-            # Apply every source-field update in row order. A field that has
-            # two values inside one packet is ambiguous, so leave it out of
-            # the forward-filled state instead of selecting a numeric winner.
+            # In row order; a field with two values in one packet is left out
+            # of the forward-filled state rather than given a numeric winner.
             names = {update[3] for update in packet_updates}
             for name in sorted(names):
                 values = {update[4] for update in packet_updates if update[3] == name}

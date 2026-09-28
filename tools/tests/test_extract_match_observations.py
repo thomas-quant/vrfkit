@@ -384,9 +384,8 @@ class MatchObservationTests(unittest.TestCase):
         append_field_rows(root, rows)
 
     def test_team_switch_credit_reset_is_not_a_money_decrease(self):
-        """0002c486 (13.02): switchTeams at 1,212,833, four Money writes to 800
-        eight ms later, the round starting at 1,212,958 -- and every snapshot
-        at the round start took one of those resets as its nearest decrease."""
+        """Shaped like 0002c486 (13.02): the resets 8 ms after switchTeams,
+        before the round start, are no snapshot's nearest decrease."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_export(root)
@@ -413,10 +412,8 @@ class MatchObservationTests(unittest.TestCase):
             "switches": 1, "closed_by_round_start": 1, "closed_by_end_of_stream": 0})
 
     def test_a_carried_over_800_then_a_buy_after_the_round_start_is_a_decrease(self):
-        """A player already on 800 gets no Money sample for the reset, so the
-        first buy's collapsed interval spans the switch. A rule on that interval
-        instead of on the decrease's own time removed 105 such buys from the
-        1,018-export audit corpus."""
+        """The buy's collapsed interval spans the switch; its own time does not
+        (see `_team_switch_windows`)."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_export(root)
@@ -436,8 +433,7 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(snapshot["nearest_money_decrease_amount"], 500)
 
     def test_a_final_switch_with_no_later_round_start_windows_to_the_end(self):
-        """Eleven overtime replays end seconds after their last switchTeams,
-        and the reset is still written 8 ms after it."""
+        """As in the overtime replays that end soon after their last switch."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_export(root)
