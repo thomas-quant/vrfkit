@@ -26,7 +26,9 @@ SUBCOMMANDS:
               --json  Write the aggregate to a file instead of stdout
               --include-payloads  Include bounded raw payload samples
     export    Write six Parquet tables (fields, movement, actors,
-              net_guids, events, partials) + manifest.json
+              net_guids, events, partials) + manifest.json into --out,
+              which must be new, empty or hold only export output:
+              anything else in it is refused, never deleted
               --checkpoints  Also parse Checkpoint chunks into
                              checkpoint_fields, checkpoint_actors,
                              checkpoint_net_guids, checkpoint_blocks,
@@ -155,6 +157,22 @@ mod tests {
 
     fn owned(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    /// `export` refuses an `--out` holding anything it does not write
+    /// (`driver::publish`), so the help states the rule rather than leaving
+    /// the refusal as the first a user hears of it. Whitespace-normalized, so
+    /// rewrapping the text does not fail this.
+    #[test]
+    fn help_states_what_export_out_may_hold() {
+        let help = USAGE.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            help.contains(
+                "into --out, which must be new, empty or hold only export output: \
+                 anything else in it is refused, never deleted"
+            ),
+            "{USAGE}"
+        );
     }
 
     #[test]
