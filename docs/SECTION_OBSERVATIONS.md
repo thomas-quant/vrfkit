@@ -121,18 +121,11 @@ The exact values and both calculations remain available, and all 46 warnings
 and their excluded comparison eligibility are independently verified.
 
 All input and implementation hashes matched before and after processing.
-Extraction used eight workers and took 332.3 seconds; the independent raw
-reader took 244.1 seconds. These are runs from existing Parquets, not replay
-parsing times. An earlier independent run with repeated filesystem resolution
-in receipt lookup was interrupted, preserved separately, and excluded from
-full-corpus acceptance. Its 78 completed outputs were byte-identical to the
-replacement run after exact-path receipt lookup was cached.
 
 Focused behavioral checks cover complete arrays across all five routes,
 declaration changes, parent/child disagreement, strict values, ordering,
 missing records, section identity and output aliases. Removing each of four
 production guards makes its targeted check fail. The independent comparison
 rejects eleven altered outputs and three altered exception reports; normal
-JSON reserialization passes. The full Rust and Python suites and documentation
-checks also pass. This derived view does not increase typed-row coverage or
-establish a new percentage of semantic completeness.
+JSON reserialization passes. This derived view does not increase typed-row
+coverage or establish a new percentage of semantic completeness.

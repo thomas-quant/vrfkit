@@ -147,10 +147,9 @@ is introduced by this batch.
 
 ## Validation status
 
-The fixed Rust 1.86 binary completed all 714 exports with eight workers in
-334.8 seconds, including checkpoints. Build populations are 215 for 13.01,
-204 for 13.02, 108 for 13.04 and 187 for 13.05. Original replays and all previous
-exports remain retained. Both full-corpus guards pass: zero overlay decode
+The fixed Rust 1.86 binary completed all 714 exports, including checkpoints:
+215 for 13.01, 204 for 13.02, 108 for 13.04 and 187 for 13.05. Both full-corpus
+guards pass: zero overlay decode
 errors, zero structured-blob failures and zero malformed packets. This does
 not establish that all input bytes have been interpreted.
 
@@ -181,9 +180,7 @@ values, and 12,507 typed children are added. Physical parents and children
 overlap, and checkpoints repeat state. These ratios are not semantic
 completeness; the earlier strict semantic classification has not been rerun.
 
-The 40-check MSRV/build-feature sweep passes, including 692 Rust tests.
 Pinned main and checkpoint baselines pass after review: the reference file
 gains 1,894 HealCauser values, retains all row counts, and reports zero new
 targeting children. Its directly measured typed presence is 914,001 of
-1,296,660 rows (70.4889%). Warning-strict Python validation covers 709 tests;
-the full documentation guard checks these counts against the actual suites.
+1,296,660 rows (70.4889%).
