@@ -243,11 +243,11 @@ member and handle by name.
 #### Reading the `Typed` ratio
 
 ```
-  Typed:            80.6% (properties + RPC parameters)
+  Typed:            83.0% (properties + RPC parameters)
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 797,451 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 820,885 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -266,16 +266,16 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 12,679,221 | |
+| `fields.parquet` | 1,296,660 | 12,684,760 | |
 | `movement.parquet` | 1,844,147 | 19,984,802 | |
 | `actors.parquet` | 3,827 | 68,243 | |
 | `net_guids.parquet` | 16,167 | 114,423 | |
 | `events.parquet` | 195 | 12,455 | |
 | `partials.parquet` | 0 | 2,505 | main-only; with checkpoints: 0 rows, 2,505 bytes |
-| `checkpoint_fields.parquet` | 352,089 | 1,183,648 | requires `--checkpoints` |
+| `checkpoint_fields.parquet` | 352,089 | 1,188,830 | requires `--checkpoints` |
 | `checkpoint_actors.parquet` | 3,014 | 24,345 | requires `--checkpoints` |
 | `checkpoint_net_guids.parquet` | 74,270 | 175,916 | requires `--checkpoints` |
-| `checkpoint_blocks.parquet` | 22,247 | 112,647 | requires `--checkpoints` |
+| `checkpoint_blocks.parquet` | 22,247 | 112,649 | requires `--checkpoints` |
 | `checkpoint_guid_entries.parquet` | 74,270 | 219,662 | requires `--checkpoints` |
 | `checkpoint_export_groups.parquet` | 8,307 | 16,481 | requires `--checkpoints` |
 | `checkpoint_export_fields.parquet` | 49,314 | 106,370 | requires `--checkpoints` |
@@ -1168,12 +1168,12 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 778 passing
+cargo +1.86.0 test --workspace --locked                              # 805 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 158 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 906 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1031 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 205 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
@@ -1390,7 +1390,7 @@ live in `%LOCALAPPDATA%\vrfkit\baseline-corpora`.
 
 ## 8. Known limits
 
-- **Untyped residual** -- the [`export`](#export) `Typed` is ~80.6% (denominator
+- **Untyped residual** -- the [`export`](#export) `Typed` is ~83.0% (denominator
   including RPC parameters). **Untyped != lost** (`raw_bits` preserved). Typing
   the rest needs the game binary or UE headers -- this is not a table-editing
   problem (archive/PROJECT_STATUS.md section 24).
