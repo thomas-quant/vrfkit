@@ -75,28 +75,6 @@ Struct blobs:      63 decoded / 0 failed
 Reward opaque:     4470 empty variants
 """ + CLEAN_SINK
 
-#: The same summary from an exporter whose decoders never ran. Every counter is
-#: a legitimate zero and `Decode errors: 0` is true, vacuously.
-NOTHING_RAN = """
-Rows offered:      0
-Decoded OK:        0
-Decode errors:     0
-Raw/Skip:          0
-Not in table:      0
-No field name:     0
-Struct blobs:      0 decoded / 0 failed
-Reward opaque:     0 empty variants
-Reward opaque:     0 empty variants
-Movement rows:     0
-Movement errors:   0
-Array decode:      0 elements / 0 fields / 0 errors / 0 truncations
-Array residual:    0 root bits / 0 nested bits / 0 implicit ends
-Array leaf errs:   0
-Truncated RPCs:    0
-CNC brute force:   0 attempted / 0 unwalked
-Movement tails:    0 sized (0 bits) / 0 open (0 bits)
-"""
-
 #: Measured on a live export -- not synthesized. 742738 + 0 + 72644 + 171605 +
 #: 1996 = 988983, an exact match to "Rows offered" only once `No field name`
 #: is part of the sum. `CLEAN_SINK` is appended: those lines are not part of
@@ -302,32 +280,23 @@ class ReconcileTests(unittest.TestCase):
 
 
 class ArgParsingTests(unittest.TestCase):
-    """Defect 1 wiring: discovery now goes through corpus_scan.py."""
-
-    def test_recursive_defaults_to_false(self):
-        args = guard.parse_args(["vrfkit.exe", "corpus"])
-        self.assertFalse(args.recursive)
-
-    def test_recursive_flag_is_readable(self):
-        args = guard.parse_args(["vrfkit.exe", "corpus", "--recursive"])
-        self.assertTrue(args.recursive)
-
-    def test_checkpoints_defaults_to_false(self):
+    def test_every_flag_is_opt_in_and_checkpoints_reach_the_export_argv(self):
         """The existing invocation in docs/USAGE.md must keep working
-        unchanged -- checkpoints cost real time and disk, so opt-in only."""
-        args = guard.parse_args(["vrfkit.exe", "corpus"])
-        self.assertFalse(args.checkpoints)
-
-    def test_checkpoints_flag_is_readable(self):
-        args = guard.parse_args(["vrfkit.exe", "corpus", "--checkpoints"])
-        self.assertTrue(args.checkpoints)
-
-    def test_identifier_redaction_is_opt_in(self):
+        unchanged -- checkpoints cost real time and disk, so opt-in only --
+        and `--checkpoints` must reach the `vrfkit export` argv, not just this
+        tool's own flag parsing."""
         plain = guard.parse_args(["vrfkit.exe", "corpus"])
-        private = guard.parse_args(
-            ["vrfkit.exe", "corpus", "--redact-identifiers"])
-        self.assertFalse(plain.redact_identifiers)
-        self.assertTrue(private.redact_identifiers)
+        for flag in ("recursive", "checkpoints", "redact_identifiers"):
+            with self.subTest(flag=flag):
+                self.assertFalse(getattr(plain, flag))
+                given = guard.parse_args(
+                    ["vrfkit.exe", "corpus", "--" + flag.replace("_", "-")])
+                self.assertTrue(getattr(given, flag))
+        paths = (Path("vrfkit.exe"), Path("a.vrf"), Path("out"))
+        self.assertNotIn("--checkpoints",
+                         guard.export_command(*paths, with_checkpoints=False))
+        self.assertIn("--checkpoints",
+                      guard.export_command(*paths, with_checkpoints=True))
 
 
 #: The `=== Checkpoints ===` block, appended to a healthy main summary, exactly
@@ -346,21 +315,6 @@ CLEAN_WITH_CHECKPOINTS = LIVE_EXPORT + """
   Checkpoint CNC:   3 RPC rows
   Checkpoint CNC brute force: 0 attempted / 0 unwalked
 """
-
-
-class ExportCommandTests(unittest.TestCase):
-    """The scope hole: `--checkpoints` must reach the `vrfkit export` argv,
-    not just this tool's own flag parsing."""
-
-    def test_without_the_flag_the_export_command_omits_checkpoints(self):
-        cmd = guard.export_command(Path("vrfkit.exe"), Path("a.vrf"), Path("out"),
-                                   with_checkpoints=False)
-        self.assertNotIn("--checkpoints", cmd)
-
-    def test_with_the_flag_the_export_command_carries_checkpoints(self):
-        cmd = guard.export_command(Path("vrfkit.exe"), Path("a.vrf"), Path("out"),
-                                   with_checkpoints=True)
-        self.assertIn("--checkpoints", cmd)
 
 
 class CheckpointCounterTests(unittest.TestCase):
