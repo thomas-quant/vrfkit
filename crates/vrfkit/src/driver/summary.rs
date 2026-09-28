@@ -18,8 +18,8 @@ use vrf_decode::{OverlayErrorReport, OverlayStats};
 use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 
-use super::CHECKPOINT_TABLES;
 use super::checkpoints::CheckpointStats;
+use super::{CHECKPOINT_TABLES, MAIN_TABLES};
 use crate::report;
 use crate::sink::SinkTotals;
 
@@ -582,12 +582,9 @@ fn print_file_sizes(
     let size = |name: &str| file_size(&out_path.join(name));
 
     eprintln!();
-    eprintln!("  fields.parquet:   {} bytes", size("fields.parquet"));
-    eprintln!("  movement.parquet: {} bytes", size("movement.parquet"));
-    eprintln!("  actors.parquet:   {} bytes", size("actors.parquet"));
-    eprintln!("  net_guids.parquet:{} bytes", size("net_guids.parquet"));
-    eprintln!("  events.parquet:   {} bytes", size("events.parquet"));
-    eprintln!("  partials.parquet: {} bytes", size("partials.parquet"));
+    for table in MAIN_TABLES {
+        eprintln!("  {:<18}{} bytes", format!("{table}:"), size(table));
+    }
     if with_checkpoints {
         for table in CHECKPOINT_TABLES {
             eprintln!("  {table}: {} bytes", size(table));
