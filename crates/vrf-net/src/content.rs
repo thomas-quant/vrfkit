@@ -1,13 +1,7 @@
-//! Content block header parsing and framing loop.
+//! Content block header parsing.
 //!
-//! A bunch's payload is a sequence of content blocks. Each block has a header
-//! that identifies what it describes (the actor itself, a subobject, or a
-//! deletion), followed by a payload whose structure depends on the header:
-//!
-//! - **RepLayout** (has_rep_layout = true): property field stream
-//! - **ClassNetCache** (has_rep_layout = false): RPC function stream
-//!
-//! # Content block header bit layout
+//! A bunch's payload is a sequence of content blocks, each a header saying
+//! what it describes (the actor, a subobject, or a deletion) and a payload.
 //!
 //! ```text
 //! +------------------------------------------------------------------+
@@ -49,7 +43,8 @@ pub struct ContentBlockHeader {
     pub object_net_guid: NetworkGuid,
     /// Net GUID of the class (subobject case, when present).
     pub class_net_guid: NetworkGuid,
-    /// True when the class GUID field was read, including an invalid zero.
+    /// The class GUID field was read, even as an invalid zero: this separates
+    /// a read-invalid class (deleted, flags 0) from an explicit delete.
     pub has_class_net_guid: bool,
     /// Net GUID of the outer object.
     pub outer_net_guid: NetworkGuid,
@@ -59,23 +54,20 @@ pub struct ContentBlockHeader {
     pub delete_flags: u8,
 }
 
-/// Read a content block header from the stream.
-///
-/// `actor_net_guid` is the channel's actor GUID (used as default outer).
-/// `is_exporting` should be false for normal content block headers.
+/// Read a content block header from the stream. `actor_net_guid` is the
+/// channel's actor GUID, the default outer.
 pub fn read_content_block_header(
     reader: &mut BitReader<'_>,
     actor_net_guid: NetworkGuid,
     sink: &mut dyn GuidPathSink,
 ) -> Result<ContentBlockHeader> {
-    // Every shape below starts from this; the actor is the default outer.
+    // Every shape below starts from this.
     let base = ContentBlockHeader {
         has_rep_layout: reader.read_bit()?,
         outer_net_guid: actor_net_guid,
         ..Default::default()
     };
 
-    // Is this block about the actor itself?
     if reader.read_bit()? {
         return Ok(ContentBlockHeader {
             is_actor: true,
@@ -83,7 +75,6 @@ pub fn read_content_block_header(
         });
     }
 
-    // Subobject: read object net GUID
     let base = ContentBlockHeader {
         object_net_guid: net_guid::internal_load_object(reader, false, 0, sink)?,
         ..base
@@ -96,7 +87,6 @@ pub fn read_content_block_header(
         });
     }
 
-    // Check if deleted
     if reader.read_bit()? {
         return Ok(ContentBlockHeader {
             is_deleted: true,
@@ -105,10 +95,8 @@ pub fn read_content_block_header(
         });
     }
 
-    // Read class net GUID
     let class_net_guid = net_guid::internal_load_object(reader, false, 0, sink)?;
     if !class_net_guid.is_valid() {
-        // Invalid class GUID means "deleted" with flags = 0
         return Ok(ContentBlockHeader {
             is_deleted: true,
             has_class_net_guid: true,
@@ -116,9 +104,8 @@ pub fn read_content_block_header(
         });
     }
 
-    // Outer
+    // bUseActorOuter
     let outer_net_guid = if reader.read_bit()? {
-        // bUseActorOuter = true
         actor_net_guid
     } else {
         net_guid::internal_load_object(reader, false, 0, sink)?

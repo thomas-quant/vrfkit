@@ -1,14 +1,8 @@
 //! Net GUID loading -- `InternalLoadObject` recursive reader.
 //!
-//! This is the Unreal mechanism for serializing object references on the wire.
-//! A GUID is read, and if it carries export flags with a path, the path (and
-//! possibly an outer GUID, recursively) is also consumed from the stream.
-//!
-//! # Callback
-//!
-//! Path registration is *not* handled here. Instead the caller provides a
-//! [`GuidPathSink`] that receives `(guid, path, outer_guid)` tuples.
-//! This keeps the NetGuidCache (a large HashMap) in the caller's domain.
+//! Unreal's wire form of an object reference: a GUID, then, when its export
+//! flags carry a path, that path and possibly an outer GUID, recursively. The
+//! paths go to the caller's [`GuidPathSink`], which owns the NetGuidCache.
 
 use vrf_bitio::BitReader;
 
@@ -16,24 +10,17 @@ use crate::error::{NetError, Result};
 use crate::types::{ExportFlags, MAX_NET_GUID_RECURSION, NetworkGuid};
 
 /// Callback invoked when a net GUID's path is decoded from the stream.
-///
-/// Implementors should store `(guid, path, outer_guid)` in their cache.
 pub trait GuidPathSink {
     /// A GUID path was read from the wire.
     fn register_path(&mut self, guid: u32, path: &str, outer_guid: NetworkGuid);
 
     /// The path this GUID is known by, if the receiver keeps one.
     ///
-    /// The replication layer needs this to decide the net-player-index byte the
-    /// same way the reference does -- `ReadNetPlayerIndexStage.cs` resolves the
-    /// channel's archetype and actor paths and asks whether either names a
-    /// PlayerController. Answering from the receiver's cache rather than from a
-    /// set this layer maintains itself is what makes the two agree: paths reach
-    /// the cache by more routes than pass through here, so a set built only
-    /// from `register_path` calls is missing entries the cache already has.
-    ///
-    /// Defaulted to `None` so a sink that keeps no cache need not implement it.
-    /// A sink that returns `None` gets the pre-cache behaviour.
+    /// Decides the net-player-index byte as `ReadNetPlayerIndexStage.cs` does:
+    /// resolve the channel's archetype and actor paths and ask whether either
+    /// names a PlayerController. Answer from the receiver's cache, not from a
+    /// set of `register_path` calls: paths reach the cache by more routes than
+    /// pass through here. The default `None` (no cache) never consumes that byte.
     fn path_for_guid(&self, _guid: u32) -> Option<&str> {
         None
     }
@@ -53,9 +40,8 @@ pub trait GuidPathSink {
 ///       checksum       : u32
 /// ```
 ///
-/// `is_exporting` is true when called from a package-map export bunch (the
-/// entire bunch is declaring paths). In normal content-block headers it is
-/// false, so only "default" GUIDs (value == 1) carry inline path data.
+/// `is_exporting` is true inside a package-map export bunch; in content-block
+/// headers only the default GUID (1) carries inline path data.
 pub fn internal_load_object(
     reader: &mut BitReader<'_>,
     is_exporting: bool,
@@ -71,9 +57,6 @@ pub fn internal_load_object(
         return Ok(guid);
     }
 
-    // Export flags are present when:
-    // 1. The GUID is the "default" object (value == 1), OR
-    // 2. We are inside a package-map export bunch.
     let flags = if guid.is_default() || is_exporting {
         ExportFlags(reader.read_u8()?)
     } else {
@@ -84,10 +67,9 @@ pub fn internal_load_object(
         return Ok(guid);
     }
 
-    // Recursive: the path's outer object is itself a net GUID reference.
     let outer_guid = internal_load_object(reader, is_exporting, depth + 1, sink)?;
 
-    // FString path. Cap at 4096 bytes to reject corrupt lengths early.
+    // Cap the FString at 4096 bytes to reject a corrupt length early.
     let path = reader.read_fstring(4096)?;
 
     if flags.has_network_checksum() {

@@ -1,9 +1,7 @@
 //! Shared types used across the replication layer.
 
-/// Maximum payload size in bits for a single packet (2 KB = 16 384 bits).
-///
-/// Used as the upper bound for `read_serialized_int` when reading the bunch
-/// payload bit count. Matches Unreal's `MAX_PACKET_SIZE * 8`.
+/// Maximum packet payload in bits: Unreal's `MAX_PACKET_SIZE * 8` (2 KB =
+/// 16 384 bits), the `read_serialized_int` bound for a bunch's bit count.
 pub const MAX_PACKET_SIZE_BITS: u32 = 2 * 1024 * 8;
 
 /// Maximum recursion depth for `InternalLoadObject`.
@@ -19,26 +17,22 @@ pub const MAX_GUID_COUNT: u32 = 2048;
 /// indices that otherwise create one hash-table entry per bunch forever.
 pub const MAX_ACTIVE_CHANNELS: usize = 4_096;
 
-/// Reason a channel was closed by the server.
-///
-/// ```text
-/// Bit layout: read_serialized_int(MAX = 15)
-/// ```
+/// Reason a channel was closed by the server, read as `SerializedInt(15)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum ChannelCloseReason {
     /// Actor was destroyed.
     #[default]
     Destroyed = 0,
-    /// Actor entered dormancy (still logically alive).
+    /// Actor entered dormancy: still alive, so not a despawn.
     Dormancy = 1,
 }
 
 impl ChannelCloseReason {
-    /// The `MAX` enum sentinel used by `read_serialized_int`.
+    /// The `MAX` passed to `read_serialized_int`.
     pub const MAX: u32 = 15;
 
-    /// Convert from raw wire value.
+    /// Any wire value but 1 (Dormancy) reads as Destroyed.
     #[must_use]
     pub fn from_raw(v: u32) -> Self {
         match v {
@@ -48,31 +42,25 @@ impl ChannelCloseReason {
     }
 }
 
-/// A network GUID as transmitted on the wire.
-///
-/// - `0` means invalid / not present.
-/// - `1` means "default object" (triggers export-flags read).
-/// - Odd values are static (level-placed) actors.
-/// - Even non-zero values are dynamic (spawned) actors.
+/// A network GUID as transmitted on the wire: `0` is no object, `1` the
+/// default object (its export flags are always read), odd values static
+/// (level-placed) actors and even non-zero values dynamic (spawned) ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct NetworkGuid(pub u32);
 
 impl NetworkGuid {
-    /// A GUID of zero means "no object".
     #[must_use]
     #[inline]
     pub const fn is_valid(self) -> bool {
         self.0 != 0
     }
 
-    /// GUID == 1 is the default object (always triggers export flags).
     #[must_use]
     #[inline]
     pub const fn is_default(self) -> bool {
         self.0 == 1
     }
 
-    /// Dynamic actors have even, non-zero GUIDs.
     #[must_use]
     #[inline]
     pub const fn is_dynamic(self) -> bool {
