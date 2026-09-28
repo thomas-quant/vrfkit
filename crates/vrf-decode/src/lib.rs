@@ -168,6 +168,7 @@ pub(crate) mod test_bits {
         }
 
         /// Another writer's bits, after these.
+        #[cfg_attr(not(any(feature = "array", feature = "structs")), allow(dead_code))]
         pub(crate) fn append(&mut self, other: &Self) -> &mut Self {
             self.0.extend_from_slice(&other.0);
             self
@@ -188,6 +189,7 @@ pub(crate) mod test_bits {
     }
 
     /// Bytes from hex digits; whitespace between them is ignored.
+    #[cfg_attr(not(any(feature = "effect", feature = "structs")), allow(dead_code))]
     pub(crate) fn hex(digits: &str) -> Vec<u8> {
         let clean: Vec<u8> = digits
             .bytes()
