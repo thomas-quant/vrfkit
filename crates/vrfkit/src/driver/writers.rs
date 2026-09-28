@@ -192,40 +192,24 @@ mod tests {
 
     /// A writer that fails must never be reported as a finished file.
     ///
-    /// Moving the Parquet writers onto threads moved their errors off the
-    /// `?` path, which is exactly the shape of a silent success. This drives the
-    /// failure deliberately: the writer returns an error and drops its receiver,
-    /// the producing side sees a send failure, and `finish` must surface the
-    /// writer's own error rather than either the send failure or `Ok`.
+    /// Moving the Parquet writers onto threads moved their errors off the `?`
+    /// path, which is exactly the shape of a silent success. The case only
+    /// `finish` can catch is a writer that drained its channel and then
+    /// failed -- a disk full while writing the Parquet footer: no send fails,
+    /// so the error exists only in the join. The test this replaced failed
+    /// its writer mid-stream, which a send always noticed first, and it
+    /// stayed green with that join arm made to swallow the error.
     #[test]
-    fn a_failed_writer_thread_is_reported_not_swallowed() {
+    fn a_writer_that_fails_after_draining_its_channel_fails_finish() {
         let mut writer = WriterThread::<u8>::spawn("test", |rx| {
-            // Take one batch, then fail -- the shape of a Parquet codec error.
-            let _ = rx.recv();
-            Err(ExportError::Usage("writer failed".into()))
+            for _ in rx {}
+            Err(ExportError::Usage("footer failed".into()))
         });
-
-        // Keep shipping until the broken channel is observed, or until enough
-        // batches have gone in to guarantee it would have been.
-        let mut saw_send_failure = false;
-        for _ in 0..(WRITER_QUEUE_DEPTH + 4) {
-            let mut batch = vec![0u8; WRITER_BATCH_ROWS];
-            if writer.append(&mut batch).is_err() {
-                saw_send_failure = true;
-                break;
-            }
-        }
-
-        let err = writer
+        writer.append(&mut vec![0u8; 3]).unwrap();
+        let error = writer
             .finish()
-            .expect_err("a failed writer must not report success");
-        assert!(
-            err.to_string().contains("writer failed"),
-            "finish must surface the writer's own error, got: {err}"
-        );
-        // Not asserted as required: whether the producer noticed first is a
-        // race. What must hold is that finish reports the failure either way.
-        let _ = saw_send_failure;
+            .expect_err("a writer whose footer failed must not finish");
+        assert!(error.to_string().contains("footer failed"), "got: {error}");
     }
 
     /// Append full batches until one is refused. The channel holds
