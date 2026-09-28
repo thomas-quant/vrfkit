@@ -108,14 +108,16 @@ impl Verdict {
 /// main and checkpoint passes plus `validate`): two from each of the local
 /// archive's 21 build directories (13.01's two include the pinned 02d4d478)
 /// and the three public fixtures -- 24 builds, 23,818,049 main and 185,244
-/// checkpoint bunches. `unopened_channel_bits` moves only with that count. A
-/// failed reopen already fails a header stage in four of its five arms; the
-/// fifth (a package-map export bunch whose exports read cleanly) still retires
-/// the displaced actor, so a later payload bunch on that channel is dropped
-/// and counted here. A rejected fragment stays unscored even when it carried a
-/// channel's open: with no live actor on the channel, the bunches dropped
-/// after it are the loss; with one, it retires nothing and later bunches frame
-/// under that actor (docs/FOLLOWUP.md).
+/// checkpoint bunches. Its two companions are not terms:
+/// `unopened_channel_bits` moves only with that count, and a failed reopen is
+/// already a `bunch_header_failures` in four of its five arms. The fifth, a
+/// package-map export bunch whose exports read cleanly, never reads the open
+/// it carries and fails no header stage, but its displaced actor is still
+/// retired, so a later payload bunch on that channel is dropped and counted
+/// here. A rejected fragment stays unscored even when it carried a channel's
+/// open: with no live actor on the channel, the bunches dropped after it are
+/// the loss; with one, it retires nothing and later bunches frame under that
+/// actor (docs/FOLLOWUP.md).
 fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verdict {
     let total_with_content = stats.rep_layout_blocks + stats.class_net_cache_blocks;
     let failures = stats.malformed_packets

@@ -182,7 +182,7 @@ pub(super) fn print(
         totals.event_trailing_bytes
     );
     // Zero included: 13.02 moving RoundResults from handle 93 to 81 went
-    // unnoticed without it (see `SinkTotals::struct_blobs_failed`).
+    // unnoticed without it (see `ExportStats::struct_blobs_failed`).
     eprintln!(
         "  Struct blobs:     {} decoded / {} failed",
         totals.sink.struct_blobs_decoded, totals.sink.struct_blobs_failed
