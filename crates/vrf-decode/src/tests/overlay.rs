@@ -855,7 +855,7 @@ fn cypher_trap_fields_follow_the_13_01_rename() {
 /// writes `ReplicatedMovement`, and every AGameObject class whose rotation is
 /// observable decodes at byte width only (AProjectile 38 of 38 byte,
 /// AShooterCharacter 7 of 7 short). `apply_type_corrections.py`,
-/// `retype_game_object_rotators`, has the evidence and the bound.
+/// `GAME_OBJECT_BYTE_ROTATOR_GROUPS`, has the evidence and the bound.
 #[test]
 fn only_the_seeker_nade_keeps_short_rotator_components() {
     const GAME_OBJECTS: [&str; 5] = [

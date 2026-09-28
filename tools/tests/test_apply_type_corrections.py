@@ -389,8 +389,8 @@ class AdditionsTests(unittest.TestCase):
         self.assertEqual(out.count("];\n"), 1)
 
 
-class RetypeExactTests(unittest.TestCase):
-    """`retype_exact` keys on each block's OWN entry, never on text elsewhere.
+class RetypeTests(unittest.TestCase):
+    """`retype` keys on each block's OWN entry, never on text elsewhere.
 
     The split on `    OverlayEntry {` leaves OVERLAY_HANDLE_TABLE in the last
     block, and that table repeats group paths and field names. A substring pass
@@ -400,29 +400,20 @@ class RetypeExactTests(unittest.TestCase):
     GROUP = "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation"
 
     def table(self, last_type):
-        body = render_table([
+        return render_table([
             (self.GROUP, "AllianceFilter", "FieldType::EnumRemainingBits"),
             (self.GROUP, "AllianceFilterX", "FieldType::EnumRemainingBits"),
             ("/Script/ShooterGame.ZzzTailComponent", "Stripes", last_type),
-        ])
-        return body + (
-            "\npub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; 1] = [\n"
-            "    OverlayHandleEntry {\n"
-            f'        group_path: "{self.GROUP}",\n'
-            "        handle: 28,\n"
-            '        field_name: "AllianceFilter",\n'
-            "    },\n"
-            "];\n"
-        )
+        ], handles=[(self.GROUP, 28, "AllianceFilter")])
 
     def test_only_the_exact_entry_changes(self):
         # The tail entry carries the old type too, and the handle table after
         # it names the same group and field -- the shape a substring pass
         # would misread as "the last entry is AllianceFilter".
         source = self.table("FieldType::EnumRemainingBits")
-        out, n = atc.retype_exact(
-            source, self.GROUP, "AllianceFilter",
-            "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=1)
+        out, n = atc.retype(source, atc.exact_retype(
+            self.GROUP, "AllianceFilter",
+            "FieldType::EnumRemainingBits", "FieldType::EnumByte"))
         self.assertEqual(n, 1)
         self.assertEqual(
             [(f, t) for _g, f, t in atc.parse_entries(out)],
@@ -431,17 +422,16 @@ class RetypeExactTests(unittest.TestCase):
              ("Stripes", "FieldType::EnumRemainingBits")])
 
     def test_an_already_corrected_table_changes_nothing(self):
-        out, n = atc.retype_exact(
-            self.table("FieldType::Float"), self.GROUP, "AllianceFilter",
-            "FieldType::EnumByte", "FieldType::Raw", expected=1)
+        out, n = atc.retype(self.table("FieldType::Float"), atc.exact_retype(
+            self.GROUP, "AllianceFilter", "FieldType::EnumByte", "FieldType::Raw"))
         self.assertEqual(n, 0)
         self.assertEqual(out, self.table("FieldType::Float"))
 
     def test_an_unexpected_count_is_a_hard_failure(self):
         with self.assertRaises(SystemExit):
-            atc.retype_exact(
-                self.table("FieldType::Float"), self.GROUP, "AllianceFilter",
-                "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=2)
+            atc.retype(self.table("FieldType::Float"), atc.exact_retype(
+                self.GROUP, "AllianceFilter",
+                "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=2))
 
     def test_a_braced_retype_changes_the_entry_it_counts(self):
         """The count claims an entry changed. rustfmt breaks a braced type
@@ -457,15 +447,15 @@ class RetypeExactTests(unittest.TestCase):
             with self.subTest(one_line=one_line):
                 source = whole_table(UNCORRECTED_GAME_OBJECT_ROTATORS,
                                      one_line=one_line, braced_multiline=not one_line)
-                out, n = atc.retype_exact(source, group, "ReplicatedMovement",
-                                          short_whole, byte_whole, expected=1)
+                out, n = atc.retype(source, atc.exact_retype(
+                    group, "ReplicatedMovement", short_whole, byte_whole))
                 types = {(g, f): t for g, f, t in atc.parse_entries(out)}
                 self.assertEqual((n, types[(group, "ReplicatedMovement")]),
                                  (1, byte_whole))
                 with self.assertRaises(SystemExit):
-                    atc.retype_exact(source, group, "ReplicatedMovement", short_whole,
-                                     rep.format("ByteComponents", "RoundTwoDecimals"),
-                                     expected=1)
+                    atc.retype(source, atc.exact_retype(
+                        group, "ReplicatedMovement", short_whole,
+                        rep.format("ByteComponents", "RoundTwoDecimals")))
 
 
 #: A weapon group of the shape the "215"/"216" pass discovers for itself.
@@ -504,15 +494,15 @@ def whole_table(overrides=None, drop=(), one_line=False, braced_multiline=False,
 #: typed variant for another, so the generated header lines are identical
 #: either way and `--check` cannot pass or fail for header reasons.
 #:
-#: `SmokeScreen.ReplicatedMovement` is rewritten by a block-based pass, so it
-#: applies in BOTH layouts: a file carrying ShortComponents is correctable.
+#: `SmokeScreen.ReplicatedMovement` is rewritten per entry, so it applies in
+#: BOTH layouts: a file carrying ShortComponents is correctable.
 UNCORRECTED_SMOKESCREEN = {
     ("SmokeScreen", "ReplicatedMovement"):
         "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
         "location: VectorQuantization::RoundWholeNumber }",
 }
 #: Gekko's Wingman as the generator emits it: whole units, the default every
-#: `RepMovement` entry starts from. Also rewritten by a block-based pass.
+#: `RepMovement` entry starts from.
 UNCORRECTED_SEEKER_NADE = {
     (atc.SEEKER_NADE_GROUP, "ReplicatedMovement"):
         "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
@@ -526,12 +516,13 @@ UNCORRECTED_GAME_OBJECT_ROTATORS = {
         "location: VectorQuantization::RoundWholeNumber }"
     for group in atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS
 }
-#: `TimedBomb.TimeRemainingToExplode` is rewritten by a pass that matches a
-#: one-line literal, so in the rustfmt'd layout it is DEAD -- the file is not
-#: correctable at all and has to fail loudly, which is the existing behaviour.
-DEAD_FLOAT_TO_DOUBLE = {
-    ("TimedBomb.TimedBomb_C", "TimeRemainingToExplode"): "FieldType::Float",
-}
+#: A correction whose entry is gone, as if the descriptors stopped declaring
+#: it: no pass can create the entry, so the correction is DEAD in either
+#: layout and has to fail loudly. Pass it as `drop=`.
+DEAD_TIME_REMAINING = [("TimedBomb.TimedBomb_C", "TimeRemainingToExplode")]
+#: The first line of each FAILED section `main()` prints.
+DEAD_HEADER = "corrections are missing from"
+UNCORRECTED_HEADER = "the file was never corrected"
 
 
 class MainOnDiskTests(unittest.TestCase):
@@ -581,20 +572,23 @@ class MainOnDiskTests(unittest.TestCase):
     def test_a_dead_pattern_still_fails_loudly(self):
         """Unchanged behaviour: a correction that cannot be applied at all."""
         code, _out, err = self.run_main(
-            whole_table(DEAD_FLOAT_TO_DOUBLE), "--check"
+            whole_table(drop=DEAD_TIME_REMAINING), "--check"
         )
         self.assertEqual(code, 1)
         self.assertIn("TimeRemainingToExplode", err)
+        self.assertIn(DEAD_HEADER, err)
 
     def test_the_two_failure_modes_are_distinguishable(self):
-        """A regenerated table trips BOTH at once -- some passes are dead in
-        the rustfmt'd layout, the block-based ones apply fine in memory. One
-        report that hides the other is how the second one gets missed."""
-        both = {**UNCORRECTED_SMOKESCREEN, **DEAD_FLOAT_TO_DOUBLE}
-        code, _out, err = self.run_main(whole_table(both), "--check")
+        """One table can trip BOTH at once -- a correction whose entry is gone
+        and one the passes apply fine in memory. One report that hides the
+        other is how the second one gets missed."""
+        code, _out, err = self.run_main(
+            whole_table(UNCORRECTED_SMOKESCREEN, drop=DEAD_TIME_REMAINING), "--check")
         self.assertEqual(code, 1)
         self.assertIn("TimeRemainingToExplode", err)
         self.assertIn("ShortComponents", err)
+        self.assertIn(DEAD_HEADER, err)
+        self.assertIn(UNCORRECTED_HEADER, err)
 
     def test_check_writes_nothing(self):
         source = whole_table(UNCORRECTED_SMOKESCREEN)
@@ -614,9 +608,7 @@ class MainOnDiskTests(unittest.TestCase):
 
     def test_final_verification_failure_leaves_the_file_byte_identical(self):
         """A partially correctable run must not publish before verify passes."""
-        source = whole_table(
-            {**UNCORRECTED_SMOKESCREEN, **DEAD_FLOAT_TO_DOUBLE}
-        )
+        source = whole_table(UNCORRECTED_SMOKESCREEN, drop=DEAD_TIME_REMAINING)
         code, _out, _err = self.run_main(source)
         self.assertEqual(code, 1)
         self.assertEqual(self.path.read_text(encoding="utf-8"), source)
@@ -697,8 +689,8 @@ class MainOnDiskTests(unittest.TestCase):
         partial = {k: v for k, v in UNCORRECTED_GAME_OBJECT_ROTATORS.items()
                    if k[0] in groups[:2]}
         with self.assertRaises(SystemExit):
-            atc.retype_game_object_rotators(whole_table(partial))
-        out, n = atc.retype_game_object_rotators(whole_table())
+            atc.retype(whole_table(partial), atc.GAME_OBJECT_ROTATOR_RETYPE)
+        out, n = atc.retype(whole_table(), atc.GAME_OBJECT_ROTATOR_RETYPE)
         self.assertEqual(n, 0, "an already corrected table must change nothing")
         self.assertEqual(out, whole_table())
 

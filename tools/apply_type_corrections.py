@@ -6,16 +6,15 @@ descriptor declarations and the actual wire format in build 13.01:
   - Actor bookkeeping fields "215"/"216" in non-weapon groups are variable-width
     (3 bits in 13.01), not Int32
 
-Run after extract_descriptors.py regenerates table.rs, and BEFORE cargo fmt.
+Run after extract_descriptors.py regenerates table.rs, and before cargo fmt.
 
-That ordering is load-bearing and used to be silent. Two of the passes below
-match one-line literals, which is the shape extract_descriptors.py emits but
-not the shape rustfmt leaves behind, so running the corrector on an already
-formatted table applies nothing. The old script printed "Applied 0" and
-exited 0 for that case -- indistinguishable from "everything was already
-correct".
+Every correction keys on each entry's own group, field and type, so it applies
+to the one-line layout extract_descriptors.py emits and to the rustfmt'd one
+alike. Two passes once matched one-line literals instead: on a formatted table
+they applied nothing, and the old script printed "Applied 0" and exited 0 --
+indistinguishable from "everything was already correct".
 
-So the script no longer trusts its own operation count. After writing, it
+So the script does not trust its own operation count. After writing, it
 verifies the END STATE of every correction against the parsed table and fails
 loudly if any is missing. That check is format-independent: if the
 application patterns ever rot again, the verification still catches it.
@@ -36,7 +35,9 @@ import argparse
 import re
 import sys
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 if __package__:
     from .atomic_io import atomic_write_text
@@ -46,7 +47,7 @@ else:  # direct script execution
 TABLE_RS = Path(__file__).parent.parent / "crates" / "vrf-decode" / "src" / "table.rs"
 
 #: Gekko's Wingman: the one class whose `ReplicatedMovement` location is packed
-#: at two decimals. See the pass that rewrites it in `main`.
+#: at two decimals. See its rule in `RETYPES`.
 SEEKER_NADE_GROUP = (
     "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade."
     "Pawn_Aggrobot_SeekerNade_C"
@@ -54,8 +55,42 @@ SEEKER_NADE_GROUP = (
 
 #: The five AGameObject-derived classes whose `ReplicatedMovement` the C#
 #: descriptors declare with a bare `.ReplicatedMovement()` -- the builder's
-#: ShortComponents default -- and which the pass in `main` reads with byte
+#: ShortComponents default -- and which their rule in `RETYPES` reads with byte
 #: rotator components instead. Exact group paths, compared with `==`.
+#:
+#: The C# descriptors for these five (CoveAbilityDescriptor, DarkCover-
+#: AbilityDescriptor and the three Smonk descriptors) call a bare
+#: `.ReplicatedMovement()`, which is the builder's ShortComponents default;
+#: none of them states a width. 13-J (docs/archive/PROJECT_STATUS.md) took
+#: that default for the three Smonk classes because the wire could not
+#: choose, and 16-D found Omen's zone in the same state.
+#:
+#: The wire still cannot choose: none of the five ever replicates a rotation,
+#: so both widths read the same 3 flag bits and the same values. What decides
+#: it is the game's own class data (13.06 cooked classes plus the
+#: executable's reflection, read-only; game-analysis cdo-defaults track):
+#:
+#: * all five derive natively from AGameObject > AActor, the chain of
+#:   GameObject_Terra_C_TimeSlowGrenade_Explosion_C, which this table already
+#:   reads with byte components on wire evidence;
+#: * no Blueprint class default in any of the five chains writes
+#:   ReplicatedMovement -- across the whole 13.06 build exactly one actor
+#:   class does (PlaceholderPlayerController_C) -- so the quantization is
+#:   the native class's;
+#: * grouped by native class, every class whose rotation IS observable
+#:   decodes exactly at one width only: AShooterCharacter 7 of 7 Short,
+#:   AProjectile 38 of 38 Byte, AGameObject_NoMesh 2 of 2 Byte, AGameObject
+#:   4 of 4 Byte.
+#:
+#: That is a prior, not a measurement of these five, and it is recorded as
+#: one. The measurement is the bound, the 13-J one: all 903 replays whose
+#: main stream declares ReplicatedMovement on one of these groups (the
+#: 2026-09-28 declaration survey of the 1,018-replay corpus; 21 builds,
+#: 11.06-13.06) were exported with checkpoints by the build before and after
+#: this correction, and every Parquet file and every manifest.json -- overlay
+#: counters included -- is byte-identical. If one of them is ever seen
+#: replicating a rotation, exact consumption decides, the 13-J way, and this
+#: prior is what it overrules.
 GAME_OBJECT_BYTE_ROTATOR_GROUPS = (
     "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke."
     "GameObject_Mage_E_WorldSmoke_C",
@@ -121,13 +156,16 @@ EXPECTED = [
     ("Comp_Ability_CooldownComponent_C", "StartTimeStamp", "FieldType::Double"),
     ("Comp_Ability_CooldownComponent_C", "CooldownSeconds", "FieldType::Double"),
 ]
-for _group in (
+#: The non-weapon groups whose "215"/"216" the descriptors declare Int32. Their
+#: rule in `RETYPES` matches a group path ENDING with one of these.
+NON_WEAPON_215_216 = (
     "TimedBomb.TimedBomb_C",
     "EquippablePickupProjectile.EquippablePickupProjectile_C",
     "EquippableGroundPickup.EquippableGroundPickup_C",
     "OwnerExclusivePlayerInfo",
     "Projectile_Phoenix_Q_FlameWall_ThroughWall.Projectile_Phoenix_Q_FlameWall_ThroughWall_C",
-):
+)
+for _group in NON_WEAPON_215_216:
     for _field in ("215", "216"):
         EXPECTED.append((_group, _field, "FieldType::EnumRemainingBits"))
 EXPECTED += [
@@ -1288,114 +1326,66 @@ def _type_token_swap(old: str, new: str) -> tuple[str, str]:
     return differ[0]
 
 
-def retype_exact(content: str, group: str, field: str, old: str, new: str,
-                 expected: int) -> tuple[str, int]:
-    """Rewrite `old` -> `new` on the entries keyed EXACTLY `(group, field)`.
+class Retype(NamedTuple):
+    """One correction: `old` -> `new` on the entries it keys.
 
-    The key is each block's OWN entry (see `_own_entry`): its group and field
-    compared with `==`, and its own `field_type` compared in full. Only the
-    differing token is swapped (`_type_token_swap`), inside the entry's own
-    `field_type`, so both layouts are rewritten. An entry is counted only once
-    its type reads `new`; a swap that does not get there is a hard failure,
-    because a count that moves without the change is worse than no count.
-
-    `expected` is how many entries a freshly generated table must change. On an
-    already corrected table the answer is 0; any other count means the key
-    matched something it was not written for, and that is a hard failure
-    rather than a quiet extra rewrite.
+    `groups` is a predicate on an entry's OWN group path. `expected` is how
+    many entries a freshly generated table must change, and `label` names the
+    rule when another count is refused; `None` makes any count acceptable.
     """
-    token, replacement = _type_token_swap(old, new)
+    groups: Callable[[str], bool]
+    field: str
+    old: str
+    new: str
+    expected: int | None = None
+    label: str = ""
+
+
+def exact_retype(group: str, field: str, old: str, new: str,
+                 expected: int = 1) -> Retype:
+    """A rule for the one entry keyed EXACTLY `(group, field)`."""
+    return Retype(lambda own_group: own_group == group, field, old, new,
+                  expected, f"{group}/{field} {old} -> {new}")
+
+
+def retype(content: str, rule: Retype) -> tuple[str, int]:
+    """Apply one `Retype` to every entry it keys.
+
+    The key is each block's OWN entry (see `_own_entry`): its group satisfies
+    `rule.groups`, its field equals `rule.field`, and its own `field_type` is
+    `rule.old` in full. Only the differing token is swapped
+    (`_type_token_swap`), inside the entry's own `field_type`, so the one-line
+    and the rustfmt'd layouts are both rewritten and a corrected table changes
+    nothing. An entry is counted only once its type reads `new`; a swap that
+    does not get there is a hard failure, because a count that moves without
+    the change is worse than no count.
+
+    On an already corrected table the count is 0. Any count other than 0 or
+    `rule.expected` means the key matched something it was not written for,
+    and that is a hard failure rather than a quiet extra rewrite.
+    """
+    token, replacement = _type_token_swap(rule.old, rule.new)
     blocks = content.split("    OverlayEntry {")
     changed = 0
     for i, block in enumerate(blocks[1:], 1):
         own_group, own_field, own_type = _own_entry(block)
-        if (own_group, own_field) != (group, field):
+        if own_field != rule.field or not rule.groups(own_group):
             continue
-        if own_type != normalize_type(old):
+        if own_type != normalize_type(rule.old):
             continue
         at = block.find(TYPE_MARKER)
         rewritten = block[:at] + block[at:].replace(token, replacement, 1)
-        if _field_type_of(rewritten) != normalize_type(new):
+        if _field_type_of(rewritten) != normalize_type(rule.new):
             raise SystemExit(
-                f"{TABLE_RS}: {group}/{field} {old} -> {new} did not rewrite "
-                f"the entry's own type."
+                f"{TABLE_RS}: {own_group}/{rule.field} {rule.old} -> {rule.new} "
+                f"did not rewrite the entry's own type."
             )
         blocks[i] = rewritten
         changed += 1
-    if changed not in (0, expected):
+    if rule.expected is not None and changed not in (0, rule.expected):
         raise SystemExit(
-            f"{TABLE_RS}: {group}/{field} {old} -> {new} changed {changed} "
-            f"entries, expected {expected} (or 0 on a corrected table)."
-        )
-    return "    OverlayEntry {".join(blocks), changed
-
-
-def retype_game_object_rotators(content: str) -> tuple[str, int]:
-    """ShortComponents -> ByteComponents on `GAME_OBJECT_BYTE_ROTATOR_GROUPS`.
-
-    The C# descriptors for these five (CoveAbilityDescriptor, DarkCover-
-    AbilityDescriptor and the three Smonk descriptors) call a bare
-    `.ReplicatedMovement()`, which is the builder's ShortComponents default;
-    none of them states a width. 13-J (docs/archive/PROJECT_STATUS.md) took
-    that default for the three Smonk classes because the wire could not
-    choose, and 16-D found Omen's zone in the same state.
-
-    The wire still cannot choose: none of the five ever replicates a rotation,
-    so both widths read the same 3 flag bits and the same values. What decides
-    it is the game's own class data (13.06 cooked classes plus the
-    executable's reflection, read-only; game-analysis cdo-defaults track):
-
-    * all five derive natively from AGameObject > AActor, the chain of
-      GameObject_Terra_C_TimeSlowGrenade_Explosion_C, which this table already
-      reads with byte components on wire evidence;
-    * no Blueprint class default in any of the five chains writes
-      ReplicatedMovement -- across the whole 13.06 build exactly one actor
-      class does (PlaceholderPlayerController_C) -- so the quantization is
-      the native class's;
-    * grouped by native class, every class whose rotation IS observable
-      decodes exactly at one width only: AShooterCharacter 7 of 7 Short,
-      AProjectile 38 of 38 Byte, AGameObject_NoMesh 2 of 2 Byte, AGameObject
-      4 of 4 Byte.
-
-    That is a prior, not a measurement of these five, and it is recorded as
-    one. The measurement is the bound, the 13-J one: all 903 replays whose
-    main stream declares ReplicatedMovement on one of these groups (the
-    2026-09-28 declaration survey of the 1,018-replay corpus; 21 builds,
-    11.06-13.06) were exported with checkpoints by the build before and after
-    this pass, and every Parquet file and every manifest.json -- overlay
-    counters included -- is byte-identical. If one of them is ever seen
-    replicating a rotation, exact consumption decides, the 13-J way, and this
-    prior is what it overrules.
-
-    Only the rotator token of the exact `(group, "ReplicatedMovement")` entry
-    whose full type is still the short, whole-unit literal is rewritten, so
-    the pass works on the one-line and the rustfmt'd layouts alike and does
-    nothing on a corrected table. Any other count is a hard failure.
-    """
-    short_whole = normalize_type(
-        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
-        "location: VectorQuantization::RoundWholeNumber }"
-    )
-    blocks = content.split("    OverlayEntry {")
-    changed = 0
-    for i, block in enumerate(blocks[1:], 1):
-        g, f = GROUP_RE.search(block), FIELD_RE.search(block)
-        if not (g and f and g.group(1) in GAME_OBJECT_BYTE_ROTATOR_GROUPS
-                and f.group(1) == "ReplicatedMovement"):
-            continue
-        if _field_type_of(block) != short_whole:
-            continue
-        blocks[i] = block.replace(
-            "RotatorQuantization::ShortComponents",
-            "RotatorQuantization::ByteComponents",
-            1,
-        )
-        changed += 1
-    if changed not in (0, len(GAME_OBJECT_BYTE_ROTATOR_GROUPS)):
-        raise SystemExit(
-            f"{TABLE_RS}: the AGameObject rotator pass changed {changed} entries, "
-            f"expected {len(GAME_OBJECT_BYTE_ROTATOR_GROUPS)} (or 0 on a "
-            f"corrected table)."
+            f"{TABLE_RS}: {rule.label} changed {changed} entries, expected "
+            f"{rule.expected} (or 0 on a corrected table)."
         )
     return "    OverlayEntry {".join(blocks), changed
 
@@ -1602,51 +1592,40 @@ def rewrite_header(content: str) -> tuple[str, tuple[str, ...]]:
     return content, lines
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="verify without writing")
-    return parser.parse_args(argv)
+def _ends_with(suffixes: str | tuple[str, ...]) -> Callable[[str], bool]:
+    """A `Retype.groups` predicate: the group path ends with `suffixes`."""
+    return lambda group: group.endswith(suffixes)
 
 
-def main():
-    check_only = parse_args().check
-    content = TABLE_RS.read_text(encoding="utf-8")
-    # The file exactly as committed. Every pass below rewrites `content`, so by
-    # the end it is the CORRECTED COPY -- and verifying that copy is what made
-    # `--check` unable to tell an already-corrected table from a correctable one.
-    on_disk = content
-    count = 0
+def _rep_movement(rotation: str, location: str) -> str:
+    return (f"FieldType::RepMovement {{ rotation: RotatorQuantization::{rotation}, "
+            f"location: VectorQuantization::{location} }}")
 
+
+GAME_OBJECT_ROTATOR_RETYPE = Retype(
+    lambda group: group in GAME_OBJECT_BYTE_ROTATOR_GROUPS, "ReplicatedMovement",
+    _rep_movement("ShortComponents", "RoundWholeNumber"),
+    _rep_movement("ByteComponents", "RoundWholeNumber"),
+    len(GAME_OBJECT_BYTE_ROTATOR_GROUPS), "the AGameObject rotator pass")
+
+#: Every correction `main` applies, in order. Each rule keys the groups its
+#: former pass did: a suffix where that pass matched the one-line literal
+#: `<group>", field_name: ...`, which ends the group path. Only the rules that
+#: replaced exact passes check their count.
+RETYPES = [
     # Fix: Float -> Double for time-related fields (verified: 64-bit on wire)
-    float_to_double = [
-        ('TimedBomb.TimedBomb_C", field_name: "TimeRemainingToExplode", field_type: FieldType::Float',
-         'TimedBomb.TimedBomb_C", field_name: "TimeRemainingToExplode", field_type: FieldType::Double'),
-        ('TimedBomb.TimedBomb_C", field_name: "DefuseProgress", field_type: FieldType::Float',
-         'TimedBomb.TimedBomb_C", field_name: "DefuseProgress", field_type: FieldType::Double'),
-        ('Comp_Ability_CooldownComponent_C", field_name: "StartTimeStamp", field_type: FieldType::Float',
-         'Comp_Ability_CooldownComponent_C", field_name: "StartTimeStamp", field_type: FieldType::Double'),
-        ('Comp_Ability_CooldownComponent_C", field_name: "CooldownSeconds", field_type: FieldType::Float',
-         'Comp_Ability_CooldownComponent_C", field_name: "CooldownSeconds", field_type: FieldType::Double'),
-    ]
-    for old, new in float_to_double:
-        if old in content:
-            content = content.replace(old, new)
-            count += 1
+    *[Retype(_ends_with(suffix), field, "FieldType::Float", "FieldType::Double")
+      for suffix, field in (
+          ("TimedBomb.TimedBomb_C", "TimeRemainingToExplode"),
+          ("TimedBomb.TimedBomb_C", "DefuseProgress"),
+          ("Comp_Ability_CooldownComponent_C", "StartTimeStamp"),
+          ("Comp_Ability_CooldownComponent_C", "CooldownSeconds"),
+      )],
 
     # Fix: the descriptor marks the replay transform timestamp as Skip even
-    # though every observed payload is a 32-bit Float. Work per entry block so
-    # the correction remains effective after rustfmt splits generated entries.
-    blocks = content.split("    OverlayEntry {")
-    for i, block in enumerate(blocks):
-        if i == 0:
-            continue
-        _group, field, ftype = _own_entry(block)
-        if field != "ReplayLastTransformUpdateTimeStamp":
-            continue
-        if ftype == "FieldType::Skip":
-            blocks[i] = block.replace("FieldType::Skip", "FieldType::Float", 1)
-            count += 1
-    content = "    OverlayEntry {".join(blocks)
+    # though every observed payload is a 32-bit Float.
+    Retype(lambda _group: True, "ReplayLastTransformUpdateTimeStamp",
+           "FieldType::Skip", "FieldType::Float"),
 
     # Fix: every group's "215"/"216" is EnumRemainingBits, weapons included.
     #
@@ -1667,38 +1646,17 @@ def main():
     # `Raw` blocked the very mechanism that would have caught it, and the rows
     # counted as "raw/skip" rather than as an error.
     #
-    # Two passes because the two sets arrive spelled differently -- the
+    # Two rules because the two sets arrive spelled differently -- the
     # non-weapon groups are declared Int32 by the C# descriptor, the weapon
-    # groups Raw. A single Int32-matching pass silently does nothing to the
-    # weapons: the string it looks for is not there, so no substitution is made
-    # and no counter moves.
-    weapon_groups_215_216 = [
-        line.split('group_path: "')[1].split('"')[0]
-        for line in content.splitlines()
-        if 'group_path: "/Game/Equippables/' in line
-    ]
-    for g in sorted(set(weapon_groups_215_216)):
-        for field in ["215", "216"]:
-            old = f'{g}", field_name: "{field}", field_type: FieldType::Raw'
-            new = f'{g}", field_name: "{field}", field_type: FieldType::EnumRemainingBits'
-            if old in content:
-                content = content.replace(old, new)
-                count += 1
-
-    groups_215_216 = [
-        "TimedBomb.TimedBomb_C",
-        "EquippablePickupProjectile.EquippablePickupProjectile_C",
-        "EquippableGroundPickup.EquippableGroundPickup_C",
-        "OwnerExclusivePlayerInfo",
-        "Projectile_Phoenix_Q_FlameWall_ThroughWall.Projectile_Phoenix_Q_FlameWall_ThroughWall_C",
-    ]
-    for g in groups_215_216:
-        for field in ["215", "216"]:
-            old = f'{g}", field_name: "{field}", field_type: FieldType::Int32'
-            new = f'{g}", field_name: "{field}", field_type: FieldType::EnumRemainingBits'
-            if old in content:
-                content = content.replace(old, new)
-                count += 1
+    # groups Raw. A single Int32-matching rule silently does nothing to the
+    # weapons: the type it keys on is not there, so nothing is rewritten and no
+    # counter moves.
+    *[Retype(lambda group: group.startswith(WEAPON_GROUP_MARKER), field,
+             "FieldType::Raw", ACTOR_BOOKKEEPING_TYPE)
+      for field in ACTOR_BOOKKEEPING_FIELDS],
+    *[Retype(_ends_with(NON_WEAPON_215_216), field, "FieldType::Int32",
+             ACTOR_BOOKKEEPING_TYPE)
+      for field in ACTOR_BOOKKEEPING_FIELDS],
 
     # Fix: rotation quantization for the Astra smoke-screen projectiles.
     #
@@ -1712,25 +1670,9 @@ def main():
     # The wire agrees with the other projectiles: on release-13.01 these payloads
     # arrive at 113-124 bits and a ShortComponents read runs off the end (137 EOF
     # failures on one replay, every one of them from this single group).
-    #
-    # Entries span several lines, so rewrite per `OverlayEntry { .. }` block
-    # rather than per line: a line-wise match cannot see the group path and the
-    # field type at the same time.
-    blocks = content.split("    OverlayEntry {")
-    for i, block in enumerate(blocks):
-        if i == 0:
-            continue
-        group, field, ftype = _own_entry(block)
-        if "SmokeScreen" not in group or field != "ReplicatedMovement":
-            continue
-        if "RotatorQuantization::ShortComponents" in (ftype or ""):
-            blocks[i] = block.replace(
-                "RotatorQuantization::ShortComponents",
-                "RotatorQuantization::ByteComponents",
-                1,
-            )
-            count += 1
-    content = "    OverlayEntry {".join(blocks)
+    Retype(lambda group: "SmokeScreen" in group, "ReplicatedMovement",
+           _rep_movement("ShortComponents", "RoundWholeNumber"),
+           _rep_movement("ByteComponents", "RoundWholeNumber")),
 
     # Fix: location quantization for Gekko's Wingman pawn.
     #
@@ -1750,29 +1692,13 @@ def main():
     # measured Pawn class replicates at two decimals too (none of them is in
     # the table yet); that is a pattern, not evidence for a class nobody has
     # measured.
-    #
-    # Block-based for the same reason as the SmokeScreen pass above: the entry
-    # spans several lines once rustfmt has run.
-    blocks = content.split("    OverlayEntry {")
-    for i, block in enumerate(blocks):
-        if i == 0:
-            continue
-        group, field, ftype = _own_entry(block)
-        if group != SEEKER_NADE_GROUP or field != "ReplicatedMovement":
-            continue
-        if "VectorQuantization::RoundWholeNumber" in (ftype or ""):
-            blocks[i] = block.replace(
-                "VectorQuantization::RoundWholeNumber",
-                "VectorQuantization::RoundTwoDecimals",
-                1,
-            )
-            count += 1
-    content = "    OverlayEntry {".join(blocks)
+    Retype(lambda group: group == SEEKER_NADE_GROUP, "ReplicatedMovement",
+           _rep_movement("ShortComponents", "RoundWholeNumber"),
+           _rep_movement("ShortComponents", "RoundTwoDecimals")),
 
     # Fix: byte rotator components for five AGameObject classes. The evidence
-    # is on `retype_game_object_rotators`.
-    content, n = retype_game_object_rotators(content)
-    count += n
+    # is on `GAME_OBJECT_BYTE_ROTATOR_GROUPS`.
+    GAME_OBJECT_ROTATOR_RETYPE,
 
     # REMOVED: FName -> Raw for DamagedBone in MulticastNotifyDamage_Point.
     #
@@ -1812,10 +1738,8 @@ def main():
     # The value is the team NAME as sent. Nothing here maps Red/Blue to
     # attacker/defender or to a player; 12.10, 12.11 and 13.00 carry one main
     # row each, all "Blue".
-    content, n = retype_exact(
-        content, "/Script/ShooterGame.AresEquippableDataTracker", "OriginalBuyerTeam",
-        "FieldType::EnumByte", "FieldType::FName", expected=1)
-    count += n
+    exact_retype("/Script/ShooterGame.AresEquippableDataTracker", "OriginalBuyerTeam",
+                 "FieldType::EnumByte", "FieldType::FName"),
 
     # Fix: Raw -> ObjectNetGuid for TransitionContext. The pinned C#
     # descriptor declares RawPayload("UTransitionContext"), so it does not
@@ -1824,18 +1748,8 @@ def main():
     # and null remains zero. This does not claim every ID resolves, nor does
     # this group/name overlay impose the measured build, handle, or checksum
     # gates that the scalar overlay cannot represent.
-    blocks = content.split("    OverlayEntry {")
-    for i, block in enumerate(blocks):
-        if i == 0:
-            continue
-        group, field, ftype = _own_entry(block)
-        if (group != "/Script/ShooterGame.EquippableStateMachineComponent"
-                or field != "TransitionContext"):
-            continue
-        if ftype == "FieldType::Raw":
-            blocks[i] = block.replace("FieldType::Raw", "FieldType::ObjectNetGuid", 1)
-            count += 1
-    content = "    OverlayEntry {".join(blocks)
+    Retype(lambda group: group == "/Script/ShooterGame.EquippableStateMachineComponent",
+           "TransitionContext", "FieldType::Raw", "FieldType::ObjectNetGuid"),
 
     # Fix: EnumRemainingBits -> EnumByte for AllianceFilter on
     # `ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation`.
@@ -1875,12 +1789,9 @@ def main():
     # 2270825073 -> EnumByte when extract_checksum_types.py runs AFTER this, and
     # `alliance_filter_donors_agree_so_the_checksum_types_the_receivers` in
     # crates/vrf-decode/src/tests/overlay.rs fails until both have happened.
-    content, n = retype_exact(
-        content,
+    exact_retype(
         "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
-        "AllianceFilter", "FieldType::EnumRemainingBits", "FieldType::EnumByte",
-        expected=1)
-    count += n
+        "AllianceFilter", "FieldType::EnumRemainingBits", "FieldType::EnumByte"),
 
     # Fix: Raw -> ObjectNetGuid for DeathMontageEffectOverride and
     # DeathMontageEffectOverrideContext on both MulticastNotifyDamage_* RPCs.
@@ -1922,19 +1833,35 @@ def main():
     # Second implementation: validate_type_evidence.py (ObjectNetGuid,
     # checksum-scoped) over the whole corpus for the Override, exit 0 with
     # 0 failures; over 5 exports (11.06-13.06) for the Context, exit 0.
-    for field in ("DeathMontageEffectOverride", "DeathMontageEffectOverrideContext"):
-        for rpc in ("MulticastNotifyDamage_Base", "MulticastNotifyDamage_Point"):
-            content, n = retype_exact(
-                content, f"/Script/ShooterGame.DamageableComponent:{rpc}", field,
-                "FieldType::Raw", "FieldType::ObjectNetGuid", expected=1)
-            count += n
+    *[exact_retype(f"/Script/ShooterGame.DamageableComponent:{rpc}", field,
+                   "FieldType::Raw", "FieldType::ObjectNetGuid")
+      for field in ("DeathMontageEffectOverride", "DeathMontageEffectOverrideContext")
+      for rpc in ("MulticastNotifyDamage_Base", "MulticastNotifyDamage_Point")],
 
     # Fix: UInt64 -> Int64 for the four EffectID entries. The evidence is on
     # EFFECT_ID_INT64.
-    for group, _checksum, _chain in EFFECT_ID_INT64:
-        content, n = retype_exact(
-            content, group, "EffectID", "FieldType::UInt64", "FieldType::Int64",
-            expected=1)
+    *[exact_retype(group, "EffectID", "FieldType::UInt64", "FieldType::Int64")
+      for group, _checksum, _chain in EFFECT_ID_INT64],
+]
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="verify without writing")
+    return parser.parse_args(argv)
+
+
+def main():
+    check_only = parse_args().check
+    content = TABLE_RS.read_text(encoding="utf-8")
+    # The file exactly as committed. Every pass below rewrites `content`, so by
+    # the end it is the CORRECTED COPY -- and verifying that copy is what made
+    # `--check` unable to tell an already-corrected table from a correctable one.
+    on_disk = content
+    count = 0
+
+    for rule in RETYPES:
+        content, n = retype(content, rule)
         count += n
 
     # Additions last, so the bucket recount below sees them.
@@ -1964,9 +1891,8 @@ def main():
     #               and CI runs `--check`, which is how a regenerated table.rs
     #               went green while the Rust build used the uncorrected one.
     #
-    # A regenerated table trips both at once (the one-line passes are dead in
-    # the rustfmt'd layout while the block-based ones apply fine in memory), so
-    # both sections print rather than one hiding the other.
+    # One table can trip both at once, so both sections print rather than one
+    # hiding the other.
     dead = verify(content)
     uncorrected = (
         [p for p in verify(on_disk) if p not in dead]
