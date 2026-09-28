@@ -27,9 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 if __package__:
+    from .apply_type_corrections import normalize_type
     from .atomic_io import atomic_write_text
     from .extract_descriptors import csharp_code_view
 else:  # direct script execution; avoid ImportWarning under python -W error.
+    from apply_type_corrections import normalize_type
     from atomic_io import atomic_write_text
     from extract_descriptors import csharp_code_view
 
@@ -62,12 +64,6 @@ def descriptor_directory(root: Path) -> Path:
     if nested.is_dir():
         return nested
     raise ValueError(f"no Replay.Valorant directory below {root}")
-
-
-def normalize_type(field_type: str) -> str:
-    """Normalize rustfmt's optional comma inside braced FieldType values."""
-    collapsed = " ".join(field_type.rstrip().rstrip(",").split())
-    return re.sub(r",\s*\}", " }", collapsed)
 
 
 def entry_blocks(content: str, marker: re.Pattern[str]):
