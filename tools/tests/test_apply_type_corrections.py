@@ -536,32 +536,43 @@ class MainOnDiskTests(unittest.TestCase):
         self.assertIn(f"all {len(atc.EXPECTED) + len(WEAPON_ROWS)} ", out)
 
     def test_the_handle_table_cannot_retype_the_last_entry(self):
-        """A rule that looked for its trigger anywhere in the last block would
-        read a handle entry (OVERLAY_HANDLE_TABLE sits there) as the last
-        entry's group or field and retype it, unreported: verify() checks
-        EXPECTED keys only and the exit code is 0. One case per trigger a rule
-        has used; each tail type is the type that rule rewrites."""
-        tail = ("zzz/Tail.Tail_C", "Unrelated")
+        """A rule that looked for its group or field anywhere in the last block
+        would read a handle entry (OVERLAY_HANDLE_TABLE sits there) as the last
+        entry's and retype it, unreported: verify() checks EXPECTED keys only
+        and the exit code is 0. Each tail carries the type a rule rewrites; the
+        handle names either a field a rule has keyed on (the tail's field is
+        unrelated) or a group the rule accepts (the tail's field is the rule's).
+        """
         short_whole = (
             "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
             "location: VectorQuantization::RoundWholeNumber }"
         )
         damage = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_"
+        smoke = "/Game/Characters/X/Projectile_X_SmokeScreen.Projectile_X_SmokeScreen_C"
+        state_machine = "/Script/ShooterGame.EquippableStateMachineComponent"
+        # (tail field, tail type, handle group, handle field)
         cases = [
-            ("FieldType::Raw", damage + "Base", "EquippableUsed"),
-            ("FieldType::Raw", damage + "Point", "DamageOrigin"),
-            ("FieldType::Skip", "/Game/Characters/X/Pawn_X.Pawn_X_C",
+            ("Unrelated", "FieldType::Raw", damage + "Base", "EquippableUsed"),
+            ("Unrelated", "FieldType::Raw", damage + "Point", "DamageOrigin"),
+            ("Unrelated", "FieldType::Skip", "/Game/Characters/X/Pawn_X.Pawn_X_C",
              "ReplayLastTransformUpdateTimeStamp"),
-            (short_whole, "/Game/Characters/X/Projectile_X_SmokeScreen."
-             "Projectile_X_SmokeScreen_C", "ReplicatedMovement"),
-            (short_whole, atc.SEEKER_NADE_GROUP, "ReplicatedMovement"),
-            ("FieldType::Raw", "/Script/ShooterGame.EquippableStateMachineComponent",
-             "TransitionContext"),
+            ("Unrelated", short_whole, smoke, "ReplicatedMovement"),
+            ("Unrelated", short_whole, atc.SEEKER_NADE_GROUP, "ReplicatedMovement"),
+            ("Unrelated", "FieldType::Raw", state_machine, "TransitionContext"),
+            ("ReplicatedMovement", short_whole, smoke, "Unrelated"),
+            ("ReplicatedMovement", short_whole, atc.SEEKER_NADE_GROUP, "Unrelated"),
+            ("TransitionContext", "FieldType::Raw", state_machine, "Unrelated"),
+            # The real handle table names this group, and the fixture's own
+            # entry is already corrected, so a stray retype of the tail would
+            # count exactly the rule's expected 1 and raise nothing.
+            ("DeathMontageEffectOverride", "FieldType::Raw", damage + "Base",
+             "Unrelated"),
         ]
-        for tail_type, handle_group, handle_field in cases:
+        for tail_field, tail_type, handle_group, handle_field in cases:
+            tail = ("zzz/Tail.Tail_C", tail_field)
             for one_line in (True, False):
-                with self.subTest(field=handle_field, group=handle_group,
-                                  one_line=one_line):
+                with self.subTest(tail=tail_field, group=handle_group,
+                                  field=handle_field, one_line=one_line):
                     source = whole_table(
                         extra=[(*tail, tail_type)],
                         handles=[(handle_group, 7, handle_field)],
@@ -570,9 +581,9 @@ class MainOnDiskTests(unittest.TestCase):
                     # row, or this passes without testing anything.
                     self.assertEqual(
                         [(g, f) for g, f, _t in atc.parse_entries(source)][-1], tail)
-                    self.assertIn(
-                        f'field_name: "{handle_field}"',
-                        source.partition("OVERLAY_HANDLE_TABLE")[2])
+                    handle_part = source.partition("OVERLAY_HANDLE_TABLE")[2]
+                    self.assertIn(f'group_path: "{handle_group}"', handle_part)
+                    self.assertIn(f'field_name: "{handle_field}"', handle_part)
                     code, _out, err = self.run_main(source)
                     self.assertEqual(code, 0, err)
                     types = {
