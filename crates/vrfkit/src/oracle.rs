@@ -157,6 +157,8 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     let mut frames_walked: u32 = 0;
     // Length-prefixed, so nothing else moves if a build starts sending them.
     let mut frame_skips = FrameSkips::default();
+    // Frames whose NaN or infinite time was read as 0 ms.
+    let mut non_finite_frame_times: u64 = 0;
     // Counted, not merely skipped: see `checkpoint_scope_note`.
     let mut checkpoint_chunks: u64 = 0;
     let mut replay_data_trailing_bytes = 0u64;
@@ -190,6 +192,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         })?;
         frames_walked += walk.frames;
         frame_skips.absorb(walk.skipped);
+        non_finite_frame_times += u64::from(walk.non_finite_times);
     }
 
     repl_reader.finish();
@@ -253,6 +256,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         "  Frame skips:          {}",
         report::frame_skips(&frame_skips)
     );
+    println!("  Frame times:          {non_finite_frame_times} non-finite");
     println!("  Packets:              {}", stats.packets);
     println!("  Bunches:              {}", stats.bunches);
     println!("  Actor opens:          {}", stats.actor_opens);

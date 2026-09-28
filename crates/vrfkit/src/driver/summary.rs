@@ -34,6 +34,9 @@ pub(crate) struct RunTotals {
     /// Length-prefixed, so no other number moves when a build starts sending
     /// them; `Frame skips:` contains no label read unanchored.
     pub frame_skips: FrameSkips,
+    /// Those frames whose time was NaN or infinite, read as 0 ms
+    /// (`vrf_frame::FrameWalk::non_finite_times`); printed as `Frame times:`.
+    pub non_finite_frame_times: u64,
     pub total_packets: u32,
     pub export_groups: usize,
     pub movement_rows: u64,
@@ -81,6 +84,10 @@ pub(super) fn print(
     eprintln!(
         "  Frame skips:      {}",
         report::frame_skips(&totals.frame_skips)
+    );
+    eprintln!(
+        "  Frame times:      {} non-finite",
+        totals.non_finite_frame_times
     );
     eprintln!("  Packets:          {}", totals.total_packets);
     eprintln!("  Export groups:    {}", totals.export_groups);
@@ -313,6 +320,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
     eprintln!(
         "  Checkpoint frame skips: {}",
         report::frame_skips(&cp.frame_skips)
+    );
+    eprintln!(
+        "  Checkpoint frame times: {} non-finite",
+        cp.non_finite_frame_times
     );
     eprintln!("  Checkpoint rows:  {}", cp.field_rows);
     eprintln!("  Checkpoint actors:{} rows", cp.actor_rows_written);

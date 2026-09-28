@@ -299,6 +299,12 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
         2,
     );
     write_frame_skips(&mut out, "frame_", &run.frame_skips, 2);
+    wkv(
+        &mut out,
+        "frame_non_finite_times",
+        &run.non_finite_frame_times.to_string(),
+        2,
+    );
     wkvs(
         &mut out,
         &[
@@ -362,6 +368,12 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
                 3,
             );
             write_frame_skips(&mut out, "checkpoint_frame_", &cp.frame_skips, 3);
+            wkv(
+                &mut out,
+                "checkpoint_frame_non_finite_times",
+                &cp.non_finite_frame_times.to_string(),
+                3,
+            );
             wkvs(
                 &mut out,
                 &[
@@ -840,6 +852,7 @@ mod tests {
             "frame_external_data_blobs",
             "frame_external_data_bytes",
             "frame_game_specific_bytes",
+            "frame_non_finite_times",
             "event_layout_mismatches",
             "event_first_layout_mismatch",
             "event_payloads_decoded",
@@ -856,6 +869,7 @@ mod tests {
             "checkpoint_frame_external_data_blobs",
             "checkpoint_frame_external_data_bytes",
             "checkpoint_frame_game_specific_bytes",
+            "checkpoint_frame_non_finite_times",
             "checkpoint_packets",
             "checkpoint_field_rows",
             "checkpoint_actor_rows_written",
@@ -1125,6 +1139,32 @@ mod tests {
             "\"checkpoint_frame_external_data_blobs\": 7",
             "\"checkpoint_frame_external_data_bytes\": 11",
             "\"checkpoint_frame_game_specific_bytes\": 13",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    /// Distinct per pass, so a key wired to the other pass shows.
+    #[test]
+    fn non_finite_frame_times_publish_measured_values_for_both_passes() {
+        let net = NetStats::default();
+        let errors = OverlayErrorReport::default();
+        let checkpoints = CheckpointStats {
+            non_finite_frame_times: 19,
+            ..CheckpointStats::default()
+        };
+        let json = quality_json(&ManifestQuality {
+            run: &RunTotals {
+                non_finite_frame_times: 17,
+                ..RunTotals::default()
+            },
+            net: &net,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"frame_non_finite_times\": 17",
+            "\"checkpoint_frame_non_finite_times\": 19",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }

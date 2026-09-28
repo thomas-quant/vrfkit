@@ -1,6 +1,7 @@
-//! The frame-skip tallies, followed from the DemoFrame walk to every output.
+//! The frame-walk tallies -- skipped section bytes and non-finite frame times
+//! -- followed from the DemoFrame walk to every output.
 //!
-//! Five passes carry `walk_demo_frames`' skip tally to an output with one line
+//! Five passes carry `walk_demo_frames`' tallies to an output with one line
 //! of glue each: export's main and checkpoint passes (summary and manifest),
 //! `validate`, and `diag`'s two passes. Unit tests stop at the walk or start
 //! from a hand-built `FrameSkips`, and no corpus guard can see a cut line: the
@@ -26,6 +27,10 @@ const MAIN: (u64, u64, u64) = (3, 6, 11);
 /// What the checkpoint pass must report, summed over (1, 2, 3) and (0, 0, 2).
 /// All six values differ, so a swapped field or pass cannot match by accident.
 const CHECKPOINT: (u64, u64, u64) = (1, 2, 5);
+/// Frames with a NaN or infinite time: one per main chunk, and one in the
+/// first checkpoint only, so a pass reporting its last chunk shows.
+const MAIN_NON_FINITE: u64 = 2;
+const CHECKPOINT_NON_FINITE: u64 = 1;
 
 fn add_u64(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_le_bytes());
@@ -108,13 +113,20 @@ fn checkpoint(index: u32, frames: &[u8]) -> Vec<u8> {
 }
 
 /// The whole file: info, header, then ReplayData and Checkpoint chunks
-/// interleaved, two of each, with the totals `MAIN` and `CHECKPOINT` name.
+/// interleaved, two of each, with the totals `MAIN`, `CHECKPOINT` and their
+/// `_NON_FINITE` counts name.
 fn replay() -> Vec<u8> {
     let mut data = replay_info();
     data.extend(chunk(0, &header_payload()));
-    data.extend(chunk(1, &replay_data(&frame(1.0, &[(12, 6), (17, 9)], 4))));
-    data.extend(chunk(2, &checkpoint(0, &frame(1.0, &[(9, 5)], 3))));
-    data.extend(chunk(1, &replay_data(&frame(2.0, &[(1, 4)], 7))));
+    data.extend(chunk(
+        1,
+        &replay_data(&frame(f32::NAN, &[(12, 6), (17, 9)], 4)),
+    ));
+    data.extend(chunk(
+        2,
+        &checkpoint(0, &frame(f32::NEG_INFINITY, &[(9, 5)], 3)),
+    ));
+    data.extend(chunk(1, &replay_data(&frame(f32::INFINITY, &[(1, 4)], 7))));
     data.extend(chunk(2, &checkpoint(1, &frame(2.0, &[], 2))));
     data
 }
@@ -193,6 +205,10 @@ fn validate_reports_the_replay_data_frame_skips() {
     );
     assert_eq!(skips_line(&run.stdout, "ReplayData frames:"), "2");
     assert_eq!(skips_line(&run.stdout, "Frame skips:"), rendered(MAIN));
+    assert_eq!(
+        skips_line(&run.stdout, "Frame times:"),
+        format!("{MAIN_NON_FINITE} non-finite")
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -215,6 +231,14 @@ fn diag_reports_each_pass_frame_skips() {
     assert_eq!(json_skips(&json, "replay_data_"), MAIN);
     assert_eq!(json_u64(&json, "frames"), 2, "checkpoint frames walked");
     assert_eq!(json_skips(&json, ""), CHECKPOINT);
+    assert_eq!(
+        json_u64(&json, "replay_data_non_finite_frame_times"),
+        MAIN_NON_FINITE
+    );
+    assert_eq!(
+        json_u64(&json, "non_finite_frame_times"),
+        CHECKPOINT_NON_FINITE
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -239,11 +263,27 @@ fn export_reports_each_pass_frame_skips_in_summary_and_manifest() {
         skips_line(&run.stderr, "Checkpoint frame skips:"),
         rendered(CHECKPOINT)
     );
+    assert_eq!(
+        skips_line(&run.stderr, "Frame times:"),
+        format!("{MAIN_NON_FINITE} non-finite")
+    );
+    assert_eq!(
+        skips_line(&run.stderr, "Checkpoint frame times:"),
+        format!("{CHECKPOINT_NON_FINITE} non-finite")
+    );
 
     let manifest =
         std::fs::read_to_string(out.join("manifest.json")).expect("export wrote a manifest");
     assert_eq!(json_skips(&manifest, "frame_"), MAIN);
     assert_eq!(json_skips(&manifest, "checkpoint_frame_"), CHECKPOINT);
     assert_eq!(json_u64(&manifest, "checkpoint_frames"), 2);
+    assert_eq!(
+        json_u64(&manifest, "frame_non_finite_times"),
+        MAIN_NON_FINITE
+    );
+    assert_eq!(
+        json_u64(&manifest, "checkpoint_frame_non_finite_times"),
+        CHECKPOINT_NON_FINITE
+    );
     std::fs::remove_dir_all(dir).ok();
 }

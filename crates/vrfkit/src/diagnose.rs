@@ -37,6 +37,8 @@ struct DiagCheckpointStats {
     frames: u64,
     /// Section bytes the snapshot frames stepped over.
     frame_skips: FrameSkips,
+    /// Snapshot frames with a NaN or infinite time, read as 0 ms.
+    non_finite_frame_times: u64,
     packets: u64,
     trailing_bytes: u64,
     guid_entries: u64,
@@ -79,6 +81,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut replay_data_chunks: u64 = 0;
     let mut replay_data_frames: u64 = 0;
     let mut replay_data_frame_skips = FrameSkips::default();
+    let mut replay_data_non_finite_frame_times: u64 = 0;
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut sink_totals = SinkTotals::default();
@@ -132,6 +135,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                     })?;
                 replay_data_frames += u64::from(walk.frames);
                 replay_data_frame_skips.absorb(walk.skipped);
+                replay_data_non_finite_frame_times += u64::from(walk.non_finite_times);
             }
             ChunkType::Header | ChunkType::Unknown(_) => {}
         }
@@ -169,6 +173,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(", \"replay_data_trailing_bytes\": ");
     json.push_str(&replay_data_trailing_bytes.to_string());
     push_frame_skips(&mut json, "replay_data_", &replay_data_frame_skips);
+    json.push_str(", \"replay_data_non_finite_frame_times\": ");
+    json.push_str(&replay_data_non_finite_frame_times.to_string());
     json.push_str("},\n");
 
     json.push_str("  \"net_main\": ");
@@ -186,6 +192,8 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(", \"trailing_bytes\": ");
     json.push_str(&cp_stats.trailing_bytes.to_string());
     push_frame_skips(&mut json, "", &cp_stats.frame_skips);
+    json.push_str(", \"non_finite_frame_times\": ");
+    json.push_str(&cp_stats.non_finite_frame_times.to_string());
     json.push_str(", \"guid_entries\": ");
     json.push_str(&cp_stats.guid_entries.to_string());
     json.push_str(", \"group_records\": ");
@@ -376,6 +384,7 @@ fn process_checkpoint_chunk(
     cp.chunks += 1;
     cp.frames += u64::from(walk.frames);
     cp.frame_skips.absorb(walk.skipped);
+    cp.non_finite_frame_times += u64::from(walk.non_finite_times);
     cp.packets += packet_count;
     cp.guid_entries += u64::from(tables.guid_count);
     cp.group_records += u64::from(tables.group_count);

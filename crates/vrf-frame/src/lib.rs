@@ -143,6 +143,9 @@ pub struct FrameWalk {
     pub frames: u32,
     /// Section bytes stepped over without being decoded.
     pub skipped: FrameSkips,
+    /// Frames whose `timeSeconds` was NaN or infinite. Their packets carry
+    /// 0 ms, as in the reference: a plausible wrong time, so it is counted.
+    pub non_finite_times: u32,
 }
 
 /// [`walk_demo_frames`] returning only `(packets, frames)`, kept for callers
@@ -177,6 +180,7 @@ pub fn walk_demo_frames(
     let mut packet_index: u32 = 0;
     let mut frame_count: u32 = 0;
     let mut skipped = FrameSkips::default();
+    let mut non_finite_times: u32 = 0;
 
     while !reader.at_end() {
         frame_count += 1;
@@ -193,8 +197,9 @@ pub fn walk_demo_frames(
         // A finite value outside u32 ms is refused, not saturated: -1.0 s
         // would land on 0 ms, the replay's first frame, a plausible wrong time
         // nothing reports. A non-finite time still becomes 0 ms, as in the
-        // reference, with no error and no tally. The range check reads the
-        // rounded value, so -0.0004 s stays 0 ms.
+        // reference, but is counted (`FrameWalk::non_finite_times`), so that
+        // same wrong time is reported. The range check reads the rounded
+        // value, so -0.0004 s stays 0 ms.
         let time_ms = if time_seconds.is_finite() {
             let ms = (f64::from(time_seconds) * 1000.0).round();
             if ms < 0.0 || ms > f64::from(u32::MAX) {
@@ -204,6 +209,7 @@ pub fn walk_demo_frames(
             }
             ms as u32
         } else {
+            non_finite_times += 1;
             0
         };
 
@@ -270,6 +276,7 @@ pub fn walk_demo_frames(
         packets: packet_index,
         frames: frame_count,
         skipped,
+        non_finite_times,
     })
 }
 
@@ -458,6 +465,29 @@ mod tests {
             time_ms = Some(pkt.time_ms);
         })?;
         Ok(time_ms.expect("the frame carries one packet"))
+    }
+
+    /// Non-finite times are read as 0 ms, as the reference reads them, and
+    /// counted per frame; a finite time, -0.0 s and a refused one are not.
+    #[test]
+    fn non_finite_frame_times_are_counted_not_refused() {
+        let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
+        let mut data = Vec::new();
+        for secs in [f32::NAN, 1.5, f32::INFINITY, -0.0, f32::NEG_INFINITY] {
+            data.extend(build_frame(flags, secs, &[0, 0], &[], &[], &[&[0x00]]));
+        }
+        let mut times = Vec::new();
+        let walk = walk_demo_frames(&data, flags, &mut NetGuidCache::new(), |pkt, _| {
+            times.push(pkt.time_ms);
+        })
+        .unwrap();
+        assert_eq!(walk.non_finite_times, 3);
+        assert_eq!((walk.frames, walk.packets), (5, 5));
+        assert_eq!(times, [0, 1_500, 0, 0, 0]);
+
+        let finite = build_frame(flags, 2.0, &[0, 0], &[], &[], &[&[0x00]]);
+        let walk = walk_demo_frames(&finite, flags, &mut NetGuidCache::new(), |_, _| {}).unwrap();
+        assert_eq!(walk.non_finite_times, 0);
     }
 
     /// The named cases of the conversion in [`walk_demo_frames`].

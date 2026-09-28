@@ -293,6 +293,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
 
         totals.frames += walk.frames;
         totals.frame_skips.absorb(walk.skipped);
+        totals.non_finite_frame_times += u64::from(walk.non_finite_times);
         totals.chunks_processed += 1;
 
         if totals.chunks_processed % 100 == 0 {

@@ -48,6 +48,8 @@ pub(crate) struct CheckpointStats {
     pub frames: u64,
     /// Section bytes the snapshot frames stepped over, as in the main pass.
     pub frame_skips: FrameSkips,
+    /// Snapshot frames with a NaN or infinite time, as in the main pass.
+    pub non_finite_frame_times: u64,
     pub packets: u64,
     pub field_rows: u64,
     pub actor_rows_written: u64,
@@ -365,6 +367,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.exported_fields += u64::from(tables.exported_fields);
     stats.frames += u64::from(walk.frames);
     stats.frame_skips.absorb(walk.skipped);
+    stats.non_finite_frame_times += u64::from(walk.non_finite_times);
     stats.packets += packet_count;
     Ok(())
 }
