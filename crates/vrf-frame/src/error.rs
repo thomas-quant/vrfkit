@@ -2,10 +2,8 @@
 
 use thiserror::Error;
 
-/// All error modes during DemoFrame iteration.
-///
-/// A frame error means the decompressed chunk is malformed at the framing level.
-/// This is distinct from content-block errors (which live in `vrf-net`).
+/// A chunk malformed at the framing level; content-block errors live in
+/// `vrf-net`.
 #[derive(Debug, Error)]
 pub enum FrameError {
     /// A bit read failed (truncation or malformed primitive).
@@ -24,11 +22,8 @@ pub enum FrameError {
     #[error("packet size {size} exceeds maximum {max}")]
     PacketTooLarge { size: i32, max: i32 },
 
-    /// A frame's `timeSeconds` was finite but does not scale to a millisecond
-    /// value a `u32` can hold.
-    ///
-    /// See the conversion comment in `iter_demo_frames` (lib.rs) for why a
-    /// finite value has no representable mapping.
+    /// A finite `timeSeconds` outside the `u32` millisecond range; see
+    /// [`walk_demo_frames`](crate::walk_demo_frames).
     #[error("frame time {seconds} s is outside the representable millisecond range")]
     TimeOutOfRange { seconds: f32 },
 
@@ -41,12 +36,8 @@ pub enum FrameError {
     },
 }
 
-// `From` rather than named adapters, so `?` performs the conversion and the 18
-// call sites do not each spell out `.map_err(FrameError::bit)`. Both variants
-// hold the rendered string rather than the source error: this crate's failures
-// are reported, not matched on, and keeping the source types out of the public
-// enum means a `vrf-bitio` or `vrf-schema` error-shape change is not a
-// breaking change here.
+// `Bit` and `Schema` hold the rendered string, not the source error, so a
+// vrf-bitio or vrf-schema error-shape change is not a breaking change here.
 impl From<vrf_bitio::BitError> for FrameError {
     fn from(e: vrf_bitio::BitError) -> Self {
         Self::Bit(e.to_string())
