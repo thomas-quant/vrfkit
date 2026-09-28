@@ -31,7 +31,11 @@ as Raw. Fields using .Ignore() are classified as Skip. An AddProperty whose type
 method is none of the above is a HARD FAILURE, not a silent omission: it used to
 fall off the end of the ladder and contribute nothing, so one new method
 upstream would untype every field declaring it while the run still reported
-success.
+success. That includes a statement whose method `_extract_type_name` could not
+see -- a generic `.Enum<EFoo>()`, or none at all, `AddProperty(x => x.Foo);` --
+which still fell off after unknown named methods stopped doing so. The only
+exceptions are the declarations DECODERLESS_PROPERTIES names, each measured,
+and each printed in the run's summary.
 
 Two descriptor classes that share a Path and declare one field at two different
 types are a hard failure too. The dedup kept the first entry without comparing
@@ -288,6 +292,45 @@ HANDLE_ARG = r'(?:\d+|[A-Za-z_]\w*(?:\s*\+\s*\d+)?)'
 # the failure report below does not read as "add this method to PRIMITIVE_TYPES".
 _UNNAMED_FIELD = "<unresolvable field name>"
 
+# Sentinel `rejected` label for an AddProperty that reaches the end of the type
+# ladder with no type method `_extract_type_name` can name: a bare
+# `AddProperty(x => x.Foo);`, or a call shape that regex does not match. Only a
+# NAMED unknown method used to be recorded, so these left without a word.
+_NO_TYPE_METHOD = "<no type method>"
+
+# The only AddProperty declarations allowed to have no type method, keyed
+# (descriptor class, C# property). Any other one is a hard failure, and so is a
+# listed property its class now declares WITH a type -- then the reason below
+# no longer describes the source.
+#
+# They contribute no entry, which is what they did before this list existed.
+# Upstream binds each property and gives it no decoder: the builder's Decoder
+# stays null, ReplayExportBinder.ResolveFieldDecoder returns null, and
+# FieldPayloadParser skips the payload bits (upstream's parser, read at the
+# vendored commit 8824794). There is no declared type to import. A Skip or Raw
+# entry would not be neutral either: any table hit in the group returns before
+# the scoped-type, engine-reference and checksum fallbacks in overlay.rs, so it
+# would stop them typing that name.
+#
+# Measured 2026-09-28 by logging every statement the splitter produced over
+# third_party/vrp and re-running each through the ladder: 464 distinct
+# statements, 461 yield a field, these 3 yielded nothing and were not rejected,
+# and nothing else took that path. Upstream 2d2e05e, b51d674, 2b66c65, 2103d92
+# and 8b7afcb declare the same three this way and no other. None of the three
+# names reached the wire in the 1,018-replay corpus exported by 259ed10: 0 rows
+# in fields.parquet and checkpoint_fields.parquet under its exact group path.
+DECODERLESS_PROPERTIES = frozenset({
+    # /Script/ShooterGame.AresAbilitySystemComponent, Kind Component. The wire
+    # names there are OwnerActor, AvatarActor, SpawnedAttributes and
+    # CachedAttributeSet.
+    ("AresAbilitySystemComponentDescriptor", "AresAttributeSet"),
+    # BaseReplayController_C, Kind PlayerController.
+    ("BaseReplayControllerDescriptor", "RemoteCharacterUpdatesArray"),
+    # /Script/ShooterGame.RemoteCharacterUpdate, Kind FastArray, so the whole
+    # group is dropped anyway; crates/vrf-movement decodes this stream itself.
+    ("RemoteCharacterUpdateDescriptor", "ComponentDataStream"),
+})
+
 # SerializedInt(maxValue: N) or SerializedInt(N)
 SERIALIZED_INT_RE = re.compile(
     r'\.SerializedInt\(\s*(?:maxValue:\s*)?(\d+)\s*\)'
@@ -417,15 +460,18 @@ def extract_fields_from_block(
     concrete decimal handle; unresolved helper parameters remain ``None``.
 
     ``rejected`` collects ``(type_method, statement)`` for every AddProperty
-    whose type method this file cannot classify, and ``(_UNNAMED_FIELD,
-    statement)`` for every AddProperty whose type method IS classified but
-    whose export name could not be extracted (e.g. a named constant instead of
-    a string literal or lambda leaf). Both used to fall off the end of the
-    ladder below and contribute nothing -- no entry, no counter, no message --
-    so one new method upstream (`.Int64()`), or one declaration naming its
-    field through a constant, would untype a field while the run still
-    reported success. The caller fails on a non-empty set; passing ``None``
-    keeps the old silence for callers that only want the fields.
+    whose type method this file cannot classify, ``(_NO_TYPE_METHOD,
+    statement)`` for every AddProperty with no type method it can name (a bare
+    ``AddProperty(x => x.Foo);``), and ``(_UNNAMED_FIELD, statement)`` for
+    every AddProperty whose type method IS classified but whose export name
+    could not be extracted (e.g. a named constant instead of a string literal
+    or lambda leaf). All three used to fall off the end of the ladder below and
+    contribute nothing -- no entry, no counter, no message -- so one new method
+    upstream (`.Int64()`), or one declaration naming its field through a
+    constant, would untype a field while the run still reported success. The
+    caller fails on a non-empty set, less the decoder-less declarations
+    DECODERLESS_PROPERTIES names; passing ``None`` keeps the old silence for
+    callers that only want the fields.
     """
     if raw_wrapper_names is None:
         raw_wrapper_names = set()
@@ -621,12 +667,16 @@ def extract_fields_from_block(
             elif rejected is not None:
                 rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
             continue
-        if type_name is not None and rejected is not None:
-            # A type method that reaches here is a declaration this file does
-            # not understand -- not an absent one. Record it rather than drop
-            # it; the statement goes in so the double scan (Configure body,
-            # then the whole class body for helpers) reports it once.
-            rejected.add((type_name, " ".join(code_line.split())))
+        if rejected is not None:
+            # A statement that reaches here is a declaration this file does
+            # not understand -- not an absent one -- whether or not
+            # `_extract_type_name` could name its method. Record it rather
+            # than drop it; the statement goes in so the double scan
+            # (Configure body, then the whole class body for helpers) reports
+            # it once.
+            rejected.add(
+                (type_name or _NO_TYPE_METHOD, " ".join(code_line.split()))
+            )
 
     return fields
 
@@ -772,8 +822,16 @@ def _extract_literal_handle(
 
 
 def _extract_type_name(line: str) -> str | None:
-    """Extract the type method name (the .Type() call) from a line."""
-    m = re.search(r'\)\s*\.(\w+)\(', line)
+    """Extract the type method name (the .Type() call) from a line.
+
+    Type arguments are skipped, so a generic `.Enum<EFoo>()` names `Enum` and
+    is rejected as an unknown method rather than as no method at all. The
+    parameterless `RepLayoutDynamicArray<T>()` -- the only generic call the
+    descriptors make -- has its own branch earlier in the ladder; its
+    element-decoder overload, or a qualified `<Ns.T>`, falls through to here
+    and is rejected by name.
+    """
+    m = re.search(r'\)\s*\.(\w+)\s*(?:<[^()]*>)?\s*\(', line)
     return m.group(1) if m else None
 
 
@@ -1348,6 +1406,8 @@ def main(argv: list[str]) -> int:
     runtime_cnc_specs: list[tuple[str, str]] = []  # (path suffix, function name)
     # (type_method, statement) for every AddProperty this file cannot classify.
     rejected_types: set[tuple[str, str]] = set()
+    # DECODERLESS_PROPERTIES keys actually declared without a type method.
+    decoderless_seen: set[tuple[str, str]] = set()
 
     cs_files = sorted(src_dir.rglob("*.cs"))
     if not cs_files:
@@ -1727,6 +1787,9 @@ def main(argv: list[str]) -> int:
             # Check if this is a ClassNetCache descriptor
             raw_base = cm.group(2)
             is_cnc = raw_base and "ClassNetCacheDescriptor" in raw_base
+            # Both scans below report into this, so a statement they both see
+            # is sorted into rejected_types / decoderless_seen once.
+            class_rejected: set[tuple[str, str]] = set()
 
             # Find Configure() methods within this class body
             configure_re = re.compile(
@@ -1769,7 +1832,7 @@ def main(argv: list[str]) -> int:
                     else:
                         # Extract fields for ExportGroupDescriptor
                         fields = extract_fields_from_block(
-                            configure_body, raw_wrapper_names, rejected_types
+                            configure_body, raw_wrapper_names, class_rejected
                         )
                         if fields:
                             class_fields[class_name] = fields
@@ -1781,7 +1844,7 @@ def main(argv: list[str]) -> int:
                 # Look for methods that contain AddProperty calls but aren't
                 # Configure(). These are helper methods.
                 helper_fields = extract_fields_from_block(
-                    scoped_class_body, raw_wrapper_names, rejected_types
+                    scoped_class_body, raw_wrapper_names, class_rejected
                 )
                 if helper_fields and class_name not in class_fields:
                     class_fields[class_name] = helper_fields
@@ -1793,9 +1856,19 @@ def main(argv: list[str]) -> int:
                             class_fields[class_name].append((n, t, h))
                             existing_names.add(n)
 
+            # No type method is a rejection like any other, unless
+            # DECODERLESS_PROPERTIES names this class and property.
+            for method, statement in class_rejected:
+                key = (class_name, _extract_lambda_field_name(statement))
+                if method == _NO_TYPE_METHOD and key in DECODERLESS_PROPERTIES:
+                    decoderless_seen.add(key)
+                else:
+                    rejected_types.add((method, statement))
+
     # A declared property whose type this file cannot classify -- or whose
-    # export name it cannot extract (see `_UNNAMED_FIELD`) -- is an unknown,
-    # not an absence. Failing here rather than emitting a table that quietly
+    # export name it cannot extract (see `_UNNAMED_FIELD`), or that names no
+    # type method at all (see `_NO_TYPE_METHOD`) -- is an unknown, not an
+    # absence. Failing here rather than emitting a table that quietly
     # omits it is the same rule EXPORT_GROUP_KIND_POLICY applies to an
     # unclassified Kind -- and it fails BEFORE the output is written, so a run
     # that stops here leaves the previous table in place.
@@ -1812,13 +1885,31 @@ def main(argv: list[str]) -> int:
             f"'{_UNNAMED_FIELD}' entries have a known type method but no "
             "extractable field name (a named constant instead of a string "
             "literal or lambda leaf) -- teach `_extract_field_name` that "
-            "shape. Every other entry needs its type method added to "
-            "PRIMITIVE_TYPES (or to the ladder in extract_fields_from_block) "
-            "-- dropping either kind would ship a table that silently omits "
-            "every field declared that way.",
+            f"shape. '{_NO_TYPE_METHOD}' entries name no method this file can "
+            "see: if upstream binds the property with no decoder on purpose, "
+            "add (class, property) to DECODERLESS_PROPERTIES with the "
+            "evidence; otherwise teach the ladder the call shape. Every other "
+            "entry needs its type method added to PRIMITIVE_TYPES (or to the "
+            "ladder in extract_fields_from_block) -- dropping any of them "
+            "would ship a table that silently omits every field declared that "
+            "way.",
             file=sys.stderr,
         )
         return 1
+
+    # The other direction: a listed property its class now declares WITH a
+    # type. The reason DECODERLESS_PROPERTIES records for it would describe
+    # nothing, and the next reader would trust it. Also before the write.
+    now_typed = sorted(
+        f"{cls}.{prop}"
+        for cls, prop in DECODERLESS_PROPERTIES
+        if any(name == prop for name, _, _ in class_fields.get(cls, []))
+    )
+    if now_typed:
+        raise SystemExit(
+            "DECODERLESS_PROPERTIES lists properties the sources now declare "
+            f"with a type: {', '.join(now_typed)}. Remove them there."
+        )
 
     def effective_export_group_kind(cls: str) -> str:
         """The Kind a descriptor gets, walking up to the nearest override.
@@ -2064,6 +2155,12 @@ def main(argv: list[str]) -> int:
           f"{sum(kind_dropped.values())}")
     for kind, count in sorted(kind_dropped.items()):
         print(f"  {kind}: {count}")
+    # Same rule. On the vendored tree this reads 3, one per
+    # DECODERLESS_PROPERTIES entry; fewer there means the scan stopped seeing
+    # them, not that they stopped mattering.
+    print(f"Declared without a type method (no entry): {len(decoderless_seen)}")
+    for cls, prop in sorted(decoderless_seen):
+        print(f"  {cls}.{prop}")
     print("Type distribution:")
     for t, c in type_counts.most_common():
         print(f"  {t}: {c}")
