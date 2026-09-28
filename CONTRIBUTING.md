@@ -272,9 +272,11 @@ These corrupt downstream consumers silently — no test fails when they break.
 | `tools/equippable_table.py` | `tools/extract_equippables.py` from the vendored `third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs` |
 
 Run order: `extract_descriptors.py` → `apply_type_corrections.py` →
-`cargo fmt` → `extract_checksum_types.py` (against a **fresh** export). The
-corrections rewrite the one-line and the rustfmt layout alike, so the first
-three commute; the checksum step's place is the load-bearing one (below).
+`cargo fmt` → `extract_checksum_types.py` (against a **fresh** export).
+`extract_descriptors.py` rewrites `table.rs` whole, so it runs first. The
+corrections work on the one-line and the rustfmt layout alike, but `cargo fmt`
+must still run after them to reproduce the committed bytes. The checksum
+step's place is load-bearing too (below).
 
 The C# descriptor input is vendored under
 [`third_party/vrp/`](third_party/vrp/README.md),
@@ -295,6 +297,16 @@ declares. Run it before the additions land and the new entries are not donors
 yet -- the symptom is a field typed on the group you declared and still raw on
 its siblings, which is easy to read as the propagation not working. Re-export
 after rebuilding, then regenerate.
+
+The S-box and golden-vector generators need an upstream checkout; nothing
+under `third_party/` holds their input:
+
+```bash
+python tools/extract_sboxes.py <path>/ValorantSeededTransformHelpers.cs \
+    crates/vrf-transform/src/sbox.rs
+python tools/extract_golden.py <path>/ValorantSeededTransformTests.cs \
+    crates/vrf-transform/tests/data/golden_vectors.rs
+```
 
 ## Type corrections are conservative
 
