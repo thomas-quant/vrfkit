@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from collections import Counter
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pyarrow as pa
@@ -230,6 +230,15 @@ class BuildTests(unittest.TestCase):
                 ["vrfkit", "corpus", "--build", "/private/replay-name"]
             )
         self.assertNotIn("/private/replay-name", error.getvalue())
+
+    def test_build_help_states_the_default_builds(self):
+        """The help said "13.02 and 13.04" while DEFAULT_BUILDS also held 13.05,
+        so a default run sampled a build --help said it excluded."""
+        printed = io.StringIO()
+        with redirect_stdout(printed), self.assertRaises(SystemExit):
+            raw_inventory.parse_args(["--help"])
+        text = " ".join(printed.getvalue().split())
+        self.assertIn(f"(default: {', '.join(raw_inventory.DEFAULT_BUILDS)})", text)
 
 
 if __name__ == "__main__":

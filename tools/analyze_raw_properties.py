@@ -649,7 +649,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--build",
         action="append",
         dest="builds",
-        help="release label to include; repeatable (default: 13.02 and 13.04)",
+        help=f"release label to include; repeatable (default: {', '.join(DEFAULT_BUILDS)})",
     )
     parser.add_argument("--recursive", action="store_true")
     selection = parser.add_mutually_exclusive_group()
