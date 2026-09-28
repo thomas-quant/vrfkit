@@ -1,13 +1,10 @@
 # September 2026 corpus follow-up
 
-**Header-order correction:** The partial missing-initial/rejection figures below
-are historical parser classifications. [The corrected header audit](PARTIAL_HEADER_CORRECTION.md)
-reassembles all 961,004 observed fragments; the source data was present.
-
-This is the earlier tail-preservation batch. The subsequent
-[schema expansion and full partial-cause audit](SCHEMA_EXPANSION.md) supersedes
-its typed-value percentages and four-file-only cause classification. The
-before/after figures below remain the dated results of this earlier batch.
+**Superseded in part:** its partial missing-initial figures are the old
+parser's misclassification ([header-order correction](PARTIAL_HEADER_CORRECTION.md)),
+and the [schema expansion](SCHEMA_EXPANSION.md) supersedes its typed-value
+percentages and four-file cause classification. The tail-preservation
+before/after figures below remain this batch's.
 
 This note records the final measurements for the September 2026 batch and
 separates completed parser work from unresolved transport loss. Measurements
@@ -168,8 +165,7 @@ Explained 2026-09-28. On `02d4d478` vrfkit exports one
 vendored `8824794`) emits: packet 391880, actor 27232, subobject 27244,
 channel 194, a killing blow of 29.45 dealt / 20 taken on Gekko's Dizzy
 (`Projectile_E_Aggrobot_DiscTurret_PowerWave_C`), whose channel closes six
-packets later. It used to be the last item under *Remaining work*, and
-`compare_rpc_params.py` exited 1 on it. The record is on the wire, both parsers
+packets later. The record is on the wire, both parsers
 decode it identically once C# knows the component's class, and vrfkit is
 right to export it.
 
@@ -290,15 +286,12 @@ the rest.
 
 ## Remaining work
 
-- ~~Add full-population reason counters for the 125,037 main and 835,967
-  checkpoint partial-reassembly rejections.~~ Superseded: the
-  [header-order correction](PARTIAL_HEADER_CORRECTION.md) reassembles all of
-  them, per-cause counters and `partials.parquet` preservation now exist, and a
-  2026-09-13 sweep of 839 replays (main and checkpoint) found 0 rejected rows.
-  The counters themselves were then shown able to read zero over a dropped
-  bunch when the packet reader's partial tracker disagreed with the
-  accumulator; that was fixed on 2026-09-13, with tests in
-  `crates/vrf-net/src/pipeline/mod.rs` that fail if it returns.
+- (Done: partial-reassembly rejections. The header-order correction
+  reassembles them, per-cause counters and `partials.parquet` exist, and a
+  2026-09-13 sweep of 839 replays found 0 rejected rows. The counters could
+  read zero over a dropped bunch when the packet reader's partial tracker
+  disagreed with the accumulator; fixed that day, pinned by tests in
+  `crates/vrf-net/src/pipeline/mod.rs`.)
 - Establish semantics for whole raw post-RepLayout tails, unresolved RPC
   payloads, InputEventData tags, GAS words and StopEffectType before adding
   typed fields or game-action labels.
