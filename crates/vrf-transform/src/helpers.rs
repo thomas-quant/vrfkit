@@ -103,27 +103,6 @@ pub const fn reverse_bits64_without_final_16bit_swap(mut v: u64) -> u64 {
     v.rotate_left(32)
 }
 
-/// Full 32-bit reversal, written out to mirror the reference implementation.
-#[inline]
-#[must_use]
-pub const fn reverse_bits_u32(mut v: u32) -> u32 {
-    v = ((v & 0x5555_5555) << 1) | ((v >> 1) & 0x5555_5555);
-    v = ((v & 0x3333_3333) << 2) | ((v >> 2) & 0x3333_3333);
-    v = ((v & 0x0F0F_0F0F) << 4) | ((v >> 4) & 0x0F0F_0F0F);
-    v = ((v & 0x00FF_00FF) << 8) | ((v >> 8) & 0x00FF_00FF);
-    // Reference writes `(v << 16) | (v >> 16)`, a half-width rotation.
-    v.rotate_left(16)
-}
-
-/// Full 8-bit reversal, written out to mirror the reference implementation.
-#[inline]
-#[must_use]
-pub const fn reverse_bits_u8(mut v: u8) -> u8 {
-    v = ((v & 0x55) << 1) | ((v >> 1) & 0x55);
-    v = ((v & 0x33) << 2) | ((v >> 2) & 0x33);
-    ((v & 0x0F) << 4) | ((v >> 4) & 0x0F)
-}
-
 /// Apply a byte substitution table to each byte of a 64-bit word.
 #[inline]
 #[must_use]
@@ -193,20 +172,6 @@ pub fn write_u32(buf: &mut [u8], offset: usize, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reverse32_matches_intrinsic() {
-        for v in [0u32, 1, 0x8000_0000, 0xDEAD_BEEF, u32::MAX, 0x0F0F_0F0F] {
-            assert_eq!(reverse_bits_u32(v), v.reverse_bits(), "value {v:#x}");
-        }
-    }
-
-    #[test]
-    fn reverse8_matches_intrinsic() {
-        for v in 0u8..=255 {
-            assert_eq!(reverse_bits_u8(v), v.reverse_bits(), "value {v:#x}");
-        }
-    }
 
     #[test]
     fn reverse64_variant_is_not_a_plain_reversal() {

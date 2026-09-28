@@ -2,8 +2,7 @@
 
 use super::SeededTransform;
 use crate::helpers::{
-    reverse_bits_u8, reverse_bits_u32, reverse_bits64_without_final_16bit_swap,
-    substitute_bytes_u32, substitute_bytes_u64,
+    reverse_bits64_without_final_16bit_swap, substitute_bytes_u32, substitute_bytes_u64,
 };
 use crate::sbox::{SBOX_8, SBOX_32, SBOX_64};
 
@@ -33,9 +32,9 @@ impl SeededTransform for V13_02 {
         let rol3 = state.rotate_left(3);
         let rol6 = state.rotate_left(6);
         v = substitute_bytes_u32(v, &SBOX_32);
-        v = reverse_bits_u32(v);
+        v = v.reverse_bits();
         v = !v.wrapping_sub(rol6);
-        v = reverse_bits_u32(v);
+        v = v.reverse_bits();
         v = v.rotate_left((rol3 % 31) + 1);
         v.rotate_right((rol2 % 31) + 1)
     }
@@ -44,9 +43,9 @@ impl SeededTransform for V13_02 {
         let mix_a = state.wrapping_mul(0x79);
         let mix_b = mix_a.wrapping_mul(0x0b);
         v = SBOX_8[v as usize];
-        v = reverse_bits_u8(v);
+        v = v.reverse_bits();
         v = !v.wrapping_sub(mix_b.wrapping_mul(0x33) as u8);
-        v = reverse_bits_u8(v);
+        v = v.reverse_bits();
         v = v.rotate_left((mix_b % 7) + 1);
         v.rotate_right((mix_a % 7) + 1)
     }

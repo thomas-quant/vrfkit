@@ -2,8 +2,8 @@
 
 use super::SeededTransform;
 use crate::helpers::{
-    reverse_bits_u8, reverse_bits_u32, reverse_bits64_without_final_16bit_swap,
-    swap_adjacent_bits_u8, swap_adjacent_bits_u32, swap_adjacent_bits_u64,
+    reverse_bits64_without_final_16bit_swap, swap_adjacent_bits_u8, swap_adjacent_bits_u32,
+    swap_adjacent_bits_u64,
 };
 
 /// `++Ares-Core+release-12.11`
@@ -43,7 +43,7 @@ impl SeededTransform for V12_11 {
         v = v.rotate_right((rol8 % 31) + 1);
         v = swap_adjacent_bits_u32(v);
         v = v.wrapping_add(rol6);
-        v = reverse_bits_u32(v);
+        v = v.reverse_bits();
         v = v.wrapping_sub(rol4);
         v = v.wrapping_sub(rol3);
         v = v.wrapping_sub(rol2);
@@ -56,7 +56,7 @@ impl SeededTransform for V12_11 {
         v = v.rotate_right((rotate_input % 7) + 1);
         v = swap_adjacent_bits_u8(v);
         v = v.wrapping_add(state_byte.wrapping_mul(0x29));
-        v = reverse_bits_u8(v);
+        v = v.reverse_bits();
         v = v.wrapping_add(state_byte.wrapping_mul(0x23));
         swap_adjacent_bits_u8(v)
     }
