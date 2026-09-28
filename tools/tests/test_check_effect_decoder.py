@@ -26,20 +26,14 @@ CASE_NAMES = (
 class CheckEffectDecoderTests(unittest.TestCase):
     def test_every_named_corruption_is_detected(self):
         self.assertEqual(tuple(case.name for case in checker.CASES), CASE_NAMES)
+        # The clean run first: a checker that fails every case would also
+        # "detect" every corruption below.
+        self.assertEqual(checker.check(), [])
 
         for name in CASE_NAMES:
             with self.subTest(name=name):
                 failures = checker.check(name)
                 self.assertGreaterEqual(len(failures), 1, name)
-
-    def test_empty_payload_corruptions_are_detected(self):
-        for name in (
-            "rust_empty_float",
-            "rust_empty_object",
-            "rust_empty_vector",
-        ):
-            with self.subTest(name=name):
-                self.assertTrue(checker.check(name), name)
 
     def test_unknown_corruption_name_is_rejected(self):
         self.assertEqual(
