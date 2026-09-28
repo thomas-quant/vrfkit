@@ -58,8 +58,9 @@ use crate::sink::{ChannelState, ExportSink, RecordBuffers};
 pub enum Verdict {
     /// Content blocks were found and every one of them framed.
     Passed,
-    /// At least one framing, payload, reassembly, or trailing-data failure was
-    /// observed. See [`Verdict::decide`].
+    /// At least one framing, payload, reassembly, or unread-ReplayData failure
+    /// was observed (bytes past an archive or left by its codec). See
+    /// [`Verdict::decide`].
     ValidationFailed,
     /// No RepLayout or ClassNetCache blocks at all -- nothing was validated.
     NoContentBlocks,

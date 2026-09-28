@@ -237,9 +237,10 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
             continue;
         }
 
-        // `_with_trailing`: the outer chunk can exceed the inner SizeInBytes,
-        // which the plain call drops unseen. Counted, not rejected: no replay
-        // has been measured carrying any, so failing would be a guess.
+        // `_with_trailing`: payload bytes no reader consumed -- past the inner
+        // SizeInBytes, or archive bytes the codec never read -- which the plain
+        // call drops unseen. Counted, not rejected: no replay has been
+        // measured carrying any, so failing would be a guess.
         let (decompressed, trailing) =
             decompress_replay_data_with_trailing(payload, ctx.compressed, ctx.encrypted)?;
         totals.replay_data_trailing_bytes += trailing as u64;

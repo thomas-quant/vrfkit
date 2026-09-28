@@ -199,9 +199,10 @@ pub(super) fn print(
     if let Some(err) = &totals.sink.movement_first_error {
         eprintln!("  Movement err:     {err}");
     }
-    // Sections that stopped with unread bits beyond the grammar's padding: a
-    // tally, not an error. Sized and open windows stay apart; see
-    // `RpcDecodeResult::sized_section_tails`.
+    // Sections that stopped with bits unread before their measured end (a
+    // `000` terminator and 8 to 23 bits after the last move): a tally, not an
+    // error. Sized and open windows stay apart; see
+    // `RpcDecodeResult::sized_section_tails` and `open_section_tails`.
     eprintln!(
         "  Movement tails:   {} sized ({} bits) / {} open ({} bits)",
         totals.sink.movement_sized_section_tails,
