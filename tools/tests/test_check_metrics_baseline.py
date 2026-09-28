@@ -181,9 +181,8 @@ class WiringTests(unittest.TestCase):
 #: A raw `compute_metrics.py` output shaped like the valplay JSON `extract()`
 #: reads (nested dicts, `per_player` maps), pinning the mapping into the
 #: flattened keys `HEALTHY` starts from. `extract()` indexes every nested path
-#: with `[...]`, so a renamed valplay section or key raises KeyError -- except
-#: the per-player counters `_sum` reads with `.get(field) or 0`, where a
-#: renamed one reads as 0.
+#: with `[...]`, so a renamed valplay section or key raises KeyError, and
+#: `_sum` refuses a per-player counter a player lacks or that is not a count.
 RAW_METRICS = {
     "combat": {
         "per_player": {
@@ -257,9 +256,27 @@ class ExtractShapeTests(unittest.TestCase):
         self.assertEqual(got["shots"], 42)  # 30 + 12
         self.assertNotEqual(got["shots"], got["distinct_weapons"])
 
+    def test_a_renamed_per_player_counter_is_an_error_not_a_zero(self):
+        """`.get(field) or 0` once read a counter valplay renamed as a
+        plausible 0 for every player. A missing key, or a value that is not a
+        count, must fail; a present 0 stays 0 (p2's assists above)."""
+        for section, player, field in (("combat", "p2", "headshots"),
+                                       ("tactical", "p1", "trade_kills"),
+                                       ("kast", "p2", "kast_rounds")):
+            for broken in ("renamed", None, "3"):
+                with self.subTest(field=field, broken=broken):
+                    raw = copy.deepcopy(RAW_METRICS)
+                    stats = raw[section]["per_player"][player]
+                    if broken == "renamed":
+                        stats[field + "_renamed"] = stats.pop(field)
+                    else:
+                        stats[field] = broken
+                    with self.assertRaisesRegex(ValueError, field):
+                        guard.extract(raw)
+
     def test_a_player_with_no_combat_entry_does_not_crash_the_sum(self):
-        """`_sum` reads `.get(field) or 0` per player -- a player present in
-        `players` but absent from `combat.per_player` (never fired a shot,
+        """`_sum` walks `combat.per_player`, not `players` -- a player present
+        in `players` but absent from `combat.per_player` (never fired a shot,
         never took damage) must not raise, and must not count."""
         raw = copy.deepcopy(RAW_METRICS)
         raw["players"].append("p3")
@@ -402,6 +419,23 @@ class MainWiringTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("drifted", output)
         self.assertIn("kills", output)
+
+    def test_a_renamed_per_player_counter_fails_the_pipeline(self):
+        """Reported like any other failed stage, with the counter named,
+        not read as 0 and compared with the baseline."""
+        renamed = copy.deepcopy(RAW_METRICS)
+        renamed["combat"]["per_player"]["p1"]["kill_count"] = (
+            renamed["combat"]["per_player"]["p1"].pop("kills"))
+        self.stage_metrics(renamed)
+        baseline = self.root / "baseline.json"
+        baseline.write_text(json.dumps({"metrics": {"test": guard.extract(RAW_METRICS)}}),
+                            encoding="utf-8")
+
+        code, output = self.run_main(["--baseline", str(baseline)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("PIPELINE FAILED", output)
+        self.assertIn("'kills'", output)
 
     def test_a_missing_baseline_is_a_controlled_failure(self):
         self.stage_metrics(RAW_METRICS)
