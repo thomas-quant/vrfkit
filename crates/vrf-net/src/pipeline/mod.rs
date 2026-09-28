@@ -308,8 +308,9 @@ struct ChannelSlot {
     /// How many bunches this channel has carried, 1-based. Reported in
     /// diagnostics as `channel_bunch_index`.
     bunch_count: u64,
-    /// `None` until the channel opens, and again once a failed open has
-    /// retired the live actor it held (`retire_after_failed_open`).
+    /// `None` until the channel opens, and again once an open bunch that did
+    /// not complete its open has retired the live actor it held
+    /// (`retire_after_failed_open`).
     state: Option<ActorChannelState>,
 }
 
@@ -511,6 +512,10 @@ impl ReplicationReader {
                     });
                 }
                 Self::abandon_bunch(&mut payload.clone(), &mut stage);
+                // A refused open is an open that did not complete. Retired
+                // before the close, so an open+close bunch closes nothing it
+                // did not open.
+                Self::retire_after_failed_open(header, &mut stage);
                 if header.b_close {
                     Self::close_channel(header, &mut stage, accumulator, sink);
                 }
@@ -780,25 +785,38 @@ impl ReplicationReader {
         payload.skip_remaining();
     }
 
-    /// Take the channel away from the actor it held before an open that failed.
+    /// Take the channel away from the actor it held when an open bunch does not
+    /// complete its open.
     ///
     /// `handle_channel_open` writes the new state only after the actor GUID and
-    /// the spawn block have both read, so a failure leaves whatever the slot
-    /// held. When that was a live actor, the wire has just said the channel
-    /// belongs to someone else and this reader cannot say who: keeping the old
-    /// state framed every later bunch on the channel under the old actor's
-    /// archetype and class. The state is cleared instead, which sends those
-    /// bunches to [`Self::drop_unopened`], where they are counted.
+    /// the spawn block have both read, so every way an open bunch can stop
+    /// short of that leaves whatever the slot held: the bunch refused at the
+    /// channel-state limit, a package-map or must-be-mapped read that fails
+    /// before the open, the open itself failing, and a package-map export bunch
+    /// whose exports read cleanly -- nothing after exports is read, so its open
+    /// never is. Each of those arms calls this. When the slot held a live
+    /// actor, the wire has just said the channel belongs to someone else and
+    /// this reader cannot say who: keeping the old state framed every later
+    /// bunch on the channel under the old actor's archetype and class. The
+    /// state is cleared instead, which sends those bunches to
+    /// [`Self::drop_unopened`], where they are counted.
+    ///
+    /// Only an open bunch displaces anything. A bunch without `b_open` that
+    /// fails a header stage says nothing about who owns the channel, so its
+    /// actor stays live; this returns without looking.
     ///
     /// No close is emitted for the displaced actor -- the same rule
     /// `channel_reopens_while_open` follows for a reopen that succeeds: the
     /// replay sent no close for it, and a fabricated one would be a row the
     /// wire never carried. A dormant or already-closed state is not live and
     /// is left as it is; bunches after it are dropped at the guard either way.
-    fn retire_after_failed_open(ch_index: u32, stage: &mut Stage<'_>) {
+    fn retire_after_failed_open(header: &RawBunchHeader, stage: &mut Stage<'_>) {
+        if !header.b_open {
+            return;
+        }
         let live = stage
             .channels
-            .get_mut(&ch_index)
+            .get_mut(&header.ch_index)
             .filter(|slot| slot.state.as_ref().is_some_and(|state| state.is_open));
         if let Some(slot) = live {
             slot.state = None;
@@ -835,22 +853,32 @@ impl ReplicationReader {
 
         // Package map exports. Count the export only when the read succeeds --
         // a partial failure used to inflate `package_map_exports` anyway.
+        //
+        // The bunch ends here on both outcomes: nothing after the exports is
+        // read, and nothing counts what is left (docs/FOLLOWUP.md says why).
+        // An open this bunch carries is therefore never read, clean exports or
+        // not, so the actor it displaces is retired on both paths. On the clean
+        // one no header failure is counted, and `failed_reopens_while_open` is
+        // the only counter that says an open was lost.
         if header.b_has_package_map_exports {
             if channel::read_package_map_exports(payload, stage.stats, sink).is_ok() {
                 stage.stats.package_map_exports += 1;
             } else {
                 Self::abandon_bunch(payload, stage);
             }
+            Self::retire_after_failed_open(header, stage);
             return;
         }
 
         // Must-be-mapped GUIDs. A failure leaves the reader at an indeterminate
         // bit, so the rest of this bunch cannot be framed safely -- count it and
-        // abandon the bunch rather than parse on as garbage.
+        // abandon the bunch rather than parse on as garbage. An open behind the
+        // list is abandoned with it.
         if header.b_has_must_be_mapped_guids
             && channel::read_must_be_mapped_guids(payload, stage.stats).is_err()
         {
             Self::abandon_bunch(payload, stage);
+            Self::retire_after_failed_open(header, stage);
             return;
         }
 
@@ -858,13 +886,14 @@ impl ReplicationReader {
         // leave the old one alone as well: a channel still holding a live
         // actor kept it, and every later bunch there was framed as that actor's
         // -- the stale-schema shape, reported only as one header failure. See
-        // `retire_after_failed_open`.
+        // `retire_after_failed_open`, which the two arms above and the
+        // channel-state limit in `process_packet` call as well.
         if header.b_open
             && channel::handle_channel_open(header, payload, stage.channels, stage.stats, sink)
                 .is_err()
         {
             Self::abandon_bunch(payload, stage);
-            Self::retire_after_failed_open(ch_index, stage);
+            Self::retire_after_failed_open(header, stage);
             return;
         }
 
@@ -1845,6 +1874,270 @@ mod tests {
             ),
             (1, 10)
         );
+    }
+
+    // --- open bunches stopped before their open, on a live channel ---
+    //
+    // Each probe below opens channel 2 for static actor 3, sends an open bunch
+    // on channel 2 that stops before its own open is read, then one non-open
+    // bunch with an empty block. The open itself failing is covered above by
+    // a_failed_reopen_does_not_leave_the_previous_actor_live; these cover the
+    // arms that return earlier, which used to keep actor 3 live and frame the
+    // later block under it with `failed_reopens_while_open` at 0.
+
+    /// Channel 2 opens for static actor 3, whose empty block frames.
+    fn open_actor_three_on_channel_two() -> Vec<u8> {
+        build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                ..Default::default()
+            },
+            &open_and_empty_block(),
+        )
+    }
+
+    /// A non-open bunch on channel 2 carrying one empty 10-bit actor block.
+    fn later_block_on_channel_two() -> Vec<u8> {
+        let mut later: Vec<bool> = Vec::new();
+        write_empty_actor_block(&mut later);
+        build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                ..Default::default()
+            },
+            &later,
+        )
+    }
+
+    /// A must-be-mapped list that declares one GUID (u16 1, little-endian) and
+    /// ends there. Nothing may follow it: the GUID read would succeed on
+    /// whatever did.
+    fn must_be_mapped_count_without_its_guid() -> Vec<bool> {
+        let mut bits = vec![true, false, false, false, false, false, false, false];
+        bits.extend([false; 8]);
+        bits
+    }
+
+    /// What every probe must show: actor 3 was taken off channel 2 and counted,
+    /// so the later block was dropped at the guard -- counted, and failing the
+    /// verdict through `bunches_on_unopened_channel` -- rather than framed
+    /// under actor 3's schema.
+    fn assert_actor_three_retired(reader: &ReplicationReader, sink: &TestSink) {
+        let stats = reader.stats();
+        assert_eq!(stats.actor_opens, 1, "only actor 3's open completed");
+        assert_eq!(stats.channel_reopens_while_open, 0, "no reopen succeeded");
+        assert_eq!(
+            stats.failed_reopens_while_open, 1,
+            "the displaced actor must be retired and counted"
+        );
+        assert_eq!(
+            stats.content_blocks, 1,
+            "only actor 3's own block; the later bunch has no actor to be framed under"
+        );
+        assert_eq!(
+            sink.content_blocks.len(),
+            1,
+            "nothing may reach the sink under actor 3's schema"
+        );
+        assert_eq!(
+            stats.actor_closes, 0,
+            "no close is fabricated for the displaced actor"
+        );
+        assert_eq!(
+            (
+                stats.bunches_on_unopened_channel,
+                stats.unopened_channel_bits
+            ),
+            (1, 10),
+            "the later bunch is dropped and counted, with its whole 10-bit block"
+        );
+    }
+
+    /// An open bunch whose must-be-mapped list fails to read is abandoned
+    /// before its open is reached.
+    #[test]
+    fn an_open_whose_must_be_mapped_read_fails_retires_the_live_actor() {
+        let reopen = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                b_has_must_be_mapped_guids: true,
+                ..Default::default()
+            },
+            &must_be_mapped_count_without_its_guid(),
+        );
+        let (reader, sink) = run_packets(&[
+            open_actor_three_on_channel_two(),
+            reopen,
+            later_block_on_channel_two(),
+        ]);
+
+        let stats = reader.stats();
+        assert_eq!(stats.bunch_header_failures, 1, "the must-be-mapped read");
+        assert_eq!(stats.skipped_bits, 16, "the abandoned window");
+        assert_actor_three_retired(&reader, &sink);
+    }
+
+    /// An open bunch whose package-map exports fail to read -- a negative GUID
+    /// count -- is abandoned before its open is reached.
+    #[test]
+    fn an_open_whose_package_map_read_fails_retires_the_live_actor() {
+        let mut exports: Vec<bool> = Vec::new();
+        exports.push(false); // hasRepLayoutExport
+        write_i32_bits(&mut exports, -1);
+        exports.extend(open_and_empty_block()); // the open, never reached
+        let reopen = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                b_has_package_map_exports: true,
+                ..Default::default()
+            },
+            &exports,
+        );
+        let (reader, sink) = run_packets(&[
+            open_actor_three_on_channel_two(),
+            reopen,
+            later_block_on_channel_two(),
+        ]);
+
+        let stats = reader.stats();
+        assert_eq!(stats.bunch_header_failures, 1, "the package-map read");
+        assert_eq!(stats.package_map_exports, 0);
+        assert_eq!(stats.skipped_bits, 51, "the abandoned window: 1 + 32 + 18");
+        assert_actor_three_retired(&reader, &sink);
+    }
+
+    /// Clean exports do not save the open: nothing after a package-map export
+    /// list is read, so an open bunch carrying one never has its open read.
+    /// Nothing failed to read here, so no header failure is counted, and
+    /// `failed_reopens_while_open` is the only counter that says an open was
+    /// lost. The unread open's own bits are not tallied (docs/FOLLOWUP.md),
+    /// so this does not assert `skipped_bits`.
+    #[test]
+    fn an_open_behind_clean_package_map_exports_retires_the_live_actor() {
+        let mut exports: Vec<bool> = Vec::new();
+        exports.push(false); // hasRepLayoutExport
+        write_i32_bits(&mut exports, 0); // no GUIDs: a clean, empty export list
+        exports.extend(open_and_empty_block()); // the open, never read
+        let reopen = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                b_has_package_map_exports: true,
+                ..Default::default()
+            },
+            &exports,
+        );
+        let (reader, sink) = run_packets(&[
+            open_actor_three_on_channel_two(),
+            reopen,
+            later_block_on_channel_two(),
+        ]);
+
+        let stats = reader.stats();
+        assert_eq!(stats.package_map_exports, 1, "the exports read cleanly");
+        assert_eq!(stats.bunch_header_failures, 0, "nothing failed to read");
+        assert_actor_three_retired(&reader, &sink);
+    }
+
+    /// An open bunch refused at the channel-state limit never reaches the
+    /// header stages at all.
+    #[test]
+    fn an_open_refused_at_the_channel_limit_retires_the_live_actor() {
+        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut sink = TestSink::default();
+        reader.process_packet(&open_actor_three_on_channel_two(), 0, &mut sink);
+
+        // A packet reader with no room for reliable-sequence state flags the
+        // reopen `has_channel_limit_error`, while the pipeline's own table
+        // still holds channel 2 and actor 3: the refusal lands on a live slot.
+        reader.packet_reader = RawPacketReader::with_max_channels(0);
+        let reopen = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                ..Default::default()
+            },
+            &open_and_empty_block(),
+        );
+        reader.process_packet(&reopen, 1, &mut sink);
+        // Restored before the later bunch: the limiting reader would refuse
+        // that one too, and a refused bunch says nothing about whether actor 3
+        // is still live. This one must reach the channel guard.
+        reader.packet_reader = RawPacketReader::new();
+        reader.process_packet(&later_block_on_channel_two(), 2, &mut sink);
+
+        let stats = reader.stats();
+        assert_eq!(stats.channel_state_limit_failures, 1);
+        assert_eq!(
+            stats.bunch_header_failures, 1,
+            "the refused bunch is abandoned"
+        );
+        assert_actor_three_retired(&reader, &sink);
+    }
+
+    /// The refusal arm retires before it closes: an open+close bunch refused on
+    /// a live channel carried its own actor's close, not actor 3's, so actor 3
+    /// gets no close row -- the corner a failed open+close already has.
+    #[test]
+    fn an_open_and_close_refused_at_the_channel_limit_closes_nothing_it_did_not_open() {
+        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut sink = TestSink::default();
+        reader.process_packet(&open_actor_three_on_channel_two(), 0, &mut sink);
+        reader.packet_reader = RawPacketReader::with_max_channels(0);
+        let reopen = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_open: true,
+                b_close: true,
+                ..Default::default()
+            },
+            &open_and_empty_block(),
+        );
+        reader.process_packet(&reopen, 1, &mut sink);
+
+        let stats = reader.stats();
+        assert_eq!(stats.channel_state_limit_failures, 1);
+        assert_eq!(stats.failed_reopens_while_open, 1);
+        assert_eq!(stats.actor_closes, 0, "actor 3 was never closed");
+        assert!(sink.closes.is_empty(), "no close row for actor 3");
+        assert!(
+            reader.channels.is_empty(),
+            "the destroyed channel is still retired"
+        );
+    }
+
+    /// Only an open bunch displaces an actor. A bunch without `b_open` whose
+    /// must-be-mapped read fails is abandoned, but it said nothing about who
+    /// owns the channel: actor 3 stays live and the next bunch is framed under
+    /// it. Pins the `b_open` gate every retire arm shares.
+    #[test]
+    fn a_header_failure_without_an_open_leaves_the_live_actor_open() {
+        let failed = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_has_must_be_mapped_guids: true,
+                ..Default::default()
+            },
+            &must_be_mapped_count_without_its_guid(),
+        );
+        let (reader, sink) = run_packets(&[
+            open_actor_three_on_channel_two(),
+            failed,
+            later_block_on_channel_two(),
+        ]);
+
+        let stats = reader.stats();
+        assert_eq!(stats.bunch_header_failures, 1);
+        assert_eq!(stats.failed_reopens_while_open, 0, "nothing was reopened");
+        assert_eq!(
+            stats.content_blocks, 2,
+            "the later bunch is still actor 3's"
+        );
+        assert_eq!(sink.content_blocks.len(), 2);
+        assert_eq!(stats.bunches_on_unopened_channel, 0);
     }
 
     /// The guard counts what it drops, which is the payload left after the

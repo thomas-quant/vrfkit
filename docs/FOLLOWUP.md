@@ -209,3 +209,30 @@ Considered on 2026-09-28 and deliberately not done:
   Deleting the tracker would remove the field or leave it a permanent 0, which
   is the counter-that-cannot-move shape this repository refuses. It stays,
   documented as advisory, and the pipeline's strip keeps it that way.
+- Retiring a live actor whose channel was reopened by a partial fragment the
+  reassembly accumulator refuses or discards. Every arm that stops an open
+  bunch before its open is read now retires the live actor it displaced
+  (`retire_after_failed_open` in `crates/vrf-net/src/pipeline/mod.rs`); the
+  accumulator path does not. A probe -- a 7-bit, non-final initial fragment
+  with `bOpen` on a channel holding a live actor -- leaves that actor live,
+  frames the next bunch's block under it, and counts only the partial error.
+  Doing it needs a rule for each discard mode -- a refused current fragment,
+  a displaced in-flight assembly, an overlapping initial that is itself an
+  open, an errored final -- inside a path the verdict deliberately leaves
+  unscored, and no replay reaches it (see the measurement below).
+- Counting the bits left after a package-map export list reads cleanly.
+  `process_complete_payload` returns after the exports, so an open,
+  must-be-mapped GUIDs or content blocks behind them are never read and reach
+  no counter; only an open is named now, through `failed_reopens_while_open`,
+  and only when it displaced a live actor. What those bits are is not
+  established: no replay carries a package-map export bunch, so neither
+  reading on nor a counter with a stated meaning has anything to be checked
+  against.
+
+Measured for both items on 2026-09-28 by summing `quality.net` and
+`quality.checkpoints.net` over the 1,018 export manifests of the common audit
+of main `259ed10` (one export per unique replay, checkpoints on):
+`package_map_exports`, `must_be_mapped_guids`, `bunch_header_failures`,
+`channel_state_limit_failures`, `channel_reopens_while_open` and
+`partial_errors` are 0 in both passes, over 563,030,549 main and 4,346,884
+checkpoint bunches.

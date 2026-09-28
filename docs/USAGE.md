@@ -111,7 +111,10 @@ transport failures, including unfinished partials, resource limits and
 bunches dropped because their channel had no open actor, fail the verdict.
 That holds even when the channel's open arrived in a rejected partial
 fragment: the fragment itself stays unscored, but the complete bunches dropped
-after it count as loss.
+after it count as loss. The exception is a rejected fragment that reopened a
+channel still holding a live actor: it retires nothing, so later bunches are
+framed under that actor rather than dropped (see
+[FOLLOWUP.md](FOLLOWUP.md)).
 
 The example is the preserved `02d4d478` replay after the September 2026
 tail-preservation change. All 714 ReplayData block runs in that historical
@@ -1014,7 +1017,7 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 727 passing
+cargo +1.86.0 test --workspace --locked                              # 733 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files

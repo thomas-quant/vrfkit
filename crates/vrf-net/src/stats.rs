@@ -177,21 +177,35 @@ pub struct NetStats {
     /// other truncated read; this names the specific shape so a corpus run can
     /// say whether it ever happens.
     pub actor_opens_missing_spawn: u64,
-    /// Opens that failed on a channel still holding a live actor.
+    /// Open bunches that did not complete their open on a channel still
+    /// holding a live actor.
     ///
-    /// The failed open is already one [`Self::bunch_header_failures`]; this
-    /// names what it used to leave behind. The new state is written only after
-    /// the spawn block reads, so a failed open left the previous actor on the
-    /// channel, still open, and every later bunch there was framed as that
-    /// actor's -- its archetype, its class, plausible field names and typed
-    /// values for an object the wire had replaced. That state is now retired,
-    /// and, as for [`Self::channel_reopens_while_open`], no close is fabricated
-    /// for it. Later bunches on the channel land in
+    /// Five arms stop an open bunch before its new state is written: the bunch
+    /// is refused at the channel-state limit, its package-map exports or its
+    /// must-be-mapped GUIDs fail to read, the open itself fails, or it is a
+    /// package-map export bunch whose exports read cleanly -- nothing after
+    /// exports is read, so its open never is. The first four are also one
+    /// [`Self::bunch_header_failures`] each; the clean export bunch is not, so
+    /// this is the only counter that names its lost open -- and only when that
+    /// open displaced a live actor (docs/FOLLOWUP.md).
+    ///
+    /// What they used to leave behind: the new state is written only after the
+    /// spawn block reads, so the previous actor stayed on the channel, still
+    /// open, and every later bunch there was framed as that actor's -- its
+    /// archetype, its class, plausible field names and typed values for an
+    /// object the wire had replaced. That state is now retired on every one of
+    /// the five, and, as for [`Self::channel_reopens_while_open`], no close is
+    /// fabricated for it. Later bunches on the channel land in
     /// [`Self::bunches_on_unopened_channel`] instead of a stranger's schema.
+    ///
+    /// Not covered: an open carried by a partial fragment the reassembly
+    /// accumulator refuses or discards. That path retires nothing; see
+    /// docs/FOLLOWUP.md.
     pub failed_reopens_while_open: u64,
     /// Bunches that reached content-block framing with payload left and no
-    /// open actor on their channel -- it never opened, its open failed, it was
-    /// destroyed, or it is dormant -- and were dropped whole.
+    /// open actor on their channel -- it never opened, an open bunch that did
+    /// not complete its open retired its actor, it was destroyed, or it is
+    /// dormant -- and were dropped whole.
     ///
     /// The only trace used to be [`Self::bunches`], so one failed open that
     /// cost every later bunch on its channel reported a single
