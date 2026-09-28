@@ -1,49 +1,38 @@
 //! Content-block group-path resolution.
 //!
-//! Every content block has to be attributed to one of the replay's declared
-//! export groups before a single field in it can be named, and the rules for
-//! doing that mirror the C# `ContentBlockPathResolver`. There are 608,020
-//! blocks in the reference replay and docs/archive/PROJECT_STATUS.md 5-P
-//! measured this resolution at 371 ms -- the largest single slice of the
-//! export after the Parquet writers were moved off the packet loop.
+//! Every content block is attributed to a declared export group before any
+//! field in it can be named. The rules are the C# `ContentBlockPathResolver`'s
+//! (`resolve_actor_group_path`: `ResolveCachedActorExportGroupPath` /
+//! `ResolveCachedActorClassPath` in `ResolveActorPackageOrClassPath` order;
+//! `resolve_subobject_group_path`: `ResolveSubobjectExportGroupPath` /
+//! `ResolveSubobjectClassPath`; `create_combined_candidate`:
+//! `TryCreateCombinedCandidate`; `NetGuidCache::unique_leaf_match`:
+//! `UniqueLeafMatch`). The reference replay has 608,020 blocks, and
+//! docs/archive/PROJECT_STATUS.md 5-P measured this resolution at 371 ms, the
+//! export's largest slice once the Parquet writers left the packet loop.
 //!
 //! # The memo
 //!
-//! [`BlockPathMemo`] is what this module adds over a straight port of the C#.
-//! Resolution is a pure function of
+//! [`BlockPathMemo`] is what this module adds over the C#. Resolution is a pure
+//! function of the header's `is_actor`, `has_rep_layout`, `class_net_guid` and
+//! `object_net_guid` and the channel index and actor GUID -- the memo key --
+//! and of three inputs with independent stamps, none covering another: the
+//! declared group paths (`NetGuidCache::schema_generation`, which tracks no
+//! field or GUID mutation); the GUID -> path and GUID -> outer maps
+//! (`NetGuidCache::guid_generation`, the one stamp that also sees the
+//! frame-level ExportData section, `vrf_frame::read_export_data`, which calls
+//! `set_net_guid_path` directly rather than through this crate's
+//! `register_path`); and the channel -> (actor, archetype) map
+//! (`ChannelState::resolution_generation`, moved only by
+//! `on_actor_open`/`on_actor_close`). Any stamp moving discards the whole memo,
+//! so a hit is indistinguishable from a recomputation.
 //!
-//! - the block header's `is_actor`, `has_rep_layout`, `class_net_guid` and
-//!   `object_net_guid`,
-//! - the channel index and actor GUID,
-//! - the cache's declared group paths (`schema_generation` tracks these),
-//! - the cache's GUID -> path and GUID -> outer maps (`guid_generation` tracks
-//!   these), and
-//! - this crate's channel -> (actor, archetype) map (`ChannelState::resolution_generation`
-//!   tracks this).
-//!
-//! The first two are the memo key. The rest are three independent stamps --
-//! `NetGuidCache::schema_generation`, `NetGuidCache::guid_generation` and
-//! `ChannelState::resolution_generation` -- none of which covers another:
-//! `schema_generation` explicitly does not track field or GUID mutations, and
-//! `resolution_generation` moves only with the archetype map
-//! (`on_actor_open`/`on_actor_close`). GUID mappings arrive both through this
-//! crate's `register_path` and from the frame-level ExportData section, which
-//! calls `NetGuidCache::set_net_guid_path` directly; `guid_generation` is the
-//! one stamp that sees both. A change in any one of the three discards the
-//! whole memo, so a hit is indistinguishable from a recomputation.
-//!
-//! The value is the pair `(group path, function count)` rather than just the
-//! path, because `resolve_function_count` can *replace* the resolved path (the
-//! bare-instance-name branch) and the two must not be memoised apart.
-//!
-//! Measured probe/hit/miss counts on 02d4d478:
-//! docs/PERFORMANCE_NOTES.md#group-path-resolution-memo.
-//!
-//! The entry count is the answer to the obvious objection. `actor_net_guid` is
-//! part of the key and grows monotonically over a replay, so an unbounded memo
-//! was the risk; in practice a resolution input moves every ~330 blocks and the
-//! table is discarded long before it can grow. The memo costs kilobytes and
-//! removes four fifths of the work.
+//! The value is `(group path, function count)` because `resolve_function_count`
+//! can *replace* the path (the bare-instance-name branch). `actor_net_guid`
+//! grows over a replay, so an unbounded memo was the risk; in practice an input
+//! moves every ~330 blocks and the table is discarded long before it grows. It
+//! costs kilobytes and removes four fifths of the work (probe/hit/miss counts
+//! on 02d4d478: docs/PERFORMANCE_NOTES.md#group-path-resolution-memo).
 
 use std::sync::Arc;
 
@@ -53,29 +42,34 @@ use vrf_schema::{FxHashMap, NetFieldExportGroup, find_class_net_cache_key, find_
 
 use super::{ChannelState, ExportSink};
 
-/// Well-known subobject leaf names that map to a fixed class path, tagged with
-/// the block kind they apply to.
+/// Stably named subobject leaves -> the class path they resolve to, tagged with
+/// the block kind each applies to: the fallback when no `class_net_guid` names
+/// the class.
 ///
-/// The replay uses short "stably named" identifiers for certain built-in
-/// components. When no `class_net_guid` is present we fall back to this table,
-/// exactly as the C# reference parser does in `ContentBlockPathResolver`.
+/// The first four pairs are the C# `ContentBlockPathResolver`'s ClassNetCache
+/// effect entries. The rest go beyond it: VALORANT replicates components under
+/// bare instance names but declares their layouts under the class, so without
+/// a remap every handle such a block carries stays unnamed (`CurrentEquippable`,
+/// the spike carrier, included). The class is usually native; for four
+/// Blueprint-class instances the replay declares, and the pair names, the
+/// Blueprint class under `/Game/`. All of them are RepLayout-only on purpose:
+/// the AbilitySystem `_ClassNetCache` group is declared with an incomplete
+/// function table, so its RPC stream stays unresolved and is brute-forced
+/// (fc=34), and a remapped component's RPC rows stay bare by design.
 ///
-/// The effect entries mirror the C# reference and apply to ClassNetCache blocks.
-/// Every later pair goes beyond the C# reference: VALORANT replicates components
-/// under their bare instance names, but the replay declares their property
-/// layouts under the component's class, so a block whose object path is the
-/// bare instance name never matches a declared group and every handle it
-/// carries stays unnamed. Remapping the leaf to its class's RepLayout group
-/// lets the handles pick up names and types -- `CurrentEquippable` (the spike
-/// carrier) included. The class is usually native; four components are
-/// instances of a Blueprint class, and for those the Blueprint class is what
-/// the replay declares and what the pair names.
-///
-/// They are tagged RepLayout-only on purpose: the AbilitySystem
-/// `_ClassNetCache` group is declared with an incomplete function table, so
-/// remapping its RPC stream to it would mis-parse it. That stream stays
-/// unresolved and is brute-forced (fc=34). Every pair added since follows the
-/// same rule, so a remapped component's RPC rows stay bare by design.
+/// The component pairs are read from the shipped game, not inferred:
+/// `tools/extract_component_classes` lists each component export (a
+/// `<Name>_GEN_VARIABLE` export or a class-default-object subobject, its class
+/// resolved through the IoStore global container), and on the 13.06 containers
+/// reproduces every pair here a cooked asset can hold, `InventoryComponent` and
+/// `AbilitiesAndBuffsComponent` (first argued from handle shapes) included.
+/// Each 13.06 addition is a bare group of at least 9,000 rows in the
+/// 1,018-replay corpus whose name has one class in every package, whose target
+/// the replay declares wherever the leaf carries RepLayout rows, and whose
+/// handles are a subset of the declared ones (widths agreeing where the target
+/// has rows). docs/DATA.md ("Reading component classes out of the game") has
+/// the procedure, numbers and rejects; `tools/check_component_remaps.py` watches
+/// for the symptoms of a rename, which nothing here can detect -- re-derive then.
 #[rustfmt::skip]
 const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     ("ReplayEffect", "/Script/ShooterGame.ReplayEffectComponent", GroupKind::ClassNetCache),
@@ -84,29 +78,6 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     ("DamageHandlerComponent", "/Script/ShooterGame.DamageableComponent", GroupKind::ClassNetCache),
     ("InventoryComponent", "/Script/ShooterGame.AresInventory", GroupKind::RepLayout),
     ("AbilitiesAndBuffsComponent", "/Script/ShooterGame.AresAbilitySystemComponent", GroupKind::RepLayout),
-    // Read out of the shipped game rather than inferred, which is what makes
-    // these authoritative where the two pairs above were first argued from
-    // handle shapes. A cooked Blueprint stores a component it adds as a
-    // `<Name>_GEN_VARIABLE` export, and one its C++ parent creates as a
-    // subobject of its class default object; either way the export's class
-    // index is a script import hash (or, for a Blueprint class, a reference
-    // into another package), and the IoStore global container maps the hash
-    // back to a native path -- so every pair below is what the asset itself
-    // says.
-    //
-    // `tools/extract_component_classes` lists every such export from an
-    // installed game. On the 13.06 containers it reproduces every pair in this
-    // table that a cooked asset can hold -- `InventoryComponent`,
-    // `AbilitiesAndBuffsComponent`, `CalloutRegionTracker` and
-    // `VisionComponent` only in the class-default-object shape -- which is the
-    // check on the method. docs/DATA.md records the procedure. Re-derive when a
-    // build renames a component; nothing here can detect that on its own, and
-    // `tools/check_component_remaps.py` is what watches for the symptoms.
-    //
-    // Every target is a group the replay itself declares wherever the leaf
-    // carries RepLayout rows (checked per replay over the corpus for the pairs
-    // added from 13.06), so the handles pick up names and types the moment the
-    // leaf resolves.
     ("ZoomStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("SelectBounceStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("StateMachine_Priming", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
@@ -116,15 +87,6 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     ("Gun_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("RewindStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("UseAbilityStateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
-    // Added from the 13.06 containers with that tool, for every bare group of at
-    // least 9,000 rows in the 1,018-replay corpus that passed all of: the
-    // instance name has exactly one class in every package that has it; the
-    // replay declares that class's group wherever the bare group carries
-    // RepLayout rows; and the handles those rows use are a subset of the ones
-    // declared in the same replay (checkpoint rows against their own
-    // checkpoint's declarations). Where the target group also has rows of its
-    // own, the widths agree handle for handle. docs/DATA.md has the numbers and
-    // the groups that failed.
     ("Resume_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("Sprint_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("Slide_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
@@ -142,12 +104,8 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     ("EquippableStateMachine_Attack", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("EquippableStateMachine_PickUpOnCooldown", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
     ("SwapCameras_StateMachine", "/Script/ShooterGame.EquippableStateMachineComponent", GroupKind::RepLayout),
-    // Both ammo counters are the same native component; the Blueprint just
-    // instantiates it twice. That is what supersedes the handle addition this
-    // group used to need: `AmmoComponent` declares handle 2 as
-    // `AuthResourceAmount`, so naming it by hand as `AmmoCount` was a guess in
-    // the right place with the wrong word. Magazine reads 0..100, reserve
-    // 0..200.
+    // One native component instantiated twice; its handle 2 is `AuthResourceAmount`,
+    // which superseded a hand-named `AmmoCount`. Magazine reads 0..100, reserve 0..200.
     ("MagazineAmmo", "/Script/ShooterGame.AmmoComponent", GroupKind::RepLayout),
     ("ReserveAmmo", "/Script/ShooterGame.AmmoComponent", GroupKind::RepLayout),
     ("CalloutRegionTracker", "/Script/ShooterGame.CalloutRegionTrackingComponent", GroupKind::RepLayout),
@@ -162,63 +120,38 @@ const KNOWN_SUBOBJECT_CLASS_PATHS: &[(&str, &str, GroupKind)] = &[
     ("StealthV1AddedForAISight", "/Script/ShooterGame.StealthComponent", GroupKind::RepLayout),
     ("Collision Static Mesh", "/Script/Engine.StaticMeshComponent", GroupKind::RepLayout),
     ("PMAimToolingPointsTarget", "/Script/InputTooling.AimToolingPointsTargetComponent", GroupKind::RepLayout),
-    // The one pair whose widths do not match its target's own rows everywhere:
-    // handle 2 is `AttachParent`, a packed object reference, so 16 bits against
-    // 24 is the size of the NetGUID it carries, not a type disagreement. The
-    // other two handles match exactly.
+    // Handle 2 is `AttachParent`, a packed reference: 16 bits vs the target's 24
+    // is the NetGUID's size, not a type disagreement. The other handles match.
     ("PMAimToolingTarget", "/Script/InputTooling.AimToolingSkeletalTargetComponent", GroupKind::RepLayout),
-    // Instances of a Blueprint component class. The replay declares the
-    // Blueprint class's group -- not its native parent's -- so that is the
-    // target; the tool resolves the class through the package that defines it.
+    // Blueprint component classes: the replay declares the Blueprint group, not
+    // its native parent's.
     ("Comp_Ability_CooldownComponent1", "/Game/Characters/Components/Comp_Ability_CooldownComponent.Comp_Ability_CooldownComponent_C", GroupKind::RepLayout),
     ("DamageSection_Vampire_Q_BloodArmor", "/Game/Characters/Vampire/S0/Ability_Q/DamageSection_Vampire_Q_Heal_BloodArmor.DamageSection_Vampire_Q_Heal_BloodArmor_C", GroupKind::RepLayout),
     ("ChooseTeleportSpot_StateComponent", "/Game/Characters/States/ChooseMapLocationOnNavMesh_StateComponent.ChooseMapLocationOnNavMesh_StateComponent_C", GroupKind::RepLayout),
-    // The armour section. In 13.06 the four packages that export the name --
-    // `BasicArmorItem`, `HeavyArmorItem`, `LightArmorItem` and
-    // `PlasmaArmorItem` -- all add `AttachedDamageSection` as this Blueprint
-    // subclass of `AttachedDamageSectionComponent`.
-    // Over the 1,018-replay corpus the Blueprint group is declared in all 529
-    // replays whose bare leaf carries RepLayout rows and in all 6,895
-    // checkpoints that carry them, and every handle those rows use is declared
-    // there: 2 `bAlive` (1 bit on every row), 5 `LastKnownDamageOwner` (a
-    // packed reference that consumes its window exactly on every row) and, in
-    // checkpoints only, 3 `Life` (32 bits).
-    //
-    // The pair does not reach every armour block, and that is not this table's
-    // doing. `unique_leaf_match` runs first and tries the leaf plus
-    // `Component`, so a replay that also declares the native
-    // `AttachedDamageSectionComponent` group binds the armour blocks to the
-    // native parent before this fallback is consulted. In the corpus those are
-    // exactly the 486 replays that carry Phoenix's `PreventDeathDamageSection`,
-    // a native instance. The native group declares only `bAlive` there, so
-    // handles 3 and 5 stay unnamed in those replays. This pair names only the
-    // rows that were bare; docs/DATA.md has the numbers.
+    // The armour section: the four 13.06 armour items add it as this subclass of
+    // `AttachedDamageSectionComponent`. Declared in all 529 corpus replays and
+    // 6,895 checkpoints whose leaf carries RepLayout rows, with every handle used
+    // (2 `bAlive`, 5 `LastKnownDamageOwner`, checkpoint-only 3 `Life`). In the 486
+    // replays carrying Phoenix's native `PreventDeathDamageSection`,
+    // `unique_leaf_match` (the leaf plus `Component`) binds the native parent
+    // first, which declares only `bAlive`, so handles 3 and 5 stay unnamed there.
+    // docs/DATA.md has the numbers.
     ("AttachedDamageSection", "/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C", GroupKind::RepLayout),
-    // GAS creates its attribute sets as runtime subobjects rather than as
-    // Blueprint components, so these pairs do not come from a cooked asset like
-    // the ones above -- they are read off the wire, and the tool finds no export
-    // by either name. The name is the giveaway and the handles confirm it.
-    // `AresAttributeSet_2`: all 116 handles the bare group uses are a subset of
-    // the 122 the native group declares, every one 32 bits wide, same as the
-    // named instance. `AresAttributeSet_1`, measured over all 536 corpus replays
-    // that carry it (11.07-13.06): every replay's main-stream handles (116 per
-    // replay) are declared by the native group in that replay, every
-    // checkpoint's handles by that checkpoint (10,455 checkpoints), and all
-    // 2,681,046 rows are 32 bits wide, the width the named instance has on each
-    // handle (124,280 per-replay handle comparisons, none different). They are
-    // the same attribute set replicated again, for actors that are not player
-    // characters.
+    // GAS attribute sets: runtime subobjects in no cooked asset, so these rest on
+    // the wire. `_2`: its 116 handles are a subset of the native group's 122, all
+    // 32 bits like the named instance. `_1`, over all 536 corpus replays carrying
+    // it (11.07-13.06): every main-stream handle (116 per replay) and every
+    // checkpoint's (10,455 checkpoints) is declared by the native group, and all
+    // 2,681,046 rows are 32 bits, the named instance's width on each handle
+    // (124,280 per-replay comparisons, none different). The same set again, for
+    // actors that are not player characters.
     ("AresAttributeSet_1", "/Script/ShooterGame.AresAttributeSet", GroupKind::RepLayout),
     ("AresAttributeSet_2", "/Script/ShooterGame.AresAttributeSet", GroupKind::RepLayout),
 ];
 
-/// Everything a block's resolution depends on that is not cache state.
-///
-/// `object_net_guid` is unused by the actor branch and `channel_index` /
-/// `actor_net_guid` by the subobject branch, but all six are kept in the key
-/// rather than normalised per branch: a normalisation that drops a field the
-/// resolution actually reads is silent byte movement, and the cost of an
-/// over-precise key is only extra entries.
+/// Everything a block's resolution reads that is not cache state. All six stay
+/// in the key though each branch ignores some: dropping a field the resolution
+/// does read is silent byte movement, while an over-precise key costs entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BlockKey {
     channel_index: u32,
@@ -233,16 +166,11 @@ struct BlockKey {
 /// exactly equivalent to recomputing.
 #[derive(Debug, Clone, Default)]
 pub(super) struct BlockPathMemo {
-    /// `NetGuidCache::schema_generation` when `entries` was last valid.
+    /// The three stamps `entries` was last valid for (see the module doc);
+    /// `guid_generation` is the only one a GUID write, via `register_path` or
+    /// frame-level ExportData, moves.
     schema_generation: u64,
-    /// `ChannelState::resolution_generation` when `entries` was last valid.
     resolution_generation: u64,
-    /// `NetGuidCache::guid_generation` when `entries` was last valid. The only
-    /// stamp that covers the cache's GUID -> path / GUID -> outer maps: the
-    /// frame-level ExportData section (`vrf_frame::read_export_data` ->
-    /// `NetGuidCache::set_net_guid_path`) mutates them directly, once per
-    /// frame, without going through `ExportSink::register_path`, and a
-    /// `register_path` write moves this stamp and no other.
     guid_generation: u64,
     entries: FxHashMap<BlockKey, (Arc<str>, u32, &'static str, &'static str)>,
 }
@@ -327,12 +255,9 @@ impl ExportSink<'_> {
         }
     }
 
-    /// Resolve one content block: set `current_group_path` and return the
-    /// function-table capacity a ClassNetCache block's RPC handles are read
-    /// against (0 for a RepLayout block, and 0 when the group is unresolved).
-    ///
-    /// This is the memoised entry point; everything below it is the
-    /// computation the memo stands in for.
+    /// Resolve one content block, memoised: set `current_group_path` and return
+    /// the function count its RPC handles are read against (0 for a RepLayout
+    /// block or an unresolved group).
     pub(super) fn resolve_block(
         &mut self,
         channel_index: u32,
@@ -366,8 +291,6 @@ impl ExportSink<'_> {
             self.resolve_group_path(channel_index, actor_net_guid.0, header);
         let interned = self.channel_state.names.intern(&path);
         self.set_current_group_path(interned);
-        // A RepLayout block reads its handles against the group directly and
-        // needs no function table, so the capacity question does not arise.
         let (count, count_source) = if header.has_rep_layout {
             (0, "rep_layout_not_applicable")
         } else {
@@ -388,15 +311,8 @@ impl ExportSink<'_> {
         count
     }
 
-    /// Resolve a content block to the appropriate export group path.
-    ///
-    /// Follows the same logic as the C# `ContentBlockPathResolver`:
-    /// - For **actor** blocks: derive the class path from the channel's archetype
-    ///   GUID (outer path + class-name leaf extracted from archetype path).
-    /// - For **subobject** blocks: use `class_net_guid` directly.
-    ///
-    /// For RepLayout blocks the result must match a RepLayout group; for
-    /// ClassNetCache blocks the result must match a `*_ClassNetCache` group.
+    /// The export group path for a block and the rule that produced it; a
+    /// ClassNetCache block binds only to a `*_ClassNetCache` group ([`GroupKind`]).
     fn resolve_group_path(
         &self,
         channel_index: u32,
@@ -410,41 +326,26 @@ impl ExportSink<'_> {
         }
     }
 
-    /// Actor path resolution -- mirrors `ResolveCachedActorExportGroupPath` /
-    /// `ResolveCachedActorClassPath` from the C# reference.
-    ///
-    /// Priority order (matching C# `ResolveActorPackageOrClassPath`):
-    /// 1. Archetype outer path (package path for the class)
-    /// 2. Archetype path itself (if not a CDO path)
-    /// 3. Actor GUID path
-    ///
-    /// For ClassNetCache blocks we then combine the package path with the class
-    /// name extracted from the archetype's leaf (stripping `Default__`).
+    /// Actor blocks: the first group of the wanted kind matched by the combined
+    /// archetype candidate, the archetype's outer (package) path, the archetype
+    /// path unless it is a CDO, then the actor GUID's own path.
     fn resolve_actor_group_path(
         &self,
         channel_index: u32,
         actor_guid: u32,
         header: &ContentBlockHeader,
     ) -> (String, &'static str) {
-        // Step 1: Determine the base "package or class" path.
         let (package_path, archetype_path) =
             self.resolve_actor_package_and_archetype(channel_index, actor_guid);
-
-        // Step 2: Combine package path with class name from archetype.
         let combined =
             self.create_combined_candidate(package_path.as_deref(), archetype_path.as_deref());
 
-        // Step 3: Find matching export group using the combined or package path.
-        //
-        // For ClassNetCache blocks, only accept groups whose canonical path
-        // ends with `_ClassNetCache`. Without this check, a lookup key like
-        // `AggroBot_PC.AggroBot_PC_C` would match the RepLayout group (14
-        // fields) instead of the ClassNetCache group (4 fields), causing
-        // ReadSerializedInt to consume the wrong number of bits.
+        // A ClassNetCache block accepts only a `_ClassNetCache` group: the key
+        // `AggroBot_PC.AggroBot_PC_C` would otherwise bind the 14-field
+        // RepLayout group, not the 4-field ClassNetCache one, and
+        // ReadSerializedInt would consume the wrong number of bits.
         let want = GroupKind::for_block(header);
 
-        // Try combined path first (most specific), then the package path, then
-        // the archetype path when it is not a CDO.
         if let Some(hit) = self.match_group(combined.as_deref(), want) {
             return (hit, "actor_archetype_combined");
         }
@@ -459,39 +360,26 @@ impl ExportSink<'_> {
             }
         }
 
-        // Fallback: try actor GUID path directly.
         if let Some(actor_path) = self.cache.get_path_by_guid(actor_guid) {
             if let Some(hit) = self.match_group(Some(actor_path), want) {
                 return (hit, "actor_guid_path");
             }
-            // UniqueLeafMatch, exactly as the class path and the subobject path
-            // already apply it below. A static actor arrives as a bare instance
-            // name (`AresWorldSettings`) and the lookup keys above can only
-            // match a group whose declared path is that same bare string; the
-            // declared group is `/Script/ShooterGame.AresWorldSettings`, so the
-            // block fell through to the raw name and every field it carried
-            // stayed unnamed. Ambiguous leaves still bind to nothing -- see
-            // NetGuidCache::unique_leaf_match -- so this determines the group
-            // rather than guessing one.
-            //
-            // The `_ClassNetCache` guard is load-bearing on this path, not
-            // decoration. Below this point `resolve_function_count` runs its own
-            // instance-name resolver, and it only runs while current_group_path
-            // is still a bare name; a RepLayout group returned here would
-            // silence it and hand ReadSerializedInt the wrong capacity. The
-            // guard cannot be satisfied by a leaf match unless the actor's own
-            // path ends with `_ClassNetCache`, because by_leaf keys are the text
-            // after the last `.` and the two suffix arms append `Component` and
-            // `_C`, so on a ClassNetCache block this call is inert.
+            // UniqueLeafMatch, as the class and subobject paths apply it: a
+            // static actor arrives as a bare instance name (`AresWorldSettings`)
+            // that no key above matches to `/Script/ShooterGame.AresWorldSettings`.
+            // An ambiguous leaf binds nothing, so this determines, not guesses.
+            // The `_ClassNetCache` guard is load-bearing here: the instance-name
+            // resolver in `resolve_function_count` runs only while the path is
+            // still bare, and a RepLayout group returned for a ClassNetCache
+            // block would hand ReadSerializedInt the wrong capacity. (A leaf
+            // match meets the guard only if the actor's own path ends in
+            // `_ClassNetCache`, so on a ClassNetCache block this is inert.)
             if let Some(g) = self.cache.unique_leaf_match(actor_path) {
                 if want.accepts(g) {
                     return (g.path.clone(), "actor_guid_unique_leaf");
                 }
             }
-            // Blueprint component name -> native parent class (see
-            // KNOWN_SUBOBJECT_CLASS_PATHS). A bare name like "InventoryComponent"
-            // never leaf-matches its native group "AresInventory", so this remap
-            // is the only way those property handles get names.
+            // The table: bare `InventoryComponent` never leaf-matches `AresInventory`.
             if let Some(known) = resolve_known_subobject_class_path(actor_path, want) {
                 if let Some(hit) = self.match_group(Some(known), want) {
                     return (hit, "actor_guid_known_remap");
@@ -500,8 +388,8 @@ impl ExportSink<'_> {
             return (actor_path.to_owned(), "actor_guid_unresolved_fallback");
         }
 
-        // Return the best candidate even if it doesn't match a group -- the
-        // export format requires a path, and downstream still gets the raw bits.
+        // The best candidate even unmatched: the export needs a path, and the
+        // raw bits still ship.
         if let Some(combined) = combined {
             (combined, "actor_archetype_combined_unresolved_fallback")
         } else if let Some(package_path) = package_path {
@@ -511,20 +399,17 @@ impl ExportSink<'_> {
         }
     }
 
-    /// Subobject path resolution -- mirrors `ResolveSubobjectExportGroupPath` /
-    /// `ResolveSubobjectClassPath` from C#.
+    /// Subobject blocks: the `class_net_guid` path (as a group, a unique leaf,
+    /// then the table), else the object's outer path as a group, then its own
+    /// path the same three ways.
     fn resolve_subobject_group_path(&self, header: &ContentBlockHeader) -> (String, &'static str) {
         let want = GroupKind::for_block(header);
 
-        // Primary: use class_net_guid path.
         if header.class_net_guid.0 != 0 {
             if let Some(class_path) = self.cache.get_path_by_guid(header.class_net_guid.0) {
                 if let Some(hit) = self.match_group(Some(class_path), want) {
                     return (hit, "subobject_class_guid_path");
                 }
-                // UniqueLeafMatch: if class_path is a bare name (no separators),
-                // try to find a group whose path ends with ".{class_path}".
-                // Mirrors C# ContentBlockPathResolver.UniqueLeafMatch.
                 if let Some(g) = self.cache.unique_leaf_match(class_path) {
                     if want.accepts(g) {
                         return (g.path.clone(), "subobject_class_guid_unique_leaf");
@@ -542,10 +427,8 @@ impl ExportSink<'_> {
             }
         }
 
-        // Secondary: use object_net_guid for path lookup.
         if header.object_net_guid.0 != 0 {
             if let Some(obj_path) = self.cache.get_path_by_guid(header.object_net_guid.0) {
-                // Try outer path (component -> owning class).
                 let outer = self.cache.get_outer_path(header.object_net_guid.0);
                 if let Some(hit) = self.match_group(outer, want) {
                     return (hit, "subobject_object_outer_path");
@@ -553,16 +436,11 @@ impl ExportSink<'_> {
                 if let Some(hit) = self.match_group(Some(obj_path), want) {
                     return (hit, "subobject_object_guid_path");
                 }
-                // UniqueLeafMatch for object path.
                 if let Some(g) = self.cache.unique_leaf_match(obj_path) {
                     if want.accepts(g) {
                         return (g.path.clone(), "subobject_object_guid_unique_leaf");
                     }
                 }
-                // Fallback: known subobject class path table. Blueprint component
-                // leaf -> native parent class; applies to RepLayout blocks too,
-                // not only ClassNetCache, so e.g. InventoryComponent property
-                // blocks resolve to AresInventory.
                 if let Some(known) = resolve_known_subobject_class_path(obj_path, want) {
                     if let Some(hit) = self.match_group(Some(known), want) {
                         return (hit, "subobject_object_guid_known_remap");
@@ -583,13 +461,9 @@ impl ExportSink<'_> {
         (format!("<unknown:{fallback_guid}>"), "subobject_unknown")
     }
 
-    /// Try every lookup key `candidate` generates and return the canonical path
-    /// of the first declared group of the wanted kind.
-    ///
-    /// One function rather than the seven copies of this loop the C# port grew:
-    /// each copy had to remember both which key generator to use and to re-apply
-    /// the `_ClassNetCache` guard, and the guard is not decoration -- see
-    /// `resolve_actor_group_path`.
+    /// The canonical path of the first declared group of kind `want` that a
+    /// lookup key of `candidate` finds. One function, so no caller can pick the
+    /// wrong key generator or skip the `_ClassNetCache` guard.
     fn match_group(&self, candidate: Option<&str>, want: GroupKind) -> Option<String> {
         let candidate = candidate?;
         want.find(candidate, |key| {
@@ -598,15 +472,11 @@ impl ExportSink<'_> {
         })
     }
 
-    /// Determine the package path and archetype path for an actor channel.
-    ///
-    /// Returns `(package_or_class_path, archetype_path)`. Either may be `None`
-    /// if the GUID cache doesn't have the mapping yet.
-    ///
-    /// The two `to_owned()` calls look removable and are not worth removing:
-    /// 5-P replaced them with borrows and measured no change (median 1.580 s vs
-    /// 1.590 s over interleaved runs), then reverted. What did move the number
-    /// is not calling this at all, which is what the memo does.
+    /// `(package_or_class_path, archetype_path)` for an actor channel; either is
+    /// `None` while the cache lacks the mapping. The two `to_owned()` calls stay:
+    /// 5-P replaced them with borrows, measured no change (median 1.580 s vs
+    /// 1.590 s, interleaved runs) and reverted. Not calling this -- the memo --
+    /// is what moved the number.
     pub(super) fn resolve_actor_package_and_archetype(
         &self,
         channel_index: u32,
@@ -623,7 +493,6 @@ impl ExportSink<'_> {
             .get_path_by_guid(archetype_guid.0)
             .map(|s| s.to_owned());
 
-        // C# priority: outer path of archetype first (gives the package path).
         let package_path = self
             .cache
             .get_outer_path(archetype_guid.0)
@@ -632,13 +501,8 @@ impl ExportSink<'_> {
         (package_path, archetype_path)
     }
 
-    /// Combine the package path with the class name from the archetype path.
-    ///
-    /// Mirrors `TryCreateCombinedCandidate` in C#:
-    /// - Extract the leaf of `archetype_path` (after last `/`, `.`, or `:`).
-    /// - Strip `Default__` prefix if present to get the class name.
-    /// - If `package_path` already ends with `.{class_name}`, return as-is.
-    /// - Otherwise append `.{class_name}` to `package_path`.
+    /// `package_path` joined with the class name of the archetype's leaf
+    /// (`Default__` stripped), unless the package path already ends with it.
     pub(super) fn create_combined_candidate(
         &self,
         package_path: Option<&str>,
@@ -647,7 +511,6 @@ impl ExportSink<'_> {
         let pkg = package_path?;
         let class_name = extract_class_name_from_archetype(archetype_path?)?;
 
-        // Check if package path already ends with the class name.
         if ends_with_class_name(pkg, class_name) {
             return Some(pkg.to_owned());
         }
@@ -659,34 +522,24 @@ impl ExportSink<'_> {
         Some(combined)
     }
 
-    /// Determine function_count for a ClassNetCache block.
-    ///
-    /// The function count equals `NetFieldExportGroup.len()` for the matching
-    /// ClassNetCache group. The C# parser uses
-    /// `ReadSerializedInt(FunctionsByHandle.Length)` where `FunctionsByHandle`
-    /// is sized to `replayGroup.NetFieldExportsLength`, i.e. the number of
-    /// declared export slots in the ClassNetCache group.
-    ///
-    /// If the group cannot be resolved we return 0, which causes the RPC parser
-    /// to skip the bits but NOT silently drop them. The caller still records the
-    /// raw payload and the oracle counts this as a stream failure.
-    ///
-    /// May replace `current_group_path`; see the bare-instance-name branch and
-    /// the module docs on why the memo stores the pair.
+    /// A ClassNetCache block's function count: its group's declared slot count,
+    /// as the C# `ReadSerializedInt(FunctionsByHandle.Length)` reads it
+    /// (`FunctionsByHandle` sized to `replayGroup.NetFieldExportsLength`). 0 when
+    /// no group resolves: the payload is then preserved raw and counted as a
+    /// stream failure, never dropped. May replace `current_group_path` (the
+    /// bare-instance-name branch), which is why the memo stores the pair.
     fn resolve_function_count(
         &mut self,
         header: &ContentBlockHeader,
         channel_index: u32,
         actor_guid: u32,
     ) -> (u32, &'static str) {
-        // Fast path: current_group_path was already resolved to a CNC group.
         if let Some(group) = self.cache.get_group_by_path(&self.current_group_path) {
             if is_class_net_cache(group) {
                 return (group.len(), "current_resolved_group");
             }
         }
 
-        // For subobjects: try class_net_guid with ClassNetCache suffix toggle.
         if header.class_net_guid.0 != 0 {
             if let Some(class_path) = self.cache.get_path_by_guid(header.class_net_guid.0) {
                 if let Some(len) = self.class_net_cache_len(class_path) {
@@ -695,7 +548,6 @@ impl ExportSink<'_> {
             }
         }
 
-        // For actors: try deriving from archetype.
         if header.is_actor {
             let (package_path, archetype_path) =
                 self.resolve_actor_package_and_archetype(channel_index, actor_guid);
@@ -708,28 +560,19 @@ impl ExportSink<'_> {
             }
         }
 
-        // Schema-driven fallback: when the resolved path is a bare instance
-        // name (no path separators), search the replay's own ClassNetCache
-        // groups for one whose leaf matches the instance name after applying
-        // Unreal naming conventions.
-        //
-        // This recovers blocks for static actors (BombDestination_A,
-        // WindowShieldA1) and stably-named subobjects (ForceModuleManager,
-        // AudDeadeyeVOComponent) that have no archetype GUID or class net GUID
-        // on the wire. The capacity comes from the matched group's declared
-        // NetFieldExportsLength -- never guessed.
-        //
-        // The C# reference parser also fails on these same blocks. This lookup
-        // goes beyond C# by leveraging the replay's own declared schema.
+        // A bare instance name -- static actors (`BombDestination_A`,
+        // `WindowShieldA1`), stably named subobjects (`ForceModuleManager`,
+        // `AudDeadeyeVOComponent`) -- has no archetype or class GUID on the wire.
+        // Match it against the replay's own `_ClassNetCache` groups by Unreal
+        // naming conventions and take the declared capacity, never a guess.
+        // The C# reference fails these blocks.
         if is_bare_instance_name(&self.current_group_path) {
             if let Some(group) = self
                 .cache
                 .resolve_cnc_for_instance_name(&self.current_group_path)
             {
                 let len = group.len();
-                // Update current_group_path so downstream field/RPC handle
-                // lookups use the correct group. Without this, resolved RPCs
-                // would emit handle-indexed names instead of proper field names.
+                // Rebind the block to that group, or its RPCs are named by handle.
                 let resolved = self.channel_state.names.intern(&group.path);
                 self.set_current_group_path(resolved);
                 return (len, "class_net_cache_instance_name");
@@ -761,12 +604,10 @@ pub(super) struct BlockResolutionEvidence {
     pub object_outer_path: Option<String>,
 }
 
-/// Which family of export group a block may bind to.
-///
-/// The distinction selects both the lookup-key generator and the acceptance
-/// test, and the two must move together: a ClassNetCache block that binds to a
-/// RepLayout group gets the wrong handle width, which is a decode failure, not
-/// a naming one.
+/// Which family of export group a block may bind to. It selects both the
+/// lookup-key generator and the acceptance test, which must move together: a
+/// ClassNetCache block bound to a RepLayout group reads the wrong handle width,
+/// a decode failure, not a naming one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GroupKind {
     RepLayout,
@@ -782,10 +623,9 @@ impl GroupKind {
         }
     }
 
-    /// Probe each of this kind's lookup keys, in order, until one is accepted.
-    ///
-    /// The key generators are visitors rather than `Vec<String>` builders, so a
-    /// path with no alias -- the common case -- costs no allocation at all.
+    /// Probe this kind's lookup keys in order until one is accepted. The
+    /// generators are visitors, not `Vec<String>` builders, so a path with no
+    /// alias -- the common case -- allocates nothing.
     fn find<T>(self, path: &str, probe: impl FnMut(&str) -> Option<T>) -> Option<T> {
         match self {
             Self::RepLayout => find_replay_path_key(path, probe),
@@ -811,11 +651,8 @@ fn is_bare_instance_name(path: &str) -> bool {
     !path.contains('/') && !path.contains('.') && !path.contains(':') && !path.starts_with('<')
 }
 
-/// Extract the class name from an archetype path by taking the leaf and
-/// stripping a `Default__` prefix if present.
-///
-/// Example: `/Game/Characters/AggroBot/AggroBot_PC.Default__AggroBot_PC_C`
-/// -> `AggroBot_PC_C`.
+/// The archetype path's leaf without a `Default__` prefix:
+/// `/Game/Characters/AggroBot/AggroBot_PC.Default__AggroBot_PC_C` -> `AggroBot_PC_C`.
 fn extract_class_name_from_archetype(archetype_path: &str) -> Option<&str> {
     if archetype_path.is_empty() {
         return None;
@@ -838,17 +675,14 @@ fn ends_with_class_name(path: &str, class_name: &str) -> bool {
     (sep == b'.' || sep == b':') && path[sep_index + 1..] == *class_name
 }
 
-/// Check whether a path is a "Class Default Object" path (leaf starts with
-/// `Default__`). Mirrors `ReplayPath.IsClassDefaultObjectPath`.
+/// Whether the path's leaf is a class default object (`Default__...`), as the
+/// C# `ReplayPath.IsClassDefaultObjectPath`.
 fn is_class_default_object_path(path: &str) -> bool {
     let leaf_start = path.rfind(['/', '.', ':']).map_or(0, |i| i + 1);
     path[leaf_start..].starts_with("Default__")
 }
 
-/// Look up a known subobject class path by the leaf name of the object path.
-///
-/// Some subobjects use "stably named" identifiers (no class_net_guid). The
-/// replay only tells us the object name; this table provides the class path.
+/// The [`KNOWN_SUBOBJECT_CLASS_PATHS`] target for `object_path`'s leaf and kind.
 fn resolve_known_subobject_class_path(object_path: &str, want: GroupKind) -> Option<&'static str> {
     let leaf_start = object_path.rfind(['/', '.', ':']).map_or(0, |i| i + 1);
     let leaf = &object_path[leaf_start..];
@@ -860,17 +694,12 @@ fn resolve_known_subobject_class_path(object_path: &str, want: GroupKind) -> Opt
 
 /// An archetype GUID together with the actor it was read for.
 ///
-/// The actor half is what stops a recycled channel number from decoding a new
-/// actor under the previous one's schema. Channel indices are reused, the
-/// archetype was recorded per channel and never removed, and a *static* actor
-/// carries no archetype of its own to displace the stale one -- so resolution
-/// read the old GUID first and bound the block to the old class. Nothing fails
-/// in that state: the fields get names, the values get types, and the rows are
-/// exported under a class the actor never had.
-///
-/// Destroyed channels are removed; dormancy closes retain the entry because a
-/// wake-up for the same actor need not repeat its archetype. The actor stamp is
-/// still load-bearing while a dormant entry survives.
+/// Channel indices are recycled and a *static* actor carries no archetype to
+/// displace its predecessor's, so a channel-keyed archetype decodes the new
+/// actor under the old class -- and nothing fails: fields get names, values get
+/// types, and rows ship under a class the actor never had. Destruction retires
+/// the entry; dormancy keeps it (a wake-up need not repeat the archetype), and
+/// the actor stamp keeps a surviving dormant entry safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ChannelArchetype {
     actor: NetworkGuid,
@@ -951,22 +780,13 @@ mod tests {
             is_actor: true,
             ..ContentBlockHeader::default()
         };
-        // No archetype is registered for this channel, so package/archetype
-        // resolution yields nothing and the actor-GUID fallback is the only
-        // path left -- which is the case this test is about.
+        // No archetype is registered, so only the actor-GUID path is left.
         sink.on_content_block(3, NetworkGuid(guid), &header);
         sink.current_group_path.to_string()
     }
 
-    /// An actor whose own NetGUID path is an exact, unique leaf of a declared
-    /// group must reach that group.
-    ///
-    /// The class path (`resolve_subobject_group_path`, primary) and the
-    /// subobject path (same function, secondary) both call `unique_leaf_match`
-    /// before falling back to the raw path. The actor-GUID fallback did not, so
-    /// `AresWorldSettings` -- an exact unique leaf of
-    /// `/Script/ShooterGame.AresWorldSettings` -- shipped as a bare instance
-    /// name with every one of its fields unnamed.
+    /// An actor whose own NetGUID path is a unique leaf of a declared group
+    /// reaches that group, as the class and subobject paths do.
     #[test]
     fn an_actor_path_that_is_a_unique_leaf_reaches_its_declared_group() {
         assert_eq!(
@@ -980,12 +800,8 @@ mod tests {
         );
     }
 
-    /// A Blueprint component whose bare class name differs from its native
-    /// replicated group ("InventoryComponent" vs "/Script/ShooterGame.AresInventory")
-    /// must still reach the native group via KNOWN_SUBOBJECT_CLASS_PATHS, so its
-    /// RepLayout property handles -- `CurrentEquippable` (the spike carrier)
-    /// included -- pick up names. Leaf matching cannot do this: the bare
-    /// Blueprint leaf is not the native group's leaf.
+    /// A component whose bare name is not its group's leaf (`InventoryComponent`
+    /// vs `AresInventory`) reaches the group through the table.
     #[test]
     fn a_blueprint_component_name_reaches_its_native_parent_group() {
         assert_eq!(
@@ -999,30 +815,14 @@ mod tests {
         );
     }
 
-    /// The pairs read out of the cooked game, across the shapes they come in:
-    /// one native class instantiated under many Blueprint names
-    /// (`EquippableStateMachineComponent`), two components of the same class in
-    /// one Blueprint (`MagazineAmmo` and `ReserveAmmo`, both `AmmoComponent`), a
-    /// class from another module entirely (`/Script/InputTooling`), an engine
-    /// class (`/Script/Engine.StaticMeshComponent`), a Blueprint class whose
-    /// group the replay declares under `/Game/`, and instance names with spaces
-    /// and parentheses in them. Every pair added from the 13.06 containers is
-    /// listed, so dropping or misspelling one fails here.
-    ///
-    /// The remaps are RepLayout-only, and that is checked in two places. On
-    /// the table, for every pair and not only the ones listed: no RepLayout
-    /// pair's leaf finds a ClassNetCache entry, and the only ClassNetCache
-    /// pairs are the four the C# reference carries. A ClassNetCache entry
-    /// for one of these leaves would bind its RPC stream to
-    /// `<target>_ClassNetCache` wherever the replay declares that group --
-    /// the AbilitySystem mis-parse the table's comment describes. And through
-    /// the resolver: a ClassNetCache block with a listed leaf keeps its bare
-    /// path rather than being handed the RepLayout group, which would read its
-    /// RPC handles against the wrong table. The resolver check cannot see the
-    /// table -- its fixture declares no `_ClassNetCache` group, so no entry
-    /// could bind -- but it is what fails if the remap stops asking which
-    /// kind of block it has. It used to be the only check, and a ClassNetCache
-    /// entry added for any leaf passed it.
+    /// The pairs read from the cooked game, in all their shapes (one class under
+    /// many names, two instances of one class, another module, an engine class,
+    /// `/Game/` Blueprint classes, names with spaces), every 13.06 addition
+    /// listed. Each reaches its group from a RepLayout block and stays bare on a
+    /// ClassNetCache block, which fails if the remap stops asking the block kind;
+    /// the table check below fails on any ClassNetCache pair beyond the C#
+    /// reference's four, which would bind that leaf's RPC stream to
+    /// `<target>_ClassNetCache` -- the AbilitySystem mis-parse.
     #[test]
     fn component_names_read_from_the_game_reach_their_native_groups() {
         const ESM: &str = "/Script/ShooterGame.EquippableStateMachineComponent";
@@ -1119,10 +919,8 @@ mod tests {
             );
         }
 
-        // The table itself. The pin fails on any ClassNetCache pair beyond the
-        // reference four, whether added beside a RepLayout pair or flipped
-        // from one. The loop goes through the lookup the resolver uses, so it
-        // also fails if that lookup stops filtering by kind.
+        // The table itself, through the resolver's lookup, so it also fails if
+        // that lookup stops filtering by kind.
         let class_net_cache: Vec<&str> = KNOWN_SUBOBJECT_CLASS_PATHS
             .iter()
             .filter(|(_, _, kind)| *kind == GroupKind::ClassNetCache)
@@ -1149,13 +947,8 @@ mod tests {
         }
     }
 
-    /// The attribute sets are the remaps not read from a cooked asset: GAS
-    /// builds them as runtime subobjects, so no Blueprint lists them. They rest
-    /// on the wire instead. `AresAttributeSet_2`: all 116 handles the bare group
-    /// uses are a subset of the 122 the native group declares, every one 32
-    /// bits wide. `AresAttributeSet_1`: over 536 replays and 10,455
-    /// checkpoints, every handle it uses is declared by the native group in the
-    /// same replay or checkpoint, and all 2,681,046 rows are 32 bits wide.
+    /// Both attribute-set instances reach the native group (wire evidence on
+    /// the table entry).
     #[test]
     fn the_second_attribute_set_reaches_the_same_native_group() {
         for leaf in ["AresAttributeSet_1", "AresAttributeSet_2"] {
@@ -1167,9 +960,8 @@ mod tests {
         }
     }
 
-    /// The remap only fires for names it was given. A Blueprint component this
-    /// table says nothing about keeps its bare path rather than being attached
-    /// to whichever native group looks close.
+    /// A component the table does not list keeps its bare path rather than
+    /// joining whichever native group looks close.
     #[test]
     fn an_unlisted_component_name_is_not_remapped() {
         assert_eq!(
@@ -1183,10 +975,8 @@ mod tests {
         );
     }
 
-    /// Ambiguity stays silent. Two declared groups sharing a leaf mark it
-    /// `AMBIGUOUS_LEAF`, and the actor keeps its raw path rather than binding
-    /// to whichever group happened to be registered first. This is the
-    /// property that makes leaf matching a determination and not a guess.
+    /// Two declared groups sharing a leaf mark it `AMBIGUOUS_LEAF`: the actor
+    /// keeps its raw path rather than binding to whichever came first.
     #[test]
     fn an_ambiguous_actor_leaf_binds_to_nothing() {
         assert_eq!(
@@ -1203,14 +993,8 @@ mod tests {
         );
     }
 
-    /// A ClassNetCache actor block must NOT be captured by a RepLayout group.
-    ///
-    /// `resolve_function_count` has its own instance-name resolver
-    /// (`resolve_cnc_for_instance_name`) that runs only while
-    /// `current_group_path` is still a bare name. Returning a RepLayout group
-    /// here would silence that resolver and hand `ReadSerializedInt` the wrong
-    /// capacity, so the `_ClassNetCache` guard has to reject the match and
-    /// leave the bare name in place.
+    /// A ClassNetCache actor block is not captured by a RepLayout leaf; see the
+    /// `_ClassNetCache` guard in `resolve_actor_group_path`.
     #[test]
     fn a_class_net_cache_actor_block_is_not_captured_by_a_rep_layout_leaf() {
         assert_eq!(
@@ -1224,22 +1008,8 @@ mod tests {
         );
     }
 
-    /// A reused channel must not decode its new actor under the old one's
-    /// schema.
-    ///
-    /// Channel numbers are recycled. The archetype was recorded per channel and
-    /// never removed, so after a dynamic actor closed, the next actor to open on
-    /// that channel number inherited its archetype -- and a static actor carries
-    /// no archetype of its own to displace it. Resolution then reads the stale
-    /// GUID first and binds the block to the previous actor's class, which does
-    /// not fail: it names fields, types values and exports them under the wrong
-    /// class. That is the wrong-but-plausible output this project ranks below a
-    /// crash.
-    ///
-    /// The archetype is now stamped with the actor it was read for and only
-    /// answers for that actor, which is strictly narrower than keying on the
-    /// channel alone: the dormancy case, where the *same* actor re-opens without
-    /// re-sending its archetype, still resolves exactly as before.
+    /// A static actor on a recycled channel is not decoded under the previous
+    /// actor's archetype; see [`ChannelArchetype`].
     #[test]
     fn a_reused_channel_does_not_inherit_the_previous_actors_archetype() {
         let mut cache = NetGuidCache::new();
@@ -1287,12 +1057,8 @@ mod tests {
         );
     }
 
-    /// ...and the dormancy re-open keeps working.
-    ///
-    /// A channel that closes for dormancy and later re-opens for the *same*
-    /// actor may not repeat the archetype. Clearing the archetype on close
-    /// would lose that actor's class for the rest of the replay; stamping it
-    /// with the actor GUID does not.
+    /// ...while the *same* actor waking from dormancy without re-sending its
+    /// archetype keeps its class.
     #[test]
     fn the_same_actor_reopening_without_an_archetype_keeps_its_class() {
         let mut cache = NetGuidCache::new();
@@ -1329,14 +1095,10 @@ mod tests {
         );
     }
 
-    /// The memo must not answer for a block whose resolution inputs moved.
-    ///
-    /// This drives the exact staleness the generation stamps exist to prevent:
-    /// the same key resolved twice, with a GUID -> path registration in
-    /// between. The registration moves only `NetGuidCache::guid_generation`,
-    /// so without that stamp in `BlockPathMemo::get` the second call returns
-    /// the first call's answer. The next test pins the same stamp for a write
-    /// that bypasses `register_path`.
+    /// The memo does not answer for a block whose inputs moved: a
+    /// `register_path` between two resolutions of one key moves only
+    /// `NetGuidCache::guid_generation`, and without that stamp in
+    /// `BlockPathMemo::get` the second returns the first's answer.
     #[test]
     fn a_guid_path_registration_invalidates_the_memo() {
         use vrf_net::net_guid::GuidPathSink;
@@ -1375,15 +1137,9 @@ mod tests {
         }
     }
 
-    /// The same holds for a GUID -> path change that never passes through
-    /// `register_path`.
-    ///
-    /// The frame-level ExportData section (`vrf_frame::read_export_data` ->
-    /// `NetGuidCache::set_net_guid_path`) writes the cache directly, ahead of
-    /// the frame's packets and so between one packet's sink and the next.
-    /// Nothing in this crate sees that write: `NetGuidCache::guid_generation`
-    /// is the only stamp that moves, and without it in `BlockPathMemo::get`
-    /// the second sink is answered from the first one's entry.
+    /// The same for a GUID write that bypasses `register_path`: frame-level
+    /// ExportData writes the cache between one packet's sink and the next, and
+    /// `guid_generation` is the only stamp that moves.
     #[test]
     fn a_frame_level_guid_registration_invalidates_the_memo() {
         let mut cache = NetGuidCache::new();
@@ -1418,13 +1174,9 @@ mod tests {
         }
     }
 
-    /// A repeat registration that changes nothing must not invalidate the memo.
-    ///
-    /// The whole memo depends on its stamps staying still while the replay
-    /// re-declares mappings the cache already holds; if every `register_path`
-    /// moved one, the hit rate would collapse to zero and the memo would be
-    /// pure overhead. The assertions read the memo's own hit flag rather than
-    /// a stamp, so they hold whichever stamp a real change moves.
+    /// A repeat registration that changes nothing leaves the memo standing (if
+    /// every re-declaration moved a stamp, the hit rate would collapse). The
+    /// asserts read the memo's hit flag, so they hold whichever stamp moves.
     #[test]
     fn a_redundant_registration_leaves_the_memo_alone() {
         use vrf_net::net_guid::GuidPathSink;
@@ -1450,9 +1202,8 @@ mod tests {
             "an unchanged re-declaration invalidated the memo"
         );
 
-        // A different outer for the same path is a real change: `outer_net_guid`
-        // is a column of net_guids.parquet and an input to resolution. An
-        // invalid outer removes the one the cache held.
+        // A different outer is a real change (the `outer_net_guid` column and a
+        // resolution input): an invalid outer removes the one the cache held.
         sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
         sink.on_content_block(3, NetworkGuid(42), &header);
         assert!(
