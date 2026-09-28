@@ -1145,7 +1145,10 @@ mod tests {
         assert_eq!(stats.exported_guids, 0);
         assert_eq!(
             stats.skipped_bits, 57,
-            "the whole abandoned payload is tallied, not just the unread tail:              the bits the failing stage had already consumed declared exports              that were dropped (package_map_exports and exported_guids are both              0 above), so they are lost too"
+            "the whole abandoned payload is tallied, not just the unread tail: \
+             the bits the failing stage had already consumed declared exports \
+             that were dropped (package_map_exports and exported_guids are both \
+             0 above), so they are lost too"
         );
     }
 
