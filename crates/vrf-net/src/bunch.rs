@@ -231,7 +231,7 @@ impl PartialBunchAccumulator {
             // state in the map until end of stream. The assembly that header
             // just started holds no bits, so retiring it loses nothing.
             if header.has_partial_error {
-                self.take(ch_index);
+                self.retire_channel(ch_index);
             } else if let Some(state) = self.fragments.get_mut(&ch_index) {
                 state.is_complete = true;
                 header.is_partial_completed = true;
@@ -262,7 +262,9 @@ impl PartialBunchAccumulator {
          -> PartialBunchResult {
             *stats_partial_errors += 1;
             header.has_partial_error = true;
-            let prior = acc.take(ch_index).filter(|_| !header.b_partial_initial);
+            let prior = acc
+                .retire_channel(ch_index)
+                .filter(|_| !header.b_partial_initial);
             let discarded_bits = sequence_discarded_bits
                 .saturating_add(prior.as_ref().map_or(0, |p| p.bit_count))
                 .saturating_add(payload_bit_count);
@@ -373,7 +375,7 @@ impl PartialBunchAccumulator {
         if !self.fragments.get(&ch_index)?.is_complete {
             return None;
         }
-        self.take(ch_index)
+        self.retire_channel(ch_index)
             .map(|taken| (taken.buffer, taken.bit_count, taken.header))
     }
 
@@ -402,10 +404,17 @@ impl PartialBunchAccumulator {
             .collect()
     }
 
-    /// Retire any incomplete assembly for a channel that was destroyed.
-    /// Returns the number of buffered bits that could not complete.
+    /// Remove the channel's assembly, finished or not, and return it; its bits
+    /// leave the buffered total. The pipeline calls this when a close destroys
+    /// the channel.
     pub fn retire_channel(&mut self, ch_index: u32) -> Option<PreservedPartial> {
-        self.take(ch_index)
+        let state = self.fragments.remove(&ch_index)?;
+        self.total_buffered_bits = self.total_buffered_bits.saturating_sub(state.bit_count);
+        Some(PreservedPartial {
+            header: state.stored_header,
+            buffer: state.buffer,
+            bit_count: state.bit_count,
+        })
     }
 
     fn validate_sequence(
@@ -475,27 +484,16 @@ impl PartialBunchAccumulator {
         (true, Vec::new())
     }
 
-    /// [`Self::take`], paired with the cause that displaced it.
+    /// [`Self::retire_channel`], paired with the cause that displaced it.
     fn take_as(
         &mut self,
         ch_index: u32,
         cause: PartialDiscardCause,
     ) -> Vec<(PreservedPartial, PartialDiscardCause)> {
-        self.take(ch_index)
+        self.retire_channel(ch_index)
             .map(|p| (p, cause))
             .into_iter()
             .collect()
-    }
-
-    fn take(&mut self, ch_index: u32) -> Option<PreservedPartial> {
-        let state = self.fragments.remove(&ch_index)?;
-        let bits = state.bit_count;
-        self.total_buffered_bits = self.total_buffered_bits.saturating_sub(bits);
-        Some(PreservedPartial {
-            header: state.stored_header,
-            buffer: state.buffer,
-            bit_count: state.bit_count,
-        })
     }
 }
 
