@@ -19,6 +19,11 @@
 //! consumes the wrong number of bits and produces plausible garbage rather than
 //! an error. The [`AMBIGUOUS_LEAF`](NetGuidCache::AMBIGUOUS_LEAF) sentinel in
 //! `by_leaf` is how that is recorded at registration time.
+//!
+//! Each resolver tries several candidate leaves in priority order, and the
+//! first candidate claimed at all decides. An ambiguous one ends the search:
+//! the unique candidate after it names a different class, so falling through
+//! to it would be the same guess.
 
 use crate::cache::NetGuidCache;
 use crate::export::NetFieldExportGroup;
@@ -121,19 +126,13 @@ impl NetGuidCache {
         if has_path_separator(bare_name) {
             return None;
         }
-        // Try exact leaf first.
-        if let Some(group) = self.leaf_group(bare_name) {
-            return Some(group);
-        }
-        // Try "name + Component" suffix -- Unreal's most common subobject naming
-        // convention stores GUIDs without the suffix but registers export groups
-        // with it.
-        if let Some(group) = with_joined(bare_name, "Component", |k| self.leaf_group(k)) {
-            return Some(group);
-        }
-        // Try "name + _C" suffix -- Blueprint class GUIDs (Comp_* etc.) register
-        // their export group with a _C suffix on the leaf.
-        with_joined(bare_name, "_C", |k| self.leaf_group(k))
+        // Exact leaf, then the two suffixed forms above. The first one claimed
+        // at all decides, so an ambiguous exact leaf yields None rather than a
+        // suffixed group of another class.
+        self.leaf_claim(bare_name)
+            .or_else(|| with_joined(bare_name, "Component", |k| self.leaf_claim(k)))
+            .or_else(|| with_joined(bare_name, "_C", |k| self.leaf_claim(k)))
+            .flatten()
     }
 
     /// Resolve a bare instance name to a `_ClassNetCache` export group.
@@ -159,7 +158,8 @@ impl NetGuidCache {
     ///
     /// The capacity comes from the matched group's declared
     /// `NetFieldExportsLength` (never guessed). Only unambiguous matches (one
-    /// group per leaf) are accepted.
+    /// group per leaf) are accepted, and an ambiguous candidate ends the search
+    /// instead of yielding to a later suffix or a shorter stem.
     ///
     /// # Why instance-suffix stripping is needed
     ///
@@ -178,8 +178,8 @@ impl NetGuidCache {
         // Try with the full name first, then progressively shorter stems.
         let mut stem = bare_name;
         loop {
-            if let Some(group) = self.try_cnc_leaf_candidates(stem) {
-                return Some(group);
+            if let Some(claim) = self.try_cnc_leaf_candidates(stem) {
+                return claim;
             }
 
             // Strip the last underscore-delimited segment to get a shorter stem.
@@ -201,8 +201,8 @@ impl NetGuidCache {
         if trimmed.len() < bare_name.len() && !trimmed.is_empty() {
             // Longest stem first, matching the loop above: try the
             // digit-only trim before the more aggressive one below.
-            if let Some(group) = self.try_cnc_leaf_candidates(trimmed) {
-                return Some(group);
+            if let Some(claim) = self.try_cnc_leaf_candidates(trimmed) {
+                return claim;
             }
             // Also strip a trailing uppercase letter -- one, not the whole
             // run -- that acts as a site/variant marker (e.g. WindowShieldA1
@@ -214,8 +214,8 @@ impl NetGuidCache {
             {
                 let trimmed2 = &trimmed[..trimmed.len() - 1];
                 if !trimmed2.is_empty() {
-                    if let Some(group) = self.try_cnc_leaf_candidates(trimmed2) {
-                        return Some(group);
+                    if let Some(claim) = self.try_cnc_leaf_candidates(trimmed2) {
+                        return claim;
                     }
                 }
             }
@@ -224,55 +224,60 @@ impl NetGuidCache {
         None
     }
 
-    /// Resolve one `by_leaf` key, rejecting the ambiguity sentinel.
+    /// Look up one `by_leaf` key: `None` when no group claims the leaf,
+    /// `Some(None)` when two or more do, `Some(Some(group))` for exactly one.
     ///
     /// `usize::MAX` in `by_leaf` means two or more groups share this leaf; the
     /// C# `UniqueLeafMatch` contract is that such a name binds to nothing rather
-    /// than to whichever group happened to register first.
+    /// than to whichever group happened to register first. Keeping "ambiguous"
+    /// apart from "absent" is what lets the resolvers stop at it instead of
+    /// trying their next candidate.
     #[inline]
-    fn leaf_group(&self, leaf: &str) -> Option<&NetFieldExportGroup> {
-        let idx = *self.leaf_index().get(leaf)?;
-        if idx == Self::AMBIGUOUS_LEAF {
-            return None;
+    fn leaf_claim(&self, leaf: &str) -> Option<Option<&NetFieldExportGroup>> {
+        match *self.leaf_index().get(leaf)? {
+            Self::AMBIGUOUS_LEAF => Some(None),
+            idx => self.groups().get(idx).map(Some),
         }
-        self.groups().get(idx)
     }
 
     /// Try ClassNetCache leaf candidates for a given stem.
     ///
     /// Checks `stem_ClassNetCache`, `stemComponent_ClassNetCache`, and
-    /// `stem_C_ClassNetCache` in the leaf index.
-    fn try_cnc_leaf_candidates(&self, stem: &str) -> Option<&NetFieldExportGroup> {
-        // The three suffixes are tried in this order and the first unambiguous
-        // hit wins, so a stem that could match under more than one convention
-        // resolves the same way it always has.
+    /// `stem_C_ClassNetCache` in the leaf index and returns the first claim,
+    /// `Some(None)` when that candidate is ambiguous; `None` when none is
+    /// claimed.
+    fn try_cnc_leaf_candidates(&self, stem: &str) -> Option<Option<&NetFieldExportGroup>> {
+        // The three suffixes are tried in this order and the first claimed
+        // candidate decides, so a stem that could match under more than one
+        // convention resolves the same way it always has, and an ambiguous
+        // one resolves to nothing.
         for suffix in [
             "_ClassNetCache",
             "Component_ClassNetCache",
             "_C_ClassNetCache",
         ] {
-            if let Some(group) = with_joined(stem, suffix, |k| self.lookup_cnc_leaf(k)) {
-                return Some(group);
+            if let Some(claim) = with_joined(stem, suffix, |k| self.lookup_cnc_leaf(k)) {
+                return Some(claim);
             }
         }
         None
     }
 
-    /// Look up a CNC leaf in `by_leaf`, accepting only unambiguous matches.
+    /// Look up a CNC leaf in `by_leaf`, with [`Self::leaf_claim`]'s three
+    /// outcomes.
     ///
     /// The `_ClassNetCache` suffix test below is a belt-and-braces assertion,
     /// not an active filter: every caller reaches this with a leaf that was
-    /// itself derived from a `_ClassNetCache` path, so the else arm does not
-    /// fire on any input the callers can produce. It is kept because the
-    /// invariant is a property of the CALLERS, and a future caller that does
-    /// not hold it should get `None` rather than a wrongly-typed group.
-    fn lookup_cnc_leaf(&self, leaf: &str) -> Option<&NetFieldExportGroup> {
-        let group = self.leaf_group(leaf)?;
-        if group.path.ends_with(crate::path::CLASS_NET_CACHE_SUFFIX) {
-            Some(group)
-        } else {
-            None
-        }
+    /// itself derived from a `_ClassNetCache` path, so it does not fail on any
+    /// input the callers can produce. It is kept because the invariant is a
+    /// property of the CALLERS, and a future caller that does not hold it
+    /// should get no claim rather than a wrongly-typed group. An ambiguous
+    /// claim passes it: every group sharing a leaf that ends in the suffix
+    /// ends in it too.
+    fn lookup_cnc_leaf(&self, leaf: &str) -> Option<Option<&NetFieldExportGroup>> {
+        self.leaf_claim(leaf).filter(|claim| {
+            claim.is_none_or(|group| group.path.ends_with(crate::path::CLASS_NET_CACHE_SUFFIX))
+        })
     }
 }
 
@@ -282,6 +287,19 @@ mod tests {
 
     use super::*;
     use crate::export::NetFieldExportGroup; // -- UniqueLeafMatch suffix extension tests -------------------------------
+
+    /// A cache holding one group per path, at indices 0, 1, 2, ... A failed
+    /// registration fails the test rather than vanishing under the module's
+    /// `unused_must_use` allowance.
+    fn cache_of(paths: &[&str]) -> NetGuidCache {
+        let mut cache = NetGuidCache::new();
+        for (index, path) in paths.iter().enumerate() {
+            cache
+                .add_export_group(NetFieldExportGroup::new((*path).into(), index as u32, 1))
+                .unwrap();
+        }
+        cache
+    }
 
     #[test]
     fn unique_leaf_match_exact() {
@@ -364,6 +382,45 @@ mod tests {
         // ambiguous entry, so still returns None.
         assert!(cache.unique_leaf_match("TestComponent").is_none());
         assert!(cache.unique_leaf_match("Test").is_none());
+    }
+
+    /// The first candidate claimed at all decides. When two groups claim it,
+    /// the name binds to nothing: the later candidate names a different class,
+    /// and binding it is the guess the ambiguity rule forbids. Each control
+    /// reaches that later group by its own leaf, so the `None` is the rule at
+    /// work and not a group that failed to register.
+    #[test]
+    fn unique_leaf_match_does_not_fall_through_an_ambiguous_candidate() {
+        for (paths, name, control) in [
+            // The exact leaf is ambiguous; `+Component` would hit.
+            (
+                ["/Script/A.Foo", "/Script/B.Foo", "/Script/C.FooComponent"],
+                "Foo",
+                "FooComponent",
+            ),
+            // `+Component` is ambiguous; `+_C` would hit.
+            (
+                [
+                    "/Script/A.FooComponent",
+                    "/Script/B.FooComponent",
+                    "/Game/C.Foo_C",
+                ],
+                "Foo",
+                "Foo_C",
+            ),
+        ] {
+            let cache = cache_of(&paths);
+            assert_eq!(
+                cache.unique_leaf_match(name).map(|g| g.path.as_str()),
+                None,
+                "{name} over {paths:?}"
+            );
+            assert_eq!(
+                cache.unique_leaf_match(control).map(|g| g.path.as_str()),
+                Some(paths[2]),
+                "control {control} over {paths:?}"
+            );
+        }
     }
 
     #[test]
@@ -601,6 +658,62 @@ mod tests {
             5,
         ));
         assert!(cache.resolve_cnc_for_instance_name("SharedName").is_none());
+    }
+
+    /// The same rule at every point where the CNC resolver moves on: the next
+    /// suffix, the next shorter stem, and the uppercase trim after the digit
+    /// trim. An ambiguous candidate ends the search there; the control reaches
+    /// the later group when nothing ambiguous comes first.
+    #[test]
+    fn cnc_resolve_does_not_fall_through_an_ambiguous_candidate() {
+        for (paths, name, control) in [
+            // `_ClassNetCache` is ambiguous; `Component_ClassNetCache` would hit.
+            (
+                [
+                    "/Script/A.Foo_ClassNetCache",
+                    "/Script/B.Foo_ClassNetCache",
+                    "/Script/C.FooComponent_ClassNetCache",
+                ],
+                "Foo",
+                "FooComponent",
+            ),
+            // The full name is ambiguous; the shorter stem `Foo` would hit.
+            (
+                [
+                    "/Game/P1/Foo_Bar.Foo_Bar_C_ClassNetCache",
+                    "/Game/P2/Foo_Bar.Foo_Bar_C_ClassNetCache",
+                    "/Game/P3/Foo.Foo_C_ClassNetCache",
+                ],
+                "Foo_Bar",
+                "Foo_Baz",
+            ),
+            // The digit trim is ambiguous; the uppercase trim would hit.
+            (
+                [
+                    "/Game/A/FooA.FooA_C_ClassNetCache",
+                    "/Game/B/FooA.FooA_C_ClassNetCache",
+                    "/Game/C/Foo.Foo_C_ClassNetCache",
+                ],
+                "FooA1",
+                "Foo1",
+            ),
+        ] {
+            let cache = cache_of(&paths);
+            assert_eq!(
+                cache
+                    .resolve_cnc_for_instance_name(name)
+                    .map(|g| g.path.as_str()),
+                None,
+                "{name} over {paths:?}"
+            );
+            assert_eq!(
+                cache
+                    .resolve_cnc_for_instance_name(control)
+                    .map(|g| g.path.as_str()),
+                Some(paths[2]),
+                "control {control} over {paths:?}"
+            );
+        }
     }
 
     #[test]
