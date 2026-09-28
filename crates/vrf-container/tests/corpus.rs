@@ -404,8 +404,15 @@ mod fixture {
 
     /// Replay info followed by a single Header chunk, and nothing else.
     pub fn header_only_replay() -> Vec<u8> {
+        with_header_residual(0)
+    }
+
+    /// `header_only_replay` with `residual` bytes after the header's layout,
+    /// inside its chunk.
+    pub fn with_header_residual(residual: usize) -> Vec<u8> {
         let mut data = replay_info();
-        let payload = header_payload();
+        let mut payload = header_payload();
+        payload.resize(payload.len() + residual, 0);
         add_u32(&mut data, 0); // chunk type: Header
         add_i32(&mut data, payload.len() as i32);
         data.extend_from_slice(&payload);
@@ -416,6 +423,12 @@ mod fixture {
     /// says uncompressed, so its data is stored as-is: SizeInBytes equals
     /// MemorySizeInBytes.
     pub fn minimal_replay() -> Vec<u8> {
+        with_replay_data_residual(0)
+    }
+
+    /// `minimal_replay` with `residual` bytes after the ReplayData chunk's
+    /// data, inside the chunk.
+    pub fn with_replay_data_residual(residual: usize) -> Vec<u8> {
         let mut data = header_only_replay();
         let mut payload = Vec::new();
         add_u32(&mut payload, 0); // Time1
@@ -423,6 +436,7 @@ mod fixture {
         add_i32(&mut payload, 4); // SizeInBytes
         add_i32(&mut payload, 4); // MemorySizeInBytes
         payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        payload.resize(payload.len() + residual, 0xCD);
         add_u32(&mut data, 1); // chunk type: ReplayData
         add_i32(&mut data, payload.len() as i32);
         data.extend_from_slice(&payload);
@@ -458,6 +472,35 @@ fn a_replay_with_nothing_decompressed_is_reported() {
             .iter()
             .any(|p| p == "no ReplayData chunk decompressed"),
         "a file with no decompressed ReplayData must be reported, got {:?}",
+        report.problems
+    );
+}
+
+/// Bytes after the header's layout are a problem, not a note. Real replays
+/// have shown none, so this fixture is the only input that runs the check.
+#[test]
+fn header_bytes_past_the_parsed_layout_are_reported() {
+    let report = scan_file(&fixture::with_header_residual(2));
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|p| p == "header: 2 bytes past the parsed layout"),
+        "a header residual must be reported, got {:?}",
+        report.problems
+    );
+}
+
+/// The same for ReplayData payload bytes no reader consumes.
+#[test]
+fn replay_data_bytes_no_reader_consumed_are_reported() {
+    let report = scan_file(&fixture::with_replay_data_residual(3));
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|p| p == "replay data: 3 payload bytes no reader consumed"),
+        "a ReplayData residual must be reported, got {:?}",
         report.problems
     );
 }
