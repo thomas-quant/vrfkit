@@ -1,20 +1,6 @@
-"""Guards for the C# comparison report.
-
-This one is a REPORT, not a gate: vrfkit deliberately exports more than the C#
-parser does, so most of what it prints is a measurement rather than a verdict,
-and no threshold in it can be defended without the corpus in hand.
-
-What a report still may not do is claim a result it did not measure. Its
-coverage section printed
-
-    ### C# only: NONE -- vrfkit covers everything C# has! (checkmark)
-
-whenever `cs_only` was empty -- including when the C# side yielded no pairs at
-all, which is what an empty, slimmed or wrong events.ndjson produces. Nothing
-compared reads exactly like total coverage.
-
-`main` also returned None and was called bare from `__main__`, so even a
-deliberate nonzero could not have escaped the process.
+"""Guards for the C# comparison report: a report, not a gate, but one that
+must not read an empty C# side as total coverage, and must exit nonzero when
+it measured nothing.
 """
 import contextlib
 import io
@@ -55,12 +41,8 @@ class CoverageProblemTests(unittest.TestCase):
         self.assertIn("no", " ".join(problems).lower())
 
     def test_missing_pairs_alone_are_not_reported_here(self):
-        """C#-only pairs are the report's subject, not a gate.
-
-        vrfkit's stated aim is to reproduce AND EXCEED the C# parser, and what
-        counts as an acceptable miss cannot be decided without the corpus. The
-        section already prints every one of them under INVESTIGATE.
-        """
+        """C#-only pairs are the report's subject, listed under INVESTIGATE,
+        not a gate: an acceptable miss cannot be decided without the corpus."""
         self.assertEqual(guard.coverage_problems({PAIR_A, PAIR_B}, {PAIR_A}), [])
 
 
@@ -103,10 +85,9 @@ class CoverageTextTests(unittest.TestCase):
 
 
 class RpcNameTests(unittest.TestCase):
-    """Section 4 looked for a manifest `rpcs_by_name` and a `rpc_name` column,
-    neither of which vrfkit writes, so it only ever listed the C# names.
-    vrfkit's RPC names are the `Function.` prefixes of its ClassNetCache rows,
-    the rows to_valplay_bundle.py builds rpc_received from."""
+    """vrfkit writes no RPC-name column or manifest key: its RPC names are the
+    `Function.` prefixes of its ClassNetCache rows, the rows
+    to_valplay_bundle.py builds rpc_received from."""
 
     CNC = "/Script/ShooterGame.Thing_ClassNetCache"
 

@@ -1,26 +1,19 @@
 """Compare vrfkit (Rust) parser output against ValorantReplayParser (C#) output.
 
-Why this exists:
-    vrfkit aims to reproduce and EXCEED the C# parser's field coverage. This tool
-    quantifies exactly what matches, what vrfkit adds (expected — C# drops groups
-    without descriptors), and what vrfkit misses (bugs to fix). It operates in
-    streaming mode to handle 86+ MB NDJSON files without loading them into memory.
+It is a report, not a gate: vrfkit exports more than the C# parser, so
+"vrfkit only" is expected, and C#-only pairs are listed under INVESTIGATE, not
+gated. Only a comparison that measured nothing fails (`coverage_problems`).
+NDJSON is streamed, for 86+ MB files.
 
-Usage (the exact command used to produce the first report):
-    python tools/compare_with_csharp.py ^
-        "<VRFKIT_VALPLAY_DIR>\\pipeline\\exports\\02d4d478-1dfb-4412-9a77-29ca29105a9d" ^
-        "<repo-root>\\out\\02d4d478"
+Usage:
+    python tools/compare_with_csharp.py CSHARP_DIR VRFKIT_DIR
 
-Arguments:
-    csharp_dir   Path to the C# bundle (manifest.json, events.ndjson, movement.ndjson)
-    vrfkit_dir   Path to vrfkit output  (manifest.json, fields.parquet, movement.parquet)
+    CSHARP_DIR   the C# bundle (manifest.json, events.ndjson, movement.ndjson)
+    VRFKIT_DIR   vrfkit's export of the same replay (manifest.json,
+                 fields.parquet, movement.parquet)
 
-Important caveat — slim_export.py:
-    The C# bundle is typically "slimmed": ~97% of rpc_received dropped, and keys
-    (was_decoded, diagnostic_fields, categories, parsed_bits, decoded_field_count)
-    removed from kept events. movement.ndjson also loses 5 constant fields (type,
-    actor_net_guid, movement_state, mode_flags, move_type). The full pre-slim counts
-    survive in manifest.json — this tool uses those for total-count comparisons.
+A slimmed C# bundle drops ~97% of rpc_received and some keys of the events it
+keeps; its manifest.json keeps the full counts, which the totals use.
 """
 
 from __future__ import annotations
@@ -45,8 +38,6 @@ from to_valplay_bundle import (  # noqa: E402
 )
 
 
-# ─── Helpers ───────────────────────────────────────────────────────────────────
-
 def iter_ndjson(path: Path) -> Iterator[dict]:
     """Yield parsed dicts from an NDJSON file, one line at a time (streaming)."""
     with path.open("r", encoding="utf-8") as f:
@@ -55,8 +46,6 @@ def iter_ndjson(path: Path) -> Iterator[dict]:
             if line:
                 yield json.loads(line)
 
-
-# ─── 1. Total-count comparison ────────────────────────────────────────────────
 
 def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
     """Compare packet/bunch/actor/export-group counts from both manifests."""
@@ -70,10 +59,8 @@ def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
     lines.append("-" * 55)
 
     def row(label, cs_val, vk_val):
-        # A key absent from a manifest is not a measured zero. Comparing two
-        # `.get(key, 0)` defaults would silently declare "match" for a pair
-        # neither side actually produced (see coverage_problems() in section 3
-        # for the same principle). Render absence visibly instead of guessing.
+        # A key absent from a manifest is not a measured zero: it renders as
+        # "?", never as a matched 0.
         if cs_val is None or vk_val is None:
             match = "?"
             cs_disp = f"{cs_val:>12,}" if cs_val is not None else f"{'?':>12}"
@@ -90,15 +77,12 @@ def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
     row("Actor opens",   cs_counts.get("actor_spawned"),      vk_counts.get("actor_opens"))
     row("Actor closes",  cs_counts.get("actor_closed"),       vk_counts.get("actor_closes"))
 
-    # Export groups — count from net_field_export_groups array length
     cs_groups = len(cs_manifest.get("net_field_export_groups", []))
     vk_groups = len(vk_manifest.get("net_field_export_groups", []))
     row("Export groups",  cs_groups, vk_groups)
 
-    # Additional counts. vrfkit's movement row count lives under the
-    # top-level "quality" object (crates/vrfkit/src/manifest.rs), not under
-    # "counts" and not at the manifest's top level -- neither of which this
-    # tool's own `vk_counts`/`vk_manifest` lookups ever populate.
+    # vrfkit's movement row count lives under the manifest's top-level
+    # "quality" object (crates/vrfkit/src/manifest.rs), not under "counts".
     row("Movement rows", cs_counts.get("movement"),
         vk_manifest.get("quality", {}).get("movement_rows"))
     fields_decoded = cs_counts.get("export_group_received")
@@ -112,8 +96,6 @@ def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
     return "\n".join(lines)
 
 
-# ─── 2. Export group path set comparison ──────────────────────────────────────
-
 def compare_group_paths(cs_manifest: dict, vk_manifest: dict,
                         vk_parquet_path: Path) -> str:
     """Compare the set of export group paths between both manifests."""
@@ -122,7 +104,6 @@ def compare_group_paths(cs_manifest: dict, vk_manifest: dict,
     cs_paths = {g["path"] for g in cs_manifest.get("net_field_export_groups", [])}
     vk_paths = {g["path"] for g in vk_manifest.get("net_field_export_groups", [])}
 
-    # Also check what's actually in the parquet
     if vk_parquet_path.exists():
         tbl = pq.read_table(vk_parquet_path, columns=["group_path"])
         vk_parquet_paths = set(tbl.column("group_path").to_pylist())
@@ -160,22 +141,14 @@ def compare_group_paths(cs_manifest: dict, vk_manifest: dict,
     return "\n".join(lines)
 
 
-# ─── 3. (Group, Field) coverage comparison ───────────────────────────────────
-
 def coverage_problems(cs_pairs: set, vk_pairs: set) -> list[str]:
     """Why this comparison compared nothing, if it compared nothing.
 
-    This script is a REPORT: vrfkit deliberately exports more than the C#
-    parser, so "vrfkit only" is expected and no threshold on the differences
-    can be defended without the corpus in hand. What a report may still not do
-    is announce a result it never measured, and it did: `cs_only` is empty when
-    the C# side yielded NO pairs at all -- an empty, slimmed, or wrong
-    events.ndjson -- and the section then printed "vrfkit covers everything C#
-    has".
-
-    C#-only pairs are deliberately NOT reported here. They are the report's
-    subject, listed in full under INVESTIGATE; gating on them would make a tool
-    that measures known-incomplete coverage permanently red.
+    No threshold on the differences can be defended without the corpus in
+    hand, but a report must not announce a result it never measured: `cs_only`
+    is also empty when the C# side yielded no pairs at all (an empty, slimmed
+    or wrong events.ndjson). C#-only pairs are not reported here; gating on
+    them would keep a tool measuring known-incomplete coverage red forever.
     """
     if not cs_pairs and not vk_pairs:
         return ["neither side produced a single (group, field) pair: "
@@ -226,13 +199,10 @@ def coverage_lines(cs_pairs: set, vk_pairs: set) -> list[str]:
 
 
 def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
-    """Compare (group_path, field_name) pairs between C# events and vrfkit parquet.
-
-    Returns `(report text, problems)`.
-    """
+    """Compare (group_path, field_name) pairs between C# events and vrfkit
+    parquet: `(report text, problems)`."""
     lines = ["## 3. (Group, Field) coverage comparison\n"]
 
-    # Collect C# (group, field) pairs from export_group_received events
     cs_pairs: set[tuple[str, str]] = set()
     lines.append("Scanning C# events.ndjson for export_group_received...")
     count = 0
@@ -254,7 +224,6 @@ def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
     lines.append(f"  Distinct (group, field) pairs from C#: {len(cs_pairs):,}")
     lines.append(f"  C# payload fields without a group/name: {cs_unnamed:,} (excluded)")
 
-    # Collect vrfkit (group, field) pairs from fields.parquet
     if not vk_parquet_path.exists():
         lines.append("  fields.parquet not found — cannot compare.")
         return "\n".join(lines), [f"fields.parquet not found at {vk_parquet_path}"]
@@ -264,14 +233,12 @@ def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
     vk_unnamed = 0
     for gp, fn in zip(tbl.column("group_path").to_pylist(),
                        tbl.column("field_name").to_pylist()):
-        # A preserved whole-block payload is not a field, so it is not a pair
-        # this comparison is about. Without this it lands in "vrfkit only" for
-        # every unresolved group and reads as coverage we do not have.
+        # A preserved whole-block payload is not a field; counted, it would
+        # read as coverage vrfkit does not have.
         if fn == UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME:
             continue
-        # Unknown identities are preserved rows, not named field coverage.
-        # Besides overstating coverage, sorting (path, None) beside a named
-        # field raises TypeError on actual 13.06 exports.
+        # An unnamed row is not field coverage either, and sorting (path, None)
+        # beside a named field raised TypeError on 13.06 exports.
         if not gp or not fn:
             vk_unnamed += 1
             continue
@@ -284,8 +251,6 @@ def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
     lines.append("")
     return "\n".join(lines), coverage_problems(cs_pairs, vk_pairs)
 
-
-# ─── 4. RPC name comparison ──────────────────────────────────────────────────
 
 def vrfkit_rpc_names(vk_parquet_path: Path) -> Counter:
     """vrfkit's RPC function names in fields.parquet, with their row counts.
@@ -337,7 +302,6 @@ def compare_rpc_names(cs_events_path: Path, vk_parquet_path: Path) -> str:
     lines.append("NOTE: C# events.ndjson is slimmed — only ~3% of RPCs survive.")
     lines.append("      Full RPC count comes from manifest.json counts.rpc_received.")
 
-    # Collect function_names from slim events
     cs_rpc_names: Counter = Counter()
     for obj in iter_ndjson(cs_events_path):
         if obj.get("type") != "rpc_received":
@@ -364,8 +328,6 @@ def compare_rpc_names(cs_events_path: Path, vk_parquet_path: Path) -> str:
     return "\n".join(lines)
 
 
-# ─── 5. Movement value comparison ────────────────────────────────────────────
-
 def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
     """Compare movement data by joining on (time_ms, character_net_guid)."""
     lines = ["## 5. Movement value comparison\n"]
@@ -377,31 +339,26 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
         lines.append("vrfkit movement.parquet not found.")
         return "\n".join(lines)
 
-    # Count C# rows
     cs_row_count = 0
     with cs_movement_path.open("r", encoding="utf-8") as f:
         for _ in f:
             cs_row_count += 1
     lines.append(f"C# movement rows (in file): {cs_row_count:,}")
 
-    # vrfkit movement rows
     vk_meta = pq.read_metadata(vk_movement_path)
     vk_row_count = vk_meta.num_rows
     lines.append(f"vrfkit movement rows: {vk_row_count:,}")
     lines.append(f"Difference: {vk_row_count - cs_row_count:,} (vrfkit - C#)")
 
-    # Schema check
     schema = pq.read_schema(vk_movement_path)
     lines.append(f"vrfkit movement columns: {[f.name for f in schema]}")
 
-    # Sample-based comparison: read first 50000 rows from both and join
-    # Join method: exact match on (time_ms, shooter_character_net_guid)
-    # with ±1ms tolerance fallback
+    # The first SAMPLE_SIZE C# rows, joined to vrfkit's rows of the same time
+    # range on (time_ms, character GUID): exact, then +-1 ms.
     SAMPLE_SIZE = 50000
 
     lines.append(f"\nSampling first {SAMPLE_SIZE:,} C# rows for value comparison...")
 
-    # Read C# sample
     cs_sample: list[tuple[int, int, dict]] = []
     cs_read = 0
     for obj in iter_ndjson(cs_movement_path):
@@ -413,7 +370,6 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
             cs_sample.append((time_ms, char_guid, obj))
         cs_read += 1
 
-    # Read vrfkit sample (same time range)
     if cs_sample:
         min_time = min(row[0] for row in cs_sample)
         max_time = max(row[0] for row in cs_sample)
@@ -421,16 +377,13 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
         lines.append("No C# samples found.")
         return "\n".join(lines)
 
-    # Read the parquet for the same time range using filters
     import pyarrow.dataset as ds
     dataset = ds.dataset(vk_movement_path)
-    # Read rows in the time range
     vk_tbl = dataset.to_table(
         filter=(ds.field("time_ms") >= min_time) & (ds.field("time_ms") <= max_time + 1)
     )
     vk_cols = [f.name for f in vk_tbl.schema]
 
-    # Build vrfkit lookup — (time_ms, character_net_guid)
     vk_sample: defaultdict[tuple[int, int], deque[int]] = defaultdict(deque)
     # movement.parquet has always named it this (vrf-export's movement_schema).
     char_col = "character_net_guid"
@@ -440,15 +393,12 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
 
     time_col = vk_tbl.column("time_ms").to_pylist()
     guid_col = vk_tbl.column(char_col).to_pylist()
-    # Collect all columns into row dicts for joined entries
     for i in range(vk_tbl.num_rows):
         vk_sample[(time_col[i], guid_col[i])].append(i)
-    # Precompute column arrays
     vk_columns_data = {}
     for col_name in vk_cols:
         vk_columns_data[col_name] = vk_tbl.column(col_name).to_pylist()
 
-    # Join: exact, then ±1ms fallback
     joined = 0
     missed = 0
     errors_pos = []
@@ -468,7 +418,6 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
             continue
         joined += 1
 
-        # Compare position
         cs_pos = cs_row.get("position", {})
         if "pos_x" in vk_cols:
             vk_x = vk_columns_data["pos_x"][vk_idx]
@@ -483,7 +432,6 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
             dz = abs((cs_pos.get("z", 0) or 0) - (vk_z or 0))
             errors_pos.append(max(dx, dy, dz))
 
-        # Yaw / Pitch
         cs_yaw = cs_row.get("yaw", 0) or 0
         cs_pitch = cs_row.get("pitch", 0) or 0
         if "yaw" in vk_cols:
@@ -492,7 +440,6 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
             errors_yaw.append(abs(cs_yaw - vk_yaw))
             errors_pitch.append(abs(cs_pitch - vk_pitch))
 
-        # Velocity
         cs_vel = cs_row.get("velocity", {})
         if "vel_x" in vk_cols:
             vvx = vk_columns_data["vel_x"][vk_idx]
@@ -530,13 +477,10 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
     return "\n".join(lines)
 
 
-# ─── 6. Raw blob TypeName comparison ─────────────────────────────────────────
-
 def compare_raw_blobs(cs_events_path: Path, vk_parquet_path: Path) -> str:
     """Find {BitCount, Data, TypeName} blobs in C# and check vrfkit coverage."""
     lines = ["## 6. Raw blob TypeName comparison\n"]
 
-    # Scan C# events for fields with TypeName/BitCount/Data structure
     typename_counts: Counter = Counter()
     blob_groups: defaultdict = defaultdict(set)  # TypeName -> set of group_paths
 
@@ -562,7 +506,6 @@ def compare_raw_blobs(cs_events_path: Path, vk_parquet_path: Path) -> str:
         groups_str = "; ".join(g.split("/")[-1] for g in groups_sample)
         lines.append(f"{tname:<50} {count:>8}  {groups_str}")
 
-    # Check vrfkit parquet for raw_bits column
     if vk_parquet_path.exists():
         schema = pq.read_schema(vk_parquet_path)
         col_names = [f.name for f in schema]
@@ -575,8 +518,6 @@ def compare_raw_blobs(cs_events_path: Path, vk_parquet_path: Path) -> str:
     lines.append("")
     return "\n".join(lines)
 
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) != 3:
@@ -593,7 +534,6 @@ def main():
     vk_fields_path = vk_dir / "fields.parquet"
     vk_movement_path = vk_dir / "movement.parquet"
 
-    # Load manifests
     with cs_manifest_path.open("r", encoding="utf-8") as f:
         cs_manifest = json.load(f)
     with vk_manifest_path.open("r", encoding="utf-8") as f:
@@ -605,37 +545,29 @@ def main():
     report_parts.append(f"Build: {cs_manifest.get('replay_build', 'unknown')}")
     report_parts.append(f"Duration: {cs_manifest.get('duration_ms', 'unknown')} ms\n")
 
-    # 1. Totals
     report_parts.append(compare_totals(cs_manifest, vk_manifest))
 
-    # 2. Export group paths
     report_parts.append(compare_group_paths(cs_manifest, vk_manifest, vk_fields_path))
 
-    # 3. (Group, Field) coverage
     coverage_text, problems = compare_group_field_coverage(
         cs_events_path, vk_fields_path)
     report_parts.append(coverage_text)
 
-    # 4. RPC names
     report_parts.append(compare_rpc_names(cs_events_path, vk_fields_path))
 
-    # 5. Movement
     report_parts.append(compare_movement(cs_movement_path, vk_movement_path))
 
-    # 6. Raw blobs
     report_parts.append(compare_raw_blobs(cs_events_path, vk_fields_path))
 
-    # Output
     full_report = "\n".join(report_parts)
     print(full_report)
 
-    # Also write to file
     out_path = vk_dir / "comparison_report.txt"
     atomic_write_text(out_path, full_report)
     print(f"\n[Report written to {out_path}]")
 
-    # This stays a report -- see `coverage_problems` for why nothing else in it
-    # is gated. What it must not do is finish quietly after comparing nothing.
+    # A report (see the module docstring), but not one that finishes quietly
+    # after comparing nothing.
     if problems:
         print(f"\nFAILED: {len(problems)} reason(s) this comparison measured "
               f"nothing", file=sys.stderr)
