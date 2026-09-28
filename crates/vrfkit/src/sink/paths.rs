@@ -1193,10 +1193,20 @@ mod tests {
     /// and parentheses in them. Every pair added from the 13.06 containers is
     /// listed, so dropping or misspelling one fails here.
     ///
-    /// Each pair is also checked the other way: the remaps are RepLayout-only,
-    /// so a ClassNetCache block with the same leaf must keep its bare path
-    /// rather than being handed the RepLayout group -- that would read its RPC
-    /// handles against the wrong table.
+    /// The remaps are RepLayout-only, and that is checked in two places. On
+    /// the table, for every pair and not only the ones listed: no RepLayout
+    /// pair's leaf finds a ClassNetCache entry, and the only ClassNetCache
+    /// pairs are the four the C# reference carries. A ClassNetCache entry
+    /// for one of these leaves would bind its RPC stream to
+    /// `<target>_ClassNetCache` wherever the replay declares that group --
+    /// the AbilitySystem mis-parse the table's comment describes. And through
+    /// the resolver: a ClassNetCache block with a listed leaf keeps its bare
+    /// path rather than being handed the RepLayout group, which would read its
+    /// RPC handles against the wrong table. The resolver check cannot see the
+    /// table -- its fixture declares no `_ClassNetCache` group, so no entry
+    /// could bind -- but it is what fails if the remap stops asking which
+    /// kind of block it has. It used to be the only check, and a ClassNetCache
+    /// entry added for any leaf passed it.
     #[test]
     fn component_names_read_from_the_game_reach_their_native_groups() {
         for (leaf, native) in [
@@ -1341,8 +1351,37 @@ mod tests {
             assert_eq!(
                 actor_group_path_for(&[native], 100, leaf, false),
                 leaf,
-                "{leaf} is RepLayout-only",
+                "{leaf}: a ClassNetCache block is not handed the RepLayout group",
             );
+        }
+
+        // The table itself. The pin fails on any ClassNetCache pair beyond the
+        // reference four, whether added beside a RepLayout pair or flipped
+        // from one. The loop goes through the lookup the resolver uses, so it
+        // also fails if that lookup stops filtering by kind.
+        let class_net_cache: Vec<&str> = KNOWN_SUBOBJECT_CLASS_PATHS
+            .iter()
+            .filter(|(_, _, kind)| *kind == GroupKind::ClassNetCache)
+            .map(|(leaf, _, _)| *leaf)
+            .collect();
+        assert_eq!(
+            class_net_cache,
+            [
+                "ReplayEffect",
+                "EffectManager",
+                "LocationalEffectManager",
+                "DamageHandlerComponent",
+            ],
+            "only the C# reference's pairs remap a ClassNetCache block",
+        );
+        for (leaf, _, kind) in KNOWN_SUBOBJECT_CLASS_PATHS {
+            if *kind == GroupKind::RepLayout {
+                assert_eq!(
+                    resolve_known_subobject_class_path(leaf, GroupKind::ClassNetCache),
+                    None,
+                    "{leaf} is RepLayout-only",
+                );
+            }
         }
     }
 
