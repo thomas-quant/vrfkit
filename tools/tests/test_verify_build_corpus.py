@@ -123,12 +123,9 @@ class ManifestTests(unittest.TestCase):
                     self.assertIn(f"{scope}_{key}=2", audit.manifest_counts(data)[1])
 
     def test_sink_event_tallies_must_equal_the_framing_counts(self):
-        """The export summary's `Sink tally` promised a desync check nobody ran.
-
-        The sink counts RPCs, actor opens and closes and content blocks in the
-        callbacks vrf-net invokes right beside its own counters, so the two
-        must be equal; a difference means the sink's bookkeeping is broken.
-        """
+        """The sink counts RPCs, actor opens and closes and content blocks in
+        callbacks vrf-net invokes beside its own counters, so the two must be
+        equal; a difference means the sink's bookkeeping is broken."""
         counts, failures = audit.manifest_counts(manifest())
         self.assertEqual(failures, [])
         self.assertEqual(counts["checkpoint_sink_content_blocks"], 100)

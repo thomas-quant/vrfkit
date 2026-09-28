@@ -1,11 +1,6 @@
-"""Guards for the CombatReport comparison.
-
-This script is listed in `docs/USAGE.md` among the regression gates, and it
-could not fail. Everything ran at module import, the verdict was printed, and
-there was no exit path at all -- so `SOME SHAPES DIFFER` and
-`ALL INTERESTING SHAPES MATCH` both left the process at 0. Anything gating on
-`$?` read a broken decoder as a pass.
-"""
+"""Guards for the CombatReport comparison, a regression gate docs/USAGE.md
+lists: its verdict must reach the exit code, and comparing nothing is no
+match."""
 import collections
 import io
 import sys
@@ -47,18 +42,9 @@ class CompareTests(unittest.TestCase):
 
 
 class VacuousMatchTests(unittest.TestCase):
-    """`ALL INTERESTING SHAPES MATCH` was printed after comparing nothing.
-
-    Empty counters satisfy `a == b`, so a replay carrying none of the ten
-    shapes -- a wrong parquet path, a CombatReport decoder that stopped
-    emitting, the wrong reference bundle -- reported every shape IDENTICAL and
-    exited 0. `compare` keeps saying they matched, because per shape that is
-    the truth; what was missing is anyone asking whether a shape was there to
-    compare at all.
-
-    The `absent both sides` arm at the same spot was unreachable for exactly
-    the same reason: it sat below the equality test that empty counters pass.
-    """
+    """Empty counters satisfy `a == b`, so a replay carrying none of the
+    shapes must not read as a match, and the `absent both sides` arm must be
+    reached before the equality test."""
 
     def test_nothing_to_compare_is_counted_as_nothing_compared(self):
         self.assertEqual(guard.compared_shapes(counters([]), counters([]),
@@ -78,7 +64,7 @@ class VacuousMatchTests(unittest.TestCase):
 
 
 class ExitCodeTests(unittest.TestCase):
-    """The part that was actually broken: the verdict reaching the caller."""
+    """The verdict must reach the caller as the exit code."""
 
     def test_matching_data_exits_zero(self):
         both = [(SHAPE, {35: 2})]
@@ -93,7 +79,7 @@ class ExitCodeTests(unittest.TestCase):
         self.assertNotEqual(guard.main(counters([]), counters([]), {SHAPE}), 0)
 
     def test_one_shape_missing_from_both_sides_is_not_a_pass(self):
-        """A matching shape used to carry the run past one nobody compared."""
+        """A matching shape must not carry the run past one nobody compared."""
         other = "Rounds[].Reports[].Interactions[].DidKill"
         both = [(SHAPE, {35: 2})]
         self.assertEqual(guard.main(counters(both), counters(both), {SHAPE, other}), 2)
@@ -105,8 +91,6 @@ class ExitCodeTests(unittest.TestCase):
 
 
 class InputTests(unittest.TestCase):
-    """The reference used to be a valplay path that no longer held it."""
-
     def test_a_missing_reference_exits_2_and_says_where_it_looked(self):
         missing = Path(__file__).with_name("no-such-reference.ndjson")
         with mock.patch("sys.stderr", new_callable=io.StringIO) as err:

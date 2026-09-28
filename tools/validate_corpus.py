@@ -8,8 +8,8 @@ we mis-detected or a stream shape we have never seen.
 Replays are independent, so they run one subprocess each, several at a time.
 Set VRFKIT_JOBS to override the worker count (default: cores - 2, capped at
 16). This changes no number -- each subprocess owns its own output and shares
-nothing. Parallelising *inside* a replay is a different question, measured
-and closed in docs/archive/PROJECT_STATUS.md 7-F.
+nothing. Parallelising *inside* a replay was measured and closed, because
+content blocks are order-dependent (docs/archive/PROJECT_STATUS.md 7-F).
 
 Corpus discovery is shared with `check_decode_errors_corpus.py` through
 `corpus_scan.py` -- read that module's docstring for why the default does not
@@ -38,10 +38,8 @@ import corpus_scan
 PATTERNS = {
     "branch": re.compile(r"Branch:\s+(\S+)"),
     "blocks": re.compile(r"Total content blocks:\s+(\d+)"),
-    # The oracle prints "Malformed framing:  0". This pattern used to be
-    # "Malformed:\s+(\d+)", which never matched -- and the accumulator below
-    # skips a pattern that does not match, so every corpus run has reported
-    # malformed 0 without ever reading the number. Anchored on the real label.
+    # The oracle's real label: a pattern that never matched once kept the
+    # corpus malformed figure a vacuous 0.
     "malformed": re.compile(r"Malformed framing:\s+(\d+)"),
     "skipped": re.compile(r"Skipped bits:\s+(\d+)"),
     "rate": re.compile(r"ORACLE PASS RATE:\s+([\d.]+)%"),
@@ -61,21 +59,12 @@ def parse_oracle_output(output: str):
 
 
 def problems(failures, missing) -> list[str]:
-    """Everything that makes this sweep a failure rather than a measurement.
-
-    A replay the oracle could not validate has always been fatal. A counter it
-    stopped PRINTING was not, and the accumulator above already argues that it
-    should be: "A counter the oracle stopped printing must not read as zero.
-    That is precisely how the malformed figure stayed a vacuous 0". The counter
-    was recorded as absent, printed as a WARNING, and the run exited 0 -- so
-    the corpus totals below could be summed over a subset nobody was told
-    about.
-
-    The pass rates deliberately stay informational. The docstring's robustness
-    claim is about them, but the threshold cannot be defended from here without
-    the corpus in hand, and `check_corpus_baseline.py` already pins each
-    replay's rate against a baseline -- which catches a rate that MOVED, the
-    thing a fixed threshold would only approximate.
+    """Everything that makes this sweep a failure rather than a measurement: a
+    replay the oracle could not validate, or a counter it stopped printing,
+    which must fail rather than read as 0 and leave the totals summed over a
+    subset. The pass rates stay informational: no threshold can be defended
+    without the corpus in hand, and `check_corpus_baseline.py` pins each
+    replay's rate, catching a rate that MOVED.
     """
     out = [f"{name}: {why}" for name, why in failures]
     out += [f"the oracle did not print '{key}' on {count} replay(s), so the "
@@ -85,12 +74,10 @@ def problems(failures, missing) -> list[str]:
 
 
 def _run_one(exe: Path, path: Path) -> tuple[str | None, str]:
-    """Validate one replay. Returns (error, combined output).
-
-    The oracle prints to stdout; stderr carries progress noise, and both are
-    searched. UTF-8 is forced because the CLI writes a few non-ASCII glyphs
-    and Python would otherwise pick the Windows console codepage and raise
-    UnicodeDecodeError mid-stream.
+    """Validate one replay. Returns (error, combined output), stdout and
+    stderr both searched. UTF-8 is forced: the CLI writes a few non-ASCII
+    glyphs, and the Windows console codepage would raise UnicodeDecodeError
+    mid-stream.
     """
     try:
         r = subprocess.run(
@@ -100,6 +87,8 @@ def _run_one(exe: Path, path: Path) -> tuple[str | None, str]:
         )
     except subprocess.TimeoutExpired:
         return "timeout", ""
+    except OSError as exc:
+        return f"could not start oracle: {exc}", ""
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0:
         tail = " | ".join(l for l in out.splitlines()[-3:] if l.strip())
@@ -108,8 +97,6 @@ def _run_one(exe: Path, path: Path) -> tuple[str | None, str]:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    """Parsed as `argv[1:]` (not `sys.argv` directly) so this is testable
-    without monkeypatching -- pass a fake argv and read the Namespace back."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("exe", type=Path)
     ap.add_argument("corpus", type=Path)
@@ -131,9 +118,7 @@ def main(argv: list[str]) -> int:
     jobs = max(1, min(int(os.environ.get("VRFKIT_JOBS", "0")) or (os.cpu_count() or 2) - 2, 16))
 
     scan = corpus_scan.discover(root, args.recursive)
-    # Unconditional, `excluded=0` included -- see corpus_scan.py. A line that
-    # only appeared when something was left out could not be told apart from
-    # a scan that silently stopped discovering files at all.
+    # Unconditional, `excluded=0` included -- see corpus_scan.py.
     print(corpus_scan.scope_line(scan, args.redact_identifiers))
     files = scan.files
     if args.limit is not None:
@@ -153,10 +138,6 @@ def main(argv: list[str]) -> int:
     missing: collections.Counter[str] = collections.Counter()
     started = time.time()
 
-    # One subprocess per replay, run jobs-wide. Each already owns its own
-    # output and shares nothing, so this is near-linear with no effect on any
-    # number -- unlike parallelising inside a replay, which 7-F measured and
-    # closed because content blocks are order-dependent.
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         results = pool.map(lambda f: (f, _run_one(exe, f)), files)
 
@@ -181,9 +162,7 @@ def main(argv: list[str]) -> int:
                 if got[key]:
                     totals[key] += int(got[key].group(1))
                 else:
-                    # A counter the oracle stopped printing must not read as
-                    # zero. That is precisely how the malformed figure stayed a
-                    # vacuous 0 for the whole corpus while its pattern wrong.
+                    # Absent, never 0: `problems` fails the run on it.
                     missing[key] += 1
             if i % 25 == 0 or i == len(files):
                 print(f"  [{i}/{len(files)}] ok={ok} failed={len(failures)}")

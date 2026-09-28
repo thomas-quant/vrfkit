@@ -1,35 +1,5 @@
-"""Guards for the corpus decode-error gate.
-
-The gate's own docstring argues that "a counter that stops being printed must
-not read as zero". Its exit path did not carry that argument one step further:
-`Decoded OK` and `Struct blobs: N decoded` were summed and printed and then
-never read, so an exporter that decoded NOTHING -- every counter a legitimate
-zero -- printed "OK: every replay reported Decode errors: 0" and exited 0. A
-counter that cannot move must not read as success either.
-
-The second hole was the process exit status. The summary is printed before the
-Parquet files are finalised, so an exporter that dies writing them has already
-printed `Decode errors: 0`, and the run counted as a clean replay.
-
-A third hole, unrelated to either of those: this file never parsed `No field
-name`, even though summary.rs defines
-`Rows offered = decoded_ok + decoded_err + raw_or_skip + not_in_table +
-no_field_name`. The five categories this tool DID print therefore summed to
-about 0.3% less than its own `rows offered` line, and a reader could not make
-the numbers add up without going to read the Rust source. See `LIVE_EXPORT`
-and `ReconcileTests`.
-
-A fourth: the main pass never read the array, leaf, truncated-RPC and movement
-failure lines, and the checkpoint pass never read its array truncation,
-residual and leaf lines, although summary.rs prints all of them unconditionally
-and verify_build_corpus.py requires every one to be zero. A replay with seven
-leaf errors classified clean and the run printed OK. See `SinkFailureTests`.
-
-A fifth, the first one again for those gates: their work counters (`Array
-decode: N elements / M fields`, `Movement rows`) were read and printed and
-never required to move, so an array walker that was never reached passed as
-"0 array failures". See `LivenessCoverageTests` and the `noarray` /
-`cpnoarray` / `nomovement` wiring tests.
+"""Guards for the corpus decode-error gate: every way it could print OK over
+an export that failed, decoded nothing, or printed a line the gate never read.
 """
 import contextlib
 import io
@@ -45,13 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_decode_errors_corpus as guard  # noqa: E402
 
 
-#: The main-pass sink lines summary.rs prints unconditionally, every failure
-#: counter at zero -- the shape a clean export has. Values taken from a real
-#: 13.02 `--checkpoints` export log. Every main-pass fixture below carries
-#: them, because the gate requires each line. The `CNC brute force` and
-#: `Movement tails` lines joined when their counters entered
-#: verify_build_corpus.py's SINK_ZERO; their values are illustrative, not
-#: from that log.
+#: The main-pass sink lines summary.rs prints unconditionally, failure counters
+#: at zero; every main-pass fixture carries them because the gate requires each
+#: line. Values from a real 13.02 `--checkpoints` export log, except the `CNC
+#: brute force` and `Movement tails` lines, which are illustrative.
 CLEAN_SINK = """
 Movement rows:     2407298
 Movement errors:   0
@@ -63,7 +30,7 @@ CNC brute force:   454 attempted / 0 unwalked
 Movement tails:    0 sized (0 bits) / 0 open (0 bits)
 """
 
-#: A healthy export summary, labels as driver.rs prints them.
+#: A healthy export summary, labels as driver/summary.rs prints them.
 CLEAN = """
 Rows offered:      130000
 Decoded OK:        129000
@@ -75,32 +42,9 @@ Struct blobs:      63 decoded / 0 failed
 Reward opaque:     4470 empty variants
 """ + CLEAN_SINK
 
-#: The same summary from an exporter whose decoders never ran. Every counter is
-#: a legitimate zero and `Decode errors: 0` is true, vacuously.
-NOTHING_RAN = """
-Rows offered:      0
-Decoded OK:        0
-Decode errors:     0
-Raw/Skip:          0
-Not in table:      0
-No field name:     0
-Struct blobs:      0 decoded / 0 failed
-Reward opaque:     0 empty variants
-Reward opaque:     0 empty variants
-Movement rows:     0
-Movement errors:   0
-Array decode:      0 elements / 0 fields / 0 errors / 0 truncations
-Array residual:    0 root bits / 0 nested bits / 0 implicit ends
-Array leaf errs:   0
-Truncated RPCs:    0
-CNC brute force:   0 attempted / 0 unwalked
-Movement tails:    0 sized (0 bits) / 0 open (0 bits)
-"""
-
-#: Measured on a live export -- not synthesized. 742738 + 0 + 72644 + 171605 +
-#: 1996 = 988983, an exact match to "Rows offered" only once `No field name`
-#: is part of the sum. `CLEAN_SINK` is appended: those lines are not part of
-#: that reconciliation, and every clean export prints them as zeros.
+#: Measured on a live export, not synthesized: 742738 + 0 + 72644 + 171605 +
+#: 1996 = 988983 matches "Rows offered" only with `No field name` in the sum.
+#: `CLEAN_SINK` is appended; those lines are outside that reconciliation.
 LIVE_EXPORT = """
 Rows offered:      988983
 Decoded OK:        742738
@@ -115,11 +59,8 @@ Reward opaque:     4470 empty variants
 
 def replace_line(text: str, label: str, new: str) -> str:
     """`text` with its one line starting with `label` replaced by `new`.
-
-    Asserts the label occurs exactly once, so a fixture that lost the line
-    cannot turn a mutation into a no-op and the test built on it into one
-    that passes without testing anything.
-    """
+    Asserts exactly one hit, so a fixture that lost the line cannot turn a
+    mutation into a no-op and its test into one that tests nothing."""
     lines = text.splitlines()
     hits = [i for i, line in enumerate(lines) if line.strip().startswith(label)]
     if len(hits) != 1:
@@ -148,12 +89,8 @@ class ReadCountersTests(unittest.TestCase):
         self.assertEqual(counters["tracked_rewards_opaque_empty_variants"], 4470)
 
     def test_a_nonzero_exit_is_not_a_clean_replay(self):
-        """The summary prints before the Parquet files are finalised.
-
-        An exporter that prints `Decode errors: 0` and then dies writing its
-        output is not a replay that decoded cleanly, and counting it as one is
-        how a whole corpus can pass on partial exports.
-        """
+        """The summary prints before the Parquet files are finalised, so an
+        exporter that dies writing them has already printed `Decode errors: 0`."""
         counters, err = guard.read_counters(CLEAN, 1)
         self.assertIsNone(counters)
         self.assertIn("exit 1", err)
@@ -182,9 +119,8 @@ class ReadCountersTests(unittest.TestCase):
         self.assertEqual(counters["no_field_name"], 1996)
 
     def test_a_summary_without_no_field_name_is_unreadable(self):
-        """`no_field_name` feeds the reconciliation, so it must be REQUIRED --
-        the same "a counter that stops being printed must not read as zero"
-        rule the other counters already get."""
+        """`no_field_name` feeds the reconciliation, so it is required like
+        every other counter."""
         text = "\n".join(l for l in CLEAN.splitlines() if "No field name" not in l)
         counters, err = guard.read_counters(text, 0)
         self.assertIsNone(counters)
@@ -243,10 +179,9 @@ class DeadCounterTests(unittest.TestCase):
         self.assertIn("Struct blobs", " ".join(dead))
 
     def test_each_work_counter_that_stays_at_zero_is_named_alone(self):
-        """The array walker and the movement decoder are additive passes, like
-        the struct blobs: stopping one moves nothing else, so its own work
-        counter is the only thing that can say so -- and the failure must name
-        the gates it leaves without evidence."""
+        """The array walker and movement decoder are additive like the struct
+        blobs, so only their own work counter can say they stopped, and the
+        failure must name the gates it leaves without evidence."""
         for key, label, gate in MAIN_WORK_CASES:
             with self.subTest(counter=key):
                 dead = guard.dead_counters(dict(WORKING_TOTALS, **{key: 0}))
@@ -269,15 +204,10 @@ class DeadCounterTests(unittest.TestCase):
 
 
 class ReconcileTests(unittest.TestCase):
-    """`Rows offered` is defined in summary.rs as the sum of five categories;
-    this tool used to print only four of them. `reconcile()` is the check that
-    the five categories this tool now prints actually add up to the sixth
-    number it also prints, so a reader never has to go read Rust source to
-    make the totals add up.
-    """
+    """`reconcile()`: the five printed overlay categories must add up to
+    `Rows offered`, as summary.rs defines it."""
 
     def test_the_live_export_reconciles(self):
-        """742738 + 0 + 72644 + 171605 + 1996 = 988983 -- measured, not invented."""
         counters, err = guard.read_counters(LIVE_EXPORT, 0)
         self.assertEqual(err, "")
         self.assertIsNone(guard.reconcile(counters))
@@ -292,9 +222,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertIn("986,987", problem)  # the wrong sum without no_field_name
 
     def test_no_field_name_absent_from_totals_is_a_loud_error_not_a_silent_zero(self):
-        """`.get(..., 0)` here would make an absent counter reconcile by
-        accident -- the same doctrine violation this whole fix exists to
-        close. Indexing directly means a missing key raises."""
+        """`.get(..., 0)` would let an absent counter reconcile by accident;
+        indexing raises."""
         totals = dict(decoded_ok=129000, decode_errors=0, raw_skip=900,
                       not_in_table=100, rows_offered=130000)
         with self.assertRaises(KeyError):
@@ -302,32 +231,21 @@ class ReconcileTests(unittest.TestCase):
 
 
 class ArgParsingTests(unittest.TestCase):
-    """Defect 1 wiring: discovery now goes through corpus_scan.py."""
-
-    def test_recursive_defaults_to_false(self):
-        args = guard.parse_args(["vrfkit.exe", "corpus"])
-        self.assertFalse(args.recursive)
-
-    def test_recursive_flag_is_readable(self):
-        args = guard.parse_args(["vrfkit.exe", "corpus", "--recursive"])
-        self.assertTrue(args.recursive)
-
-    def test_checkpoints_defaults_to_false(self):
-        """The existing invocation in docs/USAGE.md must keep working
-        unchanged -- checkpoints cost real time and disk, so opt-in only."""
-        args = guard.parse_args(["vrfkit.exe", "corpus"])
-        self.assertFalse(args.checkpoints)
-
-    def test_checkpoints_flag_is_readable(self):
-        args = guard.parse_args(["vrfkit.exe", "corpus", "--checkpoints"])
-        self.assertTrue(args.checkpoints)
-
-    def test_identifier_redaction_is_opt_in(self):
+    def test_every_flag_is_opt_in_and_checkpoints_reach_the_export_argv(self):
+        """Every flag is opt-in, so docs/USAGE.md's invocation keeps working,
+        and `--checkpoints` must reach the `vrfkit export` argv."""
         plain = guard.parse_args(["vrfkit.exe", "corpus"])
-        private = guard.parse_args(
-            ["vrfkit.exe", "corpus", "--redact-identifiers"])
-        self.assertFalse(plain.redact_identifiers)
-        self.assertTrue(private.redact_identifiers)
+        for flag in ("recursive", "checkpoints", "redact_identifiers"):
+            with self.subTest(flag=flag):
+                self.assertFalse(getattr(plain, flag))
+                given = guard.parse_args(
+                    ["vrfkit.exe", "corpus", "--" + flag.replace("_", "-")])
+                self.assertTrue(getattr(given, flag))
+        paths = (Path("vrfkit.exe"), Path("a.vrf"), Path("out"))
+        self.assertNotIn("--checkpoints",
+                         guard.export_command(*paths, with_checkpoints=False))
+        self.assertIn("--checkpoints",
+                      guard.export_command(*paths, with_checkpoints=True))
 
 
 #: The `=== Checkpoints ===` block, appended to a healthy main summary, exactly
@@ -348,27 +266,9 @@ CLEAN_WITH_CHECKPOINTS = LIVE_EXPORT + """
 """
 
 
-class ExportCommandTests(unittest.TestCase):
-    """The scope hole: `--checkpoints` must reach the `vrfkit export` argv,
-    not just this tool's own flag parsing."""
-
-    def test_without_the_flag_the_export_command_omits_checkpoints(self):
-        cmd = guard.export_command(Path("vrfkit.exe"), Path("a.vrf"), Path("out"),
-                                   with_checkpoints=False)
-        self.assertNotIn("--checkpoints", cmd)
-
-    def test_with_the_flag_the_export_command_carries_checkpoints(self):
-        cmd = guard.export_command(Path("vrfkit.exe"), Path("a.vrf"), Path("out"),
-                                   with_checkpoints=True)
-        self.assertIn("--checkpoints", cmd)
-
-
 class CheckpointCounterTests(unittest.TestCase):
-    """Follows the module's own discipline: a checkpoint counter that stops
-    being printed must be a failure, never read as a passing zero -- read the
-    module docstring's RoundResults/13.02 incident, now one level down for the
-    checkpoint pass specifically.
-    """
+    """A checkpoint counter that stops being printed is a failure, never a
+    passing zero."""
 
     def test_default_call_does_not_require_checkpoint_counters(self):
         """Backward compatible: a summary with no checkpoint block at all is
@@ -408,11 +308,8 @@ class CheckpointCounterTests(unittest.TestCase):
         self.assertIsNone(counters)
 
     def test_a_summary_missing_just_checkpoint_fails_is_unreadable_when_required(self):
-        """Each of the three checkpoint lines packs several counters into one
-        regex (see CHECKPOINT_COUNTERS), so a line either supplies all of its
-        counters or none of them -- dropping just "Checkpoint fails" must
-        still make the whole replay unreadable, not just those three counters
-        silently absent from the total."""
+        """A line packing several counters supplies all of them or none:
+        dropping just "Checkpoint fails" makes the whole replay unreadable."""
         text = "\n".join(
             l for l in CLEAN_WITH_CHECKPOINTS.splitlines()
             if "Checkpoint fails" not in l)
@@ -433,10 +330,8 @@ class CheckpointCounterTests(unittest.TestCase):
             if "Checkpoint blobs" not in l)
         counters, err = guard.read_counters(text, 0, require_checkpoints=True)
         self.assertIsNone(counters)
-        # The message must name the missing line itself. This used to also
-        # assert "Checkpoint fails" was in `err`, which only the log tail
-        # appended to the message satisfied -- that line was the fixture's
-        # last -- so it tested the fixture's order, not the parse.
+        # The message itself must name the line: the log tail appended to it
+        # could satisfy a containment check.
         self.assertTrue(err.startswith("no Checkpoint blobs ... decoded counter"),
                         err)
 
@@ -451,12 +346,8 @@ SUMMARY_RS = (
 
 def _overlay_format_string(source: str) -> str:
     """The checkpoint `Overlay:` format string as summary.rs literally spells it.
-
-    Anchored on `Overlay:` inside a quoted Rust literal. The main pass prints
-    its overlay counters one-per-line and has no such literal, so this is
-    unambiguous -- but the count is asserted rather than assumed, because a
-    second matching literal would make "the format string" a coin toss.
-    """
+    The number of matching literals is asserted, not assumed: a second one
+    would make "the format string" a coin toss."""
     matches = re.findall(r'"(  Overlay:[^"]*)"', source)
     if len(matches) != 1:
         raise AssertionError(
@@ -467,18 +358,9 @@ def _overlay_format_string(source: str) -> str:
 
 
 class SummaryFormatDriftTests(unittest.TestCase):
-    """The regex is pinned against the REAL format string, read off summary.rs.
-
-    This is the defect that made the test necessary, not a hypothetical. The
-    Rust side grew a seventh field -- `conflicts` -- and `CHECKPOINT_OVERLAY`
-    still asked for six, so it matched NOTHING on a live `--checkpoints` run.
-    The fixture in this very file pinned the stale six-field format, so the
-    suite stayed green while the check it guards could not run at all.
-
-    A hand-copied fixture cannot catch that: it drifts in exactly the same
-    step as the regex. Reading summary.rs means the NEXT field added there
-    turns this red, which is the only version of this test that works.
-    """
+    """The regex is pinned against the real format string, read off
+    summary.rs: a hand-copied fixture drifts in the same step as the regex, so
+    only the Rust literal turns red when the next field is added there."""
 
     def setUp(self):
         if not SUMMARY_RS.is_file():
@@ -486,12 +368,8 @@ class SummaryFormatDriftTests(unittest.TestCase):
         self.source = SUMMARY_RS.read_text(encoding="utf-8")
 
     def test_the_regex_matches_the_line_summary_rs_actually_prints(self):
-        """Render summary.rs's own format string and match the regex on it.
-
-        Each `{}` becomes a distinct number, so a regex that matched the line
-        while mis-assigning its groups fails here too, not just one that fails
-        to match at all.
-        """
+        """Render summary.rs's format string with a distinct number per `{}`,
+        so a regex that matches while mis-assigning its groups fails too."""
         fmt = _overlay_format_string(self.source)
         placeholders = fmt.count("{}")
         values = [str(11 * (n + 1)) for n in range(placeholders)]
@@ -507,8 +385,8 @@ class SummaryFormatDriftTests(unittest.TestCase):
             f"  rendered  : {rendered}\n"
             f"  regex     : {guard.CHECKPOINT_OVERLAY.pattern}\n"
             f"A field was added to or removed from the Rust format string. "
-            f"Update CHECKPOINT_OVERLAY, CHECKPOINT_COUNTERS group numbers, "
-            f"and CHECKPOINT_REQUIRED together.",
+            f"Update CHECKPOINT_OVERLAY and CHECKPOINT_COUNTERS' group numbers "
+            f"and labels together.",
         )
         self.assertEqual(
             list(match.groups()), values,
@@ -517,15 +395,11 @@ class SummaryFormatDriftTests(unittest.TestCase):
         )
 
     def test_every_field_summary_rs_prints_is_a_named_counter(self):
-        """A captured group nothing names is a counter that reaches no total.
-
-        The group count and the CHECKPOINT_COUNTERS entries pointing at this
-        pattern must agree, or a field is parsed and then dropped -- read but
-        never summed, never required, never printed.
-        """
+        """The group count and the CHECKPOINT_COUNTERS entries on this pattern
+        must agree, or a field is parsed and never summed or required."""
         fmt = _overlay_format_string(self.source)
         named = [
-            key for key, pattern, _group in guard.CHECKPOINT_COUNTERS
+            key for key, pattern, _group, _label in guard.CHECKPOINT_COUNTERS
             if pattern is guard.CHECKPOINT_OVERLAY
         ]
         self.assertEqual(
@@ -534,7 +408,7 @@ class SummaryFormatDriftTests(unittest.TestCase):
             f"CHECKPOINT_COUNTERS names {len(named)} of them: {named}",
         )
         groups = sorted(
-            group for _key, pattern, group in guard.CHECKPOINT_COUNTERS
+            group for _key, pattern, group, _label in guard.CHECKPOINT_COUNTERS
             if pattern is guard.CHECKPOINT_OVERLAY
         )
         self.assertEqual(
@@ -543,31 +417,9 @@ class SummaryFormatDriftTests(unittest.TestCase):
             f"exactly 1..{fmt.count('{}')}: {groups}",
         )
 
-    def test_every_overlay_counter_is_required_and_reaches_a_total(self):
-        """Parsed is not enough: each must be REQUIRED and must be printed.
-
-        `conflicts` was the field the regex missed; a fix that parsed it but
-        left it out of CHECKPOINT_REQUIRED would let a summary that stopped
-        printing it read as fine, which is this repo's named failure mode.
-        """
-        required = {key for key, _label in guard.CHECKPOINT_REQUIRED}
-        for key, pattern, _group in guard.CHECKPOINT_COUNTERS:
-            if pattern is not guard.CHECKPOINT_OVERLAY:
-                continue
-            with self.subTest(counter=key):
-                self.assertIn(
-                    key, required,
-                    f"{key} is parsed but not REQUIRED: a summary that stops "
-                    f"printing it would read as a pass",
-                )
-
     def test_the_fixture_in_this_file_matches_summary_rs_field_count(self):
-        """CLEAN_WITH_CHECKPOINTS is the fixture that drifted. Pin it too.
-
-        The stale fixture is what let the suite stay green: it described a
-        six-field line the Rust side had stopped printing, so every test built
-        on it agreed with the broken regex.
-        """
+        """CLEAN_WITH_CHECKPOINTS is pinned too: a stale fixture lets every
+        test built on it agree with a broken regex."""
         fmt = _overlay_format_string(self.source)
         fixture = [
             line for line in CLEAN_WITH_CHECKPOINTS.splitlines()
@@ -582,9 +434,7 @@ class SummaryFormatDriftTests(unittest.TestCase):
 
 
 class DeadCheckpointCounterTests(unittest.TestCase):
-    """Mirrors DeadCounterTests for the checkpoint pass: a corpus where the
-    checkpoint decoders never ran must not read as a clean checkpoint sweep.
-    """
+    """DeadCounterTests for the checkpoint pass."""
 
     WORKING = {"checkpoint_decoded": 500, "checkpoint_blobs_decoded": 8,
                "checkpoint_array_elements": 44652,
@@ -602,30 +452,35 @@ class DeadCheckpointCounterTests(unittest.TestCase):
          "Checkpoint leaf errors"),
     )
 
+    @staticmethod
+    def dead(totals):
+        return guard.dead_counters(totals, guard.CHECKPOINT_MUST_MOVE,
+                                   " (with --checkpoints)")
+
     def test_a_working_checkpoint_corpus_has_no_dead_counters(self):
-        self.assertEqual(guard.dead_checkpoint_counters(self.WORKING), [])
+        self.assertEqual(self.dead(self.WORKING), [])
 
     def test_a_corpus_where_no_checkpoint_field_decoded_is_not_a_pass(self):
         totals = dict(self.WORKING, checkpoint_decoded=0)
-        dead = guard.dead_checkpoint_counters(totals)
+        dead = self.dead(totals)
         self.assertTrue(dead)
 
     def test_a_corpus_where_no_checkpoint_blob_decoded_is_not_a_pass(self):
         totals = dict(self.WORKING, checkpoint_blobs_decoded=0)
-        dead = guard.dead_checkpoint_counters(totals)
+        dead = self.dead(totals)
         self.assertTrue(dead)
 
     def test_each_checkpoint_work_counter_that_stays_at_zero_is_named_alone(self):
         for key, label, gate in self.CASES:
             with self.subTest(counter=key):
-                dead = guard.dead_checkpoint_counters(dict(self.WORKING, **{key: 0}))
+                dead = self.dead(dict(self.WORKING, **{key: 0}))
                 self.assertEqual(len(dead), 1, dead)
                 self.assertTrue(dead[0].startswith(f"{label} totalled 0"), dead)
                 self.assertIn(gate, dead[0])
 
     def test_a_checkpoint_pass_that_decoded_nothing_fails_on_every_one(self):
         totals = {key: 0 for key in self.WORKING}
-        self.assertEqual(len(guard.dead_checkpoint_counters(totals)),
+        self.assertEqual(len(self.dead(totals)),
                          len(self.CASES))
 
 
@@ -696,16 +551,7 @@ CHECKPOINT_FAILURE_CASES = (
 
 class SinkFailureTests(unittest.TestCase):
     """Every failure counter summary.rs prints must fail the replay it is
-    nonzero on.
-
-    The main pass's `Array decode` / `Array residual` / `Array leaf errs` /
-    `Truncated RPCs` / `Movement errors` lines and the checkpoint pass's
-    `Checkpoint array` truncation/residual and `Checkpoint leaf` lines were
-    printed on every export and never read: a replay carrying seven leaf errors
-    read the same as a clean one, and the run printed OK. verify_build_corpus.py
-    already required every one of them to be zero, so the two tools disagreed
-    about what a failure is.
-    """
+    nonzero on, as verify_build_corpus.py requires."""
 
     def test_a_clean_summary_has_no_failures(self):
         counters, err = guard.read_counters(CLEAN, 0)
@@ -750,8 +596,8 @@ class SinkFailureTests(unittest.TestCase):
         self.assertEqual(guard.replay_failures(counters, checkpoints=True), [])
 
     def test_an_absent_failure_counter_is_a_loud_error_not_a_silent_zero(self):
-        """Indexed, never `.get(key, 0)`: an absent counter must not gate as 0.
-        `REQUIRED` keeps this from firing on a real run."""
+        """Indexed, never `.get(key, 0)`: an absent counter must not gate as 0
+        (`read_counters` requires every counter, so a real run never gets here)."""
         counters, _ = guard.read_counters(CLEAN, 0)
         del counters["array_leaf_errors"]
         with self.assertRaises(KeyError):
@@ -777,10 +623,9 @@ class SinkFailureTests(unittest.TestCase):
                 self.assertIn(f"no {label[:-1]}", err)
 
     def test_a_label_quoted_inside_a_diagnostic_line_is_not_read(self):
-        """`Struct blob err:` and its siblings print free text. A counter label
-        inside one, ahead of the real line, must not be read in its place --
-        here that would read the quoted 0 and pass a replay with 7 leaf
-        errors."""
+        """`Struct blob err:` and its siblings print free text: a label quoted
+        inside one, ahead of the real line, must not be read (here the quoted
+        0 would pass a replay with 7 leaf errors)."""
         text = replace_line(CLEAN, "Array leaf errs:", "Array leaf errs:   7")
         text = replace_line(
             text, "Struct blobs:",
@@ -808,9 +653,8 @@ class SinkFailureTests(unittest.TestCase):
 
 
 #: `(counter key, summary.rs label, which `{}` of that label's format string
-#: the counter reads)`. Declared here rather than derived from the guard's
-#: regexes, so a regex that reads the wrong field of its line is caught
-#: instead of restated.
+#: the counter reads)`, declared rather than derived from the guard's regexes
+#: so a regex reading the wrong field is caught instead of restated.
 SINK_FORMATS = (
     ("movement_rows", "Movement rows:", 0),
     ("movement_errors", "Movement errors:", 0),
@@ -857,14 +701,8 @@ def _format_string(source: str, label: str) -> str:
 
 
 class SinkFormatDriftTests(unittest.TestCase):
-    """The sink regexes, pinned against the format strings summary.rs prints.
-
-    Same reasoning as `SummaryFormatDriftTests`: a fixture in this file drifts
-    in the same step as the regex, so only the Rust literal can catch a label
-    or field change -- and a regex that stopped matching would make every
-    replay unreadable only if its line is REQUIRED, which the last test here
-    pins too.
-    """
+    """The sink regexes, pinned against summary.rs's format strings for the
+    reason `SummaryFormatDriftTests` gives."""
 
     def setUp(self):
         if not SUMMARY_RS.is_file():
@@ -872,9 +710,9 @@ class SinkFormatDriftTests(unittest.TestCase):
         self.source = SUMMARY_RS.read_text(encoding="utf-8")
 
     def test_each_regex_reads_its_own_field_of_the_printed_line(self):
-        main = dict(guard.COUNTERS)
+        main = {key: pattern for key, pattern, _label in guard.COUNTERS}
         checkpoint = {key: (pattern, group)
-                      for key, pattern, group in guard.CHECKPOINT_COUNTERS}
+                      for key, pattern, group, _label in guard.CHECKPOINT_COUNTERS}
         for key, label, index in SINK_FORMATS:
             with self.subTest(counter=key):
                 fmt = _format_string(self.source, label)
@@ -900,13 +738,6 @@ class SinkFormatDriftTests(unittest.TestCase):
             with self.subTest(label=label):
                 fmt = _format_string(self.source, label)
                 self.assertEqual(indices, set(range(fmt.count("{}"))))
-
-    def test_every_sink_counter_is_required(self):
-        required = ({key for key, _label in guard.REQUIRED}
-                    | {key for key, _label in guard.CHECKPOINT_REQUIRED})
-        for key, _label, _index in SINK_FORMATS:
-            with self.subTest(counter=key):
-                self.assertIn(key, required)
 
 
 #: tools/verify_build_corpus.py -- read, not imported, so this module keeps
@@ -950,12 +781,8 @@ def _sink_zero() -> tuple[str, ...]:
 
 
 class VerifyBuildCorpusAgreementTests(unittest.TestCase):
-    """The two corpus tools must agree on what a failure is.
-
-    verify_build_corpus.py gates SINK_ZERO on both passes; this gate used to
-    gate two of those ten on the main pass. A counter added there must be
-    placed here too, or this test names it.
-    """
+    """The two corpus tools must agree on what a failure is: a counter added
+    to verify_build_corpus.py's SINK_ZERO must be placed here too."""
 
     def test_every_sink_zero_counter_has_an_equivalent_here(self):
         self.assertEqual(set(_sink_zero()), set(SINK_ZERO_EQUIVALENTS))
@@ -976,15 +803,7 @@ class VerifyBuildCorpusAgreementTests(unittest.TestCase):
 
 class LivenessCoverageTests(unittest.TestCase):
     """Every failure gate is backed by a work counter that must move, or is
-    declared unbacked with a reason -- never neither.
-
-    The gate that made this necessary: the array, leaf and movement failure
-    counters were added to FAILURES with their work counters parsed, required
-    and printed but never required to MOVE, so an array walker that was never
-    reached passed as "0 array failures" -- the Decoded OK / struct blob hole
-    this module had already closed once. A failure counter added to FAILURES
-    without a work counter, or without saying why it has none, turns this red.
-    """
+    declared unbacked with a reason -- never neither."""
 
     @property
     def PASSES(self):
@@ -992,9 +811,9 @@ class LivenessCoverageTests(unittest.TestCase):
         # these tests, not take the whole module down at import.
         return (
             ("main", guard.FAILURES, guard.MUST_MOVE, guard.UNBACKED,
-             guard.REQUIRED),
+             guard.COUNTERS),
             ("checkpoint", guard.CHECKPOINT_FAILURES, guard.CHECKPOINT_MUST_MOVE,
-             guard.CHECKPOINT_UNBACKED, guard.CHECKPOINT_REQUIRED),
+             guard.CHECKPOINT_UNBACKED, guard.CHECKPOINT_COUNTERS),
         )
 
     def test_every_failure_gate_is_backed_or_declared_unbacked_exactly_once(self):
@@ -1011,7 +830,7 @@ class LivenessCoverageTests(unittest.TestCase):
         ways and backs nothing."""
         for name, failures, must_move, _unbacked, required in self.PASSES:
             failure_keys = {key for key, _label in failures}
-            required_keys = {key for key, _label in required}
+            required_keys = {key for key, *_ in required}
             for key, _label, gates in must_move:
                 with self.subTest(pass_=name, work=key):
                     self.assertIn(key, required_keys)
@@ -1025,16 +844,10 @@ class LivenessCoverageTests(unittest.TestCase):
                     self.assertTrue(why.strip())
 
 
-#: Stand-in for `vrfkit.exe`, playing the part `_export_one` expects --
-#: `[str(exe), "export", str(replay), "--out", str(out)]`. Run under
-#: `sys.executable`, the "export" token becomes the script Python executes (the
-#: same trick `test_check_export_baseline.py` uses for its fake `export`), so a
-#: file literally named `export` in the process's cwd stands in for the real
-#: binary. Every helper above (`read_counters`, `dead_counters`, `reconcile`)
-#: is proven correct on synthetic text; none of that proves `main()` actually
-#: calls them and acts on what they return -- which is exactly the shape of
-#: this file's own recorded defect ("OK: every replay reported Decode errors:
-#: 0" printed over an exporter that never ran). These tests are that call.
+#: Stand-in for `vrfkit.exe` as `_export_one` invokes it: a file named `export`
+#: run under `sys.executable` (see test_validate_corpus's FAKE_VALIDATE_SCRIPT).
+#: The helpers above are proven on synthetic text; these tests prove `main()`
+#: calls them and acts on what they return.
 FAKE_EXPORT_SCRIPT = '''\
 import sys
 from pathlib import Path
@@ -1244,8 +1057,7 @@ class MainWiringTests(unittest.TestCase):
         self.assertIn("Struct blob err:", output)
 
     def test_array_leaf_errors_fail_the_run(self):
-        """The shape that used to print OK: every counter the gate read was
-        clean and `Array leaf errs: 7` sat unread beside them."""
+        """`Array leaf errs: 7` beside otherwise clean counters fails the run."""
         self.make_replay("arrayleaf.vrf")
         code, output = self.run_main()
         self.assertEqual(code, 1, output)
@@ -1304,10 +1116,13 @@ class MainWiringTests(unittest.TestCase):
         self.make_replay("a.vrf")
         code, output = self.run_main(["--checkpoints"])
         self.assertEqual(code, 0, output)
+        # `Movement rows` cannot vouch for the sized tails: only a sized
+        # window counts one, and no measured replay has a sized window.
         self.assertRegex(
             output,
             r"(?m)^unbacked gates    : Truncated RPCs \(summary\.rs prints no "
-            r"count of RPC parameter walks\); CNC brute force unwalked \(.+\)$")
+            r"count of RPC parameter walks\); CNC brute force unwalked \(.+\); "
+            r"Movement tails sized \(.+\)$")
         self.assertRegex(
             output,
             r"(?m)^checkpoint unbacked gates: Checkpoint fails movement \(.+\); "
@@ -1317,10 +1132,10 @@ class MainWiringTests(unittest.TestCase):
         ok = [line for line in output.splitlines() if line.startswith("OK:")]
         self.assertEqual(len(ok), 1, output)
         self.assertIn(
-            "11 backed by work that moved (Decoded OK 90, Struct blobs ... "
+            "10 backed by work that moved (Decoded OK 90, Struct blobs ... "
             "decoded 5, Array decode ... elements 10, Array decode ... fields "
-            "40, Movement rows 100), 2 with no work counter (Truncated RPCs, "
-            "CNC brute force unwalked)",
+            "40, Movement rows 100), 3 with no work counter (Truncated RPCs, "
+            "CNC brute force unwalked, Movement tails sized)",
             ok[0])
         self.assertIn(
             "8 backed by work that moved (Overlay ... decoded (checkpoint) 500, "
@@ -1332,9 +1147,8 @@ class MainWiringTests(unittest.TestCase):
             ok[0])
 
     def test_an_array_walker_that_never_ran_fails_the_run(self):
-        """The finding's shape: Decoded OK, the struct blobs and every failure
-        counter read exactly as on a good run, and `Array decode: 0 elements /
-        0 fields` sat printed and unread beside them. It used to print OK."""
+        """Decoded OK, the struct blobs and every failure counter read as on a
+        good run, beside `Array decode: 0 elements / 0 fields`."""
         self.make_replay("noarray.vrf")
         code, output = self.run_main()
         self.assertEqual(code, 1, output)
@@ -1372,11 +1186,9 @@ class MainWiringTests(unittest.TestCase):
         self.assertNotIn("Checkpoint array ... elements totalled 0", output)
 
     def test_one_replay_that_did_the_work_keeps_the_corpus_alive(self):
-        """Corpus totals, as the docstring says: a replay whose walker found
-        no array beside one whose walker did is not a dead counter. (A
-        per-replay rule would need every healthy replay to carry arrays;
-        the 2026-09-28 audit measured that they all do, but the gate does not
-        depend on it.)"""
+        """Corpus totals: a replay whose walker found no array beside one
+        whose walker did is not a dead counter (every healthy replay carried
+        arrays in the 2026-09-28 audit, but the gate does not depend on it)."""
         self.make_replay("a.vrf")
         self.make_replay("noarray.vrf")
         code, output = self.run_main()

@@ -1,52 +1,40 @@
 #!/usr/bin/env python3
 """Pin the export path's own numbers and fail when they drift.
 
-`check_corpus_baseline.py` guards the *validate* path. Nothing guarded the
-*export* path, so every figure the export summary prints -- content blocks,
-fields, RPCs, movement rows, NetGUID rows, decode errors, the four Parquet
-files themselves -- was pinned only in a comment in the task brief and in
-docs/archive/PROJECT_STATUS.md prose. `NetGUID rows: 16167` is the clearest
-case: no harness read it, because `validate` never writes Parquet and
-`validate_corpus.py`'s PATTERNS has no entry for a counter the oracle does
-not print.
-
-That is the same shape as the malformed counter, which went unread for the
-project's whole history because its regex never matched. A number nobody
-machine-checks is not guarded, however often it appears in a document.
+`check_corpus_baseline.py` guards the *validate* path; this guards *export*:
+the counters its summary prints and the six main Parquet files (the
+checkpoint tables too, under `--checkpoints`). A number nobody machine-checks
+is not guarded, however often a document quotes it.
 
 Two independent checks run here, and they fail on different things:
 
   1. CROSS-CHECK.   Some printed counters are identities against the Parquet
      files: `NetGUID rows` is net_guids.parquet's row count, `Movement rows`
-     is movement.parquet's, `Event rows` is events.parquet's, and
-     `Actor opens + Actor closes` is actors.parquet's. If the summary and the
-     file disagree, the summary is lying, and this fails with no baseline
-     needed. The set lives in `cross_check_identities`; do not restate its
-     size here, where it cannot be checked.
+     is movement.parquet's, `Actor opens + Actor closes` is actors.parquet's,
+     and so on. If the summary and the file disagree, the summary is lying,
+     and this fails with no baseline needed; so does a counter the summary
+     did not print. The set lives in `cross_check_identities`; do not
+     restate its size here, where it cannot be checked.
      (fields.parquet has no such identity: it also carries RPC parameters and
      flattened dynamic-array leaves, so its row count is pinned, not derived.)
 
   2. BASELINE.      Every counter and every Parquet row count and byte size is
-     compared against a pinned JSON. This is what catches the other failure
-     mode -- the data moving and the summary faithfully reporting the new,
-     wrong number. A cross-check alone cannot see that.
-     A byte-size difference with every counter equal means the row VALUES
-     moved -- or that the parquet crate version did. Cargo.lock pins it, so
-     check that before assuming a data bug, and do not disable the guard.
+     compared against a pinned JSON. This catches the other failure mode --
+     the data moving and the summary faithfully reporting the new, wrong
+     number -- which a cross-check alone cannot see. A byte-size difference
+     with every counter equal means the row VALUES moved, or the parquet
+     crate did: Cargo.lock pins it, so check that before assuming a data bug,
+     and do not disable the guard.
 
-Both were confirmed to fail on a deliberately broken build before this was
-committed; see the commit message.
+With `--checkpoints` a third check, `checkpoint_guid_crosscheck`, holds each
+checkpoint GUID path rebuilt by the path-index rule against the main stream's
+own declaration; it needs no baseline either.
 
-With `--checkpoints` a third check runs, `checkpoint_guid_crosscheck`: every
-checkpoint GUID entry's path, rebuilt from the raw declaration record by the
-checkpoint reader's path-index rule, must equal the path the main stream's own
-reader declared for that GUID. It needs no baseline either; see its docstring
-and docs/CHECKPOINT_PATH_RESOLUTION.md.
-
-The .vrf lives outside the repo (under valplay), so a missing replay is
-reported and SKIPPED rather than failed -- the same reasoning as
-check_corpus_baseline.py: a guard that fails on someone else's machine gets
-disabled, and a disabled guard protects nothing.
+The .vrf lives outside the repo: a baseline names it by bare filename,
+resolved against VRFKIT_CORPUS_DIR. A missing replay is reported and SKIPPED
+rather than failed (unless --require-input or VRFKIT_REQUIRE_CORPUS is set):
+a guard that fails on someone else's machine gets disabled, and a disabled
+guard protects nothing.
 
 Usage:
     python tools/check_export_baseline.py --baseline tools/baselines/export_02d4d478.json
@@ -56,7 +44,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -68,20 +55,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import atomic_write_text, sha256_file
 else:  # direct script execution
-    from atomic_io import atomic_write_text
+    from atomic_io import atomic_write_text, sha256_file
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
 
 # Counters the export summary prints, anchored on the exact labels
-# crates/vrfkit/src/driver/summary.rs emits. NOT every line: on 2026-09-28,
-# 57 of the 114 labelled `eprintln!` lines in summary.rs had no pattern here
-# or in CHECKPOINT_COUNTERS, and a line in neither dict is not pinned. A label
-# listed here that stops being printed is reported as missing rather than
-# defaulted to 0, because a counter that silently reads as absent is how this
-# class of bug survives.
+# crates/vrfkit/src/driver/summary.rs emits. Not every line is pinned: on
+# 2026-09-28, 57 of the 114 labelled `eprintln!` lines in summary.rs had no
+# pattern here or in CHECKPOINT_COUNTERS. A listed label that stops being
+# printed reads as missing (None), never as 0.
 COUNTERS = {
     "chunks": r"Chunks:\s+(\d+)",
     "packets": r"Packets:\s+(\d+)",
@@ -90,7 +75,9 @@ COUNTERS = {
     "rep_layout_blocks": r"RepLayout blocks:\s+(\d+)",
     "class_net_cache_blocks": r"ClassNetCache:\s+(\d+)",
     "fields": r"Fields:\s+(\d+)",
-    "rpcs": r"RPCs:\s+(\d+)",
+    # Anchored: unanchored, it also read `Truncated RPCs:` whenever that line
+    # came first or this one went missing.
+    "rpcs": r"(?m)^\s*RPCs:\s+(\d+)\s*$",
     "actor_opens": r"Actor opens:\s+(\d+)",
     "actor_closes": r"Actor closes:\s+(\d+)",
     "bunches": r"Bunches:\s+(\d+)",
@@ -110,18 +97,14 @@ COUNTERS = {
     "overlay_not_in_table": r"Not in table:\s+(\d+)",
     "overlay_no_field_name": r"No field name:\s+(\d+)",
     "overlay_rows_offered": r"Rows offered:\s+(\d+)",
-    # Not part of the overlay ratio: the overlay buckets are decided before the
-    # effect pass runs, so a successful effect decode moves none of the five
-    # counters above. Without this line the only evidence that the decoder ran
-    # is fields.parquet's byte count, and a byte count cannot say whether the
-    # decoder produced values or merely different padding.
+    # Outside the overlay ratio: the overlay buckets are decided before the
+    # effect pass runs, so without this line only fields.parquet's byte count
+    # would show the effect decoder ran, and bytes cannot say it made values.
     "effect_blobs_decoded": r"Effect blobs:\s+(\d+)",
-    # The counter that would have caught build 13.02 on day one. Its decoders
-    # are additive, so when RoundResults moved from handle 93 to 81 nothing
-    # else on this summary twitched: same blocks, same fields, same rows, same
-    # "Decode errors: 0" -- and no match score in the Parquet. `failed` is the
-    # alarm; `decoded` is what keeps a decoder that silently stops running
-    # (0 decoded, 0 failed) from reading the same as a clean one.
+    # Additive decoders: when 13.02 moved RoundResults from handle 93 to 81,
+    # nothing else on this summary moved and the match score vanished from the
+    # Parquet. `failed` is the alarm; `decoded` keeps a decoder that stops
+    # running (0 decoded, 0 failed) from reading as a clean one.
     "struct_blobs_decoded": r"Struct blobs:\s+(\d+) decoded",
     "struct_blobs_failed": r"Struct blobs:\s+\d+ decoded / (\d+) failed",
     "targeting_world_locations_decoded": r"(?m)^\s*Target locations:\s+(\d+) array children\s*$",
@@ -132,13 +115,10 @@ COUNTERS = {
         r"(?m)^\s*Reward opaque:\s+(\d+) empty variants\s*$"
     ),
     # The AbilitiesAndBuffs ClassNetCache brute force and the post-RepLayout
-    # tails. `CNC RPC rows` counts successes only, and it also counts the
-    # tail decodes, so it can only shrink when the fc=34 walk stops fitting;
-    # `unwalked` is the line that names that failure and `attempted` its
-    # denominator. The summary.rs header claimed every line was pinned here
-    # while these had no pattern at all. Anchored at the line start: the
-    # checkpoint block prints "Checkpoint CNC brute force:", which an
-    # unanchored pattern would read whenever the main line went missing.
+    # tails. `CNC RPC rows` counts successes (tail decodes included), so it can
+    # only shrink when the fc=34 walk stops fitting; `unwalked` names that
+    # failure and `attempted` its denominator. Anchored at the line start:
+    # "Checkpoint CNC brute force:" contains "CNC brute force:".
     "cnc_rpcs_emitted": r"(?m)^\s*CNC RPC rows:\s+(\d+)\s*$",
     "cnc_bruteforce_payloads_attempted": (
         r"(?m)^\s*CNC brute force:\s+(\d+) attempted / \d+ unwalked\s*$"
@@ -167,11 +147,10 @@ COUNTERS = {
     "movement_open_section_tail_bits": (
         r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
     ),
-    # Section bytes the DemoFrame walk stepped over. The skip is
-    # length-prefixed, so a build that starts sending ExternalData or
-    # GameSpecificFrameData moves nothing else here. Anchored: `cp_frames`
-    # below is the unanchored `Frames:\s+(\d+)`, and the two must never be
-    # able to read each other's line.
+    # Section bytes the DemoFrame walk stepped over; the skip is length-
+    # prefixed, so a build that starts sending ExternalData or
+    # GameSpecificFrameData moves nothing else here. Anchored so this and the
+    # unanchored `cp_frames` can never read each other's line.
     "frame_external_data_blobs": (
         r"(?m)^\s*Frame skips:\s+(\d+) external blobs / \d+ external bytes"
         r" / \d+ game-specific bytes\s*$"
@@ -266,24 +245,10 @@ CHECKPOINT_PARQUET_FILES = (
 )
 
 
-def sha256_file(path: Path) -> str:
-    """Return a measured content digest without loading a Parquet file whole."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def cross_check_identities(counters: dict, parquet: dict) -> list:
-    """The printed counters that ARE Parquet row counts.
-
-    Each entry is (label, printed value, actual rows). Split out from
-    `cross_checks` so the pass message can count them instead of stating a
-    literal: the message said "3" for as long as there were three, and adding
-    the fourth made it report a number it had not checked -- the same class of
-    claim this whole script exists to catch.
-    """
+    """The printed counters that ARE Parquet row counts, as (label, printed
+    value, actual rows); split out so the pass message counts them rather than
+    stating a literal."""
     identities = [
         ("NetGUID rows", counters.get("net_guid_rows"), parquet["net_guids"]["rows"]),
         ("Movement rows", counters.get("movement_rows"), parquet["movement"]["rows"]),
@@ -330,11 +295,8 @@ def cross_check_identities(counters: dict, parquet: dict) -> list:
 
 def cross_checks(counters: dict, parquet: dict) -> list[str]:
     """Disagreement between a printed counter and its Parquet file = a lie.
-
-    A counter the summary did not print is itself a failure: the identity
-    cannot be checked, which is exactly the state that let the malformed
-    counter read as a vacuous 0.
-    """
+    A counter the summary did not print fails too: its identity cannot be
+    checked."""
     out = []
     for label, printed, actual in cross_check_identities(counters, parquet):
         if printed is None:
@@ -357,13 +319,10 @@ def cross_checks(counters: dict, parquet: dict) -> list[str]:
 def unpinnable(current: dict) -> list[str]:
     """Counters this run did not measure, which therefore must not be pinned.
 
-    `measure` records a counter the summary did not print as None rather than
-    0, for the reason stated at `COUNTERS`. Writing that None into the baseline
-    undoes the whole point: from then on a summary that has STOPPED printing
-    the counter compares equal to it, and the drift check reports OK.
-
-    The cross-check already refuses this for the four counters that are Parquet
-    row identities. This covers the rest, which had nothing.
+    `measure` records an unprinted counter as None, never 0; pinned, that None
+    would compare equal to a summary that has STOPPED printing the counter.
+    The cross-check refuses this for the Parquet row identities
+    (`cross_check_identities`); this covers every other counter.
     """
     return [f"{key}: the export summary did not print it"
             for key in sorted(current["counters"])
@@ -448,12 +407,11 @@ def format_guid_crosscheck(counts: dict) -> str:
 def _outer_verdict(checkpoint_outer: int, main_outer: int | None) -> str:
     """Compare outers under an explicit rule; never fold null into 0.
 
-    `checkpoint_guid_entries` keeps the wire value, where 0 means "no outer".
-    `net_guids` writes null for "no outer" and never writes 0, the invalid
-    GUID. So checkpoint 0 must meet main null, and a non-zero checkpoint outer
-    must meet the same main value. A main 0 is a presence difference, not a
-    match for checkpoint 0: folding null into 0 would let the main table start
-    writing 0 without this check noticing.
+    `checkpoint_guid_entries` keeps the wire value, 0 meaning "no outer";
+    `net_guids` writes null for "no outer" and never 0, the invalid GUID. So
+    checkpoint 0 must meet main null and a non-zero outer the same main value.
+    A main 0 is a presence difference, not a match for checkpoint 0, or the
+    main table could start writing 0 unnoticed.
     """
     checkpoint_present = checkpoint_outer != 0
     main_present = main_outer is not None
@@ -470,23 +428,21 @@ def checkpoint_guid_crosscheck(out_dir: Path) -> tuple[dict, list[str]]:
     Returns `(counts, errors)`: every key of `GUID_CROSSCHECK_KEYS`, and one
     message per reason the check fails. An empty error list is a pass.
 
-    A checkpoint GUID entry carries its path either as a literal or as an index.
+    A checkpoint GUID entry carries its path as a literal or as an index, and
     `checkpoint_guid_entries.parquet` keeps the raw record, so the path is
-    rebuilt here by the reader's rule (docs/CHECKPOINT_PATH_RESOLUTION.md): the
-    index is a zero-based position among the literals that appeared earlier
-    in the same checkpoint, indexed entries are not added to that table, and
-    the table starts empty for every `checkpoint_index`. Grouping is by
-    `checkpoint_index`, never `checkpoint_id` -- IDs repeat within a replay.
-    Rows are put in `(checkpoint_index, ordinal)` order first rather than
-    trusted to arrive in it.
+    rebuilt here by the reader's rule (docs/CHECKPOINT_PATH_RESOLUTION.md):
+    the index is a zero-based position among the literals earlier in the same
+    checkpoint, indexed entries do not join that table, and it starts empty
+    for every `checkpoint_index`. Grouping is by `checkpoint_index`, never
+    `checkpoint_id` (IDs repeat within a replay), after sorting rows by
+    `(checkpoint_index, ordinal)`.
 
     The main stream declares the same server GUIDs through a separate reader
-    into a separate cache, written as `net_guids.parquet`; its paths never pass
-    through the index rule. Each entry is joined to it by `net_guid` and the
-    path and outer GUID are compared (see `_outer_verdict`). Literal entries
-    are compared too: they do not test the rule, but they test the premise
-    that a GUID number names the same path in both tables. Agreement is
-    evidence for the path-index rule, not for actor identity across streams.
+    into `net_guids.parquet`, never through the index rule. Each entry is
+    joined to it by `net_guid` and its path and outer compared
+    (`_outer_verdict`); literal entries test the premise that a GUID number
+    names the same path in both tables. Agreement is evidence for the
+    path-index rule, not for actor identity across streams.
 
     Fails on any path or outer difference, an index past the preceding
     literals, duplicate `net_guid` keys in the main table, malformed rows or
@@ -580,90 +536,72 @@ def checkpoint_guid_crosscheck(out_dir: Path) -> tuple[dict, list[str]]:
     return counts, errors
 
 
+def _manifest_agreement(out_dir: Path, counters: dict, what: str, pick) -> list[str]:
+    """The counts `pick` reads from the manifest's `quality` object must be
+    nonnegative integers equal to the summary's; `what` names them in every
+    message."""
+    try:
+        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
+        values = pick(quality)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [f"manifest omits {what} quality data: {exc}"]
+    if any(type(value) is not int or value < 0 for value in values.values()):
+        return [f"{what} counts must be nonnegative integers"]
+    return [f"manifest {key}={value} disagrees with summary {counters.get(key)}"
+            for key, value in values.items() if counters.get(key) != value]
+
+
+def _sink_counts(key: str, checkpoints: bool):
+    """A `pick` for `quality.sink[key]` and, with checkpoints, its `cp_` twin."""
+    def pick(quality):
+        values = {key: quality["sink"][key]}
+        if checkpoints:
+            values["cp_" + key] = quality["checkpoints"]["sink"][key]
+        return values
+    return pick
+
+
 def reward_opaque_manifest_errors(
     out_dir: Path, counters: dict, checkpoints: bool,
 ) -> list[str]:
-    """The measured reward count must agree between CLI and manifest.
-
-    It is deliberately not folded into a decode-error-zero gate: the count
-    records a known opaque payload variant and can legitimately be nonzero.
-    """
-    try:
-        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
-        main = quality["sink"]["tracked_rewards_opaque_empty_variants"]
-        checkpoint = (quality["checkpoints"]["sink"]
-                      ["tracked_rewards_opaque_empty_variants"]
-                      if checkpoints else None)
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        return [f"manifest omits tracked rewards opaque-empty quality data: {exc}"]
-    values = {"tracked_rewards_opaque_empty_variants": main}
-    if checkpoints:
-        values["cp_tracked_rewards_opaque_empty_variants"] = checkpoint
-    if any(type(value) is not int or value < 0 for value in values.values()):
-        return ["tracked rewards opaque-empty counts must be nonnegative integers"]
-    return [
-        f"manifest {key}={value} disagrees with summary {counters.get(key)}"
-        for key, value in values.items()
-        if counters.get(key) != value
-    ]
+    """The measured reward count must agree between CLI and manifest. Not a
+    zero gate: it counts a known opaque payload variant, legitimately nonzero."""
+    return _manifest_agreement(out_dir, counters, "tracked rewards opaque-empty", _sink_counts(
+        "tracked_rewards_opaque_empty_variants", checkpoints))
 
 
 def targeting_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
     """Require the additive targeting count even when it is zero."""
-    key = "targeting_world_locations_decoded"
-    try:
-        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
-        values = {key: quality["sink"][key]}
-        if checkpoints:
-            values["cp_" + key] = quality["checkpoints"]["sink"][key]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return [f"manifest omits targeting world-location quality data: {exc}"]
-    if any(type(value) is not int or value < 0 for value in values.values()):
-        return ["targeting world-location counts must be nonnegative integers"]
-    return [f"manifest {name}={value} disagrees with summary {counters.get(name)}"
-            for name, value in values.items() if counters.get(name) != value]
+    return _manifest_agreement(out_dir, counters, "targeting world-location", _sink_counts(
+        "targeting_world_locations_decoded", checkpoints))
 
 
 def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
     """The frame-skip tallies must agree between CLI and manifest, zeros included.
 
-    Not a zero gate: skipping these sections is what the reference does, so
-    a non-zero count is data this parser leaves undecoded, not a failure. What
-    must hold is that the two outputs report the same measurement.
-
-    It cannot see a tally that never reaches them. Each pass feeds its summary
-    line and its manifest keys from one variable, so a pass that stops
-    absorbing its frame walk reports 0 in both, and 0 is also the value the
-    committed baselines pin for 02d4d478. The guard for that wiring is
-    crates/vrfkit/tests/frame_skips.rs, which runs the binary on a replay
-    that carries both sections.
+    Not a zero gate: the reference skips these sections too, so a non-zero
+    count is data left undecoded, not a failure. It cannot see a pass that
+    stops absorbing its frame walk: summary and manifest read one variable, so
+    both would say 0, the value 02d4d478's baselines pin.
+    crates/vrfkit/tests/frame_skips.rs guards that wiring on a replay carrying
+    both sections.
     """
-    try:
-        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
+    def pick(quality):
         values = {f"frame_{key}": quality[f"frame_{key}"] for key in FRAME_SKIP_KEYS}
         if checkpoints:
             values.update({f"cp_frame_{key}": quality["checkpoints"][f"checkpoint_frame_{key}"]
                            for key in FRAME_SKIP_KEYS})
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return [f"manifest omits frame-skip quality data: {exc}"]
-    if any(type(value) is not int or value < 0 for value in values.values()):
-        return ["frame-skip counts must be nonnegative integers"]
-    return [f"manifest {name}={value} disagrees with summary {counters.get(name)}"
-            for name, value in values.items() if counters.get(name) != value]
+        return values
+    return _manifest_agreement(out_dir, counters, "frame-skip", pick)
 
 
 def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -> dict:
     """Export one replay and collect the summary counters and Parquet shape.
 
-    The exporter transactionally replaces the complete output directory.  Do
-    not delete it here first: on export failure the previous complete result
-    must remain available, while a successful replacement removes stale files
-    by construction.
-
-    `checkpoints` runs the optional Checkpoint pass and pins its counters and
-    its table too. That path is off by default in the exporter, and an
-    unguarded optional path is the shape of every silent change this script
-    exists to prevent -- so it gets a baseline of its own rather than none.
+    The exporter replaces the output directory transactionally, so it is not
+    deleted here first: a failed export must leave the previous complete
+    result. `checkpoints` runs the optional Checkpoint pass and pins its
+    counters and tables too, so the off-by-default path has a baseline.
     """
     cmd = [str(exe), "export", str(replay), "--out", str(out_dir)]
     if checkpoints:
@@ -763,6 +701,15 @@ def main() -> int:
 
     stored = json.loads(args.baseline.read_text(encoding="utf-8")) \
         if args.baseline.exists() else {}
+    # A new baseline pins --replay as given, never the path resolved below:
+    # a path would put one machine's directory into a committed file.
+    if args.update and not stored.get("replay") and args.replay is not None \
+            and args.replay.anchor:
+        print(f"FAILED: --update would write the path {args.replay} into "
+              f"{args.baseline.name}; a baseline names its replay by bare filename. "
+              f"Set VRFKIT_CORPUS_DIR to its directory and pass --replay "
+              f"{args.replay.name}.", file=sys.stderr)
+        return 2
     replay = args.replay or Path(os.path.expandvars(stored.get("replay", "")))
     # A bare filename in the baseline resolves against VRFKIT_CORPUS_DIR so the
     # repo ships no absolute path; an absolute path (old baselines, --replay) is
@@ -805,7 +752,7 @@ def main() -> int:
                   "missing again, which is the failure this file exists to "
                   "catch.")
             return 1
-        payload = {"replay": stored.get("replay") or str(replay), **current}
+        payload = {"replay": stored.get("replay") or str(args.replay), **current}
         atomic_write_text(args.baseline, json.dumps(payload, indent=1) + "\n")
         print(f"wrote {args.baseline} (NetGUID rows "
               f"{current['counters']['net_guid_rows']})")

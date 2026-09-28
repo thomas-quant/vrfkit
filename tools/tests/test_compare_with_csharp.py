@@ -1,26 +1,15 @@
-"""Guards for the C# comparison report.
-
-This one is a REPORT, not a gate: vrfkit deliberately exports more than the C#
-parser does, so most of what it prints is a measurement rather than a verdict,
-and no threshold in it can be defended without the corpus in hand.
-
-What a report still may not do is claim a result it did not measure. Its
-coverage section printed
-
-    ### C# only: NONE -- vrfkit covers everything C# has! (checkmark)
-
-whenever `cs_only` was empty -- including when the C# side yielded no pairs at
-all, which is what an empty, slimmed or wrong events.ndjson produces. Nothing
-compared reads exactly like total coverage.
-
-`main` also returned None and was called bare from `__main__`, so even a
-deliberate nonzero could not have escaped the process.
+"""Guards for the C# comparison report: a report, not a gate, but one that
+must not read an empty C# side as total coverage, and must exit nonzero when
+it measured nothing.
 """
+import contextlib
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -52,12 +41,8 @@ class CoverageProblemTests(unittest.TestCase):
         self.assertIn("no", " ".join(problems).lower())
 
     def test_missing_pairs_alone_are_not_reported_here(self):
-        """C#-only pairs are the report's subject, not a gate.
-
-        vrfkit's stated aim is to reproduce AND EXCEED the C# parser, and what
-        counts as an acceptable miss cannot be decided without the corpus. The
-        section already prints every one of them under INVESTIGATE.
-        """
+        """C#-only pairs are the report's subject, listed under INVESTIGATE,
+        not a gate: an acceptable miss cannot be decided without the corpus."""
         self.assertEqual(guard.coverage_problems({PAIR_A, PAIR_B}, {PAIR_A}), [])
 
 
@@ -97,6 +82,60 @@ class CoverageTextTests(unittest.TestCase):
         joined = " ".join(lines)
         self.assertIn("INVESTIGATE", joined)
         self.assertIn("Armor", joined)
+
+
+class RpcNameTests(unittest.TestCase):
+    """vrfkit writes no RPC-name column or manifest key: its RPC names are the
+    `Function.` prefixes of its ClassNetCache rows, the rows
+    to_valplay_bundle.py builds rpc_received from."""
+
+    CNC = "/Script/ShooterGame.Thing_ClassNetCache"
+
+    def section_4(self) -> str:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cs, vk = root / "cs", root / "vk"
+            cs.mkdir()
+            vk.mkdir()
+            (cs / "manifest.json").write_text("{}", encoding="utf-8")
+            (vk / "manifest.json").write_text("{}", encoding="utf-8")
+            (cs / "events.ndjson").write_text("".join(json.dumps(row) + "\n" for row in [
+                {"type": "export_group_received", "export_group_path": PAIR_A[0],
+                 "payload": {"Health": 100}},
+                {"type": "rpc_received", "function_name": "MulticastShared"},
+                {"type": "rpc_received", "function_name": "MulticastShared"},
+                {"type": "rpc_received", "function_name": "ClientCsharpOnly"},
+            ]), encoding="utf-8")
+            rows = [
+                (PAIR_A[0], "Health"),
+                (self.CNC, "MulticastShared.Damage"),
+                (self.CNC, "MulticastShared.Target"),
+                (self.CNC, "ZeroParamOnly"),        # a zero-parameter RPC is its bare name
+                (self.CNC, guard.UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME),
+                (self.CNC, None),
+                (PAIR_A[0], "Rounds[3].Score"),     # an array leaf, not an RPC
+            ]
+            pq.write_table(pa.table({"group_path": [g for g, _ in rows],
+                                     "field_name": [f for _, f in rows]}),
+                           vk / "fields.parquet")
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["compare_with_csharp.py", str(cs), str(vk)]), \
+                    contextlib.redirect_stdout(output), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                guard.main()
+        report = output.getvalue()
+        return report.split("## 4. RPC name comparison", 1)[1].split("## 5.", 1)[0]
+
+    def test_vrfkit_rpc_names_come_from_class_net_cache_prefixes(self):
+        section = self.section_4()
+        self.assertIn("vrfkit RPC distinct names: 2", section)
+        self.assertIn("C# only: 1", section)
+        self.assertIn("vrfkit only: 1", section)
+        self.assertIn("Both: 1", section)
+        self.assertRegex(section, r"C# only -- ALL 1 .*\n\s+ClientCsharpOnly")
+        self.assertRegex(section, r"vrfkit only -- .*\n\s+ZeroParamOnly")
+        self.assertNotIn("Rounds[3]", section)
+        self.assertNotIn("rpcs_by_name", section)
 
 
 class MovementMultiplicityTests(unittest.TestCase):

@@ -27,9 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 if __package__:
+    from .apply_type_corrections import normalize_type
     from .atomic_io import atomic_write_text
     from .extract_descriptors import csharp_code_view
 else:  # direct script execution; avoid ImportWarning under python -W error.
+    from apply_type_corrections import normalize_type
     from atomic_io import atomic_write_text
     from extract_descriptors import csharp_code_view
 
@@ -44,8 +46,10 @@ TYPE_MARKER = "field_type:"
 
 
 def run_git(repo: Path, *args: str) -> str:
+    # errors="replace": git's messages follow the locale (cp949 on a Korean
+    # Windows), and strict UTF-8 would lose git's message to a decode error.
     result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                            text=True, encoding="utf-8", check=False)
+                            text=True, encoding="utf-8", errors="replace", check=False)
     if result.returncode:
         raise ValueError(f"git {' '.join(args)} failed for {repo}: {result.stderr.strip()}")
     return result.stdout.strip()
@@ -59,12 +63,6 @@ def descriptor_directory(root: Path) -> Path:
     if nested.is_dir():
         return nested
     raise ValueError(f"no Replay.Valorant directory below {root}")
-
-
-def normalize_type(field_type: str) -> str:
-    """Normalize rustfmt's optional comma inside braced FieldType values."""
-    collapsed = " ".join(field_type.rstrip().rstrip(",").split())
-    return re.sub(r",\s*\}", " }", collapsed)
 
 
 def entry_blocks(content: str, marker: re.Pattern[str]):
@@ -155,13 +153,10 @@ def extract_table(source_dir: Path, output: Path) -> tuple[dict[tuple[str, str],
 
 
 def record_csharp_source_changes(baseline_dir: Path, candidate_dir: Path) -> list[dict[str, object]]:
-    """Keep an extractor blind spot visible instead of calling it no change.
-
-    The generator deliberately accepts only C# shapes it understands.  A newly
-    added descriptor using a path constant can therefore add no overlay row;
-    hashing the input files makes that fact reviewable without pretending the
-    source addition was a parsed schema entry.
-    """
+    """Keep an extractor blind spot visible instead of calling it no change:
+    the generator accepts only C# shapes it understands, so a new descriptor
+    using a path constant adds no overlay row, and hashing the input files
+    makes that reviewable."""
     def files(root: Path) -> dict[str, str]:
         return {path.relative_to(root).as_posix():
                 hashlib.sha256(path.read_bytes()).hexdigest()
@@ -217,14 +212,14 @@ def source_from_spec(spec: str, workspace: Path) -> tuple[Path, dict[str, object
     archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if archive.returncode:
-        raise ValueError(f"git archive failed for {spec}: {archive.stderr.decode().strip()}")
+        raise ValueError(f"git archive failed for {spec}: "
+                         f"{archive.stderr.decode(errors='replace').strip()}")
     unpacked = workspace / f"source-{len(list(workspace.iterdir()))}"
     unpacked.mkdir()
-    # Unpacked in-process, not with whatever `tar` is first on PATH. On Windows
-    # that is Git for Windows' GNU tar inside Git Bash, which reads the drive
-    # colon in `-C C:\...` as a remote host and refuses, and System32's bsdtar
-    # everywhere else -- so the same command passed from PowerShell and failed
-    # from Git Bash. The `data` filter refuses absolute and escaping members.
+    # Unpacked in-process, not with the first `tar` on PATH: Git Bash's GNU tar
+    # reads the drive colon in `-C C:\...` as a remote host, so the result
+    # depended on the shell. The `data` filter refuses absolute and escaping
+    # members.
     try:
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
             tar.extractall(unpacked, filter="data")

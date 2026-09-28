@@ -1,13 +1,6 @@
-"""Guards for the export baseline pinner.
-
-`measure` deliberately records a counter the summary did not print as None
-rather than 0 -- its own comment says "a counter that silently reads as absent
-is how this class of bug survives". `--update` then pinned the None anyway, so
-a summary that STOPPED printing a counter matched the baseline from then on.
-
-The cross-check already catches this for the four counters that are Parquet row
-identities. The other twenty had nothing.
-"""
+"""Guards for the export baseline pinner: the Parquet cross-checks, the
+refusal to pin an unmeasured counter or a machine path, and summary patterns
+that must each read exactly one line."""
 import contextlib
 import io
 import json
@@ -68,20 +61,8 @@ class UnpinnableTests(unittest.TestCase):
             tracked_rewards_opaque_empty_variants=None))
         self.assertIn("tracked_rewards_opaque_empty_variants", " ".join(reasons))
 
-    def test_the_checkpoint_counters_are_only_required_when_measured(self):
-        """A default run never prints them, so their absence is not a fault.
-
-        They live outside `COUNTERS` precisely so a default run does not record
-        them as None and diff that against a `--checkpoints` baseline.
-        """
-        current = measurement()
-        self.assertNotIn("cp_frames", current["counters"])
-        self.assertEqual(guard.unpinnable(current), [])
-
 
 class CrossCheckTests(unittest.TestCase):
-    """Unchanged behaviour, pinned alongside the new refusal."""
-
     def test_partial_identity_includes_checkpoint_rows_only_when_present(self):
         current = measurement(partial_rows=2, cp_partial_rows=3)
         current["parquet"]["partials"]["rows"] = 5
@@ -620,6 +601,40 @@ class CncCounterTests(unittest.TestCase):
         self.assertIn("cnc_bruteforce_payloads_unwalked", " ".join(reasons))
 
 
+class RpcCounterTests(unittest.TestCase):
+    """`RPCs:` is a suffix of `Truncated RPCs:`, so an unanchored pattern
+    would read whichever of the two lines came first."""
+
+    def test_the_rpc_count_is_not_read_off_the_truncated_rpcs_line(self):
+        pattern = guard.PATTERNS["rpcs"]
+        for summary in ("  RPCs:             529\n  Truncated RPCs:   7\n",
+                        "  Truncated RPCs:   7\n  RPCs:             529\n"):
+            with self.subTest(summary=summary):
+                self.assertEqual(pattern.search(summary).group(1), "529")
+        self.assertIsNone(pattern.search("  Truncated RPCs:   7\n"))
+
+
+class SummaryLabelTests(unittest.TestCase):
+    """Every counter pattern reads exactly one line summary.rs can print, each
+    quoted `"  ..."` literal rendered with its placeholders filled in: a
+    pattern matching two reads whichever comes first, and one matching none
+    reports a printed counter as missing on every run."""
+
+    SUMMARY_RS = (Path(__file__).resolve().parents[2]
+                  / "crates" / "vrfkit" / "src" / "driver" / "summary.rs")
+
+    def test_every_counter_pattern_reads_exactly_one_summary_line(self):
+        source = self.SUMMARY_RS.read_text(encoding="utf-8")
+        literals = re.findall(r'"(  [^"\\]*(?:\\.[^"\\]*)*)"', source)
+        rendered = [re.sub(r"\{[^{}]*\}", "7", literal) for literal in literals]
+        self.assertGreater(len(rendered), 100, "summary.rs literals were not found")
+        patterns = {**guard.COUNTERS, **guard.CHECKPOINT_COUNTERS}
+        for key, pattern in patterns.items():
+            with self.subTest(counter=key):
+                hits = [line for line in rendered if re.search(pattern, line + "\n")]
+                self.assertEqual(len(hits), 1, hits)
+
+
 class MovementTailCounterTests(unittest.TestCase):
     """Each of the four numbers on each tails line reads its own position."""
 
@@ -720,6 +735,49 @@ class RequiredInputTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("required", output.getvalue().lower())
         self.assertNotIn("SKIP:", output.getvalue())
+
+
+class UpdateReplayNameTests(unittest.TestCase):
+    """--update must not pin a resolved replay path (an absolute --replay, or
+    VRFKIT_CORPUS_DIR joined to a bare one) into a new baseline: it would put
+    one machine's directory into a committed file."""
+
+    def run_update(self, root: Path, replay: str, corpus_dir: str | None):
+        current = measurement(actor_closes=0)
+        self.assertEqual(guard.cross_checks(current["counters"], current["parquet"]), [],
+                         "the stand-in measurement must reach the update")
+        argv = ["check_export_baseline.py", "--baseline", str(root / "baseline.json"),
+                "--exe", sys.executable, "--replay", replay, "--update"]
+        output = io.StringIO()
+        with patch.dict(os.environ), patch.object(sys, "argv", argv), \
+                patch.object(guard, "measure", return_value=current) as measured, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            os.environ.pop("VRFKIT_CORPUS_DIR", None)
+            if corpus_dir is not None:
+                os.environ["VRFKIT_CORPUS_DIR"] = corpus_dir
+            code = guard.main()
+        return code, output.getvalue(), measured
+
+    def test_an_absolute_replay_is_refused_before_the_export_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "match.vrf").write_bytes(b"replay")
+            code, output, measured = self.run_update(root, str(root / "match.vrf"), None)
+            self.assertEqual(code, 2, output)
+            self.assertIn("bare filename", output)
+            measured.assert_not_called()
+            self.assertFalse((root / "baseline.json").exists())
+
+    def test_a_bare_replay_is_pinned_as_given_not_as_resolved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "match.vrf").write_bytes(b"replay")
+            code, output, measured = self.run_update(root, "match.vrf", str(root))
+            self.assertEqual(code, 0, output)
+            measured.assert_called_once()
+            self.assertEqual(measured.call_args.args[1], root / "match.vrf")
+            stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["replay"], "match.vrf")
 
 
 class TransactionalOutputTests(unittest.TestCase):

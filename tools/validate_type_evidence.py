@@ -55,20 +55,11 @@ byte multiples and some of them do not even start on a byte boundary:
   server frame/handle. With ``--compare-typed`` the exported ``value_str`` JSON
   is parsed and compared numerically, rotator components after rounding to
   f32 -- a string compare would fail on ``1`` against ``1.0`` rather than on a
-  wrong value.
-
-  The location is compared WITHOUT assuming its scale. The packed header only
-  says "scaled"; the scale itself is not on the wire. The Rust reader
-  divides by the level each class's table or scoped entry states
-  (``FieldType::RepMovement { location }``): whole units on every class but
-  the two-decimal pawns (docs/DATA.md, "`ReplicatedMovement.location` is
-  world units, at a per-class level"). So the check accepts the packed
-  integers at /100 or at /1, requires everything else to match exactly, and
-  reports which scale each row was exported at (``location_scales``): "/1"
-  for a whole-unit class, "/100" for a two-decimal one. Which level a class
-  must have is not this check's to decide; the Rust test
-  ``every_rep_movement_entry_carries_its_measured_location_level`` pins it
-  per class against spawn-position evidence.
+  wrong value. The location's scale is not on the wire (the header only says
+  "scaled"), so it is accepted at /100 or /1, everything else must match
+  exactly, and each row's scale is reported (``location_scales``). Which
+  level a class must have is pinned per class by the Rust test
+  ``every_rep_movement_entry_carries_its_measured_location_level``.
 
 The geometry decoders are written from Unreal's wire layout, not from the Rust
 readers, so the two can disagree.
@@ -203,23 +194,11 @@ def _ftext_bool(reader: _Bits) -> bool:
 
 
 def _ftext_tree(reader: _Bits, depth: int = 0) -> dict:
-    """``FText`` serialization: u32 flags, a history byte, then the history.
-
-    Only the histories the Rust tree reader accepts, written from the Unreal
-    layouts rather than from ``ftext.rs``:
-
-    * 255 (none): zero flags and a zero u32 (no culture-invariant string);
-    * 11 (string table): an inline-name bit that must be clear, the table's
-      FName (FString + i32 number) and the key FString;
-    * 3 (argument format): a nested source text, an i32 argument count, and
-      per argument its name, a type byte and a value -- 0 an int64 kept as
-      its unsigned bits, 4 a nested text;
-    * 4 (as number): a type byte that must be 3 (double), the double, an
-      archive bool, the seven ``FNumberFormattingOptions`` members when it is
-      set, and the target culture FString.
-
-    Returned in the shape the exporter's JSON takes, so ``--compare-typed``
-    compares parsed JSON with this dict.
+    """``FText`` serialization: u32 flags, a history byte, then the history,
+    for the histories the module docstring lists, written from the Unreal
+    layouts rather than from ``ftext.rs``. Returned in the shape the
+    exporter's JSON takes, so ``--compare-typed`` compares parsed JSON with
+    this dict.
     """
     if depth >= FTEXT_MAX_DEPTH:
         raise ValueError("FText nesting exceeds the depth limit")
@@ -279,11 +258,9 @@ def _ftext_tree(reader: _Bits, depth: int = 0) -> dict:
 def _packed_vector(reader: _Bits) -> dict:
     """``ReadPackedVector``: a SerializeInt(128) header whose low six bits are
     the component width and whose seventh says "scaled"; width 0 falls back to
-    three raw floats, or doubles when the seventh bit is set.
-
-    Returned unscaled -- ``{"packed": ints, "scaled": flag}`` or
-    ``{"floats": values}`` -- because the scale is the reader's choice, not
-    the wire's.
+    three raw floats, or doubles when the seventh bit is set. Returned
+    unscaled (``{"packed": ints, "scaled": flag}`` or ``{"floats": values}``):
+    the scale is the reader's choice, not the wire's.
     """
     header = reader.serialized_int(1 << 7)
     width, scaled = header & 63, bool(header >> 6)
@@ -392,9 +369,6 @@ def _decode_bits(raw: bytes, bit_count: int, type_name: str):
             raise ValueError("EnumByte is not 1..8 bits")
         value = reader.bits(bit_count)
     elif type_name == "EnumRemainingBits":
-        # Every remaining bit is the value, and a 0-bit field is the enum's
-        # zero. Wider than 32 bits is more than the reader holds, so it is
-        # refused rather than truncated.
         if bit_count > 32:
             raise ValueError("EnumRemainingBits wider than 32 bits")
         value = reader.bits(bit_count)
@@ -464,27 +438,11 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
             raise ValueError("FString lacks its terminator")
         return raw[4:-unit].decode("utf-8" if length > 0 else "utf-16-le")
     if type_name == "ObjectNetGuid":
-        value = 0
-        consumed = 0
-        for index in range(5):
-            if consumed + 8 > bit_count:
-                raise ValueError("truncated IntPacked ObjectNetGuid")
-            byte = raw[consumed // 8]
-            consumed += 8
-            # Unreal's IntPacked stores continuation in the low bit; the upper
-            # seven bits are payload, unlike conventional high-bit varints.
-            chunk = byte >> 1
-            if index == 4:
-                if byte & 1:
-                    raise ValueError("runaway IntPacked ObjectNetGuid")
-                if chunk > 15:
-                    raise ValueError("overflowing IntPacked ObjectNetGuid")
-            value |= chunk << (index * 7)
-            if not byte & 1:
-                if consumed != bit_count:
-                    raise ValueError("ObjectNetGuid leaves residual bits")
-                return value
-        raise AssertionError("unreachable IntPacked loop end")
+        reader = _Bits(raw, bit_count)
+        value = reader.int_packed()
+        if reader.remaining():
+            raise ValueError("ObjectNetGuid leaves residual bits")
+        return value
     raise ValueError(f"unsupported evidence type {type_name!r}")
 
 
@@ -539,14 +497,10 @@ def _parse_triple(text, prefix: str):
 
 def exported_matches(type_name: str, exported, decoded) -> bool:
     """Whether the exported column holds the independently decoded value.
-
-    Scalars compare directly. Geometry is parsed out of ``value_str``:
-    vectors are doubles and must be equal; rotator components are single
-    precision in the model and are compared after rounding both sides to f32,
-    because the shortest f32 spelling does not parse back to the exact value
-    as a double. A ``ReplicatedMovement`` export may be passed as its
-    ``value_str`` or as `exported_value` parsed it, and matches at any location
-    scale in `LOCATION_SCALES`; `values_match` also says which one.
+    Rotator components are compared after rounding both sides to f32: the
+    shortest f32 spelling does not parse back to the exact double. A
+    ``ReplicatedMovement`` export matches at any scale in `LOCATION_SCALES`;
+    `values_match` also says which one.
     """
     if type_name.startswith("RepMovement"):
         if exported is None or isinstance(exported, str):
@@ -592,12 +546,9 @@ def values_match(type_name: str, decoded, exported) -> tuple[bool, str | None]:
 
 
 def exported_value(row: dict, type_name: str):
-    """The exported typed value, in the shape `decode_exact` returns.
-
-    A RepMovement `value_str` that does not parse is returned as a marker that
-    equals no decoded value, so it counts as a mismatch instead of stopping the
-    run.
-    """
+    """The exported typed value, in the shape `decode_exact` returns. A
+    RepMovement `value_str` that does not parse becomes a marker equal to no
+    decoded value: a mismatch, not a stopped run."""
     value = row[TYPED_COLUMNS[type_name]]
     if type_name.startswith("RepMovement") and value is not None:
         try:
@@ -608,12 +559,9 @@ def exported_value(row: dict, type_name: str):
 
 
 def parquet_files(root: Path, export_ids=None, skipped=None):
-    """Yield the field tables to read below `root`.
-
-    Only the recursive search filters: a generated staging/backup directory
-    is skipped (and added to the `skipped` set when one is given), and a
-    table without `manifest.json` beside it raises `ValueError`.
-    """
+    """Yield the field tables to read below `root`, filtering only a recursive
+    search (see the module docstring); skipped directories go into `skipped`
+    when one is given."""
     if root.is_file():
         yield root
         return

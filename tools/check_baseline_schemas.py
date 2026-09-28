@@ -23,12 +23,13 @@ CHECKPOINT_ONLY_COUNTERS = frozenset(CHECKPOINT_COUNTERS)
 MAIN_PARQUET = tuple(PARQUET_FILES)
 CORPUS_TOTALS = ("blocks", "fields", "rpcs", "malformed", "skipped")
 BUILDS = ("12.10", "12.11", "13.00", "13.01", "13.02", "13.04", "13.05", "13.06")
+#: The corpus baseline of each build; 13.01 is pinned by export_02d4d478.json.
+CORPUS_BASELINES = {build: f"build_{build.replace('.', '')}.json"
+                    for build in BUILDS if build != "13.01"}
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 KNOWN_BASELINES = {
     "bench.json", "metrics_builds.json", "export_02d4d478.json",
-    "checkpoint_02d4d478.json", "build_1210.json", "build_1211.json",
-    "build_1300.json", "build_1302.json", "build_1304.json", "build_1305.json",
-    "build_1306.json",
+    "checkpoint_02d4d478.json", *CORPUS_BASELINES.values(),
 }
 METRIC_INT_FIELDS = {
     "ability_spawns", "assists", "client_round_starts", "combat_players",
@@ -115,9 +116,7 @@ def validate_metrics_baseline(path: Path, data: dict) -> list[str]:
     return problems
 
 
-def validate_export_baseline(
-    path: Path, data: dict, *, require_hashes: bool = True
-) -> list[str]:
+def validate_export_baseline(path: Path, data: dict) -> list[str]:
     problems: list[str] = []
     _keys(path, data, {"replay", "counters", "parquet"}, problems)
     if not isinstance(data.get("replay"), str) or not data.get("replay", "").endswith(".vrf"):
@@ -144,19 +143,14 @@ def validate_export_baseline(
         if not isinstance(record, dict):
             problems.append(f"{path.name}: parquet.{name} must be an object")
             continue
-        expected_record_keys = {"rows", "bytes", "sha256"}
-        if not require_hashes and "sha256" not in record:
-            expected_record_keys.remove("sha256")
-        _keys(path, record, expected_record_keys, problems)
+        _keys(path, record, {"rows", "bytes", "sha256"}, problems)
         for field in ("rows", "bytes"):
             if not _nonnegative_int(record.get(field)):
                 problems.append(
                     f"{path.name}: parquet.{name}.{field} must be a non-negative integer"
                 )
         digest = record.get("sha256")
-        if (require_hashes or digest is not None) and (
-            not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None
-        ):
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
             problems.append(f"{path.name}: parquet.{name}.sha256 is not a measured SHA-256")
     return problems
 
@@ -207,9 +201,7 @@ def _basename(raw: str) -> str:
     return PureWindowsPath(raw).name
 
 
-def validate_repository(
-    root: Path = BASELINES, *, require_hashes: bool = True
-) -> list[str]:
+def validate_repository(root: Path = BASELINES) -> list[str]:
     problems: list[str] = []
     loaded: dict[str, dict] = {}
     for path in sorted(root.glob("*.json")):
@@ -225,9 +217,7 @@ def validate_repository(
         if path.name not in KNOWN_BASELINES:
             problems.append(f"{path.name}: unknown baseline schema; refusing to skip")
         elif path.name.startswith(("export_", "checkpoint_")):
-            problems.extend(
-                validate_export_baseline(path, value, require_hashes=require_hashes)
-            )
+            problems.extend(validate_export_baseline(path, value))
         elif path.name.startswith("build_"):
             problems.extend(validate_corpus_baseline(path, value))
         elif path.name == "bench.json":
@@ -264,19 +254,13 @@ def validate_repository(
     replays = metrics.get("replays") if isinstance(metrics.get("replays"), dict) else {}
     values = metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {}
 
-    corpus_files = {
-        "12.10": "build_1210.json", "12.11": "build_1211.json",
-        "13.00": "build_1300.json", "13.02": "build_1302.json",
-        "13.04": "build_1304.json", "13.05": "build_1305.json",
-        "13.06": "build_1306.json",
-    }
-    for build, filename in corpus_files.items():
+    for build, filename in CORPUS_BASELINES.items():
         corpus = loaded[filename]
         expected_branch = f"++Ares-Core+release-{build}"
         if corpus.get("branches") != {expected_branch: len(corpus.get("per_file", {}))}:
             problems.append(f"{filename}: branch does not identify build {build}")
         corpus_names = set(corpus.get("per_file", {}))
-        if build in BUILDS and _basename(replays.get(build, "")) not in corpus_names:
+        if _basename(replays.get(build, "")) not in corpus_names:
             problems.append(f"metrics/build baseline replay disagrees for {build}")
     if _basename(replays.get("13.01", "")) != export.get("replay"):
         problems.append("metrics/export baseline replay disagrees for 13.01")
@@ -284,10 +268,6 @@ def validate_repository(
 
 
 def main() -> int:
-    # No flags. `--allow-missing-hashes` was a migration aid that nothing ever
-    # invoked -- not CI, not CONTRIBUTING, not docs/USAGE.md. The
-    # `require_hashes=False` PARAMETER it drove is still used, by
-    # tools/tests/test_baseline_schemas.py, so only the CLI surface is gone.
     argparse.ArgumentParser(description=__doc__).parse_args()
     problems = validate_repository()
     if problems:
