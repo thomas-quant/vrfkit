@@ -5,10 +5,6 @@ pinned here is the owner classification, which is the one place the script makes
 a judgement rather than reading a column: an `Owner` NetGUID has to come out as
 the player carrying the spike, nobody at all, or a proxy carrier walked back
 through its `Instigator`.
-
-An earlier version also unpacked `SerializeIntPacked` out of `raw_bits`, because
-`Owner` arrived untyped on this group. The overlay now resolves it by name, so
-that decoder and its vectors are gone.
 """
 import json
 import sys
@@ -93,13 +89,7 @@ class CarrierAtTests(unittest.TestCase):
 
 
 class UnresolvedTests(unittest.TestCase):
-    """The command exited 0 whatever it failed to resolve.
-
-    The module docstring already says what a `NO CARRIER` plant means -- "a
-    plant with no carrier would mean the chain dropped something" -- and then
-    printed it as one more line of output. A run that writes an empty Parquet
-    and reports nobody planted the spike is not a successful extraction.
-    """
+    """No custody at all, or a plant with no carrier, fails the run."""
 
     PLANTED = {"group": ["spikePlanted"], "time1": [500]}
 
