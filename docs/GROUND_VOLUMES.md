@@ -14,8 +14,9 @@ python tools/extract_ground_volumes.py --export-dir <export-directory> --out-dir
 The output directory holds `items.ndjson` (one record per decoded cell
 update), `windows.ndjson` (every selected source window with its raw bits and
 a status) and `receipt.json` (counts including zeros, rejection reasons, the
-replay's resolved declarations, input hashes before/after, the tool's own
-hash). The exit status is nonzero if any window is rejected.
+replay's resolved declarations and the [member names](#names) they resolve
+to, input hashes before/after, the tool's own hash). The exit status is
+nonzero if any window is rejected.
 
 ## What was established
 
@@ -28,7 +29,10 @@ one cell: an integer grid position `X`/`Y`, a polygon of world-space points
 (`ConvexHullPoints`), per-point ceilings and travel distances, a floor, a
 ceiling, a mean travel distance, a 3-bit `Status`, a `bIsActive` bit, the
 item value the replay names `253`, and `ExteriorSegments` index pairs into the
-polygon. Every name here is the one the replay itself declares.
+polygon. Every name here is the one the replay itself declares. Two need a
+note, both shown by the declared checksums ([Types](#types)): `253` is the
+engine's name index for the member `ID`, and `X`/`Y` are the members of
+`GridPos`, not of the cell itself.
 
 On the whole corpus:
 
@@ -178,29 +182,82 @@ types the member by (name, checksum), never by handle.
 
 ## Types
 
-| Member | Width | Read as | Evidence beyond exact consumption |
-|---|---:|---|---|
-| `253` | 32 | signed 32-bit | small integers 0..134; never negative, so signedness is unobserved |
-| `bIsActive` | 1 | bool | -- |
-| `Status` | 3 | unsigned | values 0..3; re-sent items change only this member (below) |
-| `ExteriorSegments` | array | `{Begin, End}`, 8-bit unsigned each | every pair indexes the item's own polygon |
-| `ConvexHullPoints` | array | 3 x f64 (192 bits) | grid, spawn and floor relations below |
-| `ConvexHullCeilings`, `ConvexHullTravelDistances` | array | f32 each | one per polygon point; max / mean equal `Ceiling` / `TravelDistance` |
-| `X`, `Y` | 32 | signed 32-bit | cell indices of the polygon on a regular grid |
-| `TravelDistance`, `Ceiling`, `Floor` | 32 | f32 | exact relations below |
-| `TJunctions` | 16 | raw, untyped | always 16 zero bits (7,232 of 7,232) |
+| Member | Width | Read as | Checksum reproduces as | Evidence beyond exact consumption |
+|---|---:|---|---|---|
+| `253` | 32 | signed 32-bit | `ID : int32` | small integers 0..134 |
+| `bIsActive` | 1 | bool | `bool` | -- |
+| `Status` | 3 | unsigned | not reproduced (an enum) | values 0..3; re-sent items change only this member (below) |
+| `ExteriorSegments` | array | `{Begin, End}`, 8-bit unsigned each | `TArray`; `Begin`, `End` not reproduced | every pair indexes the item's own polygon |
+| `ConvexHullPoints` | array | 3 x f64 (192 bits) | `TArray` of `FVector` | grid, spawn and floor relations below |
+| `ConvexHullCeilings`, `ConvexHullTravelDistances` | array | f32 each | `TArray` of `float` | one per polygon point; max / mean equal `Ceiling` / `TravelDistance` |
+| `X`, `Y` | 32 | signed 32-bit | `int32` members of `GridPos : FIntPoint` | cell indices of the polygon on a regular grid |
+| `TravelDistance`, `Ceiling`, `Floor` | 32 | f32 | `float` | exact relations below |
+| `TJunctions` | 16 | raw, untyped | `TArray` | always 16 zero bits (7,232 of 7,232) |
 
-The compatible checksums are identity keys only. The Unreal formula (CRC-32
-chained over the lower-cased name, C++ type and array index) did not reproduce
-any declared value under any variant tried: reflected and MSB-first CRC-32,
-CRC-32C and CRC-32K; UTF-32LE, UTF-16LE and UTF-8; with and without
-lower-casing and the index; seeded with 0 or with the parent array's
-checksum. So a checksum is not evidence of a type here.
+The compatible checksums are type evidence. Unreal's RepLayout compatible
+checksum is CRC-32 (zlib's) over the UTF-32LE lower-cased member name, then
+its lower-cased C++ type, then its static array index as a little-endian
+32-bit word, seeded with the checksum of the struct or array that contains
+it. Seeded along the item's real parents -- `FragmentInfo :
+FGroundVolumeFragmentArray` -> `Items : TArray` -> `Items :
+FGroundVolumeFragment`, one step more (`GridPos : FIntPoint`) for `X`/`Y`,
+an array element repeating its array's name -- it reproduces 14 of the 17
+item and element identities a 13.06 replay declares, and `TJunctions` too.
+Each encodes the type the tool already read, except that `TJunctions` is an
+array (below). The earlier attempt recorded here seeded with 0 or with the
+array's checksum and reproduced nothing; the struct levels in between were
+missing.
 
-`TJunctions` stays raw on purpose: 16 zero bits read equally well as an empty
-array or as a 16-bit value, and no non-empty instance exists to tell them
-apart. `253` is kept as the replay renders it: a hardcoded engine name index
-whose name this repository does not resolve.
+- Not reproduced: `Status`, an enum -- no C++ spelling of an enum type
+  reproduces, the failure a survey of the game's Blueprint fields also met --
+  and `Begin`/`End`, byte members of `FGroundVolumeExteriorLineSegment`,
+  under `uint8`, `int8`, `uint16`, `int32` and `byte`, with and without the
+  struct's `F` prefix. Their types rest on the widths and relations alone.
+- The ClassNetCache field's checksum, `FragmentInfo` 2225407835, is computed
+  differently and does not reproduce this way. The levels above the members
+  -- `FragmentInfo`, `Items`, `GridPos` -- are declared in none of the 1,018
+  exports, so their own checksums never appear.
+- Provenance: the struct and member names are from the 13.06 game
+  executable's reflection data, read statically on 2026-09-28; no game file
+  or extract of one is in this repository. The declared values are from a
+  fresh 13.06 export (integration binary `9f92756`, checkpoints on), whose
+  main-stream and checkpoint declarations agree. Every identity has the same
+  checksum in every build (above), so the result is not specific to 13.06.
+  `tools/tests/test_extract_ground_volumes.py` recomputes each value from
+  the names alone.
+
+`TJunctions` stays raw: its checksum says `TArray`, and 16 zero bits are
+exactly an empty array's packed count and terminator, but no element was ever
+sent, so the element's identity and type are unknown.
+
+### Names
+
+Item `fields` keep the declared names, `253` included. The receipt's
+`declarations.resolved_names` adds the game's member path wherever a replay
+declares exactly these (name, checksum) pairs: `253` -> `ID`, `X` ->
+`GridPos.X`, `Y` -> `GridPos.Y`. It is keyed by the pair, never by the name,
+so a build whose checksum differed would not be relabelled. `ID` is not the
+FastArray item ID: the two are equal on 15 of the 280 items of the smoke run
+below.
+
+`Status` names come from one build. In the 13.06 executable the member's
+enum is `EGroundVolumeFragmentStatus`: `AllInside` 0, `PartiallyOutside` 1,
+`PartiallyBlocked` 2, `Invalid` 3, `Count` 4. The declared 3-bit width fits
+a largest value of 4; two bits would stop at 3. A checksum does not encode an
+enum's values, and this one does not reproduce at all, so an item's
+`status_name` is set only when the replay is 13.06 and declares the 13.06
+identity (`Status`, 2380676387). Every other build keeps the integer with a
+null name, even under the same checksum. `Count` is the enum's count
+sentinel, not a state: a 4, like a 5-7, is left unnamed. The receipt counts
+`status_named`, `status_unnamed_declaration` and `status_unnamed_value`,
+zeros included. These are names, not measured behaviour.
+
+Smoke run, 2026-09-28, on four exports -- two 13.06, one 13.05 with a
+declared-class window, one 12.06: windows and items identical to the
+previous version apart from the added fields, 0 rejected; `status_named` 118
+(every 13.06 item), `status_unnamed_declaration` 405 (every 13.05 and 12.06
+item), `status_unnamed_value` 0; `resolved_names` holds all three names in
+the 13.x exports and only `X`/`Y` in 12.06, which declares no `253`.
 
 ## Validation independent of the decoder
 
@@ -298,9 +355,11 @@ items.
 ## Tests and mutations
 
 `tools/tests/test_extract_ground_volumes.py` builds every fixture bit by bit
-from the grammar above; no replay bytes are used. Each of 26 mutations applied
-to a scratch copy of the tool made at least one test fail, and in each case
-the test named for the broken property:
+from the grammar above; no replay bytes are used. Its checksum tests compute
+CRC-32 from member names alone, apart from the tool, which holds only the
+declared numbers. Each of 42 mutations applied to a scratch copy of the tool
+made at least one test fail, and in each case the test named for the broken
+property:
 
 | Mutation | Test that fails |
 |---|---|
@@ -325,12 +384,21 @@ the test named for the broken property:
 | Counters not written when zero | `test_every_counter_is_written_even_when_zero` |
 | Input change during a run not detected | `test_changed_input_does_not_publish` |
 | Object outer not compared with the actor; unresolved object not counted | `test_object_outer_is_checked_against_the_actor` |
+| A `MEMBERS` checksum mistyped | `test_declared_checksums_reproduce_from_the_struct_chain` |
+| An identity added to `MEMBERS` without being reproduced or listed as width-only | `test_every_member_is_reproduced_or_width_only` |
+| `X` read unsigned, `bIsActive` read as a 1-bit integer, `TJunctions` decoded as an array | `test_members_are_read_as_the_type_their_checksum_encodes` |
+| A resolved name that is not its checksum's path, or its key's checksum mistyped | `test_resolved_names_are_the_paths_their_checksums_encode` |
+| Resolved names matched by the declared name alone | `test_resolved_names_follow_the_declared_checksum` |
+| `Status` named whatever its identity (reachable only by a direct call: decoding admits one `Status` identity), or in every build; `Count` named as a state | `test_status_names_only_for_the_declaration_they_were_read_from` |
+| An unnamed value tallied as named; a status counter not incremented; the build not passed to the item; `status_name` or `resolved_names` not written | `test_status_name_is_written_and_counted_per_declaration` |
 
 ## What is not established
 
-- The meaning of `Status` values, `bIsActive` (true on 994 of 340,994 bare
-  cells but 5,176 of 5,192 declared ones), `253`, the per-point travel
-  distance and `TJunctions`.
+- What the `Status` states do in play -- only their 13.06 names are known
+  ([Names](#names)) -- and the meaning of `bIsActive` (true on 994 of 340,994
+  bare cells but 5,176 of 5,192 declared ones), of `ID` (declared `253`)
+  beyond its name, of the per-point travel distance, and of the elements
+  `TJunctions` never sent.
 - Which player or ability cast a volume belongs to, beyond its owner actor's
   class, and whether a cell's presence means an effect is applied there.
 - Anything in the checkpoint stream: neither route has a checkpoint row.

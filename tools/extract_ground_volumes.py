@@ -34,9 +34,16 @@ window preserved. That includes shapes never observed -- an array element
 sent out of order or missing a member, a partial array, a non-finite float --
 because decoding them would be a guess.
 
+Names: item `fields` keep the names the replay declares. The receipt adds the
+game's own member path for the identities whose declared name is something
+else (RESOLVED_NAMES: `253` is `ID`, `X`/`Y` are `GridPos.X`/`GridPos.Y`),
+and each item carries `status_name`, the `Status` enumerator's name, only for
+the one build and declaration those names were read from (STATUS_NAMES).
+
 What this does not establish: which ability or player a cell belongs to
-beyond the owning actor's class, what the `Status` enumerators mean, and
-anything about the component's RepLayout prefix rows, which stay as exported.
+beyond the owning actor's class, what the `Status` states do in play (only
+their 13.06 names are known), and anything about the component's RepLayout
+prefix rows, which stay as exported.
 """
 from __future__ import annotations
 
@@ -57,7 +64,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-SCHEMA_VERSION = 1
+#: 2: items gained `status_name`, the receipt `declarations.resolved_names`.
+SCHEMA_VERSION = 2
 CLASS_GROUP = "/Script/DynamicVolume.GroundVolumeComponent"
 CNC_GROUP = CLASS_GROUP + "_ClassNetCache"
 UNRESOLVED_CNC = "__vrfkit_unresolved_class_net_cache_payload__"
@@ -128,20 +136,32 @@ class Untyped:
     width: int
 
 
-#: Declared (name, compatible_checksum) -> type. Checksums are used as
-#: identity keys only. They were NOT reproduced from any CRC formulation, so
-#: they are not type evidence; the types rest on the measured widths, exact
-#: consumption, the field relations and the geometry in docs/GROUND_VOLUMES.md.
+#: Declared (name, compatible_checksum) -> type. The checksum is Unreal's
+#: compatible checksum: CRC-32 chained over the lower-cased member name, its
+#: C++ type and its static array index, each struct member and array element
+#: seeded with its parent's checksum. Along the chain
+#: FragmentInfo:FGroundVolumeFragmentArray -> Items:TArray ->
+#: Items:FGroundVolumeFragment (-> GridPos:FIntPoint for X and Y) -- struct
+#: names from the 13.06 game executable's reflection data, read statically
+#: on 2026-09-28 -- every identity below
+#: reproduces except `Status` (an enum: the formula reproduces no enum type)
+#: and `Begin`/`End`. For each one that reproduces, the C++ type it encodes is
+#: the type it is read as here (int32, bool, float, FVector as three doubles,
+#: TArray), except TJunctions (below); tests/test_extract_ground_volumes.py
+#: recomputes every one. `Status`, `Begin` and `End` rest on the measured
+#: widths, exact consumption and the relations in docs/GROUND_VOLUMES.md.
 #:
-#: `253` is the replay's own rendering of a hardcoded engine name index and is
-#: kept as rendered. Its values are small non-negative integers, so signedness
-#: is unobserved; it is read as a signed 32-bit integer.
+#: `253` is the replay's rendering of a hardcoded engine name index. Its
+#: checksum reproduces as `ID : int32`, so it is read signed; the name is
+#: reported through RESOLVED_NAMES, and `fields` keeps "253".
 #:
-#: TJunctions (11.10 to 12.02 only) is declared but was 16 zero bits on every
-#: item. That is consistent with an empty array and with a 16-bit scalar, so it
-#: stays raw. The ConvexHullCeilings and ConvexHullTravelDistances arrays of
-#: 11.10 to 12.05 were always empty; their element identities below were
-#: observed from 12.06 on, and an element with any other identity rejects.
+#: TJunctions (11.10 to 12.02 only) was 16 zero bits on every item. Its
+#: checksum reproduces as a TArray, and 16 zero bits are exactly an empty
+#: array's count and terminator; but no element was ever sent, so the element
+#: identity and type are unknown and it stays raw. The ConvexHullCeilings and
+#: ConvexHullTravelDistances arrays of 11.10 to 12.05 were always empty; their
+#: element identities below were observed from 12.06 on, and an element with
+#: any other identity rejects.
 MEMBERS = {
     ("253", 1175316786): Scalar("int32", 32),
     ("bIsActive", 518428974): Scalar("bool", 1),
@@ -165,6 +185,31 @@ MEMBERS = {
 #: Identities that belong inside an array element, never directly in an item.
 ELEMENT_IDENTITIES = frozenset(i for spec in MEMBERS.values() if isinstance(spec, Array)
                                for i in spec.elements)
+#: Declared identity -> the member's path in the game's own struct, for the
+#: item members whose declared name is not that path. Keyed by the whole
+#: (name, compatible_checksum) pair, never by the name: each key reproduces
+#: from its path's chain (FGroundVolumeFragment's `ID : int32`, and
+#: `GridPos : FIntPoint`'s `X`/`Y : int32`; see MEMBERS), so a replay of any
+#: build that declares the same pair declares the same member, and one whose
+#: checksum differs is not relabelled. Reported per replay in the receipt;
+#: `fields` keeps the declared names.
+RESOLVED_NAMES = {
+    ("253", 1175316786): "ID",
+    ("X", 2123226522): "GridPos.X",
+    ("Y", 2134384775): "GridPos.Y",
+}
+#: `Status` enumerator names: EGroundVolumeFragmentStatus in the 13.06 game
+#: executable's reflection data, read statically on 2026-09-28 -- AllInside 0,
+#: PartiallyOutside 1, PartiallyBlocked 2, Invalid 3, Count 4. A compatible
+#: checksum does not encode an enum's values (and this enum member's checksum
+#: does not reproduce at all), so the names are given only to the build they
+#: were read from AND the identity it declares; every other build keeps the
+#: integer with a null name, since nothing here shows its enumerators are the
+#: same. `Count` is the enum's count sentinel, not a state: a 4, like a 5-7
+#: from the 3-bit field, gets no name and is counted. Measured values are 0-3.
+STATUS_NAMES_BUILD = "++Ares-Core+release-13.06"
+STATUS_IDENTITY = ("Status", 2380676387)
+STATUS_NAMES = {0: "AllInside", 1: "PartiallyOutside", 2: "PartiallyBlocked", 3: "Invalid"}
 #: Every per-export counter, printed and written even when zero.
 COUNTERS = (
     "rows", "rows_fields", "rows_checkpoint_fields",
@@ -173,6 +218,7 @@ COUNTERS = (
     "windows_exact", "rejected", "entries", "deleted_items", "changed_items",
     "items_complete", "items_partial", "array_elements", "hulls",
     "untyped_members", "untyped_nonzero_members",
+    "status_named", "status_unnamed_declaration", "status_unnamed_value",
     "owner_class_resolved", "owner_class_missing", "owner_class_ambiguous",
     "object_outer_is_actor", "object_outer_not_actor", "object_guid_unresolved",
 )
@@ -252,6 +298,28 @@ class ReplaySchema:
 
     def item_identities(self) -> frozenset:
         return frozenset(i for i in self.members.values() if i in MEMBERS)
+
+
+def resolved_names(schema: ReplaySchema) -> dict:
+    """Declared name -> game member path, for each RESOLVED_NAMES identity
+    this replay declares with exactly that checksum."""
+    return {identity[0]: RESOLVED_NAMES[identity]
+            for _, identity in sorted(schema.members.items()) if identity in RESOLVED_NAMES}
+
+
+def status_label(build: str, identity, value: int) -> tuple:
+    """(enumerator name or None, the counter it is tallied under).
+
+    A name only for the declaration the names were read from: that build and
+    that (name, checksum). Decoding admits no other Status identity today (it
+    must be in MEMBERS), so the identity test is reached only by a direct
+    call; it is here so a Status identity added to MEMBERS later is not named
+    by default.
+    """
+    if build != STATUS_NAMES_BUILD or identity != STATUS_IDENTITY:
+        return None, "status_unnamed_declaration"
+    name = STATUS_NAMES.get(value)
+    return name, "status_named" if name is not None else "status_unnamed_value"
 
 
 def read_scalar(bits: Bits, spec: Scalar):
@@ -505,7 +573,7 @@ def window_record(row: dict, ordinal: int, population: str, build: str, schema: 
 
 
 def item_record(window: dict, item: dict, owners: dict, objects: dict,
-                declared_items: frozenset, counts: Counter) -> dict:
+                declared_items: frozenset, counts: Counter, build: str) -> dict:
     identity = window["identity"]
     classes = owners.get(identity["actor_net_guid"], set())
     if len(classes) == 1 and None not in classes:
@@ -524,6 +592,11 @@ def item_record(window: dict, item: dict, owners: dict, objects: dict,
     fields = item["fields"]
     complete = set(item["identities"]) == declared_items
     counts["items_complete" if complete else "items_partial"] += 1
+    status_name = None
+    for member in item["identities"]:
+        if member[0] == "Status":
+            status_name, counter = status_label(build, member, fields["Status"])
+            counts[counter] += 1
     hull = None
     if "ConvexHullPoints" in fields:
         counts["hulls"] += 1
@@ -541,7 +614,7 @@ def item_record(window: dict, item: dict, owners: dict, objects: dict,
             "array_replication_key": item["array_replication_key"],
             "base_replication_key": item["base_replication_key"],
             "item_id": item["item_id"], "complete": complete,
-            "fields": fields, "hull": hull}
+            "fields": fields, "status_name": status_name, "hull": hull}
 
 
 def extract(export_dir: Path, out_dir: Path) -> dict:
@@ -581,7 +654,7 @@ def extract(export_dir: Path, out_dir: Path) -> dict:
                         counts["deleted_items"] += sum(len(e["deleted_item_ids"]) for e in record["entries"])
                         counts["changed_items"] += len(items)
                         for item in items:
-                            out = item_record(record, item, owners, objects, declared_items, counts)
+                            out = item_record(record, item, owners, objects, declared_items, counts, build)
                             items_out.write(json.dumps(out, separators=(",", ":"), allow_nan=False) + "\n")
                     else:
                         counts["rejected"] += 1
@@ -596,13 +669,16 @@ def extract(export_dir: Path, out_dir: Path) -> dict:
             "declarations": {
                 "class_group": {str(h): list(i) for h, i in sorted(schema.members.items())},
                 "cnc_group": {str(h): list(i) for h, i in sorted(schema.cnc.items())},
-                "cnc_declared_slots": schema.cnc_slots, "schema_error": schema.error},
+                "cnc_declared_slots": schema.cnc_slots, "schema_error": schema.error,
+                "resolved_names": resolved_names(schema)},
             "input_sha256_before": before, "input_sha256_after": after,
             "extractor_sha256": script_hash,
             "windows_sha256": sha(stage / "windows.ndjson"),
             "items_sha256": sha(stage / "items.ndjson"),
             "scope": ("GroundVolumeComponent FragmentInfo cells decoded with the replay's own "
-                      "declared names; no ability, player or Status-enumerator semantics."),
+                      "declared names; resolved_names by exact (name, checksum); Status "
+                      "enumerator names for the 13.06 declaration only; no ability or player "
+                      "semantics."),
         }
         (stage / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n",
                                             encoding="utf-8")
