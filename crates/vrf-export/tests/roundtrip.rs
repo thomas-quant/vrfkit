@@ -1,18 +1,7 @@
-//! Round-trip and stress tests for the Parquet export writers.
-//!
-//! These tests verify:
-//! - Write -> read round-trip preserves all values and nulls.
-//! - Rows are cut into row groups at exactly the row-group size.
-//! - Binary column data is preserved exactly.
-//! - Dictionary-encoded columns round-trip correctly.
-//! - Every table's file carries a Parquet dictionary for exactly the columns
-//!   its `DICTIONARY_COLUMNS` lists (this module also needs the `partials`
-//!   and `checkpoint-context` features).
-//!
-//! Every test here exercises a writer, so the file is empty unless all five
-//! table features are on. That is the default; the gate exists so that
-//! `--no-default-features` builds this target instead of failing to resolve
-//! writers the build deliberately left out.
+//! Round-trip tests for the Parquet writers: values and nulls survive, row
+//! groups are cut at the row-group size, and each file's dictionary pages match
+//! its table's `DICTIONARY_COLUMNS`. Gated on the five main table features (the
+//! default), so `--no-default-features` still builds this target.
 
 #![cfg(all(
     feature = "fields",
@@ -38,19 +27,11 @@ use vrf_export::{
     TableWriter, UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME,
 };
 
-/// Test output directory -- each test writes to a unique file.
-///
-/// Keyed by this crate's own source path, so two checkouts of the repository
-/// cannot write over each other. They previously shared one directory under
-/// the system temp dir, which is not per-checkout: a `cargo test` in a git
-/// worktree and one in the main tree write the same filenames, and whichever
-/// reads second reads the other's Parquet. That surfaced once already, as a
-/// column-count mismatch that looked exactly like a schema bug and was not.
-///
-/// `CARGO_MANIFEST_DIR` is the discriminator because it differs per worktree
-/// and is fixed at compile time, so every test in one binary agrees on it.
-/// CI may set `VRFKIT_INTEROP_DIR`; that exact root is used so a following
-/// language interop step can consume `<root>/interop` without guessing a hash.
+/// Test output directory, keyed by this checkout's `CARGO_MANIFEST_DIR`: one
+/// shared temp directory let two checkouts read each other's Parquet, which
+/// once surfaced as a column-count mismatch that looked exactly like a schema
+/// bug. `VRFKIT_INTEROP_DIR`, when set (CI sets it), is the exact root, so the
+/// interop step reads `<root>/interop` without guessing a hash.
 fn test_dir() -> PathBuf {
     let dir = test_dir_from_override(std::env::var_os("VRFKIT_INTEROP_DIR").map(PathBuf::from));
     fs::create_dir_all(&dir).unwrap();
@@ -74,14 +55,14 @@ fn an_explicit_interop_root_is_used_verbatim() {
     assert_eq!(test_dir_from_override(Some(root.clone())), root);
 }
 
-/// Helper: build a FieldRecord with predictable values based on an index.
+/// A FieldRecord whose values follow from `i`.
 fn make_field_record(i: u32) -> FieldRecord {
     FieldRecord {
         time_ms: i * 10,
         packet_id: i,
         channel_index: i % 8,
         actor_net_guid: 1000 + (i % 20),
-        // Every third record models a subobject block.
+        // Every third record describes the actor itself, the rest a subobject.
         object_net_guid: if i % 3 == 0 { None } else { Some(9000 + i) },
         group_path: format!("Group_{}", i % 5).into(),
         handle: i % 64,
@@ -116,7 +97,7 @@ fn make_field_record(i: u32) -> FieldRecord {
     }
 }
 
-/// Helper: build a MovementRecord with predictable values.
+/// A MovementRecord whose values follow from `i`.
 fn make_movement_record(i: u32) -> MovementRecord {
     MovementRecord {
         time_ms: i * 16,
@@ -130,8 +111,7 @@ fn make_movement_record(i: u32) -> MovementRecord {
         vel_x: if i % 3 == 0 { 0.0 } else { i as f32 },
         vel_y: if i % 3 == 1 { 0.0 } else { -(i as f32) },
         vel_z: 0.0,
-        // Vary all three so a round-trip check discriminates a real copy from
-        // a constant fill.
+        // All three vary, so a round trip tells a real copy from a constant.
         timestamp: i * 3,
         movement_state: (i % 5) as u8,
         move_type: (i % 2) as u8,
@@ -193,7 +173,7 @@ fn col<'a>(batch: &'a RecordBatch, name: &str) -> &'a ArrayRef {
         .unwrap_or_else(|| panic!("no column named {name}"))
 }
 
-// --- Field Writer Tests ---------------------------------------------------
+// --- fields ---------------------------------------------------------------
 
 #[test]
 fn field_roundtrip_basic() {
@@ -211,7 +191,6 @@ fn field_null_preservation() {
     let batch = roundtrip::<FieldsTable>(
         "field_null_preservation",
         [
-            // Row 0: field_name=None, raw_bits=None, value_i64=Some(0)
             FieldRecord {
                 time_ms: 0,
                 packet_id: 0,
@@ -229,7 +208,6 @@ fn field_null_preservation() {
                 value_bool: None,
                 value_str: None,
             },
-            // Row 1: field_name=Some, raw_bits=Some, value_str=Some
             FieldRecord {
                 time_ms: 1,
                 packet_id: 1,
@@ -250,27 +228,21 @@ fn field_null_preservation() {
         ],
     );
 
-    // field_name: row 0 null, row 1 = "Health"
     let field_name = col(&batch, "field_name").as_dictionary::<Int32Type>();
     assert!(field_name.is_null(0));
     assert!(!field_name.is_null(1));
     let field_name_values = field_name.downcast_dict::<StringArray>().unwrap();
     assert_eq!(field_name_values.value(1), "Health");
 
-    // raw_bits: row 0 null, row 1 = [0xAB]
     let raw_bits = col(&batch, "raw_bits").as_binary::<i32>();
     assert!(raw_bits.is_null(0));
     assert_eq!(raw_bits.value(1), &[0xAB]);
 
-    // value_i64: row 0 = Some(0), row 1 = null
     let value_i64 = col(&batch, "value_i64").as_primitive::<Int64Type>();
     assert!(!value_i64.is_null(0));
     assert_eq!(value_i64.value(0), 0);
     assert!(value_i64.is_null(1));
 
-    // value_str: row 0 = null, row 1 = "hello". Now dictionary-encoded like
-    // field_name, so read it back through the dictionary view rather than a
-    // bare StringArray downcast.
     let value_str = col(&batch, "value_str").as_dictionary::<Int32Type>();
     assert!(value_str.is_null(0));
     assert!(!value_str.is_null(1));
@@ -280,7 +252,7 @@ fn field_null_preservation() {
 
 #[test]
 fn field_binary_preservation() {
-    // Verify that arbitrary binary data (including 0x00 bytes) survives.
+    // Every byte value, 0x00 included.
     let payload: Vec<u8> = (0..=255).collect();
     let batch = roundtrip::<FieldsTable>(
         "field_binary_preservation",
@@ -361,7 +333,7 @@ fn unresolved_class_net_cache_payload_marker_roundtrips_exact_bits() {
     }
 }
 
-// --- Movement Writer Tests ------------------------------------------------
+// --- movement -------------------------------------------------------------
 
 #[test]
 fn movement_roundtrip_basic() {
@@ -406,10 +378,8 @@ fn movement_f32_precision() {
 
 #[test]
 fn movement_state_columns_keep_their_narrow_types() {
-    // The three columns added after vel_z are u32/u8/u8 on the wire. Parquet
-    // has no native 8-bit physical type -- it stores them as INT32 with an
-    // INTEGER(8, false) logical annotation -- so the assertion that matters is
-    // that a reader still hands them back as UInt8, not silently widened.
+    // Parquet stores a u8 as INT32 with an INTEGER(8, false) annotation; a
+    // reader must still hand it back as UInt8, not widened.
     let batch =
         roundtrip::<MovementTable>("movement_narrow_types", (0..64).map(make_movement_record));
     let schema = batch.schema();
@@ -422,8 +392,7 @@ fn movement_state_columns_keep_their_narrow_types() {
         let field = schema.field_with_name(name).unwrap();
         assert_eq!(field.data_type(), &DataType::UInt8, "{name} was widened");
     }
-    // The movement table is dense by contract; python_interop.py asserts the
-    // same thing over the whole schema.
+    // Dense by contract (python_interop.py checks the whole schema).
     for name in ["timestamp", "movement_state", "move_type"] {
         assert!(
             !schema.field_with_name(name).unwrap().is_nullable(),
@@ -431,9 +400,8 @@ fn movement_state_columns_keep_their_narrow_types() {
         );
     }
 
-    // Appended after vel_z, not interleaved: consumers that address movement
-    // columns by position (column 3 = pos_x, column 8 = vel_x) must keep
-    // working.
+    // Appended after vel_z, not interleaved: consumers address movement
+    // columns by position (column 3 = pos_x, column 8 = vel_x).
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert_eq!(
         names,
@@ -455,8 +423,7 @@ fn movement_state_columns_keep_their_narrow_types() {
         ]
     );
 
-    // mode_flags is deliberately not a column: vrf_movement assigns it from
-    // the same local as movement_state, so it could only ever duplicate it.
+    // No mode_flags column: docs/USAGE.md "movement.parquet".
     assert!(schema.field_with_name("mode_flags").is_err());
 }
 
@@ -501,7 +468,7 @@ fn movement_new_columns_roundtrip_values() {
     );
 }
 
-/// Write interop files for the Python verification step (requirement section 6).
+/// Write the files python_interop.py verifies.
 #[test]
 fn write_interop_files() {
     let dir = test_dir().join("interop");
@@ -510,7 +477,6 @@ fn write_interop_files() {
     let field_path = dir.join("fields_interop.parquet");
     let movement_path = dir.join("movement_interop.parquet");
 
-    // Write 10_000 field records.
     {
         let file = fs::File::create(&field_path).unwrap();
         let mut writer = FieldWriter::with_row_group_size(file, 4096).unwrap();
@@ -520,7 +486,6 @@ fn write_interop_files() {
         writer.finish().unwrap();
     }
 
-    // Write 50_000 movement records.
     {
         let file = fs::File::create(&movement_path).unwrap();
         let mut writer = MovementWriter::with_row_group_size(file, 8192).unwrap();
@@ -530,7 +495,6 @@ fn write_interop_files() {
         writer.finish().unwrap();
     }
 
-    // Verify files exist and have non-trivial size.
     assert!(field_path.exists());
     assert!(movement_path.exists());
     let field_size = fs::metadata(&field_path).unwrap().len();
@@ -541,16 +505,15 @@ fn write_interop_files() {
         "movement file too small: {movement_size}"
     );
 
-    // Print paths for the Python script to find.
     println!("INTEROP_FIELDS={}", field_path.display());
     println!("INTEROP_MOVEMENT={}", movement_path.display());
     println!("FIELD_SIZE_BYTES={field_size}");
     println!("MOVEMENT_SIZE_BYTES={movement_size}");
 }
 
-// --- Actor Writer Tests ---
+// --- actors ---------------------------------------------------------------
 
-/// Helper: build an ActorRecord with predictable values.
+/// An ActorRecord whose values follow from `i` and whether it is an open.
 fn make_actor_record(i: u32, is_open: bool) -> ActorRecord {
     ActorRecord {
         time_ms: i * 16,
@@ -611,7 +574,6 @@ fn actor_roundtrip_basic() {
     assert_eq!(time_ms.value(0), 0);
     assert_eq!(time_ms.value(1), 16);
 
-    // Verify event column (string).
     let event = col(&batch, "event").as_string::<i32>();
     assert_eq!(event.value(0), "open");
     // Index 2 is the first "close" (i=2, i%3==2).
@@ -645,16 +607,12 @@ fn actor_spawn_location_nullable() {
     );
 
     let spawn_x = col(&batch, "spawn_x").as_primitive::<Float32Type>();
-    // Open row has spawn_x = 50.0
     assert!(!spawn_x.is_null(0));
     assert!((spawn_x.value(0) - 50.0).abs() < f32::EPSILON);
-    // Close row has null spawn_x
     assert!(spawn_x.is_null(1));
 }
 
-// ---------------------------------------------------------------------------
-// net_guids table
-// ---------------------------------------------------------------------------
+// --- net_guids -------------------------------------------------------------
 
 #[test]
 fn net_guid_roundtrip_preserves_outer_chain() {
@@ -687,19 +645,16 @@ fn net_guid_roundtrip_preserves_outer_chain() {
     assert_eq!(path_values.value(1), "FiringState");
 
     let outer = col(&batch, "outer_net_guid").as_primitive::<UInt32Type>();
-    // A GUID with no declared outer must be null, not 0 -- 0 is a real
-    // sentinel meaning "invalid GUID" and must stay distinguishable.
+    // No declared outer is null, not 0, the invalid-GUID sentinel.
     assert!(outer.is_null(0));
     assert_eq!(outer.value(1), 2910);
 }
 
 #[test]
 fn field_object_net_guid_roundtrips_and_is_nullable() {
-    // A content block can describe the actor itself or one of its subobjects.
     // Without the subobject GUID every ItemSlot on a character collapses onto
-    // one key downstream, so a player appears to hold a single item.
-    // `None` means "this block described the actor", which must stay distinct
-    // from any real GUID -- including 0.
+    // one key downstream. `None` (the actor itself) must stay distinct from
+    // any GUID, 0 included.
     let mut actor_block = make_field_record(1);
     actor_block.object_net_guid = None;
     let mut subobject_block = make_field_record(2);
@@ -714,9 +669,7 @@ fn field_object_net_guid_roundtrips_and_is_nullable() {
     assert_eq!(object_net_guid.value(1), 4242);
 }
 
-// ---------------------------------------------------------------------------
-// events table
-// ---------------------------------------------------------------------------
+// --- events ---------------------------------------------------------------
 
 /// The first `roundStarted` payload from the reference replay, byte for byte.
 /// It carries an embedded 0x00 and a tail that is not valid text, which is the
@@ -788,8 +741,7 @@ fn event_roundtrip_preserves_payload_bytes_exactly() {
     assert_eq!(payload_size.value(0), 46);
     assert_eq!(payload_size.value(1), 3);
 
-    // The undecoded payload is the whole point of the table: every byte, in
-    // order, including the embedded 0x00 and the bytes that are not text.
+    // Every byte in order, the embedded 0x00 and the non-text tail included.
     let raw = col(&batch, "raw_payload").as_binary::<i32>();
     assert_eq!(raw.value(0), REFERENCE_EVENT_PAYLOAD);
     assert_eq!(raw.value(1), [0x00, 0xFF, 0x80]);
@@ -809,15 +761,9 @@ fn event_roundtrip_preserves_payload_bytes_exactly() {
     assert!(payload_seconds.is_null(1));
 }
 
-/// The replay's own `compatible_checksum` survives the round trip, nulls
-/// included.
-///
-/// It is what tells "this field is legitimately undescribed" apart from "this
-/// field has a checksum the overlay never learned" -- the Phoenix case, where a
-/// whole class was missing from the table and 2,791 rows read null with decode
-/// errors at 0. Without the checksum in the export those two look identical
-/// offline, and the only reason Phoenix was found at all is that a sibling
-/// class happened to share its RPC name.
+/// The replay's `compatible_checksum` survives the round trip, nulls
+/// included: it tells an undescribed field from a checksum the overlay never
+/// learned (Phoenix: 2,791 null rows at 0 decode errors; docs/USAGE.md).
 #[test]
 fn compatible_checksum_round_trips_with_its_nulls() {
     let rows = (0..8u32).map(|i| FieldRecord {
@@ -837,9 +783,7 @@ fn compatible_checksum_round_trips_with_its_nulls() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// One writer serves every table: row groups, empty files, push_batch
-// ---------------------------------------------------------------------------
+// --- one writer serves every table: row groups, empty files, push_batch ---
 
 /// An event row that varies with `i`, alternating between two groups.
 fn make_event_record(i: u32) -> EventRecord {
@@ -884,11 +828,8 @@ fn row_groups(path: &Path) -> Vec<i64> {
 
 #[test]
 fn row_groups_close_at_the_row_group_size_not_at_each_batch() {
-    // 200,000 rows at 65,536 per row group: three full groups and the rest.
-    // Each full group spans eight batches of MAX_BUFFERED_ROWS, so a writer
-    // that closed a row group whenever it handed over a batch would write 24
-    // groups of 8,192 and one of 3,392 -- which the ">= 3 row groups" these
-    // assertions replace accepted. Only the exact vector tells them apart.
+    // A writer closing a group at every 8,192-row batch would write 24 groups
+    // of 8,192 and one of 3,392, which a ">= 3 row groups" check accepted.
     const ROWS: u32 = 200_000;
     const _: () = assert!(vrf_export::writer::MAX_BUFFERED_ROWS < 65_536);
     let expected = vec![65_536, 65_536, 65_536, 3_392];
@@ -917,9 +858,9 @@ fn a_writer_finished_with_no_rows_writes_a_readable_empty_file() {
     assert_eq!(rows_in_empty_file::<EventsTable>("empty_events"), 0);
 }
 
-/// Write rows `0..count` once through `push_batch` and once through one
-/// `push` per row, at 128 rows per row group so the flushes fall inside the
-/// batch. Asserts the two files are byte-identical; returns the row groups.
+/// Write rows `0..count` through `push_batch` and through one `push` per row,
+/// at 128 rows per group so flushes fall inside the batch; assert the files
+/// are byte-identical and return the row groups.
 fn push_batch_against_push<T: Table>(name: &str, count: u32, make: fn(u32) -> T::Row) -> Vec<i64> {
     let batched = write_rows::<T>(&format!("{name}_batched"), 128, (0..count).map(make), true);
     let pushed = write_rows::<T>(&format!("{name}_pushed"), 128, (0..count).map(make), false);
@@ -942,20 +883,11 @@ fn push_batch_writes_the_same_file_as_one_push_per_row() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Dictionary encoding is per column
-// ---------------------------------------------------------------------------
+// --- dictionary encoding is per column -------------------------------------
 
-/// The writers dictionary-encode exactly the columns each table lists in
-/// `Table::DICTIONARY_COLUMNS`, and nothing else.
-///
-/// The list was once applied over parquet-rs's default of dictionary-encoding
-/// every column, so it switched on what was already on and could not move a
-/// byte, while every table's comment read as though it decided the encoding.
-/// These tests read the written file's footer, not the list.
-///
-/// Gated on the two table features the file-level gate does not cover, so the
-/// rest of this file still builds with only the five main tables.
+/// Each table's file has a dictionary for exactly its
+/// `Table::DICTIONARY_COLUMNS`, read from the footer because the list once
+/// changed nothing. Gated on the two features the file-level gate lacks.
 #[cfg(all(feature = "partials", feature = "checkpoint-context"))]
 mod dictionary_encoding {
     use super::*;
@@ -975,13 +907,10 @@ mod dictionary_encoding {
     const ROWS: u32 = 8;
 
     /// Write `rows` through the real writer and return every column whose
-    /// footer disagrees with `T::DICTIONARY_COLUMNS`.
-    ///
-    /// BOOLEAN columns are skipped: parquet-rs never gives them a dictionary,
-    /// and `dictionary_lists_name_real_columns_and_cover_every_string` rejects
-    /// one in a list. A column with no non-null value is reported rather than
-    /// checked, so a fixture that stops populating a column cannot make the
-    /// comparison depend on how an all-null chunk happens to be written.
+    /// footer disagrees with `T::DICTIONARY_COLUMNS`. BOOLEAN columns are
+    /// skipped (parquet-rs never gives them a dictionary, and the list check
+    /// rejects one); an all-null column is reported rather than checked, so
+    /// the result cannot depend on how an all-null chunk is written.
     fn footer_disagreements<T: Table>(table: &str, rows: Vec<T::Row>) -> Vec<String> {
         let name = format!("dictionary_encoding_{table}");
         let path = write_rows::<T>(&name, T::DEFAULT_ROW_GROUP_SIZE, rows, true);
@@ -1279,10 +1208,9 @@ mod dictionary_encoding {
         );
     }
 
-    /// Every name in a table's list must be a real, non-boolean column of that
-    /// table, listed once -- parquet-rs silently ignores the other two cases --
-    /// and every string column must be listed, because the docs promise that
-    /// string columns are dictionary-encoded.
+    /// Every listed name must be a real non-boolean column, listed once
+    /// (parquet-rs silently ignores an unknown or BOOLEAN name), and every
+    /// string column must be listed, as the docs promise.
     fn list_problems<T: Table>(table: &str) -> Vec<String> {
         let schema = T::schema();
         let mut problems = Vec::new();
