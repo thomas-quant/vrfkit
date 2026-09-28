@@ -1907,6 +1907,11 @@ fn a_table_entry_outranks_the_engine_fallback() {
 /// The replay's own `compatible_checksum` agrees with the grouping and was not
 /// used to derive it: `248` is 598402184 wherever it appears, `249` is
 /// 747197698, `Translation` 2235276067, `Scale3D` 2983776962.
+///
+/// `249` here is the FTransform's `Rotation`, an FQuat sent as X/Y/Z (W is
+/// implied), not a rotator: 747197698 reproduces as `Transform: FTransform ->
+/// Rotation: FQuat` (tools/tests/test_compatible_checksum_facts.py). The bits
+/// read the same as any 3 x f64; only the meaning was wrong.
 #[test]
 fn the_rpc_transform_vectors_are_typed() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -2688,8 +2693,9 @@ fn the_weapon_classes_type_215_and_216_like_everything_else() {
 /// table already carries `ReplayPlayContinuousEffectAtLocation.Rotation` as
 /// `RotationShort`.
 ///
-/// It is not the other `249`. That one is a `VectorDouble` under a different
-/// checksum; this family shares 2526428638 and is 19 bits, not 192.
+/// It is not the other `249`. That one is the FQuat X/Y/Z of an FTransform, a
+/// `VectorDouble` under 747197698; this family shares 2526428638 -- a
+/// top-level `Rotation: FRotator` -- and is 19 bits, not 192.
 #[test]
 fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
     const GROUPS: [&str; 5] = [

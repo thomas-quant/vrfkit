@@ -362,8 +362,9 @@ Note what separates the second and third buckets among RPCs, since both hold
 parameter and lands in the second, while an RPC whose payload could not be
 split into parameters is emitted whole with no declared handle and lands in the
 third. `ClientPlayOneShotEffectAtLocation.249` sits in the second because it is
-a parameter -- one whose name the replay gives as a bare handle number, and
-whose sibling `248` this repo already types as a `VectorDouble`.
+a parameter -- one whose name the replay gives as a bare number (the hardcoded
+FName index of `Rotation`), and whose sibling `248` this repo already types as
+a `VectorDouble`.
 
 Without this column those three are one undifferentiated pile. Phoenix's smoke
 wall sat in the middle bucket for the life of the project -- 2,791 rows of null

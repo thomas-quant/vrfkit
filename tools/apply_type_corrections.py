@@ -449,9 +449,15 @@ ADDITIONS = [
     # Admitted on wire evidence, same bar as the rest: every row is 192 bits
     # (3 x f64); `Translation` reads as map coordinates (7211.7, 1670.3, 96.0)
     # on an Ascent replay; `Scale3D` is (1,1,1) on every row, which no other
-    # reading of those bits produces. The third parameter of the same RPC
-    # arrives as handle `249` with no name from the replay and is left raw --
-    # naming a handle is what HANDLE_ADDITIONS is for, and its bar is higher.
+    # reading of those bits produces. The third member of the same
+    # `ValveSetTransform: FTransform` parameter arrives named `249` -- the
+    # hardcoded FName index of `Rotation`, not a handle -- and is left raw.
+    # It is the transform's FQuat, X/Y/Z only, like the typed `249`s below:
+    # its checksum 177696787 reproduces as `ValveSetTransform: FTransform ->
+    # Rotation: FQuat` (tools/tests/test_compatible_checksum_facts.py), and
+    # over the 1,018-replay corpus all 58,598 rows under it (Phoenix's and
+    # Viper's walls, Astra's MulticastAddAnchor) are 192 bits with
+    # |xyz| <= 1. Typing it is a separate change.
     ("/Game/Characters/Phoenix/S0/Ability_Q/Production/"
      "GameObject_Phoenix_Q_FlameWallManager_Production."
      "GameObject_Phoenix_Q_FlameWallManager_Production_C:MulticastAddSmokeScreenPoint",
@@ -475,10 +481,13 @@ ADDITIONS = [
     # Decoded, yaw is set on 92.5% of rows, pitch on 14.5% and roll on 0.1%,
     # all on a 0.0055-degree lattice: a ground-placed effect facing somewhere.
     #
-    # Not to be confused with the other `249` above, which is a `VectorDouble`.
-    # That one is 192 bits under a different checksum; this family shares
-    # 2526428638 and is 19 bits on most rows. Same number, different property --
-    # which is the whole reason the checksum is the thing to check.
+    # Not to be confused with the other `249`, which is a `VectorDouble`: the
+    # FQuat of an FTransform (X/Y/Z, 192 bits, checksum 747197698 and two
+    # siblings -- see the RPC transform vectors below). This family shares
+    # 2526428638, which reproduces as a top-level `Rotation: FRotator`
+    # (tools/tests/test_compatible_checksum_facts.py), and is 19 bits on most
+    # rows. Same number, different property -- which is the whole reason the
+    # checksum is the thing to check.
     ("/Script/ShooterGame.LocationalEffectManagerComponent:ClientPlayOneShotEffectAtLocation",
      "249", "FieldType::RotationShort"),
     ("/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
@@ -658,8 +667,24 @@ ADDITIONS = [
     # Read as 3 x f64 they are unambiguous. `Scale3D` is exactly
     # (1.0, 1.0, 1.0) on every row, which no other reading produces -- 6 x f32
     # gives (0, 1.875, 0, 1.875, 0, 1.875). The `248` locations are map
-    # coordinates in Unreal units with plausible floor heights, and `249` is a
-    # rotator carrying negative zero, which a wrong split would not produce.
+    # coordinates in Unreal units with plausible floor heights.
+    #
+    # `249` is NOT a rotator. It is the transform's `Rotation`, an FQuat, sent
+    # as its X, Y and Z (doubles under UE5's large world coordinates) and named
+    # by the hardcoded FName index 249. The checksum settles it: 747197698
+    # reproduces as `Transform: FTransform -> Rotation: FQuat` and not as
+    # FRotator (3753301026) or FVector (1853556327), and Translation/Scale3D
+    # reproduce under the same parent (tools/tests/test_compatible_checksum_
+    # facts.py); the 13.06 executable's reflection has `Transform.Rotation` as
+    # a quaternion. W is not on the wire: Unreal's `FQuat::NetSerialize`
+    # normalizes, flips all four signs when W < 0 and writes X, Y, Z, so a
+    # reader rebuilds W = sqrt(max(0, 1 - |xyz|^2)). That convention is the
+    # public engine source's and was NOT verified in this binary. The data fit
+    # it: over all 1,018 replays (r3 exports, 2026-09-28) 12,698,371 rows carry
+    # 747197698, every one 192 bits with |xyz| <= 1 (max 1.0, none above
+    # 1 + 1e-6), and 12,594,391 of them hold a negative zero -- what the sign
+    # flip leaves on a zero component. The exported value_str is "(x,y,z)" of
+    # the quaternion: neither Euler angles nor a direction. No W is exported.
     #
     # Independently cross-checked: `BombPlantedRPC.PlantLocation` and
     # `MulticastActivateBombSiteEffects.BombLocation` are two unrelated RPCs
@@ -739,6 +764,10 @@ ADDITIONS = [
      "EffectManagerComponent", "FieldType::ObjectNetGuid"),
     ("/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
      "EffectManagerComponent", "FieldType::ObjectNetGuid"),
+    # The same FQuat X/Y/Z under another parent: `SpawnTransform: FTransform
+    # -> Rotation: FQuat` reproduces its checksum 1874998526 (Translation
+    # 131504838, Scale3D 3357891630 follow the same parent). 183,577 rows over
+    # the 1,018 replays, all 192 bits, |xyz| <= 1.
     ("/Script/ShooterGame.AresGameStateBase:MulticastResetForRespawn",
      "249", "FieldType::VectorDouble"),
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
@@ -849,13 +878,21 @@ ADDITIONS = [
      "Module", "FieldType::ObjectNetGuid"),
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
      "Character", "FieldType::ObjectNetGuid"),
-    # Which named area of the map a player is standing in -- "A Site", "Mid",
-    # "Heaven" and so on, the same callouts the game announces. The group only
+    # Which callout region of the map a player is standing in. The group only
     # became reachable when the `CalloutRegionTracker` leaf was remapped, and
     # the field is an ObjectNetGuid: unpacking the raw bits of all 1,957
     # non-zero rows and looking them up in net_guids resolves 1,957 of 1,957 to
     # a `CalloutRegion_*` path, 22 distinct regions. Nothing else in the export
     # names where a player is in map terms.
+    #
+    # What resolves is the region ACTOR's object name (its outer chain is the
+    # map's `<Map>_Callout_Volumes` level), not the callout the game shows or
+    # announces. That name is the actor's `RegionName`, string-table text the
+    # replay does not carry, and it differs from the letters of the object
+    # name for at least 9 of 160 letter-style regions (Ascent's
+    # `CalloutRegion_A_Link` is shown as "Tree"; checked 2026-09-28 against the
+    # installed 13.06 game's string tables, read-only). Treat the path as an
+    # identifier, not as a label.
     ("/Script/ShooterGame.CalloutRegionTrackingComponent",
      "CurrentRegion", "FieldType::ObjectNetGuid"),
     # The per-cast ability log: who cast what, when, and where. vrfkit already

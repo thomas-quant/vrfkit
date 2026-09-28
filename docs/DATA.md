@@ -641,6 +641,44 @@ document began listing the field as a position source, and a position that is
 100x wrong is not a parity worth keeping. That parity join was a one-off, so no
 committed check had to be changed or excluded.
 
+### RPC transforms: `249` is a rotation quaternion, not a rotator
+
+Several RPCs and transition contexts replicate an `FTransform`, and the wire
+flattens it into three members: `Translation` and `Scale3D` by name, and the
+rotation under the hardcoded name index 249 (`Rotation`), which the export
+spells `249`. All three are 192-bit `VectorDouble`s, rendered `(x,y,z)` in
+`value_str`.
+
+`Translation` is a location and `Scale3D` a scale. **`249` is neither an Euler
+rotator nor a direction: it is the transform's `FQuat`, and the three numbers
+are its X, Y and Z.** The checksum says so -- 747197698 reproduces as the member
+`Rotation: FQuat` of `Transform: FTransform`, and not as `FRotator` or `FVector`
+(`tools/tests/test_compatible_checksum_facts.py`); the 13.06 executable's
+reflection has `Transform.Rotation` as a quaternion. W is not sent. Unreal's
+`FQuat::NetSerialize` normalizes the quaternion, flips all four signs when W is
+negative and writes only X, Y and Z, so a reader rebuilds
+`W = sqrt(max(0, 1 - (x*x + y*y + z*z)))`. That convention is the public engine
+source's; it was not verified in this binary. The data fit it: over all 1,018
+replays (24 builds, main and checkpoint rows), the 12,698,371 rows under
+747197698 are all 192 bits with `|xyz| <= 1` (the largest is exactly 1, none
+exceeds `1 + 1e-6`), and 12,594,391 of them hold a negative zero -- what the
+sign flip leaves on a zero component. No `W` column is exported; compute it
+when you need the full quaternion.
+
+| Carries it | `249` checksum | Parent | Rows (1,018 replays) |
+|---|---|---|---|
+| `EffectManagerComponent:MulticastPlay{Continuous,OneShot}Effect`, the weapons' `AresEquippable:MulticastPlay{Continuous,OneShot}EffectFromClient` | 747197698 | parameter `Transform` | in the 12,698,371 |
+| `TransformTransitionContext`, `TransitionContext_Sequoia_X_TeleportInfo_C`, `StateContext_ActorTrailTargetingResult_C` (typed through the checksum table) | 747197698 | property `Transform` | in the 12,698,371 |
+| `AresGameStateBase:MulticastResetForRespawn` | 1874998526 | parameter `SpawnTransform` | 183,577, `\|xyz\| <= 1` |
+| Viper's and Phoenix's `MulticastAddSmokeScreenPoint`, Astra's `MulticastAddAnchor` | 177696787 | parameter `ValveSetTransform` | 58,598, `\|xyz\| <= 1`; left raw |
+
+A different `249` travels on the effect-placement RPCs
+(`ClientPlayOneShotEffectAtLocation`, `ReplayPlay*EffectAtLocation`,
+`ReplayRecord*Effect`): checksum 2526428638, which reproduces as a top-level
+`Rotation: FRotator`. That one is a rotator, typed `RotationShort` and rendered
+in degrees. Same name, different property -- the checksum is what tells them
+apart.
+
 ## Weapons & loadout
 
 | Data | Source | Status |

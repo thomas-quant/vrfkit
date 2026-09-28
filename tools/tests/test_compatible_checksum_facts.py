@@ -94,6 +94,29 @@ FACTS = [
      "GameObject_Gumshoe_4_TripWire_C:SetEnemyInTrap.PairedWire (13.01-13.06)"),
     (2035145197, [("CreatedByCharacter", "AShooterCharacter*")], ["UShooterCharacter*"], None,
      "Ability_Gumshoe_{E_TripWire,4_TripWire,4_CageTrap,Q_CageTrap}_C.CreatedByCharacter"),
+    # An FTransform reaches the wire as three members. `249` (the hardcoded
+    # FName index of `Rotation`) is its FQuat, sent as X/Y/Z -- not a rotator.
+    (747197698, [("Transform", "FTransform"), ("Rotation", "FQuat")],
+     ["FRotator", "FVector"], "FieldType::VectorDouble",
+     "MulticastPlay*Effect(FromClient).249, TransformTransitionContext.249"),
+    (2235276067, [("Transform", "FTransform"), ("Translation", "FVector")],
+     ["FQuat"], "FieldType::VectorDouble",
+     "MulticastPlay*Effect(FromClient).Translation"),
+    (2983776962, [("Transform", "FTransform"), ("Scale3D", "FVector")],
+     ["FQuat"], "FieldType::VectorDouble",
+     "MulticastPlay*Effect(FromClient).Scale3D"),
+    (1874998526, [("SpawnTransform", "FTransform"), ("Rotation", "FQuat")],
+     ["FRotator", "FVector"], "FieldType::VectorDouble",
+     "AresGameStateBase:MulticastResetForRespawn.249"),
+    (177696787, [("ValveSetTransform", "FTransform"), ("Rotation", "FQuat")],
+     ["FRotator", "FVector"], None,
+     "MulticastAddSmokeScreenPoint.249 / MulticastAddAnchor.249 (raw)"),
+    # The effect-placement RPCs' `249` is a different property: a top-level
+    # FRotator, typed RotationShort by name (no checksum-table entry).
+    (2526428638, [("Rotation", "FRotator")], ["FQuat", "FVector"], None,
+     "ClientPlayOneShotEffectAtLocation / ReplayPlay*AtLocation / ReplayRecord*.249"),
+    (598402184, [("Location", "FVector")], ["FVector_NetQuantize"], "FieldType::VectorDouble",
+     "the effect-placement RPCs' 248"),
 ]
 
 #: The C++ leaf type each checksum-table FieldType above stands for.
@@ -101,6 +124,10 @@ FIELD_TYPE_OF = {
     "int64": "FieldType::Int64",
     "uint32": "FieldType::UInt32",
     "bool": "FieldType::Bool",
+    # Three doubles on this wire (UE5 large world coordinates); FQuat sends
+    # X/Y/Z only, W implied.
+    "FQuat": "FieldType::VectorDouble",
+    "FVector": "FieldType::VectorDouble",
 }
 
 
