@@ -11,11 +11,11 @@ use vrf_bitio::BitReader;
 use super::{Result, StructBlobError};
 
 const MAX_ARRAY_COUNT: u32 = 128;
-pub(super) const MAX_FIELDS_PER_ELEMENT: u32 = 8;
+const MAX_FIELDS_PER_ELEMENT: u32 = 8;
 const MAX_FIELD_PAYLOAD_BITS: u32 = 64 * 1024;
 
 /// Read the declared element count from the stream.
-pub(super) fn read_array_count(reader: &mut BitReader<'_>) -> Result<u32> {
+fn read_array_count(reader: &mut BitReader<'_>) -> Result<u32> {
     let count = reader.read_int_packed()?;
     if count > MAX_ARRAY_COUNT {
         return Err(StructBlobError::ArrayCountTooLarge {
@@ -27,10 +27,7 @@ pub(super) fn read_array_count(reader: &mut BitReader<'_>) -> Result<u32> {
 }
 
 /// Read the next element index. Returns `None` if the terminator (0) is read.
-pub(super) fn read_element_index(
-    reader: &mut BitReader<'_>,
-    declared_count: u32,
-) -> Result<Option<u32>> {
+fn read_element_index(reader: &mut BitReader<'_>, declared_count: u32) -> Result<Option<u32>> {
     let encoded = reader.read_int_packed()?;
     if encoded == 0 {
         return Ok(None);
@@ -45,9 +42,54 @@ pub(super) fn read_element_index(
     Ok(Some(index))
 }
 
+/// The element loop all three blobs share.
+///
+/// Per field, in this order: the header, the field-count limit, the field's
+/// window, the name `name_for` gives its handle, then `member`, which reads
+/// the window into the row and returns the name a leftover is reported under
+/// -- or `None` for a name it has no arm for -- and last the check that the
+/// window was consumed. The order decides which error a malformed blob
+/// reports, so it is written once.
+pub(super) fn decode_elements<'d, R>(
+    reader: &mut BitReader<'_>,
+    context: &'static str,
+    mut name_for: impl FnMut(u32) -> Result<&'d str>,
+    new_row: impl Fn(u32) -> R,
+    mut member: impl FnMut(&mut R, &'d str, &mut BitReader<'_>) -> Result<Option<&'d str>>,
+) -> Result<Vec<R>> {
+    let count = read_array_count(reader)?;
+    let mut rows = Vec::new();
+    while let Some(index) = read_element_index(reader, count)? {
+        let mut row = new_row(index);
+        for field_idx in 0..=MAX_FIELDS_PER_ELEMENT {
+            let Some((handle, bit_count)) = read_field_header(reader)? else {
+                break;
+            };
+            if field_idx == MAX_FIELDS_PER_ELEMENT {
+                return Err(StructBlobError::TooManyFields { context });
+            }
+            // The sub-reader consumes the bits from the parent, so a field we
+            // do not interpret still advances the stream correctly.
+            let mut sub = reader.sub_reader(u64::from(bit_count))?;
+            let name = name_for(handle)?;
+            let Some(label) = member(&mut row, name, &mut sub)? else {
+                return Err(StructBlobError::UnsupportedMember {
+                    name: name.to_owned(),
+                    handle,
+                    context,
+                });
+            };
+            ensure_member_consumed(&sub, label, handle, bit_count, context)?;
+        }
+        rows.push(row);
+    }
+    ensure_consumed(reader)?;
+    Ok(rows)
+}
+
 /// Read the next field handle. Returns `None` if the terminator (0) is read.
 /// Also reads the bit_count of the field payload.
-pub(super) fn read_field_header(reader: &mut BitReader<'_>) -> Result<Option<(u32, u32)>> {
+fn read_field_header(reader: &mut BitReader<'_>) -> Result<Option<(u32, u32)>> {
     let encoded = reader.read_int_packed()?;
     if encoded == 0 {
         return Ok(None);
@@ -61,28 +103,6 @@ pub(super) fn read_field_header(reader: &mut BitReader<'_>) -> Result<Option<(u3
         });
     }
     Ok(Some((handle, bit_count)))
-}
-
-/// Read an FName from a sub-reader (1 bit hardcoded flag, then either IntPacked
-/// or FString + Int32).
-///
-/// The trailing Int32 is the FName's instance number, and it is part of the
-/// name's identity rather than padding: Unreal stores it as the displayed
-/// suffix plus one, so `Source_1` and `Source_2` differ only there. Dropping it
-/// collapsed them onto one string. Rendered by the same
-/// [`crate::decode::scalar::render_fname`] the overlay's `FName` decoder uses,
-/// so a `WinningTeam` read here and an `FName` read there spell a given name
-/// identically.
-pub(super) fn read_fname(reader: &mut BitReader<'_>) -> Result<String> {
-    let is_hardcoded = reader.read_bit()?;
-    if is_hardcoded {
-        let index = reader.read_int_packed()?;
-        Ok(index.to_string())
-    } else {
-        let name = reader.read_fstring(1024)?;
-        let number = reader.read_i32()?;
-        Ok(crate::decode::scalar::render_fname(name, number)?)
-    }
 }
 
 /// Read a byte-width enum whose payload carries only its significant bits.
@@ -145,7 +165,7 @@ pub(super) fn member_name<'d>(
 ///
 /// Called per field rather than per blob for exactly that reason: the blob-level
 /// check cannot see inside a window the parent has already skipped.
-pub(super) fn ensure_member_consumed(
+fn ensure_member_consumed(
     sub: &BitReader<'_>,
     name: &str,
     handle: u32,
@@ -166,7 +186,7 @@ pub(super) fn ensure_member_consumed(
 }
 
 /// Ensure the reader is fully consumed.
-pub(super) fn ensure_consumed(reader: &BitReader<'_>) -> Result<()> {
+fn ensure_consumed(reader: &BitReader<'_>) -> Result<()> {
     if reader.bits_remaining() > 0 {
         return Err(StructBlobError::NotFullyConsumed {
             remaining: reader.bits_remaining(),

@@ -120,13 +120,24 @@ pub(super) fn decode_ftext(r: &mut BitReader<'_>) -> Result<DecodedValue, Decode
 /// as an FString ran off the end of the payload and produced mojibake, which
 /// is why the field had to be forced to Raw in the type-correction pass.
 pub(super) fn decode_fname(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+    read_fname(r, 64 * 1024).map(DecodedValue::Str)
+}
+
+/// [`decode_fname`]'s reader, generic over the caller's error type so the
+/// struct blobs keep their own (`StructBlobError::BitIo` for a read,
+/// `StructBlobError::Decode` for a bad instance number). `max_bytes` caps the
+/// inline string: 64 KiB here, 1024 in the struct blobs. One reader means a
+/// `WinningTeam` read there and an `FName` read here spell a name the same.
+pub(crate) fn read_fname<E: From<BitError> + From<DecodeError>>(
+    r: &mut BitReader<'_>,
+    max_bytes: i64,
+) -> Result<String, E> {
     if r.read_bit()? {
-        let index = r.read_int_packed()?;
-        return Ok(DecodedValue::Str(index.to_string()));
+        return Ok(r.read_int_packed()?.to_string());
     }
-    let name = r.read_fstring(64 * 1024)?;
+    let name = r.read_fstring(max_bytes)?;
     let number = r.read_i32()?;
-    render_fname(name, number).map(DecodedValue::Str)
+    Ok(render_fname(name, number)?)
 }
 
 /// Apply an `FName`'s instance number to its string, Unreal's way.
@@ -134,7 +145,7 @@ pub(super) fn decode_fname(r: &mut BitReader<'_>) -> Result<DecodedValue, Decode
 /// `number == 0` is the bare name; otherwise the displayed suffix is
 /// `number - 1`. A negative number has no valid display form and is rejected;
 /// in particular, `i32::MIN - 1` must not wrap into a plausible positive name.
-pub(crate) fn render_fname(name: String, number: i32) -> Result<String, DecodeError> {
+fn render_fname(name: String, number: i32) -> Result<String, DecodeError> {
     if number < 0 {
         return Err(DecodeError::InvalidFNameNumber { number });
     }

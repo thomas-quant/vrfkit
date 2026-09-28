@@ -534,7 +534,7 @@ fn round_results_zero_width_enum_is_an_error_not_an_absent_field() {
 
 #[test]
 fn struct_fname_rejects_a_negative_instance_number() {
-    let mut bits = vec![false]; // inline, not hardcoded
+    let mut fname = vec![false]; // inline, not hardcoded
     for byte in 5i32
         .to_le_bytes()
         .into_iter()
@@ -542,12 +542,21 @@ fn struct_fname_rejects_a_negative_instance_number() {
         .chain((-1i32).to_le_bytes())
     {
         for bit in 0..8 {
-            bits.push((byte >> bit) & 1 != 0);
+            fname.push((byte >> bit) & 1 != 0);
         }
     }
+    // One element whose WinningTeam (handle 93 on 13.01) is that FName.
+    let mut bits = Vec::new();
+    push_int_packed(&mut bits, 1); // element count
+    push_int_packed(&mut bits, 1); // encoded index -> round 0
+    push_int_packed(&mut bits, 94);
+    push_int_packed(&mut bits, fname.len() as u32);
+    bits.extend(fname);
+    push_int_packed(&mut bits, 0); // end of element
+    push_int_packed(&mut bits, 0); // end of array
     let (data, bit_len) = pack_bits(&bits);
     let mut reader = BitReader::with_bit_len(&data, bit_len).unwrap();
-    let err = super::framing::read_fname(&mut reader)
+    let err = decode_round_results(&mut reader, &bomb_game_state_1301())
         .expect_err("the struct decoder must propagate invalid FName numbers");
     assert!(
         matches!(

@@ -2,11 +2,9 @@
 
 use vrf_bitio::BitReader;
 
-use super::framing::{
-    MAX_FIELDS_PER_ELEMENT, ensure_consumed, ensure_member_consumed, member_name, read_array_count,
-    read_element_index, read_field_header, read_fname, read_narrow_byte,
-};
+use super::framing::{decode_elements, member_name, read_narrow_byte};
 use super::{Result, StructBlobError};
+use crate::decode::scalar::read_fname;
 
 /// Names this blob in error messages.
 const CONTEXT: &str = "RoundResults";
@@ -137,28 +135,19 @@ pub fn decode_round_results(
         return Ok(Vec::new());
     }
 
-    let count = read_array_count(reader)?;
-    let mut results = Vec::new();
-
-    while let Some(round_number) = read_element_index(reader, count)? {
-        let mut winning_team: Option<String> = Option::None;
-        let mut winning_team_role: Option<AresTeamRole> = Option::None;
-        let mut round_result: Option<AresRoundOutcome> = Option::None;
-
-        for field_idx in 0..=MAX_FIELDS_PER_ELEMENT {
-            let Some((handle, bit_count)) = read_field_header(reader)? else {
-                break;
-            };
-            if field_idx == MAX_FIELDS_PER_ELEMENT {
-                return Err(StructBlobError::TooManyFields { context: CONTEXT });
-            }
-
-            // The sub-reader consumes the bits from the parent, so a field we
-            // do not interpret still advances the stream correctly.
-            let mut sub = reader.sub_reader(u64::from(bit_count))?;
-            let member = member_name(declared, handle, CONTEXT)?;
-            match member {
-                "WinningTeam" => winning_team = Some(read_fname(&mut sub)?),
+    decode_elements(
+        reader,
+        CONTEXT,
+        |handle| member_name(declared, handle, CONTEXT),
+        |round_number| RoundResult {
+            round_number,
+            winning_team: None,
+            winning_team_role: None,
+            round_result: None,
+        },
+        |row, name, sub| {
+            match name {
+                "WinningTeam" => row.winning_team = Some(read_fname::<StructBlobError>(sub, 1024)?),
                 // A payload of no usable width is an error. Returning `None`
                 // would make a member explicitly sent by the wire look exactly
                 // like one absent from this update.
@@ -169,8 +158,8 @@ pub fn decode_round_results(
                 // field -- the column simply starts going null after a patch,
                 // with no counter moving.
                 "WinningTeamRole" => {
-                    let v = read_narrow_byte(&mut sub, member, CONTEXT)?;
-                    winning_team_role = Some(AresTeamRole::from_byte(v).ok_or(
+                    let v = read_narrow_byte(sub, name, CONTEXT)?;
+                    row.winning_team_role = Some(AresTeamRole::from_byte(v).ok_or(
                         StructBlobError::UnknownEnumValue {
                             enum_name: "AresTeamRole",
                             value: v,
@@ -179,8 +168,8 @@ pub fn decode_round_results(
                     )?);
                 }
                 "RoundResult" => {
-                    let v = read_narrow_byte(&mut sub, member, CONTEXT)?;
-                    round_result = Some(AresRoundOutcome::from_byte(v).ok_or(
+                    let v = read_narrow_byte(sub, name, CONTEXT)?;
+                    row.round_result = Some(AresRoundOutcome::from_byte(v).ok_or(
                         StructBlobError::UnknownEnumValue {
                             enum_name: "AresRoundOutcome",
                             value: v,
@@ -198,29 +187,13 @@ pub fn decode_round_results(
                 // distinction being drawn -- these bits are deliberately not
                 // interpreted, they are not accidentally dropped.
                 "EliminatedTeams" => sub.skip_remaining(),
-                name => {
-                    return Err(StructBlobError::UnsupportedMember {
-                        name: name.to_owned(),
-                        handle,
-                        context: CONTEXT,
-                    });
-                }
+                _ => return Ok(None),
             }
             // `read_fname` is self-delimiting and `read_narrow_byte` takes the
             // window's full width, so an interpreted member here consumes
             // exactly. A leftover means the payload was not the shape the name
             // promised; invalid enum widths are rejected at their reader.
-            ensure_member_consumed(&sub, member, handle, bit_count, CONTEXT)?;
-        }
-
-        results.push(RoundResult {
-            round_number,
-            winning_team,
-            winning_team_role,
-            round_result,
-        });
-    }
-
-    ensure_consumed(reader)?;
-    Ok(results)
+            Ok(Some(name))
+        },
+    )
 }
