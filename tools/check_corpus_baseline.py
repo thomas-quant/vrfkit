@@ -155,19 +155,23 @@ def main() -> int:
 
     stored = json.loads(args.baseline.read_text(encoding="utf-8")) \
         if args.baseline.exists() else {}
-    corpus = args.corpus or Path(os.path.expandvars(stored.get("corpus", "")))
+    # Decided on the text, not the Path: Path("") is Path("."), which exists,
+    # so a baseline naming no corpus walked and pinned the working directory.
+    named = args.corpus or os.path.expandvars(stored.get("corpus", ""))
+    corpus = Path(named) if named else None
     # A relative path in the baseline resolves against VRFKIT_CORPUS_DIR so the
     # repo ships no absolute path; absolute paths and --corpus are used as-is.
-    if corpus.name and not corpus.is_absolute():
+    if corpus is not None and corpus.name and not corpus.is_absolute():
         corpus_dir = os.environ.get("VRFKIT_CORPUS_DIR", "")
         if corpus_dir:
             corpus = Path(corpus_dir) / corpus
-    if not corpus or not corpus.exists():
+    if corpus is None or not corpus.exists():
+        missing = ("no corpus named (pass --corpus or store one in the baseline)"
+                   if corpus is None else f"corpus not present ({corpus})")
         if args.require_input or os.environ.get("VRFKIT_REQUIRE_CORPUS"):
-            print(f"REQUIRED INPUT MISSING: corpus not present ({corpus})",
-                  file=sys.stderr)
+            print(f"REQUIRED INPUT MISSING: {missing}", file=sys.stderr)
             return 2
-        print(f"SKIP: corpus not present ({corpus})")
+        print(f"SKIP: {missing}")
         print("      these replays are machine-local; nothing to guard here.")
         return 0
 

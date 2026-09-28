@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -162,6 +163,63 @@ class RequiredInputTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("required", output.getvalue().lower())
         self.assertNotIn("SKIP:", output.getvalue())
+
+
+class NoCorpusNamedTests(unittest.TestCase):
+    """A baseline that names no corpus is missing input, not the working directory.
+
+    `Path("")` is `Path(".")`, which exists, so with neither `--corpus` nor a
+    stored corpus the guard walked the directory it was started in, and
+    `--update` pinned that walk as `"corpus": "."`.
+    """
+
+    def run_main(self, root: Path, *extra: str) -> tuple[int, str]:
+        argv = ["check_corpus_baseline.py", "--baseline", str(root / "baseline.json"),
+                "--exe", sys.executable, *extra]
+        output = io.StringIO()
+        previous = Path.cwd()
+        os.chdir(root)
+        try:
+            with mock.patch.object(sys, "argv", argv), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                code = guard.main()
+        finally:
+            os.chdir(previous)
+        return code, output.getvalue()
+
+    def test_no_corpus_named_is_missing_input_not_the_working_directory(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.dict(os.environ, clear=False) as environ:
+            environ.pop("VRFKIT_REQUIRE_CORPUS", None)
+            environ.pop("VRFKIT_CORPUS_DIR", None)
+            root = Path(temp)
+            # A replay the walk would find, and an oracle that validates it,
+            # so a guard that walks the working directory gets far enough to
+            # pin it.
+            (root / "sub").mkdir()
+            (root / "sub" / "planted.vrf").write_bytes(b"replay")
+            (root / "validate").write_text(
+                f"print({CorpusMeasurementTests.SUMMARY!r})\n", encoding="utf-8")
+            baseline = root / "baseline.json"
+            no_key = {"branches": {}, "totals": {}, "per_file": {}}
+            for stored, extra, code, marker in (
+                (None, ("--update",), 0, "SKIP:"),
+                (None, ("--update", "--require-input"), 2, "REQUIRED INPUT MISSING"),
+                (no_key, (), 0, "SKIP:"),
+                (dict(no_key, corpus=""), ("--require-input",), 2, "REQUIRED INPUT MISSING"),
+            ):
+                with self.subTest(stored=stored, extra=extra):
+                    if stored is None:
+                        baseline.unlink(missing_ok=True)
+                    else:
+                        baseline.write_text(json.dumps(stored), encoding="utf-8")
+                    before = baseline.read_bytes() if baseline.exists() else None
+                    got, output = self.run_main(root, *extra)
+                    self.assertEqual(got, code, output)
+                    self.assertIn(marker, output)
+                    self.assertIn("no corpus named", output)
+                    self.assertEqual(baseline.read_bytes() if baseline.exists() else None,
+                                     before, "the baseline must not be written")
 
 
 if __name__ == "__main__":
