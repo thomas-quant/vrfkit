@@ -176,8 +176,9 @@ struct Provenance {
     container_id: u64,
     toc_entries: usize,
     package_chunks: usize,
-    utoc_bytes: u64,
-    ucas_bytes: u64,
+    /// `None` when the file's metadata cannot be read.
+    utoc_bytes: Option<u64>,
+    ucas_bytes: Option<u64>,
     ucas_modified: String,
 }
 
@@ -502,8 +503,18 @@ fn scan_all(
     (ok, failed)
 }
 
-fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+/// A file's size, `None` when its metadata cannot be read: printed as `?` and
+/// as JSON `null`, never as a plausible 0.
+fn file_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).map(|m| m.len()).ok()
+}
+
+fn size_text(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "?".to_owned(), |n| n.to_string())
+}
+
+fn json_size(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "null".to_owned(), |n| n.to_string())
 }
 
 fn modified(path: &Path) -> String {
@@ -630,7 +641,11 @@ fn render_json(rows: &[Row], counts: &Counts, provenance: &[Provenance], paks: &
             out,
             ", \"container_id\": \"{:#018x}\", \"toc_entries\": {}, \"package_chunks\": {}, \
              \"utoc_bytes\": {}, \"ucas_bytes\": {}, \"ucas_modified\": ",
-            p.container_id, p.toc_entries, p.package_chunks, p.utoc_bytes, p.ucas_bytes
+            p.container_id,
+            p.toc_entries,
+            p.package_chunks,
+            json_size(p.utoc_bytes),
+            json_size(p.ucas_bytes)
         );
         json_string(&mut out, &p.ucas_modified);
         out.push('}');
@@ -723,7 +738,12 @@ fn report(
         let _ = writeln!(
             err,
             "  {:<32} id {:#018x}  {:>7} chunks  {:>6} packages  ucas {:>12} bytes  modified {}",
-            p.name, p.container_id, p.toc_entries, p.package_chunks, p.ucas_bytes, p.ucas_modified
+            p.name,
+            p.container_id,
+            p.toc_entries,
+            p.package_chunks,
+            size_text(p.ucas_bytes),
+            p.ucas_modified
         );
     }
     for pak in legacy {
@@ -772,6 +792,18 @@ mod tests {
         assert_eq!(civil_from_days(20_354), (2025, 9, 23));
         let t = UNIX_EPOCH + std::time::Duration::from_secs(1_758_591_394);
         assert_eq!(utc_timestamp(t), "2025-09-23T01:36:34Z");
+    }
+
+    #[test]
+    fn a_size_that_cannot_be_read_is_absent_not_zero() {
+        let missing = Path::new("no such dir/no such file.ucas");
+        assert_eq!(file_len(missing), None);
+        assert_eq!(size_text(file_len(missing)), "?");
+        assert_eq!(json_size(file_len(missing)), "null");
+        // Tests run from the package root.
+        let here = Path::new("Cargo.toml");
+        let len = std::fs::metadata(here).unwrap().len();
+        assert_eq!(size_text(file_len(here)), len.to_string());
     }
 
     #[test]
