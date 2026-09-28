@@ -16,11 +16,14 @@ compared reads exactly like total coverage.
 `main` also returned None and was called bare from `__main__`, so even a
 deliberate nonzero could not have escaped the process.
 """
+import contextlib
+import io
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -97,6 +100,61 @@ class CoverageTextTests(unittest.TestCase):
         joined = " ".join(lines)
         self.assertIn("INVESTIGATE", joined)
         self.assertIn("Armor", joined)
+
+
+class RpcNameTests(unittest.TestCase):
+    """Section 4 looked for a manifest `rpcs_by_name` and a `rpc_name` column,
+    neither of which vrfkit writes, so it only ever listed the C# names.
+    vrfkit's RPC names are the `Function.` prefixes of its ClassNetCache rows,
+    the rows to_valplay_bundle.py builds rpc_received from."""
+
+    CNC = "/Script/ShooterGame.Thing_ClassNetCache"
+
+    def section_4(self) -> str:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cs, vk = root / "cs", root / "vk"
+            cs.mkdir()
+            vk.mkdir()
+            (cs / "manifest.json").write_text("{}", encoding="utf-8")
+            (vk / "manifest.json").write_text("{}", encoding="utf-8")
+            (cs / "events.ndjson").write_text("".join(json.dumps(row) + "\n" for row in [
+                {"type": "export_group_received", "export_group_path": PAIR_A[0],
+                 "payload": {"Health": 100}},
+                {"type": "rpc_received", "function_name": "MulticastShared"},
+                {"type": "rpc_received", "function_name": "MulticastShared"},
+                {"type": "rpc_received", "function_name": "ClientCsharpOnly"},
+            ]), encoding="utf-8")
+            rows = [
+                (PAIR_A[0], "Health"),
+                (self.CNC, "MulticastShared.Damage"),
+                (self.CNC, "MulticastShared.Target"),
+                (self.CNC, "ZeroParamOnly"),        # a zero-parameter RPC is its bare name
+                (self.CNC, guard.UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME),
+                (self.CNC, None),
+                (PAIR_A[0], "Rounds[3].Score"),     # an array leaf, not an RPC
+            ]
+            pq.write_table(pa.table({"group_path": [g for g, _ in rows],
+                                     "field_name": [f for _, f in rows]}),
+                           vk / "fields.parquet")
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["compare_with_csharp.py", str(cs), str(vk)]), \
+                    contextlib.redirect_stdout(output), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                guard.main()
+        report = output.getvalue()
+        return report.split("## 4. RPC name comparison", 1)[1].split("## 5.", 1)[0]
+
+    def test_vrfkit_rpc_names_come_from_class_net_cache_prefixes(self):
+        section = self.section_4()
+        self.assertIn("vrfkit RPC distinct names: 2", section)
+        self.assertIn("C# only: 1", section)
+        self.assertIn("vrfkit only: 1", section)
+        self.assertIn("Both: 1", section)
+        self.assertRegex(section, r"C# only -- ALL 1 .*\n\s+ClientCsharpOnly")
+        self.assertRegex(section, r"vrfkit only -- .*\n\s+ZeroParamOnly")
+        self.assertNotIn("Rounds[3]", section)
+        self.assertNotIn("rpcs_by_name", section)
 
 
 class MovementMultiplicityTests(unittest.TestCase):

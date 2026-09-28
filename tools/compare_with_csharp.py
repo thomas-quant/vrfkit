@@ -40,6 +40,7 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from to_valplay_bundle import (  # noqa: E402
+    CLASS_NET_CACHE_SUFFIX,
     UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME,
 )
 
@@ -294,8 +295,51 @@ def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
 
 # ─── 4. RPC name comparison ──────────────────────────────────────────────────
 
-def compare_rpc_names(cs_events_path: Path, vk_manifest: dict,
-                      vk_parquet_path: Path) -> str:
+def vrfkit_rpc_names(vk_parquet_path: Path) -> Counter:
+    """vrfkit's RPC function names in fields.parquet, with their row counts.
+
+    vrfkit writes no RPC-name column or manifest key. Its RPC rows are the
+    ones in a ClassNetCache group -- the rows to_valplay_bundle.py builds
+    rpc_received from -- and the function is the field_name before the first
+    '.': "Func.Param", "Func._hN", or a zero-parameter RPC's bare "Func".
+    Array leaves such as "Rounds[3].Score" carry a '.' too, in RepLayout
+    groups, so the prefix alone would count them as RPCs. A ClassNetCache
+    custom-delta property is counted as the bundle publishes it, among the
+    functions: on 02d4d478 that is `ActiveGameplayEffects`, one of 128 names.
+    """
+    tbl = pq.read_table(vk_parquet_path, columns=["group_path", "field_name"])
+    names: Counter = Counter()
+    for gp, fn in zip(tbl.column("group_path").to_pylist(),
+                      tbl.column("field_name").to_pylist()):
+        if (gp and CLASS_NET_CACHE_SUFFIX in gp and fn
+                and fn != UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME):
+            names[fn.split(".", 1)[0]] += 1
+    return names
+
+
+def rpc_name_lines(cs_names: set, vk_names: set) -> list[str]:
+    """The C#-only / vrfkit-only RPC names, the way `coverage_lines` splits
+    pairs: a C# side with no names at all is not measured, never NONE."""
+    cs_only, vk_only = sorted(cs_names - vk_names), sorted(vk_names - cs_names)
+    lines = [f"  Both: {len(cs_names & vk_names)}",
+             f"  C# only: {len(cs_only)}",
+             f"  vrfkit only: {len(vk_only)} (expected: the C# side is slimmed)"]
+    if not cs_names:
+        lines.append("\n### C# only: NOT MEASURED -- the C# side has no rpc_received "
+                     "records, so this says nothing about vrfkit.")
+    elif cs_only:
+        lines.append(f"\n### C# only -- ALL {len(cs_only)} (INVESTIGATE):")
+        lines += [f"  {name}" for name in cs_only]
+    else:
+        lines.append("\n### C# only: NONE -- vrfkit emits every RPC name the C# side kept.")
+    lines.append(f"\n### vrfkit only -- sample (first 30 of {len(vk_only):,}):")
+    lines += [f"  {name}" for name in vk_only[:30]]
+    if len(vk_only) > 30:
+        lines.append(f"  ... and {len(vk_only) - 30} more")
+    return lines
+
+
+def compare_rpc_names(cs_events_path: Path, vk_parquet_path: Path) -> str:
     """Compare RPC function names between the two parsers."""
     lines = ["## 4. RPC name comparison\n"]
     lines.append("NOTE: C# events.ndjson is slimmed — only ~3% of RPCs survive.")
@@ -312,29 +356,13 @@ def compare_rpc_names(cs_events_path: Path, vk_manifest: dict,
     lines.append(f"\n  C# slim RPC distinct names: {len(cs_rpc_names)}")
     lines.append(f"  C# slim RPC total records: {sum(cs_rpc_names.values()):,}")
 
-    # vrfkit RPCs — check if manifest has rpc breakdown
-    vk_rpcs = vk_manifest.get("rpcs_by_name", {})
-    if vk_rpcs:
-        lines.append(f"  vrfkit manifest rpcs_by_name: {len(vk_rpcs)} distinct")
+    if vk_parquet_path.exists():
+        vk_rpc_names = vrfkit_rpc_names(vk_parquet_path)
+        lines.append(f"  vrfkit RPC distinct names: {len(vk_rpc_names)} (field_name "
+                     f"prefixes of {sum(vk_rpc_names.values()):,} ClassNetCache rows)")
+        lines += rpc_name_lines(set(cs_rpc_names), set(vk_rpc_names))
     else:
-        lines.append("  vrfkit manifest does NOT have rpcs_by_name breakdown.")
-        # Try to get RPC names from parquet — check schema
-        if vk_parquet_path.exists():
-            schema = pq.read_schema(vk_parquet_path)
-            field_names = [f.name for f in schema]
-            lines.append(f"  fields.parquet columns: {field_names}")
-            # Check if there's an rpc_name column or similar
-            if "rpc_name" in field_names:
-                tbl = pq.read_table(vk_parquet_path, columns=["rpc_name"])
-                # filter non-null
-                rpc_col = tbl.column("rpc_name")
-                vk_rpc_counter: Counter = Counter()
-                for val in rpc_col.to_pylist():
-                    if val is not None:
-                        vk_rpc_counter[val] += 1
-                lines.append(f"  vrfkit parquet distinct RPC names: {len(vk_rpc_counter)}")
-            else:
-                lines.append("  No rpc_name column in fields.parquet — cannot extract RPC names from parquet.")
+        lines.append("  fields.parquet not found -- vrfkit's RPC names NOT MEASURED.")
 
     lines.append("\n  C# slim RPC function_name breakdown:")
     for name, count in cs_rpc_names.most_common():
@@ -613,7 +641,7 @@ def main():
     report_parts.append(coverage_text)
 
     # 4. RPC names
-    report_parts.append(compare_rpc_names(cs_events_path, vk_manifest, vk_fields_path))
+    report_parts.append(compare_rpc_names(cs_events_path, vk_fields_path))
 
     # 5. Movement
     report_parts.append(compare_movement(cs_movement_path, vk_movement_path))
