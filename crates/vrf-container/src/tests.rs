@@ -767,10 +767,41 @@ fn fstring_length_and_encoding_errors_keep_their_typed_source() {
     ));
 }
 
+/// A compressed ReplayData chunk whose archive declares 64 bytes of output
+/// and carries four bytes that are not a codec stream.
+fn compressed_replay_data_needing_64_bytes() -> Vec<u8> {
+    let mut payload = Vec::new();
+    helpers::add_u32(&mut payload, 0); // Time1
+    helpers::add_u32(&mut payload, 0); // Time2
+    helpers::add_i32(&mut payload, 12); // SizeInBytes
+    helpers::add_i32(&mut payload, 64); // MemorySizeInBytes
+    helpers::add_i32(&mut payload, 64); // archive decompressed_size
+    helpers::add_i32(&mut payload, 4); // archive compressed_size
+    payload.extend_from_slice(&[0; 4]);
+    payload
+}
+
+/// Without the decoder a compressed archive is refused by name. An empty
+/// "success" would be indistinguishable downstream from an empty chunk.
+#[cfg(not(feature = "oodle"))]
 #[test]
-fn oodle_unsupported_error_is_available_in_every_feature_build() {
-    let error = ContainerError::OodleUnsupported { needed: 17 };
-    assert!(error.to_string().contains("17"));
+fn a_compressed_archive_without_the_decoder_is_refused() {
+    let payload = compressed_replay_data_needing_64_bytes();
+    assert!(matches!(
+        decompress_replay_data(&payload, true, false),
+        Err(ContainerError::OodleUnsupported { needed: 64 })
+    ));
+}
+
+/// With the decoder the same archive reaches the codec, which rejects it.
+#[cfg(feature = "oodle")]
+#[test]
+fn a_compressed_archive_with_the_decoder_reaches_the_codec() {
+    let payload = compressed_replay_data_needing_64_bytes();
+    assert!(matches!(
+        decompress_replay_data(&payload, true, false),
+        Err(ContainerError::OodleDecompression(_))
+    ));
 }
 
 #[test]
