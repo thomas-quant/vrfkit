@@ -81,12 +81,26 @@ FACTS = [
       ("EffectID", "int64")],
      ["uint64"], None,
      "BlindManagerComponent ActiveBlinds[].EffectID (sink/blobs.rs)"),
+    # Cypher's trapwire, before and after the 13.01 rename: the wire's
+    # `PairedWire` parameter names its own class, so its checksum moves with
+    # the class name -- the rename proven in the type system itself.
+    (3902815170, [("Deployed", "bool")], ["uint8"], "FieldType::Bool",
+     "GameObject_Gumshoe_{E,4}_TripWire(_SecondWire)_C.Deployed"),
+    (3671888355, [("PairedWire", "AGameObject_Gumshoe_E_TripWire_C*")],
+     ["AGameObject_Gumshoe_4_TripWire_C*"], None,
+     "GameObject_Gumshoe_E_TripWire_C:SetEnemyInTrap.PairedWire (11.06-12.08)"),
+    (3454621121, [("PairedWire", "AGameObject_Gumshoe_4_TripWire_C*")],
+     ["AGameObject_Gumshoe_E_TripWire_C*"], None,
+     "GameObject_Gumshoe_4_TripWire_C:SetEnemyInTrap.PairedWire (13.01-13.06)"),
+    (2035145197, [("CreatedByCharacter", "AShooterCharacter*")], ["UShooterCharacter*"], None,
+     "Ability_Gumshoe_{E_TripWire,4_TripWire,4_CageTrap,Q_CageTrap}_C.CreatedByCharacter"),
 ]
 
 #: The C++ leaf type each checksum-table FieldType above stands for.
 FIELD_TYPE_OF = {
     "int64": "FieldType::Int64",
     "uint32": "FieldType::UInt32",
+    "bool": "FieldType::Bool",
 }
 
 

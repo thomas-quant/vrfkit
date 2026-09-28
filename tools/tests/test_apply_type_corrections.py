@@ -195,6 +195,12 @@ class AdditionsTests(unittest.TestCase):
         54.6%) and its `Banking` (64-bit doubles, -180..180, on 801,700 rows),
         on that exact group only.
 
+        137 -> 142 is one finding: Cypher's trapwire and cage classes were
+        renamed in 13.01, and five descriptor-typed fields -- `Deployed` on
+        both wires, `CreatedByCharacter` on both ability items, the cage's
+        `RelativeScale3D` -- follow them to the new paths with the same name,
+        checksum and width. Relocations, like BaseTeamState, not new types.
+
         63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
         for being a wrong `FString`; it is back because a decoder now exists
         and the reason given for waiting was itself wrong -- `Statistic` was
@@ -231,7 +237,7 @@ class AdditionsTests(unittest.TestCase):
         2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
         reaches a real declaration and the guessed name is gone.
         """
-        self.assertEqual(len(atc.ADDITIONS), 137, atc.ADDITIONS)
+        self.assertEqual(len(atc.ADDITIONS), 142, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
         """Same guardrail for the handle -> name additions.

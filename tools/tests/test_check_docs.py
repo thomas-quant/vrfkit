@@ -446,8 +446,9 @@ class MeasuredCountTests(unittest.TestCase):
         # AGameObject smoke/zone classes read byte rotator components
         # (game-evidence-typing-fixes). 210 -> 214: the four EffectID entries
         # retyped UInt64 -> Int64 (HandleNumber's Int32 -> UInt32 is an
-        # ADDITIONS type change, so it adds none).
-        self.assertEqual(guard.measured_counts()["corrections"], 214)
+        # ADDITIONS type change, so it adds none). 214 -> 219: five ADDITIONS
+        # for Cypher's trapwire and cage fields at their 13.01 paths.
+        self.assertEqual(guard.measured_counts()["corrections"], 219)
 
 
 class GeneratedInventoryTests(unittest.TestCase):

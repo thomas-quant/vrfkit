@@ -769,6 +769,80 @@ fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     assert_eq!(lookup_checksum(2749104612), None);
 }
 
+/// Cypher's trapwire and cage classes were renamed in 13.01, and the five
+/// descriptor-typed fields follow them: the same name, checksum and width on
+/// both sides of the rename (see apply_type_corrections.py). The old paths
+/// keep their entries -- 11.06-12.08 still carry them -- and `Deployed`'s
+/// checksum is learned so that the next rename is caught without an entry.
+/// `CreatedByCharacter` (2035145197) and `RelativeScale3D` (1992268157) are
+/// deliberately not learned: every agent's ability classes carry them, and a
+/// learned checksum would type all of those unmeasured.
+#[test]
+fn cypher_trap_fields_follow_the_13_01_rename() {
+    const OLD_E: &str = "/Game/Characters/Gumshoe/S0/Ability_E/";
+    const NEW_4: &str = "/Game/Characters/Gumshoe/S0/Ability_4/";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for wire in [
+        "GameObject_Gumshoe_{}_TripWire.GameObject_Gumshoe_{}_TripWire_C",
+        "GameObject_Gumshoe_{}_TripWire_SecondWire.GameObject_Gumshoe_{}_TripWire_SecondWire_C",
+    ] {
+        let old = format!("{OLD_E}{}", wire.replace("{}", "E"));
+        let new = format!("{NEW_4}{}", wire.replace("{}", "4"));
+        assert_eq!(
+            table.lookup(&old, "Deployed"),
+            Some(FieldType::Bool),
+            "{old}"
+        );
+        assert_eq!(
+            table.lookup(&new, "Deployed"),
+            Some(FieldType::Bool),
+            "{new}"
+        );
+    }
+    for (old, new) in [
+        (
+            "/Game/Characters/Gumshoe/S0/Ability_E/Ability_Gumshoe_E_TripWire.Ability_Gumshoe_E_TripWire_C",
+            "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_TripWire.Ability_Gumshoe_4_TripWire_C",
+        ),
+        (
+            "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
+            "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
+        ),
+    ] {
+        for group in [old, new] {
+            assert_eq!(
+                table.lookup(group, "CreatedByCharacter"),
+                Some(FieldType::ObjectNetGuid),
+                "{group}"
+            );
+        }
+    }
+    for group in [
+        "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
+        "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
+    ] {
+        assert_eq!(
+            table.lookup(group, "RelativeScale3D"),
+            Some(FieldType::VectorNetQuantize { scale: 100 }),
+            "{group}"
+        );
+    }
+    assert_eq!(lookup_checksum(3902815170), Some(FieldType::Bool));
+    assert_eq!(lookup_checksum(2035145197), None);
+    assert_eq!(lookup_checksum(1992268157), None);
+    // A future path for the same wire resolves through the checksum alone.
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            "/Game/Characters/Gumshoe/S0/Ability_C/GameObject_Gumshoe_C_TripWire.GameObject_Gumshoe_C_TripWire_C",
+            Some("Deployed"),
+            None,
+            Some(3902815170)
+        ),
+        Some(FieldType::Bool)
+    );
+}
+
 /// The five AGameObject smoke and zone classes read byte rotator components,
 /// and the only table entry left with short ones is Gekko's Wingman, an
 /// AShooterCharacter pawn.

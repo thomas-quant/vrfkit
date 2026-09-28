@@ -1005,6 +1005,63 @@ ADDITIONS = [
     ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
      "Projectile_Guide_E_HawkFlash_C",
      "Banking", "FieldType::Double"),
+    # Cypher's trapwire and cage, renamed in 13.01. Through 12.08 (and in the
+    # one 13.00 fixture) the classes live at the paths the C# descriptors
+    # name -- Ability_E/{Ability,GameObject}_Gumshoe_E_TripWire(_SecondWire)_C
+    # and Ability_4/{Ability,Projectile}_Gumshoe_4_CageTrap_C -- and the table
+    # types them there. From 13.01 on they are
+    # Ability_4/{Ability,GameObject}_Gumshoe_4_TripWire(_SecondWire)_C and
+    # Ability_Q/{Ability,Projectile}_Gumshoe_Q_CageTrap_C, and nothing typed
+    # the fields below: null on every row while decode errors stayed 0.
+    #
+    # These are relocated properties with descriptor-sourced types -- the
+    # BaseTeamState kind of addition above, not new types. Across the
+    # manifests of all 1,018 replays the old paths are declared only on
+    # 11.06-13.00 and the new ones only on 13.01-13.06, never both in one
+    # replay, with identical field sets, handles and checksums. The rename is
+    # visible in the type system itself: the trapwire's
+    # `SetEnemyInTrap.PairedWire` parameter points at its own class, and its
+    # checksum moves from 3671888355 to 3454621121 -- exactly
+    # `AGameObject_Gumshoe_E_TripWire_C*` -> `AGameObject_Gumshoe_4_TripWire_C*`
+    # (tools/tests/test_compatible_checksum_facts.py, with the chains below).
+    #
+    # Measured 2026-09-28 on exports of all 1,018 replays (fields +
+    # checkpoint_fields; independent readers from validate_type_evidence.py):
+    #
+    #   `Deployed` (3902815170 = `Deployed: bool`): 8,908 + 8,889 main rows on
+    #   the two wires in 268 replays of 13.01-13.06, 1 bit each, every one
+    #   true, none in checkpoints. False is the class default and is never
+    #   sent: the one row per wire (17,797 wire actors, one row each)
+    #   arrives after the actor's channel opens, 0-266 ms later (median 106)
+    #   on the first wire and 466-1,071 ms
+    #   (median 743) on the second -- the same timing as on the old paths
+    #   (0-260 / 512-1,049 ms over their 345 + 345 rows).
+    #   `CreatedByCharacter` (2035145197 = `CreatedByCharacter:
+    #   AShooterCharacter*`): 687 main + 5,135 checkpoint rows on each of the
+    #   two ability classes in 270 replays, IntPacked 16 bits or the 8-bit
+    #   null; every non-null value is the `Gumshoe_PC_C` actor of the same
+    #   export (actors.parquet), as on the old paths.
+    #   `RelativeScale3D` (1992268157): 684 main + 5,135 checkpoint rows on
+    #   the cage ability, 31 bits, (1, 1, 1) on every row -- the old cage's
+    #   VectorNetQuantize100. The old trapwire ability had no entry for it, so
+    #   the new one gets none either.
+    #
+    # The old entries stay: 11.06-12.08 still carry the old paths. Only
+    # `Deployed`'s checksum is donated to checksum_table.rs -- the four
+    # TripWire groups are its only carriers, so it types nothing new and
+    # catches the next rename. 2035145197 and 1992268157 are NOT donated: every
+    # agent's ability classes carry them, and nobody has measured those.
+    ("/Game/Characters/Gumshoe/S0/Ability_4/GameObject_Gumshoe_4_TripWire."
+     "GameObject_Gumshoe_4_TripWire_C", "Deployed", "FieldType::Bool"),
+    ("/Game/Characters/Gumshoe/S0/Ability_4/GameObject_Gumshoe_4_TripWire_SecondWire."
+     "GameObject_Gumshoe_4_TripWire_SecondWire_C", "Deployed", "FieldType::Bool"),
+    ("/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_TripWire."
+     "Ability_Gumshoe_4_TripWire_C", "CreatedByCharacter", "FieldType::ObjectNetGuid"),
+    ("/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap."
+     "Ability_Gumshoe_Q_CageTrap_C", "CreatedByCharacter", "FieldType::ObjectNetGuid"),
+    ("/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap."
+     "Ability_Gumshoe_Q_CageTrap_C", "RelativeScale3D",
+     "FieldType::VectorNetQuantize { scale: 100 }"),
 ]
 EXPECTED += [(g, f, t) for g, f, t in ADDITIONS]
 
