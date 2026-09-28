@@ -442,89 +442,37 @@ fn compute_bit_size(packet: &[u8], last_byte: u8) -> i32 {
 mod tests {
     use super::*;
     use crate::bunch::RawBunchHeader;
+    use crate::test_bits::{
+        BunchSpec, build_bunch_packet, build_packet, write_bunch, write_bunch_header,
+    };
 
-    /// Helper: build a packet from a list of bits, appending the sentinel.
-    fn build_packet(bits: &[bool]) -> Vec<u8> {
-        let total_data_bits = bits.len();
-        let byte_count = (total_data_bits + 1).div_ceil(8);
-        let mut packet = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                packet[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        // Set sentinel bit
-        packet[total_data_bits >> 3] |= 1 << (total_data_bits & 7);
-        packet
-    }
-
-    fn write_bit(bits: &mut Vec<bool>, v: bool) {
-        bits.push(v);
-    }
-
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
+    /// An unreliable bunch on `ch_index` with no other flag set: no control
+    /// bits and no channel name.
+    fn unreliable(ch_index: u32) -> BunchSpec {
+        BunchSpec {
+            ch_index,
+            b_reliable: false,
+            ..Default::default()
         }
     }
 
-    fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max_value: u32) {
-        let mut written_value = 0u32;
-        let mut mask = 1u32;
-        while written_value.saturating_add(mask) < max_value {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written_value |= mask;
-            }
-            mask <<= 1;
+    /// A reliable bunch on `ch_index` with no other flag set.
+    fn reliable(ch_index: u32) -> BunchSpec {
+        BunchSpec {
+            ch_index,
+            ..Default::default()
         }
     }
 
-    fn write_payload_size(bits: &mut Vec<bool>, value: u32) {
-        write_serialized_int(bits, value, MAX_PACKET_SIZE_BITS);
-    }
-
-    fn write_fname(bits: &mut Vec<bool>, index: u32) {
-        write_bit(bits, true); // isHardcoded
-        write_int_packed(bits, index);
-    }
-
-    /// Build a minimal bunch header with no control, no partial, no reliable.
-    fn write_minimal_header(bits: &mut Vec<bool>, ch_index: u32, payload_bits: u32) {
-        write_bit(bits, false); // bControl = false
-        write_bit(bits, false); // bIsReplicationPaused = false
-        write_bit(bits, false); // bReliable = false
-        write_int_packed(bits, ch_index);
-        write_bit(bits, false); // bHasPackageMapExports
-        write_bit(bits, false); // bHasMustBeMappedGUIDs
-        write_bit(bits, false); // bPartial
-        write_bit(bits, false); // VALORANT bit
-        write_payload_size(bits, payload_bits);
-    }
-
-    /// Build a reliable, non-partial bunch header on `ch_index`.
-    fn write_reliable_header(bits: &mut Vec<bool>, ch_index: u32, payload_bits: u32) {
-        write_bit(bits, false); // bControl = false
-        write_bit(bits, false); // bIsReplicationPaused = false
-        write_bit(bits, true); // bReliable = true
-        write_int_packed(bits, ch_index);
-        write_bit(bits, false); // bHasPackageMapExports
-        write_bit(bits, false); // bHasMustBeMappedGUIDs
-        write_bit(bits, false); // bPartial
-        write_bit(bits, false); // VALORANT bit
-        write_fname(bits, 1); // channel name: read whenever reliable
-        write_payload_size(bits, payload_bits);
+    /// A reliable partial fragment on `ch_index`.
+    fn fragment(ch_index: u32, initial: bool, last: bool) -> BunchSpec {
+        BunchSpec {
+            ch_index,
+            b_partial: true,
+            b_partial_initial: initial,
+            b_partial_final: last,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -545,9 +493,7 @@ mod tests {
 
     #[test]
     fn single_bunch_parses_header_fields() {
-        let mut bits = Vec::new();
-        write_minimal_header(&mut bits, 7, 0);
-        let packet = build_packet(&bits);
+        let packet = build_bunch_packet(&unreliable(7), &[]);
 
         let mut reader = RawPacketReader::new();
         let mut captured: Option<RawBunchHeader> = None;
@@ -565,20 +511,12 @@ mod tests {
 
     #[test]
     fn control_bunch_with_close_parses_close_reason() {
-        let mut bits = Vec::new();
-        write_bit(&mut bits, true); // bControl
-        write_bit(&mut bits, false); // bOpen
-        write_bit(&mut bits, true); // bClose
-        write_serialized_int(&mut bits, 1, ChannelCloseReason::MAX); // Dormancy
-        write_bit(&mut bits, false); // bIsReplicationPaused
-        write_bit(&mut bits, false); // bReliable
-        write_int_packed(&mut bits, 3); // ChIndex
-        write_bit(&mut bits, false); // bHasPackageMapExports
-        write_bit(&mut bits, false); // bHasMustBeMappedGUIDs
-        write_bit(&mut bits, false); // bPartial
-        write_bit(&mut bits, false); // VALORANT bit
-        write_payload_size(&mut bits, 0);
-        let packet = build_packet(&bits);
+        let close = BunchSpec {
+            b_close: true,
+            dormant: true,
+            ..unreliable(3)
+        };
+        let packet = build_bunch_packet(&close, &[]);
 
         let mut reader = RawPacketReader::new();
         let mut captured: Option<RawBunchHeader> = None;
@@ -594,8 +532,8 @@ mod tests {
     #[test]
     fn multiple_bunches_parsed() {
         let mut bits = Vec::new();
-        write_minimal_header(&mut bits, 0, 0);
-        write_minimal_header(&mut bits, 1, 0);
+        write_bunch(&mut bits, &unreliable(0), &[]);
+        write_bunch(&mut bits, &unreliable(1), &[]);
         let packet = build_packet(&bits);
 
         let mut reader = RawPacketReader::new();
@@ -636,38 +574,8 @@ mod tests {
     #[test]
     fn partial_initial_then_final_completes() {
         let mut bits = Vec::new();
-        // First: partial initial, reliable
-        write_bit(&mut bits, false); // bControl
-        write_bit(&mut bits, false); // bIsReplicationPaused
-        write_bit(&mut bits, true); // bReliable
-        write_int_packed(&mut bits, 2);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true); // bPartial
-        write_bit(&mut bits, false); // VALORANT
-        write_bit(&mut bits, true); // bPartialInitial
-        write_bit(&mut bits, false); // bPartialFinal
-        write_fname(&mut bits, 1);
-        write_payload_size(&mut bits, 8);
-        for _ in 0..8 {
-            write_bit(&mut bits, false);
-        }
-        // Second: partial final, reliable
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true); // bReliable
-        write_int_packed(&mut bits, 2);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true); // bPartial
-        write_bit(&mut bits, false); // VALORANT
-        write_bit(&mut bits, false); // bPartialInitial
-        write_bit(&mut bits, true); // bPartialFinal
-        write_fname(&mut bits, 1);
-        write_payload_size(&mut bits, 4);
-        for _ in 0..4 {
-            write_bit(&mut bits, false);
-        }
+        write_bunch(&mut bits, &fragment(2, true, false), &[false; 8]);
+        write_bunch(&mut bits, &fragment(2, false, true), &[false; 4]);
         let packet = build_packet(&bits);
 
         let mut reader = RawPacketReader::new();
@@ -695,21 +603,7 @@ mod tests {
     fn an_initial_final_partial_leaves_no_tracker_state() {
         let mut bits = Vec::new();
         for _ in 0..2 {
-            write_bit(&mut bits, false); // bControl
-            write_bit(&mut bits, false); // bIsReplicationPaused
-            write_bit(&mut bits, true); // bReliable
-            write_int_packed(&mut bits, 2);
-            write_bit(&mut bits, false);
-            write_bit(&mut bits, false);
-            write_bit(&mut bits, true); // bPartial
-            write_bit(&mut bits, false); // VALORANT
-            write_bit(&mut bits, true); // bPartialInitial
-            write_bit(&mut bits, true); // bPartialFinal
-            write_fname(&mut bits, 1);
-            write_payload_size(&mut bits, 8);
-            for _ in 0..8 {
-                write_bit(&mut bits, false);
-            }
+            write_bunch(&mut bits, &fragment(2, true, true), &[false; 8]);
         }
         let packet = build_packet(&bits);
 
@@ -726,20 +620,7 @@ mod tests {
 
     #[test]
     fn continuation_without_initial_reports_error() {
-        let mut bits = Vec::new();
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true); // bReliable
-        write_int_packed(&mut bits, 5);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true); // bPartial
-        write_bit(&mut bits, false); // VALORANT
-        write_bit(&mut bits, false); // not initial
-        write_bit(&mut bits, true); // final
-        write_fname(&mut bits, 1);
-        write_payload_size(&mut bits, 0);
-        let packet = build_packet(&bits);
+        let packet = build_bunch_packet(&fragment(5, false, true), &[]);
 
         let mut reader = RawPacketReader::new();
         let mut headers = Vec::new();
@@ -751,31 +632,12 @@ mod tests {
     #[test]
     fn reliability_mismatch_reports_error() {
         let mut bits = Vec::new();
-        // Initial: reliable
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true); // bReliable
-        write_int_packed(&mut bits, 2);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true);
-        write_bit(&mut bits, false); // VALORANT
-        write_bit(&mut bits, true); // initial
-        write_bit(&mut bits, false);
-        write_fname(&mut bits, 1);
-        write_payload_size(&mut bits, 0);
-        // Continuation: NOT reliable
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false); // NOT reliable
-        write_int_packed(&mut bits, 2);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, false);
-        write_bit(&mut bits, true);
-        write_bit(&mut bits, false); // VALORANT
-        write_bit(&mut bits, false); // not initial
-        write_bit(&mut bits, true); // final
-        write_payload_size(&mut bits, 0);
+        write_bunch(&mut bits, &fragment(2, true, false), &[]);
+        let unreliable_final = BunchSpec {
+            b_reliable: false,
+            ..fragment(2, false, true)
+        };
+        write_bunch(&mut bits, &unreliable_final, &[]);
         let packet = build_packet(&bits);
 
         let mut reader = RawPacketReader::new();
@@ -792,10 +654,10 @@ mod tests {
         // single global counter hands out 1, 2, 3, 4 instead, and a later
         // continuation check would reject the valid bunch as a mismatch.
         let mut bits = Vec::new();
-        write_reliable_header(&mut bits, 2, 0);
-        write_reliable_header(&mut bits, 5, 0);
-        write_reliable_header(&mut bits, 2, 0);
-        write_reliable_header(&mut bits, 5, 0);
+        write_bunch(&mut bits, &reliable(2), &[]);
+        write_bunch(&mut bits, &reliable(5), &[]);
+        write_bunch(&mut bits, &reliable(2), &[]);
+        write_bunch(&mut bits, &reliable(5), &[]);
         let packet = build_packet(&bits);
 
         let mut reader = RawPacketReader::new();
@@ -809,8 +671,8 @@ mod tests {
     fn reliable_sequence_state_refuses_new_channel_keys_past_its_budget() {
         let mut reader = RawPacketReader::with_max_channels(1);
         let mut bits = Vec::new();
-        write_reliable_header(&mut bits, 2, 0);
-        write_reliable_header(&mut bits, 5, 0);
+        write_bunch(&mut bits, &reliable(2), &[]);
+        write_bunch(&mut bits, &reliable(5), &[]);
         let packet = build_packet(&bits);
         let mut headers = Vec::new();
         let result = reader.read_packet(&packet, 0, |header, _| headers.push(header.clone()));
@@ -825,10 +687,8 @@ mod tests {
     fn reliable_sequence_overflow_fails_closed_without_panicking() {
         let mut reader = RawPacketReader::new();
         reader.in_reliable_sequence.insert(2, i32::MAX);
-        let mut bits = Vec::new();
-        write_reliable_header(&mut bits, 2, 0);
         let mut headers = Vec::new();
-        let result = reader.read_packet(&build_packet(&bits), 0, |header, _| {
+        let result = reader.read_packet(&build_bunch_packet(&reliable(2), &[]), 0, |header, _| {
             headers.push(header.clone())
         });
 
@@ -840,34 +700,20 @@ mod tests {
     #[test]
     fn destroying_then_reusing_a_reliable_channel_restarts_its_state() {
         let mut reader = RawPacketReader::new();
-        let mut open = Vec::new();
-        write_reliable_header(&mut open, 2, 0);
         let mut seen = Vec::new();
-        reader.read_packet(&build_packet(&open), 0, |header, _| {
+        reader.read_packet(&build_bunch_packet(&reliable(2), &[]), 0, |header, _| {
             seen.push(header.ch_sequence)
         });
 
-        let mut close = Vec::new();
-        write_bit(&mut close, true); // control
-        write_bit(&mut close, false); // open
-        write_bit(&mut close, true); // close
-        write_serialized_int(&mut close, 0, ChannelCloseReason::MAX);
-        write_bit(&mut close, false); // paused
-        write_bit(&mut close, true); // reliable
-        write_int_packed(&mut close, 2);
-        write_bit(&mut close, false); // exports
-        write_bit(&mut close, false); // mapped
-        write_bit(&mut close, false); // partial
-        write_bit(&mut close, false); // valorant
-        write_fname(&mut close, 1);
-        write_payload_size(&mut close, 0);
-        reader.read_packet(&build_packet(&close), 1, |header, _| {
+        let destroy = BunchSpec {
+            b_close: true,
+            ..reliable(2)
+        };
+        reader.read_packet(&build_bunch_packet(&destroy, &[]), 1, |header, _| {
             seen.push(header.ch_sequence)
         });
 
-        let mut reused = Vec::new();
-        write_reliable_header(&mut reused, 2, 0);
-        reader.read_packet(&build_packet(&reused), 2, |header, _| {
+        reader.read_packet(&build_bunch_packet(&reliable(2), &[]), 2, |header, _| {
             seen.push(header.ch_sequence)
         });
         assert_eq!(seen, [1, 2, 1]);
@@ -876,7 +722,7 @@ mod tests {
     #[test]
     fn payload_overrun_returns_malformed() {
         let mut bits = Vec::new();
-        write_minimal_header(&mut bits, 0, 17); // claims 17 bits payload
+        write_bunch_header(&mut bits, &unreliable(0), 17); // claims 17 bits payload
         // but we don't write any payload bits
         let packet = build_packet(&bits);
 
@@ -889,12 +735,7 @@ mod tests {
 
     #[test]
     fn payload_bits_consumed_stream_stays_aligned() {
-        let mut bits = Vec::new();
-        write_minimal_header(&mut bits, 0, 17);
-        for _ in 0..17 {
-            write_bit(&mut bits, false);
-        }
-        let packet = build_packet(&bits);
+        let packet = build_bunch_packet(&unreliable(0), &[false; 17]);
 
         let mut reader = RawPacketReader::new();
         let mut count = 0;

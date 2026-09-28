@@ -996,6 +996,10 @@ fn reason_for_resource_limit(limit: crate::bunch::PartialResourceLimit) -> Parti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{
+        BunchSpec, build_bunch_packet, build_packet, pack, write_bunch, write_byte,
+        write_int_packed, write_serialized_int,
+    };
 
     struct OwnedRejectedPartial {
         header: RawBunchHeader,
@@ -1143,48 +1147,6 @@ mod tests {
         );
     }
 
-    // --- packet builders, for the reassembly test below ---
-
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max_value: u32) {
-        let mut written_value = 0u32;
-        let mut mask = 1u32;
-        while written_value.saturating_add(mask) < max_value {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written_value |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    fn build_packet(bits: &[bool]) -> Vec<u8> {
-        let mut packet = vec![0u8; (bits.len() + 1).div_ceil(8)];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                packet[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        packet[bits.len() >> 3] |= 1 << (bits.len() & 7);
-        packet
-    }
-
     /// A partial bunch split across two fragments must reassemble and then
     /// frame exactly as an unsplit one would.
     ///
@@ -1195,54 +1157,30 @@ mod tests {
     /// makes it exactly the path a rewrite of the copy could break silently.
     #[test]
     fn split_bunch_reassembles_and_frames() {
-        // Fragment 1: control bunch, opens channel 2, partial initial,
-        // reliable. Payload is IntPacked(3): a static (odd) actor GUID, so no
-        // spawn block follows.
-        let mut bits = vec![
-            true,  // bControl
-            true,  // bOpen
-            false, // bClose
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            true,  // bPartial
-            false, // VALORANT bit
-            true,  // bPartialInitial
-            false, // bPartialFinal
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 8, crate::types::MAX_PACKET_SIZE_BITS);
-        write_int_packed(&mut bits, 3); // payload: actor GUID 3
+        // Fragment 1 opens channel 2 as a reliable partial initial. Its
+        // payload is IntPacked(3): a static (odd) actor GUID, so no spawn
+        // block follows.
+        let mut bits = Vec::new();
+        let initial = BunchSpec {
+            ch_index: 2,
+            b_open: true,
+            b_partial: true,
+            b_partial_initial: true,
+            ..Default::default()
+        };
+        write_bunch(&mut bits, &initial, &guid_three());
 
         // Fragment 2: partial final on the same channel. Payload is one actor
         // content block with a zero-bit body.
-        bits.extend_from_slice(&[
-            false, // bControl
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ]);
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            true,  // bPartial
-            false, // VALORANT bit
-            false, // bPartialInitial
-            true,  // bPartialFinal
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 10, crate::types::MAX_PACKET_SIZE_BITS);
-        bits.extend_from_slice(&[
-            true, // hasRepLayout
-            true, // isActor
-        ]);
-        write_int_packed(&mut bits, 0); // contentBits = 0
+        let mut block = Vec::new();
+        write_empty_actor_block(&mut block);
+        let last = BunchSpec {
+            ch_index: 2,
+            b_partial: true,
+            b_partial_final: true,
+            ..Default::default()
+        };
+        write_bunch(&mut bits, &last, &block);
 
         let packet = build_packet(&bits);
 
@@ -1287,27 +1225,9 @@ mod tests {
     fn a_partial_final_without_an_initial_is_counted_once() {
         // One partial-final bunch on channel 2, reliable, with no initial
         // fragment anywhere. Both the reader and the accumulator detect the
-        // missing initial; only the accumulator should count it.
-        let mut bits = vec![
-            false, // bControl
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            true,  // bPartial
-            false, // VALORANT bit
-            false, // bPartialInitial (no initial -> MissingInitial)
-            true,  // bPartialFinal
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 8, crate::types::MAX_PACKET_SIZE_BITS);
-        write_int_packed(&mut bits, 3); // payload: actor GUID 3 (never reached)
-
-        let packet = build_packet(&bits);
+        // missing initial; only the accumulator should count it. Its payload,
+        // actor GUID 3, is never reached.
+        let packet = partial_packet(false, false, true, &guid_three());
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
         reader.process_packet(&packet, 0, &mut sink);
@@ -1351,28 +1271,14 @@ mod tests {
         // Non-partial reliable bunch on channel 2 with a 16-bit payload: a u16
         // must-be-mapped count of 1 (LE) and then no GUID bits, so
         // read_must_be_mapped_guids EOFs on the missing GUID.
-        let mut bits = vec![
-            false, // bControl
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, 2); // ChIndex
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            true,  // bHasMustBeMappedGUIDs
-            false, // bPartial
-            false, // VALORANT bit
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(&mut bits, 16, crate::types::MAX_PACKET_SIZE_BITS); // 16 payload bits
-        // payload: u16 count = 1 little-endian, then zero GUID bits.
-        bits.extend_from_slice(&[
-            true, false, false, false, false, false, false, false, // 0x01
-            false, false, false, false, false, false, false, false, // 0x00
-        ]);
-
-        let packet = build_packet(&bits);
+        let packet = build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_has_must_be_mapped_guids: true,
+                ..Default::default()
+            },
+            &must_be_mapped_count_without_its_guid(),
+        );
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
         reader.process_packet(&packet, 0, &mut sink);
@@ -1386,73 +1292,10 @@ mod tests {
 
     // --- bunch builders for the lifecycle tests below ---
 
-    /// The header flags one synthetic bunch varies. Everything not named here
-    /// is fixed: reliable, and the hardcoded channel FName a reliable bunch
-    /// always carries.
-    #[derive(Default)]
-    struct BunchSpec {
-        ch_index: u32,
-        b_open: bool,
-        b_close: bool,
-        /// Close reason Dormancy rather than Destroyed; only read with
-        /// `b_close`.
-        dormant: bool,
-        b_has_package_map_exports: bool,
-        b_has_must_be_mapped_guids: bool,
-        b_partial: bool,
-        b_partial_initial: bool,
-        b_partial_final: bool,
-    }
-
-    /// Append one bunch (header + payload) in `parse_bunch_header` order.
-    fn write_bunch(bits: &mut Vec<bool>, spec: &BunchSpec, payload_bits: &[bool]) {
-        let b_control = spec.b_open || spec.b_close;
-        bits.push(b_control);
-        if b_control {
-            bits.push(spec.b_open);
-            bits.push(spec.b_close);
-        }
-        if spec.b_close {
-            // Close reason Destroyed (0) or Dormancy (1), read as
-            // SerializedInt(MAX).
-            write_serialized_int(
-                bits,
-                u32::from(spec.dormant),
-                crate::types::ChannelCloseReason::MAX,
-            );
-        }
-        bits.push(false); // bIsReplicationPaused
-        bits.push(true); // bReliable
-        write_int_packed(bits, spec.ch_index);
-        bits.push(spec.b_has_package_map_exports);
-        bits.push(spec.b_has_must_be_mapped_guids);
-        bits.push(spec.b_partial);
-        bits.push(false); // VALORANT bit
-        if spec.b_partial {
-            bits.push(spec.b_partial_initial);
-            bits.push(spec.b_partial_final);
-        }
-        bits.push(true); // channel FName: isHardcoded
-        write_int_packed(bits, 1); // FName index
-        write_serialized_int(
-            bits,
-            payload_bits.len() as u32,
-            crate::types::MAX_PACKET_SIZE_BITS,
-        );
-        bits.extend_from_slice(payload_bits);
-    }
-
-    /// One bunch, one packet.
-    fn build_bunch_packet(spec: &BunchSpec, payload_bits: &[bool]) -> Vec<u8> {
-        let mut bits = Vec::new();
-        write_bunch(&mut bits, spec, payload_bits);
-        build_packet(&bits)
-    }
-
-    /// Little-endian i32, LSB first, matching `BitReader::read_i32`.
+    /// Little-endian i32, matching `BitReader::read_i32`.
     fn write_i32_bits(bits: &mut Vec<bool>, value: i32) {
-        for i in 0..32 {
-            bits.push((value >> i) & 1 != 0);
+        for byte in value.to_le_bytes() {
+            write_byte(bits, byte);
         }
     }
 
@@ -1626,14 +1469,7 @@ mod tests {
         let mut open_payload = Vec::new();
         write_int_packed(&mut open_payload, 3);
         write_empty_actor_block(&mut open_payload);
-        let open = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_payload,
-        );
+        let open = build_open_bunch_packet(2, &open_payload);
         let close = build_bunch_packet(
             &BunchSpec {
                 ch_index: 2,
@@ -1906,14 +1742,7 @@ mod tests {
 
     /// Channel 2 opens for static actor 3, whose empty block frames.
     fn open_actor_three_on_channel_two() -> Vec<u8> {
-        build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_and_empty_block(),
-        )
+        build_open_bunch_packet(2, &open_and_empty_block())
     }
 
     /// A non-open bunch on channel 2 carrying one empty 10-bit actor block.
@@ -2073,14 +1902,7 @@ mod tests {
         // reopen `has_channel_limit_error`, while the pipeline's own table
         // still holds channel 2 and actor 3: the refusal lands on a live slot.
         reader.packet_reader = RawPacketReader::with_max_channels(0);
-        let reopen = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_and_empty_block(),
-        );
+        let reopen = build_open_bunch_packet(2, &open_and_empty_block());
         reader.process_packet(&reopen, 1, &mut sink);
         // Restored before the later bunch: the limiting reader would refuse
         // that one too, and a refused bunch says nothing about whether actor 3
@@ -2259,14 +2081,7 @@ mod tests {
         let mut open_payload = Vec::new();
         write_int_packed(&mut open_payload, 3);
         write_empty_actor_block(&mut open_payload);
-        let open = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &open_payload,
-        );
+        let open = build_open_bunch_packet(2, &open_payload);
         let close = build_bunch_packet(
             &BunchSpec {
                 ch_index: 2,
@@ -2289,14 +2104,7 @@ mod tests {
         let mut reopened_payload = Vec::new();
         write_int_packed(&mut reopened_payload, 5);
         write_empty_actor_block(&mut reopened_payload);
-        let reopened = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &reopened_payload,
-        );
+        let reopened = build_open_bunch_packet(2, &reopened_payload);
         reader.process_packet(&reopened, 2, &mut sink);
         assert_eq!(reader.stats().actor_opens, 2);
         assert_eq!(reader.stats().channel_reopens_while_open, 0);
@@ -2317,14 +2125,7 @@ mod tests {
         write_int_packed(&mut payload, 3);
         write_empty_actor_block(&mut payload);
         let payload_len = payload.len() as u64;
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: crate::types::MAX_ACTIVE_CHANNELS as u32,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
+        let packet = build_open_bunch_packet(crate::types::MAX_ACTIVE_CHANNELS as u32, &payload);
         let mut sink = TestSink::default();
         reader.process_packet(&packet, 0, &mut sink);
 
@@ -2383,14 +2184,7 @@ mod tests {
         let mut payload: Vec<bool> = Vec::new();
         write_int_packed(&mut payload, 2); // dynamic actor GUID, then nothing
 
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
+        let packet = build_open_bunch_packet(2, &payload);
 
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
@@ -2411,14 +2205,7 @@ mod tests {
         let mut payload: Vec<bool> = Vec::new();
         write_int_packed(&mut payload, 3); // static (odd) actor GUID
 
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
+        let packet = build_open_bunch_packet(2, &payload);
 
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
@@ -3167,12 +2954,7 @@ mod tests {
     /// Frame `bits` as one whole bunch payload, straight through
     /// `frame_content_blocks`, on channel 5 for static actor 42.
     fn frame_bits(bits: &[bool]) -> (NetStats, TestSink) {
-        let mut data = vec![0u8; bits.len().div_ceil(8)];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                data[i >> 3] |= 1 << (i & 7);
-            }
-        }
+        let data = pack(bits);
         let mut payload = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
         let mut sink = TestSink::default();
@@ -3313,22 +3095,13 @@ mod tests {
         // IntPacked(999): 999 = 0x3E7
         //   chunk0: (999 & 0x7F) = 0x67, more=1 -> byte = (0x67 << 1) | 1 = 0xCF
         //   chunk1: (999 >> 7) = 7, more=0 -> byte = (7 << 1) | 0 = 0x0E
-        let packed_bytes = [0xCF_u8, 0x0E];
-        for &byte in &packed_bytes {
-            for i in 0..8 {
-                bits.push((byte & (1 << i)) != 0);
-            }
+        for byte in [0xCF_u8, 0x0E] {
+            write_byte(&mut bits, byte);
         }
         // Add a few more padding bits so remaining > 0 but < 999
         bits.extend(std::iter::repeat_n(false, 8));
 
-        let byte_count = bits.len().div_ceil(8);
-        let mut data = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                data[i >> 3] |= 1 << (i & 7);
-            }
-        }
+        let data = pack(&bits);
 
         let mut payload_reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut stats = NetStats::default();
@@ -3420,14 +3193,7 @@ mod tests {
         overrun.extend([false; 8]);
 
         let (reader, _) = run_packets(&[
-            build_bunch_packet(
-                &BunchSpec {
-                    ch_index: 2,
-                    b_open: true,
-                    ..Default::default()
-                },
-                &open,
-            ),
+            build_open_bunch_packet(2, &open),
             build_bunch_packet(
                 &BunchSpec {
                     ch_index: 2,
@@ -3468,32 +3234,15 @@ mod tests {
     // --- controller property-block regression tests
     // (docs/archive/PROJECT_STATUS.md 17-A) ---
 
-    /// Build a non-partial open bunch around `payload_bits` and return the
-    /// full packet bytes, ready for `process_packet`.
+    /// One reliable, non-partial bunch that opens `ch_index` around
+    /// `payload_bits`, as a packet ready for `process_packet`.
     fn build_open_bunch_packet(ch_index: u32, payload_bits: &[bool]) -> Vec<u8> {
-        let mut bits = vec![
-            true,  // bControl
-            true,  // bOpen
-            false, // bClose
-            false, // bIsReplicationPaused
-            true,  // bReliable
-        ];
-        write_int_packed(&mut bits, ch_index);
-        bits.extend_from_slice(&[
-            false, // bHasPackageMapExports
-            false, // bHasMustBeMappedGUIDs
-            false, // bPartial
-            false, // VALORANT bit
-            true,  // FName isHardcoded
-        ]);
-        write_int_packed(&mut bits, 1); // FName index
-        write_serialized_int(
-            &mut bits,
-            payload_bits.len() as u32,
-            crate::types::MAX_PACKET_SIZE_BITS,
-        );
-        bits.extend_from_slice(payload_bits);
-        build_packet(&bits)
+        let spec = BunchSpec {
+            ch_index,
+            b_open: true,
+            ..Default::default()
+        };
+        build_bunch_packet(&spec, payload_bits)
     }
 
     /// Write the spawn block for a dynamic actor: archetype, level, and the

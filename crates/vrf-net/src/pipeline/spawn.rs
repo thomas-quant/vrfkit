@@ -183,22 +183,13 @@ fn read_compressed_short_component(reader: &mut BitReader<'_>) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
+    use crate::test_bits::{pack, write_byte, write_serialized_int};
 
     /// A clear leading bit yields the caller's default, never `None`. The two
     /// defaults differ (origin vs unit scale), which is the whole point.
     #[test]
     fn absent_vector_takes_the_callers_default() {
-        let data = bits_to_bytes(&[false]);
+        let data = pack(&[false]);
         let mut reader = BitReader::with_bit_len(&data, 1).unwrap();
         assert_eq!(
             read_optional_quantized_vector(&mut reader, SPAWN_SCALE_FACTOR, UNIT_SCALE).unwrap(),
@@ -214,16 +205,11 @@ mod tests {
         // hasValue=1, isQuantized=1, info = 8 | (1 << 6) = 72 -> 8-bit
         // components with extra_info = 1, so each is divided by 10.
         let mut bits = vec![true, true];
-        // SerializedInt(72, max=128): 7 value bits, LSB first.
-        for i in 0..7 {
-            bits.push((72u32 >> i) & 1 != 0);
-        }
+        write_serialized_int(&mut bits, 72, 128); // 7 value bits
         for byte in [0xFFu8, 0x01, 0x80] {
-            for i in 0..8 {
-                bits.push((byte >> i) & 1 != 0);
-            }
+            write_byte(&mut bits, byte);
         }
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let v = read_optional_quantized_vector(&mut reader, SPAWN_SCALE_FACTOR, ORIGIN)
             .unwrap()
@@ -237,12 +223,12 @@ mod tests {
     #[test]
     fn rotation_short_skips_absent_components() {
         let mut bits = vec![true];
-        for i in 0..16 {
-            bits.push((16384u32 >> i) & 1 != 0);
+        for byte in 16384u16.to_le_bytes() {
+            write_byte(&mut bits, byte);
         }
         bits.push(false);
         bits.push(false);
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let r = read_rotation_short(&mut reader).unwrap();
         assert_eq!(r.pitch, 90.0);

@@ -401,6 +401,7 @@ fn parse_class_net_cache_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{pack, write_int_packed, write_serialized_int};
 
     /// A sink that records all fields/RPCs.
     #[derive(Default)]
@@ -418,46 +419,6 @@ mod tests {
         }
     }
 
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max_value: u32) {
-        let mut written_value = 0u32;
-        let mut mask = 1u32;
-        while written_value.saturating_add(mask) < max_value {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written_value |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
-
     #[test]
     fn rep_layout_single_field() {
         let mut bits = Vec::new();
@@ -468,7 +429,7 @@ mod tests {
         bits.extend(std::iter::repeat_n(true, 32));
         write_int_packed(&mut bits, 0); // terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -491,7 +452,7 @@ mod tests {
         bits.extend(std::iter::repeat_n(true, 16));
         write_int_packed(&mut bits, 0); // terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -506,7 +467,7 @@ mod tests {
         bits.push(false); // checksum
         write_int_packed(&mut bits, 0); // immediate terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -520,7 +481,7 @@ mod tests {
         write_int_packed(&mut bits, 16); // 16 bits payload
         bits.extend(std::iter::repeat_n(false, 16));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_class_net_cache(&mut reader, 10, &mut sink).unwrap();
@@ -544,7 +505,7 @@ mod tests {
         write_serialized_int(&mut bits, 0, 2); // handle=0, written with max=2 (1 bit)
         write_int_packed(&mut bits, 0); // payload = 0 bits
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         // Bound the reader to exactly the meaningful bit count so we can
         // verify consumption without byte-padding interference.
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
@@ -572,7 +533,7 @@ mod tests {
         write_int_packed(&mut bits, 8); // 8 bits payload
         bits.extend(std::iter::repeat_n(true, 8)); // 8 bits of data
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
         let (count, _) = parse_class_net_cache(&mut reader, 3, &mut sink).unwrap();
@@ -596,7 +557,7 @@ mod tests {
         write_int_packed(&mut bits, 8);
         bits.extend(std::iter::repeat_n(true, 8));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = RecordingSink::default();
 
@@ -623,7 +584,7 @@ mod tests {
 
         // Bound to the exact bit count, the way the framing layer does: the
         // byte-padded tail must not be counted as abandoned stream data.
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -652,7 +613,7 @@ mod tests {
         bits.extend(std::iter::repeat_n(false, 8));
         write_int_packed(&mut bits, 0); // terminator
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (_count, abandoned) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -673,7 +634,7 @@ mod tests {
         write_int_packed(&mut bits, 0);
         bits.extend(std::iter::repeat_n(true, 8));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let mut context = WalkContext::default();
@@ -698,7 +659,7 @@ mod tests {
         let tail_offset = bits.len() as u64;
         bits.extend(std::iter::repeat_n(true, 13));
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let WalkOutcome::Complete { count, remainder } =
@@ -727,7 +688,7 @@ mod tests {
         write_int_packed(&mut bits, 0); // terminator, immediately
         bits.extend(std::iter::repeat_n(false, 600)); // undeclared trailing bits
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_rep_layout(&mut reader, &mut sink).unwrap();
@@ -746,7 +707,7 @@ mod tests {
         write_serialized_int(&mut bits, 0, 2); // handle = 0, 1 bit
         bits.extend(std::iter::repeat_n(false, 3)); // 3 stray bits
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_class_net_cache(&mut reader, 2, &mut sink).unwrap();
@@ -769,7 +730,7 @@ mod tests {
         write_serialized_int(&mut bits, 0, 2); // the whole block: one handle bit
         assert_eq!(bits.len(), 1);
 
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, 1).unwrap();
         let mut sink = RecordingSink::default();
         let (count, abandoned) = parse_class_net_cache(&mut reader, 2, &mut sink).unwrap();

@@ -149,6 +149,7 @@ pub fn read_content_block_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{pack, write_byte, write_int_packed};
 
     #[derive(Default)]
     struct NullSink;
@@ -156,37 +157,10 @@ mod tests {
         fn register_path(&mut self, _: u32, _: &str, _: NetworkGuid) {}
     }
 
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
-
     #[test]
     fn actor_block_returns_immediately() {
         let bits = vec![true, true]; // hasRepLayout=true, isActor=true
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = NullSink;
         let hdr = read_content_block_header(&mut reader, NetworkGuid(18), &mut sink).unwrap();
@@ -202,7 +176,7 @@ mod tests {
         bits.push(false); // isActor = false
         write_int_packed(&mut bits, 50); // objectNetGuid
         bits.push(true); // isStablyNamed
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = NullSink;
         let hdr = read_content_block_header(&mut reader, NetworkGuid(18), &mut sink).unwrap();
@@ -219,11 +193,8 @@ mod tests {
         write_int_packed(&mut bits, 60); // objectNetGuid
         bits.push(false); // isStablyNamed
         bits.push(true); // isDeleted
-        // deleteFlags byte: 0x03
-        for i in 0..8 {
-            bits.push((0x03u8 & (1 << i)) != 0);
-        }
-        let data = bits_to_bytes(&bits);
+        write_byte(&mut bits, 0x03); // deleteFlags
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = NullSink;
         let hdr = read_content_block_header(&mut reader, NetworkGuid(18), &mut sink).unwrap();
@@ -244,7 +215,7 @@ mod tests {
             } else {
                 bits.extend([false; 8]);
             }
-            let data = bits_to_bytes(&bits);
+            let data = pack(&bits);
             read_content_block_header(&mut BitReader::new(&data), NetworkGuid(18), &mut NullSink)
                 .unwrap()
         };

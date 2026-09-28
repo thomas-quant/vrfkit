@@ -101,6 +101,7 @@ pub fn internal_load_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{pack, write_byte, write_int_packed};
 
     #[derive(Default)]
     struct VecSink(Vec<(u32, String, NetworkGuid)>);
@@ -114,28 +115,28 @@ mod tests {
     /// Build a minimal InternalLoadObject payload for a non-exporting read.
     fn build_simple_guid(guid: u32) -> Vec<u8> {
         let mut bits: Vec<bool> = Vec::new();
-        write_int_packed_bits(&mut bits, guid);
-        bits_to_bytes(&bits)
+        write_int_packed(&mut bits, guid);
+        pack(&bits)
     }
 
     /// Build an InternalLoadObject with path export.
     fn build_export_guid(guid: u32, path: &str, outer_guid: u32) -> Vec<u8> {
         let mut bits: Vec<bool> = Vec::new();
-        write_int_packed_bits(&mut bits, guid);
+        write_int_packed(&mut bits, guid);
         // export flags = HasPath (0x01)
-        write_byte_bits(&mut bits, 0x01);
+        write_byte(&mut bits, 0x01);
         // outer guid (simple, no path)
-        write_int_packed_bits(&mut bits, outer_guid);
+        write_int_packed(&mut bits, outer_guid);
         // FString: length (i32) + bytes + null
         let path_bytes = format!("{}\0", path);
         let len = path_bytes.len() as i32;
         for b in len.to_le_bytes() {
-            write_byte_bits(&mut bits, b);
+            write_byte(&mut bits, b);
         }
         for b in path_bytes.bytes() {
-            write_byte_bits(&mut bits, b);
+            write_byte(&mut bits, b);
         }
-        bits_to_bytes(&bits)
+        pack(&bits)
     }
 
     #[test]
@@ -169,40 +170,5 @@ mod tests {
         assert_eq!(sink.0[0].0, 18);
         assert_eq!(sink.0[0].1, "/Game/Test.Test_C");
         assert_eq!(sink.0[0].2, NetworkGuid(0));
-    }
-
-    // --- helpers ---
-
-    fn write_int_packed_bits(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn write_byte_bits(bits: &mut Vec<bool>, byte: u8) {
-        for i in 0..8 {
-            bits.push((byte & (1 << i)) != 0);
-        }
-    }
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
     }
 }
