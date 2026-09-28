@@ -175,18 +175,9 @@ and by Sova's Recon Bolt matches the speed implied by consecutive centimetre
 positions (median ratio 0.98 to 1.02). The discriminator is the class, not the
 rotation width: five of the 24 affected groups use short rotation.
 
-This is a defect in shipped output, not only in these candidates: the
-24 typed groups include `EquippablePickupProjectile_C` (288,644 actors),
-Sova's and Fade's reveal projectiles and the smoke projectiles and game
-objects. Upstream's C#
-`ReplicatedMovementDecoder` has the same fixed scale. Fixing it rewrites typed
-values on those groups and every export baseline, so it is recorded in
-[FOLLOWUP.md](FOLLOWUP.md#remaining-work) rather than folded into this change.
-[DATA.md](DATA.md) documents the metre reading until then. A Rust test pins
-the decline: a Raze projectile's `ReplicatedMovement` resolves to no type.
-
-Integration note (2026-09-28, `auto/integration-20260928`): the per-class
-level has landed. `FieldType::RepMovement` now carries each class's measured
+The fixed scale was a defect in shipped output too (upstream's C#
+`ReplicatedMovementDecoder` has it). Integration note (2026-09-28): the
+per-class level has landed. `FieldType::RepMovement` now carries each class's measured
 location level, so the reason for this decline no longer holds; the five
 projectiles stay raw only because nothing types them yet, and typing one needs
 its spawn-join line in `REP_MOVEMENT_LOCATION_EVIDENCE`. The Boom Bot's scoped
@@ -277,15 +268,6 @@ exactly the typed rows it contains, 3,209 of them: 560 each of `Character`,
 from 16,455,178 to 16,460,477 bytes with a new hash; its rows and every other
 file are unchanged. The replay has no Raze. The per-build framing baselines do
 not move.
-
-**Sweep.** The MSRV 1.86 development sweep with the regression guards
-(`sweep.sh --guards`: formatting, clippy with warnings denied, workspace
-tests, all-target and all-feature checks, rustdoc, the offset probe, Rust and
-Python Parquet interop, the 27 advertised feature configurations, ASCII and
-generator checks, table regeneration, baseline schemas, the Python suite, the
-full documentation check, a release build, both `02d4d478` baselines and the
-seven per-build framing baselines) passes on the final commit, with 717 Rust
-and 925 Python tests.
 
 ## Reproduction
 

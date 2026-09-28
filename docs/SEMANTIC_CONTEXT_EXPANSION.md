@@ -24,7 +24,7 @@ Movement snapshot rows remain explicitly counted if discarded; the full
 714-export measurement found zero such rows. The new tables preserve 2,535,314
 actor opens and 58,509,199 GUID cache entries. All main Parquet files remained
 byte-identical, and every previous checkpoint field value and row order matched
-across all 201,727,041 rows. All 6,426 Parquet files are retained privately.
+across all 201,727,041 rows.
 
 ## Reviewed participant identity
 
@@ -105,7 +105,4 @@ routes. RequestedIgnoreActors children consume as packed integers, but their
 nonzero values do not resolve in the checked main GUID table, so they must not
 be labelled ObjectNetGUIDs on that evidence.
 
-Private reproduction artifacts are under investigation run
-`20260908-semantic-expansion`: `semantic-validation`, `economy-reload`, and
-`raw-shapes`. The catalog records the verification digest and export-set digest;
-no player identifier values are included in this document.
+The catalog records the verification digest and export-set digest.

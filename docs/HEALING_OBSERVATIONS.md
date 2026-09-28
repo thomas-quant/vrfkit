@@ -125,10 +125,8 @@ population distinctions instead of adding checkpoint state to main amounts.
 
 ## Production verification
 
-The final extraction used eight workers and completed in 286.6 seconds from
-existing Parquet exports. This is derived JSON extraction time, not replay
-parsing time. Independent comparison completed in 149.3 seconds and checked
-every observation's raw-derived amounts, physical source rows, child order,
+An independent comparison of the final extraction checked every
+observation's raw-derived amounts, physical source rows, child order,
 section paths, source edges, lifecycle evidence, reference history, recipient
 corroboration and serialized aggregates. All 714 JSON outputs are retained.
 
@@ -140,10 +138,9 @@ production guards causes its targeted behavioral test to fail. One earlier
 test changed a section delta and was also rejected by the amount-sum check;
 the corrected test changes only `LifeResult` to isolate parent/child agreement.
 
-The full validation suites contain 692 Rust and 725 Python tests. The first
-production attempt rejected four exports because it unnecessarily required
-unused source declarations; that attempt is retained separately and is not an
-accepted corpus. The final run preserves all 40 affected amount observations.
+A first production run rejected four exports by requiring source declarations
+it did not use; the accepted run preserves all 40 affected amount
+observations.
 
 This tool derives a view from already parsed values. It does not increase the
 parser's physical typed-row percentage or establish complete gameplay meaning.

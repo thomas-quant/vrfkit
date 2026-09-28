@@ -17,10 +17,14 @@ concurrency:
 
 env:
   PYTHONUTF8: '1'
+  # Public fixtures, pinned by upstream commit and SHA-256. The 12.10 one is
+  # also the packaged binary's smoke replay.
+  UPSTREAM_REPLAYS: https://raw.githubusercontent.com/michel-giehl/ValorantReplayParser/b51d67423b7b4952d59051cf91e55efa1c42da05/tests/Test.Integration/Replays
+  FIXTURE_1210: 9f8b32c5-c243-41ec-bbbb-832582edf652.12_10.vrf
+  FIXTURE_1210_SHA256: a4ce1b72f9bdf99492162013c1c909e6994a0d22bef1899e687fde71fbc86606
 
 # The parser is developed on Windows (Oodle FFI, cp949 console); the Rust job
-# runs there so the Oodle dependency always links. Python checks run on Windows
-# and Ubuntu with the dependencies from requirements.txt.
+# runs there so the Oodle dependency always links.
 jobs:
   rust:
     runs-on: windows-latest
@@ -70,8 +74,7 @@ jobs:
             & cargo @cargoArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      # Standalone (not a workspace member), so none of the workspace steps
-      # above format, lint or test it.
+      # Standalone (not a workspace member): no workspace step covers it.
       - name: standalone component class tool
         shell: pwsh
         run: |
@@ -93,6 +96,8 @@ jobs:
         run: python -W error tools/check_docs.py
       - name: core-only runtime tests
         run: cargo +1.86.0 test -p vrfkit --no-default-features --locked
+      - name: container tests without the Oodle decoder
+        run: cargo +1.86.0 test -p vrf-container --no-default-features --locked
       - name: Rust Parquet to PyArrow interoperability
         shell: pwsh
         run: |
@@ -103,18 +108,15 @@ jobs:
           $interopDir = Join-Path $root 'interop'
           python -W error crates/vrf-export/tests/python_interop.py $interopDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # Public fixtures are pinned by upstream commit and SHA-256. Builds
-      # without public fixtures remain covered by the private local audit.
+      # Builds without a public fixture are covered by the private local audit.
       - name: corpus baselines on the public upstream fixtures
         shell: pwsh
-        env:
-          UPSTREAM_REPLAYS: https://raw.githubusercontent.com/michel-giehl/ValorantReplayParser/b51d67423b7b4952d59051cf91e55efa1c42da05/tests/Test.Integration/Replays
         run: |
           cargo +1.86.0 build -p vrfkit --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $exe = Join-Path (Get-Location) 'target/debug/vrfkit.exe'
           $fixtures = @(
-            @("1210", "9f8b32c5-c243-41ec-bbbb-832582edf652.12_10.vrf", "a4ce1b72f9bdf99492162013c1c909e6994a0d22bef1899e687fde71fbc86606"),
+            @("1210", $env:FIXTURE_1210, $env:FIXTURE_1210_SHA256),
             @("1211", "5c673443-5bdc-4576-b416-aab3f62471a5.12_11.vrf", "7a7a5492ddf286bb04413da96f0d3b216f91150e8174a3a4397493529e17ebdd"),
             @("1300", "12974d2b-848f-490d-80ba-5f03a033c2d5.13_00.vrf", "fd49091dd43171bb060eb6bbae50ed6677aa1077344572c5bf65f0c6fe2b4c1a")
           )
@@ -132,12 +134,10 @@ jobs:
             python -W error tools/check_corpus_baseline.py --baseline "tools/baselines/build_$build.json" --corpus $corpus --exe $exe --require-input
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          # Run the same strict main/checkpoint gate used by the local full
-          # corpus audit. Export success alone cannot hide array/leaf errors.
+          # The local audit's strict main/checkpoint gate: export success cannot hide array/leaf errors.
           python -W error tools/verify_build_corpus.py --exe $exe --corpus (Join-Path $env:RUNNER_TEMP 'baseline-corpora') --work-dir (Join-Path $env:RUNNER_TEMP 'public-fixture-audit') --output (Join-Path $env:RUNNER_TEMP 'public-fixture-report.json') --jobs 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # An independent decoder checks observed wire values. Require every
-          # fixture identity across the three exports as well as exact matches.
+          # An independent decoder: every fixture identity observed, every value equal.
           python -W error tools/validate_type_evidence.py (Join-Path $env:RUNNER_TEMP 'public-fixture-audit') tools/fixtures/public_fixture_type_evidence.json --compare-typed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: retain public replay verification evidence
@@ -153,12 +153,9 @@ jobs:
             ${{ runner.temp }}/public-fixture-audit/*/error.txt
           retention-days: 14
           if-no-files-found: warn
-      # table.rs used to be generated from C# sources that existed on one
-      # machine, so nothing else could regenerate it or say it still matched
-      # its input. The input is vendored now; regenerating it here fails the
-      # build on a hand edit, a descriptor change committed without its table,
-      # or a generator change that moves the output. Last in the job because it
-      # rewrites table.rs, which would make any later cargo step recompile.
+      # Fails on a hand edit, a descriptor change committed without its table, or
+      # generator drift. Last because it rewrites table.rs, which would make any
+      # later cargo step recompile.
       - name: descriptor table regenerates from the vendored source
         shell: pwsh
         run: |
@@ -285,9 +282,8 @@ jobs:
           $corpus = Join-Path $env:RUNNER_TEMP 'release-corpus'
           New-Item -ItemType Directory $corpus | Out-Null
           $replay = Join-Path $corpus 'public-12.10.vrf'
-          $url = 'https://raw.githubusercontent.com/michel-giehl/ValorantReplayParser/b51d67423b7b4952d59051cf91e55efa1c42da05/tests/Test.Integration/Replays/9f8b32c5-c243-41ec-bbbb-832582edf652.12_10.vrf'
-          Invoke-WebRequest -Uri $url -OutFile $replay
-          if ((Get-FileHash -Algorithm SHA256 $replay).Hash.ToLowerInvariant() -ne 'a4ce1b72f9bdf99492162013c1c909e6994a0d22bef1899e687fde71fbc86606') { throw 'Public replay checksum mismatch' }
+          Invoke-WebRequest -Uri "$env:UPSTREAM_REPLAYS/$env:FIXTURE_1210" -OutFile $replay
+          if ((Get-FileHash -Algorithm SHA256 $replay).Hash.ToLowerInvariant() -ne $env:FIXTURE_1210_SHA256) { throw 'Public replay checksum mismatch' }
           python -W error tools/verify_build_corpus.py --exe (Join-Path $env:RUNNER_TEMP 'release-extracted/vrfkit.exe') --corpus $corpus --work-dir (Join-Path $env:RUNNER_TEMP 'release-audit') --output (Join-Path $env:RUNNER_TEMP 'release-report.json') --jobs 1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: retain packaged-binary verification evidence

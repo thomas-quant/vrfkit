@@ -114,14 +114,11 @@ serialized LifeResult of zero. The one-step arithmetic leaves positive
 residuals from 0.0000019073486328125 to 0.00007577240467071533. This does not
 establish a rounding or clamping rule; the original values remain authoritative.
 
-The 714 timeline JSON files occupy 26,885,294,147 bytes; all were retained.
-Extraction used eight workers and took 373.4 seconds from existing Parquets.
-This is not a replay-parsing benchmark. Independent outputs and rejected
-intermediate attempts remain separate from accepted results.
+The 714 timeline JSON files occupy 26,885,294,147 bytes.
 
 Twenty-two focused tests pass. Seven changed production guards each cause a
 targeted assertion failure, and restored source passes again. The exact
 comparison rejects ten altered outputs, including tiny value changes, missing
 or extra records, changed epochs, fabricated open metadata and false game-life
-claims; normal JSON reserialization passes. Full Rust, Python and documentation
-checks pass. This derived view does not increase typed-row coverage.
+claims; normal JSON reserialization passes. This derived view does not
+increase typed-row coverage.

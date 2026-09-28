@@ -31,6 +31,11 @@ passes every test. So this reads the repo and the docs and compares:
      checked counts, covering exactly the registered payload transforms
  17. CONTRIBUTING's `cargo check` lines and ci.yml's `$matrix` are the same
      cases in the same order
+ 18. every `#anchor` a link in a link-checked doc names, and every
+     `docs/<name>.md#<anchor>` a Rust or Python source names, is a heading
+     of its target by GitHub's slug rules (`anchor_problems`). docs/archive/
+     is a target, never a source. Setext headings are not read, so a link to
+     one is reported rather than passed.
 
 A number is guarded when something in the repo can be *run* to produce it.
 docs/DATA.md's measurements ("377,487 elements", "1,021 windows") come from
@@ -49,12 +54,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import importlib.util
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
+from urllib.parse import unquote
 
 REPO = Path(__file__).resolve().parent.parent
 README = REPO / "README.md"
@@ -259,22 +267,26 @@ def check_source_table_size() -> list[str]:
 
 
 #: The phrase the docs use to state a suite size, narrow enough that a match
-#: is always a claim about one of the two suites.
-TEST_COUNT_RE = re.compile(r"(\d[\d,]*)\s+(?:tests|passing)\b")
+#: is always a claim about one of the two suites. The suite may be named
+#: between the number and the noun, as README's highlight does ("793 Rust
+#: tests"); that line went stale twice while only the plain form was read.
+TEST_COUNT_RE = re.compile(r"(\d[\d,]*)\s+(?:(Rust|Python)\s+)?(?:tests|passing)\b")
 
 
-def stale_test_counts(text: str, live: set[str]) -> list[tuple[int, str]]:
+def stale_test_counts(text: str, live: set[str],
+                      by_suite: dict[str, set[str]] | None = None) -> list[tuple[int, str]]:
     """`(line number, quoted count)` for every suite-size claim not in `live`.
 
     Presence is not agreement: README carried `387 tests` and `355 passing` at
     once for twelve commits, and a check asking whether the live number
     appears somewhere passed on the first. `live` holds both suite counts in
-    both spellings, and every claim must be one of them.
+    both spellings, and every claim must be one of them; a claim that names
+    its suite must be that suite's, when `by_suite` gives it.
     """
     return [(i, quoted)
             for i, line in enumerate(text.splitlines(), 1)
-            for quoted in TEST_COUNT_RE.findall(line)
-            if quoted not in live]
+            for quoted, suite in TEST_COUNT_RE.findall(line)
+            if quoted not in ((by_suite or {}).get(suite) or live)]
 
 
 def contradicting_test_counts(docs: dict[str, str]) -> list[str]:
@@ -289,7 +301,7 @@ def contradicting_test_counts(docs: dict[str, str]) -> list[str]:
         (name, i, quoted)
         for name, text in docs.items()
         for i, line in enumerate(text.splitlines(), 1)
-        for quoted in TEST_COUNT_RE.findall(line)
+        for quoted, _suite in TEST_COUNT_RE.findall(line)
     ]
     distinct = {quoted.replace(",", "") for _, _, quoted in seen}
     if len(distinct) <= 2:
@@ -374,6 +386,148 @@ def link_checked_docs() -> list[Path]:
     paths = {REPO / name for name in ALL_DOCS}
     paths.update((REPO / "docs").glob("*.md"))
     return sorted(paths)
+
+
+FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
+INLINE_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+#: A Rust or Python source naming a doc heading. A slug never holds a dot, so
+#: a sentence-ending `.` after the anchor is not read as part of it.
+CODE_ANCHOR_RE = re.compile(r"\b(docs/(?:[\w.-]+/)*[\w.-]+\.md)#([\w-]+)")
+
+
+def unfenced_lines(text: str):
+    """`(line number, line)` for every line outside a fenced code block, where
+    a `#` line is a comment and a `[x](y)` is sample text, not a link."""
+    fence = None
+    for i, line in enumerate(text.splitlines(), 1):
+        if fence:
+            close = FENCE_CLOSE_RE.match(line)
+            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= len(fence):
+                fence = None
+            continue
+        opened = FENCE_OPEN_RE.match(line)
+        if opened:
+            fence = opened.group(1)
+            continue
+        yield i, line
+
+
+def github_slug(heading: str) -> str:
+    """The anchor GitHub renders for a heading: the rendered text (code spans
+    keep their content, links their text, images drop out) lowercased, every
+    character that is not a letter, mark, digit, `_`, `-` or space removed,
+    and each space turned into `-`. Underscore emphasis is not rendered."""
+    def outside_code(segment: str) -> str:
+        return INLINE_LINK_RE.sub(
+            lambda m: "" if m.group(0).startswith("!") else m.group(1), segment)
+
+    parts, pos = [], 0
+    for span in CODE_SPAN_RE.finditer(heading):
+        parts.append(outside_code(heading[pos:span.start()]))
+        code = span.group(2)
+        if code.startswith(" ") and code.endswith(" ") and code.strip():
+            code = code[1:-1]
+        parts.append(code)
+        pos = span.end()
+    parts.append(outside_code(heading[pos:]))
+    return "".join(
+        ch for ch in "".join(parts).lower()
+        if ch in " -" or unicodedata.category(ch) in ("Nd", "Pc")
+        or unicodedata.category(ch)[0] in "LM").replace(" ", "-")
+
+
+def heading_anchors(text: str) -> set[str]:
+    """Every anchor a document's ATX headings give, with GitHub's `-1`, `-2`
+    suffixes on repeats."""
+    seen: dict[str, int] = {}
+    anchors = set()
+    for _, line in unfenced_lines(text):
+        heading = ATX_HEADING_RE.match(line)
+        if not heading:
+            continue
+        slug = github_slug((heading.group(1) or "").strip())
+        count = seen.get(slug, 0)
+        anchors.add(f"{slug}-{count}" if count else slug)
+        seen[slug] = count + 1
+    return anchors
+
+
+@functools.lru_cache(maxsize=None)
+def anchors_of(path: Path) -> frozenset[str] | None:
+    """The anchors of a markdown file on disk; `None` when it does not exist."""
+    return frozenset(heading_anchors(read(path))) if path.is_file() else None
+
+
+def broken_markdown_anchors(path: Path, text: str, lookup=anchors_of,
+                            checked: list | None = None) -> list[str]:
+    """Links in one doc whose `#anchor` names no heading of their target;
+    each link checked is appended to `checked`. A missing target file is
+    `check_links`'s report, and an anchor on a non-markdown target (a `#L10`
+    line link) is GitHub's, not a heading."""
+    problems = []
+    for i, line in unfenced_lines(text):
+        for _label, target in LINK_RE.findall(line):
+            target = target.strip().split()[0] if target.strip() else ""
+            if target.startswith(("http://", "https://", "mailto:")) or "#" not in target:
+                continue
+            file_part, fragment = target.split("#", 1)
+            dest = (path.parent / file_part).resolve() if file_part else path
+            if not fragment or dest.suffix.lower() != ".md":
+                continue
+            anchors = lookup(dest)
+            if anchors is None:
+                continue
+            if checked is not None:
+                checked.append(target)
+            if unquote(fragment) not in anchors:
+                problems.append(f"{path.name}:{i}: link -> {target}: "
+                                f"{dest.name} has no heading #{unquote(fragment)}")
+    return problems
+
+
+def broken_code_anchors(name: str, text: str, lookup=anchors_of,
+                        checked: list | None = None) -> list[str]:
+    """`docs/<name>.md#<anchor>` references in one source file that name a
+    doc or a heading that does not exist; each one is appended to
+    `checked`. Paths are repository-relative."""
+    problems = []
+    for i, line in enumerate(text.splitlines(), 1):
+        for doc, fragment in CODE_ANCHOR_RE.findall(line):
+            if checked is not None:
+                checked.append(f"{doc}#{fragment}")
+            anchors = lookup((REPO / doc).resolve())
+            if anchors is None:
+                problems.append(f"{name}:{i}: cites {doc}#{fragment}, but {doc} does not exist")
+            elif fragment not in anchors:
+                problems.append(f"{name}:{i}: cites {doc}#{fragment}, but {doc} has no such heading")
+    return problems
+
+
+def anchor_problems(checked: dict[str, list] | None = None) -> list[str]:
+    """Every broken anchor in the link-checked docs and the tracked Rust and
+    Python sources. `checked["docs"]` and `checked["code"]` receive every
+    reference read, so a run that read none can say so. A source list that
+    cannot be read is reported, not treated as an empty one."""
+    checked = {} if checked is None else checked
+    docs, code = checked.setdefault("docs", []), checked.setdefault("code", [])
+    problems = [p for path in link_checked_docs()
+                for p in broken_markdown_anchors(path, read(path), checked=docs)]
+    r = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", "*.rs", "*.py"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=120)
+    if r.returncode != 0:
+        return problems + [
+            f"could not list the Rust and Python sources: git ls-files exited "
+            f"{r.returncode} ({(r.stderr or '').strip()[:120]}); every code "
+            f"anchor went unchecked"]
+    for name in r.stdout.splitlines():
+        if name.strip():
+            text = (REPO / name).read_text(encoding="utf-8", errors="replace")
+            problems += broken_code_anchors(name, text, checked=code)
+    return problems
 
 
 def check_generated_inventory(docs: dict[str, str]) -> list[str]:
@@ -698,6 +852,7 @@ def main() -> int:
     measurement_problems: list[str] = []
     live_counts = measured_counts(measurement_problems)
     overlay_counters = baseline_overlay_counters()
+    anchors_checked: dict[str, list] = {}
 
     # One entry per check: the summary prints len(checks), never a literal.
     checks = [
@@ -727,6 +882,7 @@ def main() -> int:
         check_build_verification(
             readme, usage, read(REPO / "crates/vrf-transform/src/lib.rs"),
             json.loads(read(BUILD_AUDIT))),
+        anchor_problems(anchors_checked),
     ]
 
     if not args.fast:
@@ -736,11 +892,14 @@ def main() -> int:
                 if str(count) not in text:
                     run_problems.append(
                         f"{name}: {label} test count is {count}, not quoted")
-        live = {s for c in (rust, tools_n) for s in (str(c), f"{c:,}")}
+        by_suite = {suite: {str(c), f"{c:,}"}
+                    for suite, c in (("Rust", rust), ("Python", tools_n))}
+        live = by_suite["Rust"] | by_suite["Python"]
         for name, text in every.items():
             run_problems += [
-                f"{name}:{i}: says {quoted}; the suites are {rust} and {tools_n}"
-                for i, quoted in stale_test_counts(text, live)]
+                f"{name}:{i}: says {quoted}; the suites are {rust} (Rust) "
+                f"and {tools_n} (Python)"
+                for i, quoted in stale_test_counts(text, live, by_suite)]
         print(f"tests: rust {rust}, tools {tools_n}")
         checks.append(run_problems)
     problems = [p for found in checks for p in found]
@@ -748,7 +907,10 @@ def main() -> int:
     n_tools = len(list((REPO / "tools").glob("*.py")))
     n_crates = len({p.parent.name for p in (REPO / "crates").glob("*/Cargo.toml")})
     print(f"docs: {len(ALL_DOCS)} files ({len(link_checked_docs())} link-checked)   "
-          f"{n_tools} tools, {n_crates} crates, {len(checks)} checks")
+          f"{n_tools} tools, {n_crates} crates, "
+          f"{len(anchors_checked.get('docs', []))} doc links and "
+          f"{len(anchors_checked.get('code', []))} code references to anchors, "
+          f"{len(checks)} checks")
 
     if problems:
         print(f"\nFAILED: {len(problems)} stale or missing doc claim(s)",

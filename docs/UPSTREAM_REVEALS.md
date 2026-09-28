@@ -77,10 +77,8 @@ the framing totals still include 87,038,567 skipped bits.
 
 ## Reproduction
 
-Inputs remain private under `$env:LOCALAPPDATA/vrfkit/baseline-corpora`.
-Run artifacts, exact before/after audit script and its report are under
-`$env:LOCALAPPDATA/vrfkit/upstream-reveals-20260924` (`audit.py`, `audit.json`).
-The audit selects the five exact descriptor paths and only Owner, Instigator
+Replay inputs and run artifacts, including the before/after audit script
+and its report, remain private and outside the repository. The audit selects the five exact descriptor paths and only Owner, Instigator
 and ReplicatedMovement, checks main and checkpoint tables, and compares all
 Parquet columns before accepting a typed-only difference.
 
@@ -99,8 +97,4 @@ only `overlay_decoded_ok` (+1,146), `overlay_not_in_table` (-1,146), and the
 `fields.parquet` byte size (+29,984) and hash, all explained by the Fade values.
 Its updated private baseline is checked again without `--update`.
 
-The MSRV 1.86 sweep covers formatting, clippy, workspace tests, all-target and
-all-feature checks, rustdoc, the offset probe, Rust/Python Parquet interop and
-all 27 advertised feature configurations. Generator, ASCII, baseline-schema
-and full documentation checks are also run. The suites contain 702 Rust and
-846 Python tests; the imported descriptor table is reproducible from source.
+The imported descriptor table is reproducible from source.

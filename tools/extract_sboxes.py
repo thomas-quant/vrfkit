@@ -11,7 +11,7 @@ the literals directly, concatenates them, and refuses to emit anything unless
 each table is exactly 512 hex chars / 256 unique byte values.
 
 Usage:
-    python tools/extract_sboxes.py <helpers.cs> <out.rs>
+    python tools/extract_sboxes.py <ValorantSeededTransformHelpers.cs> <out.rs>
 """
 
 from __future__ import annotations

@@ -23,30 +23,17 @@ describes locating the transformed reader through
 `UActorChannel::ReadContentBlockHeader` in Ghidra. It does not supply an
 unpacker for encrypted executables.
 
-The default-branch Git trees of all nine public forks returned by GitHub were
-also inspected. Their versioned-transform files all begin at 12.10:
-
-| Fork | Inspected tree |
-|---|---|
-| 33k0 | [`914039a`](https://github.com/33k0/ValorantReplayParser/tree/914039a7940eaa99efeffda10e476b1f68c0b558) |
-| Chyste | [`b51d674`](https://github.com/Chyste/ValorantReplayParser/tree/b51d67423b7b4952d59051cf91e55efa1c42da05) |
-| bhaskoro-muthohar | [`b51d674`](https://github.com/bhaskoro-muthohar/ValorantReplayParser/tree/b51d67423b7b4952d59051cf91e55efa1c42da05) |
-| Matthias1590 | [`99d9646`](https://github.com/Matthias1590/ValorantReplayParser/tree/99d964608a968e9176c4e2dc67b85544797e2ff1) |
-| lincolnchun | [`99d9646`](https://github.com/lincolnchun/ValorantReplayParser/tree/99d964608a968e9176c4e2dc67b85544797e2ff1) |
-| xiaowan108 | [`99d9646`](https://github.com/xiaowan108/ValorantReplayParser/tree/99d964608a968e9176c4e2dc67b85544797e2ff1) |
-| bmblChloe | [`99d9646`](https://github.com/bmblChloe/ValorantReplayParser/tree/99d964608a968e9176c4e2dc67b85544797e2ff1) |
-| aubwang | [`64c54b4`](https://github.com/aubwang/ValorantReplayParser/tree/64c54b4f5e92c7531f6765c1236a8065800487d0) |
-| Archers007 | [`2017487`](https://github.com/Archers007/ValorantReplayParser/tree/2017487e3a9a6d229354505c0ef8d282aa5357ae) |
-
-Two dump collections do not provide the required code:
-
-- [ZaweSec/Valorant-Dumps at `f7d8fd0`](https://github.com/ZaweSec/Valorant-Dumps/tree/f7d8fd081a69c838aedc54fae1661c61529a92fe)
-  lists archives dated 2023 and January 2024. They predate the replay system,
-  which Riot [introduced on PC with 11.06 in September 2025](https://playvalorant.com/en-us/news/dev/replays-everything-you-need-to-know/).
-  The archives were not downloaded.
-- [scros22/valorant-dumps at `bef7fc8`](https://github.com/scros22/valorant-dumps/tree/bef7fc8a37ae3ad68a7b2607f70ee028034b3051)
-  publishes offset values and analysis notes. Its README explicitly excludes
-  binaries and game code; its tree has no executable dump.
+The default-branch trees of all nine public forks GitHub returned have
+versioned transforms only from 12.10: 33k0 `914039a`, Chyste and
+bhaskoro-muthohar `b51d674`, Matthias1590, lincolnchun, xiaowan108 and
+bmblChloe `99d9646`, aubwang `64c54b4`, Archers007 `2017487`. Two dump
+collections do not provide the code either:
+[ZaweSec/Valorant-Dumps at `f7d8fd0`](https://github.com/ZaweSec/Valorant-Dumps/tree/f7d8fd081a69c838aedc54fae1661c61529a92fe)
+lists 2023 and January 2024 archives, older than the replay system Riot
+[introduced on PC with 11.06 in September 2025](https://playvalorant.com/en-us/news/dev/replays-everything-you-need-to-know/)
+(not downloaded), and
+[scros22/valorant-dumps at `bef7fc8`](https://github.com/scros22/valorant-dumps/tree/bef7fc8a37ae3ad68a7b2607f70ee028034b3051)
+publishes offsets and notes, excluding binaries and game code.
 
 ## Offline Packman implementation: useful history, incompatible input
 

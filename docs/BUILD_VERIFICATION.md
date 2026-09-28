@@ -63,32 +63,22 @@ These nonzero populations remain outside a claim of complete semantic decoding.
 
 ## Changes since 2026-09-25
 
-The previous report checked 986 replays with parser `91dc679`. It remains
-recorded in [Git history](https://github.com/yakisoba0728/vrfkit/blob/259ed10c7e0c9d87c852f80fab7535d38d2e187f/tools/fixtures/build_verification.json).
-
-- **32 new 13.06 replays.** They were copied from the game's Demos directory
-  into the archive on 2026-09-28, raising 13.06 from 6 to 38 checked replays.
-  Every one of the 986 earlier input hashes is present again and attributed to
-  the same build; none was dropped.
-- **Two roots instead of three.** The Demos directory, which added no unique
-  file on 2026-09-25, was not supplied. Discovered paths rise from 1,048 to
-  1,074, and duplicates fall from 62 to 56.
-- **Parser `91dc679` -> `259ed10`.** Every Rust change between the two lies
-  inside a `#[cfg(test)]` module. Compared section by section with the
-  executable whose digest the earlier report pins, the one used here differs
-  only in link metadata: the Rich header, the PE and debug-directory
-  timestamps, and the PDB signature. Code and data are otherwise
-  byte-identical.
-- **Runner.** `verify_build_corpus.py` now writes the `build_errors` list, so
-  the runner digest changed. The evidence specification digest did not.
-- **Carried-over results are unchanged.** Aggregating the per-replay results
-  of the 986 carried-over replays with the runner's own summary reproduces
-  every per-build entry of the earlier report exactly: all 84 counters,
-  evidence rows, table rows and bytes, and input hashes. Every change in the
-  totals therefore comes from the 32 new replays: +22,177,585 scored main
-  blocks, +792,841 checkpoint blocks and +469,847 compared values. They also
-  add one observed evidence identity to 13.06 (eight instead of seven),
-  `/Game/Characters/Gumshoe/Gumshoe_PC.Gumshoe_PC_C::ReplayLastTransformUpdateTimeStamp`.
+The previous report checked 986 replays with parser `91dc679`
+([Git history](https://github.com/yakisoba0728/vrfkit/blob/259ed10c7e0c9d87c852f80fab7535d38d2e187f/tools/fixtures/build_verification.json)).
+32 new 13.06 replays, copied from the game's Demos directory on 2026-09-28,
+raise 13.06 from 6 to 38; every earlier input hash is present again under the
+same build. Two roots were supplied instead of three (the Demos root added no
+unique file): 1,074 discovered paths instead of 1,048, 56 duplicates instead of
+62. Between `91dc679` and `259ed10` every Rust change is inside a
+`#[cfg(test)]` module, and the executables differ only in link metadata (Rich
+header, PE and debug-directory timestamps, PDB signature). The runner digest
+changed because `verify_build_corpus.py` now writes `build_errors`; the
+evidence specification did not. The 986 carried-over replays reproduce every
+per-build entry of the earlier report exactly (all 84 counters, evidence rows,
+table rows and bytes, input hashes), so every change in the totals comes from
+the 32 new replays: +22,177,585 scored main blocks, +792,841 checkpoint blocks,
++469,847 compared values, and one more observed evidence identity on 13.06,
+`/Game/Characters/Gumshoe/Gumshoe_PC.Gumshoe_PC_C::ReplayLastTransformUpdateTimeStamp`.
 
 ## Method
 

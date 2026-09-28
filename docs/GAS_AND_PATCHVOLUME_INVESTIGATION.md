@@ -119,12 +119,11 @@ refer to the original inner window; raw property values can be sliced without
 guessing their types. The receipt includes source and output hashes, explicit
 success/rejection counts and item/field totals.
 
-When first published on 2026-09-09, the tool accepted the measured main route
-on builds 13.01, 13.02, 13.04 and 13.05. Since the
-[2026-09-28 re-measurement](#build-scope-re-measured-2026-09-28) it accepts 22
-builds on that route: every supported build except 12.10 and 12.11. Since the
-[chained-route change](#chained-route-admitted-2026-09-28) later that day it
-reads two routes and labels every observation with its `route` and its stream
+First published on 2026-09-09 for the main route on 13.01, 13.02, 13.04 and
+13.05, the tool accepts that route on 22 builds since the
+[2026-09-28 re-measurement](#build-scope-re-measured-2026-09-28) (all but 12.10
+and 12.11), and since the [chained-route change](#chained-route-admitted-2026-09-28)
+reads two routes, labelling every observation with its `route` and stream
 (`population`):
 
 | Route | Exported identity (handle 1) | Main `fields` | `checkpoint_fields` |
@@ -336,48 +335,20 @@ above.
 
 ## PatchVolume: numeric structure with an unresolved item schema
 
-One positive export per build supplies 60 whole/tail rows; the bounded wire
-experiment selects 42 whole payloads and 15 tails. The observed bare
-PatchVolume objects have direct actor outers across Deadeye, Sarge and
-Aggrobot patch classes. Their enclosing actors' local CNC function tables
-differ. Those actor tables do not establish the subobject's own function
-table, even when the final GUID cache identifies its outer.
-
-A nominal function-count-2 walk consumes each sampled window as one handle-0
-CNC entry. That is only an outer framing candidate. Altering a window can also
-produce a clean walk at another function count, so complete outer consumption
-alone does not justify a class remap or a named function. The reference C#
-reader explicitly dispatches custom-delta properties separately from RPCs
-after shared CNC framing. A CNC entry is not automatically a function call.
-
-The same FastArray grammar now consumes all 57 sampled PatchVolume bodies
-exactly: 536 changed items, each with twelve numeric handles
-`23,24,25,26,30,33,36,39,40,41,42,43`. The checksum-present control closes none.
-There are no deleted-item or zero-change cases in this pilot. Several local
-export groups contain these handle numbers; numeric inclusion alone cannot
-choose a group or authorize field names. The raw windows remain authoritative.
-
-The subsequent full 714-export run finds 19,140 whole unresolved CNC windows
-and 7,163 preserved RepLayout tails: **26,303 main windows**, all fully consumed
-by the fixed FC2-handle-0 outer framing and no-checksum FastArray body.
-They contain 241,721 changed items and 2,900,652 raw property windows. Deleted
-item count is zero; no matching checkpoint windows were present. The alternate
-checksum mode happens to close eight full-corpus windows, reinforcing why
-per-row variant selection is not a reliable grammar decision.
-
-An independent integer-based reader rescanned every source, reproduced the
-outer framing and every header/ID/field boundary, and checked each saved raw
-window and context. It also corrected the initial agent output's filtered-row
-rank to an actual zero-based physical Parquet row ordinal. The accepted 714
-NDJSON files total 245,312,914 bytes, including empty files for exports with no
-selected PatchVolume rows. Before/after source hashes match the accepted parser
-comparison. The original agent output remains separately preserved as v1.
-
-The whole and tail records are separate serialized observations; this does
-not establish that they are the same update or that one is a suffix of the
-other. No actor-class remap, named PatchVolume property decoder or typed
-Parquet change is introduced. The private extraction demonstrates numerical
-structure; its property values remain raw pending an independent item schema.
+A 57-body pilot (42 whole payloads and 15 tails of the 60 rows one positive
+export per build supplied, on direct Deadeye, Sarge and Aggrobot actor outers)
+and then the full 714-export run showed the FastArray
+grammar consuming every PatchVolume window: **26,303 main windows** (19,140
+whole unresolved CNC windows, 7,163 preserved RepLayout tails), all closed by a
+fixed function-count-2, handle-0 outer framing and the no-checksum body --
+241,721 changed items, 2,900,652 raw property windows, each item with the
+twelve handles `23,24,25,26,30,33,36,39,40,41,42,43`, no deleted items and no
+checkpoint windows. That outer framing is a candidate, not a class: an altered
+window can also walk cleanly at another function count, and the checksum mode
+closes eight full-corpus windows, so per-row variant selection is not a grammar
+decision. An independent integer-based reader reproduced every boundary (the
+714 NDJSON files total 245,312,914 bytes); the whole and tail records are
+separate observations, not one update.
 
 **Follow-up (2026-09-28): schema established.** The replays declare it.
 `PatchVolume` is a `/Script/DynamicVolume.GroundVolumeComponent`, the windows
@@ -395,24 +366,10 @@ the values pass a second reader and the owner-spawn geometry checks. See
   require source-time lifecycle and identity evidence for further joins.
 - Resolve the changed-item property schemas for the now-consumed GAS windows.
   Do not promote raw property widths or GUID-number coincidences to semantics.
-- Done 2026-09-28: the chained AbilitiesAndBuffs bodies filed under
-  `/Script/ShooterGame.AresAbilitySystemComponent` are now a second extractor
-  route, in main and checkpoint rows on all 24 builds. See
-  [the chained route](#chained-route-admitted-2026-09-28). The `_cnc_h1`
-  checkpoint stream is still unobserved.
-- Done: the PatchVolume item schema, from the replays' own declarations --
-  see [ground-area volumes](GROUND_VOLUMES.md). `Status` and `bIsActive`
-  meanings remain open.
+- Observe a `_cnc_h1` checkpoint stream (the chained route has both).
+- Establish the meanings of the ground-volume `Status` and `bIsActive`.
 - The section arithmetic discrepancies and InputEventData action meanings
   remain open, as recorded in [the current backlog](CURRENT_RAW_BACKLOG.md).
 
-Private evidence is retained under `gas-reference-census-root`,
-`gas-reference-investigation-root`, `healing-role-association-root`,
-`gas-inner-investigation`, `fastarray-root-corpus`, `fastarray-observations-corpus`,
-`gas-fastarray-main-comparison`, `patchvolume-investigation`,
-`patchvolume-fastarray-entries`, `patchvolume-fastarray-root-accepted`, and,
-for the 2026-09-28 build-scope and chained-route entries, that run's private
-evidence set: the walkers, per-export results, end-to-end receipts, and the
-mutation checks of the extractor's tests. The reports keep
-sample scope and source/output hashes; private player observations are not
-included in this repository document.
+The walkers, per-export results and receipts are private; the sections above
+keep sample scope and source/output hashes.

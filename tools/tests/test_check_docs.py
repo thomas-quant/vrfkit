@@ -85,6 +85,126 @@ class LinkTests(unittest.TestCase):
             self.assertEqual(guard.check_links(path, guard.read(path)), [], path.name)
 
 
+class AnchorTests(unittest.TestCase):
+    """`check_links` checks only that a linked file exists, so a heading
+    renamed under a link, or a slug guessed wrong, went unreported:
+    USAGE.md's table of contents linked `#downstream-conversion` for a heading
+    whose anchor is `#downstream-conversion-tools`."""
+
+    TARGET = guard.REPO / "docs" / "TARGET.md"
+    SOURCE = guard.REPO / "docs" / "SOURCE.md"
+
+    def lookup(self, text):
+        anchors = frozenset(guard.heading_anchors(text))
+        return lambda path: anchors if path == self.TARGET.resolve() else None
+
+    def test_slugs_follow_githubs_rules(self):
+        for heading, slug in (
+                ("Regression guards -- after non-trivial changes",
+                 "regression-guards----after-non-trivial-changes"),
+                ("`fields.parquet`", "fieldsparquet"),
+                ("Comparison with the C# reference parser",
+                 "comparison-with-the-c-reference-parser"),
+                ("`raw_bits`: SmallVec, and the rejected arena",
+                 "raw_bits-smallvec-and-the-rejected-arena"),
+                ("Generated files — never hand-edit", "generated-files--never-hand-edit"),
+                ("5. `tools/` reference", "5-tools-reference"),
+                ("See [the table](other.md#x) here", "see-the-table-here"),
+                ("참조 저장소 및 PR 조사", "참조-저장소-및-pr-조사")):
+            with self.subTest(heading=heading):
+                self.assertEqual(guard.github_slug(heading), slug)
+
+    def test_a_repeated_heading_gets_a_numbered_anchor(self):
+        self.assertEqual(guard.heading_anchors("# A\n## A\n### A b\n#### A"),
+                         {"a", "a-1", "a-b", "a-2"})
+
+    def test_a_hash_line_in_fenced_code_is_not_a_heading(self):
+        text = ("```bash\n# not a heading\n```python\n# still code\n```\n"
+                "~~~\n## nor this\n~~~\n## Real ##\n#hashtag\n")
+        self.assertEqual(guard.heading_anchors(text), {"real"})
+
+    def test_a_broken_same_file_anchor_is_reported(self):
+        text = "## Downstream conversion tools\n\n[x](#downstream-conversion)\n"
+        problems = guard.broken_markdown_anchors(
+            self.SOURCE, text, lambda path: frozenset(guard.heading_anchors(text)))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("SOURCE.md:3", problems[0])
+        self.assertIn("#downstream-conversion", problems[0])
+        fixed = text.replace("(#downstream-conversion)", "(#downstream-conversion-tools)")
+        self.assertEqual(guard.broken_markdown_anchors(
+            self.SOURCE, fixed, lambda path: frozenset(guard.heading_anchors(fixed))), [])
+
+    def test_a_broken_cross_file_anchor_is_reported(self):
+        lookup = self.lookup("# Title\n## Name interning\n")
+        good = "[a](TARGET.md#name-interning)"
+        bad = "[a](TARGET.md#name-intern)"
+        self.assertEqual(guard.broken_markdown_anchors(self.SOURCE, good, lookup), [])
+        problems = guard.broken_markdown_anchors(self.SOURCE, bad, lookup)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("#name-intern", problems[0])
+
+    def test_a_percent_encoded_anchor_is_decoded(self):
+        lookup = self.lookup("## 어쩌고\n")
+        for link in ("[a](TARGET.md#%EC%96%B4%EC%A9%8C%EA%B3%A0)", "[a](TARGET.md#어쩌고)"):
+            with self.subTest(link=link):
+                self.assertEqual(guard.broken_markdown_anchors(self.SOURCE, link, lookup), [])
+
+    def test_links_in_fenced_code_and_line_anchors_are_not_heading_links(self):
+        lookup = self.lookup("## Only\n")
+        text = ("```\n[a](TARGET.md#nothing)\n```\n"
+                "[b](../tools/check_docs.py#L10)\n[c](https://example.com/x.md#y)\n")
+        checked = []
+        self.assertEqual(
+            guard.broken_markdown_anchors(self.SOURCE, text, lookup, checked), [])
+        self.assertEqual(checked, [])
+
+    def test_a_code_reference_to_a_missing_heading_or_doc_is_reported(self):
+        # Two literals, so the repository scan does not read this file as
+        # citing the headings it tests.
+        lookup = self.lookup("## Name interning\n")
+        target = "docs/TARGET" ".md"
+        text = (f"//! {target}#name-interning.\n"
+                f"// ({target}#name-intern)\n"
+                f"# see docs/GONE" ".md#anything\n")
+        checked = []
+        problems = guard.broken_code_anchors("x.rs", text, lookup, checked)
+        self.assertEqual(len(checked), 3, checked)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn("x.rs:2", problems[0])
+        self.assertIn("#name-intern", problems[0])
+        self.assertIn("does not exist", problems[1])
+
+    def test_the_archive_is_a_target_but_not_a_source(self):
+        sources = {p.relative_to(guard.REPO).as_posix() for p in guard.link_checked_docs()}
+        self.assertFalse(any(name.startswith("docs/archive/") for name in sources))
+        archived = guard.REPO / "docs" / "archive" / "PROJECT_STATUS.md"
+        slug = sorted(guard.anchors_of(archived.resolve()))[0]
+        text = f"[a](archive/PROJECT_STATUS.md#{slug}) [b](archive/PROJECT_STATUS.md#no-{slug})"
+        problems = guard.broken_markdown_anchors(guard.REPO / "docs" / "X.md", text)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(f"#no-{slug}", problems[0])
+
+    def test_the_shipped_docs_and_sources_have_no_broken_anchor(self):
+        checked = {}
+        self.assertEqual(guard.anchor_problems(checked), [])
+        # A guard that read nothing would pass the line above.
+        self.assertGreater(len(checked["docs"]), 0)
+        self.assertGreater(len(checked["code"]), 0)
+
+    def test_an_unlistable_source_tree_is_reported_not_passed(self):
+        import subprocess as sp
+        real = guard.subprocess.run
+
+        def failing(cmd, *a, **kw):
+            if cmd[:2] == ["git", "-C"]:
+                return sp.CompletedProcess(cmd, 128, stdout="", stderr="fatal")
+            return real(cmd, *a, **kw)
+
+        with patch.object(guard.subprocess, "run", side_effect=failing):
+            problems = guard.anchor_problems()
+        self.assertTrue(any("went unchecked" in p for p in problems), problems)
+
+
 class FeatureMatrixTests(unittest.TestCase):
     CONTRIBUTING = (
         "cargo +1.86.0 check -p vrf-a --no-default-features --locked\n"
@@ -230,6 +350,24 @@ class TestCountTests(unittest.TestCase):
         self.assertEqual(
             guard.stale_test_counts("we recover 2,387 intermediate moves", self.LIVE), [])
 
+    def test_a_count_that_names_its_suite_is_read(self):
+        """README's highlight puts the suite between the number and the noun;
+        it went stale twice while only "N tests" was read."""
+        text = "- **355 Rust tests** plus a layered validation suite"
+        self.assertEqual(guard.stale_test_counts(text, self.LIVE), [(1, "355")])
+        self.assertEqual(guard.stale_test_counts("**387 Rust tests**", self.LIVE), [])
+
+    def test_a_count_that_names_its_suite_must_be_that_suites(self):
+        by_suite = {"Rust": {"387"}, "Python": {"120"}}
+        self.assertEqual(guard.stale_test_counts(
+            "**120 Rust tests**\n**387 Python tests**\n387 passing\n120 tests",
+            self.LIVE, by_suite), [(1, "120"), (2, "387")])
+
+    def test_the_shipped_readme_highlight_is_read(self):
+        claims = [suite for line in guard.read(guard.README).splitlines()
+                  for _count, suite in guard.TEST_COUNT_RE.findall(line)]
+        self.assertIn("Rust", claims)
+
 
 class TableSizeClaimTests(unittest.TestCase):
     """Every number that claims to BE a table size must be the live one, even
@@ -314,6 +452,11 @@ class ContradictingCountTests(unittest.TestCase):
     def test_one_count_everywhere_is_not_a_contradiction(self):
         docs = {"README.md": "394 tests", "USAGE.md": "394 passing"}
         self.assertEqual(guard.contradicting_test_counts(docs), [])
+
+    def test_a_stale_highlight_is_a_third_count(self):
+        docs = {"README.md": "- **390 Rust tests** plus\n394 passing",
+                "USAGE.md": "# 133 passing"}
+        self.assertIn("390", " ".join(guard.contradicting_test_counts(docs)))
 
     def test_the_report_names_every_site_so_the_stale_one_can_be_found(self):
         docs = {"README.md": "394 tests\n355 passing", "USAGE.md": "133 passing"}

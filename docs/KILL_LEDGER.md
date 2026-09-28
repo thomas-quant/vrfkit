@@ -2,16 +2,13 @@
 
 `tools/extract_kill_ledger.py` produces one JSON document that retains labelled
 character-death events, component-local KillData state, and explicit links
-between them. Use a measured 13.01, 13.02, 13.04, 13.05 or 13.06 export
-generated with `--checkpoints`; other builds are refused (see
-[measured builds](KILL_OBSERVATIONS.md#measured-builds)):
+between them. Use an export generated with `--checkpoints` from a measured
+build, 11.06--12.09 or 13.01--13.06; 12.10, 12.11, 13.00 and any other build
+are refused (see [measured builds](KILL_OBSERVATIONS.md#measured-builds)):
 
 ```powershell
 python tools/extract_kill_ledger.py --export out/replay --out out/kill-ledger.json
 ```
-
-Exports from 11.06--12.09 are accepted as well; their measurement is in
-[Legacy builds](#legacy-builds-2026-09-28).
 
 The document has schema version 1 and kind
 `vrfkit_character_death_ledger`. It retains the complete
@@ -123,10 +120,8 @@ reconstruction and join comparison recorded for the 714 13.x exports below.
 
 ## Validation scope
 
-The final command completed all 714 retained exports with eight processes in
-159.5 seconds. This is derived JSON extraction time from existing Parquets, not
-replay parsing time. The corpus contains 215 exports from 13.01, 204 from 13.02,
-108 from 13.04 and 187 from 13.05.
+The final command completed all 714 retained exports: 215 from 13.01, 204 from
+13.02, 108 from 13.04 and 187 from 13.05.
 
 | Population | Count |
 |---|---:|
@@ -151,8 +146,8 @@ against each prior main state disproved that inference.
 Synthetic Parquet/CLI tests exercise raw-value mismatches, forged observation
 receipts/content, missing event times, source-output aliases and contextual
 events that must remain unjoined. Six deliberately broken implementations were
-rejected by their behavioral tests. The full suites contain 689 Rust and 708
-Python tests. Independent identity reconstruction and join comparison passed
+rejected by their behavioral tests. Independent identity reconstruction and
+join comparison passed
 all 714 exports. Matched replication lags range from 5 to 41 ms; increasing
 the matching cap from 50 to 100 ms changed no match in this corpus. A separate
 audit verified every original event column and every candidate/unmatched edge.
@@ -170,7 +165,7 @@ or establish an overall gameplay-semantic coverage percentage.
 
 With 13.06 admitted, the same command completed all 38 13.06 exports that
 parser `259ed10` wrote with `--checkpoints` for the 1,018-replay common audit.
-Four processes ran both extractors in 27.1 seconds, and every run exited 0:
+Both extractors exited 0 on every export:
 `kill_state.py` accepted every base, revision and checkpoint snapshot, and
 every death and round-start payload passed its independent validation. The
 figures above remain the 13.01--13.05 measurement.

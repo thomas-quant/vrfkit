@@ -90,9 +90,8 @@ integer-shift Python reader checked every new tree against its raw bits.
 Every old field row, coordinate, raw window and previously decoded value was
 preserved. The other eleven Parquet tables were byte-identical, including
 checkpoint block spans. The full manifest was unchanged except elapsed run
-time. The independent 714-file comparison passed in 142.032 seconds; export
-took 193.98 seconds with twelve workers. All outputs were retained privately.
-The candidate executable SHA-256 is
+time. The independent 714-file comparison passed. The candidate executable
+SHA-256 is
 `5c33558bd3455979bb66a7b39193ccb30270dbcddd0340824f84c3f85f5f14c4`.
 
 A fresh scan of all four value columns measured:
@@ -103,14 +102,9 @@ A fresh scan of all four value columns measured:
 | Checkpoints | 285,420,158 | 220,180,259 | 77.1425% |
 | Combined | 1,305,984,875 | 938,851,182 | 71.8884% |
 
-This is physical typed-value presence, not semantic completeness, unique
-events, or independent facts. Retained parents and their children overlap.
-The preceding [nested-reference measurement](NESTED_ARRAY_REFERENCES.md) is
-historical after this expansion.
-
-The 40 required MSRV/build/feature checks, both pinned output baselines,
-both full-corpus guards and the full documentation check passed. Rust has
-685 passing tests and Python has 678, including warning-strict CLI checks.
+Retained parents and their children overlap; this is physical presence, not
+semantic completeness. Both pinned output baselines and both full-corpus guards
+passed.
 
 ## Kill snapshots
 

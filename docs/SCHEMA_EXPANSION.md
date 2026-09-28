@@ -1,12 +1,9 @@
 # September 8, 2026 schema expansion and evidence audit
 
-**Header-order correction:** The partial missing-initial/rejection figures below
-are historical parser classifications. [The corrected header audit](PARTIAL_HEADER_CORRECTION.md)
-reassembles all 961,004 observed fragments; the source data was present.
-
-The subsequent [partial preservation and unresolved-data audit](TRANSPORT_PRESERVATION.md)
-adds raw transport exports and supersedes the current typed-value percentages.
-Figures below describe this earlier batch.
+**Superseded in part:** its partial missing-initial figures are the old
+parser's misclassification ([header-order correction](PARTIAL_HEADER_CORRECTION.md)),
+and the [partial preservation audit](TRANSPORT_PRESERVATION.md) supersedes its
+typed-value percentages.
 
 This batch adds 38 primitive overlay entries and expands the diagnostics and
 analysis tools. It was built from `4bfbbd8` plus this change using Rust 1.86.0.
@@ -16,8 +13,7 @@ The tested executable SHA-256 is
 All 714 preserved inputs were checked against their inventory SHA-256 and
 freshly exported with `--checkpoints`. The population is 215 replays on 13.01,
 204 on 13.02, 108 on 13.04 and 187 on 13.05. All 4,284 Parquet files were kept
-separately from the earlier export. The 12-worker run took 145.72 seconds on
-the measurement machine; this is one observed run, not a portable benchmark.
+separately from the earlier export.
 
 ## New typed data
 
@@ -81,11 +77,6 @@ The pinned 13.01 export baseline changes only as follows:
   bytes. These two tables' hashes change with the new value columns; all other
   table hashes stay fixed.
 
-The private run artifacts record the exact commands, input identities, binary
-and source hashes, per-file exits, full comparison records and primitive
-verification partitions. They are under the run name `20260908-improvements`;
-no private replays or player values are committed to this repository.
-
 ## Partial diagnostics: broader measurement, unchanged recovery
 
 Diagnostic JSON schema 3 separates attempted partial bunches from accepted
@@ -102,6 +93,9 @@ fragments and attributes errors by cause. All old `net_main` and
 | Errors with the reliable flag | 22,169 | 835,967 |
 
 All other cause counts and both under-/over-attribution residuals are zero.
+Attempted bunches equal missing-initial errors on this corpus only; it is not
+an invariant, and `partial_bunches` now also counts partials refused at the
+channel-state guard.
 These are observations under the current header/state interpretation. They do
 not independently prove how the game recorded every partial header. A
 different final-bit ordering found in another Unreal parser does not restore
@@ -139,9 +133,7 @@ InputEventData action names and StopEffectType. A checksum-scoped treatment of
 the colliding `B` fields and recovery of pre-framing partial payloads require
 separate verified changes.
 
-(Later: the checksum-scoped `B` treatment has since landed. The byte-shaped
-`B` fields were typed `Byte` in the [partial preservation
-batch](TRANSPORT_PRESERVATION.md), and on 2026-09-28 the 32-bit `B`
-(checksum 943211507) was typed `UInt32` together with `A`, `C` and `D` as
-the words of the player-state GUID. The name-keyed rejection above still
-stands: neither is typed by name.)
+The checksum-scoped `B` treatment landed later: the byte-shaped `B` fields in
+the [partial preservation batch](TRANSPORT_PRESERVATION.md) (`Byte`), the 32-bit
+`B` (checksum 943211507) on 2026-09-28 (`UInt32`, with `A`, `C` and `D`, the
+words of the player-state GUID). Neither is typed by name.

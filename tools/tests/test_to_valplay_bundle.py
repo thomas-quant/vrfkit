@@ -684,7 +684,7 @@ class EffectBlobBitLengthTests(unittest.TestCase):
 
     # A real FloatValues payload lifted from 02d4d478's fields.parquet: 50
     # bytes, declared 400 bits, four complete tag/value pairs. It is also the
-    # first of the eight vectors pinned in crates/vrf-decode/src/effect.rs.
+    # first of the vectors pinned in crates/vrf-decode/src/effect/tests.rs.
     BLOB = bytes.fromhex(
         "08021020390412400000803f000410200f0412400000a040"
         "000610203d0412400000803f000810203b04124015f9b3ce0000"
