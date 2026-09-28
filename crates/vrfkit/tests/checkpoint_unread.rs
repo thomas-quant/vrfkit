@@ -138,6 +138,7 @@ fn scratch(name: &str) -> (PathBuf, PathBuf) {
 }
 
 /// The text after `label` on the one line that starts with it.
+#[cfg(feature = "export")]
 fn line_value(output: &str, label: &str) -> String {
     let lines: Vec<&str> = output
         .lines()
