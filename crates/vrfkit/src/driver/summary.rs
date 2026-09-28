@@ -236,6 +236,11 @@ pub(super) fn print(
         "  Reward opaque:    {} empty variants",
         totals.sink.tracked_rewards_opaque_empty_variants
     );
+    // Its sibling tolerance: empty deltas whose trailing zero byte was spared.
+    eprintln!(
+        "  ActiveBlinds trailers: {} empty deltas",
+        totals.sink.active_blinds_empty_trailers
+    );
     eprintln!("  Truncated RPCs:   {}", totals.sink.truncated_rpcs);
     eprintln!(
         "  RPC suffix bits:  {}",
@@ -443,6 +448,10 @@ fn print_checkpoints(cp: &CheckpointStats) {
     eprintln!(
         "  Checkpoint reward opaque: {} empty variants",
         cp.sink.tracked_rewards_opaque_empty_variants
+    );
+    eprintln!(
+        "  Checkpoint ActiveBlinds trailers: {} empty deltas",
+        cp.sink.active_blinds_empty_trailers
     );
     eprintln!(
         "  Checkpoint movement: {} failures",

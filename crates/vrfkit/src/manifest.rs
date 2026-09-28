@@ -587,6 +587,10 @@ fn write_sink_quality(
             "tracked_rewards_opaque_empty_variants",
             sink.tracked_rewards_opaque_empty_variants,
         ),
+        (
+            "active_blinds_empty_trailers",
+            sink.active_blinds_empty_trailers,
+        ),
         ("truncated_rpcs", sink.truncated_rpcs),
         ("rpc_suffix_bits_dropped", sink.rpc_suffix_bits_dropped),
         ("cnc_rpcs_emitted", sink.cnc_rpcs_emitted),
@@ -811,6 +815,7 @@ mod tests {
             "array_implicit_terminations",
             "array_leaf_decode_errors",
             "tracked_rewards_opaque_empty_variants",
+            "active_blinds_empty_trailers",
             "truncated_rpcs",
             "rpc_suffix_bits_dropped",
             "cnc_rpcs_emitted",
@@ -988,6 +993,33 @@ mod tests {
             "\"movement_envelope_trailer_bits\": 62",
             "\"movement_envelope_trailers\": 71",
             "\"movement_envelope_trailer_bits\": 72",
+        ] {
+            assert!(json.contains(expected), "missing {expected}: {json}");
+        }
+    }
+
+    #[test]
+    fn active_blinds_empty_trailers_publish_measured_values() {
+        let net = NetStats::default();
+        let sink = SinkTotals {
+            active_blinds_empty_trailers: 81,
+            ..SinkTotals::default()
+        };
+        let mut checkpoints = CheckpointStats::default();
+        checkpoints.sink.active_blinds_empty_trailers = 91;
+        let errors = OverlayErrorReport::default();
+        let json = quality_json(&ManifestQuality {
+            run: &RunTotals {
+                sink,
+                ..RunTotals::default()
+            },
+            net: &net,
+            error_report: &errors,
+            checkpoints: Some(&checkpoints),
+        });
+        for expected in [
+            "\"active_blinds_empty_trailers\": 81",
+            "\"active_blinds_empty_trailers\": 91",
         ] {
             assert!(json.contains(expected), "missing {expected}: {json}");
         }

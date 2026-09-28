@@ -160,6 +160,11 @@ pub struct ExportStats {
     /// Exact 24-bit `TrackedRewards` windows with the measured opaque zero
     /// byte. They preserve their parent raw row and emit no child rows.
     pub tracked_rewards_opaque_empty_variants: u64,
+    /// Empty ActiveBlinds deltas whose one trailing zero IntPacked the strict
+    /// walker was spared (`active_blind_array_bits`). The parent row keeps the
+    /// byte; uncounted, a build that made such trailers common would move no
+    /// other number.
+    pub active_blinds_empty_trailers: u64,
     /// EffectContainer blobs turned into a `value_str` JSON array: the only
     /// signal this decoder worked, since the overlay buckets are filled before
     /// the additive pass and a success moves no other counter (a silent

@@ -588,6 +588,10 @@ fn push_sink_totals(out: &mut String, s: &SinkTotals) {
                 "tracked_rewards_opaque_empty_variants",
                 s.tracked_rewards_opaque_empty_variants,
             ),
+            (
+                "active_blinds_empty_trailers",
+                s.active_blinds_empty_trailers,
+            ),
             ("truncated_rpcs", s.truncated_rpcs),
             ("rpc_suffix_bits_dropped", s.rpc_suffix_bits_dropped),
             ("cnc_rpcs_emitted", s.cnc_rpcs_emitted),
@@ -858,6 +862,7 @@ mod tests {
                 implicit_terminations: next(),
             },
             tracked_rewards_opaque_empty_variants: next(),
+            active_blinds_empty_trailers: next(),
             array_leaf_decode_errors: next(),
             targeting_world_locations_decoded: next(),
             truncated_rpcs: next(),
