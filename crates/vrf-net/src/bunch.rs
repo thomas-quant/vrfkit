@@ -518,6 +518,22 @@ fn append_bits(dst: &mut Vec<u8>, dst_bit_offset: usize, src: &[u8], src_bit_cou
     {
         return false;
     }
+
+    if dst_bit_offset % 8 == 0 {
+        // Every append `add_fragment` makes lands here: it refuses a non-final
+        // fragment that is not byte-aligned, and nothing is appended after a
+        // final. Whole bytes are copied, and the last one's unused high bits
+        // are cleared, as the bit loop below leaves them.
+        dst.resize(dst_bit_offset / 8, 0);
+        dst.extend_from_slice(&src[..src_bit_count.div_ceil(8)]);
+        let tail_bits = src_bit_count % 8;
+        if tail_bits != 0 {
+            let last = dst.len() - 1;
+            dst[last] &= (1 << tail_bits) - 1;
+        }
+        return true;
+    }
+
     dst.resize(new_byte_count, 0);
 
     for i in 0..src_bit_count {
@@ -540,6 +556,9 @@ mod tests {
         let mut dst = vec![0xAA];
         assert!(append_bits(&mut dst, 8, &[0x55], 8));
         assert_eq!(dst, vec![0xAA, 0x55]);
+        // A partial last byte keeps only its own bits.
+        assert!(append_bits(&mut dst, 16, &[0xFF], 5));
+        assert_eq!(dst, vec![0xAA, 0x55, 0x1F]);
     }
 
     #[test]
