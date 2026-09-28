@@ -527,10 +527,73 @@ def _mask_raw_wrapper_definitions(code_view: str) -> str:
     return "".join(chars)
 
 
+def _split_statements(
+    block: str, wrapper_re: re.Pattern[str] | None
+) -> list[tuple[str, str]]:
+    """`(raw text, code view)` of every AddProperty or raw-wrapper statement.
+
+    A statement starts on a line whose live code begins with `AddProperty` or
+    a raw-wrapper call, and continuation lines are joined until one ends with
+    `;`, so a `.Type()` or `.Decode()` call on a later line stays with it. A
+    statement still open when the block ends is kept.
+    """
+    code_lines = _mask_raw_wrapper_definitions(csharp_code_view(block)).splitlines()
+    statements: list[tuple[str, str]] = []
+    raw: list[str] = []
+    code: list[str] = []
+    for raw_line, code_line in zip(block.splitlines(), code_lines):
+        stripped = code_line.strip()
+        if stripped.startswith("AddProperty") or (wrapper_re and wrapper_re.match(stripped)):
+            live_start = len(code_line) - len(code_line.lstrip())
+            raw, code = [raw_line[live_start:]], [code_line[live_start:]]
+        elif raw:
+            raw.append(raw_line)
+            code.append(code_line)
+        else:
+            continue
+        if stripped.endswith(";"):
+            statements.append(("\n".join(raw), "\n".join(code)))
+            raw, code = [], []
+    if raw:
+        statements.append(("\n".join(raw), "\n".join(code)))
+    return statements
+
+
+def _statement_type(code_line: str) -> tuple[str | None, str | None]:
+    """`(rust type, None)` for a statement the ladder classifies, else
+    `(None, rejection label)`. The checks run in the ladder's order."""
+    if serialized := SERIALIZED_INT_RE.search(code_line):
+        return f"FieldType::SerializedInt {{ max: {serialized.group(1)} }}", None
+    if byte_array := BYTE_ARRAY_RE.search(code_line):
+        return f"FieldType::ByteArray {{ max_bytes: {byte_array.group(1)} }}", None
+    if movement := REP_MOVEMENT_RE.search(code_line):
+        if movement.group("quant") not in {"ByteComponents", "ShortComponents"}:
+            return None, "ReplicatedMovement"
+        return rep_movement_type(movement.group("quant")), None
+    if REP_MOVEMENT_DEFAULT_RE.search(code_line):
+        return rep_movement_type("ShortComponents"), None
+    if movement_property := REP_MOVEMENT_PROPERTY_RE.search(code_line):
+        return MOVEMENT_TYPE_PREFIX + movement_property.group("property") + ">", None
+    # RepLayoutDynamicArray<T>() -- treated as Raw (opaque TArray)
+    if REP_LAYOUT_DYN_ARRAY_RE.search(code_line):
+        return "FieldType::Raw", None
+    # A named payload decoder carries its type; anything else is custom and
+    # therefore unknown, which we record as Raw.
+    if DECODE_RE.search(code_line):
+        decoder = PAYLOAD_DECODER_RE.search(code_line)
+        return PAYLOAD_DECODER_TYPES.get(
+            decoder.group("decoder") if decoder else "", "FieldType::Raw"
+        ), None
+    type_name = _extract_type_name(code_line)
+    if type_name in PRIMITIVE_TYPES:
+        return PRIMITIVE_TYPES[type_name], None
+    return None, type_name or _NO_TYPE_METHOD
+
+
 def extract_fields_from_block(
     block: str,
-    raw_wrapper_names: set[str] | None = None,
-    rejected: set[tuple[str, str]] | None = None,
+    raw_wrapper_names: set[str],
+    rejected: set[tuple[str, str]],
 ) -> list[tuple[str, str, int | None]]:
     """Extract (field_export_name, rust_type, literal_handle) tuples.
 
@@ -545,216 +608,35 @@ def extract_fields_from_block(
     ``AddProperty(x => x.Foo);``), and ``(_UNNAMED_FIELD, statement)`` for
     every AddProperty whose type method IS classified but whose export name
     could not be extracted (e.g. a named constant instead of a string literal
-    or lambda leaf). All three used to fall off the end of the ladder below and
+    or lambda leaf). All three used to fall off the end of the ladder and
     contribute nothing -- no entry, no counter, no message -- so one new method
     upstream (`.Int64()`), or one declaration naming its field through a
     constant, would untype a field while the run still reported success. The
     caller fails on a non-empty set, less the decoder-less declarations
-    DECODERLESS_PROPERTIES names; passing ``None`` keeps the old silence for
-    callers that only want the fields.
+    DECODERLESS_PROPERTIES names. The statement goes in, so the double scan
+    (Configure body, then the whole class body for helpers) reports it once.
     """
-    if raw_wrapper_names is None:
-        raw_wrapper_names = set()
+    wrapper_re = re.compile(
+        r'@?(' + '|'.join(map(re.escape, sorted(raw_wrapper_names))) + r')\s*\('
+    ) if raw_wrapper_names else None
     fields = []
-
-    # Join continuation lines: if a line starts with AddProperty but does not
-    # end with ';', concatenate subsequent lines until we see one ending with ';'.
-    raw_lines = block.splitlines()
-    code_lines = _mask_raw_wrapper_definitions(csharp_code_view(block)).splitlines()
-    statements: list[tuple[str, str]] = []
-    current_raw: list[str] = []
-    current_code: list[str] = []
-    in_statement = False
-    for raw_line, code_line in zip(raw_lines, code_lines):
-        code_stripped = code_line.strip()
-        starts_raw_wrapper = any(
-            re.match(rf'@?{re.escape(name)}\s*\(', code_stripped)
-            for name in raw_wrapper_names
-        )
-        if code_stripped.startswith("AddProperty") or starts_raw_wrapper:
-            in_statement = True
-            live_start = len(code_line) - len(code_line.lstrip())
-            current_raw = [raw_line[live_start:]]
-            current_code = [code_line[live_start:]]
-            if code_stripped.endswith(";"):
-                statements.append((
-                    "\n".join(current_raw),
-                    "\n".join(current_code),
-                ))
-                in_statement = False
-                current_raw = []
-                current_code = []
-        elif in_statement:
-            current_raw.append(raw_line)
-            current_code.append(code_line)
-            if code_stripped.endswith(";"):
-                statements.append((
-                    "\n".join(current_raw),
-                    "\n".join(current_code),
-                ))
-                in_statement = False
-                current_raw = []
-                current_code = []
-    # Flush any incomplete statement
-    if current_raw:
-        statements.append(("\n".join(current_raw), "\n".join(current_code)))
-
-    for raw_line, code_line in statements:
-
-        raw_wrapper = next(
-            (
-                name
-                for name in raw_wrapper_names
-                if re.match(rf'@?{re.escape(name)}\s*\(', code_line)
-            ),
-            None,
-        )
-        if raw_wrapper is not None:
+    for raw_line, code_line in _split_statements(block, wrapper_re):
+        wrapper = wrapper_re.match(code_line) if wrapper_re else None
+        if wrapper:
+            field_type, label = "FieldType::Raw", None
             name = _extract_lambda_field_name(code_line)
-            if name:
-                fields.append(
-                    (
-                        name,
-                        "FieldType::Raw",
-                        _extract_literal_handle(code_line, raw_wrapper),
-                    )
-                )
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        # Check for SerializedInt with parameter
-        sm = SERIALIZED_INT_RE.search(code_line)
-        if sm:
-            max_val = sm.group(1)
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    f"FieldType::SerializedInt {{ max: {max_val} }}",
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        # Check for ByteArray with parameter
-        bm = BYTE_ARRAY_RE.search(code_line)
-        if bm:
-            max_bytes = bm.group(1)
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    f"FieldType::ByteArray {{ max_bytes: {max_bytes} }}",
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        # Check for ReplicatedMovement with quantization
-        rm = REP_MOVEMENT_RE.search(code_line)
-        if rm:
-            quant = rm.group("quant")
-            if quant not in {"ByteComponents", "ShortComponents"}:
-                if rejected is not None:
-                    rejected.add(("ReplicatedMovement", " ".join(code_line.split())))
-                continue
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    rep_movement_type(quant),
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        # Simple ReplicatedMovement()
-        if REP_MOVEMENT_DEFAULT_RE.search(code_line):
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    rep_movement_type("ShortComponents"),
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        movement_property = REP_MOVEMENT_PROPERTY_RE.search(code_line)
-        if movement_property:
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    MOVEMENT_TYPE_PREFIX + movement_property.group("property") + ">",
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        # RepLayoutDynamicArray<T>() -- treated as Raw (opaque TArray)
-        if REP_LAYOUT_DYN_ARRAY_RE.search(code_line):
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    "FieldType::Raw",
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        # Check for Decode(...) -- a named payload decoder carries its type,
-        # anything else is custom and therefore unknown, which we record as Raw.
-        if DECODE_RE.search(code_line):
-            decoder = PAYLOAD_DECODER_RE.search(code_line)
-            field_type = "FieldType::Raw"
-            if decoder:
-                field_type = PAYLOAD_DECODER_TYPES.get(
-                    decoder.group("decoder"), "FieldType::Raw"
-                )
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    field_type,
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-
-        # Try simple primitive type
-        type_name = _extract_type_name(code_line)
-        if type_name and type_name in PRIMITIVE_TYPES:
-            name = _extract_field_name(raw_line, code_line)
-            if name:
-                fields.append((
-                    name,
-                    PRIMITIVE_TYPES[type_name],
-                    _extract_literal_handle(code_line),
-                ))
-            elif rejected is not None:
-                rejected.add((_UNNAMED_FIELD, " ".join(code_line.split())))
-            continue
-        if rejected is not None:
-            # A statement that reaches here is a declaration this file does
-            # not understand -- not an absent one -- whether or not
-            # `_extract_type_name` could name its method. Record it rather
-            # than drop it; the statement goes in so the double scan
-            # (Configure body, then the whole class body for helpers) reports
-            # it once.
-            rejected.add(
-                (type_name or _NO_TYPE_METHOD, " ".join(code_line.split()))
-            )
-
+            handle = _extract_literal_handle(code_line, wrapper.group(1))
+        else:
+            field_type, label = _statement_type(code_line)
+            name = _extract_field_name(raw_line, code_line) if field_type else None
+            handle = _extract_literal_handle(code_line)
+        statement = " ".join(code_line.split())
+        if label is not None:
+            rejected.add((label, statement))
+        elif name:
+            fields.append((name, field_type, handle))
+        else:
+            rejected.add((_UNNAMED_FIELD, statement))
     return fields
 
 
