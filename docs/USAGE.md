@@ -517,15 +517,13 @@ The timeline the server wrote itself. One row per Event chunk.
 The payload is structured as `[u32 tag][N x u32 words][FString][f32 seconds]`,
 and `N` is fixed per group (CharacterDeath=2, CharacterUltimateUsed / RoundStart
 / SwitchTeams=1, SpikePlanted / Defused / Exploded=0 -- derived as the
-residual-zero count across the corpus). A 527-replay Event-only sweep spanning
-13.01, 13.02 and 13.04 consumed all 109,126 payloads exactly, found one stable
-tag per group, public enum names no longer than 40 bytes, and a maximum 0.999878
-ms absolute difference between `payload_seconds` and `time1`. The nullable
-overlay is populated atomically only when arity, tag, name and a 1.001 ms time
-tolerance all match. For `characterDeath`, `(word0, word1)` is the `(killer,
-killed)` NetGUID; for `roundStarted`, `word0` is the round number. On any future
-layout mismatch the overlay stays null and the original remains intact in
-`raw_payload`.
+residual-zero count across the corpus; the sweep, tags and time bound are in
+[the README](../README.md#the-event-chunk----the-servers-own-timeline)). The
+nullable overlay is populated atomically only when arity, tag, name and a
+1.001 ms time tolerance all match. For `characterDeath`, `(word0, word1)` is
+the `(killer, killed)` NetGUID; for `roundStarted`, `word0` is the round
+number. On any future layout mismatch the overlay stays null and the original
+remains intact in `raw_payload`.
 
 ### `checkpoint_fields.parquet`
 
