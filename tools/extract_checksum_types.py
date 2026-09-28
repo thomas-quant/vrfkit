@@ -1,49 +1,27 @@
 #!/usr/bin/env python3
 """Generate `crates/vrf-decode/src/checksum_table.rs` from export manifests.
 
-Every `NetFieldExport` the replay declares carries a `compatible_checksum`, and
-Unreal hashes the property's *type* into it alongside its name. That makes the
-checksum a content address: two fields sharing one are the same property, even
-on classes the C# descriptors never described.
+Unreal hashes a property's *type* into each NetFieldExport's
+`compatible_checksum`, beside its name, so the checksum is a content address:
+fields sharing one are the same property, on any class and in any replay
+(`Scale3D` is 2983776962 on each of the five builds checked: 12.10, 12.11,
+13.00, 13.01, 13.02). That is why a generated table holds here, where a table
+of groups would snapshot one match. A parameter no descriptor declares takes
+the type of a declared field with the same checksum: for every
+`(group_path, field_name)` the overlay table types, this records
+`checksum -> FieldType`, emitted as a sorted static slice.
 
-So a parameter no descriptor declares can take its type from a declared field
-with the same checksum. This script learns that map -- for every
-`(group_path, field_name)` the overlay table already types, it records
-`checksum -> FieldType` -- and emits it as a sorted static slice.
+Conflicts are dropped; that is the safety property. A checksum whose donors
+disagree is not written, and a committed entry they now make unsafe fails
+`--check` and is omitted on write. On the 1,018-replay audit corpus the one
+drop is `ReplicatedMovement` (`ByteComponents` vs `ShortComponents`, different
+widths), the case a name rule would get wrong.
 
-**A checksum is not replay-specific.** It is derived from the property, so the
-map holds for any replay carrying the same property. Verified across all five
-supported builds: `Scale3D` is 2983776962 on 12.10, 12.11, 13.00, 13.01 and
-13.02 alike. That is what makes a generated table correct here, where a table
-of *groups* would have been a snapshot of whichever match was exported.
-
-**Conflicts are dropped, and that is the safety property.** A checksum whose
-donors disagree on the type is not written, and an older committed answer is
-removed as soon as a wider donor set makes it ambiguous. On the 1,018-replay
-audit corpus that drops one: `ReplicatedMovement` (`ByteComponents` vs
-`ShortComponents`, genuinely different and different in width) -- the case a
-name-based rule would have got wrong.
-
-It used to drop two. `AllianceFilter` (2270825073) had `EnumByte` donors and
-one `EnumRemainingBits` donor, equivalent at the 3 bits every one of its
-16,030,813 rows carries -- an inconsistency in the table, not on the wire, and
-it left 4,560,248 receiver rows raw. `apply_type_corrections.py` now makes the
-donors agree, so the checksum is learned; that is a fix to the donors, not an
-exception to this rule.
-
-Dropping decides what gets WRITTEN. It used to also end the story: the dropped
-set never reached `reconcile`, so a checksum the file already commits and the
-manifests now make unsafe passed `--check` and survived `merge`'s union. Every
-committed conflict now fails checking and is omitted by write mode.
-
-A committed type can only change on purpose. When a correction retypes the
-donors of a checksum the file already carries -- `EffectID` from `UInt64` to
-`Int64`, say -- the manifests teach the new type and `merge` refuses it as a
-disagreement, which is right when nobody meant it. `--retype CHECKSUM` names
-the checksums whose committed type the learned one may replace; it is refused
-for a checksum that does not disagree (a stale or mistyped flag), for one
-whose donors conflict among themselves, and in `--check`, which writes
-nothing.
+A committed type changes only on purpose. When a correction retypes the donors
+of a committed checksum (`EffectID` from `UInt64` to `Int64`, say), `merge`
+refuses the disagreement unless `--retype CHECKSUM` names it; `--retype` is
+refused for a checksum that does not disagree, for one whose donors conflict,
+and in `--check`, which writes nothing.
 
 Usage:
     python tools/extract_checksum_types.py --export out/probe [--export out/other]
@@ -72,9 +50,8 @@ REPO = Path(__file__).resolve().parents[1]
 TABLE_RS = REPO / "crates" / "vrf-decode" / "src" / "table.rs"
 OUT_RS = REPO / "crates" / "vrf-decode" / "src" / "checksum_table.rs"
 
-#: Types that carry no decode, so propagating them buys a consumer nothing.
-#: Compared whole: a substring test would also drop any type whose name merely
-#: contains one of them.
+#: Types that carry no decode, so they teach nothing. Compared whole: a
+#: substring test would also drop a type whose name merely contains one.
 UNTYPED = ("FieldType::Raw", "FieldType::Skip")
 
 HEADER = """\
@@ -101,10 +78,9 @@ QUANTIZATION_TYPES = ("RotatorQuantization", "VectorQuantization")
 
 
 def load_overlay_table() -> dict[tuple[str, str], str]:
-    """`(group_path, field_name) -> type`, read with apply_type_corrections'
-    parser, so a braced type has one spelling in either layout (rustfmt adds
-    a trailing comma inside it). That parser does not unescape, so a key
-    holding an escape sequence is refused rather than silently unmatched."""
+    """`(group_path, field_name) -> type` via apply_type_corrections' parser,
+    so a braced type has one spelling in either layout. That parser does not
+    unescape, so a key holding an escape is refused, not silently unmatched."""
     table = {(group, field): ftype
              for group, field, ftype in parse_entries(TABLE_RS.read_text(encoding="utf-8"))}
     escaped = sorted(key for key in table if "\\" in key[0] or "\\" in key[1])
@@ -142,11 +118,8 @@ COMMITTED_LEN_RE = re.compile(r"pub static CHECKSUM_TYPES: \[\(u32, FieldType\);
 
 
 def load_committed() -> dict[int, str]:
-    """The checksum -> type map as currently committed.
-
-    Every row the slice declares must be read: a row the pattern misses would
-    otherwise drop out of the comparison and out of the next write unseen.
-    """
+    """The committed checksum -> type map. Every row the slice declares must be
+    read, or a missed row would leave the comparison and the next write unseen."""
     if not OUT_RS.is_file():
         return {}
     src = OUT_RS.read_text(encoding="utf-8")
@@ -166,21 +139,11 @@ def load_committed() -> dict[int, str]:
 class Verdict:
     """How a freshly learned map relates to the committed one.
 
-    Five relations, and two of them are problems. `new` and `unseen` are both
-    coverage: a checksum identifies a property, so a wider set of replays
-    teaches a larger subset of the same truth and a narrower one teaches less.
-    `disagreed` is the real thing -- one checksum mapped two ways, which means
-    one of them is wrong.
-
-    The last two come from the checksums `learn()` DROPPED. Dropping them is
-    the safety property for what gets written, but it used to end the story:
-    `conflicts` never reached this class, so a checksum the manifests now find
-    ambiguous was compared against nothing and `--check` passed.
-
-      `contradicted` the committed type is not among the candidate types at
-                     all, so the new evidence rules it out. A problem.
-      `ambiguous`    the committed type IS one of the candidates, but donors
-                     disagree. No candidate remains safe, so this also fails.
+    `new` and `unseen` are coverage: a wider basis teaches more of the same
+    truth, a narrower one less. The other three fail `ok`: `disagreed` maps one
+    checksum two ways. Of the committed checksums whose donors now conflict,
+    `contradicted` ones are ruled out (the committed type is not among the
+    candidates), and `ambiguous` ones are among them with no candidate safe.
     """
 
     disagreed: dict
@@ -222,11 +185,8 @@ def reconcile(committed: dict[int, str], learned: dict[int, str],
 
 def retype_problems(verdict: Verdict, retype: set[int]) -> list[str]:
     """Why a `--retype` request must be refused; empty when it may proceed.
-
-    Only a real disagreement -- the committed type and one unanimous learned
-    type -- can be retyped. Anything else is a flag that names the wrong
-    checksum or a basis that cannot settle it.
-    """
+    Only a real disagreement (the committed type against one unanimous learned
+    type) can be retyped."""
     problems = []
     for checksum in sorted(retype):
         if checksum in verdict.disagreed:
@@ -244,16 +204,10 @@ def merge(committed: dict[int, str], learned: dict[int, str],
           conflicts: dict | None = None, retype=()) -> dict[int, str]:
     """Union, refusing a disagreement rather than picking a winner.
 
-    Widening the basis must not narrow the table: an entry a smaller run cannot
-    re-derive is still correct, and a plain regeneration would silently drop it.
-
-    Every key in `conflicts` is dropped from the old mapping. The write path
-    heals an unsafe narrower-basis entry while preserving unrelated checksums
-    this particular manifest set did not see.
-
-    `retype` names checksums whose committed type the learned one replaces --
-    the one deliberate exception to refusing a disagreement. Each must be
-    learned, or it would silently vanish from the table instead.
+    An entry a narrower basis cannot re-derive is still correct, so it stays;
+    a committed checksum in `conflicts` is dropped. `retype` names checksums
+    whose learned type replaces the committed one; each must be learned, or it
+    would vanish from the table instead.
     """
     retype = set(retype)
     unlearned = sorted(retype - learned.keys())
@@ -349,12 +303,7 @@ def main() -> int:
               f"overlap")
         return 0
 
-    # Merge rather than replace. A checksum this basis did not happen to see is
-    # still correct, so rendering fresh would drop it -- which is how the file
-    # came to hold 417 entries that no reachable export set reproduces. Byte
-    # equality with a regeneration was never achievable for a content-addressed
-    # table, and demanding it is what made `--check` fail for every basis and
-    # stop meaning anything.
+    # Merge, never render fresh: that would drop what this basis did not see.
     problems = retype_problems(verdict, set(args.retype))
     if problems:
         for line in problems:
