@@ -38,6 +38,7 @@ const GAMEPLAY_TAG_GROUP_PATH: &str = "NetworkGameplayTagNodeIndex";
 ///
 /// All lookups are O(1) via `HashMap`. Field access within a group is O(1) via
 /// direct `Vec` indexing (see [`NetFieldExportGroup::get_field`]).
+#[derive(Default)]
 pub struct NetGuidCache {
     /// path (String, ordinal) -> group index into `groups`.
     by_path: FxHashMap<String, usize>,
@@ -88,17 +89,7 @@ impl NetGuidCache {
     /// Create an empty cache.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            by_path: FxHashMap::default(),
-            by_index: FxHashMap::default(),
-            by_leaf: FxHashMap::default(),
-            groups: Vec::new(),
-            guid_to_path: FxHashMap::default(),
-            guid_to_outer: FxHashMap::default(),
-            schema_generation: 0,
-            guid_generation: 0,
-            dropped_field_exports: 0,
-        }
+        Self::default()
     }
 
     /// The leaf index, for the resolvers in [`crate::resolve`].
@@ -409,12 +400,6 @@ impl NetGuidCache {
     #[must_use]
     pub fn groups(&self) -> &[NetFieldExportGroup] {
         &self.groups
-    }
-}
-
-impl Default for NetGuidCache {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
