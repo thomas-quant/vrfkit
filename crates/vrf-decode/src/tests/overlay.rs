@@ -825,9 +825,13 @@ fn the_error_report_names_the_cause_of_each_failure() {
         UnsupportedTextHistory,
         ByteArrayLengthCapExceeded,
     );
-    static ENTRIES: [OverlayEntry; 12] = [
+    static ENTRIES: [OverlayEntry; 13] = [
         entry("BadUtf8", FieldType::FString),
         entry("ByteArrayOverCap", FieldType::ByteArray { max_bytes: 1 }),
+        entry(
+            "ByteArrayOverlongPrefix",
+            FieldType::ByteArray { max_bytes: 8 },
+        ),
         entry("LongInt", FieldType::Int32),
         entry("MistypedFText", FieldType::FText),
         entry("NaNVector", FieldType::VectorNetQuantize { scale: 100 }),
@@ -882,6 +886,24 @@ fn the_error_report_names_the_cause_of_each_failure() {
             bytes(&[0x64, 0, 0, 0, 0x41]),
             "BitIo",
             "Malformed",
+        ),
+        // The same cause in a byte array: a count of 4, within the cap of 8,
+        // with one byte behind it. It used to print `EOF`, because the byte
+        // loop ran into the end instead of the prefix being checked.
+        (
+            "ByteArrayOverlongPrefix",
+            bytes(&[0x08, 0xaa]),
+            "BitIo",
+            "Malformed",
+        ),
+        // Three declared where the table allows one, and no byte behind
+        // them: the cap is checked first, so the table constant is what the
+        // report names.
+        (
+            "ByteArrayOverCap",
+            bytes(&[0x06]),
+            "ByteArrayLengthCapExceeded",
+            "Rejected",
         ),
         // Five IntPacked bytes that never clear the continuation bit.
         ("RunawayIntPacked", bytes(&[0xff; 5]), "BitIo", "Malformed"),

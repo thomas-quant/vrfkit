@@ -851,11 +851,11 @@ fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
     match err {
         EffectBlobError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
         // The bits ran out before the structure did: the window ended before
-        // the terminator, a declared field runs past the window, or a
-        // member's type read past the end of its own field.
-        EffectBlobError::MissingTerminator { .. }
-        | EffectBlobError::PayloadTooLarge { .. }
-        | EffectBlobError::PayloadOverread { .. } => DecodeErrorKind::Eof,
+        // the terminator, or a member's type read past the end of its own
+        // field.
+        EffectBlobError::MissingTerminator { .. } | EffectBlobError::PayloadOverread { .. } => {
+            DecodeErrorKind::Eof
+        }
         // Bits the structure did not account for, after the terminator or
         // inside a field whose type read short of it.
         EffectBlobError::ResidualBits { .. } | EffectBlobError::PayloadUnderread { .. } => {
@@ -866,8 +866,13 @@ fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
         EffectBlobError::ArrayCountTooLarge { .. } | EffectBlobError::NonFiniteFloat { .. } => {
             DecodeErrorKind::Rejected
         }
-        // The bits break a rule of this framing.
-        EffectBlobError::IndexOutOfBounds { .. }
+        // The bits break a rule of this framing. `PayloadTooLarge` is a field
+        // header whose declared width is longer than the window or than the
+        // decoder's 64 Kib cap, refused before a bit of the payload is read:
+        // a length prefix the payload cannot hold, which is `Malformed` for an
+        // overlay string or byte array too, not a reader running out.
+        EffectBlobError::PayloadTooLarge { .. }
+        | EffectBlobError::IndexOutOfBounds { .. }
         | EffectBlobError::TooManyFields { .. }
         | EffectBlobError::BitLengthExceedsBuffer { .. }
         | EffectBlobError::UnexpectedPayloadWidth { .. }
@@ -976,12 +981,14 @@ mod tests {
             ),
             (EffectBlobError::NonZeroTerminator { value: 1 }, "Malformed"),
             (EffectBlobError::ElementFieldCount { found: 3 }, "Malformed"),
+            // A declared width past the window is an overlong length prefix,
+            // `Malformed` like an overlay string's, not an EOF.
             (
                 EffectBlobError::PayloadTooLarge {
                     bits: 64,
                     remaining: 32,
                 },
-                "EOF",
+                "Malformed",
             ),
             (
                 EffectBlobError::IndexOutOfBounds { index: 2, count: 2 },
