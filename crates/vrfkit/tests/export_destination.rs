@@ -72,10 +72,11 @@ fn entries(dir: &Path) -> Vec<String> {
     names
 }
 
-/// `export dir/match.vrf --out dir` exited 0 at 061155a and left `dir`
-/// holding only the export: the replay it had just read, the user's other
-/// files and a subdirectory were deleted. It must exit 1 naming them, and
-/// leave the directory -- and its parent -- exactly as they were.
+/// `export dir/match.vrf --out dir` exited 0 at 061155a with no warning line
+/// (measured with the pinned 12.10 public fixture) and left `dir` holding only
+/// the export: the replay it had just read, the user's other files and a
+/// subdirectory were deleted. It must exit 1 naming them, and leave the
+/// directory -- and its parent -- exactly as they were.
 #[test]
 fn export_refuses_a_destination_holding_the_replay_and_other_files() {
     let dir = scratch("refused");

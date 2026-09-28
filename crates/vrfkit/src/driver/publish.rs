@@ -1,27 +1,25 @@
 //! Same-volume staging and publication of one complete export directory.
 //!
-//! # What an interrupted export leaves behind
-//!
 //! A run writes into `.{out}.vrfkit-staging-{pid}-{nonce}` beside the
-//! destination and publishes by renaming that directory over `--out`. `Drop`
-//! removes the staging directory of a run that fails in-process, but a killed
-//! process runs no destructor. Measured at 259ed10 with `Stop-Process -Force`
-//! 1.5 s into an export: `.pub2.vrfkit-staging-55396-0` kept a
-//! 1,561,999-byte `fields.parquet` with no footer and no manifest, and
-//! nothing ever removed it. Power loss is the same case, and so -- reasoned,
-//! not measured -- is a Windows console Ctrl+C: nothing here installs a
-//! handler, and the default one ends the process through `ExitProcess`. A
-//! kill between `publish`'s two renames strands the prior output in a
-//! `.{out}.vrfkit-previous-{pid}-{nonce}` sibling instead -- a complete
-//! export, manifest included.
+//! destination and publishes by renaming it over `--out`, moving any prior
+//! output aside to `.{out}.vrfkit-previous-{pid}-{nonce}` in between. `Drop`
+//! removes the staging directory of a run that fails in-process; a killed
+//! process runs no destructor. Measured at 259ed10: `Stop-Process -Force`
+//! 1.5 s into an export left `.pub2.vrfkit-staging-55396-0` holding a
+//! footerless 1,561,999-byte `fields.parquet` and no manifest. Power loss is
+//! the same case, and so -- reasoned, not measured -- is a Windows console
+//! Ctrl+C (no handler is installed; the default ends the process through
+//! `ExitProcess`). A kill between `publish`'s two renames strands the prior
+//! output, a complete export, in its `previous` sibling. Also at 259ed10, a
+//! re-export while another process had the destination as its working
+//! directory failed with only `I/O error: ... (os error 32)`: no path, and no
+//! sign that a fully decoded export was discarded.
 //!
-//! The next export to the same destination names every such sibling on
-//! stderr and leaves it alone ([`report_leftovers`]). The corpus tools never
-//! read one as an export: `tools/export_scan.py` recognises the same names,
-//! and `tools/tests/test_export_scan.py` reads [`GENERATED_INFIX`],
-//! [`STAGING`] and [`PREVIOUS`] out of this file, so renaming one here
-//! without the other fails a test instead of quietly letting a leftover back
-//! into a corpus aggregate.
+//! The next export to the same destination names each such sibling and
+//! deletes nothing ([`report_leftovers`]). `tools/export_scan.py` recognises
+//! the same names, and `tools/tests/test_export_scan.py` reads
+//! [`GENERATED_INFIX`], [`STAGING`], [`PREVIOUS`] and `generated_name`'s
+//! format string out of this file: keep them verbatim.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -41,13 +39,9 @@ const STAGING: &str = "staging";
 /// The kind of the prior destination, moved aside for one publication.
 const PREVIOUS: &str = "previous";
 
-/// Owns a unique sibling staging directory until it is either published or
-/// abandoned.
-///
-/// The destination is never opened for writing. A failed decode therefore
-/// drops this guard and removes only the generated staging directory, leaving
-/// the last complete destination untouched. Publication uses same-parent
-/// renames so the operation never crosses volumes.
+/// Owns a unique sibling staging directory until it is published or
+/// abandoned. The destination is never opened for writing, so a failed run
+/// removes only staging; same-parent renames never cross volumes.
 pub(super) struct OutputTransaction {
     destination: PathBuf,
     staging: PathBuf,
@@ -56,10 +50,9 @@ pub(super) struct OutputTransaction {
 
 impl OutputTransaction {
     /// Create an empty, uniquely named staging directory beside `destination`,
-    /// first warning on stderr about every sibling an earlier export to the
-    /// same destination left behind (see [`report_leftovers`]). A destination
-    /// holding anything an export does not write is refused before that (see
-    /// [`foreign_entries`]).
+    /// after refusing a destination that holds anything an export does not
+    /// write ([`foreign_entries`]) and naming what earlier exports left beside
+    /// it ([`report_leftovers`]).
     pub(super) fn begin(destination: &Path) -> io::Result<Self> {
         Self::begin_reporting_to(destination, &mut io::stderr())
     }
@@ -82,9 +75,8 @@ impl OutputTransaction {
                 ),
             ));
         }
-        // `publish` replaces the whole directory, so whatever else it holds
-        // would be deleted with it. Refused here, before anything is decoded
-        // or created.
+        // `publish` replaces the whole directory, deleting whatever else it
+        // holds: refused here, before anything is decoded or created.
         let foreign = foreign_entries(destination).map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -112,8 +104,7 @@ impl OutputTransaction {
 
         let parent = usable_parent(destination);
         fs::create_dir_all(parent)?;
-        // Before this run's own staging directory exists, so a run never
-        // reports itself.
+        // Before this run's staging exists, so a run never reports itself.
         report_leftovers(destination, parent, file_name, warnings);
         let staging = create_unique_directory(parent, file_name, STAGING)?;
         Ok(Self {
@@ -130,17 +121,11 @@ impl OutputTransaction {
 
     /// Publish the completed staging directory as one directory rename.
     ///
-    /// When a prior destination exists it is first moved to a unique sibling.
-    /// If the staging rename then fails, that prior complete directory is moved
-    /// straight back before the error is returned. Only after the new directory
-    /// is in place is the backup removed.
-    ///
-    /// Every error names the step that failed, its paths, and what became of
-    /// the run's output, and keeps the OS error's kind. The bare OS error did
-    /// none of that: at 259ed10 a re-export while another process had the
-    /// destination as its working directory printed only `I/O error: ...
-    /// (os error 32)` -- no path, and no sign that a fully decoded export had
-    /// just been thrown away.
+    /// A prior destination is first moved to a unique sibling; if the staging
+    /// rename then fails, it is moved straight back. Only once the new
+    /// directory is in place is the backup removed. Every error names the step,
+    /// its paths and what became of the run's output, and keeps the OS error's
+    /// kind (the bare `os error 32` in the module doc said none of that).
     pub(super) fn publish(self) -> io::Result<()> {
         self.publish_reporting_to(&mut io::stderr())
     }
@@ -194,9 +179,8 @@ impl OutputTransaction {
 
         self.published = true;
         if let Some(backup) = prior {
-            // Publication is already committed. A cleanup failure must not be
-            // reported as a failed export (which would falsely imply the old
-            // destination was still active), but it must not be silent either.
+            // Committed: a cleanup failure is a warning, not a failed export,
+            // which would imply the old destination were still in place.
             if let Some(warning) = discard_prior_output(&backup) {
                 let _ = writeln!(warnings, "warning: export published, but {warning}");
             }
@@ -207,11 +191,9 @@ impl OutputTransaction {
 
 /// Delete the prior output `publish` moved aside, or say why it was kept.
 ///
-/// `begin` refused a destination holding anything an export does not write,
-/// but the whole decode runs between the two, and a file saved into `--out`
-/// meanwhile would be deleted here without anyone having been asked. So the
-/// backup is checked again -- as exactly what is about to be deleted -- and
-/// anything foreign in it, or a listing that fails, keeps all of it.
+/// `begin` checked the destination, but the whole decode runs in between, so
+/// the backup is checked again as exactly what is about to be deleted: a
+/// foreign entry in it, or a listing that fails, keeps all of it.
 fn discard_prior_output(backup: &Path) -> Option<String> {
     let foreign = match foreign_entries(backup) {
         Ok(foreign) => foreign,
@@ -242,14 +224,10 @@ fn discard_prior_output(backup: &Path) -> Option<String> {
 }
 
 impl Drop for OutputTransaction {
-    /// Remove the staging directory of a run that never published.
-    ///
-    /// A removal that fails is reported: `publish`'s errors say the new
-    /// export was discarded, and a staging directory that silently survived
-    /// would contradict them. Written with `writeln!`, not `eprintln!`, which
-    /// panics when the write to stderr fails -- inside an unwind, an abort.
-    /// A killed process never gets here; the next run's `report_leftovers`
-    /// covers that case.
+    /// Remove the staging directory of a run that never published, and say so
+    /// if that fails, since `publish`'s errors claim the export was discarded.
+    /// `writeln!`, not `eprintln!`, which panics on a failed stderr write --
+    /// an abort inside an unwind.
     fn drop(&mut self) {
         if self.published {
             return;
@@ -267,19 +245,13 @@ impl Drop for OutputTransaction {
 }
 
 /// Name, on `warnings`, every sibling an earlier export to `destination` left
-/// behind. Report only: nothing is deleted and nothing is restored.
-///
-/// A staging sibling may belong to an export that is still running -- in
-/// another process, or in another thread of this one, so not even this
-/// process's own PID in the name proves it dead -- and deleting it would make
-/// that export fail at its final rename with all its work done. A `previous`
-/// sibling beside a missing destination may be the only copy of that output,
-/// and restoring it on a guess would bring back a directory the user may
-/// have removed on purpose, or pick the wrong one of several. Naming them
-/// costs a line each; guessing wrong costs data.
-///
-/// A parent that cannot be listed is a warning, not an error: an export must
-/// not fail because this check could not run, and must not pretend it ran.
+/// behind; delete and restore nothing. A staging sibling may belong to an
+/// export still running (in another process or another thread of this one,
+/// so not even this PID proves it dead), which deleting it would fail at its
+/// last rename. A `previous` sibling beside a missing destination may be the
+/// only copy, and restoring it could undo a deliberate removal or pick the
+/// wrong one of several. An unlistable parent is a warning, not an error: the
+/// check must neither fail the export nor pretend it ran.
 fn report_leftovers(
     destination: &Path,
     parent: &Path,
@@ -365,9 +337,8 @@ fn leftover_warning(
             destination.display()
         )
     } else {
-        // A backup `discard_prior_output` kept can hold what someone saved
-        // into the destination while an export ran. Name it, and do not
-        // advise deleting it the way a backup of export output alone is.
+        // A backup `discard_prior_output` kept can hold the user's files: name
+        // them, and do not advise deleting it like a backup of export output.
         let (also, advice) = match foreign_entries(path) {
             Ok(foreign) if foreign.is_empty() => (
                 String::new(),
@@ -404,17 +375,13 @@ fn output_names() -> impl Iterator<Item = &'static str> {
         .chain([MANIFEST])
 }
 
-/// The entries of `directory` that no export writes, sorted by name; none
-/// for a directory that does not exist.
-///
-/// An export writes only files, each named in [`MAIN_TABLES`],
-/// [`CHECKPOINT_TABLES`] or [`MANIFEST`]. Anything else is foreign: another
-/// file, a subdirectory (its whole tree would go with it), a directory or
-/// symlink that merely bears a table's name, and also what Explorer leaves
-/// behind (`desktop.ini`, `Thumbs.db`). The comparison is exact, case
-/// included, because an export writes exactly these names. The leftovers
-/// this module names are never among them: they are siblings of the
-/// destination, not entries of it.
+/// The entries of `directory` that no export writes, sorted; none if it does
+/// not exist. An export writes only files named in [`MAIN_TABLES`],
+/// [`CHECKPOINT_TABLES`] or [`MANIFEST`], so anything else is foreign: other
+/// files, a subdirectory (its whole tree would go too), a directory or
+/// symlink bearing a table's name, and Explorer's `desktop.ini` and
+/// `Thumbs.db`. Names compare exactly, case included. The leftovers this
+/// module names are siblings of the destination, never entries of it.
 fn foreign_entries(directory: &Path) -> io::Result<Vec<OsString>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -475,12 +442,9 @@ fn generated_name(destination_name: &OsStr, kind: &str, nonce: u64) -> OsString 
 /// writes for `destination_name`: `.{destination_name}.vrfkit-{kind}-` and
 /// then `{pid}-{nonce}`, two runs of ASCII digits.
 ///
-/// Compared as encoded bytes, not `str`, so a destination whose name is not
-/// valid Unicode is still checked instead of silently never matching. The
-/// comparison is exact, case included: on a case-insensitive volume an
-/// export to `Out` does not see the leftovers of one to `out`. The tools'
-/// filter (`tools/export_scan.py`) accepts any destination name, so they
-/// skip such a directory either way.
+/// Compared as encoded bytes, so a non-Unicode destination name still
+/// matches, and case-sensitively: an export to `Out` does not see the
+/// leftovers of one to `out` (`tools/export_scan.py` skips both anyway).
 fn generated_kind(name: &OsStr, destination_name: &OsStr) -> Option<&'static str> {
     let rest = name
         .as_encoded_bytes()
@@ -505,11 +469,7 @@ fn is_pid_and_nonce(tail: &[u8]) -> bool {
         .all(|part| !part.is_empty() && part.iter().all(u8::is_ascii_digit))
 }
 
-/// Draw the next nonce and build the candidate path from it -- the one step
-/// `create_unique_directory` and `unique_sibling` both repeat inside their
-/// loop. What differs between the two is deliberately not folded in here:
-/// one claims the path atomically with `create_dir`, the other only checks
-/// `exists()` because it is naming a path it does not create yet.
+/// The next nonce's path; each caller claims it its own way.
 fn next_candidate(parent: &Path, destination_name: &OsStr, kind: &str) -> PathBuf {
     let nonce = NEXT_OUTPUT_PATH.fetch_add(1, Ordering::Relaxed);
     parent.join(generated_name(destination_name, kind, nonce))
@@ -543,11 +503,10 @@ fn unique_sibling(destination: &Path, kind: &str) -> io::Result<PathBuf> {
     }
 }
 
-/// Remove only paths generated by this module. `remove_dir_all` does not
-/// follow directory symlinks, and the exact generated path is never derived
-/// from an untrusted glob or environment variable. A prior-output backup has
-/// a generated name but the user's contents, so it only comes here once
-/// [`discard_prior_output`] has found nothing in it an export does not write.
+/// Remove only paths this module generated, never derived from a glob or an
+/// environment variable; `remove_dir_all` does not follow directory symlinks.
+/// A prior-output backup has a generated name but the user's contents, so it
+/// comes here only once [`discard_prior_output`] found nothing foreign in it.
 fn remove_generated(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
@@ -671,13 +630,6 @@ mod tests {
         );
     }
 
-    /// The error a failed publication returns must say which step failed,
-    /// on which paths, and what became of the run's work.
-    ///
-    /// At 259ed10 both renames returned the bare OS error. Measured: a
-    /// re-export while another process had the destination as its working
-    /// directory printed only `I/O error: ... (os error 32)` -- no path, and
-    /// nothing saying the fully decoded staged export had been thrown away.
     #[test]
     fn a_failed_publication_names_the_step_the_paths_and_the_outcome() {
         let root = TestDir::new();
@@ -711,11 +663,9 @@ mod tests {
         );
     }
 
-    /// The first rename -- moving the prior output aside -- fails the way the
-    /// measured os error 32 did: something else holds the destination open
-    /// without `FILE_SHARE_DELETE`. Windows-only because only Windows refuses
-    /// to rename a directory another handle has open; every Rust CI job runs
-    /// on Windows, so this runs there.
+    /// The first rename fails the way the measured os error 32 did: another
+    /// handle holds the destination without `FILE_SHARE_DELETE`. Windows-only,
+    /// like that refusal; every Rust CI job runs on Windows.
     #[cfg(windows)]
     #[test]
     fn a_destination_held_open_elsewhere_fails_naming_it_and_keeps_the_prior_output() {
@@ -760,11 +710,7 @@ mod tests {
         );
     }
 
-    /// What `Stop-Process -Force` 1.5 s into an export left behind at
-    /// 259ed10 -- measured, name and all: a footerless `fields.parquet`, no
-    /// manifest, in a staging directory nothing ever removed. The next export
-    /// to the same destination must name it, and must not delete it: the PID
-    /// in the name cannot tell a dead export from one still running.
+    /// The killed export's leftover measured in the module doc, name and all.
     #[test]
     fn a_staging_directory_left_by_a_killed_export_is_reported_and_kept() {
         let root = TestDir::new();
@@ -798,11 +744,6 @@ mod tests {
         );
     }
 
-    /// A kill between `publish`'s two renames leaves no destination and the
-    /// complete prior output in a `previous` sibling. That may be the only
-    /// copy, so it is reported -- saying the destination is missing -- and
-    /// neither restored (the user may have removed the destination on
-    /// purpose) nor deleted.
     #[test]
     fn a_prior_output_stranded_between_the_renames_is_reported_not_restored() {
         let root = TestDir::new();
@@ -835,9 +776,8 @@ mod tests {
         );
     }
 
-    /// Report-only is what keeps two exports to one destination safe: the
-    /// second names the first's live staging directory and leaves it alone,
-    /// and both still publish (last writer wins, as before).
+    /// Report-only keeps two exports to one destination safe: both publish,
+    /// and the last writer wins.
     #[test]
     fn a_concurrent_exports_staging_is_reported_and_left_to_publish() {
         let root = TestDir::new();
@@ -899,9 +839,8 @@ mod tests {
         }
     }
 
-    /// A complete `--checkpoints` export -- every name an export writes -- is
-    /// what a re-export replaces, and a table this run does not rewrite is
-    /// gone afterwards rather than left mixed in with the new set.
+    /// A prior export holding every output name; a table this run does not
+    /// rewrite is gone afterwards, not mixed into the new set.
     #[test]
     fn a_successful_publication_replaces_the_directory_as_one_complete_set() {
         let root = TestDir::new();
@@ -934,8 +873,6 @@ mod tests {
         );
     }
 
-    /// A destination that does not exist yet, or exists and is empty, has
-    /// nothing to lose and is published into as before.
     #[test]
     fn a_missing_or_empty_destination_is_accepted() {
         let root = TestDir::new();
@@ -954,8 +891,6 @@ mod tests {
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
-    /// An export writes files. A directory by a table's name is not one, and
-    /// neither is the tree under it.
     #[test]
     fn a_directory_named_like_a_table_is_a_foreign_entry() {
         let root = TestDir::new();
@@ -981,9 +916,6 @@ mod tests {
         );
     }
 
-    /// Something saved into `--out` after `begin` checked it -- while the
-    /// decode ran -- is found again at publication, in the backup that was
-    /// about to be deleted, and the backup is kept and named instead.
     #[test]
     fn an_entry_that_appears_during_the_run_keeps_the_prior_output() {
         let root = TestDir::new();
@@ -1026,10 +958,8 @@ mod tests {
         }
     }
 
-    /// A prior output kept because something was saved into it mid-run (see
-    /// the test above) holds the user's files. The next export names them,
-    /// and does not advise deleting it the way it does a backup that holds
-    /// export output only.
+    /// A backup kept by the test above holds the user's files: named, and not
+    /// advised for deletion like one holding export output only.
     #[test]
     fn a_kept_prior_output_is_reported_with_what_it_holds_besides_export_output() {
         let root = TestDir::new();
@@ -1080,12 +1010,8 @@ mod tests {
         assert_eq!(entry_count(10), "10 entries");
     }
 
-    /// `export dir/match.vrf --out dir` exited 0 with no warning line and left
-    /// `dir` holding only the export: publication moved the whole prior
-    /// directory aside and deleted it, the replay, the user's files and a
-    /// subdirectory with it. Measured with the pinned 12.10 public fixture.
-    /// Such a destination is refused before anything is decoded, and left
-    /// exactly as it was.
+    /// The loss `tests/export_destination.rs` reproduces through the binary:
+    /// refused before anything is decoded, and left exactly as it was.
     #[test]
     fn a_destination_holding_foreign_entries_is_refused_and_left_intact() {
         let root = TestDir::new();
