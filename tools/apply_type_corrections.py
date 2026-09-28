@@ -428,8 +428,8 @@ ADDITIONS = [
     ("/Script/ShooterGame.PlayerScoreComponent", "Score", "FieldType::Int32"),
     # Comp_Actor_Concussable, a generic component under
     # /Game/Characters/Components/ that no descriptor declares. On the 98605b1b
-    # Demos export: 9 actors spanning eight agents (Phoenix, Breach, Smonk,
-    # Clay, Guide, Wushu, Terra, Pandemic, Deadeye) plus Guide's
+    # Demos export: 9 actors, eight agents (Phoenix, Breach, Smonk, Clay,
+    # Guide, Terra, Pandemic, Deadeye; the match's Wushu has none) plus Guide's
     # PossessableScout pawn, with the same names and widths on each. All 375
     # rows: Start/EndTime 32 bits on 39 rows each, Float game-seconds ~2.5 s
     # apart (389.5/392.0 .. 1916.7/1919.2); Level 64 bits on 297 rows, a Double
