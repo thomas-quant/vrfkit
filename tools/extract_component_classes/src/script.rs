@@ -1,13 +1,10 @@
 //! The script object map in `global.ucas`: native (`/Script/...`) objects by
-//! their `FPackageObjectIndex`.
-//!
-//! The chunk is a name batch, an `i32` count, and that many 32-byte
-//! `FScriptObjectEntry` records: a mapped name, the object's own global index,
-//! its outer's global index, and its CDO class index. Paths are rebuilt by
-//! walking outers to the package and joined as UE's `GetPathName` joins them:
-//! `:` before an object whose outer is a top-level object (one outered to the
-//! package), `.` everywhere else -- `/Script/ShooterGame.AresInventory`,
-//! `/Script/Pkg.Object:Subobject.Inner`.
+//! `FPackageObjectIndex`. The chunk is a name batch, an `i32` count, and that
+//! many 32-byte `FScriptObjectEntry` records (mapped name, own global index,
+//! outer's global index, CDO class index). Paths are rebuilt by walking outers
+//! and joined as UE's `GetPathName` joins them: `:` before an object whose
+//! outer is a top-level object (one outered to the package), `.` everywhere
+//! else (`/Script/Pkg.Object:Subobject.Inner`).
 
 use std::collections::HashMap;
 
@@ -115,10 +112,9 @@ impl ScriptObjects {
         Some(path)
     }
 
-    /// Rebuild every path and hash it the way the engine does; the result must
-    /// be the object's own global index. This checks the outer walk and the
-    /// name table together, not the separators: the hash folds `.` and `:`
-    /// alike into `/`.
+    /// Rebuild every path and hash it as the engine does; the result must be the
+    /// object's own global index. This proves the names and the outer walk, not
+    /// the separators, which the hash folds alike into `/`.
     pub fn verify(&self) -> ScriptCheck {
         let mut check = ScriptCheck {
             objects: self.objects.len(),
@@ -223,9 +219,8 @@ pub(crate) mod tests {
         assert_eq!(check.hash_mismatches, 0);
     }
 
-    /// The hash check catches a wrong name, not a wrong separator: `.` and `:`
-    /// both hash as `/`, so a mis-separated path still matches its index, but
-    /// a renamed object does not.
+    /// The hash check catches a renamed object; a mis-separated path would
+    /// still match, since `.` and `:` both hash as `/`.
     #[test]
     fn a_name_that_does_not_hash_to_its_index_is_counted() {
         let bytes = build_script_objects(

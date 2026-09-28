@@ -1,14 +1,8 @@
 //! One IoStore container: its `.utoc` parsed, its `.ucas` read on demand.
-//!
-//! Read-only by construction. Files are opened with `File::open`, which asks
-//! for read access and, on Windows, shares read, write and delete with every
-//! other handle -- the game (or its patcher) is never locked out.
-//!
-//! A chunk is a byte range of the container's uncompressed stream, which is cut
-//! into fixed-size compression blocks; block `i` covers
-//! `[i * block_size, (i + 1) * block_size)`. Reading part of a chunk means
-//! decompressing only the blocks that part touches, which is what keeps a scan
-//! of every package's header to a fraction of the 30 GB of `.ucas`.
+//! Read-only: `File::open` asks for read access and, on Windows, shares read,
+//! write and delete, so the game or its patcher is never locked out. Reading
+//! part of a chunk decompresses only the blocks it touches, which keeps a scan
+//! of every package header to a fraction of the 30 GB of `.ucas`.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -44,8 +38,7 @@ impl Container {
         File::open(&self.ucas_path).map_err(|e| Error(format!("{}: {e}", self.ucas_path.display())))
     }
 
-    /// The first `limit` bytes of chunk `entry` (all of it when the chunk is
-    /// shorter), decompressing only the blocks that range touches.
+    /// The first `limit` bytes of chunk `entry`, or all of a shorter chunk.
     pub fn read_chunk(
         &self,
         ucas: &mut (impl Read + Seek),
@@ -112,12 +105,10 @@ impl Container {
                 let size = block.uncompressed_size as usize;
                 let start = out.len();
                 out.resize(start + size, 0);
-                // A fresh extractor per block: `Extractor` keeps decoder state
-                // across calls, and a block is an independent stream -- see the
-                // same choice, and why, in crates/vrf-container/src/oodle.rs.
-                // `read` over a slice, not `read_from_slice`, for the reason
-                // given there too: the codec stops once the output is full, and
-                // only this form shows what it left unread.
+                // A fresh extractor per block (it keeps decoder state across
+                // calls), and `read` over a slice so what the codec left unread
+                // shows: both for the reasons on `inflate` in
+                // crates/vrf-container/src/oodle.rs.
                 let mut unread: &[u8] = &raw;
                 let n = oozextract::Extractor::new()
                     .read(&mut unread, &mut out[start..])
@@ -222,10 +213,9 @@ mod tests {
         assert!(c.read_chunk(&mut f, 0, u64::MAX).is_err());
     }
 
-    /// One Oodle block holding an uncompressed Kraken block (`0x4C`: header
-    /// nibble `0xC` with the uncompressed bit set; `0x06`: Kraken, no
-    /// checksums) of eight bytes, then `unread` bytes inside the block's
-    /// compressed size that the codec never reaches.
+    /// One Oodle block: an eight-byte uncompressed Kraken block (header
+    /// `0x4C 0x06`, decoded on vrf-container's `archive_with_unread_input`),
+    /// then `unread` bytes inside the compressed size the codec never reaches.
     fn oodle(unread: usize) -> (Container, Vec<u8>) {
         let mut ucas = vec![0x4C, 0x06];
         ucas.extend(0u8..8);
@@ -263,8 +253,6 @@ mod tests {
         )
     }
 
-    /// The codec stops once its output is full and never checks that its
-    /// input is used up, so bytes of a block it never reads would vanish.
     #[test]
     fn an_oodle_block_the_codec_does_not_read_to_the_end_is_an_error() {
         let (c, ucas) = oodle(0);

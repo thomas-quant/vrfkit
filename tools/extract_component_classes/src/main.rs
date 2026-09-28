@@ -1,28 +1,15 @@
-//! Read component classes out of an installed game's IoStore containers.
+//! Read component classes out of an installed game's IoStore containers. A
+//! replay names a Blueprint component only by its instance name
+//! (`ZoomStateMachine`), and its class is not derivable from that name; the
+//! cooked game says what it is. This prints every component template's
+//! instance name, owning package and class, and is the source of
+//! `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs` (procedure
+//! and what the output establishes: docs/DATA.md, "Reading component classes
+//! out of the game").
 //!
-//! A replay names a Blueprint component only by its instance name
-//! (`ZoomStateMachine`), and the class it replicates under -- the group the
-//! replay declares -- is not derivable from that name. The cooked game says
-//! what it is. For every component template in every package this prints the
-//! instance name, the package that owns it, and its class, resolved through
-//! the script object map in `global.ucas` to a `/Script/...` path.
-//!
-//! This is what `KNOWN_SUBOBJECT_CLASS_PATHS` in
-//! `crates/vrfkit/src/sink/paths.rs` is derived from. docs/DATA.md ("Reading
-//! component classes out of the game") has the procedure and what the output
-//! does and does not establish.
-//!
-//! Read-only: files are opened for reading, shared with every other handle,
-//! and nothing is written anywhere except `--out`.
-//!
-//! Usage:
-//!   extract-component-classes <PAKS_DIR> [--format tsv|json] [--kind all|gen_variable|cdo_subobject]
-//!                             [--name NAME]... [--jobs N] [--out FILE]
-//!
-//! Exit status: 0 when every package was read and every self-check held; 1
-//! when anything could not be read or a check failed (the rows that could be
-//! read are still written, and the summary says what is missing); 2 for a
-//! usage or setup error.
+//! Exit status: 0 when every package was read and every self-check held; 1 when
+//! anything could not be read or a check failed (readable rows are still
+//! written, and the summary says what is missing); 2 for a usage or setup error.
 
 #![forbid(unsafe_code)]
 
@@ -128,7 +115,6 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// One output row.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Row {
     instance: String,
@@ -143,9 +129,7 @@ struct Row {
     container: String,
 }
 
-/// Every counter the run keeps. All of them are printed, zeros included: a
-/// line that appears only when nonzero cannot tell "nothing went wrong" from
-/// "this code never ran".
+/// Every counter the run keeps; all are printed, zeros included.
 #[derive(Debug, Default)]
 struct Counts {
     containers: usize,
@@ -179,7 +163,6 @@ struct Provenance {
     container_id: u64,
     toc_entries: usize,
     package_chunks: usize,
-    /// `None` when the file's metadata cannot be read.
     utoc_bytes: Option<u64>,
     ucas_bytes: Option<u64>,
     ucas_modified: String,
@@ -218,9 +201,8 @@ fn run(args: &Args) -> Result<i32, String> {
     counts.script = script.verify();
 
     let mut containers = Vec::new();
-    // Every `/Script` path in the output comes from global, so it is listed
-    // with the containers the packages came from. It holds no package chunk
-    // this tool reads.
+    // Listed although it holds no package this tool reads: every `/Script`
+    // path in the output comes from it.
     let mut provenance = vec![provenance_of(&global, &global_path, 0)];
     let mut jobs = Vec::new();
     for utoc in &utocs {
@@ -831,9 +813,8 @@ mod tests {
     }
 
     /// Run the tool with `--format json` over a synthetic Paks directory: a
-    /// global container and one container `other` whose single chunk is not
-    /// a package, so there is nothing to scan and the run fails, but still
-    /// reports. Returns the exit code and the JSON.
+    /// global container and one `other` whose single chunk is not a package,
+    /// so the run fails but still reports. Returns the exit code and the JSON.
     fn run_synthetic(test: &str, other_index: Vec<u8>) -> (Result<i32, String>, String) {
         use crate::script::tests::build_script_objects;
         let dir = std::env::temp_dir().join(format!("ecc-{test}-{}", std::process::id()));
@@ -860,9 +841,6 @@ mod tests {
         (code, json.unwrap())
     }
 
-    /// The run lists every container it read, global included: the script
-    /// object map, and so every `/Script` path in the output, comes from
-    /// there.
     #[test]
     fn provenance_lists_the_global_container() {
         let (code, json) = run_synthetic("provenance", Vec::new());
@@ -877,9 +855,6 @@ mod tests {
         assert_eq!(names, ["global", "other"]);
     }
 
-    /// A directory-index file that names an entry past the TOC, or an entry
-    /// another file also names, cannot be attached to a chunk. Both used to
-    /// vanish from the listing without a count.
     #[test]
     fn directory_index_files_that_name_no_entry_of_their_own_are_counted() {
         use crate::dirindex::tests::build_index;

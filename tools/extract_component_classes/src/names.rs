@@ -1,23 +1,17 @@
-//! Name batches and `FMappedName`.
-//!
-//! Unreal 5 writes every name table in IoStore -- a package's own name map, its
-//! imported package names, and the global script object names in
-//! `global.ucas` -- as one "name batch": a count, a string byte total, a hash
-//! algorithm version, one 64-bit hash per name, one two-byte header per name,
-//! and then the string bytes back to back.
+//! Name batches and `FMappedName`. Every IoStore name table (a package's name
+//! map, its imported package names, the script object names in `global.ucas`)
+//! is a name batch: a count, a string-byte total, a hash algorithm version, a
+//! u64 hash and a two-byte header per name, then the strings back to back.
 
 use crate::reader::{Cursor, Result, fail, latin1};
 
-/// The hash algorithm version the shipped game writes into every batch. It is
-/// checked rather than skipped because it is the one fixed value in the
-/// layout: finding it where it belongs is what says the batch starts where the
-/// caller thinks it does (it is how the 52-byte package summary was told apart
-/// from the older 44-byte one -- see `zen.rs`).
+/// The hash algorithm version the shipped game writes into every batch.
+/// Checked because it is the layout's one fixed value: finding it confirms the
+/// batch starts where the caller thinks (`zen.rs` tells summary widths apart by it).
 pub const NAME_HASH_VERSION: u64 = 0xC164_0000;
 
-/// Read one name batch. The string block must be consumed exactly: a length
-/// header that runs past it, or string bytes left over at the end, is an
-/// error rather than a shorter table.
+/// Read one name batch, consuming its string block exactly: a header that runs
+/// past it, or bytes left over, is an error rather than a shorter table.
 pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
     let at = c.pos();
     let num = c.u32()? as usize;
@@ -40,11 +34,9 @@ pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
     for (i, h) in headers.chunks_exact(2).enumerate() {
         let wide = h[0] & 0x80 != 0;
         let len = (usize::from(h[0] & 0x7f) << 8) | usize::from(h[1]);
-        // Not aligned: a UTF-16 name starts wherever the previous name
-        // ended, odd offsets included. Aligning it to two bytes -- which
-        // looks natural for UTF-16 -- misread 26 packages of the 13.06
-        // containers, every one holding a Chinese texture name at an odd
-        // offset, and every later name in the batch with it.
+        // Not aligned: a UTF-16 name starts wherever the previous one ended.
+        // Two-byte alignment misread 26 packages of the 13.06 containers, each
+        // with a Chinese texture name at an odd offset, and every later name.
         let (end, unit) = if wide {
             (p + len * 2, "UTF-16 units")
         } else {
@@ -176,8 +168,7 @@ pub(crate) mod tests {
     }
 
     /// The shape that broke the first real run: a UTF-16 name right after an
-    /// odd-length ANSI one. With two-byte alignment the wide name reads one
-    /// byte late and the batch no longer adds up.
+    /// odd-length ANSI one, which two-byte alignment reads one byte late.
     #[test]
     fn a_wide_name_at_an_odd_offset_is_read_where_it_starts() {
         let wide = "~\u{8d34}\u{56fe} #5";

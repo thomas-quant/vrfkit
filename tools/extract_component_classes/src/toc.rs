@@ -1,17 +1,13 @@
-//! The `.utoc` table of contents.
+//! The `.utoc` table of contents. Layout, in file order: a 144-byte header; a
+//! 12-byte chunk id and a 10-byte offset/length per chunk; perfect-hash seeds
+//! and the overflow list; a 12-byte entry per compression block; the method
+//! names; the signature block if signed; the directory index; a 33-byte meta
+//! record per chunk.
 //!
-//! Layout, in file order: a 144-byte header; one 12-byte chunk id and one
-//! 10-byte offset/length per chunk; the perfect-hash seeds and the overflow
-//! list; one 12-byte entry per compression block; the compression method
-//! names; the signature block when the container is signed; the directory
-//! index; and one 33-byte meta record per chunk.
-//!
-//! Only TOC version 5 is accepted, because it is the only one this was checked
-//! against: the shipped 13.06 containers are all version 5, and every one of
-//! their files is consumed exactly to the last byte by the layout above. A
-//! different version is an error naming the version, not a best effort -- a
-//! later version changes the meta record size, and an earlier one lacks the
-//! overflow list, so reading either with this layout would misplace the
+//! Only TOC version 5 is accepted: every 13.06 container is version 5 and is
+//! consumed exactly to its last byte by this layout. Any other version is an
+//! error naming it, not a best effort: version 8 changes the meta size and
+//! versions below 5 lack the overflow list, either of which would misplace the
 //! directory index without failing.
 
 use crate::reader::{Cursor, Result, fail};
@@ -20,8 +16,7 @@ pub const TOC_MAGIC: &[u8; 16] = b"-==--==--==--==-";
 pub const SUPPORTED_TOC_VERSION: u8 = 5;
 const TOC_HEADER_SIZE: u32 = 144;
 const COMPRESSED_BLOCK_ENTRY_SIZE: u32 = 12;
-/// `FIoStoreTocEntryMeta` before TOC version 8: a 32-byte chunk hash and a flag
-/// byte.
+/// `FIoStoreTocEntryMeta` before TOC version 8: a 32-byte hash and a flag byte.
 const META_SIZE: usize = 33;
 
 pub const FLAG_ENCRYPTED: u8 = 2;
@@ -240,8 +235,8 @@ pub(crate) mod tests {
 
     const FLAG_COMPRESSED: u8 = 1;
 
-    /// A synthetic version-5 TOC. Every structure the parser reads is present,
-    /// so a test that breaks one field breaks exactly that field.
+    /// A synthetic version-5 TOC with every structure the parser reads, so a
+    /// test that breaks one field breaks exactly that field.
     pub struct TocSpec {
         pub flags: u8,
         pub chunks: Vec<(ChunkId, OffsetLength)>,
@@ -399,8 +394,7 @@ pub(crate) mod tests {
     fn a_wrong_signature_size_misplaces_the_index_and_is_caught() {
         let spec = two_chunk_spec();
         let mut bytes = build_toc(&spec);
-        // The signature size sits right after the method names; claim 4
-        // bytes more than were written.
+        // The signature size follows the method names; claim 4 bytes too many.
         let at = bytes.len()
             - spec.chunks.len() * META_SIZE
             - spec.directory_index.len()

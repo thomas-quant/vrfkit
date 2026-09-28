@@ -1,9 +1,7 @@
-//! The directory index inside a `.utoc`: the file names of the chunks.
-//!
-//! Serialized as a mount point, a directory table, a file table and a string
-//! table. Directories and files form singly linked lists by index (first child
-//! / next sibling, first file / next file); a file's user data is the TOC
-//! entry it names. `u32::MAX` ends a list or marks "no name".
+//! The directory index inside a `.utoc`, which names the chunks: a mount point,
+//! then directory, file and string tables. Directories and files are singly
+//! linked by index (first child / next sibling, first file / next file), a
+//! file's user data is its TOC entry, and `u32::MAX` ends a list or means no name.
 
 use crate::reader::{Cursor, Result, fail};
 
@@ -32,8 +30,6 @@ pub struct DirectoryIndex {
     strings: Vec<String>,
 }
 
-/// Parse a directory index. Every byte must be used; anything left over means
-/// one of the tables was sized wrong.
 pub fn parse_directory_index(bytes: &[u8]) -> Result<DirectoryIndex> {
     let mut c = Cursor::new(bytes, "directory index");
     let mount_point = c.fstring()?;
