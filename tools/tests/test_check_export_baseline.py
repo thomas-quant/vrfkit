@@ -759,6 +759,49 @@ class RequiredInputTests(unittest.TestCase):
         self.assertNotIn("SKIP:", output.getvalue())
 
 
+class UpdateReplayNameTests(unittest.TestCase):
+    """--update wrote the replay path it had resolved into a new baseline: an
+    absolute --replay, or VRFKIT_CORPUS_DIR joined to a bare one, put one
+    machine's directory into a committed file."""
+
+    def run_update(self, root: Path, replay: str, corpus_dir: str | None):
+        current = measurement(actor_closes=0)
+        self.assertEqual(guard.cross_checks(current["counters"], current["parquet"]), [],
+                         "the stand-in measurement must reach the update")
+        argv = ["check_export_baseline.py", "--baseline", str(root / "baseline.json"),
+                "--exe", sys.executable, "--replay", replay, "--update"]
+        output = io.StringIO()
+        with patch.dict(os.environ), patch.object(sys, "argv", argv), \
+                patch.object(guard, "measure", return_value=current) as measured, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            os.environ.pop("VRFKIT_CORPUS_DIR", None)
+            if corpus_dir is not None:
+                os.environ["VRFKIT_CORPUS_DIR"] = corpus_dir
+            code = guard.main()
+        return code, output.getvalue(), measured
+
+    def test_an_absolute_replay_is_refused_before_the_export_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "match.vrf").write_bytes(b"replay")
+            code, output, measured = self.run_update(root, str(root / "match.vrf"), None)
+            self.assertEqual(code, 2, output)
+            self.assertIn("bare filename", output)
+            measured.assert_not_called()
+            self.assertFalse((root / "baseline.json").exists())
+
+    def test_a_bare_replay_is_pinned_as_given_not_as_resolved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "match.vrf").write_bytes(b"replay")
+            code, output, measured = self.run_update(root, "match.vrf", str(root))
+            self.assertEqual(code, 0, output)
+            measured.assert_called_once()
+            self.assertEqual(measured.call_args.args[1], root / "match.vrf")
+            stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["replay"], "match.vrf")
+
+
 class TransactionalOutputTests(unittest.TestCase):
     SUMMARY = """
 Total content blocks: 1

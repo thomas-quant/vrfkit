@@ -765,6 +765,15 @@ def main() -> int:
 
     stored = json.loads(args.baseline.read_text(encoding="utf-8")) \
         if args.baseline.exists() else {}
+    # A new baseline pins --replay as given, never the path resolved below:
+    # a path would put one machine's directory into a committed file.
+    if args.update and not stored.get("replay") and args.replay is not None \
+            and args.replay.anchor:
+        print(f"FAILED: --update would write the path {args.replay} into "
+              f"{args.baseline.name}; a baseline names its replay by bare filename. "
+              f"Set VRFKIT_CORPUS_DIR to its directory and pass --replay "
+              f"{args.replay.name}.", file=sys.stderr)
+        return 2
     replay = args.replay or Path(os.path.expandvars(stored.get("replay", "")))
     # A bare filename in the baseline resolves against VRFKIT_CORPUS_DIR so the
     # repo ships no absolute path; an absolute path (old baselines, --replay) is
@@ -807,7 +816,7 @@ def main() -> int:
                   "missing again, which is the failure this file exists to "
                   "catch.")
             return 1
-        payload = {"replay": stored.get("replay") or str(replay), **current}
+        payload = {"replay": stored.get("replay") or str(args.replay), **current}
         atomic_write_text(args.baseline, json.dumps(payload, indent=1) + "\n")
         print(f"wrote {args.baseline} (NetGUID rows "
               f"{current['counters']['net_guid_rows']})")
