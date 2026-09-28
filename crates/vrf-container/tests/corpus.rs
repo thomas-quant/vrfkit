@@ -1,26 +1,9 @@
-//! Integration test: parse all .vrf files in the corpus directory.
-//!
-//! The corpus lives outside the repo and is machine-local, so this test
-//! returns early when it is absent. That early return used to be invisible:
-//! the test reported as PASSING on any machine without the corpus, which
-//! meant its whole body was an untaken branch everywhere but one
-//! workstation, and `cargo test`'s green count silently included it.
-//!
-//! Two things make it honest now. The path is read from `VRFKIT_CORPUS_DIR`
-//! rather than hardcoded to one user's home directory, and setting
-//! `VRFKIT_REQUIRE_CORPUS=1` turns the skip into a failure -- so a machine
-//! that is SUPPOSED to have the corpus can say so and be held to it. The
-//! skip message names both, so anyone reading the output knows the coverage
-//! was not taken and how to take it.
-//!
-//! # What counts as a failure
-//!
-//! The test used to assert only that every preamble parsed, which left three
-//! ways to pass over broken data: an Oodle failure was tallied and then
-//! ignored, a malformed chunk header ended the `while let Ok(..)` walk exactly
-//! as a clean end-of-stream would, and an existing but EMPTY corpus directory
-//! satisfied `0 == 0`. All three are now assertions, and all three are about
-//! signals this test was already computing over the corpus.
+//! Container-level smoke test over a local replay corpus: every file's
+//! preamble, full chunk walk, Event chunks against the measured layouts, and
+//! first ReplayData decompression. It never reaches a field; the decode sweeps
+//! are listed in CONTRIBUTING.md. `VRFKIT_CORPUS_DIR` names the machine-local
+//! corpus, and `VRFKIT_REQUIRE_CORPUS` turns the skip when it is absent into a
+//! failure.
 
 use std::path::{Path, PathBuf};
 
@@ -36,11 +19,9 @@ struct FileReport {
     branch: Option<String>,
     /// A ReplayData chunk was found and decompressed.
     oodle_ok: bool,
-    /// Every problem found in this file. Empty means clean, and the test
-    /// asserts on it.
+    /// Every problem found in this file; empty means clean.
     problems: Vec<String>,
-    /// Privacy-safe observations from structurally known Event payloads. Group
-    /// names enter this vector only after matching the fixed public allowlist.
+    /// Known Event payloads; group names enter only from the fixed allowlist.
     events: Vec<KnownEventObservation>,
     event_rows: u64,
     unknown_event_groups: u64,
@@ -86,10 +67,7 @@ fn scan_file(data: &[u8]) -> FileReport {
     let mut oodle_ok = false;
     let mut iter = ChunkIterator::new(data, preamble.remaining_offset);
     loop {
-        // A chunk-header error means a malformed file, NOT the end of the
-        // stream. `while let Ok(Some(chunk))` could not tell those apart, so a
-        // truncated header or a negative size ended the walk exactly like a
-        // clean end-of-buffer and the file passed.
+        // A chunk-header error is a malformed file, not the end of the stream.
         let chunk = match iter.next_chunk() {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
@@ -120,8 +98,7 @@ fn scan_file(data: &[u8]) -> FileReport {
                 problems.push("event chunk Time1 and Time2 no longer agree".to_string());
                 continue;
             }
-            // The table's own `&'static str` is what an observation keeps, so
-            // it never retains the wire string.
+            // Keep the table's `&'static str`, never the wire string.
             let Some(known) = KNOWN_EVENT_GROUPS.iter().find(|k| k.group == event.group) else {
                 unknown_event_groups += 1;
                 continue;
@@ -280,7 +257,6 @@ fn parse_all_vrf_files() {
         }
     }
 
-    // Print summary
     eprintln!("=== VRF Corpus Test Results ===");
     eprintln!("Total .vrf files: {total}");
     eprintln!("Clean: {clean}/{total}");
@@ -312,8 +288,7 @@ fn parse_all_vrf_files() {
     }
     eprintln!("===============================");
 
-    // An existing but empty directory used to satisfy `0 == 0` and report a
-    // pass over nothing at all.
+    // An empty directory must not pass as `0 == 0`.
     assert!(
         total > 0,
         "corpus directory {} contains no .vrf files; an empty corpus is not a pass",
@@ -324,11 +299,8 @@ fn parse_all_vrf_files() {
         "{} problem(s) across {total} files: {failures:#?}",
         failures.len()
     );
-    // `assert_eq!(event_observations, event_rows)` below is satisfied by
-    // 0 == 0, which would make the whole Event-timeline guard pass silently
-    // if the Event chunk path stopped running (a renumbered discriminant, a
-    // `ChunkType::from_raw` regression). This is what actually requires the
-    // path to have run at all.
+    // The Event assertions below hold as 0 == 0 if the Event path stopped
+    // running (a renumbered discriminant, say); this requires that it ran.
     assert!(
         event_rows > 0,
         "no Event chunk was seen across {total} corpus files -- the Event-timeline \
@@ -342,11 +314,8 @@ fn parse_all_vrf_files() {
         event_observations, event_rows,
         "only {event_observations}/{event_rows} Event payloads matched the exact known layout"
     );
-    // Same shape: `oodle_ok` is printed above but nothing previously required
-    // it to be non-zero, so "no file ever decompressed" (a renumbered
-    // ReplayData discriminant, or a regression in the
-    // `chunk.chunk_type != ChunkType::ReplayData` guard in `scan_file`) was a
-    // pass.
+    // The same guard for ReplayData. Each file without a decompressed chunk is
+    // already a problem in `scan_file`; this is the directory-level backstop.
     assert!(
         oodle_ok > 0,
         "no file decompressed a ReplayData chunk across {total} corpus files"
@@ -478,10 +447,8 @@ fn the_fixture_replay_scans_without_problems() {
     );
 }
 
-/// A file whose chunk stream holds no ReplayData chunk -- an aborted
-/// recording, or a regression that renumbers the chunk type -- used to count
-/// as clean. Only the directory-wide `oodle_ok > 0` noticed, and one good file
-/// in the directory satisfied it.
+/// A file with no ReplayData chunk (an aborted recording, or a renumbered
+/// chunk type) is its own problem: one good file satisfies a directory check.
 #[test]
 fn a_replay_with_nothing_decompressed_is_reported() {
     let report = scan_file(&fixture::header_only_replay());
@@ -495,10 +462,8 @@ fn a_replay_with_nothing_decompressed_is_reported() {
     );
 }
 
-/// Four stray bytes after the last chunk are too few for a chunk header. That
-/// is a malformed file, and the walk used to treat it as the normal end of the
-/// stream: `while let Ok(Some(chunk))` exits on `Err` and on `Ok(None)`
-/// alike, so the error was discarded and the file counted as a pass.
+/// Four stray bytes after the last chunk are too few for a chunk header: a
+/// malformed file, not the normal end of the stream.
 #[test]
 fn a_malformed_chunk_header_is_reported_not_read_as_a_clean_end() {
     let mut data = fixture::minimal_replay();
