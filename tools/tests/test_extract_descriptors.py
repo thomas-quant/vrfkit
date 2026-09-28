@@ -37,7 +37,17 @@ internal static class AgentClassNetCacheDescriptors
 '''
 
 
-class ExtractDescriptorsTests(unittest.TestCase):
+class GeneratorHarness:
+    """The generator-running helpers both test classes below share.
+
+    A plain mixin, not a TestCase. `SilentDropTests` used to get these by
+    subclassing `ExtractDescriptorsTests`, and unittest collects inherited
+    `test_*` methods, so every test in that class -- 67 of them, each spawning
+    a generator subprocess -- ran a second time under `SilentDropTests`' name
+    and inflated the suite size the docs quote. The `assert*` calls resolve
+    through the `unittest.TestCase` each concrete class also inherits.
+    """
+
     def run_generator_process(
         self, sources: dict[str, str]
     ) -> tuple[subprocess.CompletedProcess[str], str | None]:
@@ -79,6 +89,13 @@ class ExtractDescriptorsTests(unittest.TestCase):
             if group.endswith("_ClassNetCache")
         }
 
+    def entries(self, output: str) -> set[tuple[str, str]]:
+        return {
+            (group, field) for group, field, _ in ENTRY_RE.findall(output)
+        }
+
+
+class ExtractDescriptorsTests(GeneratorHarness, unittest.TestCase):
     def test_virtual_movement_uses_concrete_override(self):
         output = self.run_generator({"Movement.cs": r'''
 public abstract class BaseFlash<T> : ExportGroupDescriptor<T>
@@ -102,8 +119,43 @@ public sealed class ByteFlash : BaseFlash<ByteFlash>
         ERotatorQuantization.ByteComponents;
 }
 '''})
-        self.assertIn('group_path: "/short", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents }', output)
-        self.assertIn('group_path: "/byte", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents }', output)
+        self.assertIn('group_path: "/short", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundWholeNumber }', output)
+        self.assertIn('group_path: "/byte", field_name: "ReplicatedMovement", field_type: FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundWholeNumber }', output)
+
+    def test_every_movement_form_states_its_location_quantization(self):
+        """The explicit, bare and virtual `.ReplicatedMovement` forms all emit
+        the location level. The wire does not carry it, so an entry without it
+        would leave the reader to assume one -- the constant divisor this
+        field exists to replace."""
+        output = self.run_generator({"Movement.cs": r'''
+public sealed class Explicit : ExportGroupDescriptor<Explicit>
+{
+    public override string Path => "/explicit";
+    protected override void Configure()
+    {
+        AddProperty(x => x.ReplicatedMovement)
+            .ReplicatedMovement(ERotatorQuantization.ByteComponents);
+    }
+}
+public sealed class Bare : ExportGroupDescriptor<Bare>
+{
+    public override string Path => "/bare";
+    protected override void Configure()
+    {
+        AddProperty(x => x.ReplicatedMovement).ReplicatedMovement();
+    }
+}
+'''})
+        types = {
+            group: field_type.strip()
+            for group, field, field_type in ENTRY_RE.findall(output)
+            if field == "ReplicatedMovement"
+        }
+        self.assertEqual(types, {
+            "/explicit": "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, location: VectorQuantization::RoundWholeNumber }",
+            "/bare": "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, location: VectorQuantization::RoundWholeNumber }",
+        })
+        self.assertIn("use crate::types::{RotatorQuantization, VectorQuantization};", output)
 
     def test_unresolved_movement_property_fails(self):
         error = self.run_generator_expecting_failure({"Movement.cs": r'''
@@ -216,6 +268,73 @@ internal static class Factories
 }
 '''})
         self.assertIn("unsupported ClassNetCache factory", error)
+
+    def test_private_cache_factory_fails_instead_of_vanishing(self):
+        """Upstream 8b7afcb's ClayDescriptors builds its caches this way; a
+        marker that saw only public/internal factories let them go missing."""
+        error = self.run_generator_expecting_failure({"ClayDescriptors.cs": r'''
+public static class ClayDescriptors
+{
+    public static IReadOnlyList<ClassNetCacheDescriptor> CreateClassNetCacheDescriptors() =>
+    [
+        Rpc(ClayPaths.Rocket, Function(ClayPaths.Rocket, "MulticastStopProjectile", 3)),
+    ];
+
+    private static ClassNetCacheDescriptor Rpc(string path, params RpcDescriptor[] functions) =>
+        new(path + "_ClassNetCache", functions);
+    private static RpcDescriptor Function(string path, string name, uint handle) => new()
+    {
+        Name = name, FunctionExportPath = path + ":" + name, Handle = handle,
+    };
+}
+public static class ClayPaths
+{
+    public const string Rocket = "/Game/Rocket.Rocket_C";
+}
+'''})
+        self.assertIn("unsupported ClassNetCache factory Rpc", error)
+
+    def test_runtime_cache_construction_without_a_factory_list_fails_loudly(self):
+        """Upstream 8b7afcb's AgentClassNetCacheDescriptors passes a method
+        call where the list goes. Unguarded, every agent cache entry vanished
+        from the table and the run still succeeded."""
+        error = self.run_generator_expecting_failure({
+            "GenericAgentDescriptor.cs": r'''
+public abstract class GenericAgentDescriptor : ExportGroupDescriptor<GenericAgentDescriptor>
+{
+    public override ExportCategory Categories => ExportCategory.Agent;
+}
+public sealed class LiveAgentDescriptor : GenericAgentDescriptor
+{
+    public override string Path => "/Game/Agents/Live.Live_C";
+}
+''',
+            "AgentClassNetCacheDescriptors.cs": r'''
+internal static class AgentClassNetCacheDescriptors
+{
+    public static IReadOnlyList<ClassNetCacheDescriptor> Create(
+        IEnumerable<ExportGroupDescriptor> agentDescriptors)
+    {
+        return agentDescriptors
+            .Select(agent => new ClassNetCacheDescriptor(
+                agent.Path + "_ClassNetCache",
+                CreateFunctions(agent)))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<RpcDescriptor> CreateFunctions(ExportGroupDescriptor agent)
+    {
+        return [CreateKillRpc()];
+    }
+
+    private static RpcDescriptor CreateKillRpc() => new RpcDescriptor
+    {
+        Name = "MulticastNotifyKilledEnemy",
+    };
+}
+''',
+        })
+        self.assertIn("unsupported runtime ClassNetCache construction", error)
 
     def test_unsupported_path_override_shape_fails(self):
         error = self.run_generator_expecting_failure({"Bad.cs": r'''
@@ -1266,6 +1385,14 @@ internal static class AgentClassNetCacheDescriptors
         )
 
     def test_commented_raw_wrapper_does_not_reclassify_live_typed_call(self):
+        # This fixture also defined the live typed AddValue as
+        # `=> AddPropertyHandle(handle, property, ExportCategory.GameState);`.
+        # That body reaches the end of the type ladder with no type method and
+        # was dropped without a word; it is now a `<no type method>` rejection,
+        # which is right -- the splitter cannot see calls through such a
+        # wrapper, so the definition is their only trace. The case moved to
+        # test_a_typed_wrapper_definition_is_rejected, which also fails if a
+        # typed wrapper is ever misread as a raw one.
         output = self.run_generator(
             {
                 "LiveTypedDescriptor.cs": r'''
@@ -1281,11 +1408,6 @@ public sealed class LiveTypedDescriptor : ExportGroupDescriptor<LiveTypedDescrip
         AddProperty(x => x.KnownValue).UInt32();
         AddValue(7, x => x.TypedValue).UInt32();
     }
-
-    private PropertyDescriptor AddValue(
-        uint handle,
-        Expression<Func<LiveTypedDescriptor, uint>> property) =>
-        AddPropertyHandle(handle, property, ExportCategory.GameState);
 }
 '''
             }
@@ -2220,11 +2342,6 @@ public sealed class BoundedPayloadDescriptor : ExportGroupDescriptor<BoundedPayl
     # including Unknown, which is the C# default from the protected
     # parameterless constructor and NOT a "we did not look" marker.
 
-    def entries(self, output: str) -> set[tuple[str, str]]:
-        return {
-            (group, field) for group, field, _ in ENTRY_RE.findall(output)
-        }
-
     def test_fast_array_descriptor_contributes_nothing(self):
         output = self.run_generator(
             {
@@ -2491,8 +2608,8 @@ public sealed class EffectManagerComponentClassNetCacheDescriptor : ClassNetCach
         )
 
 
-class SilentDropTests(ExtractDescriptorsTests):
-    """Two ways a declared field left the table without saying so."""
+class SilentDropTests(GeneratorHarness, unittest.TestCase):
+    """Ways a declared field left the table without saying so."""
 
     def test_an_unknown_primitive_type_is_rejected_not_dropped(self):
         """`.Int64()` is not in PRIMITIVE_TYPES, so the statement fell off the
@@ -2540,6 +2657,175 @@ public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
         self.assertEqual(
             self.entries(output), {("/Script/ShooterGame.Widget", "Spin")}
         )
+
+    @staticmethod
+    def widget(*statements: str) -> dict[str, str]:
+        """One descriptor on a path nothing else uses, declaring `statements`."""
+        body = "\n".join(f"        {statement}" for statement in statements)
+        return {
+            "WidgetDescriptor.cs": r'''
+public sealed class WidgetDescriptor : ExportGroupDescriptor<WidgetDescriptor>
+{
+    public override string Path => "/Script/ShooterGame.Widget";
+    protected override void Configure()
+    {
+''' + body + r'''
+    }
+}
+''',
+        }
+
+    def test_a_declaration_with_no_type_method_is_rejected_not_dropped(self):
+        """`AddProperty(x => x.Ticks);` names no type method, so
+        `_extract_type_name` returned None and the ladder's last step recorded
+        nothing -- no entry, no rejection, no message. Only a NAMED unknown
+        method was a failure. Upstream really does write this shape, three
+        times (DECODERLESS_PROPERTIES); anywhere else it must stop the run.
+
+        The label is asserted, not just the field name: the report echoes the
+        statement, so "Ticks" would appear under any label.
+        """
+        stderr = self.run_generator_expecting_failure(
+            self.widget(
+                "AddProperty(x => x.Spin).Float();",
+                "AddProperty(x => x.Ticks);",
+            )
+        )
+        self.assertIn("  .<no type method>(): AddProperty(x => x.Ticks);", stderr)
+
+    def test_a_generic_type_method_is_rejected_by_name(self):
+        """`.Enum<EMode>()` put a `<` where `_extract_type_name` wanted a `(`,
+        so it read as no type method at all and fell off the same way. It must
+        fail, and name the method a reader has to add.
+        """
+        stderr = self.run_generator_expecting_failure(
+            self.widget(
+                "AddProperty(x => x.Spin).Float();",
+                "AddProperty(x => x.Mode).Enum<EMode>();",
+            )
+        )
+        self.assertIn(
+            "  .Enum(): AddProperty(x => x.Mode).Enum<EMode>();", stderr
+        )
+
+    def test_a_typed_wrapper_definition_is_rejected(self):
+        """A helper that returns the builder for its caller to type. Its calls
+        (`AddValue(7, x => x.Typed).UInt32();`) do not start with AddProperty,
+        so the splitter never sees them; its own body is the one statement
+        that shows declarations are routed through it, and that body names no
+        type method. Dropping it silently dropped every call with it.
+        """
+        stderr = self.run_generator_expecting_failure(
+            {
+                "WrappedDescriptor.cs": r'''
+public sealed class WrappedDescriptor : ExportGroupDescriptor<WrappedDescriptor>
+{
+    public override string Path => "/Script/ShooterGame.Wrapped";
+    protected override void Configure()
+    {
+        AddProperty(x => x.Known).UInt32();
+        AddValue(7, x => x.Typed).UInt32();
+    }
+
+    private FieldDescriptorBuilder AddValue(
+        uint handle,
+        Expression<Func<WrappedDescriptor, uint>> property) =>
+        AddPropertyHandle(handle, property, ExportCategory.GameState);
+}
+''',
+            }
+        )
+        self.assertIn(
+            "  .<no type method>(): "
+            "AddPropertyHandle(handle, property, ExportCategory.GameState);",
+            stderr,
+        )
+
+    def test_the_generic_method_the_ladder_knows_still_generates(self):
+        """The one generic type method the descriptors use keeps its own
+        branch: a `RepLayoutDynamicArray<T>()` is an opaque TArray, so Raw,
+        not a rejection now that `_extract_type_name` can see generic names.
+        """
+        output = self.run_generator(
+            self.widget(
+                "AddProperty(x => x.Spin).Float();",
+                "AddPropertyHandle(6, x => x.FloatValues)"
+                ".RepLayoutDynamicArray<EffectDataFloat>();",
+            )
+        )
+        self.assertEqual(
+            {
+                (group, field, field_type.strip())
+                for group, field, field_type in ENTRY_RE.findall(output)
+            },
+            {
+                ("/Script/ShooterGame.Widget", "Spin", "FieldType::Float"),
+                ("/Script/ShooterGame.Widget", "FloatValues", "FieldType::Raw"),
+            },
+        )
+
+    #: A real decoder-less declaration: the vendored
+    #: AresAbilitySystemComponentDescriptor.cs, trimmed to one typed sibling.
+    #: {TYPE} is what follows `x.AresAttributeSet)`.
+    DECODERLESS_SOURCE = r'''
+public sealed class AresAbilitySystemComponentDescriptor : ExportGroupDescriptor<AresAbilitySystemComponentDescriptor>
+{
+    public override string Path => "/Script/ShooterGame.AresAbilitySystemComponent";
+    public override ExportGroupKind Kind => ExportGroupKind.Component;
+    protected override void Configure()
+    {
+        AddProperty(x => x.Owner).ObjectNetGuid();
+        AddProperty(x => x.AresAttributeSet){TYPE};
+    }
+}
+'''
+
+    def test_a_listed_decoderless_declaration_contributes_nothing(self):
+        """What DECODERLESS_PROPERTIES allows: no entry -- as before -- with
+        the sibling still typed, the run succeeding, and the declaration
+        counted by name in the summary instead of vanishing.
+        """
+        result, output = self.run_generator_process(
+            {
+                "AresAbilitySystemComponentDescriptor.cs":
+                    self.DECODERLESS_SOURCE.replace("{TYPE}", ""),
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.entries(output or ""),
+            {("/Script/ShooterGame.AresAbilitySystemComponent", "Owner")},
+        )
+        self.assertIn(
+            "Declared without a type method (no entry): 1\n"
+            "  AresAbilitySystemComponentDescriptor.AresAttributeSet\n",
+            result.stdout,
+        )
+
+    def test_the_decoderless_list_is_scoped_to_its_class(self):
+        """The listed property on a class the list does not name is an
+        ordinary rejection; the exception is one declaration, not a name.
+        """
+        stderr = self.run_generator_expecting_failure(
+            self.widget("AddProperty(x => x.AresAttributeSet);")
+        )
+        self.assertIn(
+            "  .<no type method>(): AddProperty(x => x.AresAttributeSet);",
+            stderr,
+        )
+
+    def test_a_listed_property_declared_with_a_type_fails(self):
+        """Once upstream gives a listed property a type, the reason recorded
+        for it is false. The run says so rather than carry it.
+        """
+        stderr = self.run_generator_expecting_failure(
+            {
+                "AresAbilitySystemComponentDescriptor.cs":
+                    self.DECODERLESS_SOURCE.replace("{TYPE}", ".ObjectNetGuid()"),
+            }
+        )
+        self.assertIn("DECODERLESS_PROPERTIES", stderr)
+        self.assertIn("AresAbilitySystemComponentDescriptor.AresAttributeSet", stderr)
 
     #: Two descriptor classes, one Path, one field name, two types.
     CONFLICTING_CLASSES = {

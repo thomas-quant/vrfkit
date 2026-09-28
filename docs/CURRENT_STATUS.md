@@ -1,10 +1,12 @@
 # Current status
 
-The latest common verification run is dated 2026-09-25 and covers all 24
+The latest common verification run is dated 2026-09-28 and covers all 24
 supported builds. See [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md) for
-per-build replay counts, the shared acceptance criteria, and resolved findings.
-All 986 unique replays now pass: the ActiveBlinds empty-delta and null-actor
-fixes eliminate the earlier 81-file failures and recover 522 typed children.
+per-build replay counts, the shared acceptance criteria, the changes since
+2026-09-25, and resolved findings. All 1,018 unique replays pass, including
+38 of build 13.06, 32 of them added since the 986-replay audit of 2026-09-25.
+On 2026-09-25 the ActiveBlinds empty-delta and null-actor fixes eliminated the
+earlier 81-file failures and recovered 522 typed children.
 The [README support table](../README.md#supported-valorant-builds) reports
 strictly clean replays against all replays checked, using that same report.
 Current workspace test counts are also maintained in the README.
@@ -61,11 +63,28 @@ boundaries while preserving the original bits. It does not add typed values to
 `fields.parquet` or `checkpoint_fields.parquet`, so the accepted Parquet counts
 and typed-presence ratio above remain unchanged.
 
+On 2026-09-28 the extractor's build scope was re-measured on 1,018 exports
+made by parser `259ed10` across all 24 supported builds. All 3,999,493
+`_cnc_h1` inner windows close exactly, and an independent reader agrees on
+every boundary. On that route the extractor accepts the 22 builds that carry
+such windows. 12.10 and 12.11 have none there, and no `_cnc_h1` checkpoint row
+was observed, so both stay unvalidated. See
+[the build-scope entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#build-scope-re-measured-2026-09-28).
+This widens where numeric structure can be extracted. It adds no field
+meanings and no typed Parquet values. A second change the same day admits
+the AbilitiesAndBuffs bodies the parser files under
+`/Script/ShooterGame.AresAbilitySystemComponent`. That is 250,053 main and
+181,108 checkpoint windows, all exact and accepted on all 24 builds, including
+12.10 and 12.11. Until then the extractor selected none of them. See
+[the chained-route entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#chained-route-admitted-2026-09-28).
+
 The investigation also records private structural evidence that the same
-generic walk fully consumes 26,303 selected PatchVolume windows. PatchVolume
-does not yet have a public extraction route or an established item/property
-schema. In both populations, numeric boundaries do not establish gameplay
-meanings.
+generic walk fully consumes 26,303 selected PatchVolume windows. In both
+populations, numeric boundaries alone do not establish gameplay meanings.
+PatchVolume has since gained both a schema and a public route: its windows are
+GroundVolumeComponent `FragmentInfo` cells, decoded by
+`tools/extract_ground_volumes.py` with the names each replay declares -- see
+[ground-area volumes](GROUND_VOLUMES.md). Parquet is unchanged.
 
 ## Completed evidence phases
 

@@ -10,9 +10,11 @@ import pyarrow.parquet as pq
 if __package__:
     from .atomic_io import atomic_write_text, sha256_file
     from .extract_kill_observations import InputError, parse_array, exact_ref
+    from .player_identity import load_player_bodies
 else:
     from atomic_io import atomic_write_text, sha256_file
     from extract_kill_observations import InputError, parse_array, exact_ref
+    from player_identity import load_player_bodies
 SCHEMA_VERSION = 1
 OUTER_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
 PARAM_GROUP = "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal"
@@ -60,6 +62,8 @@ FIELD_COLS = [
     "value_str",
 ]
 CHECKPOINT_FIELD_COLS = ["checkpoint_index", "checkpoint_id", *FIELD_COLS]
+#: Every status `edge()` can return, so the per-edge tally prints zeros too.
+EDGE_STATUSES = ("present", "null", "absent", "duplicate", "invalid")
 
 
 class IntegrityError(InputError):
@@ -161,6 +165,11 @@ def ref_value(r, typed):
         raise InputError("invalid reference window")
     v = exact_ref(r["raw_bits"], r["bit_count"])
     if typed:
+        # Absent is reported apart from wrong: an export from a parser that
+        # predates this reference's typing is stale input, not corruption.
+        # Neither can pass -- there would be no typed value to check.
+        if r["value_i64"] is None:
+            raise IntegrityError("untyped reference; re-export with a parser that types it")
         if type(r["value_i64"]) is not int or r["value_i64"] != v:
             raise IntegrityError("reference typed/raw mismatch")
     elif r["value_i64"] is not None:
@@ -237,7 +246,7 @@ def active_instance(rows, guid, event):
     return (active, "active") if active is not None else (None, "actor_closed")
 
 
-def edge(name, by, typed=False):
+def edge(name, by, typed):
     q = by.get(name, [])
     if not q:
         return {"status": "absent", "value": None, "source_rows": []}
@@ -271,8 +280,12 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
             schema_errors.append({"source_row": ordinal, "error": str(e)})
         by[r["field_name"]].append((ordinal, r))
     duplicates = {n: [x[0] for x in q] for n, q in by.items() if len(q) > 1}
+    # All three direct references are typed ObjectNetGuid by exact scoped
+    # entries (tools/fixtures/scoped_type_evidence.json), so each must carry a
+    # value equal to its raw window. Reading one as untyped would turn every
+    # typed row into an "invalid" edge while the run still exits 0.
     top = {
-        n: edge(n, by, n.endswith("HealCauser"))
+        n: edge(n, by, typed=True)
         for n in (
             "MulticastNotifyHeal.EventInstigator",
             "MulticastNotifyHeal.EventInstigatorPawn",
@@ -485,9 +498,13 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
     pawn = source["event_instigator_pawn"]
     pawn["static_manifest_character"] = pawn.get("value") in players
     pawn["static_manifest_subject"] = players.get(pawn.get("value"))
-    source["event_instigator"][
-        "semantics"
-    ] = "opaque packed reference candidate; no target type established"
+    source["event_instigator"]["semantics"] = (
+        "PlayerController NetGUID: equals the replicated Controller and Owner "
+        "of the EventInstigatorPawn actor, and never resolved to an opened "
+        "actor or a net_guids path in the 2026-09-28 corpus audit, so an "
+        "unresolved join is expected and is not a decode fault; no "
+        "heal-credit meaning"
+    )
     recipient_instance, recipient_status = active_instance(actors, key[3], event)
     recipient = {
         "actor_net_guid": key[3],
@@ -538,15 +555,15 @@ def extract(export):
         Path(__file__).resolve(),
         Path(__file__).with_name("extract_kill_observations.py"),
         Path(__file__).with_name("atomic_io.py"),
+        Path(__file__).with_name("player_identity.py"),
     ]
     source_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text())
     declared = declarations(manifest)
-    players = {
-        int(x["character_net_guid"]): x.get("subject")
-        for x in manifest.get("players", [])
-        if x.get("character_net_guid")
-    }
+    # Every pawn a SpawnedCharacter value names, not only the manifest's last
+    # one: a reconnected player's earlier pawn is still that player's body.
+    bodies = load_player_bodies(export, manifest)
+    players = bodies.subjects
     paths = {
         x["net_guid"]: x["path"]
         for _, x in iter_rows(export / "net_guids.parquet", ["net_guid", "path"])
@@ -632,6 +649,16 @@ def extract(export):
         for x in observations
         if x["amount"]["status"] == "validated" and not x["ambiguity_reasons"]
     ]
+    # Every edge status, zeros included: an "invalid" edge leaves the amount
+    # validated and adds no ambiguity reason, so without this tally it would
+    # reach no summary at all.
+    edge_status = {
+        k: dict.fromkeys(EDGE_STATUSES, 0)
+        for k in ("causer", "event_instigator", "event_instigator_pawn")
+    }
+    for x in observations:
+        for k, tally in edge_status.items():
+            tally[x["source_corroboration"][k]["status"]] += 1
     by_section = collections.Counter()
     by_recipient = collections.Counter()
     for x in valid:
@@ -650,6 +677,7 @@ def extract(export):
         "export_id": export.name,
         "source": str(export.resolve()),
         "source_hashes": before,
+        "player_identity": bodies.counts,
         "provenance": {
             "replay_build": manifest.get("replay_build"),
             "input_sha256_before": before,
@@ -678,6 +706,7 @@ def extract(export):
                 x["amount"]["status"] != "validated" for x in observations
             ),
             "ambiguous_groups": sum(bool(x["ambiguity_reasons"]) for x in observations),
+            "source_edge_status": edge_status,
         },
     }
 
@@ -701,6 +730,7 @@ def main(argv=None):
             Path(__file__),
             Path(__file__).with_name("extract_kill_observations.py"),
             Path(__file__).with_name("atomic_io.py"),
+            Path(__file__).with_name("player_identity.py"),
         ]
         if aliases(a.out, protected):
             raise InputError("output aliases an input or implementation file")

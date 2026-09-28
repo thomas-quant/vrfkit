@@ -27,9 +27,12 @@ class AbilityLifecycleTests(unittest.TestCase):
             ("time_ms", pa.uint32()), ("packet_id", pa.uint32()),
             ("channel_index", pa.uint32()), ("actor_net_guid", pa.uint32()),
             ("event", pa.string()), ("class_path", pa.string())])
+        # `object_net_guid` is null on every row here, as on an actor-level
+        # property of a real export; the player-body join reads it.
         field_schema = pa.schema([
             ("time_ms", pa.uint32()), ("packet_id", pa.uint32()),
             ("channel_index", pa.uint32()), ("actor_net_guid", pa.uint32()),
+            ("object_net_guid", pa.uint32()),
             ("group_path", pa.string()), ("field_name", pa.string()),
             ("value_i64", pa.int64())])
         pq.write_table(pa.Table.from_pylist(actors, schema=actor_schema), self.root / "actors.parquet")
@@ -56,6 +59,28 @@ class AbilityLifecycleTests(unittest.TestCase):
         row = doc["records"][0]
         self.assertEqual(row["linked_player_subject"], "player-50")
         self.assertEqual(row["replicated_instigator"]["evidence"][0]["packet_id"], 2)
+
+    def test_links_an_earlier_pawn_of_a_reconnected_player(self):
+        """The manifest keeps only the last SpawnedCharacter; the pawn the
+        player had before reconnecting is still that player's body."""
+        (self.root / "manifest.json").write_text(json.dumps({"players": [
+            {"actor_net_guid": 256, "character_net_guid": 50, "subject": "player-50"}]}),
+            encoding="utf-8")
+        state = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
+        path = "/Game/Characters/Sarge/S0/Ability_Q/Zone.Zone_C"
+        doc = self.write([self.actor(10, 1, 7, 100, "open", path),
+                          self.actor(30, 3, 7, 100, "close")],
+                         [self.field(1, 1, 5, 256, "SpawnedCharacter", 40, state),
+                          self.field(2, 2, 5, 256, "SpawnedCharacter", 0, state),
+                          self.field(3, 3, 5, 256, "SpawnedCharacter", 50, state),
+                          self.field(20, 2, 7, 100, "Instigator", 40)])
+        row = doc["records"][0]
+        self.assertEqual(row["linked_player_net_guid"], 40)
+        self.assertEqual(row["linked_player_subject"], "player-50")
+        self.assertEqual(row["player_reference_provenance"],
+                         "spawned_character_history_reference")
+        self.assertEqual(doc["totals"]["linked_via_non_final_spawned_character"], 1)
+        self.assertEqual(doc["totals"]["player_identity"]["non_final_spawned_character_pawns"], 1)
 
     def test_dormant_is_last_seen_evidence_and_not_close(self):
         path = "/Game/Characters/Sarge/S0/Ability_Q/Zone.Zone_C"

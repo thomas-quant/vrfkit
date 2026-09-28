@@ -1,24 +1,27 @@
-# Common build verification, 2026-09-25
+# Common build verification, 2026-09-28
 
-All **986 unique available replays**, spanning **24 supported builds**, were
-checked with parser commit `91dc679ccdfa2e1ef5e7f241d1bdc4087b743016`.
-Discovery found 1,048 paths across the version-organized archive, preserved
-fixtures and Demos directory. SHA-256 deduplication removed 62 duplicate copies.
-The archive contributes 982 unique files; preserved fixtures add the three
-12.10/12.11/13.00 replays and one additional 13.02 replay. Demos adds no unique file.
+All **1,018 unique available replays**, spanning **24 supported builds**, were
+checked with parser commit `259ed10c7e0c9d87c852f80fab7535d38d2e187f`.
+The report's `date_utc` reads 2026-09-27T17:54Z, which is 02:54 on 2026-09-28
+local time (UTC+9).
+Discovery found 1,074 paths under two roots, the version-organized archive and
+the preserved fixtures. SHA-256 deduplication removed 56 duplicate copies.
+The archive contributes 1,014 unique files, one per path. The preserved
+fixtures add the three 12.10/12.11/13.00 replays and one additional 13.02
+replay; their other 56 files are copies of archive files.
 
-All 986 pass ReplayData validation and checkpoint-enabled export. The oracle
-passes **635,388,312/635,388,312** scored main blocks;
-**23,222,700** checkpoint blocks were walked. Independent
-Python comparisons match **12,917,904** observed values, with no
+All 1,018 pass ReplayData validation and checkpoint-enabled export. The oracle
+passes **657,565,897/657,565,897** scored main blocks;
+**24,015,541** checkpoint blocks were walked. Independent
+Python comparisons match **13,387,751** observed values, with no
 width failures or typed mismatches. All 24 builds contain positive main and
 checkpoint decoding work. No run is counted as passing because it was skipped.
 
-The stronger all-counter acceptance rule is now **986/986 clean** and the
-audit command exits **0**. Two ActiveBlinds decoder fixes resolve all 81
-previously failing replays; the failure counters and acceptance rule are
-unchanged. Independent before/after comparison also verifies the 522 newly
-recovered typed children, separately from the common value sample above.
+The all-counter acceptance rule gives **1,018/1,018 clean**. The audit command
+exits **0**; its failure and `build_errors` lists are empty, and the executable
+was unchanged at completion. The per-replay acceptance rule and failure
+counters are those of the 2026-09-25 audits; the runner has since added only
+the build-level `build_errors` check described under [Method](#method).
 
 The [machine-readable report](../tools/fixtures/build_verification.json)
 contains build aggregates, input hashes and the complete finding list.
@@ -48,7 +51,44 @@ contains build aggregates, input hashes and the complete finding list.
 | 13.02 | 205 | 205 | 141,928,372 | 5,117,150 | 2,923,122 |
 | 13.04 | 108 | 108 | 67,440,898 | 2,474,063 | 1,357,848 |
 | 13.05 | 401 | 401 | 253,658,021 | 9,310,150 | 5,085,060 |
-| 13.06 | 6 | 6 | 3,369,205 | 126,702 | 77,750 |
+| 13.06 | 38 | 38 | 25,546,790 | 919,543 | 547,597 |
+
+Preserved unresolved RPC payloads total
+**5,589,152 main / 1,666 checkpoint**.
+Their associated skipped-bit counters are
+**11,054,801,711 main / 377,598 checkpoint**.
+The separately reported RPC suffix counters are
+**24,926,105 main / 0 checkpoint bits**.
+These nonzero populations remain outside a claim of complete semantic decoding.
+
+## Changes since 2026-09-25
+
+The previous report checked 986 replays with parser `91dc679`. It remains
+recorded in [Git history](https://github.com/yakisoba0728/vrfkit/blob/259ed10c7e0c9d87c852f80fab7535d38d2e187f/tools/fixtures/build_verification.json).
+
+- **32 new 13.06 replays.** They were copied from the game's Demos directory
+  into the archive on 2026-09-28, raising 13.06 from 6 to 38 checked replays.
+  Every one of the 986 earlier input hashes is present again and attributed to
+  the same build; none was dropped.
+- **Two roots instead of three.** The Demos directory, which added no unique
+  file on 2026-09-25, was not supplied. Discovered paths rise from 1,048 to
+  1,074, and duplicates fall from 62 to 56.
+- **Parser `91dc679` -> `259ed10`.** Every Rust change between the two lies
+  inside a `#[cfg(test)]` module. Compared section by section with the
+  executable whose digest the earlier report pins, the one used here differs
+  only in link metadata: the Rich header, the PE and debug-directory
+  timestamps, and the PDB signature. Code and data are otherwise
+  byte-identical.
+- **Runner.** `verify_build_corpus.py` now writes the `build_errors` list, so
+  the runner digest changed. The evidence specification digest did not.
+- **Carried-over results are unchanged.** Aggregating the per-replay results
+  of the 986 carried-over replays with the runner's own summary reproduces
+  every per-build entry of the earlier report exactly: all 84 counters,
+  evidence rows, table rows and bytes, and input hashes. Every change in the
+  totals therefore comes from the 32 new replays: +22,177,585 scored main
+  blocks, +792,841 checkpoint blocks and +469,847 compared values. They also
+  add one observed evidence identity to 13.06 (eight instead of seven),
+  `/Game/Characters/Gumshoe/Gumshoe_PC.Gumshoe_PC_C::ReplayLastTransformUpdateTimeStamp`.
 
 ## Method
 
@@ -87,10 +127,14 @@ against what the game displayed.
 The audit command also reports `build_errors` and exits unsuccessfully if any
 build has no observed checkpoint decoding. Documentation checks require
 positive checkpoint block and decoded-value counts, not just an evidence
-label. The recorded 986-replay audit already satisfies these conditions for
-all 24 builds; its parser commit and measured results above are unchanged.
+label. The recorded report carries an empty `build_errors` list, and all 24
+builds meet these conditions.
 
 ## Resolved findings
+
+These findings and their fixes date from 2026-09-25. The before/after
+comparison below covers the 986 replays audited that day; the 2026-09-28
+audit finds all 986 clean again.
 
 The first 2026-09-25 audit at parser `bf8ab9c` found 116 array-counter
 occurrences across 81 replays. The [original report](https://github.com/yakisoba0728/vrfkit/blob/448f2b64990647e7294f3fbe0c14d2cdf20c4ba0/tools/fixtures/build_verification.json)
@@ -127,7 +171,7 @@ three six-member main-stream deltas. The Python evidence reader now accepts
 sparse ActiveBlinds updates; projectile path points still require all members.
 
 The [before/after evidence](../tools/fixtures/blind_array_regression.json)
-compares all 986 identical replay hashes. It proves:
+compares all 986 identical replay hashes of that corpus. It proves:
 
 - **522 new typed children:** 18 main and 504 checkpoint, all independently
   matched in path, context, raw window and typed value; all 59 affected parents
@@ -154,14 +198,6 @@ cargo +1.86.0 test -p vrfkit active_blinds_ --locked
 python -W error -m unittest tools.tests.test_validate_ability_array_evidence
 ```
 
-Preserved unresolved RPC payloads total
-**5,404,667 main / 1,601 checkpoint**.
-Their associated skipped-bit counters are
-**10,755,182,079 main / 367,783 checkpoint**.
-The separately reported RPC suffix counters remain
-**24,107,731 main / 0 checkpoint bits**.
-These nonzero populations remain outside a claim of complete semantic decoding.
-
 ## Reproduce
 
 Build the parser from the revision recorded in the report. Use fresh output
@@ -171,8 +207,13 @@ against the export manifest.
 
 ```powershell
 cargo +1.86.0 build --release -p vrfkit --locked
-python tools/verify_build_corpus.py --exe target/release/vrfkit.exe --corpus '<archive-root>' --corpus '<preserved-fixture-root>' --corpus '<Demos-root>' --work-dir '<new-private-work-dir>' --output '<new-report.json>' --jobs 4
+python tools/verify_build_corpus.py --exe target/release/vrfkit.exe --corpus '<archive-root>' --corpus '<preserved-fixture-root>' --work-dir '<new-private-work-dir>' --output '<new-report.json>' --jobs 4
 ```
+
+The recorded run supplied these two roots and used `--jobs 12`. The worker
+count affects run time and memory use; aggregation does not depend on the
+order in which replays finish. A root that holds only copies of files in
+other roots adds paths and duplicates but no replay.
 
 The report pins the parser commit, Rust source digest, executable digest,
 runner digest, evidence specification and input content hashes. Inputs are
@@ -180,6 +221,12 @@ hashed again after processing, and the executable is checked at completion.
 Private logs, per-replay reports, manifests and exports remain in the work
 directory. The published report contains no source paths or player identities.
 The command writes findings even when its strict acceptance gate exits nonzero.
+
+The source, runner and evidence digests hash working-tree bytes, so they
+depend on the checkout's line endings. The recorded source digest is that of
+the auditing checkout, whose 158 hashed files equal `259ed10` after CRLF
+normalization; a fresh `core.autocrlf=true` checkout of the same commit gives
+a different digest. Compare sources with Git rather than by digest alone.
 
 ## Arithmetic evidence
 

@@ -144,12 +144,12 @@ class PayloadTests(unittest.TestCase):
             self.assertIsNotNone(validate_death_payload(row))
 
 
-def make_export(root):
+def make_export(root, build='++Ares-Core+release-13.05'):
     """Small real Parquet export with two pawn-to-PlayerState bridges and a kill."""
     root.mkdir()
     producer=tool.observation_extractor
     declarations={0:producer.PARENT,**producer.DECL}
-    manifest={'replay_build':'++Ares-Core+release-13.05',
+    manifest={'replay_build':build,
               'net_field_export_groups':[{'path':producer.GROUP,'fields':[
                   {'handle':h,'name':v[0],'compatible_checksum':v[1]} for h,v in declarations.items()]}]}
     (root/'manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
@@ -210,6 +210,25 @@ class IntegrationTests(unittest.TestCase):
             cached=tool.extract(export,cache)
             self.assertEqual(cached['death_events'],result['death_events'])
             self.assertEqual(cached['provenance']['observation_cache_sha256'],tool.file_sha(cache))
+
+    def test_measured_13_06_export_is_joined(self):
+        with tempfile.TemporaryDirectory() as t:
+            export=make_export(Path(t)/'export',build='++Ares-Core+release-13.06')
+            got=tool.extract(export)
+            self.assertEqual(got['provenance']['replay_build'],'++Ares-Core+release-13.06')
+            self.assertEqual(got['counts']['matched_pairs'],1)
+            self.assertEqual(got['counts']['state']['entities'],1)
+
+    def test_unmeasured_build_fails_through_the_cli_without_writing(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t); export=make_export(root/'export',build='++Ares-Core+release-13.07')
+            out=root/'ledger.json'
+            run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
+                                '--export',str(export),'--out',str(out)],
+                               capture_output=True,text=True)
+            self.assertEqual(run.returncode,1,run.stderr)
+            self.assertIn('outside the measured KillData set',run.stderr)
+            self.assertFalse(out.exists())
 
     def test_cache_cannot_forge_values_or_receipts(self):
         with tempfile.TemporaryDirectory() as t:

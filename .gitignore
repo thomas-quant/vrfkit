@@ -1,9 +1,11 @@
 /target
 **/*.rs.bk
 
-# tools/probe_offset is a standalone cargo project (not a workspace member) so it
-# builds into its own target directory.
+# tools/probe_offset and tools/extract_component_classes are standalone cargo
+# projects (not workspace members) so they build into their own target
+# directories.
 tools/probe_offset/target/
+tools/extract_component_classes/target/
 
 # Python bytecode from the generators in tools/.
 __pycache__/

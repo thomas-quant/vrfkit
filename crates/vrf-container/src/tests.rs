@@ -1054,6 +1054,45 @@ mod event_chunks {
         assert!(parse_known_event_payload("roundStarted", &retagged).is_none());
     }
 
+    /// The accessors are lookups into `KNOWN_EVENT_GROUPS`; every entry must
+    /// come back out of all three, and a group listed twice would make the
+    /// second entry unreachable. The explicit pins above stay: the table must
+    /// not be the only thing asserting its own values.
+    #[test]
+    fn every_known_event_group_round_trips_through_its_accessors() {
+        let mut seen = std::collections::BTreeSet::new();
+        for known in KNOWN_EVENT_GROUPS {
+            assert!(seen.insert(known.group), "{} is listed twice", known.group);
+            assert_eq!(known_event_word_count(known.group), Some(known.word_count));
+            assert_eq!(
+                known_event_payload_name(known.group),
+                Some(known.payload_name)
+            );
+            assert_eq!(
+                known_event_payload_tag(known.group),
+                Some(known.payload_tag)
+            );
+        }
+    }
+
+    /// The const lookup compares bytes by hand; a prefix, an extension or a
+    /// case change must not match, exactly as the `match` it replaced.
+    #[test]
+    fn known_event_lookup_matches_only_the_whole_group_name() {
+        for near_miss in [
+            "",
+            "characterDeat",
+            "characterDeathX",
+            "CharacterDeath",
+            "spikePlanted ",
+            "spike",
+        ] {
+            assert_eq!(known_event_word_count(near_miss), None, "{near_miss:?}");
+            assert_eq!(known_event_payload_name(near_miss), None, "{near_miss:?}");
+            assert_eq!(known_event_payload_tag(near_miss), None, "{near_miss:?}");
+        }
+    }
+
     #[test]
     fn event_payload_seconds_matches_the_chunk_millisecond_time() {
         let seconds = f32::from_bits(0x3D7F_C022);

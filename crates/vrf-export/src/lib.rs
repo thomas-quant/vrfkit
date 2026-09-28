@@ -22,6 +22,8 @@
 //! ## `fields` table -- sparse value columns vs. Union
 //!
 //! Sparse-column vs Union tradeoff detail and dictionary-encoding figures: docs/PERFORMANCE_NOTES.md#sparse-nullable-columns-vs-arrow-union.
+//! Which columns get a Parquet dictionary, and the measurement behind each
+//! table's list: docs/PERFORMANCE_NOTES.md#dictionary-encoding-is-chosen-per-column.
 //!
 //! Every ordinary decoded-field record carries at most one typed value (i64,
 //! f64, bool, or str); whole-block preservation records carry none. We

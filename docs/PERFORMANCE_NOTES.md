@@ -113,6 +113,31 @@ Source: `crates/vrf-frame/src/sections.rs`, module doc, lines ~8-16.
 > millions, so it is deliberately left reading (and validating) the string
 > rather than blind-skipping the bytes.
 
+The zero-blob figure above was one replay's. Re-measured on 2026-09-28, once
+the skips were counted (`vrf_frame::FrameSkips`, printed as `Frame skips:` by
+`export` and `validate`, and published in `manifest.json` quality and the
+`diag` JSON): `vrfkit diag` over 45 replays -- two from each of the 21 build
+directories of the local archive (13.01's two include the pinned 02d4d478)
+and the three public fixtures (12.10, 12.11, 13.00), 24 builds in all --
+walked 10,614,694 ReplayData frames and 860 checkpoint frames with **0**
+ExternalData blobs, **0** ExternalData bytes and **0** GameSpecificFrameData
+bytes. The last is structural on that sample: `vrfkit inspect` shows header
+flags `0x0002` (`HasStreamingFixes` only) on all 45, so the section never
+appears. A build that starts sending either section now moves these counters
+in every output instead of nothing.
+
+What keeps them wired is `crates/vrfkit/tests/frame_skips.rs`, not the corpus
+guards. It runs the binary on a synthetic uncompressed replay whose ReplayData
+and Checkpoint frames carry both sections, with different totals per pass,
+and fails if any of the five passes (export main and checkpoint, `validate`,
+`diag` main and checkpoint) reports another pass's numbers, only its last
+chunk's, or 0. The pinned `frame_*` export baselines cannot do that: they
+belong to one 13.01 replay, 02d4d478, whose true value is 0, so they would
+still read 0 with a pass's tally disconnected, and a new build's replays
+never reach them. `check_export_baseline.py`'s summary-vs-manifest
+reconciliation cannot either, because each pass feeds both outputs from one
+variable.
+
 ## Schema hot path (vrf-schema)
 
 ### FxHash over SipHash
@@ -177,6 +202,38 @@ comment, section "Why a visitor and not a `Vec<String>`", lines ~32-43.
 >
 > Handing out `&str` makes that case allocation-free. An alias still costs one
 > `String`, because it is genuinely new text.
+
+### Registering a new export group
+
+Source: `crates/vrf-schema/src/cache.rs`, `NetGuidCache::index_group`, whose
+doc comment points here. Measured 2026-09-28 against main 259ed10, on a
+shared machine that other jobs kept fully loaded throughout.
+
+`add_export_group` used to end every successful call by clearing `by_path`,
+`by_index` and `by_leaf` and registering every group again, one `String` per
+path spelling plus one per leaf. The checkpoint pass reads each checkpoint
+into a fresh cache and adds its groups one at a time, all of them new, so a
+checkpoint of n groups paid n(n+1)/2 registrations: 3.6-4.5 million per
+export on the replays below, where 14-17 thousand are needed. A new group now
+registers only itself; a merge or a reused index still rebuilds.
+
+`vrfkit export <replay> --out <new dir> --checkpoints`, 7 A/B pairs per
+replay alternating which side runs first, both sides at ABOVE_NORMAL
+priority, wall clock around the process, medians:
+
+| replay | checkpoints / groups | before | after | paired difference | faster |
+|---|---|---|---|---|---|
+| 13.05 `f2872006` (88 MB) | 33 / 17,102 | 5.574 s | 4.445 s | 1.082 s | 7 of 7 |
+| 13.05 `535c22e5` (84 MB) | 30 / 15,152 | 5.182 s | 4.191 s | 1.092 s | 6 of 7 |
+| 13.06 `c129014f` (89 MB) | 28 / 13,925 | 5.451 s | 4.621 s | 0.764 s | 6 of 7 |
+
+The manifest's `elapsed_ms` moved the same way (paired medians 1,154, 1,124
+and 836 ms). The same checkpoint group rows fed in-process through the crate
+before and after the change -- fresh cache per checkpoint, the reader's
+collision probe, then `add_export_group`, 9 alternating rounds -- took 1.30 s
+-> 18 ms, 1.72 s -> 22 ms and 1.00 s -> 11 ms (medians). Peak commit did not
+move: 200-202 MiB on both sides for `f2872006` over 3 pairs. Every Parquet
+file stays byte-identical.
 
 ## Replication pipeline (vrf-net)
 
@@ -433,6 +490,187 @@ choices", lines ~20-46.
 > index, shrinking data pages by 50-200x. The producer interns the same two
 > columns as `Arc<str>`; see `record` for why, and note that the interning is
 > invisible to Arrow -- the builders are fed `&str` either way.
+
+That paragraph is about the string columns. Which other columns get a
+dictionary is the next section.
+
+### Dictionary encoding is chosen per column
+
+Source: `crates/vrf-export/src/writer.rs`, `Table::DICTIONARY_COLUMNS` and
+`TableWriter::writer_properties`; each table's list, with its figures, is in
+`crates/vrf-export/src/tables/`. Measured 2026-09-28 against main `259ed10`,
+parquet-rs 59.1.0.
+
+**What was wrong.** parquet-rs dictionary-encodes every non-boolean column
+unless told otherwise (`DEFAULT_DICTIONARY_ENABLED = true`, for every physical
+type, not only strings). `writer_properties` never turned that default off; it
+only switched *on* the names in each table's `DICTIONARY_COLUMNS`. The lists
+therefore selected nothing. All 14 movement columns, every time, packet and
+GUID column, and `actors.event` were dictionary-encoded, while the comments
+said movement had "nothing to dictionary" and that `event` was "cheaper as
+plain Utf8". The loop dates from the crate's first commit (`9ded7ae`), and
+nothing read the encodings back, so no test could see it.
+
+**Method.** A throwaway build (never committed) read `VRFKIT_DICT_MODE`. `all`
+reproduced main's writer properties: all 13 files of the reference replay
+matched the committed baseline SHA-256s. `none` turned dictionary encoding off
+for every column. Both exported, with `--checkpoints`, the 45 replays the A/B
+harness selects: two per build folder from 11.06 to 13.06 (for 13.01, the
+reference replay and one other), plus the 12.10, 12.11 and 13.00 public
+fixtures. For every (replay, table, column), the column chunk's
+`total_compressed_size` was summed over row groups. Parquet encodes each
+column chunk independently, so a per-column choice can be predicted from
+those two runs. On the reference replay the rebuilt writer came within 907
+bytes of the prediction for every table, always smaller; the difference is
+metadata outside the column chunks, mostly the footer.
+
+**The rule.**
+
+1. Every string column, `Utf8` or `Dictionary<_, Utf8>`, keeps its dictionary.
+   The docs promise dictionary-encoded strings, and this leaves every string
+   column's encoding exactly as it was.
+2. Any other column gets a dictionary only where the dictionary was smaller
+   than PLAIN, summed over the 45 replays.
+
+Each table's comment gives its dictionary/plain ratios. The roundtrip tests
+check each written file's footer against its list, and reject a list entry
+that names no column or a BOOLEAN one; parquet-rs ignores both silently.
+
+The measurement also rejected the obvious fix: honour the old lists, which
+held only strings. Summed over the sample, that makes `checkpoint_fields` 1.40x
+the size it had under the everything-dictionary default, because checkpoints
+restate the same payloads: on the reference replay 343,683 checkpoint
+`raw_bits` values hold 7,084 distinct payloads, against 321,735 distinct in
+1,065,872 in `fields`. So `checkpoint_fields` keeps dictionaries on `raw_bits`
+and `value_f64`, both of which are smaller PLAIN in `fields`.
+
+**Result.** Old and new bytes of every Parquet file, summed over the same 45
+replays (from the A/B run described below):
+
+| Table | Old bytes | New bytes | Change |
+|---|---:|---:|---:|
+| `fields` | 751,968,735 | 575,691,555 | -23.4% |
+| `movement` | 1,496,335,072 | 948,646,955 | -36.6% |
+| `actors` | 4,164,501 | 3,214,316 | -22.8% |
+| `net_guids` | 7,669,274 | 5,444,904 | -29.0% |
+| `events` | 620,604 | 576,286 | -7.1% |
+| `partials` | 112,725 | 112,725 | 0 (zero rows; byte-identical) |
+| `checkpoint_fields` | 53,543,325 | 52,044,311 | -2.8% |
+| `checkpoint_actors` | 1,312,330 | 1,200,837 | -8.5% |
+| `checkpoint_net_guids` | 13,733,516 | 9,274,695 | -32.5% |
+| `checkpoint_blocks` | 8,391,956 | 5,319,390 | -36.6% |
+| `checkpoint_guid_entries` | 48,934,940 | 34,795,162 | -28.9% |
+| `checkpoint_export_groups` | 1,642,624 | 1,207,575 | -26.5% |
+| `checkpoint_export_fields` | 14,153,793 | 11,665,771 | -17.6% |
+| **all 13** | 2,402,583,395 | 1,649,194,482 | -31.4% |
+
+The lists were chosen on those 45 replays, so the same export was repeated on
+20 that were not among them, four each from 13.01, 13.02, 13.04, 13.05 and
+13.06. No table grew on any of them; 1,086,341,147 bytes became 750,058,550
+(-31.0%), with row counts unchanged. (`partials` held zero rows there too.)
+
+The reference replay, as pinned in `tools/baselines/`:
+
+| Table | Old bytes | New bytes | Change |
+|---|---:|---:|---:|
+| `fields` | 16,455,178 | 12,680,657 | -22.9% |
+| `movement` | 31,886,449 | 19,984,802 | -37.3% |
+| `actors` | 87,281 | 68,243 | -21.8% |
+| `net_guids` | 153,606 | 114,423 | -25.5% |
+| `events` | 13,411 | 12,455 | -7.1% |
+| `partials` | 2,505 | 2,505 | 0 (zero rows; byte-identical) |
+| `checkpoint_fields` | 1,218,992 | 1,183,936 | -2.9% |
+| `checkpoint_actors` | 27,118 | 24,345 | -10.2% |
+| `checkpoint_net_guids` | 277,718 | 175,916 | -36.7% |
+| `checkpoint_blocks` | 175,103 | 112,704 | -35.6% |
+| `checkpoint_guid_entries` | 928,714 | 651,660 | -29.8% |
+| `checkpoint_export_groups` | 27,041 | 20,799 | -23.1% |
+| `checkpoint_export_fields` | 287,130 | 241,210 | -16.0% |
+
+Values are unchanged. `ab_compare.py` (pyarrow rows hashed into a multiset)
+found no row present in only one side, in any table of any of the 45 replays.
+DuckDB 1.5.5, an independent Parquet reader, agrees on all 585 table pairs:
+equal row counts and an empty `EXCEPT ALL` both ways. On the reference replay
+pyarrow's `Table.equals(check_metadata=True)` holds for all 13 files; the
+embedded Arrow schema is unchanged, so `Dictionary` columns still read back as
+dictionaries, and DuckDB's `parquet_metadata()` shows a dictionary page on
+every string column of the new files. `to_valplay_bundle.py` writes
+byte-identical `events.ndjson`, `movement.ndjson` and `manifest.json` from the
+old and new exports of that replay.
+
+**Timing.** Measured on a shared 32-thread machine that other jobs kept at
+70-100% CPU, so wall time is noisy. Each pair ran both binaries back to back,
+alternating which went first, into a fresh output directory. Process CPU time
+(user plus kernel, all threads) is given beside wall time, because the Parquet
+writers run on threads of their own:
+
+| Export | Pairs | Wall, main -> new (median) | CPU, main -> new (median) | New used less CPU |
+|---|---:|---|---|---:|
+| `02d4d478` (13.01, 48 MB) | 9 | 1.706 -> 1.748 s | 3.641 -> 2.922 s (-20%) | 9 of 9 |
+| `712b571b` (13.06, 77 MB) | 9 | 2.539 -> 2.437 s | 4.969 -> 4.172 s (-16%) | 9 of 9 |
+| `02d4d478 --checkpoints` | 7 | 2.874 -> 2.633 s | 4.625 -> 3.922 s (-15%) | 7 of 7 |
+| `712b571b --checkpoints` | 7 | 5.041 -> 4.105 s | 7.359 -> 5.703 s (-23%) | 7 of 7 |
+
+Wall time does not move beyond the noise: the median per-pair ratio is
+0.94-1.00 in all four rows. The writers are off the critical path, so the
+encoding work saved shows up as CPU, not as a shorter run. `bench.json`'s
+0.791 s cannot be compared on this machine state, since main itself took
+1.706 s here.
+
+Read side, reference replay, 9 alternating pairs: pyarrow `read_table` takes
+28.9 -> 16.2 ms on `movement.parquet` and 24.3 -> 19.6 ms on `fields.parquet`.
+DuckDB `sum(pos_x), sum(pos_y), sum(time_ms)` over movement takes 17.9 ->
+9.4 ms. Two DuckDB queries over `fields` stay within noise: `GROUP BY
+group_path` (a string column whose encoding did not change) at 9.7 -> 10.2 ms,
+and `sum(bit_count) WHERE time_ms > 600000` at 4.8 -> 5.0 ms.
+`to_valplay_bundle.py` took 18.87 -> 18.27 s over 3 pairs.
+
+**Left alone, on purpose.**
+
+- Twelve string columns measured larger as dictionaries, and rule 1 keeps
+  them. Together they cost 4,375,159 bytes over the 45 replays, 3,228,193 of it
+  `checkpoint_guid_entries.literal_path` (1.19x). The ratios:
+  `events.metadata` 1.49, `checkpoint_actors.checkpoint_id` 1.37,
+  `checkpoint_export_groups.checkpoint_id` 1.34, `checkpoint_actors.event`
+  1.33, `checkpoint_guid_entries.checkpoint_id` 1.30,
+  `checkpoint_export_fields.checkpoint_id` 1.30,
+  `checkpoint_export_groups.group_path` 1.25,
+  `checkpoint_guid_entries.literal_path` 1.19,
+  `checkpoint_export_fields.rendered_name` 1.17,
+  `checkpoint_export_fields.fname_base` 1.15, `events.id` 1.07,
+  `checkpoint_blocks.checkpoint_id` 1.02. Writing them PLAIN means narrowing
+  the documented promise first.
+- `partials` wrote zero rows on all 45 replays, so its non-string columns take
+  the PLAIN default with no measurement behind it.
+- The byte-budget flush cuts the checkpoint declaration tables
+  (`checkpoint_guid_entries`, `checkpoint_export_groups`,
+  `checkpoint_export_fields`) into row groups: 10 row groups for the reference
+  replay's 74,270 GUID entries. A dictionary is per row group, so those
+  figures depend on the cuts. A fix in review at the time closes those row
+  groups only when the budget is crossed (one row group each on the reference
+  replay), so the same two runs were repeated on a build carrying it. The
+  per-column sums predict that, with these lists, none of the 45 replays grows
+  any table against that build's everything-dictionary output, and that the
+  three tables shrink 41.1%, 29.2% and 17.3% in total. A build with both
+  changes wrote, on the reference replay, 219,662 bytes for
+  `checkpoint_guid_entries` (396,821 with the fix alone), 16,481 for
+  `checkpoint_export_groups` (22,627) and 106,370 for
+  `checkpoint_export_fields` (121,648), with values equal to main's. Four
+  small columns flip to favour a dictionary there:
+  `checkpoint_index` in two of the tables, and `exported_flag` and
+  `fname_number` in `checkpoint_export_fields`. Each is worth at most 41 bytes
+  per file on average, against 112-222 bytes the other way under the cuts
+  measured here. The strings that measured larger as dictionaries become
+  smaller under one row group: `literal_path` 0.51, `rendered_name` 0.79,
+  `fname_base` 0.77. Re-measure once that fix lands.
+- One decision splits by build. `checkpoint_export_fields.slot` and `handle`
+  measure 0.89 on the 37 replays from 11.06-13.01 (fixtures included), but
+  2.01 on the 8 from 13.02-13.06, so the total picks PLAIN.
+  `checkpoint_actors.channel_index` also flips (0.96 against 1.06), on a
+  column of about 2 KB per file.
+- Only dictionary on or off was measured. Other encodings were not tried,
+  such as BYTE_STREAM_SPLIT for the float columns and DELTA_BINARY_PACKED for
+  `time_ms`/`packet_id`.
 
 ### raw_bits: SmallVec, and the rejected arena
 

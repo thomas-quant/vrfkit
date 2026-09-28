@@ -12,6 +12,17 @@ boundaries, and the original bits. This output is separate from Parquet typed
 values, so the inventory below remains the measured starting point. The
 remaining GAS task is item-schema and value interpretation.
 
+Follow-up, 2026-09-28: the extractor's build scope was re-measured on 1,018
+exports made by parser `259ed10`. All 3,999,493 `_cnc_h1` inner windows
+across 22 builds close exactly, and the extractor accepts those builds on that
+route. The 12.10 and 12.11 exports have no `_cnc_h1` rows. See
+[the build-scope entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#build-scope-re-measured-2026-09-28).
+The AbilitiesAndBuffs bodies filed under
+`/Script/ShooterGame.AresAbilitySystemComponent` were at first outside the
+extractor's selection. They became a second route the same day: 250,053 main
+and 181,108 checkpoint windows, all exact, on all 24 builds. The inventory
+below is still the 2026-09-09 measurement, and the open GAS task is unchanged.
+
 Private evidence also validates a numeric FastArray walk over all 26,303
 selected PatchVolume whole/tail windows. PatchVolume still lacks a public
 extraction route and an established class/item/property schema.
@@ -67,8 +78,8 @@ content or expected semantic gain.
 | `AbilitiesAndBuffsComponent` / unresolved CNC payload | 2,882,152 | 7,469,704,527 | Which item/property schema can be independently established? |
 | Same group / `_cnc_h1` | 2,882,152 | 7,406,284,351 | Inner window of the previous population; do not count twice |
 | BaseReplayController / `InputEventData` RPC parameter | 42,545,425 | 1,888,237,280 | What source establishes tag/action meanings? |
-| `PatchVolume` / unresolved CNC payload | 19,140 | 304,471,076 | Which class/item schema explains the validated numeric entries? |
-| `PatchVolume` / unparsed RepLayout tail | 7,163 | 236,962,614 | Which property schema explains the validated numeric entries? |
+| `PatchVolume` / unresolved CNC payload | 19,140 | 304,471,076 | Answered: GroundVolumeComponent `FragmentInfo` cells, see [GROUND_VOLUMES.md](GROUND_VOLUMES.md) |
+| `PatchVolume` / unparsed RepLayout tail | 7,163 | 236,962,614 | Answered: the same cells, see [GROUND_VOLUMES.md](GROUND_VOLUMES.md) |
 
 The AbilitiesAndBuffs numeric framing is established, but replication keys,
 item IDs, and raw property windows do not identify abilities, casts, buffs,
@@ -82,10 +93,11 @@ population; it has not independently revalidated tag frequencies or the
 historical grammar on all 42,545,425 rows. Historical upstream C# byte-array
 storage does not establish the wire grammar or action labels.
 
-PatchVolume framing has private full-population structural evidence, but no
-public extraction route or approved class/item/property schema. Any public
-decoder must retain exact original windows and must not infer property meanings
-from structural closure alone.
+PatchVolume now has a public extraction route and a schema taken from the
+replays' own declarations, checked by a second reader and against the owning
+actor's spawn geometry: [ground-area volumes](GROUND_VOLUMES.md). The decoder
+retains the exact original windows; the meanings of `Status` and `bIsActive`
+remain unestablished.
 
 ## Existing containers are not new decoder opportunities
 
@@ -101,9 +113,9 @@ bits. Their size is not evidence that combat-report decoding is absent.
 
 ## Follow-on work and admission criteria
 
-1. Establish AbilitiesAndBuffs and PatchVolume item/property schemas against
-   independent evidence before adding types. A successful bit walk alone is
-   insufficient.
+1. Establish the AbilitiesAndBuffs item/property schema against independent
+   evidence before adding types. A successful bit walk alone is insufficient.
+   (PatchVolume: done, see [GROUND_VOLUMES.md](GROUND_VOLUMES.md).)
 2. Associate existing healing, ability and GAS OwnerActor/AvatarActor
    references while retaining role conflicts, missing references and lifecycle
    uncertainty. Reference association must not become automatic player credit.

@@ -21,43 +21,55 @@
     "event_layout_mismatches": 0,
     "event_payloads_decoded": 195,
     "event_payload_unknown_groups": 0,
-    "overlay_decoded_ok": 796920,
+    "overlay_decoded_ok": 822185,
     "overlay_decode_errors": 0,
-    "overlay_raw_skip": 26507,
-    "overlay_not_in_table": 163534,
-    "overlay_no_field_name": 2034,
+    "overlay_raw_skip": 24747,
+    "overlay_not_in_table": 140814,
+    "overlay_no_field_name": 1249,
     "overlay_rows_offered": 988995,
     "effect_blobs_decoded": 61617,
     "struct_blobs_decoded": 207,
     "struct_blobs_failed": 0,
     "targeting_world_locations_decoded": 0,
-    "tracked_rewards_opaque_empty_variants": 7
+    "tracked_rewards_opaque_empty_variants": 7,
+    "cnc_rpcs_emitted": 4901,
+    "cnc_bruteforce_payloads_attempted": 4683,
+    "cnc_bruteforce_payloads_unwalked": 0,
+    "rep_layout_cnc_tails_decoded": 218,
+    "rep_layout_cnc_tails_preserved": 114,
+    "movement_sized_section_tails": 0,
+    "movement_sized_section_tail_bits": 0,
+    "movement_open_section_tails": 0,
+    "movement_open_section_tail_bits": 0,
+    "frame_external_data_blobs": 0,
+    "frame_external_data_bytes": 0,
+    "frame_game_specific_bytes": 0
   },
   "parquet": {
     "fields": {
       "rows": 1296660,
-      "bytes": 16455178,
-      "sha256": "b186a9b50b4f73f1c3a7d8482431732af5413420ba2ca9992c314bc61cb41b93"
+      "bytes": 12691368,
+      "sha256": "a2992d248a86c2cee163a3727bed961a4b5637ebe22aa77fe74e0b45828c4f3d"
     },
     "movement": {
       "rows": 1844147,
-      "bytes": 31886449,
-      "sha256": "97004059bfdcc3cee3d95f208f08b7fa855c013816d4496c52bab7b1e9f1ccfd"
+      "bytes": 19984802,
+      "sha256": "3f512fba743b98923dc7366686d5be387b9ae98a4282f0abe33878311048ecfc"
     },
     "actors": {
       "rows": 3827,
-      "bytes": 87281,
-      "sha256": "84076cf7ca398c957c3e67148d0622f72e809cb4e2157f66cd4f18b197e65d7b"
+      "bytes": 68243,
+      "sha256": "7ac509108455ec9eaa0fa87ac0aa896f8ccab4354a54e6e36d9a6bb16ab36f05"
     },
     "net_guids": {
       "rows": 16167,
-      "bytes": 153606,
-      "sha256": "501cabc678770431d0fec9c37c4e21ed06193bb93263313959e87865625bba0f"
+      "bytes": 114423,
+      "sha256": "77b64c48bf205dbc8c08626a22fd6ddb363f65808846f36148eaa607746bdf9a"
     },
     "events": {
       "rows": 195,
-      "bytes": 13411,
-      "sha256": "e3879e2aabfc83ecae48be30ef8056fc8ec10ee1dab50c3882dc2b72d0f12af2"
+      "bytes": 12455,
+      "sha256": "f4a628909f2be9d616bdb440a86183c68e619c00d7883830b66e2e081e31cb51"
     },
     "partials": {
       "rows": 0,

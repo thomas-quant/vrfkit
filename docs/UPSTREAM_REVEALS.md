@@ -24,8 +24,9 @@ The previous upstream survey is [UPSTREAM_PARITY.md](UPSTREAM_PARITY.md).
   were already decoded through the engine reference fallback.
 - `extract_player_effects.py` applies the upstream distinction between body
   identity and possession to blind updates and continuous-effect observations
-  (including nearsight). A manifest `SpawnedCharacter` identity admits player
-  targets; possession/ownership does not. Device observations remain available
+  (including nearsight). A `SpawnedCharacter` identity -- the manifest's value,
+  or an earlier value of the same field that a reconnect replaced -- admits
+  player targets; possession/ownership does not. Device observations remain available
   as source evidence but do not increment the player totals. The parser's
   existing manifest behavior already followed this rule and is now covered by
   the five upstream possession regression cases.

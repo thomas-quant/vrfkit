@@ -81,5 +81,83 @@ class DormantCloseTests(unittest.TestCase):
         self.assertEqual(tally["went_dormant"], 1)
 
 
+GIANTSLAYER = ("/Game/Characters/Deadeye/S0/Ability_X/Gun_Giantslayer/"
+               "Gun_Deadeye_X_Giantslayer_Prototype_FIreRatePrototype."
+               "Gun_Deadeye_X_Giantslayer_Prototype_FireRatePrototype_C")
+BREACH_FLASH = ("/Game/Characters/Breach/S0/Ability_Q/Projectile_Breach_Q_ThroughWalls_Flash."
+                "Projectile_Breach_Q_ThroughWalls_Flash_C")
+PHOENIX_WALL = ("/Game/Characters/Phoenix/S0/Ability_Q/Production/"
+                "Projectile_Phoenix_Q_FlameWall_ThroughWall."
+                "Projectile_Phoenix_Q_FlameWall_ThroughWall_C")
+ORBITAL_STRIKE = ("/Game/Characters/Sarge/S0/Ability_OrbitalStrike/"
+                  "GameObject_Sarge_X_OrbitalStrike_Production."
+                  "GameObject_Sarge_X_OrbitalStrike_Production_C")
+ULT_ORB = "/Game/GameObjects/CollectibleOrbs/UltPointOrb.UltPointOrb_C"
+
+
+class ClassifierTests(unittest.TestCase):
+    """Substring keywords matched names they were not written for. Measured
+    over the 1,018-export audit corpus (259ed10, 2026-09-28)."""
+
+    def test_chambers_ult_gun_is_not_an_effect(self):
+        """'fire' inside 'FIreRate': 17,304 of 32,714 damage_zone rows, with
+        a median lifetime of ~100 s -- an equippable, not a zone."""
+        self.assertFalse(effects.is_effect_class(GIANTSLAYER))
+
+    def test_breachs_flash_through_walls_is_not_a_wall(self):
+        """'wall' inside 'ThroughWalls': 1,416 rows filed as walls. A flash
+        projectile is not a persistent effect, and no other flash projectile
+        is in the table."""
+        self.assertFalse(effects.is_effect_class(BREACH_FLASH))
+
+    def test_classify_reads_the_name_the_filter_reads(self):
+        """No class in the corpus needs this, but a 'ThroughWall' name with a
+        real keyword must be classified by that keyword, the way the filter
+        admits it -- not as the wall the filter just refused to see."""
+        path = "/Game/Characters/X/S0/Ability_Q/Projectile_X_ThroughWall_Trap.Projectile_X_ThroughWall_Trap_C"
+        self.assertTrue(effects.is_effect_class(path))
+        self.assertEqual(effects.classify(path), "trap")
+
+    def test_phoenixs_flame_wall_through_wall_is_still_a_wall(self):
+        self.assertTrue(effects.is_effect_class(PHOENIX_WALL))
+        self.assertEqual(effects.classify(PHOENIX_WALL), "wall")
+
+    def test_brimstones_orbital_strike_is_a_damage_zone_not_an_orb(self):
+        """'orb' inside 'OrbitalStrike': 174 rows, 4-9 s of area damage."""
+        self.assertTrue(effects.is_effect_class(ORBITAL_STRIKE))
+        self.assertEqual(effects.classify(ORBITAL_STRIKE), "damage_zone")
+
+    def test_the_ult_orb_is_still_an_orb(self):
+        self.assertTrue(effects.is_effect_class(ULT_ORB))
+        self.assertEqual(effects.classify(ULT_ORB), "orb")
+
+
+class ActorKindTests(unittest.TestCase):
+    """The table keeps a projectile and the zone it places as two rows, by
+    design; `actor_kind` lets a consumer count one of them."""
+
+    def test_actor_kind_is_the_class_leaf_prefix(self):
+        for path, kind in (
+                ("/Game/Characters/Wraith/S0/Ability_4/Projectile_Wraith_4_Smoke."
+                 "Projectile_Wraith_4_Smoke_C", "projectile"),
+                ("/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke."
+                 "Zone_Wraith_4_Smoke_C", "zone"),
+                (CLASS, "game_object"),
+                ("/Game/Characters/Phoenix/S0/Ability_4/Production/NewMolotov/"
+                 "Patch_Phoenix_MolotovFire.Patch_Phoenix_MolotovFire_C", "patch"),
+                ("/Game/Characters/Hunter/S0/Ability_E/Drone/Pawn_Hunter_E_Drone."
+                 "Pawn_Hunter_E_Drone_C", "pawn"),
+                (ULT_ORB, "other")):
+            with self.subTest(path=path):
+                self.assertEqual(effects.actor_kind(path), kind)
+
+    def test_every_row_carries_its_actor_kind(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            rows = effects.build(_export(Path(temp), [(7, "open", 100), (7, "close", 500)]))
+        self.assertEqual(rows[0]["actor_kind"], "game_object")
+        self.assertIn("actor_kind", effects.SCHEMA.names)
+
+
 if __name__ == "__main__":
     unittest.main()

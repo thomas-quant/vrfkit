@@ -376,6 +376,105 @@ class MatchObservationTests(unittest.TestCase):
                             for row in result["round_balances"]))
         self.assertEqual(result["attribution_coverage"]["round_balance_player"]["joined"], 0)
 
+    @staticmethod
+    def _team_switch(root: Path, events: dict, money: list[tuple], buyer_snapshot_ms=None):
+        """Append switch/round events, a Money component 510 of PlayerState 610,
+        and optionally a PurchasedItemComponent snapshot of that player."""
+        net = pq.read_table(root / "net_guids.parquet")
+        pq.write_table(pa.concat_tables([net, pa.table({
+            "net_guid": [510, 511], "path": pa.array([None, None], pa.string()),
+            "outer_net_guid": [610, 611],
+        })]), root / "net_guids.parquet")
+        old = pq.read_table(root / "events.parquet")
+        pq.write_table(pa.concat_tables([old, pa.table(events)]), root / "events.parquet")
+        group = "/Script/ShooterGame.MoneyManagementComponent"
+        rows = [(time_ms, packet_id, 0, component, group, "Money", value, None)
+                for time_ms, packet_id, component, value in money]
+        if buyer_snapshot_ms is not None:
+            item = "/Script/ShooterGame.PurchasedItemComponent"
+            rows += [(buyer_snapshot_ms, 1, 920, 921, item, "PurchasingPlayerState", 610, None),
+                     (buyer_snapshot_ms, 1, 920, 921, item, "Purchaseable", 202, None)]
+        append_field_rows(root, rows)
+
+    def test_team_switch_credit_reset_is_not_a_money_decrease(self):
+        """0002c486 (13.02): switchTeams at 1,212,833, four Money writes to 800
+        eight ms later, the round starting at 1,212,958 -- and every snapshot
+        at the round start took one of those resets as its nearest decrease."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            self._team_switch(
+                root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
+                [(100, 1, 510, 5200), (208, 2, 510, 800),
+                 (100, 1, 511, 2300), (209, 2, 511, 0)],
+                buyer_snapshot_ms=300)
+            result = observations.build(root)
+
+        self.assertEqual([row["money_component_guid"] for row in result["money_decreases"]],
+                         [500])
+        window = result["money_decreases_in_team_switch_window"]
+        self.assertEqual([(row["money_component_guid"], row["before"], row["after"],
+                           row["amount"], row["team_switch_ms"], row["next_round_start_ms"])
+                          for row in window],
+                         [(510, 5200, 800, 4400, 200, 250), (511, 2300, 0, 2300, 200, 250)])
+        snapshot = next(row for row in result["transaction_snapshots"]
+                        if row["purchasing_player_state_guid"] == 610)
+        self.assertEqual(snapshot["nearby_money_decrease_count_2s"], 0)
+        self.assertIsNone(snapshot["nearest_money_decrease_ms"])
+        self.assertIsNone(snapshot["nearest_money_decrease_amount"])
+        self.assertEqual(result["team_switch_windows"], {
+            "switches": 1, "closed_by_round_start": 1, "closed_by_end_of_stream": 0})
+
+    def test_a_carried_over_800_then_a_buy_after_the_round_start_is_a_decrease(self):
+        """A player already on 800 gets no Money sample for the reset, so the
+        first buy's collapsed interval spans the switch. A rule on that interval
+        instead of on the decrease's own time removed 105 such buys from the
+        1,018-export audit corpus."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            self._team_switch(
+                root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
+                [(100, 1, 510, 800), (208, 2, 510, 800), (300, 3, 510, 300)],
+                buyer_snapshot_ms=300)
+            result = observations.build(root)
+
+        self.assertEqual(result["money_decreases_in_team_switch_window"], [])
+        buy = next(row for row in result["money_decreases"]
+                   if row["money_component_guid"] == 510)
+        self.assertEqual((buy["time_ms"], buy["before"], buy["after"]), (300, 800, 300))
+        snapshot = next(row for row in result["transaction_snapshots"]
+                        if row["purchasing_player_state_guid"] == 610)
+        self.assertEqual(snapshot["nearest_money_decrease_ms"], 300)
+        self.assertEqual(snapshot["nearest_money_decrease_amount"], 500)
+
+    def test_a_final_switch_with_no_later_round_start_windows_to_the_end(self):
+        """Eleven overtime replays end seconds after their last switchTeams,
+        and the reset is still written 8 ms after it."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            self._team_switch(root, {"group": ["switchTeams"], "time1": [200]},
+                              [(100, 1, 510, 300), (208, 2, 510, 0)])
+            result = observations.build(root)
+
+        window = result["money_decreases_in_team_switch_window"]
+        self.assertEqual([(row["after"], row["next_round_start_ms"]) for row in window],
+                         [(0, None)])
+        self.assertEqual(result["team_switch_windows"]["closed_by_end_of_stream"], 1)
+
+    def test_a_decrease_before_the_switch_is_untouched(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            self._team_switch(
+                root, {"group": ["switchTeams", "roundStarted"], "time1": [200, 250]},
+                [(100, 1, 510, 5200), (199, 2, 510, 800)])
+            result = observations.build(root)
+
+        self.assertEqual(result["money_decreases_in_team_switch_window"], [])
+        self.assertIn(199, [row["time_ms"] for row in result["money_decreases"]])
+
     def test_input_overwrite_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

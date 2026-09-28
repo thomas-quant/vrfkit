@@ -84,6 +84,19 @@ They must not be promoted to shot, reload or purchase event totals without
 independent event evidence. The player join for round balances resolved
 258,680 of 261,360 rows; unresolved ownership remains null.
 
+That 482,849 counts the team-switch credit resets as money decreases, and the
+tool then offered them to purchase snapshots as the nearest decrease. A
+decrease between `switchTeams` and the next `roundStarted` (or the end of the
+stream, when no round follows) is now published separately, as
+`money_decreases_in_team_switch_window`, and joins no snapshot. Re-measured on
+2026-09-28 over the 1,018-export audit corpus (parser 259ed10; the old and new
+`build()` run on every export and compared): 669,892 decreases before, 5,616 of
+them in 936 exports inside those windows -- all 7-10 ms after the switch,
+5,551 landing on 800, 50 on 5000, 12 on 0 and 3 on 6200 -- leaving 664,276.
+5,650 of 636,009 purchase-state snapshots had taken one of them as their
+nearest decrease and none does now; 6,373 snapshots change, only in their
+nearest/nearby-decrease fields, and every other output is identical.
+
 ## Guardian path mapping
 
 The canonical C# path has directory `Dmr`; build 13.02 onward also uses `DMR`.
@@ -148,6 +161,133 @@ field. Consuming all remaining bits was never sufficient evidence for a
 decoder. The implemented path therefore accepts only verified CNC framing and
 preserves every other tail whole.
 
+## The damage record only vrfkit emits
+
+Explained 2026-09-28. On `02d4d478` vrfkit exports one
+`MulticastNotifyDamage_Point` that neither C# build (upstream `b51d674`,
+vendored `8824794`) emits: packet 391880, actor 27232, subobject 27244,
+channel 194, a killing blow of 29.45 dealt / 20 taken on Gekko's Dizzy
+(`Projectile_E_Aggrobot_DiscTurret_PowerWave_C`), whose channel closes six
+packets later. It used to be the last item under *Remaining work*, and
+`compare_rpc_params.py` exited 1 on it. The record is on the wire, both parsers
+decode it identically once C# knows the component's class, and vrfkit is
+right to export it.
+
+**Cause: a C# class-resolution gap, not a parse difference.** Subobject 27244
+is stably named `Damageable`, and a stably-named subobject's content-block
+header carries no class NetGUID: `ReadSubobject` in
+`src/Replay.Unreal/Bunches/ContentBlockHeaderReader.cs` returns before reading
+one. For such a block `ResolveSubobjectClassPath` in
+`src/Replay.Unreal/Bunches/ContentBlockPathResolver.cs` falls back to
+`KnownSubobjectClassPaths`, a leaf-name table with four entries
+(`ReplayEffect`, `EffectManager`, `LocationalEffectManager`,
+`DamageHandlerComponent`). `Damageable` is not one of them, so the class path
+is null, `FrameClassNetCacheContentBlock` in `ContentBlockFramer.cs` skips the
+1,522-bit block, and the only event it raises is an undecoded
+`ExportGroupReceived`, which `EmitExportGroup` in
+`src/CliReader/JsonExport/ReplayExportSink.cs` drops from `events.ndjson` (it
+is counted in the manifest's `<unresolved>` `class_net_cache` bucket). Hence
+no event at all for the packet. The bunch is not partial, consistent with
+vrfkit having exported the record already at `d4731c8`, before the partial
+header correction. The resolver is identical in `b51d674` and `8824794`.
+Upstream `d23c13e` moved the table into `ValorantDescriptors.cs`
+(`AddSubobjectClassPath`) and still has no `Damageable`. At the vendored
+commit the table lives in `Replay.Unreal`, not in the vendored
+`Replay.Valorant`, so nothing under `third_party/vrp/` changes.
+
+vrfkit reaches the class through its schema-driven fallback instead: in
+`crates/vrfkit/src/sink/paths.rs` the bare name matches no declared group, so
+`resolve_function_count` calls `resolve_cnc_for_instance_name`
+(`crates/vrf-schema/src/resolve.rs`), whose `Component_ClassNetCache` suffix
+finds `/Script/ShooterGame.DamageableComponent_ClassNetCache`, the only group
+the replay declares with that leaf. This half is read from the code and the
+replay's declared groups, not from a runtime trace; what establishes that it
+binds the right class is the evidence below.
+
+**Method.**
+
+1. Record diff, keyed by packet, actor, subobject, channel and function, of
+   the pinned reference against main `259ed10`'s export: 729 C# records, 730
+   vrfkit, exactly one vrfkit-only (this one), none C#-only.
+2. A scratch build of `8824794`, instrumented to trace channel 194 over
+   packets 391850-391900 and otherwise unchanged: its `rpc_params.ndjson`,
+   `combat_report.ndjson` and `manifest.json` are byte-identical to the pinned
+   reference, and its full `events.ndjson` has no line for packet 391880. The
+   trace shows one reliable, non-partial 1,565-bit bunch on the open channel,
+   every pipeline stage continuing, and one ClassNetCache block for object
+   27244 (`Damageable`, stably named, class GUID 0) whose class path is null.
+3. The same build with one table entry added, `Damageable` ->
+   `/Script/ShooterGame.DamageableComponent`. The block then decodes as
+   `MulticastNotifyDamage_Point` (handle 1), consuming 1,522 of 1,522 block
+   bits and 1,503 of 1,503 RPC bits, 35 fields. The manifest moves exactly one
+   1,522-bit block from `<unresolved>` (13,575 to 13,574) to
+   `DamageableComponent` (3,707 to 3,708), `rpc_received` rises by one, and
+   the other 729 records and `combat_report.ndjson` are byte-identical.
+   `compare_rpc_params.py` against that output matches all 730 records. All 35
+   C# parameters equal vrfkit's, including the 185 raw bits of
+   `LifeChangeEvents`.
+
+**Why vrfkit is right.** Beyond the two parsers agreeing bit for bit, the
+record agrees with other streams of the same replay, none of which is derived
+from it:
+
+- The shooter is pawn 1466 (`Hunter_PC_C`). Its `PlayerState` is 268, which
+  is the record's `DamagerPlayerState` and `KillCreditPlayerState`. Its
+  `CurrentEquippable` has been 26796 since packet 385925; 26796 is the
+  record's `EquippableUsed`, a `RevolverPistol_C` whose `Owner` is 1466.
+- In `movement.parquet`, 1466 stands at (6117.0, -4541.7, 500.4) from
+  1,333,856 to 1,333,905 ms. `DamageOrigin` (6116.92, -4541.69, 576.41) is
+  that point raised 76.0 units, and 1466's view (yaw 264.1, pitch 6.6
+  degrees) matches `DamageDirection` (264.28, 6.45).
+- `DamageDirection` is within 0.31 degrees of the unit vector from
+  `DamageOrigin` to `DamageImpactLocation` (5748, -8221, 994), 3,721 units
+  away. `DamageDealt / FalloffMultiplier` is 55.0, a whole number, as it is
+  for all 581 damage records of the replay.
+- 1466 and Gekko (576) killed each other three times each. Two-colouring the
+  killer/victim pairs of all 132 `MulticastNotifyKilledEnemy` records has no
+  conflict and puts them on opposite teams.
+- The victim is the projectile itself: `DamagedComponent` 27266 (`Hitbox`)
+  and `LifeChangeEvents[0].ChangedComponent` 27242 (`ChildDamageSection`) are
+  both subobjects of actor 27232, and the change takes its life from 20 to 0.
+  Two packets later the actor's `Destroyed Logic` RPC arrives, its continuous
+  effects stop at 391883 and 391885, the channel closes as `Destroyed` at
+  391886, and at 391895 `Projectile_E_Aggrobot_OrbSpawner_C` opens on the
+  same channel 78 units from the impact point.
+
+**What changed.** `compare_rpc_params.py` now compares records (identity plus
+the compared values) as well as per-parameter value multisets, and lists this
+record as its one expected difference, keyed by the replay's SHA-256 (read
+from the reference's `manifest.json`), packet, actor, subobject, channel,
+function and the four compared values. It is excluded only when it occurs
+exactly so. On this replay anything else -- C# gaining the record, vrfkit
+losing it, other values, a second record at the same identity -- is reported
+STALE and exits 1, and any other difference still exits 1. Without the
+manifest the replay is unknown, nothing is applied, and a run that otherwise
+matches exits 2, because a stale entry could not be seen. Measured on
+`02d4d478` with main `259ed10`'s export: against the pinned reference the tool
+exits 0; against the output of step 3 it exits 1, reporting the entry STALE;
+with the manifest removed it exits 1 on the pinned reference and 2 on step 3's
+output. `tools/tests/test_compare_rpc_params.py` drives the real loaders over
+written files for each of those cases. Disabling the packet match, the value
+check, the replay check, the C#-side check, the multiplicity check, the stale
+verdict, the record verdict, the unknown-replay verdict, or treating a missing
+manifest as this replay, each makes at least one of its tests fail.
+
+**Scope.** The gap covers every RPC on a subobject named `Damageable`, not
+only Dizzy's. In a full-corpus export made with the main `259ed10` release
+binary (1,018 unique replays, builds 11.06 to 13.06), vrfkit emits 1,989 such
+invocations (1,318 `MulticastNotifyDamage_Point`, 671
+`MulticastNotifyDamage_Base`) in 391 replays, on the projectiles of six
+classes: `Projectile_Guide_E_HawkFlash_C` 831,
+`Projectile_E_Aggrobot_DiscTurret_PowerWave_C` 480,
+`Projectile_Killjoy_4_RemoteBees_MultiDetonate_C` 454,
+`Projectile_Clay_Q_Satchel_Arming_C` 194, `Projectile_Gumshoe_Q_CageTrap_C`
+17 and `Projectile_Gumshoe_4_CageTrap_C` 13. Counted from `net_guids.parquet`
+(path exactly `Damageable`) and the `_ClassNetCache` parameter rows on those
+objects, one invocation per distinct packet, channel, actor, object and
+function. Only the record above was checked against C#; no comparison covers
+the rest.
+
 ## Remaining work
 
 - ~~Add full-population reason counters for the 125,037 main and 835,967
@@ -167,13 +307,12 @@ preserves every other tail whole.
   damage or purchase counts.
 - Re-run the component-remap and mapping guards on each new supported build;
   the replay does not reveal Blueprint-to-native class aliases by itself.
-- Find out why neither C# build (upstream `b51d674`, vendored `8824794`) emits
-  any event for packet 391880 of `02d4d478`, where vrfkit decodes a
-  killing-blow `MulticastNotifyDamage_Point` on the `DamageableComponent` of
-  Gekko's E-ability projectile (actor 27232, channel 194; the actor closes six
-  packets later). vrfkit already produced it at `d4731c8`, before the partial
-  header correction. `compare_rpc_params.py` exits 1 on this one record until
-  it is explained; `compare_combat_report.py` matches all ten shapes.
+- Type Raze's satchel, Paint Shells and rocket `ReplicatedMovement` if they
+  are wanted. They were declined only because the reader read every location
+  at /100 ([UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md)); the level is
+  per class now ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)),
+  so each needs an entry with its measured level and a spawn-join line in
+  `REP_MOVEMENT_LOCATION_EVIDENCE`.
 
 Considered on 2026-09-14 and deliberately not done, each with the reason:
 
@@ -197,3 +336,42 @@ Considered on 2026-09-14 and deliberately not done, each with the reason:
   the machine-local corpus sweeps.
 - Updating the test counts in [CURRENT_STATUS.md](CURRENT_STATUS.md). They
   describe its dated 2026-09-09 validation run and say so.
+
+Considered on 2026-09-28 and deliberately not done:
+
+- Deleting the packet reader's partial tracker (`track_partial_bunch` in
+  `crates/vrf-net/src/packet.rs`). Nothing in this workspace reads what it
+  produces -- the pipeline strips its header flags, and never sums
+  `PacketReadResult::partial_error_count` -- but `RawPacketReader::read_packet`
+  and that field are published API, and an extractor built directly on the
+  reader is on record in [TRANSPORT_PRESERVATION.md](TRANSPORT_PRESERVATION.md).
+  Deleting the tracker would remove the field or leave it a permanent 0, which
+  is the counter-that-cannot-move shape this repository refuses. It stays,
+  documented as advisory, and the pipeline's strip keeps it that way.
+- Retiring a live actor whose channel was reopened by a partial fragment the
+  reassembly accumulator refuses or discards. Every arm that stops an open
+  bunch before its open is read now retires the live actor it displaced
+  (`retire_after_failed_open` in `crates/vrf-net/src/pipeline/mod.rs`); the
+  accumulator path does not. A probe -- a 7-bit, non-final initial fragment
+  with `bOpen` on a channel holding a live actor -- leaves that actor live,
+  frames the next bunch's block under it, and counts only the partial error.
+  Doing it needs a rule for each discard mode -- a refused current fragment,
+  a displaced in-flight assembly, an overlapping initial that is itself an
+  open, an errored final -- inside a path the verdict deliberately leaves
+  unscored, and no replay reaches it (see the measurement below).
+- Counting the bits left after a package-map export list reads cleanly.
+  `process_complete_payload` returns after the exports, so an open,
+  must-be-mapped GUIDs or content blocks behind them are never read and reach
+  no counter; only an open is named now, through `failed_reopens_while_open`,
+  and only when it displaced a live actor. What those bits are is not
+  established: no replay carries a package-map export bunch, so neither
+  reading on nor a counter with a stated meaning has anything to be checked
+  against.
+
+Measured for both items on 2026-09-28 by summing `quality.net` and
+`quality.checkpoints.net` over the 1,018 export manifests of the common audit
+of main `259ed10` (one export per unique replay, checkpoints on):
+`package_map_exports`, `must_be_mapped_guids`, `bunch_header_failures`,
+`channel_state_limit_failures`, `channel_reopens_while_open` and
+`partial_errors` are 0 in both passes, over 563,030,549 main and 4,346,884
+checkpoint bunches.

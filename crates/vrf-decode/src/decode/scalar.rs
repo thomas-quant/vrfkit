@@ -4,7 +4,7 @@
 //! the slot the overlay writes it to. `decode_field` is what checks that the
 //! payload was fully consumed, so nothing here needs to.
 
-use vrf_bitio::BitReader;
+use vrf_bitio::{BitError, BitReader};
 
 use super::{DecodeError, DecodedValue};
 
@@ -48,12 +48,20 @@ pub(super) fn decode_u32(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeEr
     Ok(DecodedValue::I64(i64::from(r.read_u32()?)))
 }
 
+/// A little-endian two's-complement 64-bit integer. Every bit pattern is a
+/// value, so unlike [`decode_u64`] there is nothing to refuse.
+pub(super) fn decode_i64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+    Ok(DecodedValue::I64(r.read_u64()? as i64))
+}
+
 pub(super) fn decode_u64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     // The overlay stores integers as i64. A u64 with its high bit set cannot
     // be represented without a silent sign flip, so reject it loudly rather
-    // than emit a plausible wrong (negative) number. The only UInt64 overlay
-    // entries are effect IDs (small values), so this never fires on supported
-    // replays -- it is a defensive loud failure for malformed input.
+    // than emit a plausible wrong (negative) number. The C# descriptors
+    // declare the effect IDs UInt64, but the property is an `int64`
+    // (FEffectID::EffectID; its compatible_checksum reproduces only with that
+    // type), so apply_type_corrections.py retypes them Int64 and no shipped
+    // entry reads UInt64 any more. This stays a defensive loud failure.
     let value = r.read_u64()?;
     if value > i64::MAX as u64 {
         return Err(DecodeError::UnsignedOverflow { value });
@@ -227,16 +235,30 @@ const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 /// The bytes are hex-encoded as they are read rather than collected first: the
 /// previous shape ran `format!("{b:02x}")` per byte, which is one heap
 /// allocation and one formatting machine per byte of payload.
+///
+/// A count the payload cannot hold is refused before a byte is read, the way
+/// `read_fstring` refuses a string's: the prefix is what is wrong, so it is
+/// `InvalidLength` and the error report prints `Malformed`. The byte loop
+/// used to find out by running into `Eof`, which printed `EOF` for the cause
+/// an FString's prefix prints as `Malformed`. The table's cap is checked
+/// first and keeps its own variant.
 pub(super) fn decode_byte_array(
     r: &mut BitReader<'_>,
     max_bytes: u32,
 ) -> Result<DecodedValue, DecodeError> {
+    let start = r.position();
     let count = r.read_int_packed()?;
     if count > max_bytes {
         return Err(DecodeError::ByteArrayLengthCapExceeded {
             declared: count,
             max: max_bytes,
         });
+    }
+    if u64::from(count) * 8 > r.bits_remaining() {
+        return Err(DecodeError::BitIo(BitError::InvalidLength {
+            position: start,
+            length: i64::from(count),
+        }));
     }
     let mut hex = String::with_capacity(count as usize * 2);
     for _ in 0..count {

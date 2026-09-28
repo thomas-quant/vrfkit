@@ -19,13 +19,27 @@ use crate::types::{ChannelCloseReason, MAX_ACTIVE_CHANNELS, MAX_PACKET_SIZE_BITS
 use std::collections::HashMap;
 
 /// Result of reading one packet.
+///
+/// [`crate::ReplicationReader`] reads `is_malformed` and nothing else. The
+/// other three fields exist for direct callers of
+/// [`RawPacketReader::read_packet`], which is published API: an extractor that
+/// stopped at this reader, bypassing the pipeline, is recorded in
+/// docs/TRANSPORT_PRESERVATION.md. No code in this workspace reads them.
 #[derive(Debug, Clone)]
 pub struct PacketReadResult {
     /// Number of bunches successfully parsed from this packet.
     pub bunch_count: u32,
     /// Whether the packet was malformed (last byte zero or payload overrun).
     pub is_malformed: bool,
-    /// Partial-bunch sequence errors encountered.
+    /// Partial-bunch sequence errors found by this reader's own partial
+    /// tracker (`track_partial_bunch`).
+    ///
+    /// Not the count any output reports. The pipeline's reassembly
+    /// accumulator is the one partial authority and its count is
+    /// [`crate::NetStats::partial_errors`]; the two trackers can disagree --
+    /// this one keeps an assembly the accumulator refused -- so the pipeline
+    /// neither sums this (doing so counted every error twice) nor lets the
+    /// tracker's header flags reach reassembly.
     pub partial_error_count: u32,
     /// Bunches refused because per-channel state could not be admitted or advanced.
     pub channel_limit_count: u32,
@@ -45,6 +59,19 @@ struct PartialState {
 /// per-channel partial-bunch state and a per-channel reliable sequence counter
 /// -- Unreal's `ReliableSequence` is per channel, so a single global counter
 /// diverges when two channels interleave reliable bunches.
+///
+/// The partial-bunch tracking is advisory. Its outputs -- `has_partial_error`
+/// and `is_partial_completed` on the headers handed to the `read_packet`
+/// callback, and [`PacketReadResult::partial_error_count`] -- are read by
+/// nothing in this workspace: the pipeline strips the flags before its
+/// reassembly accumulator, the one partial authority, sees the header (see
+/// `process_bunch`). The reliable sequence, by contrast, feeds that
+/// accumulator through `ch_sequence`.
+///
+/// The tracker was considered for deletion on 2026-09-28 and kept: those
+/// outputs are published API, so removing it would either delete
+/// `partial_error_count` or leave it a permanent 0 -- a counter that cannot
+/// move -- for any direct caller of `read_packet`.
 pub struct RawPacketReader {
     partial_bunches: HashMap<u32, PartialState>,
     in_reliable_sequence: HashMap<u32, i32>,
@@ -268,6 +295,9 @@ impl RawPacketReader {
     }
 
     /// Track partial bunch state across fragments.
+    ///
+    /// For direct callers of `read_packet` only; see [`RawPacketReader`] for
+    /// why the pipeline ignores it and why it is kept.
     fn track_partial_bunch(&mut self, header: &mut RawBunchHeader, partial_error_count: &mut u32) {
         if !header.b_partial {
             return;

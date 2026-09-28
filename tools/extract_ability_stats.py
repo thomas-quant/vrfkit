@@ -5,7 +5,9 @@
 and ``LocalizedStat`` (an FText key). They describe the same array element, so
 the wire supplies its own integer-to-name dictionary. This tool pairs only rows
 that share the complete serialized instance context and validates the result
-against mappings observed in the release-13.01--13.05 corpus.
+against the mappings observed per build, 13.01 through 13.06. Any other build
+has no dictionary: its mappings are reported as ``unknown_build`` and the exit
+is nonzero until that build is measured.
 
 Counts are serialized snapshot observations. They are not ability casts: the
 same cast can be repeated in later array snapshots or at checkpoints.
@@ -107,11 +109,30 @@ _BASE_STAT_NAMES = {
     67: "AlliesHealed",
     68: "EnemiesHealed",
 }
+_STAT_NAMES_1305 = {**_BASE_STAT_NAMES, 27: "TimeSprinting"}
+# 13.06, measured 2026-09-28 over all 38 13.06 exports of the 1,018-replay
+# common audit (parser 259ed10, `export --checkpoints`). The same pairing found
+# 14,814 main/checkpoint observations of 29 IDs with zero missing partners,
+# duplicate or null members, and zero ID or reverse-name collisions. Every
+# observed ID carries exactly its 13.05 name and none is new. That agreement is
+# the evidence, not the `known` status the 38 exports then receive: this entry
+# was built from them, so they validate against it by construction.
+# Three 13.05 IDs were not observed in any 13.06 export and stay unknown for
+# 13.06: 57 EnemiesJammed, 62 UtilDestroyed and 65 DebuffResisted. They are
+# rare on 13.05 too (12, 15 and 7 of its 401 audit exports), so their absence
+# says nothing either way. A 13.06 export carrying one fails as
+# unknown_statistic_id, which means "not yet measured on this build".
+_UNOBSERVED_IN_1306 = frozenset({57, 62, 65})
 KNOWN_STAT_NAMES = {
     "13.01": dict(_BASE_STAT_NAMES),
     "13.02": dict(_BASE_STAT_NAMES),
     "13.04": dict(_BASE_STAT_NAMES),
-    "13.05": {**_BASE_STAT_NAMES, 27: "TimeSprinting"},
+    "13.05": dict(_STAT_NAMES_1305),
+    "13.06": {
+        statistic_id: name
+        for statistic_id, name in _STAT_NAMES_1305.items()
+        if statistic_id not in _UNOBSERVED_IN_1306
+    },
 }
 
 

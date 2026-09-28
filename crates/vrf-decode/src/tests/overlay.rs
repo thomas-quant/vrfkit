@@ -1,13 +1,16 @@
 //! The overlay table's resolution order, and the hash index's agreement
 //! with the binary search it replaced.
 
+use std::collections::BTreeSet;
+
 use crate::checksum_table::CHECKSUM_TYPES;
-use crate::decode::FieldType;
+use crate::decode::{DecodeError, FieldType, decode_field};
 use crate::overlay::{
     OverlayEntry, OverlayHandleEntry, OverlayStats, OverlayTable, apply_overlay,
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
+use crate::types::{RotatorQuantization, VectorQuantization};
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
 
 const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
@@ -17,6 +20,9 @@ const SWIFT_GS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits
 const SWIFT_PS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
 /Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
 
+/// One name, two properties: the byte-shaped `B` and the 32-bit `B`
+/// (checksum 943211507, the second word of the player-state GUID -- see
+/// `player_state_guid_parts_are_scoped_uint32`) resolve by checksum alone.
 #[test]
 fn scoped_types_require_the_exact_group_name_and_checksum() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -25,7 +31,11 @@ fn scoped_types_require_the_exact_group_name_and_checksum() {
             resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(379198054)),
             Some(FieldType::Byte)
         );
-        for checksum in [None, Some(943211507), Some(1)] {
+        assert_eq!(
+            resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(943211507)),
+            Some(FieldType::UInt32)
+        );
+        for checksum in [None, Some(1)] {
             assert_eq!(
                 resolve_field_type_with_checksum(&table, group, Some("B"), None, checksum),
                 None
@@ -72,6 +82,318 @@ fn scoped_bytes_decode_exactly_and_reject_a_wider_payload() {
     assert_eq!(rejected.value_i64, None);
     assert_eq!(stats.decoded_ok, 1);
     assert_eq!(stats.decoded_err, 1);
+}
+
+const CLAY_SATCHEL_ABILITY: &str =
+    "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C";
+const CLAY_SATCHEL: &str = "/Game/Characters/Clay/S0/Ability_Q/\
+Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C";
+const CLAY_BOOMBOT: &str =
+    "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C";
+const CLAY_ROCKET: &str =
+    "/Game/Characters/Clay/S0/Ability_X/Projectile_Clay_X_Rocket.Projectile_Clay_X_Rocket_C";
+const FORCE_APPLY: &str =
+    "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
+const REPLICATED_MOVEMENT_CHECKSUM: u32 = 2_749_104_612;
+
+/// Every scoped identity must be reachable. The table (and its class
+/// aliases) resolve a name before `SCOPED_TYPES` is consulted, so a scoped
+/// entry whose group already has a table entry of the same name is never
+/// read: it can disagree with the type that is, and no row or counter would
+/// show it. Five force-module entries were exactly that once the table typed
+/// the same `NetMulticastApplyForceModule` parameters by name.
+///
+/// Resolved without a checksum, so only the table, the aliases and the
+/// engine-reference fallback can answer. The fallback answers for any group,
+/// so a name it covers is recognised by also answering for a group no table
+/// declares, and is not counted as shadowing.
+#[test]
+fn no_scoped_identity_is_shadowed_by_the_table() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    let by_name =
+        |group, name| resolve_field_type_with_checksum(&table, group, Some(name), None, None);
+    let shadowed: Vec<(&str, &str, u32)> = crate::scoped_types::SCOPED_TYPES
+        .iter()
+        .filter(|(name, group, _, _)| {
+            by_name(group, name).is_some() && by_name("/Unobserved", name).is_none()
+        })
+        .map(|(name, group, checksum, _)| (*group, *name, *checksum))
+        .collect();
+    assert!(
+        shadowed.is_empty(),
+        "scoped entries the table resolves first, so never read: {shadowed:?}"
+    );
+}
+
+/// Upstream 8b7afcb's Raze fields are typed by exact identity only: the
+/// checksum is part of the key, and another group or checksum resolves to
+/// nothing rather than borrowing the type.
+#[test]
+fn raze_scoped_identities_require_their_exact_checksum() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    let resolve = |group, name, checksum| {
+        resolve_field_type_with_checksum(&table, group, Some(name), None, checksum)
+    };
+    assert_eq!(
+        resolve(
+            CLAY_SATCHEL_ABILITY,
+            "CosmeticRandomSeed",
+            Some(2_863_861_815)
+        ),
+        Some(FieldType::Int32)
+    );
+    assert_eq!(
+        resolve(CLAY_SATCHEL_ABILITY, "CosmeticRandomSeed", Some(1)),
+        None
+    );
+    assert_eq!(
+        resolve(CLAY_SATCHEL_ABILITY, "CosmeticRandomSeed", None),
+        None
+    );
+    assert_eq!(
+        resolve("/Unobserved", "CosmeticRandomSeed", Some(2_863_861_815)),
+        None
+    );
+    // Of the seven force-module identities 8b7afcb declares, `Source` and
+    // `Duration` are still scoped here. `Module`, `ModuleType`, `Character`,
+    // `NetTimestamp` and `RespawnNumber` are typed by name in the table
+    // (apply_type_corrections.py), which resolves before any scoped entry, so
+    // scoped copies of them would be unreachable and were removed.
+    assert_eq!(
+        resolve(FORCE_APPLY, "Duration", Some(1_815_021_954)),
+        Some(FieldType::Float)
+    );
+    assert_eq!(
+        resolve(FORCE_APPLY, "Source", Some(1_966_913_909)),
+        Some(FieldType::ObjectNetGuid)
+    );
+    assert_eq!(resolve(FORCE_APPLY, "Duration", Some(1)), None);
+    // The Remove RPC is another group: exact identity means the scoped
+    // `Duration` checksum does not reach it. (Its `ModuleType` IS typed, but
+    // through the table entry's checksum, which is not this mechanism.)
+    assert_eq!(
+        resolve(
+            "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule",
+            "Duration",
+            Some(1_815_021_954)
+        ),
+        None
+    );
+    assert_eq!(
+        resolve(
+            "/Script/ShooterGame.ShooterCharacter:ClientResetRemoteMovementPrediction",
+            "isPossess",
+            Some(3_522_099_335)
+        ),
+        Some(FieldType::Bool)
+    );
+}
+
+/// The Boom Bot replicates short rotation components and a location in
+/// hundredths of a centimetre (two decimals), verified against its spawn
+/// location. Raze's byte-rotation projectiles stay untyped: they were declined
+/// while `RepMovement` read every location at scale 100 (docs/UPSTREAM_RAZE_WARDEN.md),
+/// and now that the level is per class, typing one needs its own spawn-join
+/// entry in `REP_MOVEMENT_LOCATION_EVIDENCE` first.
+#[test]
+fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            CLAY_BOOMBOT,
+            Some("ReplicatedMovement"),
+            None,
+            Some(REPLICATED_MOVEMENT_CHECKSUM)
+        ),
+        Some(FieldType::RepMovement {
+            rotation: crate::types::RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
+        })
+    );
+    for group in [CLAY_SATCHEL, CLAY_ROCKET] {
+        assert_eq!(
+            resolve_field_type_with_checksum(
+                &table,
+                group,
+                Some("ReplicatedMovement"),
+                None,
+                Some(REPLICATED_MOVEMENT_CHECKSUM)
+            ),
+            None,
+            "{group}"
+        );
+    }
+}
+
+/// Upstream's own recorded payloads from replay 42e03082 (not in the local
+/// corpus), decoded through the scoped identities: exact widths, exact values.
+#[test]
+fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
+    fn decode(
+        stats: &mut OverlayStats,
+        group: &str,
+        name: &str,
+        handle: u32,
+        checksum: u32,
+        raw: &[u8],
+        bits: u32,
+    ) -> crate::overlay::OverlayResult {
+        let table = OverlayTable::new(&OVERLAY_TABLE);
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some(name),
+            handle,
+            Some(checksum),
+            Some(raw),
+            bits,
+            stats,
+        )
+        .expect("a scoped identity is attempted")
+    }
+    let mut stats = OverlayStats::default();
+    let seed = decode(
+        &mut stats,
+        CLAY_SATCHEL_ABILITY,
+        "CosmeticRandomSeed",
+        56,
+        2_863_861_815,
+        &[0xE1, 0xE9, 0x4B, 0x40],
+        32,
+    );
+    assert_eq!(seed.value_i64, Some(1_078_716_897));
+    let offset = decode(
+        &mut stats,
+        CLAY_SATCHEL,
+        "LocationOffset",
+        5,
+        111_823_753,
+        &[0xD3, 0x20, 0x67, 0xB7, 0xA8, 0x97, 0x48, 0x00],
+        64,
+    );
+    assert_eq!(offset.value_str.as_deref(), Some("(-782.71,-1366.59,5.8)"));
+    let rotation = decode(
+        &mut stats,
+        CLAY_SATCHEL,
+        "RotationOffset",
+        7,
+        1_473_289_183,
+        &[0x01, 0x80, 0xEE, 0x27, 0xF7, 0xFF, 0x07],
+        51,
+    );
+    assert_eq!(
+        rotation.value_str.as_deref(),
+        Some("rot(90,284.03503,359.989)")
+    );
+    // `ModuleType` resolves through its table entry (EnumByte), not a scoped
+    // identity, since the table typed the Apply parameters by name; upstream's
+    // recorded 3-bit payload must still read 2.
+    let module_type = decode(
+        &mut stats,
+        FORCE_APPLY,
+        "ModuleType",
+        1,
+        3_263_282_135,
+        &[0x02],
+        3,
+    );
+    assert_eq!(module_type.value_i64, Some(2));
+    assert_eq!(stats.decoded_ok, 4);
+    // Upstream's truncation case: one byte cannot carry the rotator its
+    // presence bits announce. Rejected and counted, not truncated.
+    let truncated = decode(
+        &mut stats,
+        CLAY_SATCHEL,
+        "RotationOffset",
+        7,
+        1_473_289_183,
+        &[0x01],
+        8,
+    );
+    assert_eq!(truncated.value_str, None);
+    assert_eq!(stats.decoded_err, 1);
+}
+
+/// The four 32-bit words `A`/`B`/`C`/`D` on the player state are one FGuid, whose
+/// members Unreal declares `uint32`, so they are `UInt32` -- scoped per group
+/// and checksum from `tools/fixtures/scoped_type_evidence.json`.
+///
+/// The scope is load-bearing. The handles drift by build (A is 219, 204 or 207)
+/// and 207 is D's handle on 11.11-12.05, so no handle key could work; `B` also
+/// names nine byte-shaped properties and `A` an 8-bit one (1036865991); and
+/// scoped entries never follow the Swiftplay alias, so each group needs its own.
+#[test]
+fn player_state_guid_parts_are_scoped_uint32() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
+        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
+    };
+    let parts = [
+        ("A", 988_169_428),
+        ("B", 943_211_507),
+        ("C", 965_590_766),
+        ("D", 1_032_080_829),
+    ];
+    for group in [BOMB_PS, SWIFT_PS] {
+        for (field, checksum) in parts {
+            assert_eq!(
+                resolve(group, field, Some(checksum)),
+                Some(FieldType::UInt32),
+                "{group} {field}"
+            );
+            for other in [None, Some(checksum ^ 1)] {
+                assert_eq!(resolve(group, field, other), None, "{field} {other:?}");
+            }
+        }
+    }
+    for (field, checksum) in parts {
+        assert_eq!(resolve("/Unobserved", field, Some(checksum)), None);
+        assert_eq!(resolve(BOMB_GS, field, Some(checksum)), None);
+    }
+    assert_eq!(resolve(BOMB_PS, "A", Some(1_036_865_991)), None);
+}
+
+/// The first overlay use of `UInt32`, proved end to end: scoped lookup, then
+/// `decode_u32`, then `value_i64`, with a high-bit word staying positive.
+///
+/// 0xe28c69d7 is a real `D` value from the 2026-09-28 audit. Read as `Int32`
+/// the same four bytes are -494114345 -- a plausible wrong number that a
+/// width check alone would accept. A payload of any other width is a decode
+/// error, not a truncated or padded value.
+#[test]
+fn player_state_guid_parts_decode_unsigned_and_exactly() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, raw: &[u8], bits| {
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some("D"),
+            210,
+            Some(1_032_080_829),
+            Some(raw),
+            bits,
+            &mut stats,
+        )
+        .expect("a scoped GUID part is attempted")
+        .value_i64
+    };
+    for group in [BOMB_PS, SWIFT_PS] {
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2], 32),
+            Some(3_800_852_951)
+        );
+        assert_eq!(apply(group, &[0xd7, 0x69, 0x8c], 24), None, "{group}");
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2, 0x00], 40),
+            None,
+            "{group}"
+        );
+    }
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 4));
 }
 
 /// A Bomb class is already canonical and must not be rewritten.
@@ -336,6 +658,60 @@ fn equippable_used_is_an_object_net_guid() {
     }
 }
 
+/// The two death-montage parameters of both damage RPCs are IntPacked GUIDs,
+/// not the opaque payload the descriptor's `AddRaw` declares. Over the
+/// 1,018-replay audit (959,445 rows each): 8-bit rows are all the null GUID,
+/// and the rest resolve 100% -- `DeathMontageEffectOverride` through
+/// `net_guids` to an `FXC_*_C` finisher effect class, and
+/// `DeathMontageEffectOverrideContext` through `actors.parquet` to a `*_PC_C`
+/// pawn open at the event. `Raw` table entries win before the checksum and
+/// the scoped types, so this has to be a table correction, and the
+/// exact-quote match must not reach `...IsQueued` (a Bool).
+#[test]
+fn the_death_montage_parameters_are_object_net_guids() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in [
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
+    ] {
+        for field in [
+            "DeathMontageEffectOverride",
+            "DeathMontageEffectOverrideContext",
+        ] {
+            assert_eq!(
+                table.lookup(group, field),
+                Some(FieldType::ObjectNetGuid),
+                "{field} in {group}"
+            );
+        }
+        assert_eq!(
+            table.lookup(group, "bDeathMontageEffectOverrideIsQueued"),
+            Some(FieldType::Bool),
+            "the Bool sibling is untouched in {group}"
+        );
+    }
+    assert_eq!(lookup_checksum(1712763745), Some(FieldType::ObjectNetGuid));
+    assert_eq!(lookup_checksum(2397897524), Some(FieldType::ObjectNetGuid));
+}
+
+/// `AresEquippableDataTracker.OriginalBuyerTeam` is an inline FName: 97 bits
+/// is 1 (isHardcoded = 0) + 32 (length 4) + `Red\0` + 32 (number 0), and 105
+/// bits the same around `Blue\0`. Those two payloads are the only ones in the
+/// 1,018-replay audit (748,381 rows, main and checkpoint), and the descriptor's
+/// EnumByte could read neither -- no row is 8 bits.
+#[test]
+fn original_buyer_team_is_an_fname() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        table.lookup(
+            "/Script/ShooterGame.AresEquippableDataTracker",
+            "OriginalBuyerTeam"
+        ),
+        Some(FieldType::FName)
+    );
+    assert_eq!(lookup_checksum(255019476), Some(FieldType::FName));
+}
+
 #[test]
 fn transition_context_is_an_object_net_guid() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -363,6 +739,161 @@ fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
         ),
         Some(FieldType::VectorDouble)
     );
+}
+
+/// HawkFlash's `ReplicatedMovement` is read with byte rotator components and
+/// its `Banking` as a double, on that exact group only. Over the 1,018-replay
+/// audit every one of its 1,033,952 movement payloads (71-118 bits) is
+/// consumed exactly by the byte reading and 54.6% overrun or leave residue
+/// under the short one; `Banking` is 64 bits on all 801,700 rows, reading
+/// -180..180. The location is whole units: the packed integer at each actor's
+/// first update matches its spawn position (see REP_MOVEMENT_LOCATION_EVIDENCE),
+/// so the entry states `RoundWholeNumber` and the export is world units.
+#[test]
+fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
+    const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        table.lookup(HAWK, "ReplicatedMovement"),
+        Some(FieldType::RepMovement {
+            rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundWholeNumber,
+        })
+    );
+    assert_eq!(table.lookup(HAWK, "Banking"), Some(FieldType::Double));
+    assert_eq!(lookup_checksum(677106858), Some(FieldType::Double));
+    // Still no name rule and no checksum for ReplicatedMovement as a whole:
+    // byte and short donors both remain in the table (see
+    // `only_the_seeker_nade_keeps_short_rotator_components`), so 2749104612
+    // stays out of the checksum table.
+    assert_eq!(lookup_checksum(2749104612), None);
+}
+
+/// Cypher's trapwire and cage classes were renamed in 13.01, and the five
+/// descriptor-typed fields follow them: the same name, checksum and width on
+/// both sides of the rename (see apply_type_corrections.py). The old paths
+/// keep their entries -- 11.06-12.08 still carry them -- and `Deployed`'s
+/// checksum is learned so that the next rename is caught without an entry.
+/// `CreatedByCharacter` (2035145197) and `RelativeScale3D` (1992268157) are
+/// deliberately not learned: every agent's ability classes carry them, and a
+/// learned checksum would type all of those unmeasured.
+#[test]
+fn cypher_trap_fields_follow_the_13_01_rename() {
+    const OLD_E: &str = "/Game/Characters/Gumshoe/S0/Ability_E/";
+    const NEW_4: &str = "/Game/Characters/Gumshoe/S0/Ability_4/";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for wire in [
+        "GameObject_Gumshoe_{}_TripWire.GameObject_Gumshoe_{}_TripWire_C",
+        "GameObject_Gumshoe_{}_TripWire_SecondWire.GameObject_Gumshoe_{}_TripWire_SecondWire_C",
+    ] {
+        let old = format!("{OLD_E}{}", wire.replace("{}", "E"));
+        let new = format!("{NEW_4}{}", wire.replace("{}", "4"));
+        assert_eq!(
+            table.lookup(&old, "Deployed"),
+            Some(FieldType::Bool),
+            "{old}"
+        );
+        assert_eq!(
+            table.lookup(&new, "Deployed"),
+            Some(FieldType::Bool),
+            "{new}"
+        );
+    }
+    for (old, new) in [
+        (
+            "/Game/Characters/Gumshoe/S0/Ability_E/Ability_Gumshoe_E_TripWire.Ability_Gumshoe_E_TripWire_C",
+            "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_TripWire.Ability_Gumshoe_4_TripWire_C",
+        ),
+        (
+            "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
+            "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
+        ),
+    ] {
+        for group in [old, new] {
+            assert_eq!(
+                table.lookup(group, "CreatedByCharacter"),
+                Some(FieldType::ObjectNetGuid),
+                "{group}"
+            );
+        }
+    }
+    for group in [
+        "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
+        "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
+    ] {
+        assert_eq!(
+            table.lookup(group, "RelativeScale3D"),
+            Some(FieldType::VectorNetQuantize { scale: 100 }),
+            "{group}"
+        );
+    }
+    assert_eq!(lookup_checksum(3902815170), Some(FieldType::Bool));
+    assert_eq!(lookup_checksum(2035145197), None);
+    assert_eq!(lookup_checksum(1992268157), None);
+    // A future path for the same wire resolves through the checksum alone.
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            "/Game/Characters/Gumshoe/S0/Ability_C/GameObject_Gumshoe_C_TripWire.GameObject_Gumshoe_C_TripWire_C",
+            Some("Deployed"),
+            None,
+            Some(3902815170)
+        ),
+        Some(FieldType::Bool)
+    );
+}
+
+/// The five AGameObject smoke and zone classes read byte rotator components,
+/// and the only table entry left with short ones is Gekko's Wingman, an
+/// AShooterCharacter pawn.
+///
+/// The C# descriptors give the five the builder's ShortComponents default by
+/// calling a bare `.ReplicatedMovement()`. None of them ever replicates a
+/// rotation, so the wire cannot choose between the widths (13-J, 16-D); the
+/// choice follows the game's own class data (13.06): all five derive
+/// natively from AGameObject > AActor, no Blueprint default in their chains
+/// writes `ReplicatedMovement`, and every AGameObject class whose rotation is
+/// observable decodes at byte width only (AProjectile 38 of 38 byte,
+/// AShooterCharacter 7 of 7 short). `apply_type_corrections.py`,
+/// `retype_game_object_rotators`, has the evidence and the bound.
+#[test]
+fn only_the_seeker_nade_keeps_short_rotator_components() {
+    const GAME_OBJECTS: [&str; 5] = [
+        "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+        "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
+        "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
+        "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+        "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+    ];
+    const SEEKER_NADE: &str = "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in GAME_OBJECTS {
+        assert_eq!(
+            table.lookup(group, "ReplicatedMovement"),
+            Some(FieldType::RepMovement {
+                rotation: RotatorQuantization::ByteComponents,
+                location: VectorQuantization::RoundWholeNumber,
+            }),
+            "{group}"
+        );
+    }
+    let short: Vec<&str> = OVERLAY_TABLE
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.field_type,
+                FieldType::RepMovement {
+                    rotation: RotatorQuantization::ShortComponents,
+                    ..
+                }
+            )
+        })
+        .map(|e| e.group_path)
+        .collect();
+    assert_eq!(short, [SEEKER_NADE]);
+    // SeekerNade's short, two-decimal donor still disagrees with the byte,
+    // whole-unit ones, so the checksum stays dropped.
+    assert_eq!(lookup_checksum(REPLICATED_MOVEMENT_CHECKSUM), None);
 }
 
 #[test]
@@ -752,6 +1283,273 @@ fn apply_overlay_graceful_on_decode_failure() {
     assert_eq!(stats.decoded_err, 1);
 }
 
+/// The error report's `kind` is the only column that tells an operator WHY a
+/// field failed -- `field_name` says which -- and the report is the permanent
+/// schema-drift diagnostic. So each failure must print the label of its own
+/// cause. Every `BitIo` error used to print `EOF`, including an invalid string
+/// that consumed its payload exactly, and six value refusals printed
+/// `Residual`, the label that means leftover bits.
+///
+/// Asserted on the printed label, because that is what reaches the operator.
+///
+/// Every `DecodeError` variant the overlay can meet has a case, and the test
+/// checks that itself: `decode_field` is asked which variant each fixture
+/// fails with, and the variants reached are compared with the list the
+/// variant match below is generated from. That match has no wildcard, so a
+/// new variant does not compile until it is listed, and a listed variant
+/// with no case fails here. The cases used to be a hand-picked subset, and
+/// four of the refusals (`UnsupportedTextHistory`, `NonFiniteComponent`,
+/// `InvalidQuantizationScale`, `InvalidFNameNumber`) could go back to
+/// `Residual` with this test still green.
+#[test]
+fn the_error_report_names_the_cause_of_each_failure() {
+    const fn entry(field_name: &'static str, field_type: FieldType) -> OverlayEntry {
+        OverlayEntry {
+            group_path: "/test",
+            field_name,
+            field_type,
+        }
+    }
+    /// A field payload: its bytes and its bit count.
+    type Payload = (Vec<u8>, u32);
+    /// The payload of `fields`, each `(value, width)` written least
+    /// significant bit first, the order `BitReader` reads them in.
+    fn packed_bits(fields: &[(u64, u32)]) -> Payload {
+        let mut bytes = Vec::new();
+        let mut len = 0u32;
+        for &(value, width) in fields {
+            for bit in 0..width {
+                if len % 8 == 0 {
+                    bytes.push(0);
+                }
+                if (value >> bit) & 1 != 0 {
+                    bytes[(len / 8) as usize] |= 1 << (len % 8);
+                }
+                len += 1;
+            }
+        }
+        (bytes, len)
+    }
+    // Generated from one list, so the list and the match cannot disagree.
+    macro_rules! variants {
+        ($($variant:ident),+ $(,)?) => {
+            (
+                [$(stringify!($variant)),+],
+                |err: &DecodeError| -> &'static str {
+                    match err {
+                        $(DecodeError::$variant { .. } => stringify!($variant),)+
+                    }
+                },
+            )
+        };
+    }
+    let (every_variant, variant_of) = variants!(
+        BitIo,
+        NotFullyConsumed,
+        RawOrSkip,
+        UnsignedOverflow,
+        NonFiniteComponent,
+        InvalidQuantizationScale,
+        InvalidFNameNumber,
+        UnsupportedTextHistory,
+        ByteArrayLengthCapExceeded,
+        FTextTree,
+    );
+    static ENTRIES: [OverlayEntry; 15] = [
+        entry("BadTextBool", FieldType::FTextTree),
+        entry("BadUtf8", FieldType::FString),
+        entry("ByteArrayOverCap", FieldType::ByteArray { max_bytes: 1 }),
+        entry(
+            "ByteArrayOverlongPrefix",
+            FieldType::ByteArray { max_bytes: 8 },
+        ),
+        entry("LongInt", FieldType::Int32),
+        entry("MistypedFText", FieldType::FText),
+        entry("NaNVector", FieldType::VectorNetQuantize { scale: 100 }),
+        entry("NegativeFNameNumber", FieldType::FName),
+        entry("OverlongPrefix", FieldType::FString),
+        entry("RunawayIntPacked", FieldType::ObjectNetGuid),
+        entry("ShortInt", FieldType::Int32),
+        entry("U64PastI64", FieldType::UInt64),
+        entry("UnseenTextHistory", FieldType::FTextTree),
+        entry(
+            "ZeroQuantizeScale",
+            FieldType::VectorNetQuantize { scale: 0 },
+        ),
+        entry("ZeroSerializedIntMax", FieldType::SerializedInt { max: 0 }),
+    ];
+    // An inline FName (hardcoded bit clear), "Source" with its null, then
+    // instance number -1.
+    let mut fname = vec![(0, 1), (7, 32)];
+    fname.extend(b"Source\0".iter().map(|&byte| (u64::from(byte), 8)));
+    fname.push((u64::from(-1i32 as u32), 32));
+    let fname = packed_bits(&fname);
+    // A 7-bit SerializedInt(128) header of 0 -- no component bits, no extra
+    // info -- takes the raw-f32 fallback, and the first word is a NaN.
+    let nan_vector = packed_bits(&[
+        (0, 7),
+        (0x7fc0_0000, 32),
+        (u64::from(1.0f32.to_bits()), 32),
+        (u64::from(2.0f32.to_bits()), 32),
+    ]);
+    let bytes = |data: &[u8]| (data.to_vec(), data.len() as u32 * 8);
+    // (field, payload, variant decode_field fails with, printed label)
+    let cases: Vec<(&str, Payload, &str, &str)> = vec![
+        // The payload is shorter than the type: a real EOF.
+        ("ShortInt", bytes(&[0x01, 0x00]), "BitIo", "EOF"),
+        // The type finished with bits to spare.
+        (
+            "LongInt",
+            bytes(&[0x01, 0, 0, 0, 0]),
+            "NotFullyConsumed",
+            "Residual",
+        ),
+        // Length 3, then three bytes that are not UTF-8: consumed exactly,
+        // nothing ran out.
+        (
+            "BadUtf8",
+            bytes(&[0x03, 0, 0, 0, 0xff, 0xfe, 0x00]),
+            "BitIo",
+            "Malformed",
+        ),
+        // A length prefix of 100 with one byte behind it.
+        (
+            "OverlongPrefix",
+            bytes(&[0x64, 0, 0, 0, 0x41]),
+            "BitIo",
+            "Malformed",
+        ),
+        // The same cause in a byte array: a count of 4, within the cap of 8,
+        // with one byte behind it. It used to print `EOF`, because the byte
+        // loop ran into the end instead of the prefix being checked.
+        (
+            "ByteArrayOverlongPrefix",
+            bytes(&[0x08, 0xaa]),
+            "BitIo",
+            "Malformed",
+        ),
+        // Three declared where the table allows one, and no byte behind
+        // them: the cap is checked first, so the table constant is what the
+        // report names.
+        (
+            "ByteArrayOverCap",
+            bytes(&[0x06]),
+            "ByteArrayLengthCapExceeded",
+            "Rejected",
+        ),
+        // Five IntPacked bytes that never clear the continuation bit.
+        ("RunawayIntPacked", bytes(&[0xff; 5]), "BitIo", "Malformed"),
+        // Two bytes declared where the table allows one: the constant needs
+        // raising, which is why this variant was split from NotFullyConsumed.
+        (
+            "ByteArrayOverCap",
+            bytes(&[0x04, 0xaa, 0xbb]),
+            "ByteArrayLengthCapExceeded",
+            "Rejected",
+        ),
+        // Reads fine; the value has no i64 spelling.
+        (
+            "U64PastI64",
+            bytes(&[0, 0, 0, 0, 0, 0, 0, 0x80]),
+            "UnsignedOverflow",
+            "Rejected",
+        ),
+        // A table parameter no value can be read against. No bit is wrong.
+        ("ZeroSerializedIntMax", bytes(&[0x00]), "BitIo", "Rejected"),
+        // The same for a quantized vector's divisor.
+        (
+            "ZeroQuantizeScale",
+            bytes(&[0x00]),
+            "InvalidQuantizationScale",
+            "Rejected",
+        ),
+        // The 8 bits after the first 33 are not the selector this reader
+        // knows (5). A mistyped FText -- this repo's costliest bug shape --
+        // lands here, so it must not read as leftover bits.
+        (
+            "MistypedFText",
+            (vec![0; 6], 41),
+            "UnsupportedTextHistory",
+            "Rejected",
+        ),
+        // The full-tree reader's own causes, sorted the same way: a history
+        // it has never seen laid out is refused ...
+        (
+            "UnseenTextHistory",
+            bytes(&[0, 0, 0, 0, 5]),
+            "FTextTree",
+            "Rejected",
+        ),
+        // ... and an archive bool that is neither 0 nor 1 breaks the framing.
+        (
+            "BadTextBool",
+            bytes(&[1, 0, 0, 0, 4, 3, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f, 2, 0, 0, 0]),
+            "FTextTree",
+            "Malformed",
+        ),
+        // Read in full; the value has no JSON spelling.
+        ("NaNVector", nan_vector, "NonFiniteComponent", "Rejected"),
+        // Read in full; a negative instance number has no display spelling.
+        (
+            "NegativeFNameNumber",
+            fname,
+            "InvalidFNameNumber",
+            "Rejected",
+        ),
+    ];
+    let table = OverlayTable::new(&ENTRIES);
+    let mut printed = Vec::new();
+    for (field, (data, bits), variant, _) in &cases {
+        let field_type = ENTRIES
+            .iter()
+            .find(|entry| entry.field_name == *field)
+            .map(|entry| entry.field_type)
+            .unwrap_or_else(|| panic!("{field}: no entry"));
+        let err = decode_field(field_type, data, *bits)
+            .expect_err(&format!("{field}: the fixture must not decode"));
+        assert_eq!(variant_of(&err), *variant, "{field}: {err:?}");
+
+        let mut stats = OverlayStats::default();
+        let result = apply_overlay(
+            &table,
+            "/test",
+            group_hash_state("/test"),
+            Some(field),
+            Some(data),
+            *bits,
+            &mut stats,
+        );
+        assert!(
+            result.is_some_and(|r| r.value_i64.is_none()
+                && r.value_f64.is_none()
+                && r.value_bool.is_none()
+                && r.value_str.is_none()),
+            "{field}: must fail to decode"
+        );
+        assert_eq!(stats.decoded_err, 1, "{field}");
+        let rows = stats.error_report.top_n(2);
+        assert_eq!(rows.len(), 1, "{field}: one bucket");
+        printed.push((*field, rows[0].error_kind.to_string()));
+    }
+    let wanted: Vec<(&str, String)> = cases
+        .iter()
+        .map(|(field, _, _, want)| (*field, (*want).to_owned()))
+        .collect();
+    assert_eq!(printed, wanted);
+
+    // `Raw` and `Skip` return before `decode_field` is reached, so its
+    // `RawOrSkip` arm cannot fire from the overlay and has no case.
+    let reached: BTreeSet<&str> = cases.iter().map(|(_, _, variant, _)| *variant).collect();
+    let expected: BTreeSet<&str> = every_variant
+        .into_iter()
+        .filter(|variant| *variant != "RawOrSkip")
+        .collect();
+    assert_eq!(
+        reached, expected,
+        "every DecodeError the overlay can meet needs a case"
+    );
+}
+
 /// Byte-sized properties nested inside replicated arrays are written with
 /// only their significant bits, so the decoder must take its width from the
 /// payload rather than assuming 8.
@@ -1127,6 +1925,11 @@ fn a_table_entry_outranks_the_engine_fallback() {
 /// The replay's own `compatible_checksum` agrees with the grouping and was not
 /// used to derive it: `248` is 598402184 wherever it appears, `249` is
 /// 747197698, `Translation` 2235276067, `Scale3D` 2983776962.
+///
+/// `249` here is the FTransform's `Rotation`, an FQuat sent as X/Y/Z (W is
+/// implied), not a rotator: 747197698 reproduces as `Transform: FTransform ->
+/// Rotation: FQuat` (tools/tests/test_compatible_checksum_facts.py). The bits
+/// read the same as any 3 x f64; only the meaning was wrong.
 #[test]
 fn the_rpc_transform_vectors_are_typed() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -1250,20 +2053,314 @@ fn an_unlearned_checksum_resolves_nothing() {
 
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 18 groups and `ShortComponents`
-/// on 6, which differ in width, so guessing would desync the block rather than
-/// read a wrong value.
+/// is the one that matters -- `ByteComponents` on 25 groups and `ShortComponents`
+/// on 1, which differ in width, so guessing would desync the block; and that
+/// one group packs its location at two decimals where the rest pack whole
+/// units, which a guess would read 100x off with no error at all.
+///
+/// `AllianceFilter` used to be the second entry here and is not any more: its
+/// donors disagreed only in the table, never on the wire -- see
+/// `alliance_filter_donors_agree_so_the_checksum_types_the_receivers`.
 #[test]
 fn checksums_whose_donors_disagree_are_omitted() {
-    for (checksum, why) in [
-        (
-            2749104612u32,
-            "ReplicatedMovement: Byte vs Short components",
-        ),
-        (2270825073, "AllianceFilter: EnumByte vs EnumRemainingBits"),
+    assert_eq!(
+        lookup_checksum(2749104612),
+        None,
+        "ReplicatedMovement: Byte vs Short components"
+    );
+}
+
+/// `AllianceFilter` is one property, checksum 2270825073, declared by three
+/// effect RPCs and received by five more: the weapon `...FromClient` pair,
+/// `ReplayPlayOneShotEffectAtLocation` and both `ReplayRecord*Effect`.
+///
+/// The descriptors typed the three donors two ways -- `EnumByte` on the two
+/// `EffectManagerComponent` multicasts, `EnumRemainingBits` on
+/// `ReplayPlayContinuousEffectAtLocation` -- so the checksum learner dropped
+/// the checksum and the receivers shipped raw: 4,560,248 rows over the 1,018
+/// replays audited at 259ed10, every one of the 16,030,813 rows under this
+/// checksum 3 bits wide, where both readers return the same number. A
+/// correction makes the donors agree. This pins both halves: the donors, and
+/// the propagation that only a regenerated `checksum_table.rs` delivers -- a
+/// corrected table with a stale checksum table would still leave the
+/// receivers raw.
+#[test]
+fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    for group in [
+        "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+        "/Script/ShooterGame.EffectManagerComponent:MulticastPlayOneShotEffect",
+        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
     ] {
-        assert_eq!(lookup_checksum(checksum), None, "{why}");
+        assert_eq!(
+            table.lookup(group, "AllianceFilter"),
+            Some(FieldType::EnumByte),
+            "donor {group}"
+        );
     }
+    assert_eq!(lookup_checksum(2270825073), Some(FieldType::EnumByte));
+
+    const RECEIVER: &str =
+        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient";
+    assert_eq!(
+        table.lookup(RECEIVER, "AllianceFilter"),
+        None,
+        "typed by checksum, not by name"
+    );
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            RECEIVER,
+            Some("AllianceFilter"),
+            None,
+            Some(2270825073)
+        ),
+        Some(FieldType::EnumByte),
+    );
+}
+
+/// The weapon effect RPCs name the `EffectManager` of the pawn holding the
+/// weapon. Checksum 1051633025, declared only by these two functions: all
+/// 3,112,054 rows in the 1,018-replay audit are IntPacked 16/24-bit GUIDs that
+/// resolve in the same export's `net_guids` to `EffectManager`, whose outer is
+/// the holder's `*_PC_C` (or Yoru's decoy). Both twins are pinned: typing only
+/// one would be the "Viper typed, Phoenix not" shape this table has shipped
+/// before.
+#[test]
+fn the_weapon_effect_rpcs_type_their_effect_manager_reference() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in [
+        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient",
+        "/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
+    ] {
+        assert_eq!(
+            table.lookup(group, "EffectManagerComponent"),
+            Some(FieldType::ObjectNetGuid),
+            "{group}"
+        );
+    }
+    assert_eq!(lookup_checksum(1051633025), Some(FieldType::ObjectNetGuid));
+}
+
+/// Every group the overlay assigns a `RepMovement` type to -- a table entry or
+/// an exact scoped type -- with the location level the wire was measured at
+/// for that class.
+///
+/// Measured 2026-09-28 over the 1,018 replays audited at 259ed10 (21 of the
+/// 24 builds carry these rows): each actor `open` in actors.parquet joined to
+/// the actor's first `ReplicatedMovement` row at the same `time_ms` on the
+/// same channel, spawn position at least 50 units from the origin, comparing
+/// |packed location integer| with |spawn xyz|. The count is those joins, then
+/// the builds they span; the ratio is the level's divisor on every build.
+/// Checkpoint tables carry no `ReplicatedMovement` rows at all, so this is
+/// main-stream evidence only. docs/DATA.md has the method in full.
+const REP_MOVEMENT_LOCATION_EVIDENCE: [(&str, VectorQuantization); 27] = {
+    use VectorQuantization::{RoundTwoDecimals, RoundWholeNumber};
+    [
+        // 647 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_4/Projectile_Aggrobot_C_ExplodeyPatch.Projectile_Aggrobot_C_ExplodeyPatch_C",
+            RoundWholeNumber,
+        ),
+        // 1,007 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_Aggrobot_Zamboni_Rocket.Projectile_Aggrobot_Zamboni_Rocket_C",
+            RoundWholeNumber,
+        ),
+        // 1,819 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_DiscTurret_PowerWave.Projectile_E_Aggrobot_DiscTurret_PowerWave_C",
+            RoundWholeNumber,
+        ),
+        // 1,812 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_OrbSpawner.Projectile_E_Aggrobot_OrbSpawner_C",
+            RoundWholeNumber,
+        ),
+        // 932 joins, 15 builds, ratio 100.000 -- the one two-decimal class
+        (
+            "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C",
+            RoundTwoDecimals,
+        ),
+        // 5,715 joins, 14 builds, ratio 1.000
+        (
+            "/Game/Characters/BountyHunter/S0/Ability_E/Projectile_E_BountyHunter_Divebomb.Projectile_E_BountyHunter_Divebomb_C",
+            RoundWholeNumber,
+        ),
+        // Scoped entry (tools/fixtures/scoped_type_evidence.json), a pawn.
+        // 2,296 joins, 18 builds, ratio 100.000 (p1-p99 99.9986-100.0014),
+        // every component within 0.0504 of spawn; re-measured at integration.
+        (
+            "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C",
+            RoundTwoDecimals,
+        ),
+        // Table entry (apply_type_corrections.py ADDITIONS). 8,265 joins, 15
+        // builds, ratio 1.000 (p1-p99 0.9998-1.0001), every component within
+        // 0.50 of spawn; re-measured at integration with an independent join.
+        (
+            "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C",
+            RoundWholeNumber,
+        ),
+        // 5,280 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
+            RoundWholeNumber,
+        ),
+        // 12,032 joins, 14 builds, ratio 1.000
+        (
+            "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+            RoundWholeNumber,
+        ),
+        // 1,046 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+            RoundWholeNumber,
+        ),
+        // 596 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Mage/S0/Ability_Q/Projectile_Mage_Q_Wall.Projectile_Mage_Q_Wall_C",
+            RoundWholeNumber,
+        ),
+        // 703 joins, 8 builds, ratio 1.000
+        (
+            "/Game/Characters/Pandemic/S0/Ability_E/Projectile_Pandemic_E_SmokeScreen_NoCollision.Projectile_Pandemic_E_SmokeScreen_NoCollision_C",
+            RoundWholeNumber,
+        ),
+        // 2,765 joins, 18 builds, ratio 1.000
+        (
+            "/Game/Characters/Phoenix/S0/Ability_Q/Production/Projectile_Phoenix_Q_FlameWall_ThroughWall.Projectile_Phoenix_Q_FlameWall_ThroughWall_C",
+            RoundWholeNumber,
+        ),
+        // 27,667 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
+            RoundWholeNumber,
+        ),
+        // 3,320 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
+            RoundWholeNumber,
+        ),
+        // 3,490 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+            RoundWholeNumber,
+        ),
+        // 3,505 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/Projectile_Smonk_DecayNade.Projectile_Smonk_DecayNade_C",
+            RoundWholeNumber,
+        ),
+        // 3,269 joins, 12 builds, ratio 1.000
+        (
+            "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel.Projectile_Neon_C_Tunnel_C",
+            RoundWholeNumber,
+        ),
+        // 1,029 joins, 11 builds, ratio 1.000
+        (
+            "/Game/Characters/Terra/S0/Ability_4/GameObject_Terra_C_TimeSlowGrenade_Explosion.GameObject_Terra_C_TimeSlowGrenade_Explosion_C",
+            RoundWholeNumber,
+        ),
+        // 1,033 joins, 11 builds, ratio 1.000
+        (
+            "/Game/Characters/Terra/S0/Ability_4/Projectile_Terra_C_TimeSlowGrenade.Projectile_Terra_C_TimeSlowGrenade_C",
+            RoundWholeNumber,
+        ),
+        // 13,892 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Vampire/S0/Ability_4/Projectile_Vampire_4_NearsightAoE.Projectile_Vampire_4_NearsightAoE_C",
+            RoundWholeNumber,
+        ),
+        // 14,935 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_4/Projectile_Wraith_4_Smoke.Projectile_Wraith_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 14,902 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 4,062 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_Q/Projectile_Wraith_Q_NearsightMissile.Projectile_Wraith_Q_NearsightMissile_C",
+            RoundWholeNumber,
+        ),
+        // 11,976 joins, 20 builds, ratio 1.000
+        (
+            "/Game/Characters/Wushu/S0/Ability_4/Projectile_Wushu_4_Smoke.Projectile_Wushu_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 288,644 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Weapons/WeaponPickups/EquippablePickupProjectile.EquippablePickupProjectile_C",
+            RoundWholeNumber,
+        ),
+    ]
+};
+
+/// The location level of every `RepMovement` type the overlay can assign is
+/// the measured one, and no group gets a `RepMovement` type this list does not
+/// name.
+///
+/// The level is not on the wire, so the generator has to default it (whole
+/// units, extract_descriptors.py REP_MOVEMENT_LOCATION), and a default is a
+/// prior, not a measurement. Pinning each class keeps a changed default or a
+/// dropped correction from moving a class silently; failing on an unlisted
+/// group keeps a NEW class from taking the default without anyone checking
+/// it -- add it here only with its spawn-position evidence.
+///
+/// Three routes can assign the type, and all three are held to the list: the
+/// table and the exact scoped types by group, checksum propagation by
+/// admitting no `RepMovement` at all. The scoped route matters because it is
+/// generated from its own fixture, where a new `RepMovement` literal would
+/// never pass through the table's default or its corrections.
+#[test]
+fn every_rep_movement_entry_carries_its_measured_location_level() {
+    use std::collections::BTreeMap;
+
+    let table = OVERLAY_TABLE.iter().map(|e| (e.group_path, e.field_type));
+    let scoped = crate::scoped_types::SCOPED_TYPES
+        .iter()
+        .map(|&(_, group, _, field_type)| (group, field_type));
+    let mut declared: BTreeMap<&str, VectorQuantization> = BTreeMap::new();
+    for (group, field_type) in table.chain(scoped) {
+        if let FieldType::RepMovement { location, .. } = field_type {
+            let previous = declared.insert(group, location);
+            assert!(
+                previous.is_none() || previous == Some(location),
+                "{group}: RepMovement declared at two location levels"
+            );
+        }
+    }
+    let measured: BTreeMap<&str, VectorQuantization> =
+        REP_MOVEMENT_LOCATION_EVIDENCE.into_iter().collect();
+    assert_eq!(
+        measured.len(),
+        REP_MOVEMENT_LOCATION_EVIDENCE.len(),
+        "the evidence list names a group twice"
+    );
+    for (group, level) in &declared {
+        assert_eq!(
+            measured.get(group),
+            Some(level),
+            "{group}: declared {level:?}; the measured level differs or was never recorded"
+        );
+    }
+    for group in measured.keys() {
+        assert!(
+            declared.contains_key(group),
+            "{group}: measured but no route assigns it a RepMovement type"
+        );
+    }
+    // The name rule the checksum map would apply is closed for this field
+    // (donors disagree), so the table is the only route to a RepMovement type.
+    assert!(
+        CHECKSUM_TYPES
+            .iter()
+            .all(|(_, t)| !matches!(t, FieldType::RepMovement { .. })),
+        "a checksum-propagated RepMovement type would bypass the per-class evidence"
+    );
 }
 
 /// The map is only useful if it holds something; a silently empty generated
@@ -1286,6 +2383,11 @@ fn the_checksum_table_is_populated_and_sorted() {
 /// One entry each: checksum propagation carries `StopMovementTime` to
 /// `ReplayStopContinuousEffectAtLocation` (244888268) and `HandleNumber` to
 /// `NetMulticastRemoveForceModule` (3336285386).
+///
+/// `HandleNumber` is unsigned: 3336285386 reproduces only as
+/// `Handle: FForceModuleHandle -> HandleNumber: uint32`
+/// (tools/tests/test_compatible_checksum_facts.py), so both the Apply entry and
+/// the checksum that carries it to Remove say `UInt32`.
 #[test]
 fn the_movement_time_pair_and_force_module_handle_are_typed() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -1301,8 +2403,164 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
             "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
             "HandleNumber"
         ),
-        Some(FieldType::Int32),
+        Some(FieldType::UInt32),
     );
+    assert_eq!(lookup_checksum(3336285386), Some(FieldType::UInt32));
+}
+
+/// `EffectID` is the `int64` member of `FEffectID`, not the `ulong` the C#
+/// descriptors declare: each replay checksum below reproduces with `int64`
+/// and not with `uint64` (tools/tests/test_compatible_checksum_facts.py has
+/// the chains), and the 13.06 executable's reflection agrees.
+///
+/// The table entries are the donors; the checksum table carries the type on to
+/// the RPCs that declare no entry of their own (`MulticastStopContinuousEffect`,
+/// the weapons' `MulticastPlayContinuousEffectFromClient`,
+/// `ReplayStopContinuousEffectAtLocation`). Both halves are pinned because the
+/// CI checksum guard compares a one-group fixture and cannot see a checksum
+/// table left behind by a retyped donor.
+#[test]
+fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for (group, checksum) in [
+        ("/Script/ShooterGame.EffectManagerComponent", 1129645208),
+        (
+            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+            2340855891,
+        ),
+        (
+            "/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
+            2340855891,
+        ),
+        (
+            "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+            2251343646,
+        ),
+    ] {
+        assert_eq!(
+            table.lookup(group, "EffectID"),
+            Some(FieldType::Int64),
+            "{group}"
+        );
+        assert_eq!(
+            lookup_checksum(checksum),
+            Some(FieldType::Int64),
+            "{checksum}"
+        );
+    }
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
+            Some("EffectID"),
+            None,
+            Some(2340855891)
+        ),
+        Some(FieldType::Int64),
+    );
+    assert!(
+        !OVERLAY_TABLE
+            .iter()
+            .any(|e| e.field_type == FieldType::UInt64),
+        "no entry should still read an int64 property as UInt64"
+    );
+}
+
+/// The rest of `NetMulticastApplyForceModule`'s parameters, and the one
+/// `NetMulticastRemoveForceModule` parameter that only the checksum reaches.
+///
+/// Measured over the 1,018-replay audit (665,519 Apply rows, all main
+/// stream): `RespawnNumber` is 32 bits reading 0..38 and equals the same
+/// character's typed `AresInventory.RespawnNumber` on 665,363 of 665,370
+/// comparable rows; `NetTimestamp` is 32 bits of finite f32 on the 1/128 s
+/// tick grid; `ModuleType` is 3 bits reading {0, 2}; `Module` and `Character`
+/// are IntPacked GUIDs -- every `Module` resolves to a `ForceModule_*` class
+/// and every `Character` equals the row's own actor GUID.
+///
+/// `ModuleType` is declared once, on Apply. Remove carries the same property
+/// (checksum 3263282135) with no entry of its own, so its 2,743,504 rows are
+/// typed only if the regenerated checksum table learned the Apply donor --
+/// the same route `HandleNumber` takes above. Paired by (object, handle),
+/// Remove and Apply agree on 647,381 of 647,381 rows.
+#[test]
+fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() {
+    const APPLY: &str =
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
+    const REMOVE: &str =
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule";
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    for (field, expected) in [
+        ("RespawnNumber", FieldType::Int32),
+        ("NetTimestamp", FieldType::Float),
+        ("ModuleType", FieldType::EnumByte),
+        ("Module", FieldType::ObjectNetGuid),
+        ("Character", FieldType::ObjectNetGuid),
+    ] {
+        assert_eq!(table.lookup(APPLY, field), Some(expected), "Apply {field}");
+    }
+    assert_eq!(lookup_checksum(3263282135), Some(FieldType::EnumByte));
+    assert_eq!(
+        table.lookup(REMOVE, "ModuleType"),
+        None,
+        "typed by checksum, not by name"
+    );
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            REMOVE,
+            Some("ModuleType"),
+            None,
+            Some(3263282135)
+        ),
+        Some(FieldType::EnumByte),
+    );
+    // The component's own `RespawnNumber` property (checksum 3044239005) is a
+    // different property on a different group; the RPC entry does not reach it.
+    assert_eq!(
+        table.lookup(
+            "/Script/ShooterGame.ForceModuleManagerComponent",
+            "RespawnNumber"
+        ),
+        None
+    );
+}
+
+/// `ReadyingStateComponent.AuthEquipSpeed` and the two inventory correction
+/// counters. Measured over the 1,018-replay audit: `AuthEquipSpeed` is 3 bits
+/// on all 1,015,515 rows (main {0,1,2}, checkpoints always 0), matching its
+/// descriptor-typed sibling `AutoEquipTransitionContext.AutoEquipSpeed` in the
+/// same packet; `CorrectionIndex` and `LastSeenClientCorrectionIndex` are 32
+/// bits on all 1,222,930 / 1,129,599 rows, strictly increasing per actor, with
+/// `LastSeen <= Correction - 1` on every paired row.
+#[test]
+fn readying_speed_and_inventory_correction_counters_are_typed() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for (group, field, expected) in [
+        (
+            "/Script/ShooterGame.ReadyingStateComponent",
+            "AuthEquipSpeed",
+            FieldType::EnumByte,
+        ),
+        (
+            "/Script/ShooterGame.AresInventory",
+            "CorrectionIndex",
+            FieldType::Int32,
+        ),
+        (
+            "/Script/ShooterGame.AresInventory",
+            "LastSeenClientCorrectionIndex",
+            FieldType::Int32,
+        ),
+    ] {
+        assert_eq!(table.lookup(group, field), Some(expected), "{field}");
+    }
+    for (checksum, expected) in [
+        (3151779304u32, FieldType::EnumByte),
+        (3198546915, FieldType::Int32),
+        (1076231069, FieldType::Int32),
+    ] {
+        assert_eq!(lookup_checksum(checksum), Some(expected), "{checksum}");
+    }
 }
 
 /// Which named area of the map a player is standing in -- "A Site", "Mid",
@@ -1453,8 +2711,9 @@ fn the_weapon_classes_type_215_and_216_like_everything_else() {
 /// table already carries `ReplayPlayContinuousEffectAtLocation.Rotation` as
 /// `RotationShort`.
 ///
-/// It is not the other `249`. That one is a `VectorDouble` under a different
-/// checksum; this family shares 2526428638 and is 19 bits, not 192.
+/// It is not the other `249`. That one is the FQuat X/Y/Z of an FTransform, a
+/// `VectorDouble` under 747197698; this family shares 2526428638 -- a
+/// top-level `Rotation: FRotator` -- and is 19 bits, not 192.
 #[test]
 fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
     const GROUPS: [&str; 5] = [
@@ -1553,6 +2812,108 @@ fn targeting_vectors_and_heal_causer_require_exact_scoped_checksums() {
             None
         );
     }
+}
+
+const HEAL_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal";
+const DECAY_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay";
+
+/// The heal and overheal-decay references, each typed by its exact
+/// group/name/checksum from `tools/fixtures/scoped_type_evidence.json`.
+///
+/// Scoped because the same parameter names carry other checksums on the damage
+/// RPCs (`MulticastNotifyDamage_Base` / `_Point`), which the descriptor types by
+/// name in their own groups -- a name rule would merge signatures the schema
+/// keeps apart. The negatives pin that boundary: no checksum, a neighbouring
+/// checksum, the exported `_ClassNetCache` spelling, or the sibling RPC types
+/// nothing. Production resolves through `with_handles`, so this does too.
+#[test]
+fn heal_and_decay_references_require_exact_scoped_checksums() {
+    const CNC: &str = "/Script/ShooterGame.DamageableComponent_ClassNetCache";
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
+        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
+    };
+    let cases = [
+        (HEAL_PARAMS, "EventInstigator", 3_087_885_251),
+        (HEAL_PARAMS, "EventInstigatorPawn", 3_901_949_544),
+        (DECAY_PARAMS, "EventInstigator", 3_087_885_251),
+        (DECAY_PARAMS, "EventInstigatorPawn", 3_901_949_544),
+        (DECAY_PARAMS, "DecayCauser", 3_648_603_088),
+    ];
+    for (group, field, checksum) in cases {
+        assert_eq!(
+            resolve(group, field, Some(checksum)),
+            Some(FieldType::ObjectNetGuid),
+            "{group} {field}"
+        );
+        for other in [None, Some(checksum ^ 1)] {
+            assert_eq!(
+                resolve(group, field, other),
+                None,
+                "{group} {field} {other:?}"
+            );
+        }
+        let (_, function) = group.split_once(':').expect("a parameter group");
+        let exported = format!("{function}.{field}");
+        assert_eq!(resolve(CNC, &exported, Some(checksum)), None, "{exported}");
+    }
+    // Each causer is declared on one RPC only.
+    assert_eq!(
+        resolve(HEAL_PARAMS, "DecayCauser", Some(3_648_603_088)),
+        None
+    );
+    assert_eq!(resolve(DECAY_PARAMS, "HealCauser", Some(546_618_027)), None);
+}
+
+/// The scoped references decode through the ordinary packed-NetGUID reader,
+/// with the payload consumed exactly.
+///
+/// The 24-bit window is the widest the 2026-09-28 audit saw on these
+/// parameters (50,360 = 56 + 9*128 + 3*16384, low-bit continuation). The
+/// single zero byte is the null reference: 39 `DecayCauser` rows in that audit
+/// are exactly `0x00`, and they decode to 0 -- Unreal's null NetGUID, the same
+/// value the damage-side references already export -- not to an actor.
+#[test]
+fn heal_and_decay_references_decode_packed_guids_exactly() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, field: &str, handle: u32, checksum: u32, raw: &[u8], bits| {
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some(field),
+            handle,
+            Some(checksum),
+            Some(raw),
+            bits,
+            &mut stats,
+        )
+        .expect("a scoped reference is attempted")
+        .value_i64
+    };
+    let pawn = apply(
+        HEAL_PARAMS,
+        "EventInstigatorPawn",
+        8,
+        3_901_949_544,
+        &[0x71, 0x13, 0x06],
+        24,
+    );
+    assert_eq!(pawn, Some(50_360));
+    let null = apply(DECAY_PARAMS, "DecayCauser", 9, 3_648_603_088, &[0x00], 8);
+    assert_eq!(null, Some(0));
+    // A byte the packed value never claims is a residual, not a value.
+    let residual = apply(
+        HEAL_PARAMS,
+        "EventInstigator",
+        7,
+        3_087_885_251,
+        &[0x71, 0x13, 0x06, 0x00],
+        32,
+    );
+    assert_eq!(residual, None);
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 1));
 }
 
 /// The life-change array walks into its four members, on real wire bytes.

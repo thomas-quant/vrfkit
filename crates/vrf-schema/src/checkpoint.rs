@@ -167,7 +167,9 @@ pub enum CheckpointPathMode {
     /// Retain the former decimal rendering for callers comparing legacy output.
     LegacyDecimal,
     /// Resolve zero-based indices into preceding literal GUID paths in this
-    /// checkpoint. This is the default, measured over builds 13.01 through 13.05.
+    /// checkpoint. This is the default. It was first measured on builds 13.01
+    /// through 13.05; the main-stream cross-check described at
+    /// [`read_checkpoint_tables`] covers all 24 supported builds.
     LiteralPathTable,
 }
 
@@ -185,8 +187,20 @@ pub enum CheckpointPathMode {
 /// zero-based order. References do not append to the table, and the table resets
 /// for every call. This rule resolved all 14,403,610 indexed entries in 714
 /// measured replays from builds 13.01, 13.02, 13.04 and 13.05 (2026-09-08).
-/// The exact current engine serializer is not available as an independent
-/// specification. Raw indices remain available to [`CheckpointTableSink`].
+///
+/// The main replay stream is an independent check on it: it declares the same
+/// server GUIDs through [`crate::read_export_guids`] into a separate cache, so
+/// its paths never pass through this rule. On 2026-09-28, in 1,018 replays
+/// covering all 24 supported builds, the path this rule selects equalled the
+/// main stream's path for all 19,993,994 indexed entries whose GUID the main
+/// stream also declared, while a one-based index, references appended to the
+/// table, and one table shared across checkpoints each disagreed on most of
+/// them. `tools/check_export_baseline.py --checkpoints` and
+/// `tools/verify_build_corpus.py` repeat the comparison on every export they
+/// check; docs/CHECKPOINT_PATH_RESOLUTION.md has the method. That is
+/// agreement between two readers of the same files: the exact current engine
+/// serializer is still not available as an independent specification. Raw
+/// indices remain available to [`CheckpointTableSink`].
 ///
 /// An index outside the preceding literals is rejected before decoding the
 /// frame. Call [`read_checkpoint_tables_with_sink_mode`] with

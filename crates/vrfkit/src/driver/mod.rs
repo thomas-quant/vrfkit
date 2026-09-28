@@ -17,7 +17,6 @@
 pub(crate) mod checkpoints;
 mod publish;
 mod summary;
-pub(crate) mod totals;
 mod writers;
 
 use std::fs;
@@ -39,17 +38,16 @@ use vrf_export::{
     CheckpointNetGuidWriter, EventRecord, EventWriter, FieldRecord, FieldWriter, MovementRecord,
     MovementWriter, NetGuidRecord, NetGuidWriter,
 };
-use vrf_frame::iter_demo_frames;
+use vrf_frame::{FrameSkips, walk_demo_frames};
 use vrf_net::pipeline::ReplicationReader;
 use vrf_schema::NetGuidCache;
 
 use crate::error::CliError;
 use crate::manifest::{self, ManifestQuality};
-use crate::sink::{ChannelState, ExportSink, RecordBuffers};
+use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 use checkpoints::{CheckpointStats, ReplayContext};
 use publish::OutputTransaction;
 use summary::RunTotals;
-use totals::SinkTotals;
 use writers::WriterThread;
 
 /// The structural payload for an Event group that declares `word_count` words,
@@ -159,6 +157,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);
     let mut chunks_processed = 0u32;
     let mut frames_walked = 0u32;
+    let mut frame_skips = FrameSkips::default();
     let mut total_packets: u32 = 0;
     let mut channel_state = ChannelState::new();
 
@@ -171,7 +170,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     let mut event_trailing_bytes: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut error_report = OverlayErrorReport::default();
-    // Every sink-derived counter, in one place. See `totals`.
+    // Every sink-derived counter, in one place. See `sink::totals`.
     let mut sink_totals = SinkTotals::default();
     let mut event_layout_mismatches: u64 = 0;
     let mut event_first_layout_mismatch: Option<String> = None;
@@ -282,56 +281,56 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         // records the first one and makes later callbacks no-ops until the
         // frame walk finishes and the error can be returned here.
         let mut packet_error = None;
-        let (_, chunk_frames) =
-            iter_demo_frames(&decompressed, ctx.flags, &mut cache, |pkt, packet_cache| {
-                if packet_error.is_some() {
-                    return;
+        let walk = walk_demo_frames(&decompressed, ctx.flags, &mut cache, |pkt, packet_cache| {
+            if packet_error.is_some() {
+                return;
+            }
+            let pkt_id = total_packets;
+            total_packets += 1;
+
+            // Scoped so the sink's borrow of `buffers` ends before they are
+            // drained. The buffers outlive the sink; that is the point.
+            {
+                let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
+                sink.enable_measured_array_routes(ctx.branch);
+                sink.time_ms = pkt.time_ms;
+                sink.packet_id = pkt_id;
+
+                repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
+
+                // The sink is dropped at the end of this scope, so a counter
+                // not read here is a counter that never existed. All of them
+                // go through one function; see `sink::totals`.
+                sink_totals.absorb(&mut sink.stats, &mut error_report);
+            }
+
+            // Hand field and movement records to their writer threads.
+            let result = (|| -> Result<(), CliError> {
+                fields.append(&mut buffers.fields)?;
+                movement_rows += buffers.movement.len() as u64;
+                movement.append(&mut buffers.movement)?;
+                // Drain actor lifecycle records to the inline writer.
+                for record in buffers.actors.drain(..) {
+                    actor_writer.push(record)?;
                 }
-                let pkt_id = total_packets;
-                total_packets += 1;
-
-                // Scoped so the sink's borrow of `buffers` ends before they are
-                // drained. The buffers outlive the sink; that is the point.
-                {
-                    let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-                    sink.enable_measured_array_routes(ctx.branch);
-                    sink.time_ms = pkt.time_ms;
-                    sink.packet_id = pkt_id;
-
-                    repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
-
-                    // The sink is dropped at the end of this scope, so a counter
-                    // not read here is a counter that never existed. All of them
-                    // go through one function; see `totals`.
-                    sink_totals.absorb(&mut sink.stats, &mut error_report);
+                for mut record in buffers.partials.drain(..) {
+                    partial_rows += 1;
+                    partial_bits += record.bit_count;
+                    record.source = "main";
+                    partial_writer.push(record)?;
                 }
-
-                // Hand field and movement records to their writer threads.
-                let result = (|| -> Result<(), CliError> {
-                    fields.append(&mut buffers.fields)?;
-                    movement_rows += buffers.movement.len() as u64;
-                    movement.append(&mut buffers.movement)?;
-                    // Drain actor lifecycle records to the inline writer.
-                    for record in buffers.actors.drain(..) {
-                        actor_writer.push(record)?;
-                    }
-                    for mut record in buffers.partials.drain(..) {
-                        partial_rows += 1;
-                        partial_bits += record.bit_count;
-                        record.source = "main";
-                        partial_writer.push(record)?;
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    packet_error = Some(error);
-                }
-            })?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                packet_error = Some(error);
+            }
+        })?;
         if let Some(error) = packet_error {
             return Err(error);
         }
 
-        frames_walked += chunk_frames;
+        frames_walked += walk.frames;
+        frame_skips.absorb(walk.skipped);
         chunks_processed += 1;
 
         if chunks_processed % 100 == 0 {
@@ -428,6 +427,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
             partial_bits,
             event_trailing_bytes,
             replay_data_trailing_bytes,
+            frame_skips,
             event_layout_mismatches,
             event_first_layout_mismatch: event_first_layout_mismatch.as_deref(),
             event_payloads_decoded,
@@ -459,6 +459,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         &RunTotals {
             chunks_processed,
             frames: frames_walked,
+            frame_skips,
             total_packets,
             export_groups: cache.group_count(),
             movement_rows,
@@ -486,94 +487,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{SinkTotals, typed_event_payload};
-    use vrf_decode::OverlayErrorReport;
-
-    /// Every counter a packet's sink produced must survive the sink.
-    ///
-    /// `ExportSink` is rebuilt for each of a replay's ~530,000 packets, so a
-    /// counter the driver does not read is dropped 530,000 times and reads as a
-    /// permanent zero. `cnc_rpcs_emitted` was exactly that: the only evidence
-    /// the AbilitiesAndBuffs brute-force produced RPC structure at all, never
-    /// aggregated, so a build that stopped reaching that decoder would leave
-    /// "Decode errors: 0" and every other line on the summary untouched.
-    ///
-    /// This is one accumulation point shared by the ReplayData pass and the
-    /// checkpoint pass, so the same omission cannot be made twice.
-    #[test]
-    fn absorbing_a_packets_stats_keeps_every_counter() {
-        let mut report = OverlayErrorReport::default();
-        let mut totals = SinkTotals::default();
-
-        for _ in 0..2 {
-            let mut stats = crate::sink::ExportStats {
-                effect_blobs_decoded: 1,
-                struct_blobs_decoded: 2,
-                struct_blobs_failed: 3,
-                struct_blob_first_error: Some("blob boom".to_owned()),
-                multi_contents_items_emitted: 4,
-                movement_rpc_errors: 5,
-                movement_first_error: Some("movement boom".to_owned()),
-                truncated_rpcs: 6,
-                rpc_suffix_bits_dropped: 7,
-                cnc_rpcs_emitted: 8,
-                rep_layout_cnc_tails_decoded: 23,
-                rep_layout_cnc_tails_preserved: 24,
-                tracked_rewards_opaque_empty_variants: 25,
-                array_leaf_decode_errors: 22,
-                targeting_world_locations_decoded: 26,
-                ..crate::sink::ExportStats::default()
-            };
-            stats.overlay.decoded_ok = 9;
-            stats.overlay.decoded_err = 10;
-            stats.overlay.raw_or_skip = 11;
-            stats.overlay.not_in_table = 12;
-            stats.overlay.no_field_name = 13;
-            stats.overlay.handle_conflicts_refused = 14;
-            stats.array.elements_decoded = 15;
-            stats.array.fields_emitted = 16;
-            stats.array.truncations = 17;
-            stats.array.errors = 18;
-            stats.array.unconsumed_nested_bits = 19;
-            stats.array.implicit_terminations = 20;
-            stats.array.unconsumed_root_bits = 21;
-            totals.absorb(&mut stats, &mut report);
-        }
-
-        assert_eq!(totals.effect_blobs_decoded, 2);
-        assert_eq!(totals.struct_blobs_decoded, 4);
-        assert_eq!(totals.struct_blobs_failed, 6);
-        assert_eq!(totals.multi_contents_items_emitted, 8);
-        assert_eq!(totals.movement_rpc_errors, 10);
-        assert_eq!(totals.truncated_rpcs, 12);
-        assert_eq!(totals.rpc_suffix_bits_dropped, 14);
-        assert_eq!(totals.cnc_rpcs_emitted, 16);
-        assert_eq!(totals.rep_layout_cnc_tails_decoded, 46);
-        assert_eq!(totals.rep_layout_cnc_tails_preserved, 48);
-        assert_eq!(totals.tracked_rewards_opaque_empty_variants, 50);
-        assert_eq!(totals.array_leaf_decode_errors, 44);
-        assert_eq!(totals.targeting_world_locations_decoded, 52);
-        assert_eq!(totals.overlay.decoded_ok, 18);
-        assert_eq!(totals.overlay.decoded_err, 20);
-        assert_eq!(totals.overlay.raw_or_skip, 22);
-        assert_eq!(totals.overlay.not_in_table, 24);
-        assert_eq!(totals.overlay.no_field_name, 26);
-        assert_eq!(totals.overlay.handle_conflicts_refused, 28);
-        assert_eq!(totals.array.elements_decoded, 30);
-        assert_eq!(totals.array.fields_emitted, 32);
-        assert_eq!(totals.array.truncations, 34);
-        assert_eq!(totals.array.errors, 36);
-        assert_eq!(totals.array.unconsumed_nested_bits, 38);
-        assert_eq!(totals.array.implicit_terminations, 40);
-        assert_eq!(totals.array.unconsumed_root_bits, 42);
-        // First error wins, so a later packet cannot overwrite the one that
-        // names the build change.
-        assert_eq!(totals.struct_blob_first_error.as_deref(), Some("blob boom"));
-        assert_eq!(
-            totals.movement_first_error.as_deref(),
-            Some("movement boom")
-        );
-    }
+    use super::typed_event_payload;
 
     /// Build an Event payload: `[u32 tag][words][FString][f32 seconds]`.
     fn payload(tag: u32, words: &[u32], name: &str) -> Vec<u8> {

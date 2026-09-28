@@ -4,7 +4,8 @@
 //!   inspect <file.vrf>           -- print replay info, header, and chunk summary
 //!   validate <file.vrf>          -- run the transform-validation oracle
 //!   `diag <file.vrf> [--json <path>] [--include-payloads]` -- failure aggregate
-//!   export `<file.vrf>` --out `<dir>` -- emit five Parquet tables + manifest.json
+//!   export `<file.vrf>` --out `<dir>` -- emit six Parquet tables + manifest.json
+//!                                       (seven more with `--checkpoints`)
 //!
 //! `export` is behind the `export` feature (on by default). With it off the
 //! binary still inspects, validates and runs diag -- all three drive the whole

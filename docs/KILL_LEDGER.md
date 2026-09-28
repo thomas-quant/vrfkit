@@ -2,12 +2,16 @@
 
 `tools/extract_kill_ledger.py` produces one JSON document that retains labelled
 character-death events, component-local KillData state, and explicit links
-between them. Use a measured 13.01, 13.02, 13.04 or 13.05 export generated with
-`--checkpoints`:
+between them. Use a measured 13.01, 13.02, 13.04, 13.05 or 13.06 export
+generated with `--checkpoints`; other builds are refused (see
+[measured builds](KILL_OBSERVATIONS.md#measured-builds)):
 
 ```powershell
 python tools/extract_kill_ledger.py --export out/replay --out out/kill-ledger.json
 ```
+
+Exports from 11.06--12.09 are accepted as well; their measurement is in
+[Legacy builds](#legacy-builds-2026-09-28).
 
 The document has schema version 1 and kind
 `vrfkit_character_death_ledger`. It retains the complete
@@ -85,6 +89,38 @@ values. Input/schema/value violations return a nonzero exit; a successful
 document is written atomically. Output paths that alias input tables, the
 observation document or the implementation files are refused.
 
+## Legacy builds, 2026-09-28
+
+The ledger reads KillData through the [observation extractor](KILL_OBSERVATIONS.md),
+so it accepts the builds that extractor admits. 11.06--12.09 were added once the
+parser emitted KillData children on them (see the
+[legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+The committed command completed all 48 available exports, three per build,
+made by parser `2e7acce` with `--checkpoints`, one process at a time.
+
+| Population | Count |
+|---|---:|
+| Character-death events, with fully validated payloads | 7,381 |
+| Complete main KillData entities | 7,335 |
+| Mutually unique same-round identity joins | 7,332 |
+| Unmatched character-death events | 49 |
+| Unmatched main KillData observations | 3 |
+| Ambiguous event/main-observation joins | 0 / 0 |
+| Finisher revisions that change the previous state | 12 |
+| Finisher revisions that repeat the previous state | 0 |
+| Checkpoint snapshots matching an existing state | 73,518 |
+| Unresolved checkpoint snapshots | 0 |
+| Validated round-start events | 985 |
+
+Every killer and victim pawn resolved to a PlayerState, and no death round was
+unresolved. Matched replication lags range from 8 to 35 ms. All 49 unmatched
+death events have the same resolved PlayerState on both sides, and all three
+unmatched KillData observations retain same-round, same-victim context with a
+different killer identity. As on 13.x, these are observed attribution
+differences, not suicide or kill-credit rules. This run checks the tool's own
+invariants on these exports; it did not repeat the independent identity
+reconstruction and join comparison recorded for the 714 13.x exports below.
+
 ## Validation scope
 
 The final command completed all 714 retained exports with eight processes in
@@ -129,3 +165,40 @@ attribution differences; they do not establish suicide or kill-credit rules.
 
 This derived view does not change the parser's physical typed-row percentage
 or establish an overall gameplay-semantic coverage percentage.
+
+### 13.06, measured 2026-09-28
+
+With 13.06 admitted, the same command completed all 38 13.06 exports that
+parser `259ed10` wrote with `--checkpoints` for the 1,018-replay common audit.
+Four processes ran both extractors in 27.1 seconds, and every run exited 0:
+`kill_state.py` accepted every base, revision and checkpoint snapshot, and
+every death and round-start payload passed its independent validation. The
+figures above remain the 13.01--13.05 measurement.
+
+| 13.06 population, 38 exports | Count |
+|---|---:|
+| Character-death events, with fully validated payloads | 5,408 |
+| Complete main KillData entities | 5,373 |
+| Mutually unique same-round identity joins | 5,370 |
+| Unmatched character-death events | 38 |
+| Unmatched main KillData observations | 3 |
+| Ambiguous event/main-observation joins | 0 / 0 |
+| Finisher revisions that change the previous state | 8 |
+| Finisher revisions that repeat the previous state | 0 |
+| Checkpoint snapshots matching an existing state | 53,563 |
+| Unresolved checkpoint snapshots | 0 |
+| Validated round-start events | 726 |
+
+Every killer and victim pawn resolved to a PlayerState, and every death found
+its round. Matched replication lags range from 7 to 30 ms, and rerunning the
+join with a 100 ms cap changed no match. Of the 38 unmatched death events, 37
+have the same resolved PlayerState on both sides and one has distinct ones.
+All three unmatched KillData observations retain same-round, same-victim
+context with a different killer identity. Two further checks sit outside the
+tools: each export's `characterDeath` and `roundStarted` row counts, read
+straight from `events.parquet`, equal the document's; and the retained
+`source_observations` equal the standalone observation document after
+canonical JSON. For comparison, the 401 13.05 exports of the same audit
+give 54,872 validated death events, 54,382 joins, 490 unmatched events,
+30 unmatched observations and lags of 7 to 41 ms, again with no ambiguous join
+or unresolved checkpoint snapshot.

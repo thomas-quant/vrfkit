@@ -17,7 +17,7 @@ use vrf_decode::{ABILITY_CASTS_SCHEMA, COMBAT_ROUNDS_SCHEMA, FieldType};
 use vrf_schema::NetGuidCache;
 
 use super::intern::put;
-use super::{ExportSink, FieldValues, TABLE};
+use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 
 /// The four typed columns a decoded value lands in. At most one is ever
 /// populated; see the crate-level note on why this is four nullable columns
@@ -190,12 +190,7 @@ fn decode_verified_nested_array(
         declared_names,
         &mut stats,
     );
-    let complete = stats.truncations == 0
-        && stats.errors == 0
-        && stats.implicit_terminations == 0
-        && stats.unconsumed_nested_bits == 0
-        && stats.unconsumed_root_bits == 0;
-    if !complete {
+    if !stats.is_clean() {
         return (None, stats, 0);
     }
 
@@ -276,6 +271,14 @@ fn verified_array_leaf_type(
 /// enclosing checksum and each member declaration were observed unchanged in
 /// 13.02 and 13.05. A changed name/checksum or conflicting future overlay
 /// refuses typing, while the parent's raw_bits stay available.
+///
+/// `EffectID` is signed. Its checksum 3321413110 reproduces only as
+/// `AuthBlindManagerState: FBlindManagerState -> ActiveBlinds: TArray ->
+/// FActiveBlind -> BlindEffectID: FEffectID -> EffectID: int64` (not `uint64`,
+/// which gives 2854897423); the 13.06 executable's reflection has
+/// `FEffectID.EffectID` as Int64 too. The chain is recomputed in
+/// tools/tests/test_compatible_checksum_facts.py. Below 2^63 both readings
+/// give the same number; UInt64 refused the rest.
 fn verified_blind_leaf_type(
     handle: u32,
     name: Option<&str>,
@@ -284,7 +287,7 @@ fn verified_blind_leaf_type(
 ) -> Option<FieldType> {
     let (wanted_name, wanted_checksum, wanted_type) = match handle {
         3 => ("BlindId", 2_836_858_544, FieldType::UInt32),
-        4 => ("EffectID", 3_321_413_110, FieldType::UInt64),
+        4 => ("EffectID", 3_321_413_110, FieldType::Int64),
         5 => ("SourceID", 4_130_766_059, FieldType::FName),
         6 => ("bLocalEffect", 2_802_682_995, FieldType::Bool),
         7 => ("bTransient", 815_378_154, FieldType::Bool),
@@ -543,39 +546,45 @@ fn decode_kill_weapon_theme(raw: &[u8], bit_count: u32, failures: &mut u64) -> D
     }
 }
 
-fn measured_array_route(group: &str, parent: &str, checksum: Option<u32>) -> bool {
-    matches!(
-        (group, parent, checksum),
+/// The measured route a flattened-array parent belongs to, from its exact
+/// group, name and checksum. Whether the replay's branch admits that route is
+/// a separate question, answered by `ExportSink::admits`.
+fn measured_array_route(
+    group: &str,
+    parent: &str,
+    checksum: Option<u32>,
+) -> Option<MeasuredArrayRoute> {
+    let route = match (group, parent, checksum) {
         (
             "/Script/ShooterGame.OwnerExclusivePlayerInfo",
             "AllPlayersObfuscatedPlayerInformation",
-            Some(1_349_268_968)
-        ) | (
-            "/Script/ShooterGame.OwnerExclusivePlayerInfo",
-            "TrackedRewards",
-            Some(976_048_801)
-        ) | (
-            "/Script/ShooterGame.PersonalizationComponent",
-            "SelectedV2",
-            Some(4_218_721_055)
-        ) | (
-            "/Script/ShooterGame.PlayerMatchStatsComponent",
-            "KillData",
-            Some(1_493_759_848)
-        ) | (
+            Some(1_349_268_968),
+        ) => MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation,
+        ("/Script/ShooterGame.OwnerExclusivePlayerInfo", "TrackedRewards", Some(976_048_801)) => {
+            MeasuredArrayRoute::TrackedRewards
+        }
+        ("/Script/ShooterGame.PersonalizationComponent", "SelectedV2", Some(4_218_721_055)) => {
+            MeasuredArrayRoute::SelectedV2
+        }
+        ("/Script/ShooterGame.PlayerMatchStatsComponent", "KillData", Some(1_493_759_848)) => {
+            MeasuredArrayRoute::KillData
+        }
+        (
             "/Script/ShooterGame.EffectManagerComponent",
             "ServerActiveEffects",
-            Some(3_301_618_856)
-        ) | (
+            Some(3_301_618_856),
+        ) => MeasuredArrayRoute::ServerActiveEffects,
+        (
             "/Script/ShooterGame.FiniteSpeedMovementComponent",
             "RequestedIgnoreActors",
-            Some(1_063_739_204)
-        ) | (
-            "/Script/ShooterGame.BlindManagerComponent",
-            "ActiveBlinds",
-            Some(3_853_965_310)
-        )
-    )
+            Some(1_063_739_204),
+        ) => MeasuredArrayRoute::RequestedIgnoreActors,
+        ("/Script/ShooterGame.BlindManagerComponent", "ActiveBlinds", Some(3_853_965_310)) => {
+            MeasuredArrayRoute::ActiveBlinds
+        }
+        _ => return None,
+    };
+    Some(route)
 }
 
 /// The sole measured empty `TrackedRewards` variant is a 24-bit `02 00 00`
@@ -600,19 +609,6 @@ fn is_tracked_rewards_opaque_empty_variant(
             [0x02, 0x00, 0x00]
         )
     )
-}
-
-fn merge_array_stats(
-    target: &mut vrf_decode::ArrayDecodeStats,
-    source: &vrf_decode::ArrayDecodeStats,
-) {
-    target.elements_decoded += source.elements_decoded;
-    target.fields_emitted += source.fields_emitted;
-    target.truncations += source.truncations;
-    target.errors += source.errors;
-    target.unconsumed_nested_bits += source.unconsumed_nested_bits;
-    target.unconsumed_root_bits += source.unconsumed_root_bits;
-    target.implicit_terminations += source.implicit_terminations;
 }
 
 /// The struct-blob fields that have a dedicated decoder in `vrf-decode`.
@@ -682,37 +678,37 @@ impl ExportSink<'_> {
                 .current_group_path
                 .contains("AbilityStatisticsReplicator"),
             (Some("AllPlayersObfuscatedPlayerInformation"), Some(1_349_268_968)) => {
-                self.measured_array_routes
+                self.admits(MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation)
                     && self.current_group_path.as_ref()
                         == "/Script/ShooterGame.OwnerExclusivePlayerInfo"
             }
             (Some("TrackedRewards"), Some(976_048_801)) => {
-                self.measured_array_routes
+                self.admits(MeasuredArrayRoute::TrackedRewards)
                     && self.current_group_path.as_ref()
                         == "/Script/ShooterGame.OwnerExclusivePlayerInfo"
             }
             (Some("SelectedV2"), Some(4_218_721_055)) => {
-                self.measured_array_routes
+                self.admits(MeasuredArrayRoute::SelectedV2)
                     && self.current_group_path.as_ref()
                         == "/Script/ShooterGame.PersonalizationComponent"
             }
             (Some("KillData"), Some(1_493_759_848)) => {
-                self.measured_array_routes
+                self.admits(MeasuredArrayRoute::KillData)
                     && self.current_group_path.as_ref()
                         == "/Script/ShooterGame.PlayerMatchStatsComponent"
             }
             (Some("ServerActiveEffects"), Some(3_301_618_856)) => {
-                self.measured_array_routes
+                self.admits(MeasuredArrayRoute::ServerActiveEffects)
                     && self.current_group_path.as_ref()
                         == "/Script/ShooterGame.EffectManagerComponent"
             }
             (Some("RequestedIgnoreActors"), Some(1_063_739_204)) => {
-                self.measured_array_routes
+                self.admits(MeasuredArrayRoute::RequestedIgnoreActors)
                     && self.current_group_path.as_ref()
                         == "/Script/ShooterGame.FiniteSpeedMovementComponent"
             }
             (Some("ActiveBlinds"), Some(3_853_965_310)) => {
-                self.measured_array_routes
+                self.admits(MeasuredArrayRoute::ActiveBlinds)
                     && self.current_group_path.as_ref()
                         == "/Script/ShooterGame.BlindManagerComponent"
             }
@@ -758,8 +754,8 @@ impl ExportSink<'_> {
         let declared_checksums =
             Self::declared_handle_checksums(self.cache, &self.current_group_path);
         let parent_name = field_name.unwrap_or("_array");
-        let measured = self.measured_array_routes
-            && measured_array_route(&self.current_group_path, parent_name, checksum);
+        let measured = measured_array_route(&self.current_group_path, parent_name, checksum)
+            .is_some_and(|route| self.admits(route));
         let array_bits = if measured && parent_name == "ActiveBlinds" {
             active_blind_array_bits(raw, bit_count)
         } else {
@@ -797,13 +793,8 @@ impl ExportSink<'_> {
             )
         };
         if measured {
-            let complete = isolated.truncations == 0
-                && isolated.errors == 0
-                && isolated.implicit_terminations == 0
-                && isolated.unconsumed_nested_bits == 0
-                && isolated.unconsumed_root_bits == 0;
-            merge_array_stats(&mut self.stats.array, &isolated);
-            if !complete {
+            self.stats.array.merge_from(&isolated);
+            if !isolated.is_clean() {
                 return;
             }
             if parent_name == "ActiveBlinds"
@@ -942,7 +933,7 @@ impl ExportSink<'_> {
             })
             .collect();
         for (_, nested_stats, nested_failures) in &nested_results {
-            merge_array_stats(&mut self.stats.array, nested_stats);
+            self.stats.array.merge_from(nested_stats);
             self.stats.array_leaf_decode_errors = self
                 .stats
                 .array_leaf_decode_errors
@@ -1386,7 +1377,7 @@ fn decode_array_leaf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::{ChannelState, ExportStats, RecordBuffers};
+    use crate::sink::{ChannelState, ExportStats, MeasuredArrayRoutes, RecordBuffers};
     use std::sync::Arc;
     use vrf_net::field::FieldSink;
 
@@ -2615,6 +2606,57 @@ mod tests {
         assert_eq!(stats.array_leaf_decode_errors, 1);
     }
 
+    /// `FEffectID::EffectID` is an `int64` (checksum 3321413110 reproduces
+    /// only with that type), so a pattern with bit 63 set is a negative ID,
+    /// not an overflow: read as `UInt64` it would be refused and the element
+    /// would lose its typed value.
+    #[test]
+    fn active_blinds_effect_id_is_signed() {
+        const GROUP: &str = "/Script/ShooterGame.BlindManagerComponent";
+        const PARENT: &str = "ActiveBlinds";
+        let declarations = [
+            (3, "BlindId", 2_836_858_544),
+            (4, "EffectID", 3_321_413_110),
+            (5, "SourceID", 4_130_766_059),
+            (6, "bLocalEffect", 2_802_682_995),
+            (7, "bTransient", 815_378_154),
+            (8, "InitialDuration", 1_370_668_337),
+            (9, "StartNetMovementTime", 2_358_118_895),
+            (10, "BlindConfig", 4_121_438_116),
+            (11, "CausingActor", 2_370_661_694),
+        ];
+        let mut source_id = vec![false];
+        source_id.extend(bits_from_bytes(&(29i32).to_le_bytes()));
+        source_id.extend(bits_from_bytes(b"DedicatedServerWorldSourceID\0"));
+        source_id.extend(bits_from_bytes(&0i32.to_le_bytes()));
+        let mut blind_config = Vec::new();
+        packed(&mut blind_config, 256);
+        let mut causing_actor = Vec::new();
+        packed(&mut causing_actor, 257);
+        let bits = one_element(&[
+            (3, bits_from_bytes(&7u32.to_le_bytes())),
+            (4, bits_from_bytes(&(-2i64).to_le_bytes())),
+            (5, source_id),
+            (6, vec![true]),
+            (7, vec![false]),
+            (8, bits_from_bytes(&1.5f32.to_le_bytes())),
+            (9, bits_from_bytes(&10.0f32.to_le_bytes())),
+            (10, blind_config),
+            (11, causing_actor),
+        ]);
+        let identity = (GROUP, PARENT, 3_853_965_310);
+        let (valid, stats) =
+            export_array_with_declarations(identity, &declarations, &bits, Some(MEASURED_BUILD));
+        assert_eq!(stats.array_leaf_decode_errors, 0);
+        let effect_id = valid
+            .fields
+            .iter()
+            .find(|f| f.field_name.as_deref() == Some("ActiveBlinds[0].EffectID"))
+            .expect("the EffectID leaf is emitted");
+        assert_eq!(effect_id.value_i64, Some(-2));
+        assert_eq!(effect_id.bit_count, 64);
+    }
+
     #[test]
     fn nested_array_identity_and_overlay_disagreements_are_refused() {
         assert!(verified_nested_container(
@@ -2989,26 +3031,173 @@ mod tests {
 
     #[test]
     fn measured_routes_require_the_full_qualified_identity() {
-        assert!(measured_array_route(
-            "/Script/ShooterGame.FiniteSpeedMovementComponent",
-            "RequestedIgnoreActors",
-            Some(1_063_739_204)
-        ));
-        assert!(measured_array_route(
-            OWNER,
-            REWARDS_PARENT,
-            Some(REWARDS_CHECKSUM)
-        ));
-        assert!(!measured_array_route(
-            "/Script/ShooterGame.FiniteSpeedMovementComponent",
-            "RequestedIgnoreActors",
-            Some(1)
-        ));
-        assert!(!measured_array_route(
-            "/Script/ShooterGame.Other",
-            "RequestedIgnoreActors",
-            Some(1_063_739_204)
-        ));
+        assert_eq!(
+            measured_array_route(
+                "/Script/ShooterGame.FiniteSpeedMovementComponent",
+                "RequestedIgnoreActors",
+                Some(1_063_739_204)
+            ),
+            Some(MeasuredArrayRoute::RequestedIgnoreActors)
+        );
+        assert_eq!(
+            measured_array_route(OWNER, REWARDS_PARENT, Some(REWARDS_CHECKSUM)),
+            Some(MeasuredArrayRoute::TrackedRewards)
+        );
+        assert_eq!(
+            measured_array_route(
+                "/Script/ShooterGame.FiniteSpeedMovementComponent",
+                "RequestedIgnoreActors",
+                Some(1)
+            ),
+            None
+        );
+        assert_eq!(
+            measured_array_route(
+                "/Script/ShooterGame.Other",
+                "RequestedIgnoreActors",
+                Some(1_063_739_204)
+            ),
+            None
+        );
+    }
+
+    /// The gate is per route, not per build: one legacy branch can expand
+    /// KillData while its TrackedRewards and ActiveBlinds parents stay single
+    /// raw rows. Every case is a leaf the 13.05 route types, so a typed child
+    /// appears exactly where the branch admits the route and nowhere else.
+    ///
+    /// `is_known_array_field` picks each parent's admission bit by hand, so
+    /// what this checks is that every parent reads its own route's bit. Each
+    /// flattened route has a case, from a match with no wildcard, and every
+    /// supported branch runs, plus no branch at all; the expected admission
+    /// comes from `MeasuredArrayRoutes::for_branch`, whose table
+    /// `routes_are_pinned_for_every_supported_branch` pins. This used to be
+    /// four routes on five branches, and an arm reading another route's bit
+    /// passed wherever the two agreed on those five: ServerActiveEffects
+    /// reading SelectedV2's, RequestedIgnoreActors reading the projectile
+    /// path's, AllPlayersObfuscatedPlayerInformation reading ActiveBlinds'.
+    /// Each dropped every child of its route on some legacy build with no
+    /// counter moving. Two pairs are admitted on exactly the same branches
+    /// -- AllPlayersObfuscatedPlayerInformation with TrackedRewards, KillData
+    /// with RequestedIgnoreActors -- so a swap inside either pair changes no
+    /// output on any build, and no branch can tell them apart. Each case's
+    /// identity is also checked against `measured_array_route`, the second
+    /// identity-to-route mapping.
+    #[test]
+    fn legacy_branches_expand_only_their_admitted_routes() {
+        let mut reference = Vec::new();
+        packed(&mut reference, 5);
+        let float: Vec<bool> = (0..32)
+            .map(|bit| 1.5f32.to_bits() & (1 << bit) != 0)
+            .collect();
+        // No wildcard: a new route does not compile until it has a case.
+        let case_for = |route| {
+            let case = match route {
+                MeasuredArrayRoute::KillData => (
+                    (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
+                    (3, "Victim", 3_990_035_472),
+                    one_leaf(3, &reference),
+                ),
+                MeasuredArrayRoute::SelectedV2 => (
+                    (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
+                    (3, "EquippableDataAsset", 1_793_937_854),
+                    one_leaf(3, &reference),
+                ),
+                MeasuredArrayRoute::TrackedRewards => (
+                    (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
+                    (30, "InstancesOfReward", 2_922_243_316),
+                    one_leaf(30, &[false; 32]),
+                ),
+                MeasuredArrayRoute::ActiveBlinds => (
+                    (
+                        "/Script/ShooterGame.BlindManagerComponent",
+                        "ActiveBlinds",
+                        3_853_965_310,
+                    ),
+                    (11, "CausingActor", 2_370_661_694),
+                    one_leaf(11, &bits_from_bytes(&[0])),
+                ),
+                MeasuredArrayRoute::ServerActiveEffects => (
+                    (
+                        "/Script/ShooterGame.EffectManagerComponent",
+                        "ServerActiveEffects",
+                        3_301_618_856,
+                    ),
+                    (33, "StartTimeStamp", 0),
+                    one_leaf(33, &float),
+                ),
+                MeasuredArrayRoute::RequestedIgnoreActors => (
+                    (
+                        "/Script/ShooterGame.FiniteSpeedMovementComponent",
+                        "RequestedIgnoreActors",
+                        1_063_739_204,
+                    ),
+                    (5, "RequestedIgnoreActors", 3_344_674_359),
+                    one_leaf(5, &reference),
+                ),
+                MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation => (
+                    (OWNER, OWNER_PARENT, OWNER_CHECKSUM),
+                    (49, "bIsAfk", 0),
+                    one_leaf(49, &[true]),
+                ),
+                // An RPC parameter, not a flattened property; its gate is
+                // `projectile_path_rpc_expands_only_on_admitting_branches`.
+                MeasuredArrayRoute::NetworkedProjectilePath => return None,
+            };
+            Some(case)
+        };
+        // `emit_flattened_array` picks the exact walker from the other
+        // mapping, `measured_array_route`. A case expands through the lenient
+        // walker too, so it cannot see that map go wrong; pin it here.
+        for route in MeasuredArrayRoute::ALL {
+            if let Some(((group, parent, checksum), _, _)) = case_for(route) {
+                assert_eq!(
+                    measured_array_route(group, parent, Some(checksum)),
+                    Some(route),
+                    "{route:?}"
+                );
+            }
+        }
+        let branches = vrf_transform::ALL_VERSIONS
+            .iter()
+            .map(|version| Some(version.branch()))
+            .chain([None]);
+        let mut expanded = Vec::new();
+        for branch in branches {
+            let admitted =
+                branch.map_or(MeasuredArrayRoutes::NONE, MeasuredArrayRoutes::for_branch);
+            for route in MeasuredArrayRoute::ALL {
+                let Some((identity, leaf, bits)) = case_for(route) else {
+                    continue;
+                };
+                let (records, stats) =
+                    export_array_with_declarations(identity, &[leaf], &bits, branch);
+                let at = format!("{branch:?} {route:?}");
+                let parent = records.fields.last().unwrap();
+                assert_eq!(parent.field_name.as_deref(), Some(identity.1), "{at}");
+                assert_eq!(parent.raw_bits.as_deref(), Some(bytes(&bits).as_slice()));
+                assert_eq!(stats.array_leaf_decode_errors, 0, "{at}");
+                if admitted.admits(route) {
+                    if !expanded.contains(&route) {
+                        expanded.push(route);
+                    }
+                    assert_eq!(records.fields.len(), 2, "{at}");
+                    let child = &records.fields[0];
+                    assert!(
+                        child.value_i64.is_some()
+                            || child.value_f64.is_some()
+                            || child.value_bool.is_some(),
+                        "{at}: the admitted child is typed"
+                    );
+                } else {
+                    assert_eq!(records.fields.len(), 1, "{at}");
+                    assert_eq!(stats.array.fields_emitted, 0, "{at}");
+                }
+            }
+        }
+        // Not vacuous: each of the seven flattened routes expanded on some
+        // branch, and the run with no branch kept every one of them raw.
+        assert_eq!(expanded.len(), 7, "{expanded:?}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The streaming writer every table shares.
 //!
-//! All five tables have the same shape: buffer rows, convert a batch of them to
+//! Every table has the same shape: buffer rows, convert a batch of them to
 //! Arrow when the buffer fills, finalise on `finish`. Only three things differ
 //! -- the Arrow schema, the columns worth dictionary-encoding, and how a slice
 //! of rows becomes a `RecordBatch`. Those three are the [`Table`] trait;
@@ -11,6 +11,10 @@
 //! memory. The row-group size is what `ArrowWriter` cuts row groups at -- what
 //! shapes the file. A multi-million-row export holds one batch, not one row
 //! group and not the whole table.
+//!
+//! A table whose rows carry large heap payloads adds a third, a byte budget
+//! ([`Table::MAX_BUFFERED_BYTES`]). It is the only thing besides the row-group
+//! size that closes a row group; filling a batch never does.
 
 use std::io::Write;
 use std::marker::PhantomData;
@@ -98,11 +102,70 @@ pub trait Table {
     /// ZSTD gets to work on.
     const DEFAULT_ROW_GROUP_SIZE: usize;
 
-    /// Columns to dictionary-encode. Dictionary is Parquet's default for Utf8,
-    /// but the tables pin it explicitly so the intent is in the source.
+    /// The only columns written with a Parquet dictionary. Every other column
+    /// is written PLAIN (and then ZSTD-compressed, like everything else).
+    ///
+    /// Every table follows one rule:
+    ///
+    /// - **Every string column is listed**, `Utf8` and `Dictionary<_, Utf8>`
+    ///   alike. The docs promise that string columns are dictionary-encoded,
+    ///   and this keeps that true. A few of them measured larger that way;
+    ///   they stay listed anyway, and docs/PERFORMANCE_NOTES.md names them.
+    /// - **Any other column is listed only where a dictionary measured
+    ///   smaller** than PLAIN, summed over a 45-replay sample. Each table's
+    ///   comment carries its own figures as dictionary/plain ratios.
+    ///
+    /// # Why this list used to do nothing
+    ///
+    /// parquet-rs dictionary-encodes every non-boolean column unless told
+    /// otherwise (`DEFAULT_DICTIONARY_ENABLED = true`, for every physical
+    /// type, not only strings). This list was applied as "switch these on"
+    /// over that default, so it switched on what was already on. Every
+    /// high-cardinality number -- movement positions, times, packet ids --
+    /// was hashed into a dictionary and written as bit-packed indices, which
+    /// ZSTD compresses worse than the neighbouring raw values. [`TableWriter`]
+    /// now turns the default off first. Method and per-table figures:
+    /// docs/PERFORMANCE_NOTES.md, "Dictionary encoding is chosen per column".
+    ///
+    /// parquet-rs ignores a name that matches no column without an error, and
+    /// never dictionary-encodes a BOOLEAN column. The roundtrip tests reject
+    /// both, and check that every written file's dictionary pages match this
+    /// list exactly.
     const DICTIONARY_COLUMNS: &'static [&'static str];
 
     /// Optional retained-row byte budget. Zero leaves row-count batching unchanged.
+    ///
+    /// Non-zero bounds [`Self::retained_bytes`] summed over every row not yet
+    /// in a closed row group: the rows still buffered as records *and* the
+    /// rows already handed to the `ArrowWriter`, which holds them encoded in
+    /// memory until their row group closes. Before a row that would take that
+    /// sum past the budget, the buffer is flushed and the row group closed; a
+    /// single row larger than the budget is allowed and gets a row group of
+    /// its own.
+    ///
+    /// Only the budget closes a row group early. A batch flush because the
+    /// buffer reached [`MAX_BUFFERED_ROWS`] leaves the row group open, exactly
+    /// as it does for an unbudgeted table. It used to close it as well, which
+    /// cut every budgeted table into 8,192-row row groups and cost them
+    /// compression -- on the reference replay's `export --checkpoints`,
+    /// `checkpoint_guid_entries.parquet` went from 928,714 bytes in ten row
+    /// groups to 396,821 in one once it stopped.
+    ///
+    /// The sum is kept across batch flushes, and reset only when a row group
+    /// closes, because resetting it per batch would have made that fix a
+    /// memory regression: the open row group could then hold 131,072 / 8,192
+    /// = 16 batches of just under the budget each, sixteen times what the
+    /// budget promises.
+    ///
+    /// The open row group still costs memory the budget does not count: its
+    /// encoders' state (dictionaries, page buffers), bounded by the row limit
+    /// as for every unbudgeted table. The per-batch close had been keeping
+    /// that at 8,192 rows' worth. Measured on the largest corpus replay (13.04
+    /// `fce40cc5`, 113.6 MB), `export --checkpoints`, five alternating runs
+    /// against the previous binary: peak commit 226.6 -> 240.5 MB median, peak
+    /// working set 219.6 -> 230.9 MB. The main-only export, which has no
+    /// budgeted rows there, measured the same on both (peak working set 187.3
+    /// vs 186.9 MB).
     const MAX_BUFFERED_BYTES: usize = 0;
 
     /// Bytes retained outside the row struct itself for budgeted tables.
@@ -160,13 +223,18 @@ pub struct TableWriter<T: Table, W: Write + Send> {
     /// after it nothing holds the writer to push into; the guard exists for the
     /// by-reference variant and for a caller that keeps the writer alive.
     finished: bool,
-    buffered_bytes: usize,
+    /// [`Table::retained_bytes`] summed over every row not yet in a closed row
+    /// group -- in `buffer` or in `writer`'s open row group. Zeroed whenever
+    /// that row group closes, never by a batch flush alone, and consulted only
+    /// for a table with a byte budget: see [`Table::MAX_BUFFERED_BYTES`].
+    pending_bytes: usize,
     _table: PhantomData<fn() -> T>,
 }
 
 impl<T: Table, W: Write + Send> TableWriter<T, W> {
     /// Create a writer with the table's default settings (ZSTD compression,
-    /// dictionary encoding for the table's string columns, page statistics).
+    /// dictionary encoding for exactly the table's [`Table::DICTIONARY_COLUMNS`],
+    /// page statistics).
     pub fn new(sink: W) -> Result<Self, ExportError> {
         Self::with_row_group_size(sink, T::DEFAULT_ROW_GROUP_SIZE)
     }
@@ -198,18 +266,20 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
             buffer: Vec::with_capacity(T::initial_capacity(batch_rows)),
             batch_rows,
             finished: false,
-            buffered_bytes: 0,
+            pending_bytes: 0,
             _table: PhantomData,
         })
     }
 
     /// Push a single record. Converts and hands off a batch when the buffer is
-    /// full; the row group is closed by `ArrowWriter`, not here.
+    /// full; the row group is closed by `ArrowWriter` at its row limit, not
+    /// here -- unless the table's byte budget is crossed (see
+    /// [`Table::MAX_BUFFERED_BYTES`]).
     pub fn push(&mut self, record: T::Row) -> Result<(), ExportError> {
         self.guard_open()?;
         self.flush_for_byte_budget(&record)?;
-        self.buffered_bytes = self
-            .buffered_bytes
+        self.pending_bytes = self
+            .pending_bytes
             .saturating_add(T::retained_bytes(&record));
         self.buffer.push(record);
         self.flush_if_full_or_oversized()
@@ -224,8 +294,8 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
         self.guard_open()?;
         for record in records {
             self.flush_for_byte_budget(&record)?;
-            self.buffered_bytes = self
-                .buffered_bytes
+            self.pending_bytes = self
+                .pending_bytes
                 .saturating_add(T::retained_bytes(&record));
             self.buffer.push(record);
             self.flush_if_full_or_oversized()?;
@@ -262,27 +332,43 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
         Ok(())
     }
 
+    /// Close the open row group before `record` if adding it would take the
+    /// pending bytes past the budget, so the row that tips it starts a new
+    /// group. "Open" includes rows the `ArrowWriter` already holds: straight
+    /// after a batch flush the buffer is empty but the row group is not.
     fn flush_for_byte_budget(&mut self, record: &T::Row) -> Result<(), ExportError> {
         let incoming = T::retained_bytes(record);
         if T::MAX_BUFFERED_BYTES != 0
-            && !self.buffer.is_empty()
-            && self.buffered_bytes.saturating_add(incoming) > T::MAX_BUFFERED_BYTES
+            && (!self.buffer.is_empty() || self.writer.in_progress_rows() != 0)
+            && self.pending_bytes.saturating_add(incoming) > T::MAX_BUFFERED_BYTES
         {
-            self.flush_buffer()?;
-            self.writer.flush()?;
+            self.close_row_group()?;
         }
         Ok(())
     }
 
     fn flush_if_full_or_oversized(&mut self) -> Result<(), ExportError> {
-        if self.buffer.len() >= self.batch_rows
-            || (T::MAX_BUFFERED_BYTES != 0 && self.buffered_bytes >= T::MAX_BUFFERED_BYTES)
-        {
-            self.flush_buffer()?;
-            if T::MAX_BUFFERED_BYTES != 0 {
-                self.writer.flush()?;
-            }
+        if T::MAX_BUFFERED_BYTES != 0 && self.pending_bytes >= T::MAX_BUFFERED_BYTES {
+            // The budget, not the row count: the ArrowWriter must let go of
+            // these bytes too, so the row group closes with the buffer.
+            self.close_row_group()
+        } else if self.buffer.len() >= self.batch_rows {
+            // The row count alone: hand the batch over and leave the row group
+            // open for the ArrowWriter to close at its row limit.
+            self.flush_buffer()
+        } else {
+            Ok(())
         }
+    }
+
+    /// Flush the buffer and close the open row group, releasing every byte
+    /// `pending_bytes` counts.
+    fn close_row_group(&mut self) -> Result<(), ExportError> {
+        if !self.buffer.is_empty() {
+            self.flush_buffer()?;
+        }
+        self.writer.flush()?;
+        self.pending_bytes = 0;
         Ok(())
     }
 
@@ -297,7 +383,13 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
             // MAX_BUFFERED_ROWS has to stay a multiple of it. A parquet release
             // that changed the default would otherwise move this crate's output
             // bytes with nothing in this repository having changed.
-            .set_write_batch_size(PARQUET_WRITE_BATCH_SIZE);
+            .set_write_batch_size(PARQUET_WRITE_BATCH_SIZE)
+            // Off unless listed. parquet-rs defaults dictionary encoding to ON
+            // for every column, so without this line the loop below can only
+            // switch on what is already on -- which is all it did from this
+            // crate's first commit until it was measured. See
+            // `Table::DICTIONARY_COLUMNS`.
+            .set_dictionary_enabled(false);
         for column in T::DICTIONARY_COLUMNS {
             builder = builder
                 .set_column_dictionary_enabled(ColumnPath::new(vec![(*column).to_owned()]), true);
@@ -312,8 +404,179 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
         // Dropping the rows before handing the batch to the encoder also keeps
         // the records and the arrays from being live at the same time.
         self.buffer.clear();
-        self.buffered_bytes = 0;
         self.writer.write(&batch)?;
+        // The ArrowWriter closes a row group on its own at the row limit, and
+        // what it held is then on the sink, not in memory. The budgeted
+        // tables' 131,072 is 16 x MAX_BUFFERED_ROWS and a budget cut empties
+        // both sides, so that limit falls exactly between two batches and
+        // this sees every such close. A custom size that splits a batch
+        // leaves the tail open here and keeps counting the flushed head: an
+        // over-count, which can only close a later row group early.
+        if self.writer.in_progress_rows() == 0 {
+            self.pending_bytes = 0;
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::BinaryArray;
+    use arrow_schema::{DataType, Field};
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    /// The byte budget all four budgeted production tables declare.
+    const BUDGET: usize = 8 * 1024 * 1024;
+
+    /// A budgeted table whose retained bytes are exactly its payload length,
+    /// so every test can compute the row on which the budget is crossed
+    /// instead of guessing it. Same budget and default row-group size as the
+    /// production budgeted tables (partials and the three checkpoint
+    /// declaration tables).
+    struct Budgeted;
+
+    impl Table for Budgeted {
+        type Row = Vec<u8>;
+        const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
+        const DICTIONARY_COLUMNS: &'static [&'static str] = &[];
+        const MAX_BUFFERED_BYTES: usize = BUDGET;
+
+        fn retained_bytes(row: &Self::Row) -> usize {
+            row.len()
+        }
+
+        fn schema() -> Arc<Schema> {
+            Arc::new(Schema::new(vec![Field::new(
+                "payload",
+                DataType::Binary,
+                false,
+            )]))
+        }
+
+        fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
+            RecordBatch::try_new(
+                Self::schema(),
+                vec![Arc::new(BinaryArray::from_iter_values(
+                    rows.iter().map(Vec::as_slice),
+                ))],
+            )
+            .map_err(|e| ExportError::Parquet(e.into()))
+        }
+    }
+
+    /// Push `rows` through a `Budgeted` writer and return every row group's
+    /// row count, in file order -- the exact vector, because a bare "one row
+    /// group" or ">= 3" cannot tell the candidate flush policies apart.
+    fn row_group_rows(
+        test: &str,
+        row_group_size: usize,
+        rows: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Vec<i64> {
+        let path = std::env::temp_dir().join(format!(
+            "vrfkit-writer-{test}-{}.parquet",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer =
+            TableWriter::<Budgeted, _>::with_row_group_size(file, row_group_size).unwrap();
+        for row in rows {
+            writer.push(row).unwrap();
+        }
+        writer.finish().unwrap();
+        let counts = {
+            let reader = SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+            reader
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|group| group.num_rows())
+                .collect()
+        };
+        std::fs::remove_file(&path).unwrap();
+        counts
+    }
+
+    #[test]
+    fn row_count_flushes_leave_a_budgeted_row_group_open() {
+        // Four full batches and a remainder, 16 bytes each: ~0.5 MB against an
+        // 8 MiB budget. Nothing here is a reason to close a row group before
+        // the 131,072-row limit, so the whole table is one row group. Closing
+        // one on every 8,192-row batch is what fragmented the four budgeted
+        // tables; `Table::MAX_BUFFERED_BYTES` records what it cost.
+        const ROWS: usize = 4 * MAX_BUFFERED_ROWS + 5;
+        const _: () = assert!(ROWS * 16 < BUDGET / 10, "must stay far below the budget");
+        assert_eq!(
+            row_group_rows(
+                "row-count",
+                Budgeted::DEFAULT_ROW_GROUP_SIZE,
+                (0..ROWS).map(|_| vec![7; 16]),
+            ),
+            vec![ROWS as i64]
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_counts_rows_already_in_the_open_row_group() {
+        // No single batch reaches the budget, but the open row group does. A
+        // batch handed to the ArrowWriter is still held in memory, encoded,
+        // until its row group closes -- so its bytes must still count. Reset
+        // the count on every batch instead and the open row group can hold up
+        // to 131,072 / 8,192 = 16 batches of just under 8 MiB each.
+        const ROW: usize = 700;
+        const _: () = assert!(
+            MAX_BUFFERED_ROWS * ROW < BUDGET,
+            "no single batch may do it"
+        );
+        // `flush_for_byte_budget` closes the group before the row whose bytes
+        // would take the total strictly past the budget, so the first group
+        // holds the largest row count whose total still fits.
+        const FIRST: usize = BUDGET / ROW;
+        const _: () = assert!(FIRST > MAX_BUFFERED_ROWS, "the cut must span a batch flush");
+        const ROWS: usize = 20_000;
+        assert_eq!(
+            row_group_rows(
+                "across-batches",
+                Budgeted::DEFAULT_ROW_GROUP_SIZE,
+                (0..ROWS).map(|_| vec![7; ROW]),
+            ),
+            vec![FIRST as i64, (ROWS - FIRST) as i64]
+        );
+    }
+
+    #[test]
+    fn a_row_group_closed_at_its_row_limit_resets_the_byte_budget() {
+        // Two full 16,384-row groups of 300-byte rows: each holds ~4.9 MB, the
+        // pair ~9.8 MB. The ArrowWriter closes the first at its row limit and
+        // those bytes leave memory with it, so they must stop counting.
+        // Carried over, they would force a spurious third group.
+        const ROW: usize = 300;
+        const GROUP: usize = 2 * MAX_BUFFERED_ROWS;
+        const _: () = assert!(GROUP * ROW < BUDGET && 2 * GROUP * ROW > BUDGET);
+        assert_eq!(
+            row_group_rows("row-limit", GROUP, (0..2 * GROUP).map(|_| vec![7; ROW])),
+            vec![GROUP as i64, GROUP as i64]
+        );
+    }
+
+    #[test]
+    fn a_row_that_would_overflow_the_open_row_group_starts_a_new_one() {
+        // One full batch (8,192,000 bytes, under the 8,388,608 budget) goes to
+        // the ArrowWriter by row count and leaves the application buffer
+        // empty. The next row would take the open row group past the budget,
+        // so the group closes first -- even though the application buffer has
+        // nothing in it. Only the buffer consulted, that row would join the
+        // group and close it one row over budget: [8193].
+        const ROW: usize = 1_000;
+        const BIG: usize = 200_000;
+        const _: () =
+            assert!(MAX_BUFFERED_ROWS * ROW < BUDGET && MAX_BUFFERED_ROWS * ROW + BIG > BUDGET);
+        let rows = (0..MAX_BUFFERED_ROWS)
+            .map(|_| vec![7; ROW])
+            .chain(std::iter::once(vec![7; BIG]));
+        assert_eq!(
+            row_group_rows("empty-buffer", Budgeted::DEFAULT_ROW_GROUP_SIZE, rows),
+            vec![MAX_BUFFERED_ROWS as i64, 1]
+        );
     }
 }

@@ -22,7 +22,7 @@ use vrf_decode::{
 use vrf_schema::{FxHashMap, NetGuidCache};
 
 use super::intern::put;
-use super::{ExportSink, FieldValues, TABLE};
+use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 
 /// Memo for [`ExportSink::find_rpc_param_group_path`].
 ///
@@ -309,7 +309,7 @@ impl ExportSink<'_> {
                     .is_some_and(|field| {
                         field.name == "WorldLocation" && field.compatible_checksum == 3965480401
                     });
-            let projectile_path_array = self.measured_array_routes
+            let projectile_path_array = self.admits(MeasuredArrayRoute::NetworkedProjectilePath)
                 && self.current_group_path.as_ref()
                     == "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache"
                 && param_group_path_ref
@@ -491,20 +491,10 @@ impl ExportSink<'_> {
         ];
         let mut isolated = vrf_decode::ArrayDecodeStats::default();
         let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut isolated);
-        let walker_clean = isolated.errors == 0
-            && isolated.truncations == 0
-            && isolated.implicit_terminations == 0
-            && isolated.unconsumed_nested_bits == 0
-            && isolated.unconsumed_root_bits == 0;
+        let walker_clean = isolated.is_clean();
         let complete_points = isolated.fields_emitted == flattened.len() as u64
             && isolated.elements_decoded.saturating_mul(3) == flattened.len() as u64;
-        self.stats.array.elements_decoded += isolated.elements_decoded;
-        self.stats.array.fields_emitted += isolated.fields_emitted;
-        self.stats.array.truncations += isolated.truncations;
-        self.stats.array.errors += isolated.errors;
-        self.stats.array.unconsumed_nested_bits += isolated.unconsumed_nested_bits;
-        self.stats.array.unconsumed_root_bits += isolated.unconsumed_root_bits;
-        self.stats.array.implicit_terminations += isolated.implicit_terminations;
+        self.stats.array.merge_from(&isolated);
         // The generic walker reports a clean frame even when a path point
         // omits one of its three members. Count that separate shape refusal;
         // malformed framing already moved a walker diagnostic above.
@@ -589,24 +579,15 @@ impl ExportSink<'_> {
         raw: &[u8],
         bit_count: u32,
     ) {
-        let before = self.stats.array.clone();
         let declared = [None, Some("WorldLocation")];
-        let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut self.stats.array);
-        let diagnostics_clean = self.stats.array.errors == before.errors
-            && self.stats.array.truncations == before.truncations
-            && self.stats.array.unconsumed_nested_bits == before.unconsumed_nested_bits
-            && self.stats.array.unconsumed_root_bits == before.unconsumed_root_bits
-            && self.stats.array.implicit_terminations == before.implicit_terminations;
-        let decoded_elements = self
-            .stats
-            .array
-            .elements_decoded
-            .saturating_sub(before.elements_decoded);
-        let decoded_fields = self
-            .stats
-            .array
-            .fields_emitted
-            .saturating_sub(before.fields_emitted);
+        let mut isolated = vrf_decode::ArrayDecodeStats::default();
+        let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut isolated);
+        // Folded in before anything else reads the running total, so every
+        // walk is counted whether or not its children are accepted below.
+        self.stats.array.merge_from(&isolated);
+        let diagnostics_clean = isolated.is_clean();
+        let decoded_elements = isolated.elements_decoded;
+        let decoded_fields = isolated.fields_emitted;
         let unique_paths = flattened
             .iter()
             .map(|field| field.path.as_str())
@@ -839,14 +820,210 @@ fn effect_array_kind_for_param(param_name: Option<&str>) -> Option<EffectArrayKi
 
 /// Map an effect-blob failure onto the overlay report's error kinds.
 ///
-/// `DecodeErrorKind` has three variants and this decoder has seven failures,
-/// so the mapping is lossy by construction; the report's `field_name` column
-/// carries the identification. `Residual` is the bucket for "the payload was
-/// not consumable as this format", which is what every structural failure
-/// means here.
+/// These rows share the report with overlay failures, so a kind must mean the
+/// same thing here as there. The report's `field_name` column identifies the
+/// parameter; the kind is the only column that says why. This used to be two
+/// arms -- every `BitIo` error `EOF`, everything else `Residual` -- so an
+/// invalid string printed as EOF and a non-finite float as leftover bits.
+///
+/// No wildcard: a new `EffectBlobError` has to be classified before it
+/// compiles, instead of silently joining whatever a `_` arm names.
 fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
     match err {
-        EffectBlobError::BitIo(_) => DecodeErrorKind::Eof,
-        _ => DecodeErrorKind::Residual,
+        EffectBlobError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
+        // The bits ran out before the structure did: the window ended before
+        // the terminator, or a member's type read past the end of its own
+        // field.
+        EffectBlobError::MissingTerminator { .. } | EffectBlobError::PayloadOverread { .. } => {
+            DecodeErrorKind::Eof
+        }
+        // Bits the structure did not account for, after the terminator or
+        // inside a field whose type read short of it.
+        EffectBlobError::ResidualBits { .. } | EffectBlobError::PayloadUnderread { .. } => {
+            DecodeErrorKind::Residual
+        }
+        // Decoded values refused: a count over the configured maximum, a
+        // float JSON cannot carry.
+        EffectBlobError::ArrayCountTooLarge { .. } | EffectBlobError::NonFiniteFloat { .. } => {
+            DecodeErrorKind::Rejected
+        }
+        // The bits break a rule of this framing. `PayloadTooLarge` is a field
+        // header whose declared width is longer than the window or than the
+        // decoder's 64 Kib cap, refused before a bit of the payload is read:
+        // a length prefix the payload cannot hold, which is `Malformed` for an
+        // overlay string or byte array too, not a reader running out.
+        EffectBlobError::PayloadTooLarge { .. }
+        | EffectBlobError::IndexOutOfBounds { .. }
+        | EffectBlobError::TooManyFields { .. }
+        | EffectBlobError::BitLengthExceedsBuffer { .. }
+        | EffectBlobError::UnexpectedPayloadWidth { .. }
+        | EffectBlobError::ElementFieldCount { .. }
+        | EffectBlobError::NonAdjacentHandles { .. }
+        | EffectBlobError::InconsistentHandleBase { .. }
+        | EffectBlobError::NonZeroTerminator { .. } => DecodeErrorKind::Malformed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use vrf_bitio::BitError;
+
+    use super::{EffectBlobError, effect_error_kind};
+
+    /// Effect-blob failures land in the same error report as overlay failures,
+    /// so the same cause must print the same label. Every `BitIo` error used
+    /// to print `EOF`, and every other failure `Residual` -- the label that
+    /// means leftover bits -- whether bits were left over or not.
+    ///
+    /// Every variant has a case, and the test checks that itself against the
+    /// list the variant match below is generated from. That match has no
+    /// wildcard, so a new variant does not compile until it is listed, and a
+    /// listed variant with no case fails here. The cases used to be a
+    /// hand-picked eleven, and the seven variants they left out could go back
+    /// to `Residual` with every test green.
+    #[test]
+    fn effect_failures_print_the_label_of_their_cause() {
+        // Generated from one list, so the list and the match cannot disagree.
+        macro_rules! variants {
+            ($($variant:ident),+ $(,)?) => {
+                (
+                    [$(stringify!($variant)),+],
+                    |err: &EffectBlobError| -> &'static str {
+                        match err {
+                            $(EffectBlobError::$variant { .. } => stringify!($variant),)+
+                        }
+                    },
+                )
+            };
+        }
+        let (every_variant, variant_of) = variants!(
+            BitIo,
+            ArrayCountTooLarge,
+            IndexOutOfBounds,
+            PayloadTooLarge,
+            TooManyFields,
+            BitLengthExceedsBuffer,
+            ResidualBits,
+            NonFiniteFloat,
+            UnexpectedPayloadWidth,
+            ElementFieldCount,
+            NonAdjacentHandles,
+            InconsistentHandleBase,
+            PayloadOverread,
+            PayloadUnderread,
+            MissingTerminator,
+            NonZeroTerminator,
+        );
+        let cases = [
+            (
+                EffectBlobError::BitIo(BitError::Eof {
+                    position: 0,
+                    length: 8,
+                    requested: 8,
+                }),
+                "EOF",
+            ),
+            (
+                EffectBlobError::BitIo(BitError::MalformedIntPacked { position: 0 }),
+                "Malformed",
+            ),
+            (
+                EffectBlobError::BitIo(BitError::InvalidString { position: 0 }),
+                "Malformed",
+            ),
+            (
+                EffectBlobError::MissingTerminator { context: "array" },
+                "EOF",
+            ),
+            (
+                EffectBlobError::PayloadOverread {
+                    declared: 16,
+                    consumed: 32,
+                },
+                "EOF",
+            ),
+            (EffectBlobError::ResidualBits { remaining: 16 }, "Residual"),
+            (
+                EffectBlobError::PayloadUnderread {
+                    declared: 32,
+                    consumed: 16,
+                },
+                "Residual",
+            ),
+            (EffectBlobError::NonFiniteFloat { index: 0 }, "Rejected"),
+            (
+                EffectBlobError::ArrayCountTooLarge {
+                    count: 300,
+                    max: 256,
+                },
+                "Rejected",
+            ),
+            (EffectBlobError::NonZeroTerminator { value: 1 }, "Malformed"),
+            (EffectBlobError::ElementFieldCount { found: 3 }, "Malformed"),
+            // A declared width past the window is an overlong length prefix,
+            // `Malformed` like an overlay string's, not an EOF.
+            (
+                EffectBlobError::PayloadTooLarge {
+                    bits: 64,
+                    remaining: 32,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::IndexOutOfBounds { index: 2, count: 2 },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::TooManyFields { context: "element" },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::BitLengthExceedsBuffer {
+                    bits: 64,
+                    available: 32,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::UnexpectedPayloadWidth {
+                    context: "float value",
+                    expected: 32,
+                    found: 16,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::NonAdjacentHandles {
+                    first: 1,
+                    second: 3,
+                },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::InconsistentHandleBase {
+                    expected: 1,
+                    found: 3,
+                },
+                "Malformed",
+            ),
+        ];
+        let printed: Vec<(String, String)> = cases
+            .iter()
+            .map(|(err, _)| (format!("{err:?}"), effect_error_kind(err).to_string()))
+            .collect();
+        let wanted: Vec<(String, String)> = cases
+            .iter()
+            .map(|(err, want)| (format!("{err:?}"), (*want).to_owned()))
+            .collect();
+        assert_eq!(printed, wanted);
+
+        let reached: BTreeSet<&str> = cases.iter().map(|(err, _)| variant_of(err)).collect();
+        assert_eq!(
+            reached,
+            every_variant.into_iter().collect::<BTreeSet<_>>(),
+            "every EffectBlobError needs a case"
+        );
     }
 }

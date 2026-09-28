@@ -228,6 +228,11 @@ impl FieldSink for ExportSink<'_> {
             // Clean batches are represented row-for-row in movement.parquet.
             // A failed or partial batch is different: its missing rows cannot
             // reproduce the input, so retain the entire RPC payload here.
+            // One exception is counted rather than retained: a movement
+            // section that stops with bits of its window unread leaves the
+            // batch "clean" here, so those bits reach no row. They are
+            // tallied (`movement_*_section_tail*`) until measurement says
+            // whether they are loss; see `RpcDecodeResult::sized_section_tails`.
             self.push_field(FieldValues {
                 handle,
                 field_name,
@@ -416,7 +421,11 @@ impl ExportSink<'_> {
             return;
         }
 
+        self.stats.cnc_bruteforce_payloads_attempted += 1;
         let Some(rpcs) = decode_cnc_payload(payload, bit_count, ABILITIES_AND_BUFFS_FC) else {
+            // The preservation row already holds the payload whole; what the
+            // caller must not lose is that the walk failed.
+            self.stats.cnc_bruteforce_payloads_unwalked += 1;
             return;
         };
 
@@ -1890,6 +1899,97 @@ mod tests {
         }
     }
 
+    /// The projectile path is admitted per branch like the flattened arrays:
+    /// a valid path point expands on the builds whose samples held one, and
+    /// stays a single raw parameter row where the route was never observed.
+    #[test]
+    fn projectile_path_rpc_expands_only_on_admitting_branches() {
+        const CNC: &str =
+            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache";
+        const PARAMS: &str =
+            "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:MulticastSetPath";
+        const PARENT: &str = "MulticastSetPath.NetworkedProjectilePath";
+
+        let mut array = Vec::new();
+        write_int_packed(&mut array, 1); // one path point
+        write_int_packed(&mut array, 1); // index zero
+        for (handle, payload) in [
+            (1, 2.5f32.to_le_bytes().to_vec()),
+            (2, vec![0; 24]),
+            (3, vec![0; 24]),
+        ] {
+            write_int_packed(&mut array, handle + 1);
+            write_int_packed(&mut array, (payload.len() * 8) as u32);
+            array.extend(
+                payload
+                    .iter()
+                    .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0)),
+            );
+        }
+        write_int_packed(&mut array, 0); // element terminator
+        write_int_packed(&mut array, 0); // array terminator
+        let mut rpc = vec![false]; // FunctionParameters checksum bit
+        write_int_packed(&mut rpc, 1); // parameter handle zero
+        write_int_packed(&mut rpc, array.len() as u32);
+        rpc.extend_from_slice(&array);
+        write_int_packed(&mut rpc, 0); // parameter terminator
+        let rpc_raw = bits_to_bytes(&rpc);
+
+        for (branch, want_children) in [
+            ("++Ares-Core+release-11.06", 0),
+            ("++Ares-Core+release-11.07", 3),
+            ("++Ares-Core+release-12.06", 0),
+            ("++Ares-Core+release-12.09", 3),
+            ("++Ares-Core+release-12.10", 0),
+            ("++Ares-Core+release-13.05", 3),
+        ] {
+            let mut cache = NetGuidCache::new();
+            cache
+                .add_export_group(vrf_schema::NetFieldExportGroup::new(CNC.into(), 7, 1))
+                .unwrap();
+            cache
+                .add_export_group(vrf_schema::NetFieldExportGroup::new(PARAMS.into(), 8, 1))
+                .unwrap();
+            assert!(cache.set_field_on_group(
+                7,
+                vrf_schema::NetFieldExport {
+                    handle: 0,
+                    compatible_checksum: 2_336_552_129,
+                    name: "MulticastSetPath".into(),
+                }
+            ));
+            assert!(cache.set_field_on_group(
+                8,
+                vrf_schema::NetFieldExport {
+                    handle: 0,
+                    compatible_checksum: 2_930_105_559,
+                    name: "NetworkedProjectilePath".into(),
+                }
+            ));
+            let mut channel_state = ChannelState::new();
+            let mut records = RecordBuffers::default();
+            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            sink.set_current_group_path(Arc::from(CNC));
+            sink.enable_measured_array_routes(branch);
+            sink.on_rpc(
+                0,
+                rpc.len() as u32,
+                BitReader::with_bit_len(&rpc_raw, rpc.len() as u64).unwrap(),
+            );
+            assert_eq!(sink.stats.array.errors, 0, "{branch}");
+            assert_eq!(sink.stats.array_leaf_decode_errors, 0, "{branch}");
+            drop(sink);
+
+            assert_eq!(records.fields.len(), want_children + 1, "{branch}");
+            let parent = records.fields.last().unwrap();
+            assert_eq!(parent.field_name.as_deref(), Some(PARENT), "{branch}");
+            assert_eq!(parent.bit_count, array.len() as u32, "{branch}");
+            if want_children > 0 {
+                assert_eq!(records.fields[0].value_f64, Some(2.5), "{branch}");
+            }
+        }
+    }
+
     /// The one permitted leftover stays silent.
     ///
     /// `FunctionParameters` grammar allows a single trailing alignment bit
@@ -2029,6 +2129,73 @@ mod tests {
         );
         assert!(rpc.raw_bits.is_some(), "raw bits should be extracted");
         assert_eq!(sink.stats.cnc_rpcs_emitted, 1);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 1);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_unwalked, 0);
+    }
+
+    /// An `AbilitiesAndBuffsComponent` payload the fc=34 walk cannot fit is
+    /// counted, not dropped in silence.
+    ///
+    /// The walk used to end in `let Some(rpcs) = .. else { return; }`, which
+    /// moved nothing. `cnc_rpcs_emitted` counts successes only (and RepLayout
+    /// tail decodes as well), so a build whose handle width changed would
+    /// shrink `CNC RPC rows` with no line on the summary and no key in the
+    /// manifest naming a failure. The fc=34 constant is empirical; its own doc
+    /// says an update "can fail this walk".
+    ///
+    /// The payload declares 64 payload bits and carries 32, the shape a
+    /// misread handle width leaves behind. The preservation row still carries
+    /// every bit; what was missing is the count.
+    #[test]
+    fn unresolved_abilities_and_buffs_that_does_not_walk_is_counted() {
+        let mut bits = Vec::new();
+        write_serialized_int(&mut bits, 1, 34); // handle=1, 6 bits
+        write_int_packed(&mut bits, 64); // declares 64 payload bits ...
+        bits.extend(std::iter::repeat_n(true, 32)); // ... but carries 32
+        let data = bits_to_bytes(&bits);
+        let bit_count = bits.len() as u32;
+        assert!(
+            decode_cnc_payload(&data, bit_count, ABILITIES_AND_BUFFS_FC).is_none(),
+            "the fixture must not walk under fc=34, or this tests nothing"
+        );
+
+        let mut cache = NetGuidCache::new();
+        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let header = ContentBlockHeader {
+            has_rep_layout: false,
+            is_actor: false,
+            object_net_guid: NetworkGuid(144),
+            is_stably_named: true,
+            ..ContentBlockHeader::default()
+        };
+        sink.on_content_block(3, NetworkGuid(89), &header);
+        let failure = StreamFailure {
+            kind: vrf_net::pipeline::StreamKind::Rpc,
+            actor_net_guid: NetworkGuid(89),
+            bit_count,
+            function_count: 0,
+            consumed_bits: 0,
+            remaining_bits: u64::from(bit_count),
+            cause: vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount,
+            record_handle: None,
+            record_offset: Some(0),
+            payload_preserved: true,
+        };
+        sink.on_unresolved_class_net_cache_payload(failure, &data);
+
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 1);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_unwalked, 1);
+        assert_eq!(sink.stats.cnc_rpcs_emitted, 0);
+        assert_eq!(sink.records.fields.len(), 1, "only the preservation row");
+        let preserved = &sink.records.fields[0];
+        assert_eq!(
+            preserved.field_name.as_deref(),
+            Some(UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME)
+        );
+        assert_eq!(preserved.raw_bits.as_deref(), Some(data.as_slice()));
     }
 
     /// An unresolved payload for a group OTHER than AbilitiesAndBuffsComponent
@@ -2087,6 +2254,10 @@ mod tests {
         // above), so only the group-path gate can be what stops it here.
         assert_eq!(sink.records.fields.len(), 1);
         assert_eq!(sink.stats.cnc_rpcs_emitted, 0);
+        // Gated out before the walk, so it was never attempted -- and an
+        // attempt that did not walk is not what happened either.
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_attempted, 0);
+        assert_eq!(sink.stats.cnc_bruteforce_payloads_unwalked, 0);
     }
     /// A dormancy close is not a despawn, and must not be exported as one.
     ///
@@ -2123,6 +2294,50 @@ mod tests {
         );
         // Both still count as closes: the actor channel did close.
         assert_eq!(sink.stats.actor_closes, 2);
+    }
+
+    /// A deleted block and a live one are both content blocks to the sink,
+    /// as they are to vrf-net.
+    ///
+    /// `NetStats::content_blocks` counts both kinds beside the callback it
+    /// makes, and `tools/verify_build_corpus.py` fails a replay whose
+    /// `sink_content_blocks` differs from it. A replay without deleted blocks
+    /// -- the 13.06 one this check was first measured on has none -- cannot
+    /// notice `on_deleted_block` forgetting its count, so it is pinned here.
+    #[test]
+    fn deleted_and_live_blocks_both_advance_the_sink_block_tally() {
+        let mut cache = NetGuidCache::new();
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let header = ContentBlockHeader {
+            has_rep_layout: true,
+            is_actor: true,
+            ..ContentBlockHeader::default()
+        };
+
+        sink.on_content_block(7, NetworkGuid(1234), &header);
+        assert_eq!(sink.stats.content_blocks, 1);
+        sink.on_deleted_block(7, NetworkGuid(1234), &header);
+        assert_eq!(sink.stats.content_blocks, 2);
+    }
+
+    /// Every RPC callback advances `rpcs_emitted` exactly once, whatever row
+    /// shape it produces, because vrf-net counts `NetStats::rpcs` once per
+    /// callback. The zero-bit marker row is the branch a misplaced increment
+    /// would most easily skip.
+    #[test]
+    fn every_rpc_shape_advances_the_sink_rpc_tally_once() {
+        let mut cache = NetGuidCache::new();
+        let mut channel_state = ChannelState::new();
+        let mut records = RecordBuffers::default();
+        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+
+        sink.on_rpc(5, 0, BitReader::with_bit_len(&[], 0).unwrap());
+        assert_eq!(sink.stats.rpcs_emitted, 1, "zero-bit marker row");
+        sink.on_rpc(6, 8, BitReader::with_bit_len(&[0xA5], 8).unwrap());
+        assert_eq!(sink.stats.rpcs_emitted, 2, "whole-payload fallback row");
+        assert_eq!(sink.records.fields.len(), 2);
     }
 
     /// A static actor (no archetype) must not get its class_path filled in

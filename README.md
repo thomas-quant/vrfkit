@@ -18,10 +18,11 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
-**Verified state (2026-09-25):** Rust has **714 passing** tests; Python has
-**910 passing** tests. All 24 supported builds received the same verification
-on **986 unique replays**; all **986** meet every strict criterion after fixing
-the two ActiveBlinds decoding errors found by the first audit. See [build verification](docs/BUILD_VERIFICATION.md)
+**Verified state (2026-09-28):** Rust has **829 passing** tests; Python has
+**1252 passing** tests. All 24 supported builds received the same verification
+on **1,018 unique replays**; all **1,018** meet every strict criterion. The two
+ActiveBlinds decoding errors found by the first 2026-09-25 audit were fixed
+that day. See [build verification](docs/BUILD_VERIFICATION.md)
 for the measured scope, common checks and remaining limits.
 
 - Run it: [`docs/USAGE.md`](docs/USAGE.md)
@@ -30,11 +31,13 @@ for the measured scope, common checks and remaining limits.
 - Latest build verification: [`docs/BUILD_VERIFICATION.md`](docs/BUILD_VERIFICATION.md)
 - Historical field inventory: [`docs/TARGETING_AND_HEAL_VALUES.md`](docs/TARGETING_AND_HEAL_VALUES.md)
 - Upstream parity and 13.06 validation: [`docs/UPSTREAM_PARITY.md`](docs/UPSTREAM_PARITY.md)
+- Upstream Warden and Raze review: [`docs/UPSTREAM_RAZE_WARDEN.md`](docs/UPSTREAM_RAZE_WARDEN.md)
 - Character-death and KillData state: [`docs/KILL_LEDGER.md`](docs/KILL_LEDGER.md)
 - Damage, healing, decay and reset observations: [`docs/SECTION_OBSERVATIONS.md`](docs/SECTION_OBSERVATIONS.md)
 - Observed section timelines and explicit continuity gaps: [`docs/SECTION_TIMELINE.md`](docs/SECTION_TIMELINE.md)
 - Packet-ordered section comparisons: [`docs/SECTION_PACKET_TIMELINE.md`](docs/SECTION_PACKET_TIMELINE.md)
 - Numeric FastArray observations and remaining item semantics: [`docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md`](docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md)
+- Ground-area volume cells (molotov, slow, net and wire patches): [`docs/GROUND_VOLUMES.md`](docs/GROUND_VOLUMES.md)
 - Build it, test it, open a PR: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - Working conventions (for an AI agent): [`CLAUDE.md`](CLAUDE.md)
 
@@ -56,7 +59,7 @@ can be represented by their rows instead of a duplicate raw RPC.
 
 | 🎮 Build | 🌿 Branch | ✅ Clean/checked | 🔎 Verified by |
 |---|---|---:|---|
-| **13.06** | `release-13.06` | 6/6 | Validation + checkpoints + typed/raw |
+| **13.06** | `release-13.06` | 38/38 | Validation + checkpoints + typed/raw |
 | **13.05** | `release-13.05` | 401/401 | Validation + checkpoints + typed/raw |
 | **13.04** | `release-13.04` | 108/108 | Validation + checkpoints + typed/raw |
 | **13.02** | `release-13.02` | 205/205 | Validation + checkpoints + typed/raw |
@@ -81,13 +84,17 @@ can be represented by their rows instead of a duplicate raw RPC.
 | **11.07** | `release-11.07` | 3/3 | Validation + checkpoints + typed/raw |
 | **11.06** | `release-11.06` | 3/3 | Validation + checkpoints + typed/raw |
 
-Measured 2026-09-25 on all **986 unique available replays**, across all 24
+Measured 2026-09-28 on all **1,018 unique available replays**, across all 24
 supported branches. Every row uses the [same acceptance rule](docs/BUILD_VERIFICATION.md).
 **Clean/checked** includes the strict array and array-leaf error counters:
-✅ **986/986** are clean after the ActiveBlinds empty-delta and null-reference
-fixes. All 986 pass ReplayData validation, checkpoint-enabled export and
-the independent comparisons on observed evidence fields. The full report
-records counts and limits; this is not a claim that every field is understood.
+✅ **1,018/1,018** are clean. All 1,018 pass ReplayData validation,
+checkpoint-enabled export and the independent comparisons on observed
+evidence fields. The full report records counts and limits, and what changed
+since the 986-replay audit of 2026-09-25; this is not a claim that every field
+is understood.
+Structured-array child rows are admitted per build and per route: all
+measured routes on 13.01--13.06, a measured subset on 11.06--13.00
+([legacy route table](docs/LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
 
 All branches are `++Ares-Core+release-<build>`. Adding a build is one
 `SeededTransform` impl; see [Adding a new build](#supported-builds-and-the-cost-of-a-new-build).
@@ -113,9 +120,11 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
   deduplication; unresolved ownership and incomplete effect pairs remain gaps.
 - **Numeric FastArray observations** — the standalone GAS extractor retains
   replication keys, deleted/changed item IDs and raw property boundaries.
-  All 2,882,152 measured inner windows close exactly; property names and
-  gameplay meanings remain unverified. This output is separate from Parquet
-  typed-value coverage.
+  On 2026-09-28 every window it reads in 1,018 exports closed exactly:
+  3,999,493 `_cnc_h1` windows across 22 builds, and 431,161 chained windows,
+  main and checkpoint, across all 24. Property names and gameplay meanings
+  remain unverified. This output is separate from Parquet typed-value
+  coverage.
 - **Status-effect observations** — nearsight, slow, detain and suppress can
   arrive on affected actors. Matched start/stop records support intervals;
   unmatched records must not be assigned an invented duration.
@@ -134,7 +143,7 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
-- **714 Rust tests** plus a layered validation suite (framing / bytes / decode
+- **829 Rust tests** plus a layered validation suite (framing / bytes / decode
   errors / semantics).
 
 ## Table of contents
@@ -188,19 +197,19 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 16,455,178 |
-| `movement.parquet` | 1,844,147 | 31,886,449 |
-| `actors.parquet` | 3,827 | 87,281 |
-| `net_guids.parquet` | 16,167 | 153,606 |
-| `events.parquet` | 195 | 13,411 |
+| `fields.parquet` | 1,296,660 | 12,691,368 |
+| `movement.parquet` | 1,844,147 | 19,984,802 |
+| `actors.parquet` | 3,827 | 68,243 |
+| `net_guids.parquet` | 16,167 | 114,423 |
+| `events.parquet` | 195 | 12,455 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,218,992 |
-| `checkpoint_actors.parquet` | 3,014 | 27,118 |
-| `checkpoint_net_guids.parquet` | 74,270 | 277,718 |
-| `checkpoint_blocks.parquet` | 22,247 | 175,103 |
-| `checkpoint_guid_entries.parquet` | 74,270 | 928,714 |
-| `checkpoint_export_groups.parquet` | 8,307 | 27,041 |
-| `checkpoint_export_fields.parquet` | 49,314 | 287,130 |
+| `checkpoint_fields.parquet` | 352,089 | 1,190,437 |
+| `checkpoint_actors.parquet` | 3,014 | 24,345 |
+| `checkpoint_net_guids.parquet` | 74,270 | 175,916 |
+| `checkpoint_blocks.parquet` | 22,247 | 112,649 |
+| `checkpoint_guid_entries.parquet` | 74,270 | 219,662 |
+| `checkpoint_export_groups.parquet` | 8,307 | 16,481 |
+| `checkpoint_export_fields.parquet` | 49,314 | 106,370 |
 | `manifest.json` |  | ~660,030 |
 
 `checkpoint_fields.parquet` requires `--checkpoints`. The partials row above
@@ -379,7 +388,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**714 passing**; the full Python suite also has **910 passing** tests. The
+**829 passing**; the full Python suite also has **1252 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
@@ -554,9 +563,14 @@ the timeline. In vrfkit the timeline itself is complete.
 The one extra damage record is a killing blow (29.45 dealt, 20 taken) on the
 `DamageableComponent` of Gekko's E-ability projectile -- actor 27232, packet
 391880, channel 194 -- whose actor closes six packets later. Neither C# build
-emits any event for packet 391880, and why is not established
-([follow-up](docs/FOLLOWUP.md#remaining-work)). vrfkit already produced it at
-`d4731c8`, before the partial header correction, so that is not the cause.
+can name that component's class: it is stably named `Damageable`, so the wire
+carries no class GUID for it, and the C# resolver's fixed table of
+stably-named components lacks the name, so the block is skipped undecoded.
+With that one name added, C# emits the record with the same 35 values
+([how this was established](docs/FOLLOWUP.md#the-damage-record-only-vrfkit-emits)).
+`compare_rpc_params.py` lists it as its one expected difference, keyed by
+replay, packet, actor, subobject, channel, function and values, and fails if
+it stops occurring exactly so.
 
 ## The Event chunk -- the server's own timeline
 
@@ -599,13 +613,14 @@ original is always left intact in `raw_payload`.
 
 ## Whole-corpus robustness
 
-The 2026-09-25 [common audit](docs/BUILD_VERIFICATION.md) checks 986 unique
+The 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 1,018 unique
 replays across 24 builds. Every ReplayData validation and checkpoint export
-succeeds. Independent typed/raw comparisons match 12,917,904
-observed values. All 986 pass the strict quality gate. The two ActiveBlinds
-fixes resolve the earlier 81-file findings and recover 522 additional typed
-children; an independent before/after comparison verifies those values and
-preserves every existing field row and raw payload.
+succeeds. Independent typed/raw comparisons match 13,387,751
+observed values. All 1,018 pass the strict quality gate. On 2026-09-25, the
+two ActiveBlinds fixes resolved the earlier 81-file findings and recovered 522
+additional typed children in the 986-replay corpus; an independent
+before/after comparison verified those values and preserved every existing
+field row and raw payload.
 
 The measurements below describe earlier corpus revisions.
 
@@ -726,7 +741,7 @@ cannot be expanded into fields, so it emits one preservation row (`handle` =
 diagnostic rather than pretending the properties were decoded.
 
 The overlay table is extracted mechanically from the C# descriptors
-(`tools/extract_descriptors.py`) -- 219 groups, 1,319 entries, 96 handles.
+(`tools/extract_descriptors.py`) -- 224 groups, 1,336 entries, 96 handles.
 Those descriptors are vendored verbatim in
 [`third_party/vrp/`](third_party/vrp/README.md),
 and CI regenerates the table from them on every push.
@@ -745,17 +760,18 @@ export sweep, it typed 6,048 further rows with decode errors still at zero.
 
 `02d4d478` (`02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf`), as recorded by the
 committed export baseline `tools/baselines/export_02d4d478.json` after the
-partial-header and shot-array corrections:
+partial-header and shot-array corrections and the component remaps read from the
+13.06 game:
 
 ```
-Decoded OK:   796,920      Decode errors:      0
-Raw/Skip:      26,507      Not in table: 163,534
-No field name:  2,034      Typed:          80.6%
+Decoded OK:   822,185      Decode errors:      0
+Raw/Skip:      24,747      Not in table: 140,814
+No field name:  1,249      Typed:          83.1%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (796,920 + 26,507 + 163,534 +
-2,034 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
+The four buckets partition `Rows offered` exactly (822,185 + 24,747 + 140,814 +
+1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
 in table`, and they contradicted the baseline this repo commits for the same
@@ -775,7 +791,7 @@ Physical value coverage is the fraction of `fields.parquet` rows with at
 least one non-null `value_*` column. It cannot be computed by adding overlay,
 effect-blob or struct counters: these count different units and may describe
 parent/child expansions of the same input. The current reference
-baseline has 914,117 typed rows out of 1,296,660 (70.50%), measured directly
+baseline has 939,382 typed rows out of 1,296,660 (72.45%), measured directly
 from its columns.
 Adding raw child windows changes this denominator even when every old typed
 value survives; compare raw preservation and newly typed values separately.
@@ -833,7 +849,7 @@ checkpoint decode failures. This separate check exists because `vrfkit
 validate` does not print overlay counters, so `validate_corpus.py` alone cannot
 see a wrong type. Reaching zero found three places where the wire disagreed
 with the C# declarations; they are recorded with evidence in
-`tools/apply_type_corrections.py` (187 corrections, verified with `--check`).
+`tools/apply_type_corrections.py` (219 corrections, verified with `--check`).
 
 | Symptom | Actual | Evidence |
 |---|---|---|
@@ -908,9 +924,10 @@ rows, 20,756 decoded struct blobs, 3,129,483 decoded checkpoint fields and
 1,872 decoded checkpoint blobs. The
 machine-local corpus can rotate; the reproducible transform oracle remains the
 88 mechanically extracted upstream golden vectors (11 staging boundaries per
-build, eight builds). The 13.06 implementation was also validated on six real
+build, eight builds). The 13.06 implementation was first validated on six real
 replays; [the upstream parity report](docs/UPSTREAM_PARITY.md) records the
-before/after comparisons and the limits of that sample.
+before/after comparisons and the limits of that sample. The 2026-09-28
+[common audit](docs/BUILD_VERIFICATION.md) checks 38 replays of 13.06.
 
 The sixteen recovered 11.06--12.09 builds add 1,264 native-machine-code
 vectors and a full 48-sample main/checkpoint validation; see the
@@ -988,9 +1005,10 @@ layered, and the layers catch different things:
 - **Bytes** (`check_export_baseline.py`, per-file row and byte counts) --
   regression in any of the 28 export counters.
 - **Decode** (`check_decode_errors_corpus.py`, scoped export corpora) -- overlay
-  type errors and struct-blob failures; the recorded 13.04 scope is all 108 files
-  with checkpoints enabled.
-- **Semantics** (`check_metrics_baseline.py`, 7 builds) -- round count,
+  type errors, struct-blob failures, array/leaf/truncated-RPC/movement
+  failures, unwalked CNC brute-force payloads and movement-section tails; the
+  recorded 13.04 scope is all 108 files with checkpoints enabled.
+- **Semantics** (`check_metrics_baseline.py`, 8 builds) -- round count,
   score, K/D/A invariants that need no baseline.
 
 Two of the headline metrics are **not** "100% / high is good" and reading them
@@ -1002,7 +1020,7 @@ that way is a trap:
   rows cannot yet be split into named properties. `Malformed framing`,
   `Transform failed`, and `RPC payload lost` must remain zero; a non-zero
   `RPC unresolved/raw` count describes preserved, uninterpreted data.
-- The **~80.6% `Typed`** ratio reads low because of the *RPC-parameter
+- The **~83.1% `Typed`** ratio reads low because of the *RPC-parameter
   denominator* -- most of `Not in table` is RPC parameters with no C#
   descriptor. A low ratio is uninterpreted, not lost: those rows still carry
   `raw_bits`, and additive decoders (effects, structs, the economy typing)
@@ -1014,9 +1032,9 @@ The following files are generated and must never be edited by hand:
 
 | Generated file | Generator | Notes |
 |---|---|---|
-| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,319 entries, 219 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
+| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,336 entries, 224 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
-| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum primitive types for ambiguous field names; no cross-group propagation |
+| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including upstream-declared geometry and enum shapes; no cross-group propagation |
 | `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` | 768-byte S-box, shared across builds |
 | `crates/vrf-transform/tests/data/golden_vectors.rs` | `tools/extract_golden.py` | Per-build golden test vectors |
 | `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` | Expected bytes from pinned original executable readers |

@@ -14,7 +14,13 @@ pub type PartialWriter<W> = TableWriter<PartialsTable, W>;
 impl Table for PartialsTable {
     type Row = PartialRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
-    const DICTIONARY_COLUMNS: &'static [&'static str] = &[];
+    // NOT measured: every replay in the 45-replay sample behind
+    // `Table::DICTIONARY_COLUMNS` wrote zero partial rows. The four string
+    // columns are listed by the every-string-column rule; every other column,
+    // `raw_bits` payloads included, takes the writer's PLAIN default without a
+    // measurement behind it. Re-measure once a replay produces rows here.
+    const DICTIONARY_COLUMNS: &'static [&'static str] =
+        &["source", "checkpoint_id", "payload_kind", "reason"];
     const MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
     fn retained_bytes(row: &PartialRecord) -> usize {
         row.raw_bits.len() + row.checkpoint_id.as_ref().map_or(0, String::len)

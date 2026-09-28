@@ -27,6 +27,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+if __package__:
+    from .export_scan import child_exports, leftover_note, skipped_report
+else:
+    from export_scan import child_exports, leftover_note, skipped_report
+
 
 VALUE_COLUMNS = ("value_i64", "value_f64", "value_bool", "value_str")
 REQUIRED_COLUMNS = ("group_path", "field_name", "compatible_checksum", "bit_count", "raw_bits", *VALUE_COLUMNS)
@@ -43,8 +48,12 @@ class InputError(ValueError):
     """An input cannot support an honest raw/untyped inventory."""
 
 
-def discover(inputs: Iterable[Path]) -> list[Path]:
-    """Find export directories without recursively treating unrelated files as input."""
+def discover(inputs: Iterable[Path], skipped: list[Path] | None = None) -> list[Path]:
+    """Find export directories without recursively treating unrelated files as input.
+
+    A parent's `vrfkit export` staging/backup leftovers are never exports
+    (see `export_scan.py`); they are appended to `skipped` when it is given.
+    """
     exports: set[Path] = set()
     for root in inputs:
         if not root.is_dir():
@@ -52,10 +61,13 @@ def discover(inputs: Iterable[Path]) -> list[Path]:
         if (root / "fields.parquet").is_file():
             exports.add(root.resolve())
             continue
-        children = sorted(path.parent.resolve() for path in root.glob("*/fields.parquet"))
+        children, leftovers = child_exports(root)
+        if skipped is not None:
+            skipped.extend(leftovers)
         if not children:
-            raise InputError(f"no direct child exports containing fields.parquet in {root}")
-        exports.update(children)
+            raise InputError(
+                f"no direct child exports containing fields.parquet in {root}{leftover_note(leftovers)}")
+        exports.update(child.resolve() for child in children)
     return sorted(exports)
 
 
@@ -382,8 +394,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jobs", type=int, default=4, help="parallel export scanners (1..16), each with a bounded SQLite shard")
     args = parser.parse_args(argv)
     try:
-        exports = discover(args.inputs)
+        skipped: list[Path] = []
+        exports = discover(args.inputs, skipped)
         report, catalog = summarize(exports, args.jobs, args.top)
+        report["skipped_generated_dirs"] = skipped_report(skipped)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(args.output_dir / "raw_untyped_summary.json", report)
         _write_json(args.output_dir / "raw_untyped_catalog.json", {"schema_version": 1, "entries": catalog})

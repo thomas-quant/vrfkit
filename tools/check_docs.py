@@ -470,7 +470,15 @@ def check_generated_inventory(docs: dict[str, str]) -> list[str]:
 
 
 def baseline_table_figures() -> dict[str, tuple[int, int]]:
-    """Rows and bytes promised by the committed reference export baselines."""
+    """Rows and bytes promised by the committed reference export baselines.
+
+    The main tables come from the export baseline, because README and USAGE
+    quote the default main-only run. Every `checkpoint_*` table comes from the
+    checkpoint baseline -- all of them, not a named one: this read only
+    `checkpoint_fields` while both docs quoted six more checkpoint tables, so
+    a change that moved three of those files' bytes (the byte-budget row-group
+    fix) left six doc rows stale with this check still passing.
+    """
     export = json.loads(read(REPO / "tools" / "baselines" / "export_02d4d478.json"))
     checkpoint = json.loads(
         read(REPO / "tools" / "baselines" / "checkpoint_02d4d478.json")
@@ -479,8 +487,11 @@ def baseline_table_figures() -> dict[str, tuple[int, int]]:
         f"{name}.parquet": (int(values["rows"]), int(values["bytes"]))
         for name, values in export["parquet"].items()
     }
-    cp = checkpoint["parquet"]["checkpoint_fields"]
-    figures["checkpoint_fields.parquet"] = (int(cp["rows"]), int(cp["bytes"]))
+    figures.update(
+        (f"{name}.parquet", (int(values["rows"]), int(values["bytes"])))
+        for name, values in checkpoint["parquet"].items()
+        if name.startswith("checkpoint_")
+    )
     return figures
 
 

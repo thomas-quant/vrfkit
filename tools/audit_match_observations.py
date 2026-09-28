@@ -32,8 +32,10 @@ import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import atomic_write_text
+    from .export_scan import child_exports, leftover_note, skipped_report
 else:
     from atomic_io import atomic_write_text
+    from export_scan import child_exports, leftover_note, skipped_report
 
 
 AMMO_FIELD = "AuthResourceAmount"
@@ -204,6 +206,12 @@ def audit_exports(exports_dir: Path, *, window_ms: int = 300,
     A sample is evenly spaced through sorted export names, which makes it
     reproducible and prevents a quick check from only describing the earliest
     files in a corpus directory.
+
+    The staging and backup directories `vrfkit export` leaves beside an
+    interrupted export are never candidates; they are listed under
+    `skipped_generated_dirs` (see `export_scan.py`). A candidate without
+    `manifest.json` -- which vrfkit writes last -- is a counted failure, not
+    an export.
     """
     records = []
     failures = []
@@ -211,10 +219,10 @@ def audit_exports(exports_dir: Path, *, window_ms: int = 300,
         raise ValueError("jobs must be between 1 and 16")
     if window_ms < 0:
         raise ValueError("window_ms must be non-negative")
-    children = [child for child in sorted(exports_dir.iterdir())
-                if child.is_dir() and (child / "fields.parquet").is_file()]
+    children, skipped = child_exports(exports_dir)
+    candidate_exports = len(children)
     if not children:
-        raise ValueError("no export directories found")
+        raise ValueError(f"no export directories found{leftover_note(skipped)}")
     if sample_size is not None:
         if sample_size <= 0:
             raise ValueError("sample_size must be positive")
@@ -223,6 +231,10 @@ def audit_exports(exports_dir: Path, *, window_ms: int = 300,
                        for index in range(sample_size)} if sample_size > 1 else {0}
             children = [child for index, child in enumerate(children) if index in indices]
     def one(child):
+        if not (child / "manifest.json").is_file():
+            return None, {"export": str(child.resolve()),
+                          "error": "manifest.json is missing; vrfkit writes it last, so this is "
+                                   "not a finished export (an interrupted export or a partial copy)"}
         try:
             return audit_export(child, window_ms=window_ms), None
         except (OSError, ValueError) as exc:
@@ -242,8 +254,8 @@ def audit_exports(exports_dir: Path, *, window_ms: int = 300,
             "method": "all_direct_exports" if sample_size is None else "evenly_spaced_sorted_export_names",
             "requested_sample_size": sample_size,
         },
-        "candidate_exports": len([child for child in exports_dir.iterdir()
-                                  if child.is_dir() and (child / "fields.parquet").is_file()]),
+        "candidate_exports": candidate_exports,
+        "skipped_generated_dirs": skipped_report(skipped),
         "exports_scanned": len(records),
         "exports_failed": len(failures),
         "aggregate_counts": {key: totals[key] for key in sorted(totals)},

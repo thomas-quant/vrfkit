@@ -4,6 +4,7 @@ check_docs.py catches stale documentation, which nothing else can: a wrong
 number in prose compiles and passes every test. Its own detection logic is
 therefore the thing that must not rot into something that passes everything.
 """
+import json
 import sys
 import unittest
 from unittest.mock import patch
@@ -437,7 +438,17 @@ class MeasuredCountTests(unittest.TestCase):
         # expectation_count() includes the generated table's dynamic weapon
         # entries. Keep this pin explicit: verified new typing changes the
         # count, and the test must make that intentional change visible.
-        self.assertEqual(guard.measured_counts()["corrections"], 187)
+        # 187 -> 204: the September 2026 table typing -- 12 ADDITIONS plus the
+        # AllianceFilter and four DeathMontage corrections (OriginalBuyerTeam
+        # changed type but not count). 204 -> 205: the SeekerNade location-level
+        # correction (repmovement-location-scale); HawkFlash's level rides on its
+        # existing ADDITIONS entry, so it adds none. 205 -> 210: the five
+        # AGameObject smoke/zone classes read byte rotator components
+        # (game-evidence-typing-fixes). 210 -> 214: the four EffectID entries
+        # retyped UInt64 -> Int64 (HandleNumber's Int32 -> UInt32 is an
+        # ADDITIONS type change, so it adds none). 214 -> 219: five ADDITIONS
+        # for Cypher's trapwire and cage fields at their 13.01 paths.
+        self.assertEqual(guard.measured_counts()["corrections"], 219)
 
 
 class GeneratedInventoryTests(unittest.TestCase):
@@ -481,6 +492,21 @@ class BaselineFigureTests(unittest.TestCase):
             {"README.md": "No measured export table here."}, tables
         )
         self.assertEqual(len(problems), len(tables), problems)
+
+    def test_every_checkpoint_table_is_checked_against_its_own_baseline(self):
+        # Only checkpoint_fields used to be read. The docs quote every
+        # checkpoint table, and three of those rows went stale with this
+        # check still passing when their files' bytes moved.
+        checkpoint = json.loads(guard.read(
+            guard.REPO / "tools" / "baselines" / "checkpoint_02d4d478.json"))
+        expected = {
+            f"{name}.parquet": (int(values["rows"]), int(values["bytes"]))
+            for name, values in checkpoint["parquet"].items()
+            if name.startswith("checkpoint_")
+        }
+        self.assertGreater(len(expected), 1, "the baseline lost its checkpoint tables")
+        tables = guard.baseline_table_figures()
+        self.assertEqual({name: tables.get(name) for name in expected}, expected)
 
     def test_the_shipped_docs_quote_every_live_baseline_figure(self):
         docs = {

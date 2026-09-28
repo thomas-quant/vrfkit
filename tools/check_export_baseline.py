@@ -37,6 +37,12 @@ Two independent checks run here, and they fail on different things:
 Both were confirmed to fail on a deliberately broken build before this was
 committed; see the commit message.
 
+With `--checkpoints` a third check runs, `checkpoint_guid_crosscheck`: every
+checkpoint GUID entry's path, rebuilt from the raw declaration record by the
+checkpoint reader's path-index rule, must equal the path the main stream's own
+reader declared for that GUID. It needs no baseline either; see its docstring
+and docs/CHECKPOINT_PATH_RESOLUTION.md.
+
 The .vrf lives outside the repo (under valplay), so a missing replay is
 reported and SKIPPED rather than failed -- the same reasoning as
 check_corpus_baseline.py: a guard that fails on someone else's machine gets
@@ -58,6 +64,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 if __package__:
@@ -68,10 +75,13 @@ else:  # direct script execution
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
 
-# Every counter the export summary prints, except `Elapsed` and the manifest
-# path. Anchored on the exact labels driver.rs emits; a label that stops being
-# printed is reported as missing rather than defaulted to 0, because a counter
-# that silently reads as absent is how this class of bug survives.
+# Counters the export summary prints, anchored on the exact labels
+# crates/vrfkit/src/driver/summary.rs emits. NOT every line: on 2026-09-28,
+# 57 of the 114 labelled `eprintln!` lines in summary.rs had no pattern here
+# or in CHECKPOINT_COUNTERS, and a line in neither dict is not pinned. A label
+# listed here that stops being printed is reported as missing rather than
+# defaulted to 0, because a counter that silently reads as absent is how this
+# class of bug survives.
 COUNTERS = {
     "chunks": r"Chunks:\s+(\d+)",
     "packets": r"Packets:\s+(\d+)",
@@ -121,8 +131,64 @@ COUNTERS = {
     "tracked_rewards_opaque_empty_variants": (
         r"(?m)^\s*Reward opaque:\s+(\d+) empty variants\s*$"
     ),
+    # The AbilitiesAndBuffs ClassNetCache brute force and the post-RepLayout
+    # tails. `CNC RPC rows` counts successes only, and it also counts the
+    # tail decodes, so it can only shrink when the fc=34 walk stops fitting;
+    # `unwalked` is the line that names that failure and `attempted` its
+    # denominator. The summary.rs header claimed every line was pinned here
+    # while these had no pattern at all. Anchored at the line start: the
+    # checkpoint block prints "Checkpoint CNC brute force:", which an
+    # unanchored pattern would read whenever the main line went missing.
+    "cnc_rpcs_emitted": r"(?m)^\s*CNC RPC rows:\s+(\d+)\s*$",
+    "cnc_bruteforce_payloads_attempted": (
+        r"(?m)^\s*CNC brute force:\s+(\d+) attempted / \d+ unwalked\s*$"
+    ),
+    "cnc_bruteforce_payloads_unwalked": (
+        r"(?m)^\s*CNC brute force:\s+\d+ attempted / (\d+) unwalked\s*$"
+    ),
+    "rep_layout_cnc_tails_decoded": (
+        r"(?m)^\s*RepLayout tails:\s+(\d+) decoded / \d+ preserved\s*$"
+    ),
+    "rep_layout_cnc_tails_preserved": (
+        r"(?m)^\s*RepLayout tails:\s+\d+ decoded / (\d+) preserved\s*$"
+    ),
+    # Movement sections that stopped with bits of their window unread, in
+    # sized and open windows. A measured tally, not a loss verdict: pinned so
+    # a change in either direction on the reference replay is seen.
+    "movement_sized_section_tails": (
+        r"(?m)^\s*Movement tails:\s+(\d+) sized \(\d+ bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "movement_sized_section_tail_bits": (
+        r"(?m)^\s*Movement tails:\s+\d+ sized \((\d+) bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "movement_open_section_tails": (
+        r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / (\d+) open \(\d+ bits\)\s*$"
+    ),
+    "movement_open_section_tail_bits": (
+        r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
+    ),
+    # Section bytes the DemoFrame walk stepped over. The skip is
+    # length-prefixed, so a build that starts sending ExternalData or
+    # GameSpecificFrameData moves nothing else here. Anchored: `cp_frames`
+    # below is the unanchored `Frames:\s+(\d+)`, and the two must never be
+    # able to read each other's line.
+    "frame_external_data_blobs": (
+        r"(?m)^\s*Frame skips:\s+(\d+) external blobs / \d+ external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "frame_external_data_bytes": (
+        r"(?m)^\s*Frame skips:\s+\d+ external blobs / (\d+) external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "frame_game_specific_bytes": (
+        r"(?m)^\s*Frame skips:\s+\d+ external blobs / \d+ external bytes"
+        r" / (\d+) game-specific bytes\s*$"
+    ),
 }
 PATTERNS = {k: re.compile(v) for k, v in COUNTERS.items()}
+#: The three frame-skip tallies, as the manifest names them after its
+#: `frame_` / `checkpoint_frame_` prefixes.
+FRAME_SKIP_KEYS = ("external_data_blobs", "external_data_bytes", "game_specific_bytes")
 
 # Only printed under `--checkpoints`, so they live apart from COUNTERS -- a
 # default run must not record them as None and then diff that against a
@@ -153,6 +219,43 @@ CHECKPOINT_COUNTERS = {
     "cp_targeting_world_locations_decoded": r"(?m)^\s*Checkpoint targets:\s+(\d+) array children\s*$",
     "cp_tracked_rewards_opaque_empty_variants": (
         r"(?m)^\s*Checkpoint reward opaque:\s+(\d+) empty variants\s*$"
+    ),
+    "cp_cnc_rpcs_emitted": r"(?m)^\s*Checkpoint CNC:\s+(\d+) RPC rows\s*$",
+    "cp_cnc_bruteforce_payloads_attempted": (
+        r"(?m)^\s*Checkpoint CNC brute force:\s+(\d+) attempted / \d+ unwalked\s*$"
+    ),
+    "cp_cnc_bruteforce_payloads_unwalked": (
+        r"(?m)^\s*Checkpoint CNC brute force:\s+\d+ attempted / (\d+) unwalked\s*$"
+    ),
+    "cp_rep_layout_cnc_tails_decoded": (
+        r"(?m)^\s*Checkpoint tails:\s+(\d+) decoded / \d+ preserved\s*$"
+    ),
+    "cp_rep_layout_cnc_tails_preserved": (
+        r"(?m)^\s*Checkpoint tails:\s+\d+ decoded / (\d+) preserved\s*$"
+    ),
+    "cp_movement_sized_section_tails": (
+        r"(?m)^\s*Checkpoint movement tails:\s+(\d+) sized \(\d+ bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "cp_movement_sized_section_tail_bits": (
+        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \((\d+) bits\) / \d+ open \(\d+ bits\)\s*$"
+    ),
+    "cp_movement_open_section_tails": (
+        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / (\d+) open \(\d+ bits\)\s*$"
+    ),
+    "cp_movement_open_section_tail_bits": (
+        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
+    ),
+    "cp_frame_external_data_blobs": (
+        r"(?m)^\s*Checkpoint frame skips:\s+(\d+) external blobs / \d+ external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "cp_frame_external_data_bytes": (
+        r"(?m)^\s*Checkpoint frame skips:\s+\d+ external blobs / (\d+) external bytes"
+        r" / \d+ game-specific bytes\s*$"
+    ),
+    "cp_frame_game_specific_bytes": (
+        r"(?m)^\s*Checkpoint frame skips:\s+\d+ external blobs / \d+ external bytes"
+        r" / (\d+) game-specific bytes\s*$"
     ),
 }
 
@@ -300,6 +403,183 @@ def checkpoint_manifest_errors(out_dir: Path, counters: dict | None = None) -> l
     return errors
 
 
+#: The columns `checkpoint_guid_crosscheck` reads from each table.
+GUID_ENTRY_COLUMNS = ("checkpoint_index", "ordinal", "net_guid", "outer_net_guid",
+                      "path_is_string", "literal_path", "name_index")
+MAIN_GUID_COLUMNS = ("net_guid", "path", "outer_net_guid")
+
+#: Every count `checkpoint_guid_crosscheck` returns, in print order. All of them
+#: are always returned and printed, zeros included: a line that shows a count
+#: only when it is non-zero cannot tell "nothing differed" from "nothing ran".
+#: For each kind, joined = path_equal + path_differs = outer_equal +
+#: outer_value_differs + outer_presence_differs; indexed entries are joined,
+#: unjoined or unresolved.
+GUID_CROSSCHECK_KEYS = (
+    "indexed_joined", "indexed_path_equal", "indexed_path_differs",
+    "indexed_unresolved", "indexed_outer_equal", "indexed_outer_value_differs",
+    "indexed_outer_presence_differs", "indexed_unjoined",
+    "literal_joined", "literal_path_equal", "literal_path_differs",
+    "literal_outer_equal", "literal_outer_value_differs",
+    "literal_outer_presence_differs", "literal_unjoined",
+    "main_duplicate_guids", "malformed_entries", "ordinal_errors",
+)
+
+#: Counts that fail the check when non-zero. `indexed_joined == 0` fails too.
+#: Unjoined entries do not: a checkpoint may declare a GUID the main stream
+#: never exported.
+GUID_CROSSCHECK_FAILURES = {
+    "indexed_path_differs": "indexed entries resolve to a path the main stream does not declare for that GUID",
+    "indexed_unresolved": "indexed entries name a position past the literals that precede them",
+    "indexed_outer_value_differs": "indexed entries carry a different outer GUID than the main stream",
+    "indexed_outer_presence_differs": "indexed entries disagree with the main stream on whether an outer GUID exists",
+    "literal_path_differs": "literal entries carry a different path than the main stream",
+    "literal_outer_value_differs": "literal entries carry a different outer GUID than the main stream",
+    "literal_outer_presence_differs": "literal entries disagree with the main stream on whether an outer GUID exists",
+    "main_duplicate_guids": "net_guids.parquet rows repeat a net_guid, so the join is ambiguous",
+}
+
+
+def format_guid_crosscheck(counts: dict) -> str:
+    """One line with every cross-check count, zeros included."""
+    return "Checkpoint GUID cross-check: " + ", ".join(
+        f"{key.replace('_', ' ')} {counts[key]}" for key in GUID_CROSSCHECK_KEYS)
+
+
+def _outer_verdict(checkpoint_outer: int, main_outer: int | None) -> str:
+    """Compare outers under an explicit rule; never fold null into 0.
+
+    `checkpoint_guid_entries` keeps the wire value, where 0 means "no outer".
+    `net_guids` writes null for "no outer" and never writes 0, the invalid
+    GUID. So checkpoint 0 must meet main null, and a non-zero checkpoint outer
+    must meet the same main value. A main 0 is a presence difference, not a
+    match for checkpoint 0: folding null into 0 would let the main table start
+    writing 0 without this check noticing.
+    """
+    checkpoint_present = checkpoint_outer != 0
+    main_present = main_outer is not None
+    if checkpoint_present != main_present:
+        return "outer_presence_differs"
+    if checkpoint_present and checkpoint_outer != main_outer:
+        return "outer_value_differs"
+    return "outer_equal"
+
+
+def checkpoint_guid_crosscheck(out_dir: Path) -> tuple[dict, list[str]]:
+    """Check checkpoint GUID paths against the main stream's own declarations.
+
+    Returns `(counts, errors)`: every key of `GUID_CROSSCHECK_KEYS`, and one
+    message per reason the check fails. An empty error list is a pass.
+
+    A checkpoint GUID entry carries its path either as a literal or as an index.
+    `checkpoint_guid_entries.parquet` keeps the raw record, so the path is
+    rebuilt here by the reader's rule (docs/CHECKPOINT_PATH_RESOLUTION.md): the
+    index is a zero-based position among the literals that appeared earlier
+    in the same checkpoint, indexed entries are not added to that table, and
+    the table starts empty for every `checkpoint_index`. Grouping is by
+    `checkpoint_index`, never `checkpoint_id` -- IDs repeat within a replay.
+    Rows are put in `(checkpoint_index, ordinal)` order first rather than
+    trusted to arrive in it.
+
+    The main stream declares the same server GUIDs through a separate reader
+    into a separate cache, written as `net_guids.parquet`; its paths never pass
+    through the index rule. Each entry is joined to it by `net_guid` and the
+    path and outer GUID are compared (see `_outer_verdict`). Literal entries
+    are compared too: they do not test the rule, but they test the premise
+    that a GUID number names the same path in both tables. Agreement is
+    evidence for the path-index rule, not for actor identity across streams.
+
+    Fails on any path or outer difference, an index past the preceding
+    literals, duplicate `net_guid` keys in the main table, malformed rows or
+    non-contiguous ordinals, and when no indexed entry joined at all -- a check
+    that compared nothing must not read as one that passed.
+    """
+    counts = dict.fromkeys(GUID_CROSSCHECK_KEYS, 0)
+    try:
+        entries = pq.read_table(out_dir / "checkpoint_guid_entries.parquet",
+                                columns=list(GUID_ENTRY_COLUMNS)).to_pydict()
+        main = pq.read_table(out_dir / "net_guids.parquet",
+                             columns=list(MAIN_GUID_COLUMNS)).to_pydict()
+    except (OSError, ValueError, pa.ArrowException) as exc:
+        return counts, [f"checkpoint GUID cross-check cannot read its tables: {exc}"]
+
+    main_rows: dict[int, tuple] = {}
+    for guid, path, outer in zip(main["net_guid"], main["path"], main["outer_net_guid"]):
+        if guid in main_rows:
+            counts["main_duplicate_guids"] += 1
+        main_rows[guid] = (path, outer)
+
+    rows = list(zip(*(entries[name] for name in GUID_ENTRY_COLUMNS)))
+    well_formed = []
+    for row in rows:
+        checkpoint, ordinal, guid, outer, is_literal, literal, index = row
+        if (None in (checkpoint, ordinal, guid, outer, is_literal)
+                or (is_literal and (literal is None or index is not None))
+                or (not is_literal and (index is None or literal is not None))):
+            counts["malformed_entries"] += 1
+        else:
+            well_formed.append(row)
+    well_formed.sort(key=lambda row: (row[0], row[1]))
+    previous = None
+    for checkpoint, ordinal, *_ in well_formed:
+        expected = previous[1] + 1 if previous and previous[0] == checkpoint else 0
+        if ordinal != expected:
+            counts["ordinal_errors"] += 1
+        previous = (checkpoint, ordinal)
+    if counts["malformed_entries"] or counts["ordinal_errors"]:
+        return counts, [
+            f"checkpoint_guid_entries.parquet is not a complete raw record "
+            f"({counts['malformed_entries']} malformed entries, "
+            f"{counts['ordinal_errors']} ordinal errors); paths were not compared"]
+
+    # The first example of each difference, for the error message.
+    first: dict[str, str] = {}
+
+    def note(key: str, row: tuple, detail: str) -> None:
+        if key not in first:
+            first[key] = (f"checkpoint_index {row[0]} ordinal {row[1]} "
+                          f"net_guid {row[2]}: {detail}")
+
+    literals: list[str] = []
+    current = None
+    for row in well_formed:
+        checkpoint, _, guid, outer, is_literal, literal, index = row
+        if checkpoint != current:
+            current, literals = checkpoint, []
+        if is_literal:
+            literals.append(literal)
+            kind, path = "literal", literal
+        elif index < len(literals):
+            kind, path = "indexed", literals[index]
+        else:
+            counts["indexed_unresolved"] += 1
+            note("indexed_unresolved", row, f"index {index}, {len(literals)} preceding literals")
+            continue
+        if guid not in main_rows:
+            counts[f"{kind}_unjoined"] += 1
+            continue
+        counts[f"{kind}_joined"] += 1
+        main_path, main_outer = main_rows[guid]
+        if path == main_path:
+            counts[f"{kind}_path_equal"] += 1
+        else:
+            counts[f"{kind}_path_differs"] += 1
+            note(f"{kind}_path_differs", row, f"checkpoint {path!r}, main {main_path!r}")
+        verdict = _outer_verdict(outer, main_outer)
+        counts[f"{kind}_{verdict}"] += 1
+        if verdict != "outer_equal":
+            note(f"{kind}_{verdict}", row, f"checkpoint outer {outer}, main outer {main_outer}")
+
+    errors = []
+    if counts["indexed_joined"] == 0:
+        errors.append("no indexed checkpoint GUID entry joined a main-stream GUID, "
+                      "so the path-index rule was not compared at all")
+    for key, reason in GUID_CROSSCHECK_FAILURES.items():
+        if counts[key]:
+            example = f" (first: {first[key]})" if key in first else ""
+            errors.append(f"checkpoint GUID cross-check: {counts[key]} {reason}{example}")
+    return counts, errors
+
+
 def reward_opaque_manifest_errors(
     out_dir: Path, counters: dict, checkpoints: bool,
 ) -> list[str]:
@@ -340,6 +620,34 @@ def targeting_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) 
         return [f"manifest omits targeting world-location quality data: {exc}"]
     if any(type(value) is not int or value < 0 for value in values.values()):
         return ["targeting world-location counts must be nonnegative integers"]
+    return [f"manifest {name}={value} disagrees with summary {counters.get(name)}"
+            for name, value in values.items() if counters.get(name) != value]
+
+
+def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
+    """The frame-skip tallies must agree between CLI and manifest, zeros included.
+
+    Not a zero gate: skipping these sections is what the reference does, so
+    a non-zero count is data this parser leaves undecoded, not a failure. What
+    must hold is that the two outputs report the same measurement.
+
+    It cannot see a tally that never reaches them. Each pass feeds its summary
+    line and its manifest keys from one variable, so a pass that stops
+    absorbing its frame walk reports 0 in both, and 0 is also the value the
+    committed baselines pin for 02d4d478. The guard for that wiring is
+    crates/vrfkit/tests/frame_skips.rs, which runs the binary on a replay
+    that carries both sections.
+    """
+    try:
+        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
+        values = {f"frame_{key}": quality[f"frame_{key}"] for key in FRAME_SKIP_KEYS}
+        if checkpoints:
+            values.update({f"cp_frame_{key}": quality["checkpoints"][f"checkpoint_frame_{key}"]
+                           for key in FRAME_SKIP_KEYS})
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [f"manifest omits frame-skip quality data: {exc}"]
+    if any(type(value) is not int or value < 0 for value in values.values()):
+        return ["frame-skip counts must be nonnegative integers"]
     return [f"manifest {name}={value} disagrees with summary {counters.get(name)}"
             for name, value in values.items() if counters.get(name) != value]
 
@@ -392,7 +700,8 @@ def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -
         }
 
     manifest_errors = (reward_opaque_manifest_errors(out_dir, counters, checkpoints)
-                       + targeting_manifest_errors(out_dir, counters, checkpoints))
+                       + targeting_manifest_errors(out_dir, counters, checkpoints)
+                       + frame_skip_manifest_errors(out_dir, counters, checkpoints))
     if manifest_errors:
         raise SystemExit("; ".join(manifest_errors))
 
@@ -400,6 +709,12 @@ def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -
         manifest_errors = checkpoint_manifest_errors(out_dir, counters)
         if manifest_errors:
             raise SystemExit("; ".join(manifest_errors))
+        # Printed, never pinned: adding these to `counters` would make every
+        # existing checkpoint baseline report them as drift from None.
+        guid_counts, guid_errors = checkpoint_guid_crosscheck(out_dir)
+        print(format_guid_crosscheck(guid_counts))
+        if guid_errors:
+            raise SystemExit("; ".join(guid_errors))
 
     return {"counters": counters, "parquet": parquet}
 

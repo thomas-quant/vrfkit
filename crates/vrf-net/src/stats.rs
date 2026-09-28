@@ -177,6 +177,49 @@ pub struct NetStats {
     /// other truncated read; this names the specific shape so a corpus run can
     /// say whether it ever happens.
     pub actor_opens_missing_spawn: u64,
+    /// Open bunches that did not complete their open on a channel still
+    /// holding a live actor.
+    ///
+    /// Five arms stop an open bunch before its new state is written: the bunch
+    /// is refused at the channel-state limit, its package-map exports or its
+    /// must-be-mapped GUIDs fail to read, the open itself fails, or it is a
+    /// package-map export bunch whose exports read cleanly -- nothing after
+    /// exports is read, so its open never is. The first four are also one
+    /// [`Self::bunch_header_failures`] each; the clean export bunch is not, so
+    /// this is the only counter that names its lost open -- and only when that
+    /// open displaced a live actor (docs/FOLLOWUP.md).
+    ///
+    /// What they used to leave behind: the new state is written only after the
+    /// spawn block reads, so the previous actor stayed on the channel, still
+    /// open, and every later bunch there was framed as that actor's -- its
+    /// archetype, its class, plausible field names and typed values for an
+    /// object the wire had replaced. That state is now retired on every one of
+    /// the five, and, as for [`Self::channel_reopens_while_open`], no close is
+    /// fabricated for it. Later bunches on the channel land in
+    /// [`Self::bunches_on_unopened_channel`] instead of a stranger's schema.
+    ///
+    /// Not covered: an open carried by a partial fragment the reassembly
+    /// accumulator refuses or discards. That path retires nothing; see
+    /// docs/FOLLOWUP.md.
+    pub failed_reopens_while_open: u64,
+    /// Bunches that reached content-block framing with payload left and no
+    /// open actor on their channel -- it never opened, an open bunch that did
+    /// not complete its open retired its actor, it was destroyed, or it is
+    /// dormant -- and were dropped whole.
+    ///
+    /// The only trace used to be [`Self::bunches`], so one failed open that
+    /// cost every later bunch on its channel reported a single
+    /// `bunch_header_failures`. How many content blocks those bunches carried
+    /// is unknowable -- they were never framed -- so they are counted here as
+    /// bunches and bits, not added to [`Self::lost_content_blocks`].
+    pub bunches_on_unopened_channel: u64,
+    /// Payload bits those bunches still held after their preambles.
+    ///
+    /// Kept out of [`Self::skipped_bits`] for the reason
+    /// [`Self::rep_layout_export_bunches`] is: the oracle reads that tally as
+    /// bits lost across failed content blocks, and no content block was framed
+    /// here.
+    pub unopened_channel_bits: u64,
     /// Bunches refused because a channel-state table was at capacity or a
     /// reliable sequence could not advance representably.
     pub channel_state_limit_failures: u64,
@@ -282,6 +325,9 @@ impl NetStats {
         self.actor_closes += other.actor_closes;
         self.channel_reopens_while_open += other.channel_reopens_while_open;
         self.actor_opens_missing_spawn += other.actor_opens_missing_spawn;
+        self.failed_reopens_while_open += other.failed_reopens_while_open;
+        self.bunches_on_unopened_channel += other.bunches_on_unopened_channel;
+        self.unopened_channel_bits += other.unopened_channel_bits;
         self.channel_state_limit_failures += other.channel_state_limit_failures;
         self.partial_resource_limit_failures += other.partial_resource_limit_failures;
         self.package_map_exports += other.package_map_exports;
@@ -413,7 +459,12 @@ pub struct DiagnosticEvent {
     pub content_bits: Option<u32>,
     /// Which content block within this bunch (0-based).
     pub block_index_in_bunch: u32,
-    /// Number of bits actually skipped in this event.
+    /// Number of bits this event charged to [`NetStats::skipped_bits`].
+    ///
+    /// For a block-framing abort that is the failing block's first bit to the
+    /// end of the bunch, so it can exceed `remaining_bits`: the header and
+    /// `content_bits` reads before the failure consumed bits that framed
+    /// nothing.
     pub bits_skipped: u64,
 }
 
@@ -709,6 +760,9 @@ mod tests {
             actor_closes: 23,
             channel_reopens_while_open: 24,
             actor_opens_missing_spawn: 25,
+            failed_reopens_while_open: 44,
+            bunches_on_unopened_channel: 45,
+            unopened_channel_bits: 46,
             channel_state_limit_failures: 26,
             partial_resource_limit_failures: 27,
             package_map_exports: 28,
@@ -758,6 +812,9 @@ mod tests {
         assert_eq!(totals.actor_closes, 46);
         assert_eq!(totals.channel_reopens_while_open, 48);
         assert_eq!(totals.actor_opens_missing_spawn, 50);
+        assert_eq!(totals.failed_reopens_while_open, 88);
+        assert_eq!(totals.bunches_on_unopened_channel, 90);
+        assert_eq!(totals.unopened_channel_bits, 92);
         assert_eq!(totals.channel_state_limit_failures, 52);
         assert_eq!(totals.partial_resource_limit_failures, 54);
         assert_eq!(totals.package_map_exports, 56);

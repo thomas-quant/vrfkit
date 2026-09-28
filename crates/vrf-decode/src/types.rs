@@ -17,6 +17,36 @@ pub enum RotatorQuantization {
     ShortComponents,
 }
 
+/// Location quantization for [`FRepMovement`], mirroring Unreal's
+/// `EVectorQuantization`: how many decimal places the sending class rounds
+/// the location to before packing it as an integer.
+///
+/// Not on the wire. A packed quantized vector's 7-bit header carries the
+/// component width and a "the integer was scaled" flag, but not the scale,
+/// so the reader has to be told the sending class's level -- the same
+/// situation as [`RotatorQuantization`], and handled the same way: every
+/// `RepMovement` entry in the overlay table states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VectorQuantization {
+    /// Whole units: the packed integer is the coordinate.
+    RoundWholeNumber,
+    /// One decimal: the packed integer is ten times the coordinate.
+    RoundOneDecimal,
+    /// Two decimals: the packed integer is a hundred times the coordinate.
+    RoundTwoDecimals,
+}
+
+impl VectorQuantization {
+    /// The divisor that turns a scaled packed integer back into world units.
+    pub const fn scale(self) -> u32 {
+        match self {
+            Self::RoundWholeNumber => 1,
+            Self::RoundOneDecimal => 10,
+            Self::RoundTwoDecimals => 100,
+        }
+    }
+}
+
 /// A 3D vector. Components are always `f64` regardless of wire format (float
 /// values are widened on decode to avoid losing precision when mixing formats).
 ///
@@ -112,13 +142,16 @@ impl fmt::Display for FTransform {
 /// Bit 1: bRepPhysics
 /// Bit 2: bRepServerFrame
 /// Bit 3: bRepServerHandle
-/// [VectorNetQuantize100]: location
+/// [packed quantized vector / VectorQuantization::scale()]: location
 /// [RotationShort or RotationByte]: rotation
-/// [VectorNetQuantize(1)]: linear velocity
-/// if bRepPhysics: [VectorNetQuantize(1)]: angular velocity
+/// [packed quantized vector, whole units]: linear velocity
+/// if bRepPhysics: [packed quantized vector, whole units]: angular velocity
 /// if bRepServerFrame: IntPacked server frame
 /// if bRepServerHandle: IntPacked server physics handle
 /// ```
+///
+/// The location's divisor and the rotator's width are per-class choices the
+/// wire does not carry; `FieldType::RepMovement` supplies both.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FRepMovement {
     pub location: FVector,

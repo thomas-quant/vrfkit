@@ -25,12 +25,21 @@ pub enum FieldType {
     EnumByte,
     Int32,
     UInt32,
+    /// A signed 64-bit integer. `FEffectID::EffectID` is one: its
+    /// `compatible_checksum` reproduces only with the C++ type `int64`.
+    Int64,
     UInt64,
     Float,
     Double,
     FString,
-    /// See the internal `scalar::decode_ftext` reader.
+    /// See the internal `scalar::decode_ftext` reader: a string-table key,
+    /// and every other history refused.
     FText,
+    /// A whole `FText` history tree ([`crate::decode_ftext_tree`]'s measured
+    /// forms, the empty history 255 among them), as its JSON in `value_str`.
+    /// `FText` cannot stand in for it: it keeps only a string-table key and
+    /// refuses the empty form, which is most of what a text property sends.
+    FTextTree,
     FName,
     ObjectNetGuid,
     Guid,
@@ -51,8 +60,14 @@ pub enum FieldType {
     RotationShort,
     RotationByte,
     Transform,
+    /// `FRepMovement`. Both parameters are per-class choices the wire does not
+    /// carry: the rotator's component width, and the number of decimals the
+    /// location was rounded to before packing. See
+    /// [`crate::types::RotatorQuantization`] and
+    /// [`crate::types::VectorQuantization`].
     RepMovement {
         rotation: crate::types::RotatorQuantization,
+        location: crate::types::VectorQuantization,
     },
     /// Dynamic arrays and custom decoders -- not decoded, raw_bits suffices.
     Raw,
@@ -118,6 +133,11 @@ pub enum DecodeError {
     /// when the actual cause is a table constant that needs raising.
     #[error("byte array declared {declared} bytes, exceeding the {max} configured for this field")]
     ByteArrayLengthCapExceeded { declared: u32, max: u32 },
+
+    /// The full-tree FText reader refused the payload; see
+    /// [`crate::FTextTreeError`] for the reason.
+    #[error("FText tree: {0}")]
+    FTextTree(crate::FTextTreeError),
 }
 
 /// Decode raw bits according to the given [`FieldType`].
@@ -162,11 +182,15 @@ fn dispatch_decode(
         FieldType::Byte | FieldType::EnumByte => scalar::decode_byte(r),
         FieldType::Int32 => scalar::decode_i32(r),
         FieldType::UInt32 => scalar::decode_u32(r),
+        FieldType::Int64 => scalar::decode_i64(r),
         FieldType::UInt64 => scalar::decode_u64(r),
         FieldType::Float => scalar::decode_float(r),
         FieldType::Double => scalar::decode_double(r),
         FieldType::FString => scalar::decode_fstring(r),
         FieldType::FText => scalar::decode_ftext(r),
+        FieldType::FTextTree => crate::ftext::decode_ftext_tree_from(r)
+            .map(|tree| DecodedValue::Str(tree.to_json()))
+            .map_err(DecodeError::FTextTree),
         FieldType::FName => scalar::decode_fname(r),
         FieldType::ObjectNetGuid => scalar::decode_object_net_guid(r),
         FieldType::Guid => scalar::decode_guid(r),
@@ -181,7 +205,9 @@ fn dispatch_decode(
         FieldType::RotationShort => geometry::decode_rotation_short(r),
         FieldType::RotationByte => geometry::decode_rotation_byte(r),
         FieldType::Transform => geometry::decode_transform(r),
-        FieldType::RepMovement { rotation } => geometry::decode_rep_movement(r, rotation),
+        FieldType::RepMovement { rotation, location } => {
+            geometry::decode_rep_movement(r, rotation, location)
+        }
         FieldType::Raw | FieldType::Skip => Err(DecodeError::RawOrSkip),
     }
 }

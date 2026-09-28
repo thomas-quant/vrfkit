@@ -31,8 +31,8 @@ SUBCOMMANDS:
               into one bounded JSON document. Writes no table.
               --json  Write the aggregate to a file instead of stdout
               --include-payloads  Include bounded raw payload samples
-    export    Write five Parquet tables (fields, movement, actors,
-              net_guids, events) + manifest.json
+    export    Write six Parquet tables (fields, movement, actors,
+              net_guids, events, partials) + manifest.json
               --checkpoints  Also parse Checkpoint chunks into
                              checkpoint_fields, checkpoint_actors,
                              checkpoint_net_guids, checkpoint_blocks,
@@ -40,8 +40,10 @@ SUBCOMMANDS:
                              checkpoint_export_fields
                              Parquet tables. Off by default: the
                              snapshots are ~10% of the file and a separate
-                             read, and the five other tables are unaffected
-                             either way.
+                             read. fields, movement, actors, net_guids and
+                             events are unaffected either way; checkpoint
+                             partial rejections, if any, are added to
+                             partials.
 ";
 
 /// Dispatch one command line and report the process exit code it earns.

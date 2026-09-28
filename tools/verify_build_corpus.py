@@ -5,6 +5,8 @@ logs/exports under a new --work-dir. The JSON report contains aggregate build
 counts and content hashes, never source filenames or player identifiers.
 Missing counters and failed checks are errors, not implicit zeros. Absent
 evidence fields are reported separately from mismatching observed values.
+Each export also runs `check_export_baseline.checkpoint_guid_crosscheck`, and
+its counts reach the report as `guid_crosscheck_*`.
 """
 from __future__ import annotations
 
@@ -34,13 +36,36 @@ NET_ZERO = (
     "content_block_framing_failures", "malformed_content_blocks",
     "transform_failures", "field_stream_failures", "channel_reopens_while_open",
     "actor_opens_missing_spawn", "channel_state_limit_failures",
-    "partial_resource_limit_failures",
+    "partial_resource_limit_failures", "failed_reopens_while_open",
+    "bunches_on_unopened_channel", "unopened_channel_bits",
 )
 SINK_ZERO = (
     "overlay_decoded_err", "struct_blobs_failed", "movement_rpc_errors",
     "array_truncations", "array_errors", "array_unconsumed_nested_bits",
     "array_unconsumed_root_bits", "array_implicit_terminations",
     "array_leaf_decode_errors", "truncated_rpcs",
+    # The three below were zero in both passes of all 1,018 unique corpus
+    # replays (24 builds) when added on 2026-09-28. The brute force rests on
+    # one empirical constant (fc=34), so a payload it cannot walk means a
+    # build changed. A movement-section tail is a tally in the exporter, not
+    # an error (see RpcDecodeResult::sized_section_tails), but no measured
+    # build has produced one: a nonzero count is a new shape to look at, the
+    # same footing array_implicit_terminations has here.
+    "cnc_bruteforce_payloads_unwalked",
+    "movement_sized_section_tails", "movement_open_section_tails",
+)
+#: Each sink event tally the manifest publishes, and the NetStats counter it
+#: must equal. vrf-net calls the sink right beside its own increment for each
+#: of these events, so the two are one count taken twice; a difference means
+#: the sink's bookkeeping (a missing or extra `+= 1`) is broken. The export
+#: summary printed both sides as `Sink tally` for exactly this comparison, and
+#: nothing performed it. The sink's `fields_emitted` has no pair: it counts
+#: emitted rows, not framed properties.
+SINK_NET_EQUAL = (
+    ("sink_rpcs_emitted", "rpcs"),
+    ("sink_actor_opens", "actor_opens"),
+    ("sink_actor_closes", "actor_closes"),
+    ("sink_content_blocks", "content_blocks"),
 )
 
 
@@ -74,12 +99,20 @@ def manifest_counts(manifest):
                 keys.update(("overlay_decoded_ok", "overlay_raw_or_skip",
                              "overlay_not_in_table", "overlay_no_field_name",
                              "struct_blobs_decoded", "rpc_suffix_bits_dropped",
-                             "overlay_handle_conflicts_refused"))
+                             "overlay_handle_conflicts_refused",
+                             "cnc_bruteforce_payloads_attempted",
+                             "movement_sized_section_tail_bits",
+                             "movement_open_section_tail_bits"))
             for key in sorted(keys):
                 name = f"{prefix}_{key}"
                 counts[name] = require_count(source, key)
                 if key in zero_keys and counts[name]:
                     failures.append(f"{name}={counts[name]}")
+        for sink_key, net_key in SINK_NET_EQUAL:
+            tally = counts[f"{prefix}_{sink_key}"] = require_count(scope["sink"], sink_key)
+            framed = counts[f"{prefix}_{net_key}"] = require_count(scope["net"], net_key)
+            if tally != framed:
+                failures.append(f"{prefix}_{sink_key}={tally} != {prefix}_{net_key}={framed}")
         lost = counts[f"{prefix}_rpc_stream_failures"] - counts[f"{prefix}_unresolved_rpc_payloads_preserved"]
         counts[f"{prefix}_rpc_loss"] = lost
         if lost != 0:
@@ -131,9 +164,13 @@ def check_export(text, directory):
     errors += baseline.checkpoint_manifest_errors(directory, printed)
     errors += baseline.reward_opaque_manifest_errors(directory, printed, True)
     errors += baseline.targeting_manifest_errors(directory, printed, True)
+    errors += baseline.frame_skip_manifest_errors(directory, printed, True)
+    guid_counts, guid_errors = baseline.checkpoint_guid_crosscheck(directory)
+    if guid_errors:
+        errors += guid_errors + [baseline.format_guid_crosscheck(guid_counts)]
     if errors:
         raise ValueError("; ".join(errors))
-    return tables
+    return tables, guid_counts
 
 
 def audit_one(entry, exe, work, specifications):
@@ -163,7 +200,11 @@ def audit_one(entry, exe, work, specifications):
         counts, failures = manifest_counts(manifest)
         result["counts"].update(counts)
         result["failures"].extend(failures)
-        result["tables"] = check_export(text, export)
+        result["tables"], guid_counts = check_export(text, export)
+        # Every count, zeros included, so the report shows how many entries
+        # each build actually compared rather than only that nothing failed.
+        result["counts"].update({f"guid_crosscheck_{key}": value
+                                 for key, value in guid_counts.items()})
         checked = evidence.validate(export, specifications, compare_typed=True)
         (directory / "type-evidence.json").write_text(json.dumps(checked, indent=2), encoding="utf-8")
         result["evidence_fields"] = {name: value["rows"] for name, value in checked["fields"].items()}

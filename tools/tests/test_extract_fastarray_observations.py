@@ -1,4 +1,6 @@
 """Wire boundaries and preserved failure evidence for numeric FastArray updates."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import struct
@@ -10,6 +12,60 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tools import extract_fastarray_observations as fast
+
+#: Route identities exactly as the parser exports them. Literal rather than
+#: read from the extractor: a misspelled group selects nothing and would pass
+#: every other test, which is how the chained route stayed dead until
+#: 2026-09-28.
+CNC_H1 = ("AbilitiesAndBuffsComponent", "_cnc_h1")
+CHAINED = ("/Script/ShooterGame.AresAbilitySystemComponent", "__vrfkit_chained_cnc_h1__")
+
+#: The `replay_build` strings, exactly as the manifests spell them, of every
+#: build whose cnc_h1 main windows were walked exactly in the 2026-09-28
+#: measurement recorded next to `fast.ACCEPTED_BUILDS`. Typed out rather than
+#: derived so that a change to the extractor's sets -- a build added without a
+#: measurement, or a measured one dropped -- fails here instead of agreeing
+#: with itself.
+CNC_H1_MAIN_BUILDS = frozenset({
+    "++Ares-Core+release-11.06", "++Ares-Core+release-11.07",
+    "++Ares-Core+release-11.08", "++Ares-Core+release-11.09",
+    "++Ares-Core+release-11.10", "++Ares-Core+release-11.11",
+    "++Ares-Core+release-12.00", "++Ares-Core+release-12.01",
+    "++Ares-Core+release-12.02", "++Ares-Core+release-12.03",
+    "++Ares-Core+release-12.04", "++Ares-Core+release-12.05",
+    "++Ares-Core+release-12.06", "++Ares-Core+release-12.07",
+    "++Ares-Core+release-12.08", "++Ares-Core+release-12.09",
+    "++Ares-Core+release-13.00", "++Ares-Core+release-13.01",
+    "++Ares-Core+release-13.02", "++Ares-Core+release-13.04",
+    "++Ares-Core+release-13.05", "++Ares-Core+release-13.06",
+})
+#: Chained windows were observed, all exact, in all 24 builds and both
+#: streams -- including 12.10 and 12.11, which have no cnc_h1 rows at all.
+CHAINED_BUILDS = CNC_H1_MAIN_BUILDS | {"++Ares-Core+release-12.10", "++Ares-Core+release-12.11"}
+EXPECTED_ACCEPTED = {
+    ("cnc_h1", "fields"): CNC_H1_MAIN_BUILDS,
+    ("cnc_h1", "checkpoint_fields"): frozenset(),
+    ("chained_cnc_h1", "fields"): CHAINED_BUILDS,
+    ("chained_cnc_h1", "checkpoint_fields"): CHAINED_BUILDS,
+}
+
+#: Builds every route must keep rejecting: 13.07 stands for any future build;
+#: the rest are malformed spellings of a measured one, because the gate
+#: compares the manifest string exactly.
+UNMEASURED_BUILDS = ("++Ares-Core+release-13.07", "++Ares-Core+release-11.05",
+                     "13.06", "++Ares-Core+release-13.06 ", "")
+
+METRICS = ("rows", "structural_exact", "rejected", "deleted_items", "changed_items", "raw_fields")
+
+#: The exported column types, including the dictionary-encoded names.
+NAME = pa.dictionary(pa.int32(), pa.string())
+FIELD_SCHEMA = pa.schema([
+    ("time_ms", pa.uint32()), ("packet_id", pa.uint32()), ("channel_index", pa.uint32()),
+    ("actor_net_guid", pa.uint32()), ("object_net_guid", pa.uint32()), ("group_path", NAME),
+    ("handle", pa.uint32()), ("field_name", NAME), ("compatible_checksum", pa.uint32()),
+    ("bit_count", pa.uint32()), ("raw_bits", pa.binary())])
+CHECKPOINT_SCHEMA = pa.schema([("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()),
+                               *FIELD_SCHEMA])
 
 
 def packed(value):
@@ -33,6 +89,35 @@ def payload(deleted=(), changed=(), keys=(8, 5)):
         body += b"\0"
     # Shift the byte-aligned body to insert its single leading support bit.
     return (1 | (int.from_bytes(body, "little") << 1)).to_bytes(len(body) + 1, "little"), len(body) * 8 + 1
+
+
+def field_row(identity, raw, count, handle=1):
+    group, name = identity
+    return {"time_ms": 10, "packet_id": 2, "channel_index": 3, "actor_net_guid": 4,
+            "object_net_guid": 5, "group_path": group, "handle": handle, "field_name": name,
+            "compatible_checksum": None, "bit_count": count, "raw_bits": raw}
+
+
+def write_export(root, build, fields=(), checkpoint=()):
+    source = root / "export"
+    source.mkdir()
+    (source / "manifest.json").write_text(json.dumps({"replay_build": build}))
+    pq.write_table(pa.Table.from_pylist(list(fields), schema=FIELD_SCHEMA), source / "fields.parquet")
+    rows = [dict(row, checkpoint_index=0, checkpoint_id="cp0") for row in checkpoint]
+    pq.write_table(pa.Table.from_pylist(rows, schema=CHECKPOINT_SCHEMA), source / "checkpoint_fields.parquet")
+    return source
+
+
+def records(out):
+    return [json.loads(line) for line in (out / "observations.ndjson").read_text().splitlines()]
+
+
+def run_cli(source, out):
+    printed = io.StringIO()
+    with patch.object(fast.sys, "argv", ["extract", "--export-dir", str(source), "--out-dir", str(out)]), \
+            contextlib.redirect_stdout(printed):
+        code = fast.main()
+    return code, printed.getvalue()
 
 
 class FastArrayTests(unittest.TestCase):
@@ -90,7 +175,7 @@ class FastArrayTests(unittest.TestCase):
 
     def test_identity_and_unvalidated_context_stay_raw(self):
         raw, count = payload([1, 3])
-        row = {"group_path": fast.GROUP, "field_name": "_cnc_h1", "handle": 1,
+        row = {"group_path": CNC_H1[0], "field_name": CNC_H1[1], "handle": 1,
                "raw_bits": raw, "bit_count": count}
         for population, build, handle, reason in [
             ("fields", "future", 1, "unvalidated_build"),
@@ -102,24 +187,162 @@ class FastArrayTests(unittest.TestCase):
             self.assertEqual(record["physical_row_ordinal"], 27)
             self.assertIsNone(record["structure"])
 
-    def make_export(self, root, malformed=False):
-        source = root / "export"
-        source.mkdir()
-        (source / "manifest.json").write_text(json.dumps({"replay_build": "++Ares-Core+release-13.05"}))
+    def test_routes_are_the_exported_identities(self):
+        self.assertEqual(fast.ROUTES, {"cnc_h1": CNC_H1, "chained_cnc_h1": CHAINED})
+        self.assertEqual(fast.ROUTE_HANDLE, 1)
+
+    def test_accepted_builds_are_exactly_the_measured_sets(self):
+        self.assertEqual(fast.ACCEPTED_BUILDS, EXPECTED_ACCEPTED)
+
+    def test_every_measured_build_decodes_on_its_route_and_stream(self):
+        raw, count = payload([1, 3], [(5, [(0, b"\x96\xab")])])
+        for (route, stream), accepted in EXPECTED_ACCEPTED.items():
+            identity = CNC_H1 if route == "cnc_h1" else CHAINED
+            row = {"group_path": identity[0], "field_name": identity[1], "handle": 1,
+                   "raw_bits": raw, "bit_count": count}
+            for build in sorted(CHAINED_BUILDS):
+                with self.subTest(route=route, stream=stream, build=build):
+                    record = fast.observation(dict(row), 3, stream, build)
+                    self.assertEqual((record["route"], record["population"]), (route, stream))
+                    if build in accepted:
+                        self.assertEqual(record["status"], "structural_exact")
+                        self.assertEqual(record["structure"]["deleted_item_ids"], [1, 3])
+                    else:
+                        # 12.10/12.11 on cnc_h1 main; every build on cnc_h1 checkpoint.
+                        self.assertEqual(record["status"], "unvalidated_build" if accepted
+                                         else "unvalidated_checkpoint_route")
+                        self.assertIsNone(record["structure"])
+
+    def test_unmeasured_builds_are_rejected_with_raw_bits_kept(self):
+        # A body that decodes exactly: only the build can reject it.
+        raw, count = payload([1, 3], [(5, [(0, b"\x96\xab")])])
+        self.assertEqual(fast.decode(raw, count)["consumed_bits"], count)
+        for identity, stream in ((CNC_H1, "fields"), (CHAINED, "fields"), (CHAINED, "checkpoint_fields")):
+            row = {"group_path": identity[0], "field_name": identity[1], "handle": 1,
+                   "raw_bits": raw, "bit_count": count}
+            for build in UNMEASURED_BUILDS:
+                with self.subTest(identity=identity, stream=stream, build=build):
+                    record = fast.observation(dict(row), 4, stream, build)
+                    self.assertEqual(record["status"], "unvalidated_build")
+                    self.assertIsNone(record["structure"])
+                    self.assertEqual(record["raw_bits_hex"], raw.hex())
+
+    def test_chained_rows_are_selected_and_decoded_in_both_streams(self):
+        # Literal identities and only extract(): this runs unchanged against the
+        # extractor before 2026-09-28's fix, and fails there at the first check.
+        raw, count = payload([1, 3], [(5, [(0, b"\x96\xab"), (18, b"")])])
+        chained = field_row(CHAINED, raw, count)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = write_export(root, "++Ares-Core+release-12.10",
+                                  fields=[field_row(("unrelated", "x"), raw, count), chained],
+                                  checkpoint=[chained])
+            receipt = fast.extract(source, root / "result")
+            counts = receipt["counts"]
+            self.assertEqual((counts["fields_rows"], counts["checkpoint_fields_rows"]), (1, 1))
+            self.assertEqual((counts["rows"], counts["structural_exact"], counts["rejected"]), (2, 2, 0))
+            self.assertEqual(receipt["rejection_reasons"], {})
+            for stream in ("fields", "checkpoint_fields"):
+                self.assertEqual({m: counts[f"chained_cnc_h1.{stream}.{m}"] for m in METRICS},
+                                 {"rows": 1, "structural_exact": 1, "rejected": 0,
+                                  "deleted_items": 2, "changed_items": 1, "raw_fields": 2})
+            got = records(root / "result")
+            self.assertEqual([(r["route"], r["population"], r["physical_row_ordinal"], r["status"]) for r in got],
+                             [("chained_cnc_h1", "fields", 1, "structural_exact"),
+                              ("chained_cnc_h1", "checkpoint_fields", 0, "structural_exact")])
+            self.assertEqual([r["raw_bits_hex"] for r in got], [raw.hex(), raw.hex()])
+            self.assertEqual(got[1]["identity"]["checkpoint_id"], "cp0")
+            self.assertEqual(got[0]["structure"]["changed_items"][0]["fields"][1]["handle"], 18)
+
+    def test_only_exact_route_pairs_are_selected(self):
         raw, count = payload([1, 3])
-        row = {name: 0 for name in fast.COLUMNS}
-        row.update(group_path=fast.GROUP, field_name="_cnc_h1", handle=1,
-                   raw_bits=raw, bit_count=count + int(malformed))
-        unrelated = dict(row, group_path="unrelated")
-        table = pa.Table.from_pylist([unrelated, row])
-        pq.write_table(table, source / "fields.parquet")
-        cp = table.slice(0, 0).append_column("checkpoint_index", pa.array([], type=pa.int64())).append_column("checkpoint_id", pa.array([], type=pa.int64()))
-        pq.write_table(cp, source / "checkpoint_fields.parquet")
-        return source
+        near_misses = [
+            field_row((CNC_H1[0], CHAINED[1]), raw, count),  # the pair the old cross product allowed
+            field_row((CHAINED[0], CNC_H1[1]), raw, count),
+            field_row(("AbilitiesAndBuffsComponent_ClassNetCache", CNC_H1[1]), raw, count),
+            field_row((CHAINED[0], "OwnerActor"), raw, count),  # not a route name, so not counted
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = write_export(root, "++Ares-Core+release-13.05", fields=near_misses,
+                                  checkpoint=near_misses[:1])
+            receipt = fast.extract(source, root / "result")
+            counts = receipt["counts"]
+            self.assertEqual((counts["rows"], counts["rejected"]), (0, 0))
+            self.assertEqual(counts["unselected_route_name.fields.rows"], 3)
+            self.assertEqual(counts["unselected_route_name.checkpoint_fields.rows"], 1)
+            self.assertEqual(records(root / "result"), [])
+
+    def test_route_rows_with_another_handle_are_rejected_not_dropped(self):
+        raw, count = payload([1, 3])
+        wrong = field_row(CHAINED, raw, count, handle=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = write_export(root, "++Ares-Core+release-13.05", fields=[wrong], checkpoint=[wrong])
+            receipt = fast.extract(source, root / "result")
+            self.assertEqual(receipt["rejection_reasons"], {"route_identity": 2})
+            self.assertEqual((receipt["counts"]["chained_cnc_h1.fields.rejected"],
+                              receipt["counts"]["chained_cnc_h1.checkpoint_fields.rejected"]), (1, 1))
+            self.assertEqual([r["raw_bits_hex"] for r in records(root / "result")], [raw.hex()] * 2)
+
+    def test_receipt_counts_every_route_and_stream_even_when_zero(self):
+        raw, count = payload([1, 3], [(5, [(0, b"\x96\xab"), (18, b"")])])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); out = root / "result"
+            source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
+            code, printed = run_cli(source, out)
+            self.assertEqual(code, 0)
+            receipt = json.loads((out / "receipt.json").read_text())
+            counts = receipt["counts"]
+            self.assertEqual(json.loads(printed), counts)
+            self.assertEqual(set(counts), {
+                *METRICS, "fields_rows", "checkpoint_fields_rows",
+                *(f"{route}.{stream}.{metric}" for route in ("cnc_h1", "chained_cnc_h1")
+                  for stream in ("fields", "checkpoint_fields") for metric in METRICS),
+                "unselected_route_name.fields.rows", "unselected_route_name.checkpoint_fields.rows"})
+            self.assertEqual({k: v for k, v in counts.items() if v}, {
+                "rows": 1, "structural_exact": 1, "deleted_items": 2, "changed_items": 1, "raw_fields": 2,
+                "fields_rows": 1, "cnc_h1.fields.rows": 1, "cnc_h1.fields.structural_exact": 1,
+                "cnc_h1.fields.deleted_items": 2, "cnc_h1.fields.changed_items": 1,
+                "cnc_h1.fields.raw_fields": 2})
+            self.assertEqual(receipt["schema_version"], 2)
+            self.assertEqual(receipt["routes"], {
+                "cnc_h1": {"group_path": CNC_H1[0], "field_name": CNC_H1[1], "handle": 1},
+                "chained_cnc_h1": {"group_path": CHAINED[0], "field_name": CHAINED[1], "handle": 1}})
+
+    def test_cli_exit_follows_the_build_gate(self):
+        raw, count = payload([1, 3])
+        cases = [
+            (CNC_H1, "fields", "++Ares-Core+release-11.06", None),
+            (CNC_H1, "fields", "++Ares-Core+release-13.06", None),
+            (CNC_H1, "fields", "++Ares-Core+release-12.10", "unvalidated_build"),
+            (CNC_H1, "fields", "++Ares-Core+release-13.07", "unvalidated_build"),
+            (CNC_H1, "checkpoint_fields", "++Ares-Core+release-13.05", "unvalidated_checkpoint_route"),
+            (CHAINED, "fields", "++Ares-Core+release-12.10", None),
+            (CHAINED, "checkpoint_fields", "++Ares-Core+release-12.11", None),
+            (CHAINED, "checkpoint_fields", "++Ares-Core+release-13.07", "unvalidated_build"),
+        ]
+        for identity, stream, build, reason in cases:
+            with self.subTest(identity=identity, stream=stream, build=build), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); out = root / "result"
+                rows = [field_row(identity, raw, count)]
+                source = write_export(root, build, **{"fields" if stream == "fields" else "checkpoint": rows})
+                code, printed = run_cli(source, out)
+                self.assertEqual(code, 1 if reason else 0)
+                receipt = json.loads((out / "receipt.json").read_text())
+                self.assertEqual(json.loads(printed), receipt["counts"])
+                self.assertEqual(receipt["replay_build"], build)
+                self.assertEqual((receipt["counts"]["rows"], receipt["counts"][f"{stream}_rows"]), (1, 1))
+                self.assertEqual(receipt["counts"]["rejected"], 1 if reason else 0)
+                self.assertEqual(receipt["rejection_reasons"], {reason: 1} if reason else {})
 
     def test_cli_artifact_receipts_and_physical_ordinal(self):
+        raw, count = payload([1, 3])
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); source = self.make_export(root); out = root / "result"
+            root = Path(tmp); out = root / "result"
+            source = write_export(root, "++Ares-Core+release-13.05",
+                                  fields=[field_row(("unrelated", "x"), raw, count), field_row(CNC_H1, raw, count)])
             receipt = fast.extract(source, out)
             self.assertEqual(receipt["counts"]["structural_exact"], 1)
             self.assertEqual(receipt["counts"]["rejected"], 0)
@@ -127,6 +350,7 @@ class FastArrayTests(unittest.TestCase):
             self.assertEqual(receipt["observations_sha256"], fast.sha(out / "observations.ndjson"))
             record = json.loads((out / "observations.ndjson").read_text())
             self.assertEqual(record["physical_row_ordinal"], 1)
+            self.assertEqual((record["route"], record["population"]), ("cnc_h1", "fields"))
             self.assertEqual(record["structure"]["deleted_item_ids"], [1, 3])
             with self.assertRaisesRegex(ValueError, "already exists"):
                 fast.extract(source, out)
@@ -134,19 +358,24 @@ class FastArrayTests(unittest.TestCase):
                 fast.extract(source, source / "forbidden")
 
     def test_cli_rejections_retained_and_nonzero_exit(self):
+        raw, count = payload([1, 3])
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); source = self.make_export(root, malformed=True); out = root / "result"
-            with patch.object(fast.sys, "argv", ["extract", "--export-dir", str(source), "--out-dir", str(out)]):
-                self.assertEqual(fast.main(), 1)
+            root = Path(tmp); out = root / "result"
+            source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count + 1)])
+            code, _ = run_cli(source, out)
+            self.assertEqual(code, 1)
             receipt = json.loads((out / "receipt.json").read_text())
             self.assertEqual(receipt["counts"]["rejected"], 1)
+            self.assertEqual(receipt["counts"]["cnc_h1.fields.rejected"], 1)
             record = json.loads((out / "observations.ndjson").read_text())
             self.assertEqual(record["status"], "unconsumed_suffix")
             self.assertIsNotNone(record["raw_bits_hex"])
 
     def test_changed_input_does_not_publish(self):
+        raw, count = payload([1, 3])
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); source = self.make_export(root); out = root / "result"
+            root = Path(tmp); out = root / "result"
+            source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
             original = fast.selected_rows
             def alter(path, checkpoint):
                 yield from original(path, checkpoint)

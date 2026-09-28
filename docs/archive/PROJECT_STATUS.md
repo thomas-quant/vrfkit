@@ -3126,6 +3126,21 @@ and `ProjectileSmokeScreen` is Short and **wrong**. The builder default is the
 only clean tiebreaker, and if these three classes are ever seen replicating a
 rotation, that correction is the precedent to check first.
 
+**Superseded 2026-09-28** (branch `auto/game-evidence-typing-fixes`). All three,
+16-D's `Zone_Wraith_4_Smoke` and Astra's `GameObject_Mage_E_WorldSmoke` now read
+`ByteComponents`. The wire still cannot choose -- none of the five sets a
+rotator flag -- but a better tiebreaker than the builder default now exists:
+the 13.06 game's own class data, read-only. All five derive natively from
+`AGameObject > AActor`; no Blueprint class default in their chains writes
+`ReplicatedMovement` (across the build, one actor class does); and grouped by
+native class, every class whose rotation is observable decodes at one width
+only -- `AShooterCharacter` 7 of 7 short, `AProjectile` 38 of 38 byte,
+`AGameObject` 4 of 4 byte. The change was bounded the way this section bounded
+the default, at corpus scale: all 903 replays that declare `ReplicatedMovement`
+on one of the five (21 builds) were exported with the build before and after,
+and every Parquet file and manifest is byte-identical. The correction is
+`retype_game_object_rotators` in `tools/apply_type_corrections.py`.
+
 Two independent checks that the values are real, not merely bit-exact:
 
   * **gravity.** All 30 newly-covered rows decode to exactly `(0,0,-1)`,
@@ -3892,6 +3907,8 @@ rotation value, all zero -- and it is declared `ShortComponents`. The safety
 argument for the other three is otherwise confirmed: every `ByteComponents`
 class has 7 to 22,844 distinct rotations, so the discriminator really does fire
 where it can.
+(2026-09-28: it and the other four unobservable classes now read
+`ByteComponents`; see the note closing 13-J.)
 
 **13-J's coverage is per-replay, not corpus-wide.** "0 untyped" holds on
 02d4d478. Across the other 10 replays 290 of 659 gravity rows and 34,765 of
@@ -6547,6 +6564,11 @@ would have replaced the scan outright. numpy is not installed -- recent pyarrow
 does not require it -- and adding a dependency to a tool for one function is a
 worse trade than the memo.
 
+SUPERSEDED 2026-09-28: numpy became a hard dependency (`requirements.txt`) and
+the adapter's movement text has used it since cecea64. Its bulk text equals the
+per-value rule only on part of the float32 range; `_json_scalar_column` in
+`tools/to_valplay_bundle.py` records where, and how that was proven.
+
 ### 35-D. Where the time goes now
 
 ```
@@ -6562,6 +6584,12 @@ Flat. Nothing left is more than ~18% of the run, and the two structural wins
 either a different serialization contract -- which the consumer fixes -- or
 parallelism, which belongs to the caller processing several replays, not to a
 converter handling one.
+
+SUPERSEDED IN PART, 2026-09-28: the movement writer had grown back to ~40% of
+a conversion, and a third route existed -- same contract, same bytes, with the
+lines assembled in Arrow's C++ from the per-distinct texts instead of by
+Python string formatting. See `_write_movement` and `docs/USAGE.md` for the
+measurements.
 
 ---
 

@@ -8,28 +8,56 @@
 
 use std::collections::HashMap;
 
+use vrf_bitio::BitError;
+
 use crate::decode::FieldType;
 
 /// Categorisation of a decode failure -- distinguishes root cause so the
 /// operator knows whether to fix the overlay type, the bit-count expectation,
 /// or something structural.
+///
+/// This is the only per-cause column the error report prints -- `field_name`
+/// says which field, this says why -- so each failure maps to the kind of its
+/// own cause, by exhaustive matches with no wildcard: a new error variant has
+/// to be classified before it compiles. Three kinds used to carry every
+/// failure, which printed an invalid string that consumed its payload exactly
+/// as `EOF`, and a byte-array length over the table's cap as `Residual`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DecodeErrorKind {
-    /// BitReader reached EOF before the decoder finished consuming.
+    /// BitReader reached EOF before the decoder finished consuming: the type
+    /// needs more bits than the field carries.
     Eof,
-    /// Decoder finished but bits remained unconsumed.
+    /// Decoder finished but bits remained unconsumed: the type is narrower
+    /// than the field, or not its layout.
     Residual,
     /// Zero-bit payload with a non-zero-expecting type.
     ZeroBits,
+    /// The bits are not a valid encoding of the type: an IntPacked that never
+    /// terminates or overflows, a length prefix longer than the payload or its
+    /// cap, a string that is not UTF-8 or UTF-16, a framing rule the payload
+    /// breaks. `Eof` and `Residual` say the type and the field disagree about
+    /// length; this says the content itself is not the type.
+    Malformed,
+    /// The bits decoded, but to something the decoder refuses rather than
+    /// render wrong: an unsigned value past `i64::MAX`, a non-finite
+    /// component, an FText history or FName number with no display form, a
+    /// length over the table's configured cap -- or a table parameter (a zero
+    /// quantization scale or `SerializedInt` maximum) no value can be read
+    /// against. Usually a table entry to revisit rather than a wire problem.
+    Rejected,
 }
 
+/// `pad`, not `write_str`: the report prints this in a padded column, and
+/// `write_str` ignores the width it is formatted with.
 impl std::fmt::Display for DecodeErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Eof => f.write_str("EOF"),
-            Self::Residual => f.write_str("Residual"),
-            Self::ZeroBits => f.write_str("ZeroBits"),
-        }
+        f.pad(match self {
+            Self::Eof => "EOF",
+            Self::Residual => "Residual",
+            Self::ZeroBits => "ZeroBits",
+            Self::Malformed => "Malformed",
+            Self::Rejected => "Rejected",
+        })
     }
 }
 
@@ -39,6 +67,29 @@ impl DecodeErrorKind {
             Self::Eof => 0,
             Self::Residual => 1,
             Self::ZeroBits => 2,
+            Self::Malformed => 3,
+            Self::Rejected => 4,
+        }
+    }
+
+    /// The kind a bit-level read failure belongs to.
+    ///
+    /// Shared by every decoder that reports into [`OverlayErrorReport`], so the
+    /// same `BitError` prints the same label wherever it came from. Only
+    /// [`BitError::Eof`] is an EOF.
+    ///
+    /// [`BitError::InvalidSerializedIntMax`] is `Rejected`, not `Malformed`: it
+    /// means the maximum the table supplied is zero, and no bit of the payload
+    /// is at fault -- the same case as a zero quantization scale.
+    pub fn from_bit_error(err: &BitError) -> Self {
+        match err {
+            BitError::Eof { .. } => Self::Eof,
+            BitError::MalformedIntPacked { .. }
+            | BitError::IntPackedOverflow { .. }
+            | BitError::InvalidLength { .. }
+            | BitError::InvalidBitLength { .. }
+            | BitError::InvalidString { .. } => Self::Malformed,
+            BitError::InvalidSerializedIntMax { .. } => Self::Rejected,
         }
     }
 }
@@ -161,6 +212,35 @@ pub struct OverlayStats {
     pub error_report: OverlayErrorReport,
 }
 
+impl OverlayStats {
+    /// Add the six counters of `other` into `self`.
+    ///
+    /// `error_report` is deliberately not merged: callers fold it into one
+    /// report shared by every pass (see `OverlayErrorReport::merge_from`), so
+    /// a checkpoint-only failure is still in the breakdown the summary prints.
+    /// The destructure has no `..`, so a counter added to this struct does not
+    /// compile until it is summed here -- the export and `diag` totals both go
+    /// through this method, and a hand-written copy of the sum is how a new
+    /// counter used to reach one of them and not the other.
+    pub fn merge_counts_from(&mut self, other: &Self) {
+        let Self {
+            decoded_ok,
+            decoded_err,
+            raw_or_skip,
+            not_in_table,
+            no_field_name,
+            handle_conflicts_refused,
+            error_report: _,
+        } = other;
+        self.decoded_ok += decoded_ok;
+        self.decoded_err += decoded_err;
+        self.raw_or_skip += raw_or_skip;
+        self.not_in_table += not_in_table;
+        self.no_field_name += no_field_name;
+        self.handle_conflicts_refused += handle_conflicts_refused;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,16 +323,19 @@ mod tests {
     #[test]
     fn top_n_breaks_identity_ties_by_error_kind() {
         let mut report = OverlayErrorReport::default();
+        // Inserted out of order, so a report echoing insertion order fails.
         for kind in [
             DecodeErrorKind::ZeroBits,
+            DecodeErrorKind::Rejected,
             DecodeErrorKind::Residual,
+            DecodeErrorKind::Malformed,
             DecodeErrorKind::Eof,
         ] {
             report.record("Group", "Field", FieldType::Int32, 32, kind);
         }
 
         let kinds: Vec<DecodeErrorKind> = report
-            .top_n(3)
+            .top_n(5)
             .into_iter()
             .map(|row| row.error_kind)
             .collect();
@@ -262,7 +345,105 @@ mod tests {
                 DecodeErrorKind::Eof,
                 DecodeErrorKind::Residual,
                 DecodeErrorKind::ZeroBits,
+                DecodeErrorKind::Malformed,
+                DecodeErrorKind::Rejected,
             ]
         );
+    }
+
+    /// Every `BitError`, and only `Eof` is an EOF.
+    #[test]
+    fn only_a_bit_level_eof_is_labelled_eof() {
+        let cases = [
+            (
+                BitError::Eof {
+                    position: 0,
+                    length: 8,
+                    requested: 8,
+                },
+                DecodeErrorKind::Eof,
+            ),
+            (
+                BitError::MalformedIntPacked { position: 0 },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::IntPackedOverflow { position: 0 },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidLength {
+                    position: 0,
+                    length: 100,
+                },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidBitLength {
+                    requested: 16,
+                    available: 8,
+                },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidString { position: 0 },
+                DecodeErrorKind::Malformed,
+            ),
+            (
+                BitError::InvalidSerializedIntMax { max: 0 },
+                DecodeErrorKind::Rejected,
+            ),
+        ];
+        for (err, want) in cases {
+            assert_eq!(DecodeErrorKind::from_bit_error(&err), want, "{err:?}");
+        }
+    }
+
+    /// The report prints the kind in a padded column. `write_str` ignores a
+    /// format width, so a label written that way never lined the table up --
+    /// the `{:<6}` it was printed with did nothing for any kind.
+    #[test]
+    fn kind_labels_honour_the_report_column_width() {
+        for kind in [
+            DecodeErrorKind::Eof,
+            DecodeErrorKind::Residual,
+            DecodeErrorKind::ZeroBits,
+            DecodeErrorKind::Malformed,
+            DecodeErrorKind::Rejected,
+        ] {
+            let cell = format!("{kind:<9}|");
+            assert_eq!(cell.len(), 10, "{cell:?}");
+            assert!(cell.starts_with(&kind.to_string()), "{cell:?}");
+        }
+        // And unpadded where no width is asked for.
+        assert_eq!(DecodeErrorKind::Malformed.to_string(), "Malformed");
+    }
+
+    fn distinct_counts(base: u64) -> OverlayStats {
+        OverlayStats {
+            decoded_ok: base + 1,
+            decoded_err: base + 2,
+            raw_or_skip: base + 3,
+            not_in_table: base + 4,
+            no_field_name: base + 5,
+            handle_conflicts_refused: base + 6,
+            error_report: tied_report(),
+        }
+    }
+
+    /// Each counter lands in its own total, and the per-field breakdown is
+    /// left alone: callers merge it into a report shared across passes.
+    #[test]
+    fn merge_counts_from_sums_every_counter_and_leaves_the_report() {
+        let mut total = OverlayStats::default();
+        total.merge_counts_from(&distinct_counts(0));
+        total.merge_counts_from(&distinct_counts(100));
+        assert_eq!(total.decoded_ok, 1 + 101);
+        assert_eq!(total.decoded_err, 2 + 102);
+        assert_eq!(total.raw_or_skip, 3 + 103);
+        assert_eq!(total.not_in_table, 4 + 104);
+        assert_eq!(total.no_field_name, 5 + 105);
+        assert_eq!(total.handle_conflicts_refused, 6 + 106);
+        assert_eq!(total.error_report.total_errors(), 0);
     }
 }

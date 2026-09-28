@@ -8,6 +8,186 @@ transforms.** All 48 available replays pass ReplayData validation and
 checkpoint-enabled export. Together with the eight existing versions, the
 parser supports 24 exact branches. Unknown branches still fail closed.
 
+## Measured array routes, 2026-09-28
+
+The checksum-gated structured-array routes were measured on 13.01--13.06,
+and until this update every other build kept their parents as single raw
+rows, with no child and no counter saying why. The gate is now per build
+and per route, in [`measured_routes.rs`](../crates/vrfkit/src/sink/measured_routes.rs).
+A route is admitted on a build only when, on every available replay of it:
+
+- the replay declares every handle the route's tables are keyed on (the
+  parent, the typed members, the nested container and its members) with the
+  same name and checksum as the measured 13.x layout;
+- every array counter stays zero on the main stream and in checkpoints:
+  errors, truncations, implicit terminations, unconsumed root and nested
+  bits, and array-leaf decode errors;
+- an independent Python re-parse of every parent reproduces every emitted
+  child: count, physical adjacency, name, handle, context, raw window and
+  typed value, with no refused parent, no refused nested array, no
+  zero-width member and no measured member left null;
+- the route emits at least one child on that build. A route never observed
+  there is unobserved, not verified, and stays off.
+
+| Build | Replays | Admitted routes | Main rows added (typed) | Checkpoint rows added (typed) |
+|---|---:|---|---:|---:|
+| 11.06 | 3 | KillData, ServerActiveEffects, RequestedIgnoreActors | 31,342 (26,504) | 57,320 (50,918) |
+| 11.07 | 3 | as 11.06, plus the projectile path | 26,854 (23,359) | 58,851 (52,325) |
+| 11.08 | 3 | as 11.07 | 28,637 (24,731) | 63,384 (56,378) |
+| 11.09 | 3 | as 11.07, plus SelectedV2 | 42,633 (33,546) | 327,309 (221,774) |
+| 11.10 | 3 | as 11.09 | 34,076 (26,862) | 281,718 (188,373) |
+| 11.11 | 3 | as 11.09 | 50,801 (40,960) | 353,780 (240,317) |
+| 12.00 | 3 | as 11.09 | 35,850 (28,355) | 326,040 (219,319) |
+| 12.01 | 3 | as 11.09 | 37,360 (29,668) | 304,730 (204,409) |
+| 12.02 | 3 | as 11.09 | 40,056 (31,735) | 333,768 (225,019) |
+| 12.03 | 3 | as 11.09 | 35,325 (28,012) | 308,703 (206,901) |
+| 12.04 | 3 | every route but ActiveBlinds | 80,512 (48,281) | 464,924 (306,815) |
+| 12.05 | 3 | every route but ActiveBlinds | 66,178 (39,720) | 341,460 (220,047) |
+| 12.06 | 3 | every route but ActiveBlinds and the path | 61,880 (38,151) | 280,502 (180,526) |
+| 12.07 | 3 | every route but ActiveBlinds and the path | 66,924 (40,451) | 363,603 (235,470) |
+| 12.08 | 3 | every route but ActiveBlinds | 73,881 (46,395) | 340,929 (219,927) |
+| 12.09 | 3 | every route but ActiveBlinds | 70,625 (42,852) | 347,023 (224,619) |
+| 12.10 | 1 | AllPlayersObfuscatedPlayerInformation, TrackedRewards, SelectedV2, ServerActiveEffects | 524 (299) | 3,067 (1,875) |
+| 12.11 | 1 | as 12.10 | 510 (294) | 2,627 (1,606) |
+| 13.00 | 1 | as 12.10 | 510 (294) | 2,639 (1,614) |
+| 13.01--13.06 | -- | every route, unchanged | -- | -- |
+
+"The path" is `MulticastSetPath.NetworkedProjectilePath`. Across the 51
+replays the admitted routes add 784,478 main rows (550,469 typed) and
+4,562,377 checkpoint rows (3,058,232 typed). Every added row is an additive
+child of a parent that is still exported whole; typed counts include nested
+`EquippableAttachments` and `AssistingPlayers` references. Rows added per
+route, main / checkpoint:
+
+| Route | Rows added | Typed |
+|---|---:|---:|
+| `AllPlayersObfuscatedPlayerInformation` | 7,587 / 108,402 | 5,778 / 72,268 |
+| `TrackedRewards` | 173,562 / 154,630 | 62,224 / 55,225 |
+| `SelectedV2` | 161,760 / 3,283,500 | 100,236 / 2,034,584 |
+| `KillData` | 78,144 / 783,354 | 75,887 / 760,599 |
+| `ServerActiveEffects` | 145,513 / 232,491 | 88,432 / 135,556 |
+| `RequestedIgnoreActors` | 195,640 / 0 | 195,640 / 0 |
+| `MulticastSetPath.NetworkedProjectilePath` | 22,272 / 0 | 22,272 / 0 |
+
+The 12.10, 12.11 and 13.00 entries rest on one short public fixture each:
+their four admitted routes emit a few hundred main rows, and KillData,
+RequestedIgnoreActors, ActiveBlinds and the path never occur in them.
+
+### Why routes stay off
+
+- **`AllPlayersObfuscatedPlayerInformation` and `TrackedRewards`, before
+  12.04.** Two members (`StartOfRoundMoneyCache`,
+  `StartOfRoundLoadoutValueCache`) sit at `OwnerExclusivePlayerInfo`
+  handles 19--20, so `TrackedRewards` is at 21 instead of 18 and every later
+  member moves by +3, with unchanged names and checksums. The member tables
+  are keyed by handle: on the probe, 26,325--32,416 main-stream
+  `TrackedRewards` children per build, and none of them typed. That is not
+  the measured route.
+- **`SelectedV2`, 11.06--11.08.** `DynamicMappings` (checksum 149045687) is
+  declared at handle 13 and arrives with zero-width payloads, moving the
+  nested `EquippableAttachments` array to handle 14. The nested route never
+  matched, and the walker skips zero-width members without a counter:
+  20,740, 20,160 and 21,328 of them per build on the probe.
+- **`ActiveBlinds`, every legacy build.** Through 12.04 `SourceID` and
+  `EffectID` swap handles 4 and 5. From 12.05 the handles match 13.x, but
+  some `SourceID` values arrive as the 9-bit hardcoded-name form (flag 1,
+  index 0) instead of the 297-bit inline string. The route refuses both and
+  counts each refusal in `array_leaf_decode_errors`: 1,846 main and 2
+  checkpoint parents on the probe, all ActiveBlinds.
+  `validate_ability_array_evidence.py` independently rejects the same 1,846
+  main parents. None occurred on 13.x in the 986-replay audit.
+- **Unobserved.** The path on 11.06, 12.06 and 12.07, and four routes in each
+  fixture, never produced a child.
+
+### Method and results
+
+A probe binary, `259ed10` with the gate open on every branch, exported all
+48 legacy samples described under [Replay evidence](#replay-evidence) (three
+per build, 11.06--12.09) and the three fixtures with `--checkpoints`. For each route, a private Python checker
+written from the RepLayout array grammar re-parsed every parent's raw bits,
+derived the expected children with the replay's own main or checkpoint
+declarations, and compared them with the exported rows. A mutation run
+confirmed that it reports changed values, raw windows, typing and dropped
+children. The only nonzero array counter on the probe was the ActiveBlinds
+refusal count above. `tracked_rewards_opaque_empty_variants` also moved on
+every legacy build: it counts the documented `02 00 00` empty variant, not
+an error.
+
+The final binary, `2e7acce`, re-exported the same 51 replays plus the
+reference 13.01 replay:
+
+- All six array counters are zero on the main stream and in checkpoints of
+  every replay. `tracked_rewards_opaque_empty_variants` is 11, 2, 22, 26, 13
+  and 15 on 12.04--12.09 (main), and zero on the other legacy builds and the
+  fixtures.
+- The independent checker matched every child row of every admitted route
+  and found no child for any route the build does not admit.
+- `extract_kill_observations.py`, with its build set extended in-process for
+  this run only, accepted all 48 legacy exports: 7,334 main and 8,876
+  checkpoint parents, 7,347 and 73,518 element updates, and 2,525 and 25,419
+  assisting references, none unresolved. It now admits 11.06--12.09, and the
+  committed extractor and kill ledger both complete all 48 exports; see
+  [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md) and
+  [KILL_LEDGER.md](KILL_LEDGER.md#legacy-builds-2026-09-28).
+- `validate_ability_array_evidence.py --compare-typed` matched all 22,272 path
+  children on 464 parents. Its only failures are the ActiveBlinds parents that
+  now stay raw.
+- Against `259ed10`, ten tables are byte-identical on all 52 replays. In the
+  three that differ, removing the route children from `fields` and
+  `checkpoint_fields` leaves exactly the baseline rows, in order and in every
+  column. `checkpoint_blocks` changes only `field_row_start` and
+  `field_row_count`, by exactly the children in each span. The manifest
+  differs only in the array element and field tallies, the checkpoint
+  field-row count and the opaque-variant counter. The 13.01 replay is
+  byte-identical in every table. A separate row-multiset comparison of the
+  same pairs agrees: no `fields` or `checkpoint_fields` baseline row is
+  missing or changed, the 784,478 and 4,562,377 new rows are exactly the
+  route children, and the 1,191,332 changed `checkpoint_blocks` rows are the
+  shifted spans. Validation verdicts and oracle lines are identical.
+- `verify_build_corpus.py`, the common strict audit, passes all 51 replays
+  at `2e7acce` with every array and array-leaf counter at zero. Its
+  independent scalar comparison reproduces the per-build counts of the
+  2026-09-25 audit exactly.
+- `verify_build_corpus.py` and `validate_type_evidence.py --compare-typed` on
+  the three public fixtures, the CI audit, pass.
+
+The pinned table is tested for every supported branch, and wiring tests check
+that a branch expands exactly its admitted routes for both the flattened
+arrays and the projectile-path RPC. Seven deliberate gate mutations each
+failed at least one of them. The flattened-array test first covered four of
+the seven routes on five branches, and an admission arm reading another
+route's bit passed it wherever the two routes agreed on those five:
+ServerActiveEffects reading SelectedV2's bit dropped its children on
+11.06-11.08, RequestedIgnoreActors reading the projectile path's on 11.06,
+12.06 and 12.07, and AllPlayersObfuscatedPlayerInformation reading
+ActiveBlinds' on 12.04-13.00, with no counter moving. It now runs a case for
+every flattened route on every supported branch and checks each case's
+identity against the route map that selects the exact walker; those
+mutations, and a mis-mapped identity, fail it.
+AllPlayersObfuscatedPlayerInformation and TrackedRewards, and KillData and
+RequestedIgnoreActors, are admitted on identical branch sets, so a swap
+within either pair changes no output on any build.
+
+To reproduce, export with checkpoints and audit with the repository tools:
+
+```powershell
+cargo +1.86.0 build --release -p vrfkit --locked
+vrfkit export '<replay-root>/12.09/sample-1.vrf' --out '<exports>/12.09/sample-1' --checkpoints
+python tools/verify_build_corpus.py --exe target/release/vrfkit.exe --corpus '<replay-root>/12.09' --work-dir '<new-work-dir>' --output '<report.json>'
+python tools/validate_ability_array_evidence.py '<exports>/12.09/sample-1' --compare-typed
+```
+
+### Follow-ups
+
+- Key the `OwnerExclusivePlayerInfo` and nested `SelectedV2` member typing by
+  declared name and checksum, as TeamEconomy already selects its 12.01--12.05
+  handles, before admitting those routes on the shifted builds.
+- ActiveBlinds needs both declaration-keyed member widths for the
+  11.06--12.04 swap and an explicit rule for the 9-bit hardcoded `SourceID`,
+  with the matching change in `validate_ability_array_evidence.py`.
+- The exact array walker skips zero-width members without a counter. Only
+  the held-back `SelectedV2` layout produced them here.
+
 ## 11.06--12.00 recovery and replay results
 
 The implementation following `6cbf2bec0645c5278c099839d5db9708e9a45f21`

@@ -207,6 +207,37 @@ fn uint64_above_i64_max_is_rejected_not_wrapped() {
     assert_eq!(result, DecodedValue::I64(i64::MAX));
 }
 
+/// `Int64` reads the same 64 bits as `UInt64` but as two's complement: the
+/// pattern `UInt64` refuses is a negative number here, not an error, and a
+/// value below `i64::MAX` is the same either way -- which is why retyping the
+/// effect IDs changes no exported value on data that never sets bit 63.
+/// Anything but exactly 64 bits is refused like every fixed-width read.
+#[test]
+fn int64_reads_eight_byte_twos_complement() {
+    let data = 0x0102030405060708u64.to_le_bytes();
+    assert_eq!(
+        decode_field(FieldType::Int64, &data, 64).unwrap(),
+        DecodedValue::I64(0x0102030405060708i64)
+    );
+    let data = (-2i64).to_le_bytes();
+    assert_eq!(
+        decode_field(FieldType::Int64, &data, 64).unwrap(),
+        DecodedValue::I64(-2)
+    );
+    let data = i64::MIN.to_le_bytes();
+    assert_eq!(
+        decode_field(FieldType::Int64, &data, 64).unwrap(),
+        DecodedValue::I64(i64::MIN)
+    );
+    assert!(matches!(
+        decode_field(FieldType::UInt64, &data, 64),
+        Err(DecodeError::UnsignedOverflow { .. })
+    ));
+    let data = [0u8; 9];
+    assert!(decode_field(FieldType::Int64, &data, 72).is_err());
+    assert!(decode_field(FieldType::Int64, &data, 32).is_err());
+}
+
 #[test]
 fn enum_remaining_bits_reads_all_remaining() {
     // 3 bits = value 3 (0b111 but only 0b011 = 3)
