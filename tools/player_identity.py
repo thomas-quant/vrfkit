@@ -1,29 +1,26 @@
 """Player bodies from the whole `SpawnedCharacter` history, not its last value.
 
 Only `SpawnedCharacter`, the PlayerState's reference to the character it
-spawned, proves a pawn is a player's body. `PossessedCharacter`, `Owner`,
-`Instigator` and a pawn's own `PlayerState` can name a controlled device:
-Astra's `Rift_TargetingForm_PC_C` carries the player's PlayerState on every
-possession and is never a `SpawnedCharacter` value.
+spawned, proves a body. `PossessedCharacter`, `Owner`, `Instigator` and a
+pawn's own `PlayerState` can name a device: Astra's `Rift_TargetingForm_PC_C`
+carries the player's PlayerState on every possession and is never a
+`SpawnedCharacter` value.
 
-The manifest keeps the last non-zero value, dropping the pawn a player had
-before reconnecting (docs/DATA.md, "Player identity": on 39c2bb2c, 1510 -> 0
--> 45530, and the manifest-only join mislabelled pawn 1510's 1,854 effect
-records in a run that exited 0). `player_bodies` admits every non-zero value
-from main `fields.parquet`, joined to the PlayerState's manifest `subject`,
-by a static rule like the manifest's: a pawn named by exactly one
+The manifest keeps the last non-zero value and drops a pre-reconnect pawn
+(docs/DATA.md, "Player identity": 39c2bb2c, 1510 -> 0 -> 45530; the
+manifest-only join mislabelled pawn 1510's 1,854 effect records and exited
+0). The rule is as static as the manifest's: a pawn named by exactly one
 PlayerState is that player's body for the whole export. `history` keeps each
 PlayerState's writes in order, zeros included.
 
-On the 1,018-export corpus (parser 259ed10, 2026-09-28): 10,426
-`SpawnedCharacter` rows, all top-level and typed on `PLAYER_STATE_GROUPS`;
-10,250 pawns, each named by one PlayerState, which the pawn's own
-`PlayerState` names back (10,250 of 10,250); 97 earlier pawns in 86 exports.
-A time-scoped rule was rejected: 347 effect rows on 24 pawns share the naming
-write's `time_ms` but precede it by packet id (the spawn tick), 327 of them
-on pawns the manifest already admitted, and no effect row on a named pawn
-follows its PlayerState's next write, so a packet-ordered scope would demote
-those 327 for nothing.
+1,018 exports (parser 259ed10, 2026-09-28): 10,426 `SpawnedCharacter` rows,
+all top-level and typed on `PLAYER_STATE_GROUPS`; 10,250 pawns, each named by
+one PlayerState that the pawn's own `PlayerState` names back (10,250 of
+10,250); 97 earlier pawns in 86 exports. A time-scoped rule was rejected: 347
+effect rows on 24 pawns share the naming write's `time_ms` but precede it by
+packet id (the spawn tick), 327 of them on pawns the manifest already
+admitted, and none on a named pawn follows its PlayerState's next write, so a
+packet-ordered scope would demote those 327 for nothing.
 """
 
 from __future__ import annotations
