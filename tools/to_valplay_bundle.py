@@ -1944,12 +1944,9 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
 def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally):
     """Build export_group_received events from the replicated-property groups.
 
-    A row the parser could not name carries a value this bundle has no key to
-    put it under, so it is dropped -- 1,996 of them on the documented
-    reference export. The group still emits an event, which is right (the
-    other rows in it are real), but a group whose rows were ALL unnamed then
-    emits an event with an empty payload that is indistinguishable from a
-    genuine existence signal. `tally` is what tells the two apart.
+    A row with no field name has no key to go under: dropped and counted. A
+    group whose rows were all unnamed still emits an event, whose empty
+    payload only the tally tells apart from a genuine existence signal.
     """
     col_time = cols.time_ms
     col_fn = cols.field_name
@@ -1965,24 +1962,18 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
     for (pid, actor, obj, gp), row_indices in prop_groups.items():
         ms = col_time[row_indices[0]]
 
-        # Build nested payload from field paths.
-        # WHY two passes: vrfkit emits BOTH a bare array-container blob (e.g.
-        # field_name="Rounds", raw_bits=the whole serialized array) AND the
-        # individually-decoded sub-fields (e.g. "Rounds[0].Reports[0]...").
-        # If we naively set the bare blob first, it clobbers the list that
-        # _set_nested needs. Solution: first pass collects names that have
-        # indexed versions (contain '['), second pass skips bare blobs for
-        # those names.
+        # Two passes: vrfkit emits both the container row ("Rounds", the whole
+        # array) and its decoded sub-fields ("Rounds[0].Reports[0]..."), the
+        # elements first (stream.rs). Collect the names that have indexed
+        # sub-fields, so the second pass skips their containers.
         indexed_names = set()
         for ri in row_indices:
             fn = col_fn[ri]
             if fn and '[' in fn:
-                # Top-level array name = everything before first '['
                 indexed_names.add(fn[:fn.index('[')])
 
         payload = {}
-        # {RAW_BLOB_PREFERRED name: blob built?} for this event; created only
-        # for an event that carries such a field.
+        # {RAW_BLOB_PREFERRED name: blob built?}, only once one is touched.
         blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
@@ -1999,10 +1990,8 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 # stand-in below, or is dropped behind its blob.
                 if fn in payload:
                     tally.bump("property_key_collisions")
-                # The container row of a field whose consumer decodes the
-                # blob: built from raw_bits whether or not the row is also
-                # typed (see RAW_BLOB_PREFERRED). `_get_value` still ran above,
-                # so its multi-typed counter keeps seeing this row.
+                # The RAW_BLOB_PREFERRED rule; `_get_value` ran above, so
+                # multi_typed_rows still sees the row.
                 if blob_state is None:
                     blob_state = {}
                 raw = col_raw[ri]
@@ -2012,10 +2001,9 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                     payload[fn] = blob
                     blob_state[fn] = True
                 else:
-                    # No bits, no blob: counted once the event is complete.
-                    # A typed value is published in the blob's place rather
-                    # than dropped -- the consumer skips a non-blob, visibly --
-                    # unless this event already built the blob.
+                    # No bits, no blob: counted when the event is complete.
+                    # A typed value goes in the blob's place (the consumer
+                    # skips a non-blob, visibly) unless a blob was built.
                     blob_state.setdefault(fn, False)
                     if value is not None and not blob_state[fn]:
                         payload[fn] = value
@@ -2023,12 +2011,9 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
             if value is None and not is_raw:
                 continue
 
-            # Combat report array leaves are labelled from the wire; the bundle
-            # wants the reference's member names. Keyed on the handle because
-            # the declared names are not unique within one element.
+            # See "Combat report leaf labels".
             fn = _combat_report_leaf_name(gp, fn, col_handle[ri])
 
-            # Normalize boolean field names (strip 'b' prefix)
             is_bool = col_bool[ri] is not None
             fn = _normalize_prop_field_name(fn, is_bool)
 
@@ -2037,24 +2022,16 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 if parsed_vec is not None:
                     value = parsed_vec
             elif fn in JSON_OBJECT_PROPERTIES and isinstance(value, str):
-                # No try/except: the parser writes this column, so a value that
-                # will not parse is a parser bug and must stop the run rather
-                # than quietly ship the raw string downstream.
+                # No try/except: the parser writes this column, so a value
+                # that will not parse is a parser bug and stops the run.
                 value = json.loads(value)
 
-            # Parse the field path and set in nested structure
             parts = _parse_field_path(fn, tally)
             if len(parts) == 1 and parts[0][1] is None:
-                # Simple top-level field. Skip it when it is the container of
-                # indexed sub-fields: the sub-fields carry the decoded data.
-                #
-                # Skipped whether raw OR typed. This used to test `is_raw`, and
-                # stream.rs writes a flattened array's element rows first and
-                # the container row after them, so a typed container reached
-                # the assignment below -- which no conflict counter watched then
-                # -- and replaced the decoded list with its own value. No such
-                # typed container occurs on the 1,018-export corpus
-                # (2026-09-28); typing one upstream must not change the bundle.
+                # A container of indexed sub-fields is skipped, raw OR typed:
+                # its elements carry the data. No typed container occurs on
+                # the 1,018-export corpus (2026-09-28); typing one upstream
+                # must not change the bundle.
                 bare_name = parts[0][0]
                 if bare_name in indexed_names:
                     continue
@@ -2065,9 +2042,8 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                     tally.bump("property_key_collisions")
                 payload[bare_name] = value
             elif parts[0][0] in RAW_BLOB_PREFERRED:
-                # A decoded member of a raw-blob field. The blob carries it, so
-                # the member is not published -- which makes a member whose
-                # event built no blob a loss, counted below.
+                # A decoded member of a raw-blob field is not published (the
+                # blob carries it), so one whose event built no blob is a loss.
                 if blob_state is None:
                     blob_state = {}
                 blob_state.setdefault(parts[0][0], False)
@@ -2077,7 +2053,7 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
         _count_unbuilt_blobs(blob_state, tally)
         _drop_padding_elements(payload)
 
-        # Emit even if payload is empty (some events are just existence signals)
+        # Emitted even when empty: some events are existence signals.
         event = {
             "type": "export_group_received",
             "time_ms": ms,
@@ -2096,23 +2072,15 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
     """Build rpc_received events, plus a valorant_shot_received for each shot RPC.
 
     Returns ``(events, shot_count, resolved_weapon_count)``. A shot RPC emits
-    both events, the shot first -- they tie on (packet_id, time_ms) and the
-    stable sort preserves that order.
+    both, the shot first; the stable sort keeps that order on their tie.
 
-    Two losses are counted rather than fixed, because the export cannot tell
-    us how to fix them:
-
-    * A group is keyed (packet_id, actor, group_path, handle), so one actor
-      invoking the same function TWICE in one packet produces one group. The
-      second call's parameters overwrite the first's and one rpc_received
-      comes out where two calls happened. Nothing in fields.parquet marks
-      where one invocation ends and the next begins -- inventing a boundary
-      (row contiguity, first repeated parameter) would split legitimate single
-      invocations in two, which is the same silent corruption pointed the
-      other way. So the collision is reported, not guessed at.
-    * A row with no field name cannot name its parameter, and a group whose
-      rows are ALL unnamed cannot even name its function, so it is dropped
-      whole. The count is the only trace either leaves.
+    Two losses are counted, not fixed, because the export cannot say how:
+    * one actor invoking a function TWICE in one packet makes one group (the
+      key is packet_id, actor, group_path, handle), the second call's
+      parameters overwriting the first's. Nothing marks where an invocation
+      ends, and a guessed boundary would split real single invocations;
+    * an unnamed row cannot name its parameter, and a group of only unnamed
+      rows cannot name its function, so it is dropped whole.
     """
     col_time = cols.time_ms
     col_fn = cols.field_name
@@ -2130,12 +2098,10 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
     for (pid, actor, gp, handle), row_indices in rpc_groups.items():
         ms = col_time[row_indices[0]]
 
-        # Determine RPC name from first field_name
         rpc_name = None
         payload = {}
         effect_blobs = {}  # shot array parameter -> _EffectBlob
-        # {raw-sourced parameter: blob built?} for this invocation; created
-        # only when it carries one. See `_RAW_SOURCED_RPC_PARAMS`.
+        # {raw-sourced parameter: blob built?}, only once one is touched.
         blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
@@ -2146,21 +2112,13 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
             if rpc_name is None:
                 rpc_name = name
             if param is None:
-                # The row is the function itself, not one of its parameters.
-                # Usually that means a zero-parameter RPC and there is nothing
-                # to carry -- but 608 rows on 02d4d478 arrive with the whole
-                # parameter block as undecoded bits, because the descriptor
-                # bound no property handles for that function. Dropping them
-                # made "payload: null" mean two different things: no parameters
-                # at all, and parameters we could not read.
-                #
-                # Keyed under the function's own name. The reference emits none
-                # of these functions (they sit in its 241 unbound groups), so
-                # there is no key to match -- this is a vrfkit-only convention.
-                #
-                # A typed row is carried as well. This tested `is_raw`, so a
-                # function row the overlay typed was dropped with no counter;
-                # none is typed on the 1,018-export corpus (2026-09-28).
+                # The row is the function itself: usually a zero-parameter RPC,
+                # but 608 rows on 02d4d478 carry the whole parameter block as
+                # undecoded bits (the descriptor bound no handles). Carried,
+                # raw or typed (none is typed on the 1,018-export corpus,
+                # 2026-09-28), so "payload: null" means only "no parameters".
+                # Keyed under the function's name, a vrfkit-only convention:
+                # the reference emits none of these (its 241 unbound groups).
                 value, is_raw = _get_value(
                     col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                     col_raw[ri], col_bits[ri], tally
@@ -2174,11 +2132,8 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                 col_raw[ri], col_bits[ri], tally
             )
-            # A raw-sourced parameter keeps the preserved wire blob as its
-            # source whether or not the overlay typed it: a value_str overlay
-            # must neither replace the shot decoder's raw input nor change a
-            # consumer's blob contract. `_get_value` still ran above, so its
-            # multi-typed counter keeps seeing these rows.
+            # The RAW_BLOB_PREFERRED rule for `_RAW_SOURCED_RPC_PARAMS`;
+            # `_get_value` ran above, so multi_typed_rows still sees the row.
             sourced = _RAW_SOURCED_RPC_PARAMS.get(name)
             if sourced is not None:
                 if param in sourced:
@@ -2188,28 +2143,24 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                     if raw is not None:
                         bits = col_bits[ri]
                         if name == "ReplayPlayContinuousEffectAtLocation":
-                            # bit_count travels with the bytes. Recomputing it
-                            # downstream as len(data) * 8 would feed the last
-                            # byte's padding bits to the decoder as data.
                             effect_blobs[param] = _EffectBlob(bytes(raw), bits)
                         value = _raw_blob(raw, bits)
                         is_raw = True
                         blob_state[param] = True
                     else:
-                        # Counted once the invocation is complete; whatever
-                        # typed value the row has still goes out below.
+                        # Counted when the invocation is complete; any typed
+                        # value still goes out below.
                         blob_state.setdefault(param, False)
                 elif "[" in param:
                     member_of = param.split("[", 1)[0]
                     if member_of in sourced:
-                        # A decoded member (dropped by `_normalize_rpc_param`
-                        # because the blob carries it): the blob is expected.
+                        # A decoded member, dropped by `_normalize_rpc_param`
+                        # because the blob carries it: the blob is expected.
                         if blob_state is None:
                             blob_state = {}
                         blob_state.setdefault(member_of, False)
             if value is None and not is_raw:
                 continue
-            # Map parameter names to match C# parser output
             param_out = _normalize_rpc_param(rpc_name, param, value, is_raw, tally)
             if param_out is not None:
                 for k, v in param_out.items():
@@ -2223,13 +2174,10 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
             tally.bump("unnamed_rpc_invocations")
             continue
 
-        # Build valorant_shot_received for shot RPCs
         if rpc_name == "ReplayPlayContinuousEffectAtLocation":
             # No blob guard: 7 of 02d4d478's 2,647 invocations carry only
-            # scalar params and an undecoded EffectContainer. They are still
-            # effect events the reference emits, and requiring a blob dropped
-            # them entirely rather than letting them reach the "unknown"
-            # bucket built for exactly this case.
+            # scalar params and an undecoded EffectContainer, effect events
+            # the reference emits and valplay's "unknown" bucket expects.
             first = row_indices[0]
             shot_event = _build_shot_event(
                 shot_ctx, ms, pid, actor,
@@ -2243,7 +2191,6 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
             shot_count += 1
             if shot_event["shot"]["equippable"] is not None:
                 resolved_weapon_count += 1
-            # Still emit as rpc_received too (some downstream might need it)
 
         event = {
             "type": "rpc_received",
@@ -2258,35 +2205,16 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
 
 
 def _write_events(events: list, output_dir: Path, verbose: bool) -> tuple[int, int]:
-    """Sort by (packet_id, time_ms) and write events.ndjson.
+    """Stable-sort on (packet_id, time_ms) and write events.ndjson.
 
-    Returns ``(events_written, time_ms_regressions)``.
-
-    # The ordering contract this file owns
-
-    `packet_id` is the replay's own global packet counter and is the only
-    total order the wire actually provides: vrfkit stamps it from a
-    monotonically increasing driver counter (`driver/mod.rs`, `total_packets`)
-    and never sorts, so append order IS packet order. Sorting on it here is
-    therefore a re-assertion, not a reordering, and the sort is stable, so
-    events tying on `(packet_id, time_ms)` keep the order the phases appended
-    them in -- actors, then properties, then RPCs, and inside each phase the
-    insertion order of the grouping dicts, which is the row order of
-    fields.parquet, which is wire order.
-
-    `time_ms` is NOT part of that guarantee and must not be treated as one.
-    It is derived per demo frame from a raw `read_f32` with no validation
-    (`vrf-frame/src/lib.rs`), and a frame whose time is not finite yields
-    `time_ms = 0`. A single such frame mid-replay makes `time_ms`
-    non-monotonic in file order.
-
-    That matters downstream: valplay orders same-millisecond events by
-    `(time_ms, line_index)`, which is a sound total order only while `time_ms`
-    is non-decreasing in file order. So the regression is COUNTED here rather
-    than repaired -- repairing it would mean reordering away from packet
-    order, i.e. away from the wire -- and the count is published in the bundle
-    manifest so the consumer can see that its tie-break is standing on sand
-    instead of assuming it is not.
+    Returns ``(events_written, time_ms_regressions)``. packet_id is the wire's
+    only total order (driver/mod.rs `total_packets`, never sorted), so the
+    sort re-asserts it and ties keep the phase order ("Conversion phases").
+    time_ms is not guaranteed monotonic: vrf-frame reads it with a bare
+    `read_f32` and a non-finite frame gives 0. valplay's (time_ms, line)
+    tie-break needs it non-decreasing, so a regression is counted and
+    published, never repaired away from packet order (docs/USAGE.md, "What
+    the bundle manifest carries").
     """
     t0 = time.time()
     if verbose:
@@ -2322,17 +2250,13 @@ _MOVEMENT_COLUMNS = ("time_ms", "packet_id", "character_net_guid",
 
 
 def _join_movement_block(pieces) -> memoryview:
-    """Concatenate one block's line pieces row by row; return the text's bytes.
+    """Join one block's pieces (literal fragments and slot text arrays) row by
+    row and return the lines' bytes, back to back in the data buffer.
 
-    `pieces` alternate literal fragments (scalars) and slot texts (arrays of
-    one block's length). The joined lines sit back to back in the result's
-    data buffer, so the block is written as that buffer's used span.
-
-    A NULL line is refused, not written. `binary_join_element_wise` emits
-    NULL for a row with any null input, and a null contributes no bytes to
-    the data buffer: the line would vanish from the file while
-    `movement_rows_written` still counted it. `_write_movement` refuses null
-    input columns before it gets here, so this is the second line of defence.
+    A NULL line is refused: `binary_join_element_wise` makes one for any null
+    input, and it adds no bytes, so the line would vanish while still counted
+    as written. `_write_movement` refuses null columns first; this is the
+    second line of defence.
     """
     lines = pc.binary_join_element_wise(*pieces, "")
     if lines.null_count:
@@ -2343,12 +2267,9 @@ def _join_movement_block(pieces) -> memoryview:
 
 
 def _string_bytes(arr) -> memoryview:
-    """The values of a pa.string() array as one span of bytes, back to back.
-
-    That is the data buffer between the array's first and last offsets --
-    not the whole buffer, which for a slice starts before the array's first
-    value, and which Arrow may allocate larger than it fills.
-    """
+    """A pa.string() array's values as one span of bytes: the data buffer
+    between its first and last offsets, not the whole buffer (a slice starts
+    earlier, and Arrow may allocate more than it fills)."""
     if arr.type != pa.string():
         raise RuntimeError(f"expected a string array, got {arr.type}")
     offsets = numpy.frombuffer(arr.buffers()[1], dtype=numpy.int32,
@@ -2359,33 +2280,18 @@ def _string_bytes(arr) -> memoryview:
 def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tuple:
     """Write movement.ndjson, keeping the last sub-move per (packet, character).
 
-    Returns ``(rows_read, rows_written, non_finite_rows)``. The first two
-    differ by the intra-packet sub-move collapse below, so only `rows_read`
-    can be compared with what the export manifest declared; publishing
-    `rows_written` against `quality.movement_rows` would report every healthy
-    replay as lossy. `rows_read` is `None` when the table is absent, which is
-    a different fact from an empty one.
-
-    `non_finite_rows` counts WRITTEN rows with at least one non-finite float
-    (position, velocity, yaw or pitch); a collapsed sub-move is not in the
-    bundle and is not counted. Such a value is written the way the encoder
-    spells a non-finite float everywhere else in this bundle -- `Infinity`,
-    `-Infinity`, `NaN` (see `_json_scalar_column`) -- not as `null` and not as
-    a number. Python's json reads those tokens; a strict parser rejects the
-    line. valplay parses with orjson when it is installed, skips a line it
-    cannot parse, and then recounts fewer movement rows than
-    `adapter.movement_rows_written` declares, which stops the bundle from
-    publishing -- a refusal, not a quietly shorter track. The count is what
-    names the cause.
+    Returns ``(rows_read, rows_written, non_finite_rows)``. Only rows_read
+    (None when the table is absent) compares with the export's declared
+    count; rows_written is short by the intended collapse. non_finite_rows
+    counts WRITTEN rows with a non-finite value, spelled Infinity/-Infinity/
+    NaN as everywhere in this bundle: Python's json reads them, a strict
+    parser rejects the line, and valplay (orjson when installed) then
+    recounts fewer rows than `adapter.movement_rows_written` and refuses to
+    publish. The count names the cause.
     """
     if not movement_path.exists():
-        # Truncate rather than return. `convert` reuses an existing output
-        # directory, so converting a replay with no movement table over an
-        # earlier bundle left the EARLIER replay's movement.ndjson sitting
-        # beside the new events -- a whole replay's positions attributed to
-        # the wrong match, under a run that printed "Conversion complete".
-        # An empty file says "this replay has no movement"; a missing one is
-        # indistinguishable from a stale one.
+        # Written empty, not skipped: `convert` requires movement.ndjson, and
+        # an empty file says "this replay has no movement".
         (output_dir / "movement.ndjson").write_text("", encoding='utf-8')
         if verbose:
             print("  movement.parquet not found, movement.ndjson written empty")
@@ -2397,22 +2303,16 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     mv_table = pq.read_table(movement_path, columns=list(_MOVEMENT_COLUMNS))
     n_mv = len(mv_table)
 
-    # Every movement column is declared non-null, and that is load-bearing:
-    # `to_numpy` turns a uint32 column with a null into float64 with NaN, and
-    # every line of it would then carry `1000.0`-style times, or `nan`. It
-    # used to be assumed. A null is now refused here, naming the column.
+    # Declared non-null, and load-bearing: `to_numpy` turns a uint32 column
+    # with a null into float64 NaN, so every line would carry `1000.0`-style
+    # times or `nan`. Refused, naming the column.
     for name in _MOVEMENT_COLUMNS:
         nulls = mv_table.column(name).null_count
         if nulls:
             raise ValueError(f"movement.parquet column {name!r} carries "
                              f"{nulls:,} nulls; the export declares it non-null")
 
-    # Batch-extract every column to a numpy array. `to_numpy` hands over the
-    # raw buffer; `to_pylist` boxes one Python float/int per row through
-    # pyarrow's per-element type dispatch (~14x slower on these 1.84M-row
-    # columns, the same win the fields path gets via _numeric_column_to_pylist).
-    # With no nulls, zero_copy_only=False never widens ints to float64 --
-    # uint32 stays uint32, float32 stays float32.
+    # numpy arrays, as in _numeric_column_to_pylist; no nulls, so dtypes stay.
     mv_time = mv_table.column('time_ms').to_numpy(zero_copy_only=False)
     mv_pid = mv_table.column('packet_id').to_numpy(zero_copy_only=False)
     mv_char = mv_table.column('character_net_guid').to_numpy(zero_copy_only=False)
@@ -2425,74 +2325,41 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     mv_vy = mv_table.column('vel_y').to_numpy(zero_copy_only=False)
     mv_vz = mv_table.column('vel_z').to_numpy(zero_copy_only=False)
 
-    # Keep only the last sub-move per (packet_id, character).
+    # Keep only the last sub-move per (packet_id, character). The decoder
+    # emits every sub-move of a packet's move chain, all at one time_ms: 1,687
+    # of 02d4d478's 2,387 extra rows carry distinct positions, none of the
+    # reference's rows is missing, and movement.parquet keeps them all. The
+    # bundle cannot: valplay's posture.py skips a dt=0 leg but still advances
+    # last_sample, so distance_m came out 3.1-5.2 m LOW for every player. The
+    # reference keeps the final move per packet; so does this, matching its
+    # movement_detail on 60/60 values with no rounding.
     #
-    # Our decoder walks the marker-chained move sequence inside a
-    # replication packet and emits every sub-move, so a packet can produce
-    # several rows sharing one time_ms. That is genuinely more data --
-    # 1,687 of the 2,387 extra rows on 02d4d478 carry distinct positions,
-    # and none of the reference's rows are missing from ours -- and
-    # movement.parquet keeps all of it.
+    # Keyed on the PACKET, never the millisecond: stream.rs
+    # (decode_movement_rpc) hoists time_ms and packet_id before walking the
+    # chain, so both collapse the same sub-moves, but the millisecond also
+    # merges two packets landing in one ms, whose earlier final move is a
+    # real sample. packet_id is therefore required (vrf-export's movement
+    # table always had it): an export without it raises, never silently
+    # falls back to the millisecond.
     #
-    # The bundle cannot. valplay's posture.py requires 0 < dt before adding
-    # a distance step but updates last_sample unconditionally, so for two
-    # sub-moves A then B at the same ms it adds |A-prev|, skips the A->B
-    # leg, and continues from B. The result is a distance_m that is *lower*
-    # than the reference for every player (3.1-5.2 m on 02d4d478) -- an
-    # impossible direction for finer sampling, and simply wrong.
-    #
-    # The reference retains only the final move per packet, and dropping
-    # exactly these rows reproduces its movement_detail on 60/60 values
-    # with no rounding. So this is not an approximation: it is the shape
-    # the consumer was written against.
-    #
-    # The key is the PACKET, not the millisecond. Both readings collapse the
-    # same sub-moves -- vrfkit/src/sink/stream.rs, decode_movement_rpc,
-    # hoists time_ms and packet_id out of the sink BEFORE walking the move
-    # chain, so every sub-move of one packet carries both identically -- but
-    # keying on the millisecond ALSO merges two different packets that land
-    # in the same millisecond, and there the earlier packet's final move is a
-    # distinct sample, not a sub-move. It was being dropped and counted as an
-    # intra-packet collapse, so the message said the loss was the intended
-    # one. Keying on the packet is what the rationale above always said.
-    #
-    # This makes packet_id a REQUIRED movement column. It has been one for as
-    # long as the table has existed (vrf-export/src/tables/movement.rs), and
-    # an export old enough to lack it raises here rather than converting. That
-    # is the intended trade: falling back to the millisecond key would restore
-    # the silent loss this fixes, and restore it invisibly.
-    #
-    # Vectorised: pack the two uint32 keys into one uint64, and the FIRST
-    # index of each key in the reversed array is the LAST index in the
-    # original -- exactly what the per-row dict overwrite computed. `np.sort`
-    # restores row order. Both keys are uint32 so the shift cannot collide.
+    # Vectorised: the first index of each packed (packet << 32 | char) uint64
+    # in the reversed array is its last in the original; np.sort restores row
+    # order. Both keys are uint32, so the pack cannot collide.
     key64 = (mv_pid.astype(numpy.uint64) << numpy.uint64(32)) | mv_char.astype(numpy.uint64)
     first_in_rev = numpy.unique(key64[::-1], return_index=True)[1]
     keep = numpy.sort((n_mv - 1) - first_in_rev)
     del key64, first_in_rev
     movement_collapsed = n_mv - len(keep)
 
-    # Every position and velocity component is Float32 on the wire and in
-    # Parquet; widening to a Python float prints the binary artefact
-    # (349.989990234375 for what the reference shows as 349.99).
-    # position_bbox is min/max of the raw values, so it surfaced there even
-    # though the derived distances agreed either way.
-    #
-    # yaw and pitch are NOT shortened. The reference serializes those two
-    # through a different path from position/velocity and writes the widened
-    # float32 (253.289794921875), not its shortest round-trip. Measured over
-    # 4,000 reference rows: yaw and pitch are exactly float32-representable
-    # 4000/4000, position.x only 25/4000 -- the discriminating signal.
-    # Applying _f32_shortest here was a regression introduced in 3d37c68
-    # alongside the position fix, and it moved 1,821,648 yaw and 1,699,418
-    # pitch rows away from the reference. It changed no metric, which is
-    # exactly why it survived.
-    #
-    # Select the kept rows once per column via numpy fancy indexing (C-level)
-    # and turn each kept float column into its JSON TEXT once per distinct
-    # value (see _json_scalar_column). One float column at a time, in
-    # `_MOVEMENT_LINE`'s slot order, so only one kept copy is alive at once;
-    # holding all eight cost +35-83 MB of peak working set across 11 exports.
+    # Positions and velocities are float32: widening prints the binary
+    # artefact (349.989990234375 where the reference shows 349.99; it
+    # surfaced in position_bbox). yaw and pitch are NOT shortened: the
+    # reference writes them widened (253.289794921875); over 4,000 reference
+    # rows yaw and pitch are float32-exact 4000/4000, position.x 25/4000.
+    # Shortening them (3d37c68) moved 1,821,648 yaw and 1,699,418 pitch rows
+    # and changed no metric. One float column alive at a time, in
+    # _MOVEMENT_LINE's slot order: all eight cost +35-83 MB of peak working
+    # set across 11 exports.
     non_finite = numpy.zeros(len(keep), dtype=bool)
     float_texts = []
     for column, shorten in ((mv_px, True), (mv_py, True), (mv_pz, True),
@@ -2504,28 +2371,19 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
         del kept
     non_finite_rows = int(numpy.count_nonzero(non_finite))
     movement_written = len(keep)
-    # time_ms and character_net_guid are uint32 and nearly all distinct, so
-    # they are not deduplicated: Arrow's integer-to-string cast writes the
-    # plain decimal digits, the same text `int.__repr__` -- and so the JSON
-    # encoder -- gives an int.
+    # The uint32 time_ms and character_net_guid are nearly all distinct, so
+    # not deduplicated: Arrow's integer-to-string cast writes the same digits
+    # the JSON encoder gives an int.
     int_slots = (pa.array(mv_time[keep]), pa.array(mv_char[keep]))
-    # The table and its column views are no longer needed; what the write
-    # loop reads is above. Dropping them now keeps them out of its peak.
+    # Dropped now, to stay out of the write loop's peak.
     del (mv_table, mv_time, mv_pid, mv_char, mv_px, mv_py, mv_pz,
          mv_vx, mv_vy, mv_vz, mv_yaw, mv_pitch, keep, non_finite)
 
-    # The lines are assembled in Arrow's C++, one block at a time: each slot's
-    # texts are taken for the block's rows (`take` for the deduplicated
-    # floats, a cast for the ints) and `binary_join_element_wise` interleaves
-    # them with `_MOVEMENT_LINE`'s literal fragments, so no Python object is
-    # made per row -- only per distinct value. The text of every slot is
-    # what the per-row `_MOVEMENT_LINE % (...)` join put there, so the bytes
-    # are too (`MovementLineAssemblyTests`; sha256-identical on 11 exports).
-    #
-    # The file is written in binary mode, so the line ending is spelled
-    # here: it was opened in text mode, which turns '\n' into os.linesep --
-    # CRLF on Windows -- and the fragments carry that same os.linesep so each
-    # platform keeps the bytes it had.
+    # Lines are assembled in Arrow one block at a time (per-slot texts
+    # joined with _MOVEMENT_LINE's fragments; see _json_scalar_column), byte
+    # for byte what the per-row join wrote (MovementLineAssemblyTests;
+    # sha256-identical on 11 exports). Written in binary mode, with the line
+    # ending the text-mode file had: os.linesep, deliberately.
     fragments = [pa.scalar(text, type=pa.string()) for text in
                  _MOVEMENT_LINE.replace("\n", os.linesep).split("%s")]
     if len(fragments) != 2 + len(float_texts) + 1:
@@ -2562,38 +2420,23 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
 
     tally = _Tally()
 
-    # ---- Load manifest ----
-    #
-    # An absent manifest is survivable but never harmless, and the bundle it
-    # produces does not look damaged: `_write_manifest` fills every field with
-    # a plausible default ("unknown", 0, "") and the gameplay-tag table comes
-    # out empty, so every effect blob is keyed by its numeric tag index and
-    # every shot reports null ammo, firing state, player and attack vectors.
-    # None of that is visible in the output, so it is counted here and again
-    # below, where we know whether any shot actually paid the price.
+    # An absent manifest leaves a bundle that does not look damaged: plausible
+    # header defaults ("unknown", 0, "") and an empty tag table, so every
+    # shot reports null ammo, firing state, player and attack vectors. So it
+    # is counted, here and below once it is known whether any shot paid.
     manifest = {}
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     else:
         tally.bump("missing_manifest")
-    # The bundle manifest is written LAST, once the counts it has to carry
-    # exist. It used to be written here, before a single row had been read,
-    # which is why it could only ever carry header scalars.
     upstream_quality = manifest.get("quality")
     if not isinstance(upstream_quality, dict):
-        # An export with no quality accounting is not a lossy conversion --
-        # older vrfkit builds emitted none and this run dropped nothing -- so
-        # it is deliberately NOT counted in the tally. It is still visible: the
-        # manifest publishes `"quality": null`, which says "nobody counted"
-        # rather than the plausible zero that would say "nothing was lost".
+        # Not a loss (older vrfkit emitted none), so not counted; published
+        # as `"quality": null`, "nobody counted", never a plausible zero.
         upstream_quality = None
 
-    # ---- Load fields.parquet ----
     cols = _load_field_columns(fields_path, verbose)
 
-    # ---- Classify rows: RPC vs replicated property ----
-    # We need to group and emit events in packet_id order (time order).
-    # Strategy: build a list of events keyed by packet_id, then sort and write.
     t0 = time.time()
     if verbose:
         print("Grouping rows into events...")
@@ -2603,24 +2446,21 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         print(f"  {len(prop_groups):,} property events, {len(rpc_groups):,} RPC invocations")
         print(f"  Grouped in {time.time()-t0:.1f}s")
 
-    # ---- Build events list ----
     t0 = time.time()
     if verbose:
         print("Building event records...")
 
-    # Containment chain for weapon identity. Loaded before the actor pass so
-    # guid_class can be filled from the same loop that emits actor_spawned.
+    # The containment chain for weapon identity, before the actor pass so
+    # guid_class fills in the loop that emits actor_spawned. The phases run
+    # in "Conversion phases" order: actors, properties, RPCs, timeline.
     guid_outer, guid_path, net_guid_rows_read = _load_net_guids(export_dir)
 
-    # 1 & 2. actor_spawned and actor_closed
     events, guid_class = _build_actor_events(
         export_dir, actor_first, actor_last, verbose, tally
     )
 
-    # 3. export_group_received events (replicated properties)
     events += _build_property_events(cols, prop_groups, tally)
 
-    # 4. rpc_received events, and valorant_shot_received for the effect RPCs
     def equippable_lookup(firing_state_guid):
         return _resolve_equippable(firing_state_guid, guid_outer, guid_path, guid_class)
 
@@ -2628,7 +2468,6 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         return _resolve_fire_mode(firing_state_guid, source_id, guid_outer, guid_path)
 
     shot_ctx = _ShotContext(
-        # Gameplay tag table for effect blob decoding.
         _build_tag_table(manifest), equippable_lookup, fire_mode_lookup,
     )
     rpc_events, shot_count, resolved_weapon_count = _build_rpc_events(
@@ -2636,19 +2475,12 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     )
     events += rpc_events
 
-    # 5. The server's own labelled Event-chunk timeline.  Its rows have no
-    # packet id, so _build_server_timeline_events derives a private sort key
-    # from the replication time index and publishes only group/time plus the
-    # fixed-layout words Rust already validated.  Event id, metadata and raw
-    # payload never cross the adapter seam.
     timeline_events, server_timeline_rows_read = _build_server_timeline_events(
         export_dir, cols, verbose
     )
     events += timeline_events
 
-    # Only now is it known whether the empty tag table cost anything: a replay
-    # with no shots loses nothing by having no tag names, and counting it
-    # there would cry wolf.
+    # An empty tag table costs only a replay with shots.
     if shot_count and not shot_ctx.tag_table:
         tally.bump("empty_gameplay_tag_table")
 
@@ -2658,34 +2490,23 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         pct = 100 * resolved_weapon_count / shot_count if shot_count else 0
         print(f"  {resolved_weapon_count:,} with a resolved weapon ({pct:.2f}%)")
 
-    # ---- Sort by (packet_id, time_ms) and write ----
     events_written, time_ms_regressions = _write_events(events, output_dir, verbose)
     if time_ms_regressions:
-        # Not a conversion loss -- every event is still written -- but it
-        # invalidates the (time_ms, line index) tie-break the consumer uses,
-        # so it is surfaced with the losses rather than buried in the manifest.
+        # Not a loss (every event is written), but it breaks the consumer's
+        # (time_ms, line index) tie-break, so it is surfaced with the losses.
         tally.bump("events_time_ms_regressions", time_ms_regressions)
 
-    # ---- Convert movement.parquet ----
     movement_rows_read, movement_written, non_finite_movement_rows = _write_movement(
         movement_path, output_dir, verbose
     )
-    # Every row is still written, so this is not a loss; it is surfaced with
-    # the losses because a strict parser rejects the line it is on.
+    # Not a loss either, but a strict parser rejects the line.
     tally.bump("non_finite_movement_rows", non_finite_movement_rows)
 
-    # ---- Cross-check what vrfkit declared against what was actually read ----
-    #
-    # Only exact table-height identities are judged. `quality.movement_rows`,
-    # `quality.net_guid_rows` and `quality.event_rows` are the row counts of the
-    # tables vrfkit wrote, so they must equal the heights this adapter reads
-    # back. `quality.net.fields`
-    # is NOT such an identity -- fields.parquet carries flattened array leaves,
-    # struct sub-fields and preservation rows on top of the wire fields
-    # (1,277,658 rows against 429,637 fields on the 02d4d478 reference) -- so it
-    # is recorded, never compared. Asserting an equality that does not hold
-    # would put a permanent false alarm in front of every run, and a false alarm
-    # is how a real one stops being read.
+    # Declared vs read back: only exact table-height identities are judged
+    # (movement_rows, net_guid_rows, event_rows). `quality.net.fields` is not
+    # one: fields.parquet adds array leaves, struct sub-fields and
+    # preservation rows (1,277,658 rows against 429,637 fields on 02d4d478),
+    # and a permanent false alarm is how a real one stops being read.
     declared = upstream_quality or {}
     upstream_row_counts = {
         "movement_rows": _upstream_row_check(
@@ -2702,11 +2523,8 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         1 for check in upstream_row_counts.values() if check["agrees"] is False
     )
     if disagreements:
-        # The export's own manifest does not describe the tables sitting next
-        # to it. Which of the two is wrong is not knowable here, so nothing is
-        # repaired and nothing is refused: the disagreement is counted, and the
-        # consumer decides what a bundle whose producer contradicts itself is
-        # allowed to publish.
+        # Which side is wrong is not knowable here: counted, never repaired
+        # or refused; the consumer decides what such a bundle may publish.
         tally.bump("upstream_row_count_disagreement", disagreements)
 
     adapter_accounting = {
@@ -2721,10 +2539,8 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         "field_rows_read": cols.n_rows,
         "field_rows_unresolved_class_net_cache": unresolved_cnc_rows,
         "upstream_row_counts": upstream_row_counts,
-        # Every conversion loss this run recorded, printed below as well.
-        # Written even when empty: `{}` says the counters ran and found
-        # nothing, where an absent key would not distinguish that from a run
-        # that never counted.
+        # Every counter, zeros included: an absent key could not tell a clean
+        # run from one that never counted.
         "losses": dict(tally),
     }
     _write_manifest(manifest, output_dir, adapter_accounting)
@@ -2737,16 +2553,8 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
 
 
 def _print_summary(output_dir: Path, result: dict) -> None:
-    """The console summary, printed once the bundle is published.
-
-    "complete" is a claim, so it is only made when it is true. A run that
-    dropped rows or invented values says how many and of what; the counters
-    that did not fire are not printed, because a block of ten zeroes is a
-    block readers learn to skip. `convert` calls this after the publish
-    commit, with the final path: printed from the staging step, it named a
-    directory the publish renamed away, and it claimed completion before a
-    publish that could still fail.
-    """
+    """The console summary, from `convert` after the publish commit, so it
+    names the final path; "complete" only when nothing was lost."""
     tally = result["tally"]
     if tally.total:
         print(f"\nConversion finished WITH LOSSES: {output_dir}")
@@ -2796,10 +2604,9 @@ def _publish_bundle(staging: Path, output_dir: Path) -> None:
         try:
             remove_tree(backup, parent)
         except OSError as exc:
-            # os.replace(staging, output_dir) is the commit point.  Cleanup is
-            # best-effort after that: reporting conversion failure here would
-            # be false (and callers might retry over the newly published
-            # bundle).  Leave the uniquely named old bundle recoverable.
+            # Past the commit point, os.replace(staging, output_dir), failure
+            # would be false and invite a retry over the new bundle; the old
+            # one is left recoverable.
             print(
                 f"warning: published {output_dir}, but could not remove old "
                 f"backup {backup}: {exc}",
@@ -2839,16 +2646,10 @@ def convert(export_dir: Path, output_dir: Path, *, verbose: bool = False):
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
-    # One replay builds ~680k event dicts and holds them all until they are
-    # sorted and written, so the cyclic collector rescans an ever-growing set
-    # of container objects it will never find a cycle in. Measured on a 53 MB
-    # replay: 6.58s -> 5.43s wall, 17.5% faster, with peak RSS unchanged at
-    # 2.2 GB -- no cycles were being reclaimed, only looked for. Reference
-    # counting still frees everything acyclic, and the process is short-lived
-    # and exits after one conversion.
-    #
-    # Deliberately here and not at import time: the tools test suite imports
-    # this module, and a library import must not change the caller's GC.
+    # ~680k event dicts live until the sort, and the cyclic collector rescans
+    # them for cycles that do not exist: disabled, a 53 MB replay went from
+    # 6.58 s to 5.43 s, peak RSS unchanged at 2.2 GB. Here, not at import:
+    # the test suite imports this module.
     gc.disable()
 
     parser = argparse.ArgumentParser(
@@ -2866,7 +2667,6 @@ def main():
     if args.output:
         output_dir = args.output.resolve()
     else:
-        # Derive stem from source_file in manifest or directory name
         manifest_path = export_dir / "manifest.json"
         if manifest_path.exists():
             m = json.loads(manifest_path.read_text(encoding='utf-8'))
