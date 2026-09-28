@@ -650,11 +650,6 @@ fn print_overlay(overlay: &OverlayStats, effect_blobs_decoded: u64) {
         + overlay.raw_or_skip
         + overlay.not_in_table
         + overlay.no_field_name;
-    let pct = if total > 0 {
-        (overlay.decoded_ok as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
     eprintln!();
     eprintln!("=== Type overlay ===");
     eprintln!("  Decoded OK:       {}", overlay.decoded_ok);
@@ -663,7 +658,10 @@ fn print_overlay(overlay: &OverlayStats, effect_blobs_decoded: u64) {
     eprintln!("  Not in table:     {}", overlay.not_in_table);
     eprintln!("  No field name:    {}", overlay.no_field_name);
     eprintln!("  Rows offered:     {total}");
-    eprintln!("  Typed:            {pct:.1}% (properties + RPC parameters)");
+    eprintln!(
+        "  Typed:            {} (properties + RPC parameters)",
+        typed_share(overlay.decoded_ok, total)
+    );
     // Unconditional, zero included. These are rows the handle fallback WOULD
     // have typed, refused because the replay declared a different, non-numeric
     // name at that handle -- the stale-mapping case that used to read a float
@@ -683,6 +681,15 @@ fn print_overlay(overlay: &OverlayStats, effect_blobs_decoded: u64) {
     // how much the static table covers, and how much this decoder recovered
     // from what the table does not.
     eprintln!("  Effect blobs:     {effect_blobs_decoded}");
+}
+
+/// `decoded_ok` as a share of the `total` rows offered, or `?` when none
+/// were: no share at all, not a typed share of zero.
+fn typed_share(decoded_ok: u64, total: u64) -> String {
+    if total == 0 {
+        return "?".to_owned();
+    }
+    format!("{:.1}%", (decoded_ok as f64 / total as f64) * 100.0)
 }
 
 /// Top-15 decode error breakdown. Always shown when there are any -- this is a
@@ -732,7 +739,7 @@ fn display_tail(value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHECKPOINT_TABLES, display_tail, file_size, stale_checkpoint_note};
+    use super::{CHECKPOINT_TABLES, display_tail, file_size, stale_checkpoint_note, typed_share};
     use std::fs;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -777,6 +784,15 @@ mod tests {
         assert_eq!(file_size(&dir.join("five.parquet")), "5");
         assert_eq!(file_size(&dir.join("missing.parquet")), "?");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// With no rows offered the typed share is undefined: `?`, not a
+    /// plausible `0.0%` that reads like an overlay that stopped typing.
+    #[test]
+    fn the_typed_share_of_no_rows_is_unknown_not_zero() {
+        assert_eq!(typed_share(0, 0), "?");
+        assert_eq!(typed_share(1, 8), "12.5%");
+        assert_eq!(typed_share(0, 5), "0.0%");
     }
 
     #[test]
