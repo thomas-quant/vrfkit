@@ -118,7 +118,13 @@
 //!
 //! Counted on 2026-09-28 with temporary counters in `vrfkit validate`, over 80
 //! replays from 24 builds, 11.06 to 13.06: 18,488,787 RPCs, 156,407,150
-//! component streams, 157,457,629 moves.
+//! component streams, 157,457,629 moves. The 80: `sample-1` to `sample-3` of
+//! each build 11.06 to 12.09; the first four by file name from each of 13.01,
+//! 13.02, 13.04, 13.05 and 13.06; and the twelve replays the per-build corpus
+//! baselines pin (`tools/baselines/build_*.json`: 12.10, 12.11, 13.00, 13.02,
+//! 13.04, 13.05 and six of 13.06). The 13.04 and 13.05 baseline replays are
+//! byte-identical to one of the four from their build, so the sample holds 78
+//! distinct replays and the totals count those two twice.
 //!
 //! - Every stream is byte-wrapped and every inner `movementBitCount` is 0, so
 //!   every movement window runs to the end of its envelope.
