@@ -133,10 +133,14 @@ class StrictRepLayoutTests(unittest.TestCase):
         self.assertEqual(
             [x.state for x in guard.verdicts(PAIRS, rows, self.KINDS)], ["broken"])
 
-    def test_a_class_net_cache_pair_keeps_the_ratio(self):
+    def test_a_class_net_cache_pair_is_not_judged_on_rep_layout_rows(self):
+        """The shape the ratio used to call `ok`: 70 bare RepLayout rows beside
+        a busy RepLayout target. Neither is what a ClassNetCache pair routes,
+        so with no ClassNetCache row either side there is nothing to judge."""
         rows = {self.NATIVE: 60101, "ZoomStateMachine": 70}
         v = guard.verdicts(PAIRS, rows, {"ZoomStateMachine": "ClassNetCache"})
-        self.assertEqual([x.state for x in v], ["ok"])
+        self.assertEqual([x.state for x in v], ["absent"])
+        self.assertIn("70 RepLayout rows under the leaf", v[0].detail)
 
     def test_every_real_pair_has_a_kind(self):
         kinds = guard.remap_kinds()
@@ -144,6 +148,105 @@ class StrictRepLayoutTests(unittest.TestCase):
         self.assertEqual(set(kinds.values()), {"RepLayout", "ClassNetCache"})
         self.assertEqual(kinds["ZoomStateMachine"], "RepLayout")
         self.assertEqual(kinds["EffectManager"], "ClassNetCache")
+
+
+class ClassNetCachePairTests(unittest.TestCase):
+    """A ClassNetCache pair is judged on the rows it routes, strictly.
+
+    The four C# reference pairs kept the 5% ratio over RepLayout rows -- the
+    leaf's against the class's RepLayout group -- and neither is what they
+    remap. Over the 1,018 exports of the 2026-09-28 audit that read
+    `DamageHandlerComponent` `broken` on 10 healthy exports (one or two stray
+    RepLayout rows, 0 on `DamageableComponent`) and `absent` on the other
+    1,008 while `DamageableComponent_ClassNetCache` took 72.2M rows; and a
+    scratch build with the pair's target renamed printed byte-identical output.
+    The row counts below are those exports'.
+    """
+
+    PAIR = [("DamageHandlerComponent", "/Script/ShooterGame.DamageableComponent")]
+    KINDS = {"DamageHandlerComponent": "ClassNetCache"}
+    ROUTED = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
+
+    def verdict(self, rows, cnc_bare=None):
+        return guard.verdicts(self.PAIR, rows, self.KINDS, cnc_bare)[0]
+
+    def test_routed_rows_and_nothing_bare_is_ok(self):
+        v = self.verdict({self.ROUTED: 89843})
+        self.assertEqual(v.state, "ok")
+        self.assertIn("89843 rows on the _ClassNetCache group", v.detail)
+
+    def test_a_stray_rep_layout_row_under_the_leaf_is_reported_not_broken(self):
+        """The healthy 13.05 export the ratio failed: one 1-bit RepLayout row
+        under the leaf, 0 on the RepLayout group, 89,843 routed."""
+        rows = {"DamageHandlerComponent": 1, self.ROUTED: 89843}
+        v = self.verdict(rows)
+        self.assertEqual(v.state, "ok")
+        self.assertIn("1 RepLayout rows under the leaf", v.detail)
+        self.assertEqual(guard.exit_code([v]), 0)
+
+    def test_a_remap_that_did_not_fire_is_broken(self):
+        """The same replay exported by the scratch build: 0 routed, the one
+        RepLayout row unchanged, 4,563 whole payloads bare under the leaf."""
+        v = self.verdict({"DamageHandlerComponent": 1},
+                         {"DamageHandlerComponent": 4563})
+        self.assertEqual(v.state, "broken")
+        self.assertIn("4563 ClassNetCache rows still bare", v.detail)
+
+    def test_rows_on_the_target_do_not_excuse_bare_ones(self):
+        """The scratch build's 13.01 export: 78 rows still reached the class
+        group without the table, beside 5,247 payloads left bare. Bare is
+        checked first, so the 78 cannot read as the remap working."""
+        v = self.verdict({self.ROUTED: 78}, {"DamageHandlerComponent": 5247})
+        self.assertEqual(v.state, "broken")
+
+    def test_one_bare_payload_beside_a_busy_target_is_broken(self):
+        """Strict, as for a RepLayout pair: healthy is exactly zero -- 0 bare
+        ClassNetCache rows in all 4,072 (pair, export) cases of the audit --
+        so no share of a busy target may hide one."""
+        v = self.verdict({self.ROUTED: 89843}, {"DamageHandlerComponent": 1})
+        self.assertEqual(v.state, "broken")
+
+    def test_the_healthy_and_the_broken_export_now_read_differently(self):
+        """What the old verdict could not do. It saw only RepLayout rows, which
+        are the same on both exports, so it returned one state for both."""
+        healthy_rows = {"DamageHandlerComponent": 1, self.ROUTED: 89843}
+        broken_rows = {"DamageHandlerComponent": 1}
+        old = [guard.verdicts(self.PAIR, rows)[0].state
+               for rows in (healthy_rows, broken_rows)]
+        self.assertEqual(old, ["broken", "broken"])
+        new = [self.verdict(healthy_rows).state,
+               self.verdict(broken_rows, {"DamageHandlerComponent": 4563}).state]
+        self.assertEqual(new, ["ok", "broken"])
+
+    def test_the_rep_layout_target_group_says_nothing(self):
+        """`EffectManager` read `ok` on every export because its RepLayout group
+        happens to carry rows -- not rows this pair routes."""
+        v = self.verdict({"/Script/ShooterGame.DamageableComponent": 5000})
+        self.assertEqual(v.state, "absent")
+
+    def test_neither_routed_nor_bare_is_absent(self):
+        v = self.verdict({"DamageHandlerComponent": 2})
+        self.assertEqual(v.state, "absent")
+        self.assertIn("2 RepLayout rows under the leaf", v.detail)
+
+    def test_the_two_bare_counts_split_every_row_of_a_bare_group(self):
+        names = {"DamageHandlerComponent": collections.Counter({
+            "__vrfkit_unresolved_class_net_cache_payload__": 4563, None: 1}),
+            "AbilitiesAndBuffsComponent": collections.Counter({
+                "_cnc_h1": 4683, "Status": 3})}
+        rep_layout = guard.bare_counts(names)
+        cnc = guard.cnc_bare_counts(names)
+        self.assertEqual(rep_layout, {"DamageHandlerComponent": 1,
+                                      "AbilitiesAndBuffsComponent": 3})
+        self.assertEqual(cnc, {"DamageHandlerComponent": 4563,
+                               "AbilitiesAndBuffsComponent": 4683})
+
+    def test_the_rep_layout_tally_counts_only_class_net_cache_leaves(self):
+        rows = {"DamageHandlerComponent": 2, "EffectManager": 3,
+                "ZoomStateMachine": 70}
+        kinds = {"DamageHandlerComponent": "ClassNetCache",
+                 "EffectManager": "ClassNetCache", "ZoomStateMachine": "RepLayout"}
+        self.assertEqual(guard.class_net_cache_leaf_rep_layout_rows(rows, kinds), 5)
 
 
 class RenameSignalTests(unittest.TestCase):
@@ -255,6 +358,37 @@ class MainTests(unittest.TestCase):
             result = self._run(directory)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("OK:", result.stdout)
+        # Printed with its zero: a line that appears only when nonzero could
+        # not tell "none" from "never counted".
+        self.assertIn("0 RepLayout row(s) under the leaves of the ClassNetCache "
+                      "pairs", result.stdout)
+
+    def test_main_reads_a_stray_rep_layout_row_under_a_class_net_cache_leaf_as_ok(self):
+        """The 10 healthy audit exports the old ratio failed, in miniature."""
+        with tempfile.TemporaryDirectory() as directory:
+            routed = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
+            self._export(directory,
+                         [(routed, "MulticastNotifyHeal.HealTaken")] * 100
+                         + [("DamageHandlerComponent", None)])
+            result = self._run(directory)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 RepLayout row(s) under the leaves of the ClassNetCache "
+                      "pairs", result.stdout)
+
+    def test_main_fails_a_class_net_cache_remap_that_did_not_fire(self):
+        """`main` must hand the leaf's ClassNetCache rows to `verdicts`: the
+        scratch-build shape, whole payloads bare and nothing routed."""
+        with tempfile.TemporaryDirectory() as directory:
+            native = "/Script/ShooterGame.EquippableStateMachineComponent"
+            self._export(directory,
+                         [(native, "CurrentState")] * 100
+                         + [("DamageHandlerComponent",
+                             "__vrfkit_unresolved_class_net_cache_payload__")] * 50
+                         + [("DamageHandlerComponent", None)])
+            result = self._run(directory)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("broken  DamageHandlerComponent", result.stdout)
+        self.assertIn("50 ClassNetCache rows still bare", result.stdout)
 
     def test_main_judges_a_rep_layout_pair_strictly(self):
         """`main` must hand the table's kinds to `verdicts`.
