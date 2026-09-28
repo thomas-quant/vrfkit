@@ -1,20 +1,9 @@
 //! Unreal Engine replication layer: packets -> bunches -> content blocks -> fields.
 //!
-//! # Design intent: exhaustive traversal without descriptors
-//!
-//! This crate intentionally does **not** skip any field payload. Every property
-//! and every RPC is emitted as `(handle, bit_count, raw_bits)` to the caller's
-//! sink. This is the reason this project exists as a new implementation rather
-//! than wrapping an existing one: the reference replay 02d4d478 carries 608,080
-//! content blocks and 1,844,147 movement samples, and the upstream parser's "skip if no
-//! descriptor" path means most of that data is silently discarded.
-//!
-//! Descriptor-free traversal is possible because the field stream is
-//! self-describing: each field carries its own handle and bit length, so the
-//! reader can always advance to the next field without knowing what type the
-//! current one is.
-//!
-//! # Layers
+//! No field payload is skipped, descriptor or not (the upstream parser skips
+//! any field it has no descriptor for). Every property and RPC reaches the
+//! caller's sink as `(handle, bit_count, raw_bits)`, which works because the
+//! field stream is self-describing: each field carries its handle and length.
 //!
 //! ```text
 //! packet  : sentinel-trimmed byte slice -> bit stream
@@ -23,46 +12,20 @@
 //! field   : self-describing handle/size stream
 //! ```
 //!
-//! # What is *not* here (injected by the caller)
+//! The caller injects export-group resolution (which names map to which
+//! handles), typed field decoding, and NetGuidCache storage (through
+//! [`net_guid::GuidPathSink`]).
 //!
-//! - Export group path resolution (which names map to which handles)
-//! - Typed field decoding (interpreting raw bits as floats, vectors, etc.)
-//! - NetGuidCache storage (this crate calls a trait for path registration)
-//!
-//! # Error policy
-//!
-//! A malformed bunch is discarded and counted; it does not abort the replay.
-//! Silent skipping is forbidden: every discard increments a stat counter.
-//!
-//! # Module layout
-//!
-//! One module per layer above, plus the pieces they share:
-//!
-//! | module | layer |
-//! |---|---|
-//! | [`packet`] | sentinel sizing, bunch headers, partial-sequence tracking |
-//! | [`bunch`] | bunch header struct, partial reassembly |
-//! | [`pipeline`] | the reader that drives all of it, and the sink trait |
-//! | [`content`] | content block headers |
-//! | [`field`] | field and RPC streams |
-//! | [`net_guid`] | `InternalLoadObject` |
-//! | [`stats`] | counters and the diagnostic event log |
-//! | [`types`], [`error`] | shared wire types and the error enum |
-//!
-//! [`pipeline`] is itself split -- channel lifecycle, spawn data and the
-//! per-block framing loop are separate private submodules -- because those
-//! three run at rates three orders of magnitude apart and are read against
-//! different parts of the wire format. Its public surface is unchanged by that
-//! split.
+//! A malformed bunch is discarded and counted; it does not abort the replay,
+//! and no discard goes uncounted.
 //!
 //! # Features
 //!
-//! - `diagnostics` (default): the per-failure event log in [`stats`]. Turning
-//!   it off removes [`stats::DiagnosticEvent`] and the machinery that builds
-//!   one; the counters that say *how much* was discarded stay in every build,
-//!   because losing them would mean losing data silently. Nothing else in this
-//!   crate is optional: packets, bunches, content blocks and fields are one
-//!   state machine and cannot be taken apart.
+//! `diagnostics` (default) adds only the per-failure event log in [`stats`]:
+//! `DiagnosticEvent`, `SkipReason`, the two snapshot types and the two
+//! `NetStats` fields that hold them. The counters are in every build -- a
+//! build without them would lose data silently -- and nothing else is
+//! optional: packets, bunches, content blocks and fields are one state machine.
 
 #![forbid(unsafe_code)]
 
@@ -80,11 +43,9 @@ pub use error::NetError;
 pub use pipeline::{PLAYER_CONTROLLER_LEAF, ReplicationReader, ReplicationSink};
 pub use stats::NetStats;
 
-/// Bit writers shared by this crate's unit tests.
-///
-/// Each writer appends bits in the order the matching `BitReader` read
-/// consumes them, least significant bit first; [`test_bits::pack`] and
-/// [`test_bits::build_packet`] turn the result into bytes.
+/// Bit writers shared by this crate's unit tests, appending bits in the order
+/// the matching `BitReader` read consumes them (least significant first);
+/// `pack` and `build_packet` turn the result into bytes.
 #[cfg(test)]
 mod test_bits {
     use crate::types::{ChannelCloseReason, MAX_PACKET_SIZE_BITS};
@@ -119,7 +80,6 @@ mod test_bits {
         }
     }
 
-    /// Append one byte.
     pub fn write_byte(bits: &mut Vec<bool>, byte: u8) {
         bits.extend((0..8).map(|i| (byte & (1 << i)) != 0));
     }
@@ -148,8 +108,7 @@ mod test_bits {
         pub ch_index: u32,
         pub b_open: bool,
         pub b_close: bool,
-        /// Close reason Dormancy rather than Destroyed; only read with
-        /// `b_close`.
+        /// Close reason Dormancy rather than Destroyed; used only with `b_close`.
         pub dormant: bool,
         pub b_reliable: bool,
         pub b_has_package_map_exports: bool,
@@ -187,7 +146,6 @@ mod test_bits {
             bits.push(spec.b_close);
         }
         if spec.b_close {
-            // Close reason Destroyed (0) or Dormancy (1).
             write_serialized_int(bits, u32::from(spec.dormant), ChannelCloseReason::MAX);
         }
         bits.push(false); // bIsReplicationPaused
