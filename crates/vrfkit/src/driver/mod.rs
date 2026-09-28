@@ -1,18 +1,12 @@
 //! `export` subcommand driver -- full pipeline from .vrf to Parquet.
 //!
-//! # Architecture
-//!
-//! DemoFrames and packets are processed in one wire-order pass. The frame
-//! iterator applies one frame's ExportData, then lends that exact cache state
-//! to the packet callback. Packet-side export mutations therefore precede the
-//! next packet, while a later frame's schema cannot leak backward into an
-//! earlier packet.
-//!
-//! # Layout
-//!
-//! - [`writers`] -- the two large tables' writers, running off the packet loop.
-//! - [`checkpoints`] -- the optional full-state snapshot pass.
-//! - [`summary`] -- the stderr report, whose every line a Python harness pins.
+//! One wire-order pass: the frame walk applies a frame's ExportData, then
+//! lends that exact cache state to its packets, so packet-side export
+//! mutations precede the next packet and a later frame's schema cannot leak
+//! backward. [`writers`] runs the large tables off the packet loop,
+//! [`checkpoints`] is the optional snapshot pass, [`publish`] stages and
+//! publishes the directory, and [`summary`] prints the stderr report whose
+//! labels the Python harnesses parse.
 
 pub(crate) mod checkpoints;
 mod publish;
@@ -50,7 +44,7 @@ use writers::WriterThread;
 /// The six tables every export writes. With [`CHECKPOINT_TABLES`] and
 /// [`MANIFEST`], every name `run` creates: `publish` refuses a destination
 /// holding anything else, so a table missing here makes the next export to
-/// the same directory refuse it.
+/// that directory refuse it.
 const MAIN_TABLES: [&str; 6] = [
     "fields.parquet",
     "movement.parquet",
@@ -75,12 +69,10 @@ const MANIFEST: &str = "manifest.json";
 pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), CliError> {
     let start = Instant::now();
 
-    // -- Read file ---------------------------------------------------------
     eprintln!("reading {vrf_path}...");
     let data = fs::read(vrf_path)?;
     let file_size = data.len();
 
-    // -- Parse preamble ----------------------------------------------------
     let preamble = parse_preamble(&data)?;
     let ctx = ReplayContext {
         branch: &preamble.header.replay_version.branch,
@@ -94,7 +86,6 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         ctx.branch, ctx.flags, ctx.compressed, preamble.info.length_in_ms
     );
 
-    // -- Setup output ------------------------------------------------------
     let destination = PathBuf::from(out_dir);
     let output = OutputTransaction::begin(&destination)?;
     let out_path = output.path();
@@ -106,8 +97,8 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     let mut field_writer = FieldWriter::new(create("fields.parquet")?)?;
     let mut movement_writer = MovementWriter::new(create("movement.parquet")?)?;
     let mut actor_writer = ActorWriter::new(create("actors.parquet")?)?;
-    // Event chunks are a couple of hundred rows and are written inline for the
-    // same reason `actors` is: the encoding cost is far below a thread's worth.
+    // A couple of hundred rows, so inline like `actors`: far below a thread's
+    // worth of encoding.
     let mut event_writer = EventWriter::new(create("events.parquet")?)?;
     let mut partial_writer = vrf_export::PartialWriter::new(create("partials.parquet")?)?;
     let mut checkpoint_writer = if with_checkpoints {
@@ -151,41 +142,31 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         movement_writer.finish()
     });
 
-    // -- Setup replication reader and schema cache --------------------------
     let mut cache = NetGuidCache::new();
     let mut repl_reader = replication_reader(ctx.branch)?;
 
-    // -- Iterate chunks ----------------------------------------------------
     let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);
     let mut channel_state = ChannelState::new();
 
-    // Reusable per-packet record buffers; see `RecordBuffers`.
     let mut buffers = RecordBuffers::default();
     let mut error_report = OverlayErrorReport::default();
-    // Every run counter the manifest and the summary report, sink-derived
-    // ones included (see `sink::totals`), in one place.
     let mut totals = RunTotals::default();
     let mut cp_stats = CheckpointStats::default();
 
     while let Some(chunk) = chunk_iter.next_chunk()? {
-        // Sliced once for all three chunk kinds. Safe for the kinds this loop
-        // ignores too: `next_chunk` refuses a chunk whose declared size runs
-        // past the file, so the range is in bounds before it is returned.
+        // In bounds for every kind: `next_chunk` refuses a chunk whose declared
+        // size runs past the file.
         let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
 
-        // Event chunks carry the server's own labelled timeline. They are
-        // uncompressed and independent of the replication pass, so they are
-        // read here and written straight out.
+        // The server's own labelled timeline: uncompressed and independent of
+        // replication, so written straight out.
         if chunk.chunk_type == ChunkType::Event {
             let event = parse_event_chunk(payload)?;
             totals.event_trailing_bytes += event.trailing_bytes as u64;
-            // Structural payload fields for groups whose word count, tag and
-            // public enum-name FString are established. Payload layout:
-            // [u32 tag][N x u32 words][FString][f32]. The guarded parser also
-            // requires exact consumption; the final filter checks the inner
-            // seconds against Time1. A disagreement yields no overlay fields
-            // and is counted, never guessed at. `raw_payload` still keeps
-            // every byte either way.
+            // Layout [u32 tag][N x u32 words][FString][f32] for groups whose
+            // word count, tag and public name are established; the parse must
+            // consume it exactly and its seconds must match Time1. A mismatch
+            // is counted, never guessed at; `raw_payload` keeps every byte.
             let word_count = known_event_word_count(&event.group);
             let parsed_payload = match word_count {
                 Some(count) => {
@@ -256,19 +237,15 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
             continue;
         }
 
-        // `_with_trailing` rather than the plain call: the outer chunk can be
-        // larger than the inner SizeInBytes, and the plain signature drops that
-        // excess with nothing to show for it. Counted, not rejected -- no replay
-        // has ever been measured carrying any, so failing on it would be
-        // guessing at a format we have not seen.
+        // `_with_trailing`: the outer chunk can exceed the inner SizeInBytes,
+        // which the plain call drops unseen. Counted, not rejected: no replay
+        // has been measured carrying any, so failing would be a guess.
         let (decompressed, trailing) =
             decompress_replay_data_with_trailing(payload, ctx.compressed, ctx.encrypted)?;
         totals.replay_data_trailing_bytes += trailing as u64;
 
-        // Process each packet before the iterator advances to later ExportData.
-        // The callback cannot return a writer error through `FrameError`, so it
-        // records the first one and makes later callbacks no-ops until the
-        // frame walk finishes and the error can be returned here.
+        // The callback cannot return a writer error through `FrameError`, so
+        // the first one is parked and later callbacks become no-ops.
         let mut packet_error = None;
         let walk = walk_demo_frames(&decompressed, ctx.flags, &mut cache, |pkt, packet_cache| {
             if packet_error.is_some() {
@@ -277,8 +254,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
             let pkt_id = totals.total_packets;
             totals.total_packets += 1;
 
-            // Scoped so the sink's borrow of `buffers` ends before they are
-            // drained. The buffers outlive the sink; that is the point.
+            // Scoped so the sink's borrow of `buffers` ends before the drain.
             {
                 let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
                 sink.enable_measured_array_routes(ctx.branch);
@@ -287,18 +263,15 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
 
                 repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
 
-                // The sink is dropped at the end of this scope, so a counter
-                // not read here is a counter that never existed. All of them
-                // go through one function; see `sink::totals`.
+                // The sink dies with this scope: a counter not absorbed here
+                // never existed. See `sink::totals`.
                 totals.sink.absorb(&mut sink.stats, &mut error_report);
             }
 
-            // Hand field and movement records to their writer threads.
             let result = (|| -> Result<(), CliError> {
                 fields.append(&mut buffers.fields)?;
                 totals.movement_rows += buffers.movement.len() as u64;
                 movement.append(&mut buffers.movement)?;
-                // Drain actor lifecycle records to the inline writer.
                 for record in buffers.actors.drain(..) {
                     actor_writer.push(record)?;
                 }
@@ -332,14 +305,13 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         }
     }
 
-    // -- Finish writers ----------------------------------------------------
-    //
-    // The two offloaded writers are joined here, before the elapsed time is
-    // taken and before any file size is read, so both files are complete and
-    // both results are checked.
+    // Joined before the elapsed time is taken and any file size is read, so
+    // both files are complete and both results are checked.
     fields.finish()?;
     movement.finish()?;
-    // EOF can turn still-active reassemblies into preservation rows.
+    // Drain fragments that never got their final piece into preservation
+    // rows; a dropped accumulator would make a partial bunch lost at EOF look
+    // like one still in flight.
     {
         let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut buffers);
         sink.enable_measured_array_routes(ctx.branch);
@@ -358,12 +330,9 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         w.finish()?;
     }
 
-    // -- Write the NetGUID registry ----------------------------------------
-    //
-    // Written after the replication pass because the cache accumulates over the
-    // whole replay: a GUID's outer may be declared in a later chunk than the
-    // one that first referenced it. Sorted so the file is byte-reproducible
-    // across runs (the cache is HashMap-backed and iterates in arbitrary order).
+    // After the pass, because a GUID's outer may be declared in a later chunk
+    // than the one that first referenced it; sorted, because the cache is a
+    // HashMap and the file must be byte-reproducible.
     let mut net_guid_writer = NetGuidWriter::new(create("net_guids.parquet")?)?;
     let mut guid_entries = cache.net_guid_entries();
     guid_entries.sort_unstable_by_key(|e| e.net_guid);
@@ -377,21 +346,12 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     }
     net_guid_writer.finish()?;
 
-    // Drain fragments that never got their final piece. Without this the
-    // accumulator is simply dropped and a partial bunch lost at EOF is
-    // indistinguishable from one still legitimately in flight -- the counters
-    // it feeds only exist if someone asks for them.
     let net_stats = repl_reader.stats();
     totals.export_groups = cache.group_count();
     totals.elapsed = start.elapsed();
 
-    // -- Write manifest ----------------------------------------------------
-    //
-    // Before the summary so the path the summary prints names a file that
-    // exists by the time it is read.
+    // Before the summary, so the path it prints names a file that exists.
     let staged_manifest_path = out_path.join(MANIFEST);
-    // Drain per-PlayerState identity (Subject + SpawnedCharacter) captured
-    // during the walk into a sorted players list for the manifest.
     let mut players: Vec<(u32, Option<String>, Option<u32>)> = channel_state
         .players()
         .iter()
@@ -414,17 +374,11 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         },
     )?;
 
-    // Checked against the directory `publish` is about to replace, not the
-    // one that exists once it returns: publication is a single atomic
-    // rename of the whole destination, so a table this run did not rewrite
-    // can only still be found here, before that swap happens. See
-    // `summary::stale_checkpoint_note`'s own doc for why checking afterward
-    // could never see it.
+    // Before `publish`: see `summary::stale_checkpoint_note`.
     totals.stale_checkpoint_note = summary::stale_checkpoint_note(&destination, with_checkpoints);
 
-    // No handle remains open in staging at this point. Replace the destination
-    // only after every table and the manifest are complete; a failed run before
-    // here drops the guard and removes staging without touching the prior run.
+    // Every table and the manifest are complete and closed. A run that failed
+    // before here dropped the guard, removing staging only.
     output.publish()?;
     let manifest_path = destination.join(MANIFEST);
 
