@@ -1,34 +1,19 @@
-"""Convert vrfkit Parquet export into a valplay-compatible NDJSON bundle.
+"""Convert a vrfkit Parquet export into a valplay-compatible NDJSON bundle.
 
-WHY: valplay's compute_metrics.py consumes events.ndjson + movement.ndjson +
-manifest.json. This adapter proves the vrfkit Rust parser can replace the C#
-parser by converting vrfkit's flat Parquet rows back into the nested JSON
-events that compute_metrics.py already understands. No metrics code is
-reimplemented -- only the serialization format is bridged.
+Writes the events.ndjson, movement.ndjson and manifest.json that valplay's
+compute_metrics.py consumes; only the serialization is bridged, no metric is
+reimplemented. Whole unresolved ClassNetCache block rows are excluded first.
+Replicated properties group by (packet_id, actor, object, group_path) into
+export_group_received events; RPCs (group_path contains '_ClassNetCache')
+group by (packet_id, actor, group_path, handle) into rpc_received events.
 
-The Parquet schema stores one row per decoded field, plus explicitly marked
-whole-block payload rows for unresolved ClassNetCache groups. Those block rows
-are excluded before grouping. Replicated properties are grouped by (packet_id,
-actor_net_guid, group_path) into export_group_received events. RPCs (group_path
-contains '_ClassNetCache') are grouped by (packet_id, actor_net_guid,
-group_path, handle) into rpc_received events.
-
-Shot data: ReplayPlayContinuousEffectAtLocation RPCs carry FloatValues,
-ObjectValues, VectorValues blobs. These are decoded in Python using the
-gameplay tag table from the manifest, and emitted as valorant_shot_received
-events matching the C# parser's output format.
-
-Weapon identity: the shot blob does not name the gun. It carries a FiringState
-subobject GUID, whose *outer* is the equippable actor. net_guids.parquet
-supplies that containment chain and actors.parquet supplies the class path,
-which equippable_table.py maps to a display name. This mirrors the C# parser's
-second resolution tier (ValorantShotEventEnricher.ResolveFromFiringState); its
-first tier, an equippable GUID inside the effect blob, is never populated in
-practice (0 of 2,647 shots in the 02d4d478 reference).
-
-Layout: constants, then leaf helpers (vectors, blob decoding, path parsing,
-RPC normalization), then one function per conversion phase, then `convert`
-which wires the phases together.
+Shots: ReplayPlayContinuousEffectAtLocation's FloatValues, ObjectValues and
+VectorValues blobs are decoded here with the manifest's gameplay-tag table
+into valorant_shot_received events. The gun is the FiringState subobject's
+outer (net_guids.parquet), named from its class path (actors.parquet,
+equippable_table.py): the C# parser's second tier,
+ValorantShotEventEnricher.ResolveFromFiringState. Its first tier, an
+equippable GUID in the blob, is never populated (0 of 2,647 shots, 02d4d478).
 
 Usage:
     python tools/to_valplay_bundle.py <vrfkit_export_dir> [-o <output_dir>]
@@ -70,33 +55,25 @@ from atomic_io import remove_tree, require_descendant  # noqa: E402
 # Constants and lookup tables
 # ---------------------------------------------------------------------------
 
-# Unreal's own cap in FNetGUIDCache traversal; the C# resolver uses the same
-# value. Real chains observed in 02d4d478 are one hop, but a bounded loop is
-# what keeps a malformed self-referential chain from hanging the adapter.
+# UE's FNetGUIDCache traversal cap, as in the C# resolver. Real chains on
+# 02d4d478 are one hop; the bound keeps a self-referential chain from hanging.
 MAX_OUTER_DEPTH = 16
 
-# A whole unresolved ClassNetCache block is preservation data, not a field or
-# RPC. This exact reserved field name is the production discriminator shared
-# with vrf-export. Exclude it before actor lifetime tracking as well as event
-# grouping, because unresolved paths do not necessarily carry a CNC suffix.
+# vrf-export's reserved field name for a whole unresolved ClassNetCache block:
+# preservation data, not a field or RPC. Excluded before lifetime tracking and
+# grouping, because an unresolved path need not carry the CNC suffix.
 UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME = (
     "__vrfkit_unresolved_class_net_cache_payload__"
 )
 
-# The group-path suffix that separates an RPC group from a replicated property
-# group. Shared with vrf-schema's CLASS_NET_CACHE_SUFFIX; the two are pinned
-# together by crates/vrfkit/tests/adapter_contract.rs, because a drift here
-# reclassifies every RPC as a property and yields a bundle that looks complete
-# and contains no kills, damage or abilities.
+# Separates an RPC group from a property group. Both constants are pinned to
+# vrf-export/vrf-schema by crates/vrfkit/tests/adapter_contract.rs: a drift
+# reclassifies every RPC as a property (no kills, damage or abilities).
 CLASS_NET_CACHE_SUFFIX = "_ClassNetCache"
 
-# Substrings that mark a firing state as the weapon's secondary fire cycle.
-# Copied from ValorantShotFireModeResolver.AlternateMarkers; matched
-# case-insensitively against every object path on the FiringState outer chain.
-#
-# The distinction matters because spray_control drops alternate-fire shots
-# outright: ADS and burst cycles have a different recoil pattern, so mixing
-# them into a spray would compare shots that were never part of one.
+# ValorantShotFireModeResolver.AlternateMarkers, matched case-insensitively on
+# every path of the FiringState outer chain. spray_control drops alternate
+# fire outright (ADS and burst recoil differ).
 ALTERNATE_FIRE_MARKERS = (
     "altfire",
     "zoomedfire",
@@ -106,26 +83,20 @@ ALTERNATE_FIRE_MARKERS = (
     "burstmode",
 )
 
-# Array fields whose *undecoded* blob is what downstream expects, mapped to the
-# TypeName the reference labels them with.
+# Array fields whose consumer decodes the undecoded blob itself, by wire name,
+# mapped to the TypeName the reference labels the blob with. vrfkit emits both
+# the container blob and the decoded elements; the general rule keeps the
+# elements (CombatReport's `Rounds` needs them), these keep the blob.
 #
-# vrfkit emits both forms for these: the bare container blob and the decoded
-# per-element sub-fields. The general rule below prefers the decoded form,
-# because that is what CombatReport's `Rounds` needs. RoundInfos is the
-# opposite case -- valplay's _roundinfo.collect_round_infos does its own
-# bit-level decode and requires {Data, BitCount}, skipping anything that is not
-# a dict, so handing it our decoded list silently produced
-# events_with_roundinfos: 0 and left every credits_actual figure null.
+# The raw-blob rule, for these and `_RAW_SOURCED_RPC_PARAMS`: the blob is built
+# from raw_bits whenever the row has them, typed or not, because raw_bits rides
+# beside a typed value by design and `_get_value` reports raw only when every
+# typed column is null.
 #
-# Our raw bits for RoundInfos are byte-identical to the reference's, so passing
-# them through is exact rather than approximate.
-#
-# The blob is built from raw_bits DIRECTLY, whether or not the overlay also
-# typed the row. It used to be taken only when `_get_value` reported the row
-# raw -- which it does only when every typed column is null, though raw_bits
-# travels beside a typed value by design -- so a typed RoundInfos row dropped
-# its blob and, with it, every decoded child, with no counter moving. Keyed by
-# the wire's own field name. See `_RAW_SOURCED_RPC_PARAMS` for the RPC side.
+# RoundInfos: valplay's _roundinfo.collect_round_infos bit-decodes
+# {Data, BitCount} and skips any non-dict, so our decoded list gave
+# events_with_roundinfos 0 and a null credits_actual. Our RoundInfos bits are
+# byte-identical to the reference's.
 RAW_BLOB_PREFERRED = {
     "RoundInfos": "TArray<FAresPlayerRoundInfo>",
 }
@@ -143,23 +114,17 @@ DEATH_MONTAGE_BLOB_PARAMS = frozenset({
     "DeathMontageEffectOverrideContext",
 })
 
-# RPC parameters whose consumer decodes the raw wire blob itself, by function.
-# Built from raw_bits whenever the row has them, typed or not -- the same rule
-# as RAW_BLOB_PREFERRED -- so typing a parameter upstream can neither drop the
-# blob nor swap it for a value its consumer cannot read.
-#
-# * The shot effect arrays feed this file's own effect decoder
-#   (`_decode_effect_elements`), which needs the exact payload window.
-# * A damage RPC's LifeChangeEvents feeds valplay's `_decode_remaining_hp`
-#   (weapon_stats.py), which reads the bits of the blob and nothing else.
-# * A damage RPC's death-montage pair (DEATH_MONTAGE_BLOB_PARAMS above) is
-#   typed ObjectNetGuid in fields.parquet, but the reference bundle carries
-#   each as a labelled blob and rpc_received keeps that shape.
-#
-# valplay's resource_budget.RETAINED_RAW_BLOB_KEYS lists every blob its metrics
-# decode: these, RoundInfos, and AggregateKills/Deaths/Assists and Score. The
-# last four take the generic path here -- no branch of this file depends on
-# whether they are raw -- and valplay reads either shape of them.
+# RPC parameters, by function, built from raw_bits by the RAW_BLOB_PREFERRED
+# rule, so typing one upstream can neither drop its blob nor swap it for a
+# value its consumer cannot read:
+# * the shot effect arrays feed this file's effect decoder
+#   (`_decode_effect_elements`), which needs the exact payload window;
+# * a damage RPC's LifeChangeEvents feeds valplay's `_decode_remaining_hp`
+#   (weapon_stats.py), which reads only the blob's bits;
+# * the death-montage pair is typed ObjectNetGuid in fields.parquet, but the
+#   reference carries each as a labelled blob and rpc_received keeps that.
+# The rest of valplay's RETAINED_RAW_BLOB_KEYS (AggregateKills/Deaths/Assists,
+# Score) take the generic path; valplay reads either shape of them.
 _RAW_SOURCED_RPC_PARAMS = {
     "ReplayPlayContinuousEffectAtLocation":
         frozenset({"FloatValues", "ObjectValues", "VectorValues"}),
@@ -168,48 +133,31 @@ _RAW_SOURCED_RPC_PARAMS = {
 }
 
 
-# Replicated PROPERTIES whose decoded value is a vector. The parser renders a
-# decoded vector as the compact "(x,y,z)" string, which is what lands in
-# value_str; the reference emits {x, y, z}. The RPC path already converts its
-# vectors (DAMAGE_VECTOR_PARAMS below) but the property path never did, so
-# these shipped as strings.
-#
-# Measured on 02d4d478: this is the complete set -- a scan for fields the
-# reference emits as {x,y,z} while we emit "(x,y,z)" finds only this one,
-# 9 occurrences. Add to it rather than matching the string shape generally:
-# a value that merely LOOKS like a vector is not evidence that it is one.
+# Replicated properties whose value_str is the parser's compact "(x,y,z)"
+# vector, which the reference emits as {x, y, z}. The complete set on 02d4d478:
+# a scan for fields the reference emits as {x,y,z} where we emit "(x,y,z)"
+# finds only this one, 9 occurrences. Listed by name, never sniffed: a value
+# that merely LOOKS like a vector is not evidence that it is one.
 VECTOR_PROPERTIES = frozenset({
     "ReplicatedGravityDirection",
 })
 
 
-# Replicated PROPERTIES the parser renders as a JSON object in value_str.
-#
-# Every other decoded type fits a scalar or the compact "(x,y,z)" string, but
-# FRepMovement is an eight-member struct with nowhere to live in a single
-# column, so vrf-decode writes it as JSON (types.rs, FRepMovement's Display).
-# The reference emits the same eight members as a real object
-# (ReplayJsonNormalizer.cs:255), so the adapter's job is just to parse it back.
-#
-# Listed by name rather than sniffed with `value.startswith("{")`: a string
-# that merely looks like JSON is not evidence that it is a movement struct.
-# ReplicatedMovement is the only field name with FieldType::RepMovement in the
-# generated table (26 entries, all this name).
-#
-# The JSON is passed through untouched, units included: `location` is world
-# units on every class the table types (the reader divides by each class's
-# own quantization level; docs/DATA.md has the per-class evidence), so the
-# adapter applies no scale of its own. Exports from before 2026-09-28 carry
-# location/100 on all classes but one and should be regenerated, not
-# rescaled here.
+# Replicated properties the parser writes as a JSON object in value_str:
+# FRepMovement's eight members fit no single column (types.rs, its Display),
+# and the reference emits them as an object (ReplayJsonNormalizer.cs:255).
+# Listed by name, not sniffed with startswith("{"). ReplicatedMovement is the
+# only FieldType::RepMovement name in the generated table (26 entries).
+# Passed through untouched: `location` is world units on every class the table
+# types (docs/DATA.md has the per-class evidence). Exports from before
+# 2026-09-28 carry location/100 on all classes but one: regenerate, not rescale.
 JSON_OBJECT_PROPERTIES = frozenset({
     "ReplicatedMovement",
 })
 
 
-# Damage RPC parameters that carry an FVector_NetQuantize* payload. The C#
-# call sites are DamageParameters.cs:50 and
-# MulticastNotifyDamagePointParameters.cs:40-46.
+# Damage RPC parameters carrying an FVector_NetQuantize* payload (C# call
+# sites: DamageParameters.cs:50, MulticastNotifyDamagePointParameters.cs:40-46).
 DAMAGE_VECTOR_PARAMS = frozenset({
     "DamageOrigin",
     "DamageImpactLocation",
@@ -219,22 +167,12 @@ DAMAGE_VECTOR_PARAMS = frozenset({
 })
 
 
-# RegionalDamage enum mapping: vrfkit stores as int, valplay expects string.
+# Enum ordinal (int in fields.parquet) -> the reference's string, from the C#
+# enums verbatim; an unmapped ordinal becomes a loud *_unknown_{n}.
 #
-# EAresAlliance.cs. Verbatim from the enum, not inferred:
-#
-#   AllianceAlly = 0, AllianceEnemy = 1, AllianceNeutral = 2,
-#   AllianceAny = 3, AllianceCount = 4, AllianceMax = 5
-#
-# This map previously read {0: "alliance_self", 1: "alliance_ally",
-# 2: "alliance_enemy", 3: "alliance_any", 4: "alliance_any"} -- shifted by
-# one, with an "alliance_self" that is not in the enum at all. Ordinal 1
-# occurs 30 times on 02d4d478 and was reported as "ally" where the reference
-# says "enemy"; ordinal 3 was right only by coincidence.
-#
-# This is the same defect as the RegionalDamage swap fixed in e7414d9, in the
-# same file, and it was not checked at the time. When one enum map turns out
-# to be shifted, check the others.
+# EAresAlliance.cs: AllianceAlly = 0, AllianceEnemy = 1, AllianceNeutral = 2,
+# AllianceAny = 3, AllianceCount = 4, AllianceMax = 5. On 02d4d478 ordinal 1
+# occurs 30 times, and the reference says alliance_enemy.
 ALLIANCE_MAP = {
     0: "alliance_ally",
     1: "alliance_enemy",
@@ -244,27 +182,12 @@ ALLIANCE_MAP = {
     5: "alliance_max",
 }
 
-# EAresRegionalDamage.cs. The ordinals are the C# enum's, not an invention:
-#
-#   RegionalDamage_Normal         = 0
-#   RegionalDamage_Headshot       = 1
-#   RegionalDamage_Legshot        = 2
-#   RegionalDamage_RegionCount    = 3
-#   RegionalDamage_Invalid_Radial = 4
-#   RegionalDamage_Invalid        = 5
-#   RegionalDamage_CountPlusOne   = 6
-#
-# This map previously had 0 and 1 swapped and put invalid at 3, so every
-# body shot was reported as a headshot and vice versa (Vandal: 109 head /
-# 35 body instead of 35 / 109), and the 18 genuine "no hit region" damage
-# events at ordinal 5 fell through to unknown_5.
-#
-# The four strings that appear on the wire are verified against 02d4d478's
-# reference bundle. The remaining three are derived with the same
-# name-to-string rule (insert "_" before each capital, lowercase) which that
-# verification confirms on 4 of 4 cases; they are sentinels and have not been
-# observed, so an unexpected ordinal still falls through to a loud
-# unknown_{n} rather than being silently absorbed.
+# EAresRegionalDamage.cs: RegionalDamage_Normal = 0, _Headshot = 1,
+# _Legshot = 2, _RegionCount = 3, _Invalid_Radial = 4, _Invalid = 5,
+# _CountPlusOne = 6. The four strings seen on the wire are verified against
+# 02d4d478's reference bundle (counts inline); the three unobserved sentinels
+# follow the name-to-string rule those four confirm (insert "_" before each
+# capital, lowercase).
 REGIONAL_DAMAGE_MAP = {
     0: "regional_damage__normal",           # verified: 446 occurrences
     1: "regional_damage__headshot",         # verified: 83
@@ -287,20 +210,11 @@ _PATH_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)\])?')
 class _Tally(dict):
     """Every row this conversion dropped and every value it invented.
 
-    WHY a counter rather than a raise or a silent skip: each of these is a
-    shape the adapter can keep going past (most are rare; property key
-    collisions are structural and number in the tens of thousands per replay),
-    and going past it quietly is precisely what made them invisible. This file
-    is the last hop before the data is consumed, so a row it drops is
-    invisible to every upstream check -- the bundle still comes out as valid
-    JSON, the counts still look plausible, and the run still prints
-    "Conversion complete". Rejecting the whole replay over 1,996 unnamed rows
-    would be worse; saying nothing is what we had. A count that reaches the
-    summary is the third option and the one the rest of this project already
-    uses.
-
-    A dict with a fixed key set: `bump` on a name that is not one of them
-    raises KeyError rather than inventing a counter nothing ever prints.
+    Counted, neither raised nor skipped: each shape is one the adapter can go
+    past (property key collisions are structural, tens of thousands per
+    replay), and this is the last hop before consumption, so an uncounted drop
+    is invisible to every upstream check while the bundle still looks complete.
+    The key set is fixed: `bump` on an unknown name raises KeyError.
     """
 
     #: counter -> the wording its summary line uses.
@@ -366,21 +280,15 @@ class _Tally(dict):
         return sum(self.values())
 
     def lines(self) -> list[str]:
-        """One line per counter that fired, in REASONS order.
-
-        Silent counters are omitted: a summary listing ten zeroes trains the
-        reader to skip the block, which is the failure mode this replaces.
-        """
+        """One line per counter that fired, in REASONS order; the manifest's
+        `losses` carries every counter, zeros included (docs/USAGE.md)."""
         return [f"  {name}: {self[name]:,} -- {reason}"
                 for name, reason in self.REASONS.items() if self[name]]
 
 
 def _bump(tally, name: str, n: int = 1) -> None:
-    """Increment a counter if one is being kept; a `None` tally is a no-op.
-
-    The leaf helpers take an optional tally so they stay callable -- and
-    testable -- on their own. The conversion phases always pass a real one.
-    """
+    """Increment a counter; a `None` tally is a no-op, so the leaf helpers stay
+    callable and testable alone. The conversion phases always pass one."""
     if tally is not None:
         tally.bump(name, n)
 
