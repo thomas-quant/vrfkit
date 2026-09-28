@@ -123,8 +123,20 @@ walked 10,614,694 ReplayData frames and 860 checkpoint frames with **0**
 ExternalData blobs, **0** ExternalData bytes and **0** GameSpecificFrameData
 bytes. The last is structural on that sample: `vrfkit inspect` shows header
 flags `0x0002` (`HasStreamingFixes` only) on all 45, so the section never
-appears. A build that starts sending either section now moves these counters,
-and the pinned `frame_*` export baselines, instead of nothing.
+appears. A build that starts sending either section now moves these counters
+in every output instead of nothing.
+
+What keeps them wired is `crates/vrfkit/tests/frame_skips.rs`, not the corpus
+guards. It runs the binary on a synthetic uncompressed replay whose ReplayData
+and Checkpoint frames carry both sections, with different totals per pass,
+and fails if any of the five passes (export main and checkpoint, `validate`,
+`diag` main and checkpoint) reports another pass's numbers, only its last
+chunk's, or 0. The pinned `frame_*` export baselines cannot do that: they
+belong to one 13.01 replay, 02d4d478, whose true value is 0, so they would
+still read 0 with a pass's tally disconnected, and a new build's replays
+never reach them. `check_export_baseline.py`'s summary-vs-manifest
+reconciliation cannot either, because each pass feeds both outputs from one
+variable.
 
 ## Schema hot path (vrf-schema)
 
