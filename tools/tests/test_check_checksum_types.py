@@ -733,6 +733,13 @@ def listed(**changes):
     return item
 
 
+def committed_items():
+    """The committed list, read the way `main` reads it. Tests derive counts
+    from it rather than pinning its size, so adding a reasoned item breaks
+    nothing that is still true."""
+    return cct.load_expected(cct.EXPECTED_JSON, {label for label, _ in cct.Seeds().named})
+
+
 def expected_item(**changes):
     item = listed(**changes)
     return cct.ExpectedItem(**{k: item[k] for k in cct.ExpectedItem._fields})
@@ -871,7 +878,7 @@ class ExpectedListLoadTests(unittest.TestCase):
         seeds = dict(cct.Seeds().named)
         chains = {" > ".join(f"{n}:{t}" for n, t in c.links): c.links for c in cct.PARENT_CHAINS}
         items = cct.load_expected(cct.EXPECTED_JSON, set(seeds))
-        self.assertEqual(len(items), 2)
+        self.assertTrue(items, "the committed list is empty: nothing below would run")
         for item in items:
             with self.subTest(item=item.describe()):
                 hashed = cct.HARDCODED_FNAMES.get(item.name, item.name)
@@ -920,7 +927,8 @@ class ExpectedMainTests(unittest.TestCase):
         self.assertIn("      2 / 2     expected", out)
         self.assertIn("      2  matched", out)
         self.assertIn("      0  STALE", out)
-        self.assertIn("      0  not applicable", out)
+        others = len(committed_items()) - 2  # items for checksums this export lacks
+        self.assertIn(f"{others:>7}  not applicable", out)
         self.assertIn(f"EXPECTED {EFFECT_RPC} | 249 | {ROTATION}", out)
         self.assertIn(f"EXPECTED {RESPAWN} | 249 | {SPAWN_ROTATION}", out)
         self.assertIn(f"EXPECTED checksum_table.rs {SPAWN_ROTATION} -> VectorDouble", out)
@@ -930,7 +938,9 @@ class ExpectedMainTests(unittest.TestCase):
         self.assertEqual(sorted((r["name"], r["checksum"], r["expected"]) for r in data["identities"]),
                          [("249", ROTATION, True), ("249", SPAWN_ROTATION, True)])
         self.assertEqual([c["expected"] for c in data["checksum_table_mismatches"]], [True, True])
-        self.assertEqual(sorted(i["state"] for i in data["expected_items"]), ["matched", "matched"])
+        self.assertEqual({i["checksum"]: i["state"] for i in data["expected_items"]
+                          if i["checksum"] in (ROTATION, SPAWN_ROTATION)},
+                         {ROTATION: "matched", SPAWN_ROTATION: "matched"})
 
     def test_a_mismatch_the_list_does_not_name_still_fails(self):
         """Beside a listed mismatch, one the list lacks fails the run -- with
@@ -975,7 +985,7 @@ class ExpectedMainTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("      0  matched", out)
         self.assertIn("      1  STALE", out)
-        self.assertIn("      1  not applicable", out)
+        self.assertIn(f"{len(committed_items()) - 1:>7}  not applicable", out)
         self.assertIn("the input declares 747197698; its typed identities: 1 untestable as "
                       "VectorDouble", out)
         self.assertIn("STALE", err)
@@ -989,10 +999,12 @@ class ExpectedMainTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("      0 / 0     unexpected", out)
         self.assertIn("      0 / 0     expected", out)
-        self.assertIn("expected mismatches (tools/fixtures/checksum_types_expected.json): 2 item(s)", out)
+        n = len(committed_items())
+        self.assertIn(f"expected mismatches (tools/fixtures/checksum_types_expected.json): {n} item(s)",
+                      out)
         self.assertIn("      0  matched", out)
         self.assertIn("      0  STALE", out)
-        self.assertIn("      2  not applicable", out)
+        self.assertIn(f"{n:>7}  not applicable", out)
         code, out, _ = run_main("--export", str(d), "--expected", str(self.write_list()))
         self.assertEqual(code, 0, out)
         self.assertIn("0 item(s)", out)
