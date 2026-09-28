@@ -259,6 +259,82 @@ public sealed class Fade : ExportGroupDescriptor<Fade>
 '''})
         self.assertIn("Fade.DescriptorPath", error)
 
+    def test_a_generic_and_a_plain_class_sharing_a_name_stay_two_classes(self):
+        """C# tells `Res` from `Res<T>` by arity, and the vendored tree declares
+        both for ResourceComponentDescriptor. Keyed by bare name they merged
+        into one record, and file order decided whose fields survived."""
+        generic = r'''
+public abstract class Res<T> : ExportGroupDescriptor<T> where T : Res<T>
+{
+    protected override void Configure()
+    {
+        AddProperty(x => x.BaseValue).Int32();
+    }
+}
+'''
+        plain = r'''
+public sealed class Res : Res<Res>
+{
+    public override string Path => "/res";
+    protected override void Configure()
+    {
+        AddProperty(x => x.OwnValue).Float();
+    }
+}
+'''
+        for generic_file, plain_file in (("A.cs", "B.cs"), ("B.cs", "A.cs")):
+            with self.subTest(generic_file=generic_file):
+                output = self.run_generator({generic_file: generic, plain_file: plain})
+                self.assertEqual(
+                    {(g, f, t.strip()) for g, f, t in ENTRY_RE.findall(output)},
+                    {("/res", "BaseValue", "FieldType::Int32"),
+                     ("/res", "OwnValue", "FieldType::Float")})
+
+    def test_arity_keys_resolve_own_constants_and_bases(self):
+        """Classes are keyed by name and generic arity (`Gen`2`). The arity
+        counts top-level type arguments only, and a generic class's constants
+        and every base reference use the same key: otherwise `Gen<T>` and
+        `Gen<TKey, TSelf>` merge, a Path stops resolving, or a derived class
+        loses its base's fields."""
+        output = self.run_generator({"Generic.cs": r'''
+public class Probe<T> : ExportGroupDescriptor<T>
+{
+    public const string DescriptorPath = "/probe";
+    public override string Path => DescriptorPath;
+    protected override void Configure()
+    {
+        AddProperty(x => x.Value).Int32();
+    }
+}
+public abstract class Gen<T> : ExportGroupDescriptor<T>
+{
+    protected override void Configure()
+    {
+        AddProperty(x => x.One).Int32();
+    }
+}
+public abstract class Gen<TKey, TSelf> : ExportGroupDescriptor<TSelf>
+{
+    protected override void Configure()
+    {
+        AddProperty(x => x.Two).Float();
+    }
+}
+public sealed class UsesOne : Gen<UsesOne>
+{
+    public override string Path => "/one";
+}
+public sealed class UsesTwo : Gen<Dictionary<int, string>, UsesTwo>
+{
+    public override string Path => "/two";
+}
+'''})
+        self.assertEqual(
+            {(g, f, t.strip()) for g, f, t in ENTRY_RE.findall(output)},
+            {("/probe", "Value", "FieldType::Int32"),
+             ("/one", "One", "FieldType::Int32"),
+             ("/two", "Two", "FieldType::Float")})
+
     def test_unsupported_dynamic_cache_factory_fails(self):
         error = self.run_generator_expecting_failure({"Factory.cs": r'''
 internal static class Factories

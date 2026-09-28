@@ -159,15 +159,58 @@ def resolve_path_expression(
 
 # Find every public/internal descriptor class in a file. The optional ``@``
 # sits outside the name capture so all dictionaries use the semantic C# name.
+# Groups are named: a positional group(2) shifts when a group is added.
 MULTI_CLASS_RE = re.compile(
     rf'(?:public|internal)\s+(?:sealed\s+)?(?:abstract\s+)?class\s+'
-    rf'@?({CSHARP_IDENTIFIER})'
-    r'(?:<[^>]+>)?\s*'
-    r'(?::\s*([\w@.<>,\s]+?))?'
+    rf'@?(?P<name>{CSHARP_IDENTIFIER})'
+    r'(?P<generics><[^>]+>)?\s*'
+    r'(?::\s*(?P<base>[\w@.<>,\s]+?))?'
     r'(?:\s+where\s+[^\{]+?)?'
     r'\s*\{',
     re.DOTALL,
 )
+
+
+def class_key(reference: str) -> str:
+    """The key a class is stored under: its name and generic arity.
+
+    C# tells `Foo` from `Foo<T>`, and the vendored tree declares both for
+    ResourceComponentDescriptor. Keyed by bare name they merged into one
+    record whose fields depended on file order, so the generic one is
+    `Foo`1` (the .NET spelling). `reference` is a declaration (`Foo<T>`) or a
+    use (`Foo<List<int>, Bar>`).
+    """
+    name, bracket, arguments = reference.partition("<")
+    name = normalize_csharp_identifier(name.strip())
+    if not bracket:
+        return name
+    depth, arity = 0, 1
+    for ch in arguments:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            if depth == 0:
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            arity += 1
+    return f"{name}`{arity}"
+
+
+def declared_class_key(match: re.Match[str]) -> str:
+    """`class_key` of one MULTI_CLASS_RE declaration."""
+    return class_key(match.group("name") + (match.group("generics") or ""))
+
+
+def base_class_key(bases: str) -> str:
+    """`class_key` of the first entry of a base list, which is the base class."""
+    depth = 0
+    for i, ch in enumerate(bases):
+        depth += {"<": 1, ">": -1}.get(ch, 0)
+        if ch == "," and depth == 0:
+            return class_key(bases[:i])
+    return class_key(bases)
+
 
 # What each ExportGroupKind means for THIS table, which answers exactly one
 # question: can this descriptor's property names ever be wire field names?
@@ -1461,7 +1504,7 @@ def main(argv: list[str]) -> int:
             (match.group("name"), match.start())
             for match in STATIC_CLASS_RE.finditer(code_view)
         ] + [
-            (match.group(1), match.start())
+            (declared_class_key(match), match.start())
             for match in MULTI_CLASS_RE.finditer(code_view)
         ]
         for owner, start in constant_owners:
@@ -1563,15 +1606,11 @@ def main(argv: list[str]) -> int:
     class_declarations_by_name: dict[str, list[Path]] = {}
     for cs_file, source, code_view in sources:
         for class_match in MULTI_CLASS_RE.finditer(code_view):
-            class_name = class_match.group(1)
+            class_name = declared_class_key(class_match)
             class_declarations_by_name.setdefault(class_name, []).append(cs_file)
-            raw_base = class_match.group(2)
+            raw_base = class_match.group("base")
             if raw_base:
-                base_class = raw_base.strip().split("<")[0].strip()
-                base_class = base_class.split(",")[0].strip()
-                class_bases[class_name] = normalize_csharp_identifier(
-                    base_class
-                )
+                class_bases[class_name] = base_class_key(raw_base)
 
             body_start, body_end = find_class_body_range(
                 code_view, class_match.start()
@@ -1768,7 +1807,7 @@ def main(argv: list[str]) -> int:
         # Extract Path for each class (find Path declarations and associate
         # with the class whose body contains them)
         for cm in class_matches:
-            class_name = cm.group(1)
+            class_name = declared_class_key(cm)
             body_start, body_end = find_class_body_range(code_view, cm.start())
             class_body = source[body_start:body_end]
             class_body_code_view = code_view[body_start:body_end]
@@ -1819,7 +1858,7 @@ def main(argv: list[str]) -> int:
                     raise SystemExit(f"{class_name}.Path: {error}") from error
 
             # Check if this is a ClassNetCache descriptor
-            raw_base = cm.group(2)
+            raw_base = cm.group("base")
             is_cnc = raw_base and "ClassNetCacheDescriptor" in raw_base
             # Both scans below report into this, so a statement they both see
             # is sorted into rejected_types / decoderless_seen once.
