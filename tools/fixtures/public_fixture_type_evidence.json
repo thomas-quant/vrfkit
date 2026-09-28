@@ -74,5 +74,17 @@
   "field": "NetMulticastRemoveForceModule.ModuleType",
   "type": "EnumByte",
   "checksum": 3263282135
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+  "field": "CurrentLossStreak",
+  "type": "Int32",
+  "checksum": 1863385026
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+  "field": "LossStreakTeam",
+  "type": "ObjectNetGuid",
+  "checksum": 22256526
  }
 ]

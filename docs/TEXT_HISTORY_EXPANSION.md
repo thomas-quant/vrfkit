@@ -42,6 +42,39 @@ consumption. Format arguments are not restricted to the observed count of two.
 The existing `FieldType::FText` key-string representation is unchanged for
 other consumers such as `LocalizedStat`.
 
+## History 4: a formatted number
+
+The same reader also decodes history 4 (`AsNumber`), and the overlay type
+`FieldType::FTextTree` applies it to a whole replicated property rather than
+to one array leaf. Its first user is `BombGameState_C.OverrideMatchTimerText`
+(and the Swiftplay game state's copy), typed by exact group, name and checksum
+(`tools/fixtures/scoped_type_evidence.json`). That property sends two forms:
+the 72-bit history-255 empty form, and a 376-bit history 4:
+
+```json
+{"flags":1,"history":4,"kind":"as_number","source":{"tag":3,"double":15.614009857177734},"format":{"always_sign":false,"use_grouping":true,"rounding_mode":0,"minimum_integral_digits":2,"maximum_integral_digits":2,"minimum_fractional_digits":2,"maximum_fractional_digits":2},"culture":""}
+```
+
+The wire layout after the 32 flag bits and the history byte: the source
+value's type byte (`FFormatArgumentValue`; only 3, a double, is read -- any
+other type is refused rather than read at a guessed width), the double, an
+archive bool (a whole u32, 0 or 1) saying whether `FNumberFormattingOptions`
+follow, then those options -- two archive bools, the rounding-mode byte and
+four i32 digit limits -- and last the target culture as an FString. A
+non-finite double is refused: JSON has no spelling for it. The legacy
+`FieldType::FText` reader keeps only string-table keys, and refuses both of
+these forms.
+
+Measured 2026-09-28 on all 1,018 unique replays (11.06-13.06): 7,096 main and
+14,008 checkpoint rows of the two identities, 14,005 of them the empty form
+and 7,099 history 4, every one with a double source (0.01..36.95), format
+options present and identical (no sign, grouping, rounding mode 0, two
+integral and two fractional digits), an empty culture and flags 1. Each row
+shares its packet with a `ShouldOverrideMatchTimer` row of the same actor:
+true with the number, false with the empty form, without exception. An
+independent Python reader (`validate_type_evidence.py`, type `FTextTree`)
+agrees with the exported JSON on every row.
+
 ## Whole-corpus evidence
 
 All 714 replays were exported with the candidate, covering 215 release-13.01,

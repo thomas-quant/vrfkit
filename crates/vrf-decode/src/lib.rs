@@ -123,7 +123,8 @@ mod tests;
 
 pub use decode::{DecodeError, DecodedValue, FieldType, decode_field};
 pub use ftext::{
-    FTextArgument, FTextArgumentValue, FTextName, FTextTree, FTextTreeError, decode_ftext_tree,
+    FTextArgument, FTextArgumentValue, FTextName, FTextNumberFormat, FTextTree, FTextTreeError,
+    decode_ftext_tree,
 };
 pub use types::{
     FQuat, FRepMovement, FRotator, FTransform, FVector, RotatorQuantization, VectorQuantization,

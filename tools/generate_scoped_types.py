@@ -5,8 +5,9 @@ or another field name. The evidence fixture is explicit; this tool does not
 infer types from widths or names. Run again after editing the fixture, and use
 --check to detect stale generated Rust.
 
-Every fixture type name maps to exactly one `FieldType` expression below. The
-geometry shapes (`VectorNetQuantize100`, `RotationShort`, `RepMovementByte`,
+Every fixture type name maps to exactly one `FieldType` expression below.
+`FTextTree` is the full-tree FText reader; like the geometry shapes it has an
+independent decoder in `validate_type_evidence.py`. The geometry shapes (`VectorNetQuantize100`, `RotationShort`, `RepMovementByte`,
 `RepMovementShort`) and `EnumRemainingBits` exist for upstream descriptors whose
 types are not primitives; each needs an independent decoder in
 `validate_type_evidence.py` before an entry may use it. A `RepMovement` entry's
@@ -50,6 +51,7 @@ TYPES = {
     "Double": ("FieldType::Double",),
     "VectorDouble": ("FieldType::VectorDouble",),
     "FString": ("FieldType::FString",),
+    "FTextTree": ("FieldType::FTextTree",),
     "ObjectNetGuid": ("FieldType::ObjectNetGuid",),
     "EnumRemainingBits": ("FieldType::EnumRemainingBits",),
     "RotationShort": ("FieldType::RotationShort",),

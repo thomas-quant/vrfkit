@@ -19,6 +19,7 @@ mod stats;
 use std::sync::OnceLock;
 
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
+use crate::ftext::FTextTreeError;
 use index::{OverlayIndex, handle_hash, handle_hash_from_group, name_hash, name_hash_from_group};
 
 pub use index::{GroupHashState, group_hash_state};
@@ -737,6 +738,26 @@ fn apply_overlay_inner(
                 // variant's doc). Bucketing it as `Residual` here undid the
                 // split for the one reader who sees the kind.
                 DecodeError::ByteArrayLengthCapExceeded { .. } => DecodeErrorKind::Rejected,
+                // The tree reader's own reasons, sorted the same way: a bit
+                // error by its own kind, a history or argument type it has
+                // never seen laid out (or a value JSON cannot hold) refused,
+                // and framing the payload breaks malformed.
+                DecodeError::FTextTree(tree) => match tree {
+                    FTextTreeError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
+                    FTextTreeError::TrailingBits { .. } => DecodeErrorKind::Residual,
+                    FTextTreeError::UnsupportedHistory { .. }
+                    | FTextTreeError::UnsupportedNameForm
+                    | FTextTreeError::UnsupportedArgumentTag { .. }
+                    | FTextTreeError::NegativeNameSuffix { .. }
+                    | FTextTreeError::NonFiniteNumber => DecodeErrorKind::Rejected,
+                    FTextTreeError::InvalidArgumentCount { .. }
+                    | FTextTreeError::InvalidEmptyForm
+                    | FTextTreeError::InvalidBool { .. }
+                    | FTextTreeError::StringTooLong { .. }
+                    | FTextTreeError::MissingStringTerminator
+                    | FTextTreeError::DepthLimit { .. }
+                    | FTextTreeError::NodeLimit { .. } => DecodeErrorKind::Malformed,
+                },
             };
             stats
                 .error_report

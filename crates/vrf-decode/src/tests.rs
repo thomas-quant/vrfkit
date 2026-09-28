@@ -8,6 +8,8 @@
 //! overlay.
 
 #[cfg(feature = "overlay")]
+mod blueprint_fields;
+#[cfg(feature = "overlay")]
 mod overlay;
 mod scalar;
 mod vector;

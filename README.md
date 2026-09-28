@@ -197,13 +197,13 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 12,684,760 |
+| `fields.parquet` | 1,296,660 | 12,691,368 |
 | `movement.parquet` | 1,844,147 | 19,984,802 |
 | `actors.parquet` | 3,827 | 68,243 |
 | `net_guids.parquet` | 16,167 | 114,423 |
 | `events.parquet` | 195 | 12,455 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,188,830 |
+| `checkpoint_fields.parquet` | 352,089 | 1,190,437 |
 | `checkpoint_actors.parquet` | 3,014 | 24,345 |
 | `checkpoint_net_guids.parquet` | 74,270 | 175,916 |
 | `checkpoint_blocks.parquet` | 22,247 | 112,649 |
@@ -764,13 +764,13 @@ partial-header and shot-array corrections and the component remaps read from the
 13.06 game:
 
 ```
-Decoded OK:   820,885      Decode errors:      0
-Raw/Skip:      24,747      Not in table: 142,114
-No field name:  1,249      Typed:          83.0%
+Decoded OK:   822,185      Decode errors:      0
+Raw/Skip:      24,747      Not in table: 140,814
+No field name:  1,249      Typed:          83.1%
 Effect blobs:  61,617
 ```
 
-The four buckets partition `Rows offered` exactly (820,885 + 24,747 + 142,114 +
+The four buckets partition `Rows offered` exactly (822,185 + 24,747 + 140,814 +
 1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. The figures this
 block held until 2026-08-30 partitioned the same 988,983 rows differently -- they
 were an older snapshot, taken before overlay entries that moved rows out of `Not
@@ -791,7 +791,7 @@ Physical value coverage is the fraction of `fields.parquet` rows with at
 least one non-null `value_*` column. It cannot be computed by adding overlay,
 effect-blob or struct counters: these count different units and may describe
 parent/child expansions of the same input. The current reference
-baseline has 938,082 typed rows out of 1,296,660 (72.35%), measured directly
+baseline has 939,382 typed rows out of 1,296,660 (72.45%), measured directly
 from its columns.
 Adding raw child windows changes this denominator even when every old typed
 value survives; compare raw preservation and newly typed values separately.

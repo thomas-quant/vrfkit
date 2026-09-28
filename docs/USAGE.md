@@ -246,11 +246,11 @@ member and handle by name.
 #### Reading the `Typed` ratio
 
 ```
-  Typed:            83.0% (properties + RPC parameters)
+  Typed:            83.1% (properties + RPC parameters)
 ```
 
 (That figure is `02d4d478`'s, from `tools/baselines/export_02d4d478.json`:
-`overlay_decoded_ok / overlay_rows_offered` = 820,885 / 988,995. It moves as
+`overlay_decoded_ok / overlay_rows_offered` = 822,185 / 988,995. It moves as
 overlay entries are added -- re-measure before quoting it.)
 
 The denominator is **every row offered** to the overlay, and thanks to RPC
@@ -269,13 +269,13 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 12,684,760 | |
+| `fields.parquet` | 1,296,660 | 12,691,368 | |
 | `movement.parquet` | 1,844,147 | 19,984,802 | |
 | `actors.parquet` | 3,827 | 68,243 | |
 | `net_guids.parquet` | 16,167 | 114,423 | |
 | `events.parquet` | 195 | 12,455 | |
 | `partials.parquet` | 0 | 2,505 | main-only; with checkpoints: 0 rows, 2,505 bytes |
-| `checkpoint_fields.parquet` | 352,089 | 1,188,830 | requires `--checkpoints` |
+| `checkpoint_fields.parquet` | 352,089 | 1,190,437 | requires `--checkpoints` |
 | `checkpoint_actors.parquet` | 3,014 | 24,345 | requires `--checkpoints` |
 | `checkpoint_net_guids.parquet` | 74,270 | 175,916 | requires `--checkpoints` |
 | `checkpoint_blocks.parquet` | 22,247 | 112,649 | requires `--checkpoints` |
@@ -756,7 +756,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `compare_rpc_params.py` | RPC parameters and records against the C# export, with its listed expected differences |
 | `compare_with_csharp.py` | Diff against the C# parser |
 | `check_effect_decoder.py` | Effect decoder (12 cases) |
-| `check_ascii.py` | Rust source ASCII sweep (159 files) |
+| `check_ascii.py` | Rust source ASCII sweep (160 files) |
 | `check_docs.py` | This document itself (below) |
 | `atomic_io.py` | Internal containment, recursive-removal and atomic-replacement helpers shared by mutating tools |
 
@@ -853,10 +853,11 @@ leftovers of an interrupted export are skipped and listed
 `tools/fixtures/scoped_type_evidence.json`. These types require the exact
 group, field name and compatible checksum. They never propagate to an
 unobserved class alias or globally by checksum, and they are not checksum
-donors. Besides the primitives, the fixture accepts `EnumRemainingBits`,
-`RotationShort`, `VectorNetQuantize100`, `RepMovementByte` and
-`RepMovementShort`, each with an independent decoder in
-`validate_type_evidence.py`. A `RepMovement` entry must also state its
+donors. Besides the primitives, the fixture accepts `VectorDouble`,
+`FTextTree`, `EnumRemainingBits`, `RotationShort`, `VectorNetQuantize100`,
+`RepMovementByte` and `RepMovementShort`, each with an independent decoder in
+`validate_type_evidence.py` (`test_generate_scoped_types.py` fails on a type
+name without one). A `RepMovement` entry must also state its
 location level, `location_quantization` (`RoundWholeNumber`, `RoundOneDecimal`
 or `RoundTwoDecimals`), measured by the spawn join in
 [DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level):
@@ -1023,10 +1024,13 @@ consumption. Its recursive search skips the leftovers of an interrupted export
 and refuses a table without `manifest.json` beside it. This checks structure and observed numeric ranges, not gameplay
 meaning. Use it before adding overlay types and when comparing their emitted
 values after export (`--compare-typed`). Besides the byte-aligned primitives (`UInt32`
-read unsigned) it reads seven bit-level types -- `EnumByte` (a 1..8-bit
-payload), `EnumRemainingBits`, `FName`, `RotationShort`, `VectorNetQuantize100`,
-`RepMovementByte` and `RepMovementShort` -- with its own LSB-first reader rather
-than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
+read unsigned, and `VectorDouble` as exactly 192 bits of three finite
+little-endian doubles, compared by parsing the exported `(x,y,z)` back into
+doubles) it reads eight bit-level types -- `EnumByte` (a 1..8-bit
+payload), `EnumRemainingBits`, `FName`, `FTextTree` (the full FText history
+tree, compared by parsing the exported JSON), `RotationShort`,
+`VectorNetQuantize100`, `RepMovementByte` and `RepMovementShort` -- with its own
+LSB-first reader rather than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
 `ReplicatedMovement` value is compared by parsing the exported JSON, so `1` and
 `1.0` are the same number there. Its `location` is compared at either scale the
 packed integers allow -- divided by 100 or in whole units -- and the report
@@ -1055,8 +1059,15 @@ original additions, checked in the 714-replay corpus. Run on a sample, the
 for that reason alone. `tools/fixtures/type_evidence_scoped.json` holds checksum-scoped
 specifications for the scoped types added on 2026-09-28, in their exported
 spelling (`_ClassNetCache` group and function-qualified name for RPC
-parameters). Every identity in it must be observed, so run it on a set of
-exports that contains each one. A specimen must not be promoted to gameplay semantics
+parameters), and the 99 Blueprint properties typed by exact identity from the
+same date on -- the Sova bolts' `TrailPosition`, the possession flags, Killjoy's
+`DeployedActor`, `CurrentCharge`, the round-loss-streak and match-timer fields
+of the Bomb and Swiftplay game states, the ceremonies, the kill-effect classes,
+the ability items, map interactables and finisher objects, and six pre-13.01
+paths -- 112 specifications in all. Every identity in it must be observed, so
+run it on a set of exports that contains each one (nine replays cover all 112
+on the 1,018-replay corpus: 69,796 rows, 0 failures, 0 mismatches on
+2026-09-28). A specimen must not be promoted to gameplay semantics
 just because this primitive check passes.
 
 `validate_ability_array_evidence.py <export-directory> [...] --compare-typed
@@ -1207,7 +1218,7 @@ field meaning; the analyzer deliberately performs no type inference.
 cargo +1.86.0 test --workspace --locked                              # 819 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
-python -W error tools/check_ascii.py --check                         # 159 files
+python -W error tools/check_ascii.py --check                         # 160 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
 python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1241 tests
 python -W error tools/check_docs.py --fast
