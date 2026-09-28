@@ -638,13 +638,13 @@ fn ping_latency_is_typed() {
 #[test]
 fn equippable_used_is_an_object_net_guid() {
     // The C# descriptor attaches a custom decoder
-    // (DamageParameters.cs:51 -> ValorantPayloadDecoders.Equippable), which
-    // extract_descriptors.py cannot see through, so it lands in table.rs as
-    // Raw. That decoder is exactly archive.ReadIntPacked(), i.e. our
-    // ObjectNetGuid. Leaving it Raw forces consumers to guess the encoding;
-    // the adapter guessed a fixed 16-bit LE integer and produced values that
-    // were never valid NetGUIDs. tools/apply_type_corrections.py restores
-    // the real type.
+    // (DamageParameters.cs:51 -> ValorantPayloadDecoders.Equippable) that is
+    // exactly archive.ReadIntPacked(), i.e. our ObjectNetGuid.
+    // tools/extract_descriptors.py types it from the decoder's name
+    // (PAYLOAD_DECODER_TYPES); tools/apply_type_corrections.py only verifies
+    // it. Leaving it Raw forces consumers to guess the encoding; the adapter
+    // guessed a fixed 16-bit LE integer and produced values that were never
+    // valid NetGUIDs.
     let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in [
         "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
@@ -898,11 +898,12 @@ fn only_the_seeker_nade_keeps_short_rotator_components() {
 
 #[test]
 fn damage_geometry_fields_are_quantized_vectors() {
-    // Same trap as EquippableUsed: DamageParameters attaches
-    // ValorantPayloadDecoders.VectorNetQuantize* to these four, so
-    // extract_descriptors.py cannot see the type and they land as Raw --
-    // even though vrf-decode already implements the exact quantization.
-    // Scales are the C# call sites: VectorNetQuantize = 1,
+    // Typed like EquippableUsed, from the decoder's name: DamageParameters.cs:50
+    // (DamageOrigin) and MulticastNotifyDamagePointParameters.cs:40-46 attach
+    // ValorantPayloadDecoders.VectorNetQuantize*, and
+    // tools/extract_descriptors.py (PAYLOAD_DECODER_TYPES) maps each to the
+    // exact quantization vrf-decode implements; tools/apply_type_corrections.py
+    // only verifies them. Scales are the C# call sites: VectorNetQuantize = 1,
     // VectorNetQuantize100 = 100, VectorNetQuantizeNormal = unit vector.
     const BASE: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base";
     const POINT: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point";
