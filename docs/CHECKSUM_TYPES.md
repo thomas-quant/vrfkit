@@ -149,9 +149,10 @@ members that is
   with names one character apart.
 
 A spelling of a different length cannot agree systematically at all: its shift
-depends on the name's own CRC. Object references never establish a parent --
-thousands of candidate spellings each would make an agreement a lottery -- but
-are tested at the parents others establish. The residual blind spot is two
+depends on the name's own CRC. An object reference offers only its `UClass*`
+spelling towards a parent: its thousands of `A<Class>*` / `U<Class>*`
+candidates would make an agreement a lottery, so they are tested at the parents
+others establish and never set one. The residual blind spot is two
 truths outside the tool's spelling universe that deviate identically from
 their hypotheses at aligned offsets.
 

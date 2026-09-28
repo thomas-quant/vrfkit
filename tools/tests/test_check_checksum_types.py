@@ -249,7 +249,14 @@ class ParseTests(unittest.TestCase):
         self.assertGreater(len(resolver.entries), 1000)
         self.assertGreater(len(resolver.checksums), 400)
         self.assertIn("Owner", resolver.engine_refs)
-        self.assertEqual(len(resolver.aliases), 2)
+        # every alias read out of overlay.rs must lead somewhere the table can
+        # type, or the Python resolver would be porting a different order
+        self.assertTrue(resolver.aliases)
+        tabled_groups = {group for group, _ in resolver.entries}
+        for source, target in resolver.aliases.items():
+            with self.subTest(alias=source):
+                self.assertTrue(source.startswith("/") and "." in source)
+                self.assertIn(target, tabled_groups)
 
     def test_an_entry_the_pattern_misses_is_refused(self):
         src = ('pub static OVERLAY_TABLE: [OverlayEntry; 2] = [\n'

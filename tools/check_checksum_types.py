@@ -73,9 +73,10 @@ Each typed identity lands in exactly one of three buckets:
   * members of a flattened struct or array whose parent chain is not in
     `PARENT_CHAINS` and whose siblings do not give it back (fewer than two
     testable members, or only an ambiguous agreement): the parent seed is
-    unknown, so no spelling reproduces. Object references never establish a
-    parent themselves -- thousands of candidate spellings each would turn
-    the agreement into a lottery -- but are tested at parents others do.
+    unknown, so no spelling reproduces. An object reference offers only its
+    `UClass*` spelling towards a parent; its `A<Class>*` / `U<Class>*`
+    candidates, thousands of them, would turn the agreement into a lottery,
+    so they are tested at the parents others establish and never set one.
   * a bare FName index (`"108"`) not in `HARDCODED_FNAMES`, a non-ASCII name,
     or a declared checksum of 0.
 
