@@ -48,7 +48,7 @@ pub(super) fn apply_scoped(
     raw: &[u8],
     bits: u32,
 ) -> OverlayResult {
-    let applied = crate::apply_overlay_with_checksum(
+    let Some(applied) = crate::apply_overlay_with_checksum(
         &TABLE,
         group,
         group_hash_state(group),
@@ -58,8 +58,11 @@ pub(super) fn apply_scoped(
         Some(raw),
         bits,
         stats,
-    );
-    applied.unwrap_or_else(|| panic!("{group} {field}: the overlay declined it"))
+    ) else {
+        // In the body, not a closure, so #[track_caller] names the test's line.
+        panic!("{group} {field}: the overlay declined it");
+    };
+    applied
 }
 
 const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
