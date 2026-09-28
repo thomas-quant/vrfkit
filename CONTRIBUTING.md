@@ -42,6 +42,8 @@ Run the full sweep. Every one of these must be green:
 cargo +1.86.0 fmt --check
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 test --workspace --locked
+cargo +1.86.0 test -p vrfkit --no-default-features --locked
+cargo +1.86.0 test -p vrf-container --no-default-features --locked
 cargo +1.86.0 check --workspace --all-targets --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo +1.86.0 doc --workspace --all-features --no-deps --locked
 cargo +1.86.0 fmt --manifest-path tools/extract_component_classes/Cargo.toml --check
@@ -60,7 +62,7 @@ python -W error tools/apply_type_corrections.py
 cargo +1.86.0 fmt -p vrf-decode
 git diff --exit-code -- crates/vrf-decode/src/table.rs   # regenerated table == committed table
 python -W error tools/check_baseline_schemas.py
-python tools/check_docs.py            # not --fast: that skips the count check
+python -W error tools/check_docs.py   # not --fast: runs both suites again to check the counts
 python -W error -m unittest discover -s tools/tests -p "test_*.py"
 ```
 
@@ -103,27 +105,42 @@ cargo +1.86.0 check -p vrf-schema --no-default-features --locked
 cargo +1.86.0 check -p vrf-schema --no-default-features --features checkpoint --locked
 ```
 
-`check_docs.py` without `--fast` runs the suites and compares the documented
-counts with the measured results. The Windows MSRV job runs this full check,
-including Python with warnings treated as errors. Failed processes, missing
-or zero test counts, and skipped Python tests fail the measurement.
-
-The Python checks also run on Windows and Ubuntu with Python 3.12 and 3.13;
-those jobs use `check_docs.py --fast` for source/document consistency. A
-separate Windows Rust stable job runs all-feature workspace tests and
-core-only CLI tests. The pinned MSRV feature matrix above remains required.
-
-CI validates the workflow with checksum-pinned actionlint, pins Actions to
-commit IDs, grants read-only repository permissions, cancels superseded runs,
-and limits job durations. The final `CI complete` job succeeds only when every
-required job succeeds, including Windows release packaging; failures,
-cancellations and skipped jobs cannot pass it.
-
 If your change affects exported output, also run the regression guards in
 [`docs/USAGE.md`](docs/USAGE.md) §6 (`check_export_baseline.py`,
 `check_decode_errors_corpus.py`, `validate_corpus.py`) against a replay, and
 update baselines with `--update` only after explaining each changed line. Those
 need a corpus — see [Environment](#environment) below.
+
+### What CI runs
+
+- **`rust`** (Windows, Rust 1.86): fmt, clippy, the all-features check, the
+  feature matrix, the standalone component tool, strict rustdoc, the core-only
+  `vrfkit` and `vrf-container` tests, the interop test, the table
+  regeneration, and `check_docs.py` in full -- both suites with Python
+  warnings as errors; a failed process, a missing or zero count, or a skipped
+  Python test fails it. It then runs `check_corpus_baseline.py`,
+  `verify_build_corpus.py` (validation, checkpoint export, reconciled
+  counters, independent raw/typed comparisons, positive checkpoint decoding
+  per build) and `validate_type_evidence.py --compare-typed` on the 12.10,
+  12.11 and 13.00 fixtures. Those are byte-identical to the upstream parser's
+  public test replays and are fetched from a pinned commit, SHA-256 checked.
+  Every identity in `tools/fixtures/public_fixture_type_evidence.json` must
+  be observed and every independently decoded value must match; the fixtures
+  cover only the fields they contain. The report and logs are kept 14 days as
+  an artifact, failures included; replays and Parquet are not uploaded.
+- **`python-checks`** (Python 3.12 and 3.13, Windows and Ubuntu): the ASCII,
+  generator and baseline-schema checks, the tools suite, the effect decoder
+  and `check_docs.py --fast`.
+- **`rust-stable`** (Windows): all-feature workspace tests and core-only CLI
+  tests.
+- **`workflow-lint`**: checksum-pinned actionlint. Actions are pinned to
+  commit IDs, permissions are read-only, superseded runs are cancelled and
+  every job has a time limit.
+- **`windows-package`**: see [Tagged Windows releases](#tagged-windows-releases).
+
+`CI complete` succeeds only when every job above succeeds; a failure,
+cancellation or skip cannot pass it. The 13.02, 13.04, 13.05 and 13.06
+baselines have no public fixture and are still yours to run.
 
 ### Replay evidence for parser changes
 
@@ -190,23 +207,15 @@ them are needed for the sweep above; all of them are needed for §6.
 | `VRFKIT_JOBS` | Worker count for the corpus sweeps; default is cores - 2, capped at 16 | `validate_corpus.py` |
 | `VRFKIT_REQUIRE_CORPUS` | Set to anything to turn "corpus absent, skipping" into a failure | `crates/vrf-container/tests/corpus.rs`, `check_export_baseline.py`, `check_corpus_baseline.py` |
 
-`VRFKIT_CSHARP_DIR` is gone. `analyze_coverage.py` and
-`extract_equippables.py` read the C# descriptors vendored under
-[`third_party/vrp/`](third_party/vrp/README.md) by default; nobody had set the
-variable, so both ran without their input (`extract_equippables.py` stopped at
-"resolver not found"). Pass `--csharp-dir` / `--csharp-root` to use another
-checkout.
-
-The `compare_*.py` scripts were listed against `VRFKIT_CSHARP_DIR` here, which
-none of them read. Two of them (`compare_combat_report.py`,
-`compare_rpc_params.py`) then read `VRFKIT_VALPLAY_DIR` for a C# bundle under
-valplay's `pipeline/exports` that no longer exists; they now take `--reference`
-and `--ours` and default to a machine-local C# export, produced as described in
-[docs/USAGE.md](docs/USAGE.md#regression-guards----after-non-trivial-changes).
-The third, `compare_with_csharp.py`, reads **no environment variable at all**
--- it takes the C# bundle directory and the vrfkit output directory as its two
-positional arguments. Nothing checks this table, so verify a row by grepping
-for the variable rather than by reading the name:
+`analyze_coverage.py` and `extract_equippables.py` read the C# descriptors
+vendored under [`third_party/vrp/`](third_party/vrp/README.md) (`--csharp-dir`
+/ `--csharp-root` for another checkout). `compare_combat_report.py` and
+`compare_rpc_params.py` take `--reference` and `--ours`, defaulting to a
+machine-local C# export produced as described in
+[docs/USAGE.md](docs/USAGE.md#regression-guards----after-non-trivial-changes);
+`compare_with_csharp.py` takes both directories as positional arguments. None
+of the three reads an environment variable. Nothing checks this table, so
+verify a row by grepping for the variable rather than by reading the name:
 
 ```bash
 grep -rn "VRFKIT_" tools/*.py | grep environ
@@ -218,27 +227,9 @@ a field. A green `cargo test` with the corpus present therefore says nothing
 about decoding. The sweeps that do are `validate_corpus.py` (RepLayout framing
 on every content block), `check_decode_errors_corpus.py` (the overlay), and
 `verify_build_corpus.py` (the common main/checkpoint audit). These are separate
-from `cargo test`. CI runs the common audit on three public replays; the full
-private corpus audit remains a local check.
-
-The pinned baseline guard also runs in CI: `check_corpus_baseline.py`, on the
-12.10, 12.11 and 13.00 fixtures only. Those three are byte-identical to the
-upstream parser's public test replays, so the Windows job fetches them from a
-pinned commit and checks their SHA-256 first. The 13.02, 13.04, 13.05 and 13.06
-baselines have no public fixture and are still yours to run.
-
-The same job runs `verify_build_corpus.py` on all three fixtures, requiring
-validation, checkpoint-enabled exports, reconciled counters, independent
-raw/typed value comparisons, and positive checkpoint decoding per build.
-It then runs `validate_type_evidence.py --compare-typed` against
-`tools/fixtures/public_fixture_type_evidence.json` across the combined exports:
-every listed field identity must be observed and every independently decoded
-value must match. These public fixtures cover only the fields they contain;
-they do not replace the full available corpus audit.
-
-The public-fixture report, per-replay results and diagnostic logs are retained
-as a GitHub Actions artifact for 14 days, including on failure. Replay files
-and Parquet exports are not uploaded by the workflow.
+from `cargo test`. CI runs the common audit and the corpus baselines on the
+three public fixtures only ([What CI runs](#what-ci-runs)); the full private
+corpus audit remains a local check.
 
 ```bash
 export VRFKIT_CORPUS_DIR=/path/to/replays
@@ -280,9 +271,10 @@ These corrupt downstream consumers silently — no test fails when they break.
 | `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` against pinned original executable readers |
 | `tools/equippable_table.py` | `tools/extract_equippables.py` from the vendored `third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs` |
 
-Ordering for the overlay table is load-bearing:
-`extract_descriptors.py` → `apply_type_corrections.py` → `cargo fmt` →
-`extract_checksum_types.py` (against a **fresh** export).
+Run order: `extract_descriptors.py` → `apply_type_corrections.py` →
+`cargo fmt` → `extract_checksum_types.py` (against a **fresh** export). The
+corrections rewrite the one-line and the rustfmt layout alike, so the first
+three commute; the checksum step's place is the load-bearing one (below).
 
 The C# descriptor input is vendored under
 [`third_party/vrp/`](third_party/vrp/README.md),
@@ -313,7 +305,7 @@ after rebuilding, then regenerate.
 - **ADDITIONS** — the C# descriptor is silent. These rest on unusually complete
   wire evidence (e.g. `Money` = 800 at pistol-round start across all actors). Do
   not widen the ADDITIONS list "by eye" — that undoes the reason it is allowed.
-  Read the rationale block at the top of the script first.
+  Read the bar stated above `ADDITIONS` in the script first.
 
 ## Commit style
 

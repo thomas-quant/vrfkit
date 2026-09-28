@@ -254,11 +254,9 @@ against a public replay, and publishes the verified ZIP without rebuilding it.
 The same packaging checks run on PRs. See [release maintenance](CONTRIBUTING.md#tagged-windows-releases)
 for tag naming and validation before publishing.
 
-CI measures these test counts, runs Python checks on Windows and Ubuntu
-with Python 3.12/3.13, and tests Rust stable with all features and core-only CLI
-support. Three pinned public replays pass through the common checkpoint audit
-on every run. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full CI gates and
-the separate private-corpus checks.
+What CI runs, three pinned public replays included, is in
+[CONTRIBUTING.md](CONTRIBUTING.md#what-ci-runs); the private-corpus checks stay
+local.
 
 Re-measure per-crate counts with `cargo test -p <crate>`. Counts are omitted
 from the table below on purpose -- they go stale, and re-measuring is one line.
@@ -276,46 +274,13 @@ from the table below on purpose -- they go stale, and re-measuring is one line.
 | Parquet export | `vrf-export` | `parquet` + per-table |
 | Unified CLI | `vrfkit` | `export` (default) |
 
-Take only the layer you need:
-
-```
-cargo tree -p vrfkit --no-default-features | grep -E "arrow|parquet|zstd"
-# (no output)
-```
-
 ZSTD is deliberately *not* feature-gated out -- every writer picks it, so
 disabling it would produce files this crate could not explain.
 
-CI also compiles every advertised core-only and singleton feature from
-`--no-default-features`, checks all workspace targets/all features, builds the
-standalone probe tool, and runs strict rustdoc. The executable matrix is in
-[`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-open-a-pr) as 27 `cargo check`
-lines; `.github/workflows/ci.yml` expresses **the same 27 cases** as a PowerShell
-array of `@("crate","feature")` pairs. Same set, same order, two notations -- so
-they are not copies of one another. `tools/check_docs.py` (including `--fast`,
-which CI runs) fails when the two lists differ in membership or order, and when
-either count quoted here is stale. This paragraph used to say nothing checked
-that they agree; by the time anyone looked, three cases were in a different
-order and the count quoted here was two short. If you add a case, add it in
-both. To see the two lists side by side:
-
-```bash
-python - <<'EOF'
-import re
-sh = re.findall(r'cargo \+1\.86\.0 check -p (\S+) --no-default-features'
-                r'(?: --features (\S+))? --locked',
-                open('CONTRIBUTING.md', encoding='utf-8').read())
-block = re.search(r'\$matrix = @\((.*?)\n\s*\)',
-                  open('.github/workflows/ci.yml', encoding='utf-8').read(), re.S).group(1)
-ci = re.findall(r'@\("([^"]+)",\s*"([^"]*)"\)', block)
-sh = [(c, f or '') for c, f in sh]
-print(len(sh), 'in CONTRIBUTING,', len(ci), 'in ci.yml; identical:', sh == ci)
-print('only in CONTRIBUTING:', sorted(set(sh) - set(ci)))
-print('only in ci.yml:', sorted(set(ci) - set(sh)))
-EOF
-```
-
-(Measured 2026-09-13 after reordering ci.yml: identical, including order.)
+CI checks every core-only and singleton feature of the table. The cases are
+listed in [`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-open-a-pr) and in
+`ci.yml`'s `$matrix`, and `tools/check_docs.py` (also with `--fast`) fails if
+the two differ in membership or order: add a case to both.
 
 ## Performance
 
