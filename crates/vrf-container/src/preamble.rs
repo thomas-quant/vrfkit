@@ -1,40 +1,28 @@
-//! The replay info section plus the mandatory first (Header) chunk.
-//!
-//! These two are parsed together because neither is useful alone: the info
-//! section says whether payloads are compressed, and the header says which
-//! build recorded the replay and which DemoFrame sections are present. A
-//! caller needs both before it can read a single packet.
+//! The replay info plus the mandatory first (Header) chunk, parsed together
+//! because a caller needs both before it can read one packet: the info says
+//! whether payloads are compressed, the header which build recorded the replay
+//! and which DemoFrame sections are present.
 
 use crate::chunk::{ChunkIterator, ChunkType};
 use crate::error::ContainerError;
 use crate::header::{self, ReplayHeader};
 use crate::info::{self, ReplayInfo};
 
-/// Result of parsing the preamble: info, header, and the byte offset where the
-/// remaining chunks start.
+/// The parsed info and header, and where the chunk stream resumes.
 #[derive(Debug)]
 pub struct Preamble {
     pub info: ReplayInfo,
     pub header: ReplayHeader,
-    /// Byte offset where the remaining chunks start (after the header chunk).
+    /// Byte offset of the first chunk after the Header chunk.
     pub remaining_offset: usize,
 }
 
-/// Parse the replay info and first (Header) chunk, returning the structured
-/// preamble and the byte offset where subsequent chunks begin.
-///
-/// This is the primary entry point for reading a `.vrf` file.
-///
-/// # Errors
-///
-/// Returns [`ContainerError`] if magic numbers don't match, required fields are
-/// missing, or the data is truncated.
+/// Parse the replay info and the Header chunk: the entry point for reading a
+/// `.vrf` file.
 pub fn parse_preamble(data: &[u8]) -> Result<Preamble, ContainerError> {
     let (replay_info, info_end) = info::parse_replay_info(data)?;
 
-    // Header must be the first chunk. Even an unknown discriminant owns a
-    // declared payload, and skipping it here would make bytes before Header
-    // disappear despite the public container-order contract.
+    // Header must be first; see `ContainerError::ChunkBeforeHeader`.
     let mut iter = ChunkIterator::new(data, info_end);
     let chunk = iter
         .next_chunk()?

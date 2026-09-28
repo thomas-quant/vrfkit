@@ -1,8 +1,5 @@
-//! Error types for the `.vrf` container parser.
-//!
-//! Every failure mode is explicitly typed -- no panics, no silent zeros. A
-//! truncated or malformed file produces a descriptive error that names the
-//! field and the byte counts involved.
+//! Error types for the `.vrf` container parser: every failure is a typed variant
+//! naming the field and the byte counts involved -- no panics, no silent zeros.
 
 use thiserror::Error;
 use vrf_bitio::BitError;
@@ -11,12 +8,9 @@ use crate::chunk::ChunkType;
 
 /// All errors the container parser can produce.
 ///
-/// Keep the existing exhaustive shape and variants for downstream callers,
-/// including variants the current parser does not construct. Adding
-/// `#[non_exhaustive]` would itself break their existing exhaustive matches.
-///
-/// Designed for match-based handling: callers can distinguish "wrong magic" from
-/// "truncated" from "Oodle failure" without string inspection.
+/// Exhaustive on purpose, and kept whole even where no path constructs a
+/// variant (`UnregisteredCustomVersion`; `OodleUnsupported` when `oodle` is on):
+/// removing one or adding `#[non_exhaustive]` breaks downstream exhaustive matches.
 #[derive(Debug, Error)]
 pub enum ContainerError {
     /// The 4-byte file magic at offset 0 did not match `0x43F4EFDD`.
@@ -47,8 +41,7 @@ pub enum ContainerError {
     #[error("unsupported LocalFileReplay version: expected 7, got {actual}")]
     UnsupportedLocalReplayVersion { actual: i32 },
 
-    /// Never constructed: the info parser ignores custom-version GUIDs it does
-    /// not pin, as Unreal readers do.
+    /// Never constructed: the info parser ignores custom-version GUIDs it does not pin.
     #[error("unregistered custom version GUID: {guid:08X?}")]
     UnregisteredCustomVersion { guid: [u32; 4] },
 
@@ -119,11 +112,8 @@ pub enum ContainerError {
     OodleDecompression(String),
 
     /// A compressed archive was met in a build with the `oodle` feature off.
-    ///
-    /// This variant is part of the public error shape in every feature build;
-    /// it is only constructed when the `oodle` feature is disabled. Reported
-    /// rather than returning an empty buffer: a zero-length "success" is
-    /// indistinguishable downstream from a genuinely empty chunk.
+    /// Reported rather than returning an empty buffer: a zero-length "success"
+    /// is indistinguishable downstream from a genuinely empty chunk.
     #[error(
         "compressed chunk needs {needed} bytes of Oodle output, but this build \
          has the `oodle` feature disabled"

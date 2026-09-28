@@ -10,8 +10,6 @@ pub(crate) fn le_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
-/// A read of `needed` bytes for `context` that ran out, with the bytes still
-/// left to the reader.
 fn truncated(reader: &BitReader<'_>, context: &'static str, needed: usize) -> ContainerError {
     ContainerError::Truncated {
         context,
@@ -92,9 +90,8 @@ pub(crate) fn declared_body<'a>(
     Ok((&payload[header_end..header_end + size], available - size))
 }
 
-/// `max_bytes` is a parameter rather than [`crate::limits::MAX_FSTRING_BYTES`]
-/// because `info` reads one string under a much tighter bound
-/// (`MAX_FRIENDLY_NAME_BYTES`); the other three pass the general limit.
+/// `max_bytes` is a parameter because `info` reads FriendlyName under the tighter
+/// `MAX_FRIENDLY_NAME_BYTES`; every other caller passes `MAX_FSTRING_BYTES`.
 pub(crate) fn read_fstring(
     reader: &mut BitReader<'_>,
     context: &'static str,
