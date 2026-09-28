@@ -146,8 +146,9 @@ def extract(m: dict) -> dict:
 def invariants(v: dict) -> list[str]:
     """Checks that need no baseline. Each returns a message when it FAILS.
 
-    R1-R3 state the 13.02 break three ways; before bcc7d70 the 13.02 fixture
-    violated R1 and R2 (objective 0 vs rpc 21). R3 does not fire on it.
+    R1 and R2 catch the 13.02 break: before bcc7d70 the 13.02 fixture violated
+    both (objective 0 vs rpc 21). R3, a round with no recorded winner, does
+    not fire on it.
     """
     bad = []
     if v["rounds_objective"] <= 0:

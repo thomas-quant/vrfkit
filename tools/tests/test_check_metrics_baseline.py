@@ -180,7 +180,10 @@ class WiringTests(unittest.TestCase):
 
 #: A raw `compute_metrics.py` output shaped like the valplay JSON `extract()`
 #: reads (nested dicts, `per_player` maps), pinning the mapping into the
-#: flattened keys `HEALTHY` starts from.
+#: flattened keys `HEALTHY` starts from. `extract()` indexes every nested path
+#: with `[...]`, so a renamed valplay section or key raises KeyError -- except
+#: the per-player counters `_sum` reads with `.get(field) or 0`, where a
+#: renamed one reads as 0.
 RAW_METRICS = {
     "combat": {
         "per_player": {

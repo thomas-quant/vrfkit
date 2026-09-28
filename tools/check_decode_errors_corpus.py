@@ -229,7 +229,7 @@ MUST_MOVE = (
 #: (`parse_movement_with_bit_count`, vrf-movement's rpc.rs): `vrfkit validate`,
 #: instrumented to count windows, found none in 156,407,150 sections of 80
 #: replays covering 11.06-13.06 (2026-09-28). `Movement rows` moves in open
-#: windows only, so it backs the open-tail gate alone.
+#: windows only, so it vouches for the open-tail gate and not for this one.
 UNBACKED = (
     ("truncated_rpcs", "summary.rs prints no count of RPC parameter walks"),
     ("cnc_bruteforce_unwalked",
