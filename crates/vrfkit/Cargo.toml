@@ -13,8 +13,9 @@ path = "src/main.rs"
 
 [features]
 # `export` is the only genuinely optional part of this crate. Without it the
-# binary keeps `inspect` and `validate` -- both of which drive the full decode
-# pipeline -- and arrow, parquet and zstd leave the dependency graph entirely.
+# binary keeps `inspect`, `validate` and `diag` -- the last two drive the full
+# decode pipeline -- and arrow, parquet and zstd leave the dependency graph
+# entirely.
 #
 # The other eight vrf-* crates are NOT optional and there is no flag for them:
 # `validate` runs the container, frame, transform, net, schema, bitio, decode

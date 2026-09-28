@@ -79,7 +79,8 @@ pub fn run(path: &str, redact_identifiers: bool) -> Result<(), CliError> {
             ChunkType::Checkpoint => checkpoint_count += 1,
             ChunkType::Event => event_count += 1,
             ChunkType::Unknown(_) => unknown_count += 1,
-            ChunkType::Header => {} // already consumed
+            // `parse_preamble` consumed the first Header; a second is not counted.
+            ChunkType::Header => {}
         }
     }
 

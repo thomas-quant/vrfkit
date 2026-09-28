@@ -50,8 +50,8 @@ pub(crate) struct CheckpointStats {
     pub resolved_path_indices: u64,
     pub group_records: u64,
     pub exported_fields: u64,
-    /// DemoFrames walked, as `iter_demo_frames` actually counted them -- not
-    /// assumed to be one per chunk.
+    /// DemoFrames walked, as `walk_demo_frames` counted them -- not assumed to
+    /// be one per chunk.
     pub frames: u64,
     /// ExternalData and GameSpecificFrameData bytes the snapshot frames
     /// stepped over; the main pass's `frame_skips` has the same meaning.
@@ -387,7 +387,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.resolved_path_indices += u64::from(tables.resolved_path_indices);
     stats.group_records += u64::from(tables.group_count);
     stats.exported_fields += u64::from(tables.exported_fields);
-    // The actual DemoFrame count `iter_demo_frames` walked, not an assumed
+    // The actual DemoFrame count `walk_demo_frames` walked, not an assumed
     // one-per-chunk. `tools/check_export_baseline.py`'s `cp_frames`/`cp_chunks`
     // pin used to be a tautology -- always equal, because this line always
     // added exactly 1 -- which could not have caught a build whose checkpoint
