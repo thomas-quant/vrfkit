@@ -59,7 +59,7 @@ impl Container {
         if want == 0 {
             return Ok(Vec::new());
         }
-        let block_size = u64::from(self.toc.header.compression_block_size);
+        let block_size = u64::from(self.toc.block_size);
         let first = chunk.offset / block_size;
         let last = (chunk.offset + want - 1) / block_size;
         let mut out = Vec::with_capacity(((last - first + 1) * block_size) as usize);
@@ -167,7 +167,6 @@ mod tests {
             chunks: vec![(
                 ChunkId {
                     id: 1,
-                    index: 0,
                     chunk_type: 1,
                 },
                 OffsetLength {
@@ -238,7 +237,6 @@ mod tests {
             chunks: vec![(
                 ChunkId {
                     id: 1,
-                    index: 0,
                     chunk_type: 1,
                 },
                 OffsetLength {

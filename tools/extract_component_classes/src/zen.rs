@@ -20,15 +20,13 @@ use crate::reader::{Cursor, Result, fail};
 pub const SUMMARY_SIZE: usize = 52;
 pub const EXPORT_ENTRY_SIZE: usize = 72;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExportEntry {
     pub object_name: MappedName,
     pub outer_index: u64,
     pub class_index: u64,
     pub super_index: u64,
-    pub template_index: u64,
     pub public_export_hash: u64,
-    pub object_flags: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -146,9 +144,9 @@ pub fn parse_package_header(bytes: &[u8]) -> Result<PackageHeader> {
         let outer_index = ec.u64()?;
         let class_index = ec.u64()?;
         let super_index = ec.u64()?;
-        let template_index = ec.u64()?;
+        let _template_index = ec.u64()?;
         let public_export_hash = ec.u64()?;
-        let object_flags = ec.u32()?;
+        let _object_flags = ec.u32()?;
         let _filter_flags = ec.u8()?;
         ec.skip(3)?;
         object_name.base(&names)?;
@@ -157,9 +155,7 @@ pub fn parse_package_header(bytes: &[u8]) -> Result<PackageHeader> {
             outer_index,
             class_index,
             super_index,
-            template_index,
             public_export_hash,
-            object_flags,
         });
     }
 

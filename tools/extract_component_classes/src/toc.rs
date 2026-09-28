@@ -32,31 +32,13 @@ pub const FLAG_INDEXED: u8 = 8;
 pub const CHUNK_EXPORT_BUNDLE_DATA: u8 = 1;
 pub const CHUNK_SCRIPT_OBJECTS: u8 = 5;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TocHeader {
-    pub version: u8,
-    pub entry_count: u32,
-    pub compressed_block_count: u32,
-    pub compression_method_count: u32,
-    pub compression_method_length: u32,
-    pub compression_block_size: u32,
-    pub directory_index_size: u32,
-    pub partition_count: u32,
-    pub container_id: u64,
-    pub container_flags: u8,
-    pub perfect_hash_seed_count: u32,
-    pub partition_size: u64,
-    pub chunks_without_perfect_hash: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct ChunkId {
     pub id: u64,
-    pub index: u16,
     pub chunk_type: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct OffsetLength {
     pub offset: u64,
     pub length: u64,
@@ -74,7 +56,9 @@ pub struct CompressedBlock {
 
 #[derive(Debug, Clone)]
 pub struct Toc {
-    pub header: TocHeader,
+    pub container_id: u64,
+    /// Bytes of the uncompressed stream per compression block.
+    pub block_size: u32,
     pub chunk_ids: Vec<ChunkId>,
     pub chunks: Vec<OffsetLength>,
     pub blocks: Vec<CompressedBlock>,
@@ -125,7 +109,7 @@ pub fn parse_toc(bytes: &[u8]) -> Result<Toc> {
     let container_flags = c.u8()?;
     c.skip(3)?;
     let perfect_hash_seed_count = c.u32()?;
-    let partition_size = c.u64()?;
+    let _partition_size = c.u64()?;
     let chunks_without_perfect_hash = c.u32()?;
     c.skip(4 + 5 * 8)?;
     if header_size != TOC_HEADER_SIZE || c.pos() != TOC_HEADER_SIZE as usize {
@@ -153,34 +137,14 @@ pub fn parse_toc(bytes: &[u8]) -> Result<Toc> {
         return fail("utoc: compression block size 0");
     }
 
-    let header = TocHeader {
-        version,
-        entry_count,
-        compressed_block_count,
-        compression_method_count,
-        compression_method_length,
-        compression_block_size,
-        directory_index_size,
-        partition_count,
-        container_id,
-        container_flags,
-        perfect_hash_seed_count,
-        partition_size,
-        chunks_without_perfect_hash,
-    };
-
     let n = entry_count as usize;
     let mut chunk_ids = Vec::with_capacity(n.min(c.remaining() / 12));
     for _ in 0..n {
         let id = c.u64()?;
-        let index = c.be_uint(2)? as u16;
+        let _index = c.be_uint(2)?;
         c.skip(1)?;
         let chunk_type = c.u8()?;
-        chunk_ids.push(ChunkId {
-            id,
-            index,
-            chunk_type,
-        });
+        chunk_ids.push(ChunkId { id, chunk_type });
     }
     let mut chunks = Vec::with_capacity(n.min(c.remaining() / 10));
     for _ in 0..n {
@@ -242,7 +206,8 @@ pub fn parse_toc(bytes: &[u8]) -> Result<Toc> {
     }
 
     let toc = Toc {
-        header,
+        container_id,
+        block_size: compression_block_size,
         chunk_ids,
         chunks,
         blocks,
@@ -328,8 +293,7 @@ pub(crate) mod tests {
         assert_eq!(out.len(), TOC_HEADER_SIZE as usize);
         for (id, _) in &spec.chunks {
             out.extend_from_slice(&id.id.to_le_bytes());
-            out.extend_from_slice(&id.index.to_be_bytes());
-            out.push(0);
+            out.extend_from_slice(&[0, 0, 0]); // chunk index, padding
             out.push(id.chunk_type);
         }
         for (_, ol) in &spec.chunks {
@@ -367,7 +331,6 @@ pub(crate) mod tests {
                 (
                     ChunkId {
                         id: 0xDEAD_BEEF,
-                        index: 0,
                         chunk_type: CHUNK_EXPORT_BUNDLE_DATA,
                     },
                     OffsetLength {
@@ -378,7 +341,6 @@ pub(crate) mod tests {
                 (
                     ChunkId {
                         id: 7,
-                        index: 0x0102,
                         chunk_type: 6,
                     },
                     OffsetLength {
@@ -410,9 +372,9 @@ pub(crate) mod tests {
     fn a_synthetic_toc_parses_field_for_field() {
         let spec = two_chunk_spec();
         let toc = parse_toc(&build_toc(&spec)).unwrap();
-        assert_eq!(toc.header.container_id, 0x1122_3344_5566_7788);
+        assert_eq!(toc.container_id, 0x1122_3344_5566_7788);
         assert_eq!(toc.chunk_ids.len(), 2);
-        assert_eq!(toc.chunk_ids[1].index, 0x0102);
+        assert_eq!((toc.chunk_ids[1].id, toc.chunk_ids[1].chunk_type), (7, 6));
         assert_eq!(toc.chunk_ids[0].chunk_type, CHUNK_EXPORT_BUNDLE_DATA);
         assert_eq!(toc.chunks[1].offset, 0x40000);
         assert_eq!(toc.blocks, spec.blocks);

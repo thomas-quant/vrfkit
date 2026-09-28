@@ -9,7 +9,7 @@ use crate::reader::{Cursor, Result, fail};
 
 const NONE: u32 = u32::MAX;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 struct DirEntry {
     name: u32,
     first_child: u32,
@@ -17,7 +17,7 @@ struct DirEntry {
     first_file: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 struct FileEntry {
     name: u32,
     next_file: u32,

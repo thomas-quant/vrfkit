@@ -41,7 +41,7 @@ pub struct ScriptObjects {
 }
 
 /// What the self-check found; printed on every run.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ScriptCheck {
     pub objects: usize,
     pub paths_resolved: usize,

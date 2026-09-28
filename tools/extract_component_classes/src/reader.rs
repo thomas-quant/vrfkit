@@ -8,7 +8,7 @@
 use std::fmt;
 
 /// A parse or I/O failure, with enough context to find the byte that caused it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Error(pub String);
 
 impl fmt::Display for Error {

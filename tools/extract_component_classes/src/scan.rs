@@ -227,7 +227,7 @@ pub fn scan_package(
         ));
     }
     let chunk = toc.chunks[job.entry];
-    let block_size = u64::from(toc.header.compression_block_size);
+    let block_size = u64::from(toc.block_size);
     let first_block = block_size - chunk.offset % block_size;
     let mut data = container.read_chunk(ucas, job.entry, first_block)?;
     let header_size = u64::from(declared_header_size(&data)?);
@@ -264,7 +264,7 @@ pub type ClassTable = HashMap<(u64, u64), ClassExport>;
 
 /// The resolved class of a candidate: `(class path, how it resolved, first
 /// native class, what the index pointed at)`. Unresolvable parts are `?`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Resolved {
     pub class: String,
     pub class_kind: &'static str,

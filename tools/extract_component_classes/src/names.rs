@@ -90,10 +90,9 @@ pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
 
 /// An `FMappedName`: a 30-bit index into some name table (the top two bits are
 /// the table kind), and the FName instance number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct MappedName {
     pub index: u32,
-    pub kind: u32,
     pub number: u32,
 }
 
@@ -103,7 +102,6 @@ impl MappedName {
         let number = c.u32()?;
         Ok(MappedName {
             index: raw & 0x3fff_ffff,
-            kind: raw >> 30,
             number,
         })
     }
@@ -232,17 +230,12 @@ pub(crate) mod tests {
     #[test]
     fn the_instance_number_is_part_of_the_name() {
         let names = vec!["AresAttributeSet".to_owned()];
-        let n = |number| MappedName {
-            index: 0,
-            kind: 0,
-            number,
-        };
+        let n = |number| MappedName { index: 0, number };
         assert_eq!(n(0).render(&names).unwrap(), "AresAttributeSet");
         assert_eq!(n(1).render(&names).unwrap(), "AresAttributeSet_0");
         assert_eq!(n(2).render(&names).unwrap(), "AresAttributeSet_1");
         let bad = MappedName {
             index: 1,
-            kind: 0,
             number: 0,
         };
         assert!(bad.render(&names).is_err());

@@ -52,7 +52,7 @@ use toc::{CHUNK_EXPORT_BUNDLE_DATA, CHUNK_SCRIPT_OBJECTS};
 const USAGE: &str = "usage: extract-component-classes <PAKS_DIR> [--format tsv|json] \
 [--kind all|gen_variable|cdo_subobject] [--name NAME]... [--jobs N] [--out FILE]";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 enum Format {
     Tsv,
     Json,
@@ -426,7 +426,7 @@ fn discover(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
 fn provenance_of(container: &Container, utoc: &Path, package_chunks: usize) -> Provenance {
     Provenance {
         name: container.name.clone(),
-        container_id: container.toc.header.container_id,
+        container_id: container.toc.container_id,
         toc_entries: container.toc.chunk_ids.len(),
         package_chunks,
         utoc_bytes: file_len(utoc),
@@ -820,11 +820,7 @@ mod tests {
             block_size: 0x10000,
             methods: vec![],
             chunks: vec![(
-                ChunkId {
-                    id: 1,
-                    index: 0,
-                    chunk_type,
-                },
+                ChunkId { id: 1, chunk_type },
                 OffsetLength {
                     offset: 0,
                     length: len as u64,
