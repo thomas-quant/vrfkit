@@ -1,31 +1,20 @@
-//! Model types for decoded Unreal Engine replay primitives.
-//!
-//! These mirror the C# `Replay.Models.Unreal` types but are pure data structs
-//! with no allocations. Display impls produce the compact string form written
-//! to `value_str`.
+//! Model types mirroring the C# `Replay.Models.Unreal` ones, as plain data;
+//! their `Display` impls produce the string written to `value_str`.
 
 use core::fmt;
 
-/// Rotation quantization modes for [`FRepMovement`].
-///
-/// Determines how the rotation is serialized in `ReplicatedMovement`:
-/// - `ByteComponents`: 1 flag bit + 8 data bits per axis (compact, +/-1.4deg precision)
-/// - `ShortComponents`: 1 flag bit + 16 data bits per axis (precise, +/-0.005deg)
+/// How [`FRepMovement`] serializes its rotation, per axis:
+/// - `ByteComponents`: 1 flag bit + 8 data bits (+/-1.4deg precision)
+/// - `ShortComponents`: 1 flag bit + 16 data bits (+/-0.005deg)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RotatorQuantization {
     ByteComponents,
     ShortComponents,
 }
 
-/// Location quantization for [`FRepMovement`], mirroring Unreal's
-/// `EVectorQuantization`: how many decimal places the sending class rounds
-/// the location to before packing it as an integer.
-///
-/// Not on the wire. A packed quantized vector's 7-bit header carries the
-/// component width and a "the integer was scaled" flag, but not the scale,
-/// so the reader has to be told the sending class's level -- the same
-/// situation as [`RotatorQuantization`], and handled the same way: every
-/// `RepMovement` entry in the overlay table states it.
+/// Location quantization for [`FRepMovement`] (Unreal's `EVectorQuantization`):
+/// the decimals the sending class rounds to before packing. Not on the wire --
+/// the packed header says only "scaled" -- so every `RepMovement` entry states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VectorQuantization {
     /// Whole units: the packed integer is the coordinate.
@@ -47,17 +36,7 @@ impl VectorQuantization {
     }
 }
 
-/// A 3D vector. Components are always `f64` regardless of wire format (float
-/// values are widened on decode to avoid losing precision when mixing formats).
-///
-/// # Wire layouts
-///
-/// | Variant | Bits |
-/// |---------|------|
-/// | Float (3 x f32) | 96 |
-/// | Double (3 x f64) | 192 |
-/// | NetQuantize (packed header + N-bit signed x 3) | variable |
-/// | NetQuantizeNormal (3 x SerializedInt(65536)) | ~48 |
+/// A 3D vector; components are `f64` whatever the wire width (f32 is widened).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FVector {
     pub x: f64,
@@ -72,13 +51,6 @@ impl fmt::Display for FVector {
 }
 
 /// Euler rotation (degrees).
-///
-/// # Wire layouts
-///
-/// | Variant | Bits per axis |
-/// |---------|---------------|
-/// | Short | 1 flag + 16 | -> `value * 360/65536` |
-/// | Byte | 1 flag + 8 | -> `value * 360/256` |
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FRotator {
     pub pitch: f32,
@@ -93,10 +65,6 @@ impl fmt::Display for FRotator {
 }
 
 /// Quaternion rotation (4 x f32).
-///
-/// # Wire layout
-///
-/// 128 bits = 4 x IEEE-754 single.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FQuat {
     pub x: f32,
@@ -112,10 +80,6 @@ impl fmt::Display for FQuat {
 }
 
 /// Transform = rotation (quat) + translation (vec3) + scale (vec3).
-///
-/// # Wire layout
-///
-/// 320 bits = FQuat(128) + FVector_float(96) + FVector_float(96).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FTransform {
     pub rotation: FQuat,
@@ -133,25 +97,18 @@ impl fmt::Display for FTransform {
     }
 }
 
-/// Replicated movement state.
-///
-/// # Wire layout
+/// Replicated movement state, in wire order:
 ///
 /// ```text
-/// Bit 0: bSimulatedPhysicsSleep
-/// Bit 1: bRepPhysics
-/// Bit 2: bRepServerFrame
-/// Bit 3: bRepServerHandle
-/// [packed quantized vector / VectorQuantization::scale()]: location
-/// [RotationShort or RotationByte]: rotation
-/// [packed quantized vector, whole units]: linear velocity
-/// if bRepPhysics: [packed quantized vector, whole units]: angular velocity
-/// if bRepServerFrame: IntPacked server frame
-/// if bRepServerHandle: IntPacked server physics handle
+/// 4 bits: bSimulatedPhysicsSleep, bRepPhysics, bRepServerFrame, bRepServerHandle
+/// location: packed quantized vector / VectorQuantization::scale()
+/// rotation: RotationShort or RotationByte; linear velocity: whole units
+/// if bRepPhysics: angular velocity (whole units)
+/// if bRepServerFrame / bRepServerHandle: IntPacked server frame / physics handle
 /// ```
 ///
-/// The location's divisor and the rotator's width are per-class choices the
-/// wire does not carry; `FieldType::RepMovement` supplies both.
+/// The location divisor and rotator width are per-class choices the wire does
+/// not carry; `FieldType::RepMovement` supplies both.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FRepMovement {
     pub location: FVector,
@@ -160,38 +117,24 @@ pub struct FRepMovement {
     pub angular_velocity: Option<FVector>,
     pub simulated_physics_sleep: bool,
     pub rep_physics: bool,
-    /// `None` when the wire's `bRepServerFrame` bit is clear -- no value was
-    /// sent, not a reported frame of 0. Mirrors `angular_velocity`'s use of
-    /// `Option` for the same reason: `bRepPhysics` gates that field the same
-    /// way `bRepServerFrame` gates this one.
+    /// `None` when `bRepServerFrame` is clear: not sent, not frame 0.
     pub server_frame: Option<u32>,
-    /// `None` when the wire's `bRepServerHandle` bit is clear. See
-    /// `server_frame`.
+    /// `None` when `bRepServerHandle` is clear.
     pub server_physics_handle: Option<u32>,
 }
 
-/// Writes an [`FVector`] as `{"x":..,"y":..,"z":..}`.
-///
-/// [`FVector`]'s own `Display` is the compact `(x,y,z)` form; a vector nested
-/// inside a `ReplicatedMovement` object needs the named-member shape instead,
-/// so this cannot reuse it.
+/// Writes an [`FVector`] as `{"x":..,"y":..,"z":..}`, not its compact `Display`.
 fn write_vector_json(f: &mut fmt::Formatter<'_>, v: &FVector) -> fmt::Result {
     write!(f, "{{\"x\":{},\"y\":{},\"z\":{}}}", v.x, v.y, v.z)
 }
 
-/// `ReplicatedMovement` serializes as a JSON object, not the compact form the
-/// other types use, because the compact form has nowhere to put
+/// A JSON object, not the compact form, which has nowhere to put
 /// `simulated_physics_sleep` or `server_physics_handle`. Member names and
-/// order follow the reference exactly. See docs/archive/PROJECT_STATUS.md
-/// 13-B for the 14,377-row regression this fixed.
-///
-/// Finiteness is enforced by DecodeError::NonFiniteComponent, not by
-/// construction -- see docs/OVERLAY_RESOLUTION.md "FRepMovement finiteness
-/// is enforced" for why (the componentBitCount == 0 raw-float fallback can
-/// carry NaN).
-///
-/// Anything that constructs an `FRepMovement` by another route owes the same
-/// check.
+/// order follow the reference exactly (docs/archive/PROJECT_STATUS.md 13-B: a
+/// 14,377-row regression). Finiteness is enforced by
+/// `DecodeError::NonFiniteComponent`, not by construction: the
+/// componentBitCount == 0 raw-float fallback can carry NaN (docs/OVERLAY_RESOLUTION.md
+/// "FRepMovement finiteness is enforced"). Any other constructor owes that check.
 impl fmt::Display for FRepMovement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("{\"linear_velocity\":")?;
