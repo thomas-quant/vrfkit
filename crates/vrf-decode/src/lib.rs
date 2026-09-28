@@ -24,7 +24,8 @@
 //! | EnumByte | 8 | `value_i64` |
 //! | Int32 | 32 | `value_i64` |
 //! | UInt32 | 32 | `value_i64` |
-//! | UInt64 | 64 | `value_i64` |
+//! | Int64 | 64 | `value_i64` |
+//! | UInt64 | 64 | `value_i64` (refused past `i64::MAX`) |
 //! | Float | 32 | `value_f64` |
 //! | Double | 64 | `value_f64` |
 //! | FString | variable | `value_str` |

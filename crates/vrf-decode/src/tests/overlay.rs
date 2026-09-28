@@ -2286,6 +2286,11 @@ fn the_checksum_table_is_populated_and_sorted() {
 /// One entry each: checksum propagation carries `StopMovementTime` to
 /// `ReplayStopContinuousEffectAtLocation` (244888268) and `HandleNumber` to
 /// `NetMulticastRemoveForceModule` (3336285386).
+///
+/// `HandleNumber` is unsigned: 3336285386 reproduces only as
+/// `Handle: FForceModuleHandle -> HandleNumber: uint32`
+/// (tools/tests/test_compatible_checksum_facts.py), so both the Apply entry and
+/// the checksum that carries it to Remove say `UInt32`.
 #[test]
 fn the_movement_time_pair_and_force_module_handle_are_typed() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -2301,7 +2306,66 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
             "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
             "HandleNumber"
         ),
-        Some(FieldType::Int32),
+        Some(FieldType::UInt32),
+    );
+    assert_eq!(lookup_checksum(3336285386), Some(FieldType::UInt32));
+}
+
+/// `EffectID` is the `int64` member of `FEffectID`, not the `ulong` the C#
+/// descriptors declare: each replay checksum below reproduces with `int64`
+/// and not with `uint64` (tools/tests/test_compatible_checksum_facts.py has
+/// the chains), and the 13.06 executable's reflection agrees.
+///
+/// The table entries are the donors; the checksum table carries the type on to
+/// the RPCs that declare no entry of their own (`MulticastStopContinuousEffect`,
+/// the weapons' `MulticastPlayContinuousEffectFromClient`,
+/// `ReplayStopContinuousEffectAtLocation`). Both halves are pinned because the
+/// CI checksum guard compares a one-group fixture and cannot see a checksum
+/// table left behind by a retyped donor.
+#[test]
+fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for (group, checksum) in [
+        ("/Script/ShooterGame.EffectManagerComponent", 1129645208),
+        (
+            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+            2340855891,
+        ),
+        (
+            "/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
+            2340855891,
+        ),
+        (
+            "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+            2251343646,
+        ),
+    ] {
+        assert_eq!(
+            table.lookup(group, "EffectID"),
+            Some(FieldType::Int64),
+            "{group}"
+        );
+        assert_eq!(
+            lookup_checksum(checksum),
+            Some(FieldType::Int64),
+            "{checksum}"
+        );
+    }
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
+            Some("EffectID"),
+            None,
+            Some(2340855891)
+        ),
+        Some(FieldType::Int64),
+    );
+    assert!(
+        !OVERLAY_TABLE
+            .iter()
+            .any(|e| e.field_type == FieldType::UInt64),
+        "no entry should still read an int64 property as UInt64"
     );
 }
 

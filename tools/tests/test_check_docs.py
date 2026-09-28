@@ -444,8 +444,10 @@ class MeasuredCountTests(unittest.TestCase):
         # correction (repmovement-location-scale); HawkFlash's level rides on its
         # existing ADDITIONS entry, so it adds none. 205 -> 210: the five
         # AGameObject smoke/zone classes read byte rotator components
-        # (game-evidence-typing-fixes).
-        self.assertEqual(guard.measured_counts()["corrections"], 210)
+        # (game-evidence-typing-fixes). 210 -> 214: the four EffectID entries
+        # retyped UInt64 -> Int64 (HandleNumber's Int32 -> UInt32 is an
+        # ADDITIONS type change, so it adds none).
+        self.assertEqual(guard.measured_counts()["corrections"], 214)
 
 
 class GeneratedInventoryTests(unittest.TestCase):

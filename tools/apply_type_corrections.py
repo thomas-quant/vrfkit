@@ -68,6 +68,43 @@ GAME_OBJECT_BYTE_ROTATOR_GROUPS = (
     "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
 )
 
+#: The four `EffectID` entries the C# descriptors declare `UInt64`, retyped
+#: `Int64`: (group, the replay's compatible_checksum, the chain it reproduces).
+#:
+#: Every one of them is the member `EffectID` of the struct `FEffectID`, and
+#: each replay checksum reproduces with that member typed `int64` and not
+#: `uint64` (tools/tests/test_compatible_checksum_facts.py recomputes all four
+#: from the chains below). The 13.06 executable's reflection agrees:
+#: `FEffectID.EffectID` is Int64. The C# `ulong` was a guess the width could
+#: not refute -- 64 bits read the same either way below 2^63.
+#:
+#: Unsigned would also refuse a real value: `decode_u64` fails any pattern with
+#: bit 63 set, which is a legitimate negative `int64`. No measured row sets it,
+#: so nothing exported changes; the change is to what the reader claims.
+#: Measured 2026-09-28 over all 1,018 replays (exports by the r3 build, main
+#: and checkpoint tables): 27,672,549 rows under 2340855891, 3,269,732 under
+#: 2251343646 and 26,813 `ActiveBlinds[].EffectID` leaves, every one 64 bits
+#: wide, values 2..40,853, bit 63 never set; the typed value equals an
+#: independent little-endian i64 read on every row.
+#:
+#: The same property reaches `MulticastStopContinuousEffect`, the weapons'
+#: `MulticastPlayContinuousEffectFromClient` and
+#: `ReplayStopContinuousEffectAtLocation` under 2340855891 through
+#: checksum_table.rs, which therefore has to learn the new type too, and
+#: `ActiveBlinds[].BlindEffectID.EffectID` (3321413110) is typed in
+#: crates/vrfkit/src/sink/blobs.rs.
+EFFECT_ID_INT64 = (
+    ("/Script/ShooterGame.EffectManagerComponent", 1129645208,
+     "ServerActiveEffects: TArray<FActiveEffectInfo> -> EffectID: FEffectID "
+     "-> EffectID: int64"),
+    ("/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+     2340855891, "parameter EffectID: FEffectID -> EffectID: int64"),
+    ("/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
+     2340855891, "parameter EffectID: FEffectID -> EffectID: int64"),
+    ("/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+     2251343646, "parameter CurrentEffectID: FEffectID -> EffectID: int64"),
+)
+
 #: (group_path substring, field_name, required FieldType -- IN FULL).
 #: One entry per correction the passes below make. Checked against the file
 #: after writing; a miss is a hard failure.
@@ -106,6 +143,7 @@ EXPECTED += [
        "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
        "location: VectorQuantization::RoundWholeNumber }")
       for _group in GAME_OBJECT_BYTE_ROTATOR_GROUPS],
+    *[(_group, "EffectID", "FieldType::Int64") for _group, _c, _chain in EFFECT_ID_INT64],
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::FName"),
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Point", "EquippableUsed", "FieldType::ObjectNetGuid"),
@@ -726,8 +764,21 @@ ADDITIONS = [
     # range present -- a dense sequential id, which no other reading of these
     # bits produces. Checksum 3336285386 shares it with `NetMulticastRemove`
     # `ForceModule`.
+    #
+    # UInt32, not the Int32 this entry first carried: the width and the values
+    # could not tell the two apart, the checksum can. 3336285386 reproduces as
+    # the parameter `Handle` of type `FForceModuleHandle` with member
+    # `HandleNumber` of type `uint32`, and as nothing with `int32` (4073821633)
+    # or at the top level; `NetMulticastEnforceEndOfLifeCleanup`'s 1457545067
+    # is the same member inside `ModulesCleanedUpByServer: TArray<
+    # FForceModuleHandle>`. The 13.06 executable's reflection agrees
+    # (`FForceModuleHandle.HandleNumber` is UInt32). The formula and the chain
+    # are pinned in tools/tests/test_compatible_checksum_facts.py. Every
+    # measured value is below 2^31, so the exported numbers do not change:
+    # over all 1,018 replays (2026-09-28) 665,519 Apply and 2,743,504 Remove
+    # rows, 32 bits each, 1..4,518, bit 31 never set.
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-     "HandleNumber", "FieldType::Int32"),
+     "HandleNumber", "FieldType::UInt32"),
     # The other five `NetMulticastApplyForceModule` parameters. Descriptor-silent;
     # measured 2026-09-28 over the 1,018 replays audited at 259ed10. The RPC
     # occurs in 1,015 of them (not in the single 12.10, 12.11 and 13.00 files),
@@ -1842,6 +1893,14 @@ def main():
                 content, f"/Script/ShooterGame.DamageableComponent:{rpc}", field,
                 "FieldType::Raw", "FieldType::ObjectNetGuid", expected=1)
             count += n
+
+    # Fix: UInt64 -> Int64 for the four EffectID entries. The evidence is on
+    # EFFECT_ID_INT64.
+    for group, _checksum, _chain in EFFECT_ID_INT64:
+        content, n = retype_exact(
+            content, group, "EffectID", "FieldType::UInt64", "FieldType::Int64",
+            expected=1)
+        count += n
 
     # Additions last, so the bucket recount below sees them.
     content, n_added = apply_additions(content)

@@ -5915,7 +5915,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
     OverlayEntry {
         group_path: "/Script/ShooterGame.EffectManagerComponent",
         field_name: "EffectID",
-        field_type: FieldType::UInt64,
+        field_type: FieldType::Int64,
     },
     OverlayEntry {
         group_path: "/Script/ShooterGame.EffectManagerComponent",
@@ -5985,7 +5985,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
     OverlayEntry {
         group_path: "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
         field_name: "EffectID",
-        field_type: FieldType::UInt64,
+        field_type: FieldType::Int64,
     },
     OverlayEntry {
         group_path: "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
@@ -6105,7 +6105,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
     OverlayEntry {
         group_path: "/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
         field_name: "EffectID",
-        field_type: FieldType::UInt64,
+        field_type: FieldType::Int64,
     },
     OverlayEntry {
         group_path: "/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
@@ -6235,7 +6235,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
     OverlayEntry {
         group_path: "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
         field_name: "HandleNumber",
-        field_type: FieldType::Int32,
+        field_type: FieldType::UInt32,
     },
     OverlayEntry {
         group_path: "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
@@ -6470,7 +6470,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
     OverlayEntry {
         group_path: "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
         field_name: "EffectID",
-        field_type: FieldType::UInt64,
+        field_type: FieldType::Int64,
     },
     OverlayEntry {
         group_path: "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",

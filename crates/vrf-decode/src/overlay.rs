@@ -717,7 +717,7 @@ fn apply_overlay_inner(
                 DecodeError::RawOrSkip => DecodeErrorKind::ZeroBits, // unreachable here
                 // The rest are refusals, not bit-level failures, and each used
                 // to print as `Residual` for want of a kind. A UInt64 that
-                // overflows i64: defensive, does not fire on supported replays.
+                // overflows i64: defensive; no shipped entry reads UInt64.
                 DecodeError::UnsignedOverflow { .. } => DecodeErrorKind::Rejected,
                 // The bits read fine; the discriminator was one the decoder
                 // has never seen laid out. Refusing beats returning a

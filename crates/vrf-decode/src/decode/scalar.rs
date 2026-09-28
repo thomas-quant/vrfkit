@@ -48,12 +48,20 @@ pub(super) fn decode_u32(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeEr
     Ok(DecodedValue::I64(i64::from(r.read_u32()?)))
 }
 
+/// A little-endian two's-complement 64-bit integer. Every bit pattern is a
+/// value, so unlike [`decode_u64`] there is nothing to refuse.
+pub(super) fn decode_i64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+    Ok(DecodedValue::I64(r.read_u64()? as i64))
+}
+
 pub(super) fn decode_u64(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     // The overlay stores integers as i64. A u64 with its high bit set cannot
     // be represented without a silent sign flip, so reject it loudly rather
-    // than emit a plausible wrong (negative) number. The only UInt64 overlay
-    // entries are effect IDs (small values), so this never fires on supported
-    // replays -- it is a defensive loud failure for malformed input.
+    // than emit a plausible wrong (negative) number. The C# descriptors
+    // declare the effect IDs UInt64, but the property is an `int64`
+    // (FEffectID::EffectID; its compatible_checksum reproduces only with that
+    // type), so apply_type_corrections.py retypes them Int64 and no shipped
+    // entry reads UInt64 any more. This stays a defensive loud failure.
     let value = r.read_u64()?;
     if value > i64::MAX as u64 {
         return Err(DecodeError::UnsignedOverflow { value });
