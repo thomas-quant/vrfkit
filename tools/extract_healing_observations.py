@@ -558,7 +558,7 @@ def extract(export):
         Path(__file__).with_name("player_identity.py"),
     ]
     source_before = {p.name: sha(p) for p in source_files}
-    manifest = json.loads((export / "manifest.json").read_text())
+    manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     declared = declarations(manifest)
     # Every pawn a SpawnedCharacter value names, not only the manifest's last
     # one: a reconnected player's earlier pawn is still that player's body.

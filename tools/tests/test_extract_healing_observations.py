@@ -178,7 +178,7 @@ class Tests(unittest.TestCase):
     def make(self, rows=None, actors=None, checkpoint=None):
         td = tempfile.TemporaryDirectory()
         p = Path(td.name)
-        (p / "manifest.json").write_text(json.dumps(manifest()))
+        (p / "manifest.json").write_text(json.dumps(manifest()), encoding="utf-8")
         pq.write_table(
             pa.Table.from_pylist(rows or fixture(), schema=SCHEMA), p / "fields.parquet"
         )
@@ -212,6 +212,20 @@ class Tests(unittest.TestCase):
             p / "net_guids.parquet",
         )
         return td, p
+
+    def test_a_non_ascii_manifest_is_read_as_utf8(self):
+        """vrfkit writes manifest.json as UTF-8 and copies the replay path into
+        source_file verbatim. Decoded with the locale codec, a Hangul path made
+        this tool exit 1 on cp949 Windows. The fixture must hold raw UTF-8:
+        json.dumps escapes non-ASCII by default, which would hide the bug."""
+        td, p = self.make()
+        self.addCleanup(td.cleanup)
+        data = manifest()
+        data["source_file"] = "D:\\\ub9ac\ud50c\ub808\uc774\\\uacbd\uae30.vrf"
+        (p / "manifest.json").write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+        self.assertEqual(tool.extract(p)["counts"]["amount_validated"], 1)
 
     def test_signed_zero_missing_causer_keeps_valid_amount_and_edges(self):
         td, p = self.make(fixture(causer=False))
@@ -277,9 +291,9 @@ class Tests(unittest.TestCase):
         td, p = self.make(rows)
         self.addCleanup(td.cleanup)
         out = p / "out.json"
-        out.write_text("old")
+        out.write_text("old", encoding="utf-8")
         self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-        self.assertEqual(out.read_text(), "old")
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_checkpoint_rows_are_preserved_separately(self):
         first = {
@@ -312,7 +326,7 @@ class Tests(unittest.TestCase):
         data["net_field_export_groups"][1]["fields"] = [
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] <= 5
         ]
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         result = tool.extract(p)
         self.assertEqual(result["counts"]["amount_validated"], 1)
         self.assertEqual(
@@ -326,14 +340,14 @@ class Tests(unittest.TestCase):
         data["net_field_export_groups"][1]["fields"] = [
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] != 9
         ]
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(tool.IntegrityError, "lacks its declaration"):
             tool.extract(p)
         data = manifest()
         next(
             x for x in data["net_field_export_groups"][1]["fields"] if x["handle"] == 7
         )["compatible_checksum"] = 1
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaisesRegex(tool.InputError, "optional heal parameter"):
             tool.extract(p)
 
@@ -415,9 +429,9 @@ class Tests(unittest.TestCase):
         td, p = self.make(rows)
         self.addCleanup(td.cleanup)
         out = p / "out.json"
-        out.write_text("old")
+        out.write_text("old", encoding="utf-8")
         self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-        self.assertEqual(out.read_text(), "old")
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_typed_instigator_edges_are_present_and_raw_checked(self):
         td, p = self.make()
@@ -449,9 +463,9 @@ class Tests(unittest.TestCase):
                 td, p = self.make(rows)
                 self.addCleanup(td.cleanup)
                 out = p / "out.json"
-                out.write_text("old")
+                out.write_text("old", encoding="utf-8")
                 self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-                self.assertEqual(out.read_text(), "old")
+                self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_an_invalid_edge_is_counted_not_just_labelled(self):
         # A malformed reference window keeps the amount and marks the edge
@@ -546,7 +560,7 @@ class EarlierPawnTests(unittest.TestCase):
             {"actor_net_guid": 7, "subject": "recipient", "character_net_guid": 45},
             {"actor_net_guid": 8, "subject": "source", "character_net_guid": 50},
         ]
-        (p / "manifest.json").write_text(json.dumps(data))
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
         d = tool.extract(p)
         recipient = d["observations"][0]["recipient_corroboration"]
         self.assertTrue(recipient["static_manifest_character"])
