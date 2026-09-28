@@ -147,6 +147,20 @@ COUNTERS = {
     "movement_open_section_tail_bits": (
         r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
     ),
+    # Every byte-wrapped movement stream and the bits after its envelope,
+    # which nothing reads; verify_build_corpus.py fails a replay whose bits are
+    # not 24 per stream.
+    "movement_envelope_trailers": (
+        r"(?m)^\s*Envelope trailers:\s+(\d+) streams / \d+ bits\s*$"
+    ),
+    "movement_envelope_trailer_bits": (
+        r"(?m)^\s*Envelope trailers:\s+\d+ streams / (\d+) bits\s*$"
+    ),
+    # Empty ActiveBlinds deltas whose trailing zero byte the strict walker
+    # was spared: a measured tolerance, legitimately nonzero on some builds.
+    "active_blinds_empty_trailers": (
+        r"(?m)^\s*ActiveBlinds trailers:\s+(\d+) empty deltas\s*$"
+    ),
     # Section bytes the DemoFrame walk stepped over; the skip is length-
     # prefixed, so a build that starts sending ExternalData or
     # GameSpecificFrameData moves nothing else here. Anchored so this and the
@@ -163,11 +177,19 @@ COUNTERS = {
         r"(?m)^\s*Frame skips:\s+\d+ external blobs / \d+ external bytes"
         r" / (\d+) game-specific bytes\s*$"
     ),
+    # Frames whose NaN or infinite time was read as 0 ms.
+    "frame_non_finite_times": r"(?m)^\s*Frame times:\s+(\d+) non-finite\s*$",
 }
 PATTERNS = {k: re.compile(v) for k, v in COUNTERS.items()}
-#: The three frame-skip tallies, as the manifest names them after its
-#: `frame_` / `checkpoint_frame_` prefixes.
-FRAME_SKIP_KEYS = ("external_data_blobs", "external_data_bytes", "game_specific_bytes")
+#: The frame-walk tallies -- the three skip counts and the frames with a
+#: non-finite time -- as the manifest names them after its `frame_` /
+#: `checkpoint_frame_` prefixes.
+FRAME_SKIP_KEYS = ("external_data_blobs", "external_data_bytes", "game_specific_bytes",
+                   "non_finite_times")
+#: Sink tallies of bits or bytes nothing reads, published under the same key in
+#: the manifest's `sink` blocks as in COUNTERS (checkpoint: `cp_` + key).
+SINK_TALLY_KEYS = ("movement_envelope_trailers", "movement_envelope_trailer_bits",
+                   "active_blinds_empty_trailers")
 
 # Only printed under `--checkpoints`, so they live apart from COUNTERS -- a
 # default run must not record them as None and then diff that against a
@@ -224,6 +246,15 @@ CHECKPOINT_COUNTERS = {
     "cp_movement_open_section_tail_bits": (
         r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
     ),
+    "cp_movement_envelope_trailers": (
+        r"(?m)^\s*Checkpoint envelope trailers:\s+(\d+) streams / \d+ bits\s*$"
+    ),
+    "cp_movement_envelope_trailer_bits": (
+        r"(?m)^\s*Checkpoint envelope trailers:\s+\d+ streams / (\d+) bits\s*$"
+    ),
+    "cp_active_blinds_empty_trailers": (
+        r"(?m)^\s*Checkpoint ActiveBlinds trailers:\s+(\d+) empty deltas\s*$"
+    ),
     "cp_frame_external_data_blobs": (
         r"(?m)^\s*Checkpoint frame skips:\s+(\d+) external blobs / \d+ external bytes"
         r" / \d+ game-specific bytes\s*$"
@@ -235,6 +266,9 @@ CHECKPOINT_COUNTERS = {
     "cp_frame_game_specific_bytes": (
         r"(?m)^\s*Checkpoint frame skips:\s+\d+ external blobs / \d+ external bytes"
         r" / (\d+) game-specific bytes\s*$"
+    ),
+    "cp_frame_non_finite_times": (
+        r"(?m)^\s*Checkpoint frame times:\s+(\d+) non-finite\s*$"
     ),
 }
 
@@ -576,8 +610,21 @@ def targeting_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) 
         "targeting_world_locations_decoded", checkpoints))
 
 
+def sink_tally_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
+    """The SINK_TALLY_KEYS counts must agree between CLI and manifest, zeros
+    included. Not a zero gate: each counts bits a decoder left unread on every
+    replay (envelope trailers) or on some (ActiveBlinds trailers)."""
+    def pick(quality):
+        values = {key: quality["sink"][key] for key in SINK_TALLY_KEYS}
+        if checkpoints:
+            values.update({"cp_" + key: quality["checkpoints"]["sink"][key]
+                           for key in SINK_TALLY_KEYS})
+        return values
+    return _manifest_agreement(out_dir, counters, "sink unread-bits tally", pick)
+
+
 def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
-    """The frame-skip tallies must agree between CLI and manifest, zeros included.
+    """The frame-walk tallies must agree between CLI and manifest, zeros included.
 
     Not a zero gate: the reference skips these sections too, so a non-zero
     count is data left undecoded, not a failure. It cannot see a pass that
@@ -639,6 +686,7 @@ def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -
 
     manifest_errors = (reward_opaque_manifest_errors(out_dir, counters, checkpoints)
                        + targeting_manifest_errors(out_dir, counters, checkpoints)
+                       + sink_tally_manifest_errors(out_dir, counters, checkpoints)
                        + frame_skip_manifest_errors(out_dir, counters, checkpoints))
     if manifest_errors:
         raise SystemExit("; ".join(manifest_errors))

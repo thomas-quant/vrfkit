@@ -65,6 +65,11 @@ SINK_NET_EQUAL = (
     ("sink_actor_closes", "actor_closes"),
     ("sink_content_blocks", "content_blocks"),
 )
+#: Bits after each byte-wrapped movement envelope: 24 in every one of the
+#: 156,407,150 streams of the 80-replay sample in vrf-movement's crate docs
+#: (11.06-13.06). Unread by the decoder, so this shape is all that says the
+#: trailer still is what was measured.
+ENVELOPE_TRAILER_BITS = 24
 
 
 def require_count(obj, key):
@@ -100,7 +105,10 @@ def manifest_counts(manifest):
                              "overlay_handle_conflicts_refused",
                              "cnc_bruteforce_payloads_attempted",
                              "movement_sized_section_tail_bits",
-                             "movement_open_section_tail_bits"))
+                             "movement_open_section_tail_bits",
+                             "movement_envelope_trailers",
+                             "movement_envelope_trailer_bits",
+                             "active_blinds_empty_trailers"))
             for key in sorted(keys):
                 name = f"{prefix}_{key}"
                 counts[name] = require_count(source, key)
@@ -111,6 +119,11 @@ def manifest_counts(manifest):
             framed = counts[f"{prefix}_{net_key}"] = require_count(scope["net"], net_key)
             if tally != framed:
                 failures.append(f"{prefix}_{sink_key}={tally} != {prefix}_{net_key}={framed}")
+        streams = counts[f"{prefix}_movement_envelope_trailers"]
+        bits = counts[f"{prefix}_movement_envelope_trailer_bits"]
+        if bits != ENVELOPE_TRAILER_BITS * streams:
+            failures.append(f"{prefix}_movement_envelope_trailer_bits={bits} != "
+                            f"{ENVELOPE_TRAILER_BITS} x {prefix}_movement_envelope_trailers={streams}")
         lost = counts[f"{prefix}_rpc_stream_failures"] - counts[f"{prefix}_unresolved_rpc_payloads_preserved"]
         counts[f"{prefix}_rpc_loss"] = lost
         if lost != 0:
@@ -162,6 +175,7 @@ def check_export(text, directory):
     errors += baseline.checkpoint_manifest_errors(directory, printed)
     errors += baseline.reward_opaque_manifest_errors(directory, printed, True)
     errors += baseline.targeting_manifest_errors(directory, printed, True)
+    errors += baseline.sink_tally_manifest_errors(directory, printed, True)
     errors += baseline.frame_skip_manifest_errors(directory, printed, True)
     guid_counts, guid_errors = baseline.checkpoint_guid_crosscheck(directory)
     if guid_errors:

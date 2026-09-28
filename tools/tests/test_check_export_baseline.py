@@ -486,9 +486,15 @@ class CheckpointGuidCrossCheckTests(unittest.TestCase):
                    "  Frame skips:      0 external blobs / 0 external bytes / 0 game-specific bytes\n"
                    "  Checkpoint frame skips: 0 external blobs / 0 external bytes"
                    " / 0 game-specific bytes\n"
+                   "  Frame times:      0 non-finite\n  Checkpoint frame times: 0 non-finite\n"
+                   "  Envelope trailers: 0 streams / 0 bits\n"
+                   "  Checkpoint envelope trailers: 0 streams / 0 bits\n"
+                   "  ActiveBlinds trailers: 0 empty deltas\n"
+                   "  Checkpoint ActiveBlinds trailers: 0 empty deltas\n"
                    f"GUID entries: {len(DECLARATIONS)}\n"
                    f"GUID paths: {literals} literals / {indices} indices / {indices} resolved\n")
-        sink = {"tracked_rewards_opaque_empty_variants": 0, "targeting_world_locations_decoded": 0}
+        sink = {"tracked_rewards_opaque_empty_variants": 0, "targeting_world_locations_decoded": 0,
+                **dict.fromkeys(guard.SINK_TALLY_KEYS, 0)}
         frames = {f"frame_{key}": 0 for key in guard.FRAME_SKIP_KEYS}
         manifest = {"quality": {"sink": sink, **frames, "checkpoints": dict(
             sink=sink, checkpoint_actor_rows_dropped=0,
@@ -679,8 +685,10 @@ class FrameSkipCounterTests(unittest.TestCase):
         (root / "manifest.json").write_text(json.dumps({"quality": quality}), encoding="utf-8")
 
     def test_frame_skip_counts_must_match_the_manifest_in_both_passes(self):
-        main = {"external_data_blobs": 2, "external_data_bytes": 9, "game_specific_bytes": 0}
-        checkpoint = {"external_data_blobs": 1, "external_data_bytes": 4, "game_specific_bytes": 5}
+        main = {"external_data_blobs": 2, "external_data_bytes": 9, "game_specific_bytes": 0,
+                "non_finite_times": 6}
+        checkpoint = {"external_data_blobs": 1, "external_data_bytes": 4, "game_specific_bytes": 5,
+                      "non_finite_times": 8}
         counts = {f"frame_{key}": value for key, value in main.items()}
         counts.update({f"cp_frame_{key}": value for key, value in checkpoint.items()})
         with tempfile.TemporaryDirectory() as temp:
@@ -719,6 +727,98 @@ class FrameSkipCounterTests(unittest.TestCase):
         self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_frame_external_data_blobs"],
                                     self.MAIN))
         self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_frames"], text).group(1), "3")
+
+    def test_frame_time_lines_are_read_only_by_their_own_patterns(self):
+        main = "  Frame times:      6 non-finite\n"
+        checkpoint = "  Checkpoint frame times: 8 non-finite\n"
+        text = main + checkpoint + "  Frames:           3\n"
+        self.assertEqual(guard.PATTERNS["frame_non_finite_times"].search(text).group(1), "6")
+        self.assertEqual(
+            re.search(guard.CHECKPOINT_COUNTERS["cp_frame_non_finite_times"], text).group(1), "8")
+        self.assertIsNone(guard.PATTERNS["frame_non_finite_times"].search(checkpoint))
+        self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_frame_non_finite_times"], main))
+        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_frames"], text).group(1), "3")
+
+
+class SinkTallyCounterTests(unittest.TestCase):
+    """The envelope-trailer and ActiveBlinds lines: each number reads its own
+    position in its own block, and each must agree with the manifest."""
+
+    SUMMARY = (
+        "  Envelope trailers: 11 streams / 264 bits\n"
+        "  ActiveBlinds trailers: 13 empty deltas\n"
+        "  Checkpoint envelope trailers: 21 streams / 504 bits\n"
+        "  Checkpoint ActiveBlinds trailers: 23 empty deltas\n"
+    )
+    MAIN = {"movement_envelope_trailers": 11, "movement_envelope_trailer_bits": 264,
+            "active_blinds_empty_trailers": 13}
+    CHECKPOINT = {"movement_envelope_trailers": 21, "movement_envelope_trailer_bits": 504,
+                  "active_blinds_empty_trailers": 23}
+
+    def test_each_number_is_its_own_counter_in_its_own_block(self):
+        self.assertEqual(set(self.MAIN), set(guard.SINK_TALLY_KEYS))
+        main_only, checkpoint_only = self.SUMMARY.split("  Checkpoint envelope", 1)
+        checkpoint_only = "  Checkpoint envelope" + checkpoint_only
+        for key in guard.SINK_TALLY_KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(int(guard.PATTERNS[key].search(self.SUMMARY).group(1)),
+                                 self.MAIN[key])
+                self.assertEqual(int(re.search(guard.CHECKPOINT_COUNTERS["cp_" + key],
+                                               self.SUMMARY).group(1)), self.CHECKPOINT[key])
+                self.assertIsNone(guard.PATTERNS[key].search(checkpoint_only))
+                self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_" + key], main_only))
+
+    def test_the_counts_must_match_the_manifest_in_both_passes(self):
+        counts = dict(self.MAIN)
+        counts.update({"cp_" + key: value for key, value in self.CHECKPOINT.items()})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "manifest.json"
+            data = {"quality": {"sink": dict(self.MAIN),
+                                "checkpoints": {"sink": dict(self.CHECKPOINT)}}}
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            self.assertEqual(guard.sink_tally_manifest_errors(root, counts, True), [])
+            for key in counts:
+                changed = dict(counts, **{key: counts[key] + 1})
+                self.assertIn(f"manifest {key}=",
+                              " ".join(guard.sink_tally_manifest_errors(root, changed, True)))
+            unprinted = {k: v for k, v in counts.items() if k != "active_blinds_empty_trailers"}
+            self.assertIn("disagrees",
+                          " ".join(guard.sink_tally_manifest_errors(root, unprinted, True)))
+            for invalid in (True, -1, "0"):
+                data["quality"]["checkpoints"]["sink"]["movement_envelope_trailer_bits"] = invalid
+                manifest.write_text(json.dumps(data), encoding="utf-8")
+                self.assertIn("nonnegative integers",
+                              " ".join(guard.sink_tally_manifest_errors(root, counts, True)))
+            del data["quality"]["checkpoints"]
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            self.assertIn("omits", " ".join(guard.sink_tally_manifest_errors(root, counts, True)))
+            self.assertEqual(guard.sink_tally_manifest_errors(root, counts, False), [])
+
+    def test_a_measurement_whose_manifest_disagrees_is_refused(self):
+        """`measure` runs the check: a summary printing another envelope
+        trailer count than the manifest publishes stops the run."""
+        summary = ("Reward opaque: 0 empty variants\nTarget locations: 0 array children\n"
+                   "Frame skips: 0 external blobs / 0 external bytes / 0 game-specific bytes\n"
+                   "Frame times: 0 non-finite\n" + self.SUMMARY)
+        sink = {"tracked_rewards_opaque_empty_variants": 0,
+                "targeting_world_locations_decoded": 0, **self.MAIN}
+        quality = {"sink": sink, **{f"frame_{key}": 0 for key in guard.FRAME_SKIP_KEYS}}
+        for trailers, passes in ((11, True), (12, False)):
+            with self.subTest(trailers=trailers), tempfile.TemporaryDirectory() as temp:
+                out = Path(temp)
+                for name in guard.PARQUET_FILES:
+                    pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
+                sink["movement_envelope_trailers"] = trailers
+                (out / "manifest.json").write_text(json.dumps({"quality": quality}),
+                                                   encoding="utf-8")
+                with patch.object(guard.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout=summary, stderr="")):
+                    if passes:
+                        guard.measure(Path("fake.exe"), out / "sample.vrf", out)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "movement_envelope_trailers=12"):
+                            guard.measure(Path("fake.exe"), out / "sample.vrf", out)
 
 
 class RequiredInputTests(unittest.TestCase):
@@ -803,6 +903,9 @@ Actor closes: 0
 Reward opaque: 0 empty variants
 Target locations: 0 array children
 Frame skips: 0 external blobs / 0 external bytes / 0 game-specific bytes
+Frame times: 0 non-finite
+Envelope trailers: 0 streams / 0 bits
+ActiveBlinds trailers: 0 empty deltas
 """
 
     def run_fake_export(self, *, fail: bool):
@@ -836,7 +939,7 @@ Frame skips: 0 external blobs / 0 external bytes / 0 game-specific bytes
                 "stage.mkdir()\n"
                 "for name in ('actors', 'fields', 'movement', 'net_guids', 'events', 'partials'):\n"
                 "    pq.write_table(pa.table({'value': [1]}), stage / (name + '.parquet'))\n"
-                "(stage / 'manifest.json').write_text(json.dumps({'quality': {'sink': {'tracked_rewards_opaque_empty_variants': 0, 'targeting_world_locations_decoded': 0}, 'frame_external_data_blobs': 0, 'frame_external_data_bytes': 0, 'frame_game_specific_bytes': 0}}), encoding='utf-8')\n"
+                "(stage / 'manifest.json').write_text(json.dumps({'quality': {'sink': {'tracked_rewards_opaque_empty_variants': 0, 'targeting_world_locations_decoded': 0, 'movement_envelope_trailers': 0, 'movement_envelope_trailer_bits': 0, 'active_blinds_empty_trailers': 0}, 'frame_external_data_blobs': 0, 'frame_external_data_bytes': 0, 'frame_game_specific_bytes': 0, 'frame_non_finite_times': 0}}), encoding='utf-8')\n"
                 "os.replace(out, backup)\n"
                 "os.replace(stage, out)\n"
                 "shutil.rmtree(backup)\n"
