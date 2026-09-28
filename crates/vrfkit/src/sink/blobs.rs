@@ -1321,6 +1321,7 @@ mod tests {
     use crate::sink::test_fixtures::{bits_from_bytes, bytes, packed};
     use crate::sink::{ChannelState, ExportStats, MeasuredArrayRoutes, RecordBuffers};
     use std::sync::Arc;
+    use vrf_export::FieldRecord;
     use vrf_net::field::FieldSink;
 
     const OWNER: &str = "/Script/ShooterGame.OwnerExclusivePlayerInfo";
@@ -1335,6 +1336,33 @@ mod tests {
     const KILL_PARENT: &str = "KillData";
     const KILL_CHECKSUM: u32 = 1_493_759_848;
     const MEASURED_BUILD: &str = "++Ares-Core+release-13.05";
+    const BLINDS: (&str, &str, u32) = (
+        "/Script/ShooterGame.BlindManagerComponent",
+        "ActiveBlinds",
+        3_853_965_310,
+    );
+    /// The nine measured ActiveBlinds member declarations.
+    const BLIND_MEMBERS: [(u32, &str, u32); 9] = [
+        (3, "BlindId", 2_836_858_544),
+        (4, "EffectID", 3_321_413_110),
+        (5, "SourceID", 4_130_766_059),
+        (6, "bLocalEffect", 2_802_682_995),
+        (7, "bTransient", 815_378_154),
+        (8, "InitialDuration", 1_370_668_337),
+        (9, "StartNetMovementTime", 2_358_118_895),
+        (10, "BlindConfig", 4_121_438_116),
+        (11, "CausingActor", 2_370_661_694),
+    ];
+
+    /// A row's four typed columns.
+    fn values(row: &FieldRecord) -> (Option<i64>, Option<f64>, Option<bool>, Option<&str>) {
+        (
+            row.value_i64,
+            row.value_f64,
+            row.value_bool,
+            row.value_str.as_deref(),
+        )
+    }
 
     fn one_leaf(handle: u32, payload: &[bool]) -> Vec<bool> {
         let mut bits = Vec::new();
@@ -1359,6 +1387,30 @@ mod tests {
         packed(&mut bits, 0);
         packed(&mut bits, 0);
         bits
+    }
+
+    /// One ActiveBlinds element with every member at its measured width.
+    fn blind_element(effect_id: i64) -> Vec<bool> {
+        let mut source_id = vec![false];
+        source_id.extend(bits_from_bytes(&(29i32).to_le_bytes()));
+        source_id.extend(bits_from_bytes(b"DedicatedServerWorldSourceID\0"));
+        source_id.extend(bits_from_bytes(&0i32.to_le_bytes()));
+        assert_eq!(source_id.len(), 297);
+        let mut blind_config = Vec::new();
+        packed(&mut blind_config, 256);
+        let mut causing_actor = Vec::new();
+        packed(&mut causing_actor, 257);
+        one_element(&[
+            (3, bits_from_bytes(&7u32.to_le_bytes())),
+            (4, bits_from_bytes(&effect_id.to_le_bytes())),
+            (5, source_id),
+            (6, vec![true]),
+            (7, vec![false]),
+            (8, bits_from_bytes(&1.5f32.to_le_bytes())),
+            (9, bits_from_bytes(&10.0f32.to_le_bytes())),
+            (10, blind_config),
+            (11, causing_actor),
+        ])
     }
 
     fn kill_weapon_theme_payload(value: &str, utf16: bool) -> Vec<bool> {
@@ -1547,15 +1599,7 @@ mod tests {
         assert_eq!(records.fields.len(), 2);
         let child = &records.fields[0];
         assert_eq!(child.raw_bits.as_deref(), Some([5u8].as_slice()));
-        assert_eq!(
-            (
-                child.value_i64,
-                child.value_f64,
-                child.value_bool,
-                child.value_str.as_deref()
-            ),
-            (None, None, None, None)
-        );
+        assert_eq!(values(child), (None, None, None, None));
     }
 
     #[test]
@@ -1574,15 +1618,7 @@ mod tests {
             Some("TrackedRewards[0].AdditionalRawReward")
         );
         assert_eq!(child.raw_bits.as_deref(), Some([1u8].as_slice()));
-        assert_eq!(
-            (
-                child.value_i64,
-                child.value_f64,
-                child.value_bool,
-                child.value_str.as_deref()
-            ),
-            (None, None, None, None)
-        );
+        assert_eq!(values(child), (None, None, None, None));
         assert_eq!(stats.tracked_rewards_opaque_empty_variants, 0);
     }
 
@@ -1732,10 +1768,7 @@ mod tests {
                 records.fields[0].raw_bits.as_deref(),
                 Some(bytes(&payload).as_slice())
             );
-            assert_eq!(records.fields[0].value_str.as_deref(), expected);
-            assert_eq!(records.fields[0].value_i64, None);
-            assert_eq!(records.fields[0].value_f64, None);
-            assert_eq!(records.fields[0].value_bool, None);
+            assert_eq!(values(&records.fields[0]), (None, None, None, expected));
             assert_eq!(stats.array_leaf_decode_errors, errors);
             assert_eq!(
                 records.fields[1].raw_bits.as_deref(),
@@ -1760,12 +1793,7 @@ mod tests {
             assert_eq!(records.fields.len(), 2, "{parent}");
             assert_eq!(records.fields[0].raw_bits.as_deref(), Some([5].as_slice()));
             assert_eq!(
-                (
-                    records.fields[0].value_i64,
-                    records.fields[0].value_f64,
-                    records.fields[0].value_bool,
-                    records.fields[0].value_str.as_deref()
-                ),
+                values(&records.fields[0]),
                 (None, None, None, None),
                 "{parent}"
             );
@@ -2214,11 +2242,7 @@ mod tests {
 
     #[test]
     fn active_blinds_empty_delta_with_zero_trailer_is_complete() {
-        let identity = (
-            "/Script/ShooterGame.BlindManagerComponent",
-            "ActiveBlinds",
-            3_853_965_310,
-        );
+        let identity = BLINDS;
         // Captured 57 times across 13.01/13.02/13.04/13.05: capacity
         // one (56 cases) or two (one case), no changed elements, zero trailer.
         for capacity in [1, 2] {
@@ -2248,11 +2272,7 @@ mod tests {
 
     #[test]
     fn active_blinds_null_causing_actor_is_a_decoded_reference() {
-        let identity = (
-            "/Script/ShooterGame.BlindManagerComponent",
-            "ActiveBlinds",
-            3_853_965_310,
-        );
+        let identity = BLINDS;
         // The 59 rejected value windows contain a one-byte IntPacked zero.
         // Keep the positive reference as a control through the same sink.
         for reference in [257, 0] {
@@ -2282,11 +2302,7 @@ mod tests {
 
     #[test]
     fn active_blinds_invalid_trailers_and_references_still_fail() {
-        let identity = (
-            "/Script/ShooterGame.BlindManagerComponent",
-            "ActiveBlinds",
-            3_853_965_310,
-        );
+        let identity = BLINDS;
         let mut empty = Vec::new();
         packed(&mut empty, 1);
         packed(&mut empty, 0);
@@ -2345,11 +2361,7 @@ mod tests {
 
     #[test]
     fn active_blinds_null_reference_obeys_build_and_parent_identity_guards() {
-        let identity = (
-            "/Script/ShooterGame.BlindManagerComponent",
-            "ActiveBlinds",
-            3_853_965_310,
-        );
+        let identity = BLINDS;
         let declaration = [(11, "CausingActor", 2_370_661_694)];
         let bits = one_leaf(11, &bits_from_bytes(&[0]));
         for branch in ["13.01", "13.02", "13.04", "13.05", "13.06"] {
@@ -2382,11 +2394,7 @@ mod tests {
 
     #[test]
     fn active_blinds_every_truncated_null_update_retains_only_raw_parent() {
-        let identity = (
-            "/Script/ShooterGame.BlindManagerComponent",
-            "ActiveBlinds",
-            3_853_965_310,
-        );
+        let identity = BLINDS;
         let bits = one_leaf(11, &bits_from_bytes(&[0]));
         for length in 1..bits.len() {
             let truncated = &bits[..length];
@@ -2410,16 +2418,8 @@ mod tests {
     fn active_blinds_empty_delta_rejects_every_nonzero_trailer_byte() {
         for trailer in 1..=255u8 {
             let bits = bits_from_bytes(&[2, 0, trailer]);
-            let (records, stats) = export_array_with_declarations(
-                (
-                    "/Script/ShooterGame.BlindManagerComponent",
-                    "ActiveBlinds",
-                    3_853_965_310,
-                ),
-                &[],
-                &bits,
-                Some(MEASURED_BUILD),
-            );
+            let (records, stats) =
+                export_array_with_declarations(BLINDS, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 1, "trailer {trailer}");
             assert_eq!(records.fields.len(), 1);
         }
@@ -2427,11 +2427,7 @@ mod tests {
 
     #[test]
     fn active_blinds_sparse_updates_keep_indices_and_packed_reference_boundaries() {
-        let identity = (
-            "/Script/ShooterGame.BlindManagerComponent",
-            "ActiveBlinds",
-            3_853_965_310,
-        );
+        let identity = BLINDS;
         for reference in [0, 1, 127, 128, 16_383, 16_384, 2_097_151] {
             let mut bits = Vec::new();
             packed(&mut bits, 3);
@@ -2469,53 +2465,20 @@ mod tests {
 
     #[test]
     fn active_blinds_changed_member_declaration_retains_only_raw_parent() {
-        const GROUP: &str = "/Script/ShooterGame.BlindManagerComponent";
-        const PARENT: &str = "ActiveBlinds";
-        let declarations = [
-            (3, "BlindId", 2_836_858_544),
-            (4, "EffectID", 3_321_413_110),
-            (5, "SourceID", 4_130_766_059),
-            (6, "bLocalEffect", 2_802_682_995),
-            (7, "bTransient", 815_378_154),
-            (8, "InitialDuration", 1_370_668_337),
-            (9, "StartNetMovementTime", 2_358_118_895),
-            (10, "BlindConfig", 4_121_438_116),
-            (11, "CausingActor", 2_370_661_694),
-        ];
-        let mut source_id = vec![false];
-        source_id.extend(bits_from_bytes(&(29i32).to_le_bytes()));
-        source_id.extend(bits_from_bytes(b"DedicatedServerWorldSourceID\0"));
-        source_id.extend(bits_from_bytes(&0i32.to_le_bytes()));
-        assert_eq!(source_id.len(), 297);
-        let mut blind_config = Vec::new();
-        packed(&mut blind_config, 256);
-        let mut causing_actor = Vec::new();
-        packed(&mut causing_actor, 257);
-        let bits = one_element(&[
-            (3, bits_from_bytes(&7u32.to_le_bytes())),
-            (4, bits_from_bytes(&8u64.to_le_bytes())),
-            (5, source_id),
-            (6, vec![true]),
-            (7, vec![false]),
-            (8, bits_from_bytes(&1.5f32.to_le_bytes())),
-            (9, bits_from_bytes(&10.0f32.to_le_bytes())),
-            (10, blind_config),
-            (11, causing_actor),
-        ]);
-        let identity = (GROUP, PARENT, 3_853_965_310);
+        let bits = blind_element(8);
         let (valid, clean) =
-            export_array_with_declarations(identity, &declarations, &bits, Some(MEASURED_BUILD));
+            export_array_with_declarations(BLINDS, &BLIND_MEMBERS, &bits, Some(MEASURED_BUILD));
         assert_eq!(valid.fields.len(), 10);
         assert_eq!(clean.array_leaf_decode_errors, 0);
         assert_eq!(valid.fields[0].value_i64, Some(7));
         assert_eq!(valid.fields[8].value_i64, Some(257));
 
-        let mut changed = declarations;
+        let mut changed = BLIND_MEMBERS;
         changed[0].2 += 1;
         let (refused, stats) =
-            export_array_with_declarations(identity, &changed, &bits, Some(MEASURED_BUILD));
+            export_array_with_declarations(BLINDS, &changed, &bits, Some(MEASURED_BUILD));
         assert_eq!(refused.fields.len(), 1);
-        assert_eq!(refused.fields[0].field_name.as_deref(), Some(PARENT));
+        assert_eq!(refused.fields[0].field_name.as_deref(), Some(BLINDS.1));
         assert_eq!(
             refused.fields[0].raw_bits.as_deref(),
             Some(bytes(&bits).as_slice())
@@ -2529,41 +2492,12 @@ mod tests {
     /// would lose its typed value.
     #[test]
     fn active_blinds_effect_id_is_signed() {
-        const GROUP: &str = "/Script/ShooterGame.BlindManagerComponent";
-        const PARENT: &str = "ActiveBlinds";
-        let declarations = [
-            (3, "BlindId", 2_836_858_544),
-            (4, "EffectID", 3_321_413_110),
-            (5, "SourceID", 4_130_766_059),
-            (6, "bLocalEffect", 2_802_682_995),
-            (7, "bTransient", 815_378_154),
-            (8, "InitialDuration", 1_370_668_337),
-            (9, "StartNetMovementTime", 2_358_118_895),
-            (10, "BlindConfig", 4_121_438_116),
-            (11, "CausingActor", 2_370_661_694),
-        ];
-        let mut source_id = vec![false];
-        source_id.extend(bits_from_bytes(&(29i32).to_le_bytes()));
-        source_id.extend(bits_from_bytes(b"DedicatedServerWorldSourceID\0"));
-        source_id.extend(bits_from_bytes(&0i32.to_le_bytes()));
-        let mut blind_config = Vec::new();
-        packed(&mut blind_config, 256);
-        let mut causing_actor = Vec::new();
-        packed(&mut causing_actor, 257);
-        let bits = one_element(&[
-            (3, bits_from_bytes(&7u32.to_le_bytes())),
-            (4, bits_from_bytes(&(-2i64).to_le_bytes())),
-            (5, source_id),
-            (6, vec![true]),
-            (7, vec![false]),
-            (8, bits_from_bytes(&1.5f32.to_le_bytes())),
-            (9, bits_from_bytes(&10.0f32.to_le_bytes())),
-            (10, blind_config),
-            (11, causing_actor),
-        ]);
-        let identity = (GROUP, PARENT, 3_853_965_310);
-        let (valid, stats) =
-            export_array_with_declarations(identity, &declarations, &bits, Some(MEASURED_BUILD));
+        let (valid, stats) = export_array_with_declarations(
+            BLINDS,
+            &BLIND_MEMBERS,
+            &blind_element(-2),
+            Some(MEASURED_BUILD),
+        );
         assert_eq!(stats.array_leaf_decode_errors, 0);
         let effect_id = valid
             .fields
@@ -2796,30 +2730,6 @@ mod tests {
                 None,
                 literal.clone(),
             ),
-            // A different trailing byte and a nonempty extension cannot become
-            // an accepted optional trailer.
-            (
-                OWNER,
-                REWARDS_PARENT,
-                REWARDS_CHECKSUM,
-                Some(MEASURED_BUILD),
-                bits_from_bytes(&[0x02, 0x00, 0x01]),
-            ),
-            (
-                OWNER,
-                REWARDS_PARENT,
-                REWARDS_CHECKSUM,
-                Some(MEASURED_BUILD),
-                bits_from_bytes(&[0x02, 0x00, 0x00, 0x00]),
-            ),
-            // No zero index terminator: the exact decoder must reject it.
-            (
-                OWNER,
-                REWARDS_PARENT,
-                REWARDS_CHECKSUM,
-                Some(MEASURED_BUILD),
-                bits_from_bytes(&[0x02]),
-            ),
         ] {
             let (records, stats) =
                 export_array((group, parent, checksum), (49, "Rewards"), &bits, branch);
@@ -2833,6 +2743,9 @@ mod tests {
         }
     }
 
+    /// A different trailing byte, a nonempty extension, or no zero index
+    /// terminator: none becomes an accepted optional trailer, and each keeps
+    /// the exact decoder's diagnostic.
     #[test]
     fn tracked_rewards_residual_variants_keep_exact_diagnostics() {
         for bits in [
@@ -2911,15 +2824,7 @@ mod tests {
         assert_eq!(records.fields.len(), 2);
         let child = &records.fields[0];
         assert_eq!(child.raw_bits.as_deref(), Some(bytes(&payload).as_slice()));
-        assert_eq!(
-            (
-                child.value_i64,
-                child.value_f64,
-                child.value_bool,
-                child.value_str.as_deref()
-            ),
-            (Some(700), None, None, None)
-        );
+        assert_eq!(values(child), (Some(700), None, None, None));
     }
 
     #[test]
@@ -3020,11 +2925,7 @@ mod tests {
                     one_leaf(30, &[false; 32]),
                 ),
                 MeasuredArrayRoute::ActiveBlinds => (
-                    (
-                        "/Script/ShooterGame.BlindManagerComponent",
-                        "ActiveBlinds",
-                        3_853_965_310,
-                    ),
+                    BLINDS,
                     (11, "CausingActor", 2_370_661_694),
                     one_leaf(11, &bits_from_bytes(&[0])),
                 ),
@@ -3203,10 +3104,7 @@ mod tests {
         assert_eq!(records.fields.len(), 2);
         let child = &records.fields[0];
         assert_eq!(child.raw_bits.as_deref(), Some([0xff].as_slice()));
-        assert_eq!(child.value_i64, None);
-        assert_eq!(child.value_f64, None);
-        assert_eq!(child.value_bool, None);
-        assert_eq!(child.value_str, None);
+        assert_eq!(values(child), (None, None, None, None));
         let parent = &records.fields[1];
         assert_eq!(parent.raw_bits.as_deref(), Some(bytes(&bits).as_slice()));
         assert_eq!(stats.array_leaf_decode_errors, 1);
