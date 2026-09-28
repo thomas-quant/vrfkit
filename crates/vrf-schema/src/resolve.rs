@@ -283,14 +283,15 @@ impl NetGuidCache {
 
 #[cfg(test)]
 mod tests {
-    #![allow(unused_must_use)]
-
     use super::*;
-    use crate::export::NetFieldExportGroup; // -- UniqueLeafMatch suffix extension tests -------------------------------
+    use crate::export::NetFieldExportGroup;
+
+    /// `(registered paths, bare name, the path it must resolve to)`.
+    type Row<'a> = (&'a [&'a str], &'a str, Option<&'a str>);
 
     /// A cache holding one group per path, at indices 0, 1, 2, ... A failed
-    /// registration fails the test rather than vanishing under the module's
-    /// `unused_must_use` allowance.
+    /// registration fails the test rather than leaving a row that resolves to
+    /// nothing for the wrong reason.
     fn cache_of(paths: &[&str]) -> NetGuidCache {
         let mut cache = NetGuidCache::new();
         for (index, path) in paths.iter().enumerate() {
@@ -302,477 +303,195 @@ mod tests {
     }
 
     #[test]
-    fn unique_leaf_match_exact() {
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.AresAttributeSet".into(),
-            20,
-            3,
-        ));
-        // Exact leaf match: "AresAttributeSet" -> leaf is "AresAttributeSet".
-        let g = cache.unique_leaf_match("AresAttributeSet").unwrap();
-        assert_eq!(g.path, "/Script/ShooterGame.AresAttributeSet");
-    }
-
-    #[test]
-    fn unique_leaf_match_component_suffix() {
-        // Bare name "EquippableStateMachine" should match a group whose leaf is
-        // "EquippableStateMachineComponent" via the +Component suffix fallback.
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.EquippableStateMachineComponent".into(),
-            30,
-            5,
-        ));
-        let g = cache.unique_leaf_match("EquippableStateMachine").unwrap();
-        assert_eq!(
-            g.path,
-            "/Script/ShooterGame.EquippableStateMachineComponent"
-        );
-    }
-
-    #[test]
-    fn unique_leaf_match_c_suffix() {
-        // Bare name "Comp_Projectile_FloatCurveMovement" should match a group
-        // whose leaf is "Comp_Projectile_FloatCurveMovement_C" via +_C suffix.
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Characters/Components/Comp_Projectile_FloatCurveMovement.Comp_Projectile_FloatCurveMovement_C".into(),
-            40,
-            3,
-        ));
-        let g = cache
-            .unique_leaf_match("Comp_Projectile_FloatCurveMovement")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Game/Characters/Components/Comp_Projectile_FloatCurveMovement.Comp_Projectile_FloatCurveMovement_C"
-        );
-    }
-
-    #[test]
-    fn unique_leaf_match_rejects_qualified_paths() {
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.TestComponent".into(),
-            50,
-            2,
-        ));
-        // Paths with separators should never trigger leaf matching.
-        assert!(cache.unique_leaf_match("/Script/Test").is_none());
-        assert!(cache.unique_leaf_match("ShooterGame.Test").is_none());
-        assert!(cache.unique_leaf_match("Game:Test").is_none());
-    }
-
-    #[test]
-    fn unique_leaf_match_ambiguous_returns_none() {
-        let mut cache = NetGuidCache::new();
-        // Two groups with the same leaf "TestComponent" -> ambiguous.
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/A.TestComponent".into(),
-            60,
-            1,
-        ));
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/B.TestComponent".into(),
-            61,
-            1,
-        ));
-        // Exact leaf is ambiguous, but "Test" + "Component" also hits the same
-        // ambiguous entry, so still returns None.
-        assert!(cache.unique_leaf_match("TestComponent").is_none());
-        assert!(cache.unique_leaf_match("Test").is_none());
-    }
-
-    /// The first candidate claimed at all decides. When two groups claim it,
-    /// the name binds to nothing: the later candidate names a different class,
-    /// and binding it is the guess the ambiguity rule forbids. Each control
-    /// reaches that later group by its own leaf, so the `None` is the rule at
-    /// work and not a group that failed to register.
-    #[test]
-    fn unique_leaf_match_does_not_fall_through_an_ambiguous_candidate() {
-        for (paths, name, control) in [
-            // The exact leaf is ambiguous; `+Component` would hit.
+    fn unique_leaf_match_resolves_each_row() {
+        const FLOAT_CURVE: &str = "/Game/Characters/Components/Comp_Projectile_FloatCurveMovement.Comp_Projectile_FloatCurveMovement_C";
+        let ambiguous_then_component = ["/Script/A.Foo", "/Script/B.Foo", "/Script/C.FooComponent"];
+        let ambiguous_then_c = [
+            "/Script/A.FooComponent",
+            "/Script/B.FooComponent",
+            "/Game/C.Foo_C",
+        ];
+        let separators = ["/Script/X.Game:Test", "/Script/X.Game/Test"];
+        let rows: &[Row<'_>] = &[
             (
-                ["/Script/A.Foo", "/Script/B.Foo", "/Script/C.FooComponent"],
-                "Foo",
-                "FooComponent",
+                &["/Script/ShooterGame.AresAttributeSet"],
+                "AresAttributeSet",
+                Some("/Script/ShooterGame.AresAttributeSet"),
             ),
-            // `+Component` is ambiguous; `+_C` would hit.
+            // Subobject GUIDs often omit the `Component` their group has.
             (
-                [
-                    "/Script/A.FooComponent",
-                    "/Script/B.FooComponent",
-                    "/Game/C.Foo_C",
-                ],
-                "Foo",
-                "Foo_C",
+                &["/Script/ShooterGame.EquippableStateMachineComponent"],
+                "EquippableStateMachine",
+                Some("/Script/ShooterGame.EquippableStateMachineComponent"),
             ),
-        ] {
-            let cache = cache_of(&paths);
-            assert_eq!(
-                cache.unique_leaf_match(name).map(|g| g.path.as_str()),
+            // Blueprint-class GUIDs map to a leaf with a `_C` suffix.
+            (
+                &[FLOAT_CURVE],
+                "Comp_Projectile_FloatCurveMovement",
+                Some(FLOAT_CURVE),
+            ),
+            (
+                &["/Script/ShooterGame.SomethingElse"],
+                "NonexistentThing",
                 None,
-                "{name} over {paths:?}"
-            );
-            assert_eq!(
-                cache.unique_leaf_match(control).map(|g| g.path.as_str()),
-                Some(paths[2]),
-                "control {control} over {paths:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn unique_leaf_match_no_match_returns_none() {
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.SomethingElse".into(),
-            70,
-            1,
-        ));
-        assert!(cache.unique_leaf_match("NonexistentThing").is_none());
-    }
-
-    // -- resolve_cnc_for_instance_name tests --
-
-    #[test]
-    fn cnc_resolve_exact_class_name() {
-        // AresWorldSettings -> AresWorldSettings_ClassNetCache (the plain
-        // suffix; the Component suffix is cnc_resolve_component_suffix)
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.AresWorldSettings_ClassNetCache".into(),
-            80,
-            1,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("AresWorldSettings")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Script/ShooterGame.AresWorldSettings_ClassNetCache"
-        );
-        assert_eq!(g.len(), 1);
-    }
-
-    /// A stem declared under more than one convention resolves by suffix
-    /// order: `_ClassNetCache`, then `Component_ClassNetCache`, then
-    /// `_C_ClassNetCache`. The groups are registered in the reverse order, so
-    /// registration order cannot produce the same answers.
-    #[test]
-    fn cnc_resolve_tries_the_suffixes_in_order() {
-        let c = "/Game/X/X.X_C_ClassNetCache";
-        let component = "/Script/ShooterGame.XComponent_ClassNetCache";
-        let plain = "/Script/ShooterGame.X_ClassNetCache";
-        for (paths, expected) in [
-            (&[c, component, plain][..], plain),
-            (&[c, component][..], component),
-        ] {
+            ),
+            // Two groups share the leaf, so neither name binds, the second
+            // through `+Component` reaching the same ambiguous leaf.
+            (
+                &["/Script/A.TestComponent", "/Script/B.TestComponent"],
+                "TestComponent",
+                None,
+            ),
+            (
+                &["/Script/A.TestComponent", "/Script/B.TestComponent"],
+                "Test",
+                None,
+            ),
+            // The first candidate claimed at all decides: an ambiguous exact
+            // leaf does not fall through to `+Component`, nor an ambiguous
+            // `+Component` to `+_C`. The later group of another class is
+            // reachable by its own leaf.
+            (&ambiguous_then_component, "Foo", None),
+            (
+                &ambiguous_then_component,
+                "FooComponent",
+                Some("/Script/C.FooComponent"),
+            ),
+            (&ambiguous_then_c, "Foo", None),
+            (&ambiguous_then_c, "Foo_C", Some("/Game/C.Foo_C")),
+            // A qualified name is never leaf-matched, even when a leaf is
+            // spelled exactly like it.
+            (&separators, "Game:Test", None),
+            (&separators, "Game/Test", None),
+        ];
+        for &(paths, name, expected) in rows {
             assert_eq!(
                 cache_of(paths)
-                    .resolve_cnc_for_instance_name("X")
+                    .unique_leaf_match(name)
                     .map(|g| g.path.as_str()),
-                Some(expected),
-                "{paths:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn cnc_resolve_component_suffix() {
-        // ForceModuleManager -> ForceModuleManagerComponent_ClassNetCache
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache".into(),
-            81,
-            4,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("ForceModuleManager")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache"
-        );
-        assert_eq!(g.len(), 4);
-    }
-
-    #[test]
-    fn cnc_resolve_blueprint_c_suffix() {
-        // AudDeadeyeVOComponent -> AudDeadeyeVOComponent_C_ClassNetCache
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Audio/VOComponent/AudDeadeyeVoComponent.AudDeadeyeVOComponent_C_ClassNetCache"
-                .into(),
-            82,
-            3,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("AudDeadeyeVOComponent")
-            .unwrap();
-        assert!(g.path.ends_with("_ClassNetCache"));
-        assert_eq!(g.len(), 3);
-    }
-
-    #[test]
-    fn cnc_resolve_instance_suffix_stripping() {
-        // BombDestination_A -> strip _A -> BombDestination -> _C_ClassNetCache
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/GameModes/Bomb/BombDestination.BombDestination_C_ClassNetCache".into(),
-            83,
-            3,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("BombDestination_A")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Game/GameModes/Bomb/BombDestination.BombDestination_C_ClassNetCache"
-        );
-        // Also works for _B variant:
-        let g2 = cache
-            .resolve_cnc_for_instance_name("BombDestination_B")
-            .unwrap();
-        assert_eq!(g.path, g2.path);
-    }
-
-    #[test]
-    fn cnc_resolve_trailing_digit_strip() {
-        // WindowShieldA1 -> strip digits -> WindowShieldA -> strip uppercase ->
-        // WindowShield -> _C_ClassNetCache
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Interactable/WindowShield.WindowShield_C_ClassNetCache".into(),
-            84,
-            5,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("WindowShieldA1")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Game/Interactable/WindowShield.WindowShield_C_ClassNetCache"
-        );
-    }
-
-    /// The longer digit-only trim must be tried before the more aggressive
-    /// uppercase-run trim, and that trim must remove one trailing uppercase
-    /// letter, not the whole run. Both groups below are real archive names
-    /// (`AudDeadeyeVOComponent_ClassNetCache` and a shorter, unrelated
-    /// `AudDeadeye*_ClassNetCache`); the instance name `AudDeadeyeVO2` must
-    /// resolve to the former. Before the fix, the shorter-first order and the
-    /// whole-run trim (`"AudDeadeyeVO"` -> `"AudDeadeye"`, stripping both `V`
-    /// and `O`) matched the wrong, shorter group first.
-    #[test]
-    fn cnc_resolve_tries_the_longer_stem_before_the_more_aggressive_trim() {
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Audio/VOComponent/AudDeadeye.AudDeadeye_ClassNetCache".into(),
-            90,
-            1,
-        ));
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Audio/VOComponent/AudDeadeyeVoComponent.AudDeadeyeVOComponent_ClassNetCache"
-                .into(),
-            91,
-            3,
-        ));
-
-        let g = cache
-            .resolve_cnc_for_instance_name("AudDeadeyeVO2")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Game/Audio/VOComponent/AudDeadeyeVoComponent.AudDeadeyeVOComponent_ClassNetCache",
-            "must resolve through the longer stem, not the shorter unrelated group"
-        );
-    }
-
-    #[test]
-    fn cnc_resolve_multi_segment_strip() {
-        // AmbientAudio_Ascent_Defender_SoundA_003 -> strips segments until
-        // AmbientAudio matches via _C_ClassNetCache
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Audio/Core/AmbientAudio.AmbientAudio_C_ClassNetCache".into(),
-            85,
-            1,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("AmbientAudio_Ascent_Defender_SoundA_003")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Game/Audio/Core/AmbientAudio.AmbientAudio_C_ClassNetCache"
-        );
-    }
-
-    #[test]
-    fn cnc_resolve_variant_suffix() {
-        // MeleeAttackState_Alt -> strip _Alt -> MeleeAttackState ->
-        // Component_ClassNetCache
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.MeleeAttackStateComponent_ClassNetCache".into(),
-            86,
-            2,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("MeleeAttackState_Alt")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Script/ShooterGame.MeleeAttackStateComponent_ClassNetCache"
-        );
-    }
-
-    #[test]
-    fn cnc_resolve_no_match_returns_none() {
-        // AbilitiesAndBuffsComponent has no CNC group in schema -- must still
-        // fail (return None) so the oracle counts it as function_count=0.
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.SomethingUnrelated_ClassNetCache".into(),
-            87,
-            5,
-        ));
-        assert!(
-            cache
-                .resolve_cnc_for_instance_name("AbilitiesAndBuffsComponent")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn cnc_resolve_rejects_qualified_paths() {
-        // Fully-qualified paths must not trigger instance name resolution.
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.TestComponent_ClassNetCache".into(),
-            88,
-            2,
-        ));
-        assert!(
-            cache
-                .resolve_cnc_for_instance_name("/Script/ShooterGame.Test")
-                .is_none()
-        );
-        assert!(
-            cache
-                .resolve_cnc_for_instance_name("ShooterGame.Test")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn cnc_resolve_ambiguous_returns_none() {
-        // If two groups share the same CNC leaf, resolution must return None
-        // (ambiguous) rather than guessing.
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/A.SharedName_ClassNetCache".into(),
-            89,
-            3,
-        ));
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/B.SharedName_ClassNetCache".into(),
-            90,
-            5,
-        ));
-        assert!(cache.resolve_cnc_for_instance_name("SharedName").is_none());
-    }
-
-    /// The same rule at every point where the CNC resolver moves on: the next
-    /// suffix, the next shorter stem, and the uppercase trim after the digit
-    /// trim. An ambiguous candidate ends the search there; the control reaches
-    /// the later group when nothing ambiguous comes first.
-    #[test]
-    fn cnc_resolve_does_not_fall_through_an_ambiguous_candidate() {
-        for (paths, name, control) in [
-            // `_ClassNetCache` is ambiguous; `Component_ClassNetCache` would hit.
-            (
-                [
-                    "/Script/A.Foo_ClassNetCache",
-                    "/Script/B.Foo_ClassNetCache",
-                    "/Script/C.FooComponent_ClassNetCache",
-                ],
-                "Foo",
-                "FooComponent",
-            ),
-            // The full name is ambiguous; the shorter stem `Foo` would hit.
-            (
-                [
-                    "/Game/P1/Foo_Bar.Foo_Bar_C_ClassNetCache",
-                    "/Game/P2/Foo_Bar.Foo_Bar_C_ClassNetCache",
-                    "/Game/P3/Foo.Foo_C_ClassNetCache",
-                ],
-                "Foo_Bar",
-                "Foo_Baz",
-            ),
-            // The digit trim is ambiguous; the uppercase trim would hit.
-            (
-                [
-                    "/Game/A/FooA.FooA_C_ClassNetCache",
-                    "/Game/B/FooA.FooA_C_ClassNetCache",
-                    "/Game/C/Foo.Foo_C_ClassNetCache",
-                ],
-                "FooA1",
-                "Foo1",
-            ),
-        ] {
-            let cache = cache_of(&paths);
-            assert_eq!(
-                cache
-                    .resolve_cnc_for_instance_name(name)
-                    .map(|g| g.path.as_str()),
-                None,
+                expected,
                 "{name} over {paths:?}"
             );
-            assert_eq!(
-                cache
-                    .resolve_cnc_for_instance_name(control)
-                    .map(|g| g.path.as_str()),
-                Some(paths[2]),
-                "control {control} over {paths:?}"
-            );
         }
     }
 
     #[test]
-    fn cnc_resolve_grenade_indicator_bounce() {
-        // GrenadeExplodeIndicator_Bounce -> strip _Bounce ->
-        // GrenadeExplodeIndicator -> _C_ClassNetCache
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Abilities/GrenadeExplodeIndicator.GrenadeExplodeIndicator_C_ClassNetCache"
-                .into(),
-            91,
-            1,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("GrenadeExplodeIndicator_Bounce")
-            .unwrap();
-        assert!(g.path.ends_with("_ClassNetCache"));
-    }
-
-    #[test]
-    fn cnc_resolve_switch_exact_name() {
-        // Switch_BlackMarket_2 -> first tries full name with _C_ClassNetCache
-        // suffix which matches directly without stripping.
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(NetFieldExportGroup::new(
-            "/Game/Maps/Switch_BlackMarket_2.Switch_BlackMarket_2_C_ClassNetCache".into(),
-            92,
-            4,
-        ));
-        let g = cache
-            .resolve_cnc_for_instance_name("Switch_BlackMarket_2")
-            .unwrap();
-        assert_eq!(
-            g.path,
-            "/Game/Maps/Switch_BlackMarket_2.Switch_BlackMarket_2_C_ClassNetCache"
-        );
+    fn resolve_cnc_for_instance_name_resolves_each_row() {
+        const DEADEYE_VO_C: &str =
+            "/Game/Audio/VOComponent/AudDeadeyeVoComponent.AudDeadeyeVOComponent_C_ClassNetCache";
+        const DEADEYE: &str = "/Game/Audio/VOComponent/AudDeadeye.AudDeadeye_ClassNetCache";
+        const DEADEYE_VO: &str =
+            "/Game/Audio/VOComponent/AudDeadeyeVoComponent.AudDeadeyeVOComponent_ClassNetCache";
+        const BOMB: &str = "/Game/GameModes/Bomb/BombDestination.BombDestination_C_ClassNetCache";
+        const GRENADE: &str =
+            "/Game/Abilities/GrenadeExplodeIndicator.GrenadeExplodeIndicator_C_ClassNetCache";
+        const SWITCH: &str = "/Game/Maps/Switch_BlackMarket_2.Switch_BlackMarket_2_C_ClassNetCache";
+        const X_C: &str = "/Game/X/X.X_C_ClassNetCache";
+        const X_COMPONENT: &str = "/Script/ShooterGame.XComponent_ClassNetCache";
+        const X_PLAIN: &str = "/Script/ShooterGame.X_ClassNetCache";
+        let next_suffix = [
+            "/Script/A.Foo_ClassNetCache",
+            "/Script/B.Foo_ClassNetCache",
+            "/Script/C.FooComponent_ClassNetCache",
+        ];
+        let shorter_stem = [
+            "/Game/P1/Foo_Bar.Foo_Bar_C_ClassNetCache",
+            "/Game/P2/Foo_Bar.Foo_Bar_C_ClassNetCache",
+            "/Game/P3/Foo.Foo_C_ClassNetCache",
+        ];
+        let uppercase_trim = [
+            "/Game/A/FooA.FooA_C_ClassNetCache",
+            "/Game/B/FooA.FooA_C_ClassNetCache",
+            "/Game/C/Foo.Foo_C_ClassNetCache",
+        ];
+        let separators = [
+            "/Script/X.Foo_ClassNetCache",
+            "/Script/X.Game:Foo_ClassNetCache",
+        ];
+        let rows: &[Row<'_>] = &[
+            // The three suffixes: `_ClassNetCache`, `Component_ClassNetCache`,
+            // `_C_ClassNetCache`.
+            (
+                &["/Script/ShooterGame.AresWorldSettings_ClassNetCache"],
+                "AresWorldSettings",
+                Some("/Script/ShooterGame.AresWorldSettings_ClassNetCache"),
+            ),
+            (
+                &["/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache"],
+                "ForceModuleManager",
+                Some("/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache"),
+            ),
+            (&[DEADEYE_VO_C], "AudDeadeyeVOComponent", Some(DEADEYE_VO_C)),
+            // A stem declared under more than one convention resolves by that
+            // suffix order. The groups are registered in the reverse order, so
+            // registration order cannot produce the same answers.
+            (&[X_C, X_COMPONENT, X_PLAIN], "X", Some(X_PLAIN)),
+            (&[X_C, X_COMPONENT], "X", Some(X_COMPONENT)),
+            // Instance suffixes are stripped one `_` segment at a time.
+            (&[BOMB], "BombDestination_A", Some(BOMB)),
+            (&[BOMB], "BombDestination_B", Some(BOMB)),
+            (
+                &["/Game/Audio/Core/AmbientAudio.AmbientAudio_C_ClassNetCache"],
+                "AmbientAudio_Ascent_Defender_SoundA_003",
+                Some("/Game/Audio/Core/AmbientAudio.AmbientAudio_C_ClassNetCache"),
+            ),
+            (
+                &["/Script/ShooterGame.MeleeAttackStateComponent_ClassNetCache"],
+                "MeleeAttackState_Alt",
+                Some("/Script/ShooterGame.MeleeAttackStateComponent_ClassNetCache"),
+            ),
+            (&[GRENADE], "GrenadeExplodeIndicator_Bounce", Some(GRENADE)),
+            // The full name is tried first and matches without stripping.
+            (&[SWITCH], "Switch_BlackMarket_2", Some(SWITCH)),
+            // Trailing digits, then one trailing uppercase letter.
+            (
+                &["/Game/Interactable/WindowShield.WindowShield_C_ClassNetCache"],
+                "WindowShieldA1",
+                Some("/Game/Interactable/WindowShield.WindowShield_C_ClassNetCache"),
+            ),
+            // Both are real archive names. The digit-only trim is tried before
+            // the uppercase trim (shorter-first matched the unrelated
+            // `AudDeadeye` group), and the uppercase trim removes one letter:
+            // `AudDeadeyeVOB` loses the `B`, not the whole `VOB` run.
+            (&[DEADEYE, DEADEYE_VO], "AudDeadeyeVO2", Some(DEADEYE_VO)),
+            (&[DEADEYE, DEADEYE_VO], "AudDeadeyeVOB1", Some(DEADEYE_VO)),
+            (
+                &["/Script/ShooterGame.SomethingUnrelated_ClassNetCache"],
+                "AbilitiesAndBuffsComponent",
+                None,
+            ),
+            (
+                &[
+                    "/Script/A.SharedName_ClassNetCache",
+                    "/Script/B.SharedName_ClassNetCache",
+                ],
+                "SharedName",
+                None,
+            ),
+            // An ambiguous candidate ends the search wherever the resolver
+            // would move on: at the next suffix, the next shorter stem, and the
+            // uppercase trim after the digit trim. Each later group is
+            // reachable when nothing ambiguous comes first.
+            (&next_suffix, "Foo", None),
+            (&next_suffix, "FooComponent", Some(next_suffix[2])),
+            (&shorter_stem, "Foo_Bar", None),
+            (&shorter_stem, "Foo_Baz", Some(shorter_stem[2])),
+            (&uppercase_trim, "FooA1", None),
+            (&uppercase_trim, "Foo1", Some(uppercase_trim[2])),
+            // A qualified name is never resolved, even where stripping a `_`
+            // segment or matching a leaf spelled like it would succeed.
+            (&separators, "Foo_Bar.Baz", None),
+            (&separators, "Foo_Bar/Baz", None),
+            (&separators, "Game:Foo", None),
+        ];
+        for &(paths, name, expected) in rows {
+            assert_eq!(
+                cache_of(paths)
+                    .resolve_cnc_for_instance_name(name)
+                    .map(|g| g.path.as_str()),
+                expected,
+                "{name} over {paths:?}"
+            );
+        }
     }
 }
