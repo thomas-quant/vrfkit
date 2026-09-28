@@ -83,10 +83,6 @@ fn read_fname(reader: &mut BitReader<'_>) -> Result<String> {
 /// to existing ones. The cache accumulates state across frames.
 ///
 /// Returns the number of layout-command exports processed.
-///
-/// `#[must_use]` because the only production caller took the count with a bare
-/// `?` and dropped it, so a documented tally reached no counter anywhere. If a
-/// caller genuinely does not want it, `let _ =` says so out loud.
 #[must_use = "the export count is a tally; bind it or discard it explicitly"]
 pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -> Result<u32> {
     let num_exports = reader.read_int_packed()?;
@@ -152,8 +148,6 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
 /// they can be individually validated for complete consumption.
 ///
 /// Returns the number of GUID payloads processed.
-///
-/// `#[must_use]` for the same reason as [`read_net_field_exports`].
 #[must_use = "the GUID payload count is a tally; bind it or discard it explicitly"]
 pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -> Result<u32> {
     let num_guids = reader.read_int_packed()?;

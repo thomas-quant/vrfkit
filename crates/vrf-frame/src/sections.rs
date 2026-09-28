@@ -22,18 +22,13 @@ const MAX_FSTRING_BYTES: i64 = 1024 * 1024;
 /// `ReadExportGuids()`. Both are byte-aligned (FBinaryArchive) reads.
 ///
 /// This is the only section that mutates state: the schema a replay declares
-/// arrives here, incrementally, frame by frame.
+/// arrives here, incrementally, frame by frame, and its group total reaches
+/// the summary as `Export groups`.
 pub(crate) fn read_export_data(
     reader: &mut BitReader<'_>,
     cache: &mut NetGuidCache,
 ) -> Result<(), FrameError> {
-    // Both counts are deliberately dropped, and said so rather than left to a
-    // bare `?`. `#[must_use]` does not catch this: `?` unwraps the Result and
-    // discarding the resulting `u32` is not a warning, so nothing would have
-    // flagged the silent drop. The numbers are per-frame schema-delta sizes;
-    // the accumulated schema is what downstream reads, via `cache`, and the
-    // group total reaches the summary as `Export groups`. If a per-frame
-    // export rate is ever wanted, this is where to start counting.
+    // Bound on purpose (`#[must_use]` misses a bare `?`); these per-frame counts reach no counter.
     let _exports = vrf_schema::read_net_field_exports(reader, cache)?;
     let _guids = vrf_schema::read_export_guids(reader, cache)?;
     Ok(())
