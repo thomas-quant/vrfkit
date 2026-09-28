@@ -172,5 +172,467 @@
   "field": "OverrideMatchTimerText",
   "checksum": 4004484071,
   "type": "FTextTree"
+ },
+ {
+  "group": "/Game/GameModes/Bomb/BombGameState.BombGameState_C",
+  "field": "ActiveSlowTimeEffects",
+  "checksum": 1807371052,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C",
+  "field": "ActiveSlowTimeEffects",
+  "checksum": 1807371052,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Sequoia/S0/Ability_X/Actor_Sequoia_X_StandardArena.Actor_Sequoia_X_StandardArena_C",
+  "field": "AssignedPlayspace",
+  "checksum": 2379229353,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/ThriftyCeremony.ThriftyCeremony_C",
+  "field": "BlueTeamStartingAvgInventoryValue",
+  "checksum": 2511444522,
+  "type": "Int32"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/WaterBlaster/Functions/FXC_WaterBlaster_Finisher_Destructible.FXC_WaterBlaster_Finisher_Destructible_C",
+  "field": "Bubble_Destroy_Audio",
+  "checksum": 945042264,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "Bubble_Destroy_Audio",
+  "checksum": 945042264,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Breach/S0/Ability_E/GameObject_Breach_E_SweetSpotFissure.GameObject_Breach_E_SweetSpotFissure_C",
+  "field": "CharacterLocation",
+  "checksum": 3040835906,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Characters/Cable/S0/Ability_Q/GameObject_SoundSensor_SweetSpotFissure.GameObject_SoundSensor_SweetSpotFissure_C",
+  "field": "CharacterLocation",
+  "checksum": 3040835906,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Characters/Breach/S0/Ability_4/GameObject_Breach_4_FusionBlast.GameObject_Breach_4_FusionBlast_C",
+  "field": "Charge",
+  "checksum": 4180852283,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/Characters/Breach/S0/Ability_4/Projectile_Breach_4_FusionBlast.Projectile_Breach_4_FusionBlast_C",
+  "field": "Charge",
+  "checksum": 4180852283,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/Characters/Breach/S0/Ability_4/Projectile_Breach_4_FusionBlast.Projectile_Breach_4_FusionBlast_C",
+  "field": "ChargeDistance",
+  "checksum": 261706910,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/CloserCeremony.CloserCeremony_C",
+  "field": "CloserPlayer",
+  "checksum": 951985780,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/ClutchCeremony.ClutchCeremony_C",
+  "field": "ClutchPlayer",
+  "checksum": 829915424,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/WaterBlaster/Functions/FXC_WaterBlaster_Finisher_Destructible.FXC_WaterBlaster_Finisher_Destructible_C",
+  "field": "Collision Offset Position",
+  "checksum": 4217858995,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "Collision Offset Position",
+  "checksum": 4217858995,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Characters/Mage/S0/Ability_E/Ability_Mage_E_WorldSmoke.Ability_Mage_E_WorldSmoke_C",
+  "field": "DefaultToTargetViewModeTargeting",
+  "checksum": 3409090095,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Wraith/S0/Ability_4/Ability_Wraith_4_Smoke.Ability_Wraith_4_Smoke_C",
+  "field": "DefaultToTargetViewModeTargeting",
+  "checksum": 3409090095,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Environment/Breakables/Rockman/BP_Breakable_Simple_Rockman.BP_Breakable_Simple_Rockman_C",
+  "field": "Destroyed",
+  "checksum": 1997410783,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Environment/Rook/VFX/Breakables/BP_Breakable_Simple_Saltman_Helmet.BP_Breakable_Simple_Saltman_Helmet_C",
+  "field": "Destroyed",
+  "checksum": 1997410783,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "Enable Rotate around Axis",
+  "checksum": 3404560428,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C",
+  "field": "EndingStrikeLocation",
+  "checksum": 1641873608,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/FlawlessCeremony.FlawlessCeremony_C",
+  "field": "FlawlessTeam",
+  "checksum": 3355379499,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/States/Contexts/FloatTransitionContext.FloatTransitionContext_C",
+  "field": "Float",
+  "checksum": 3878297219,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/Interactable/Switch_BlackMarket_2.Switch_BlackMarket_2_C",
+  "field": "GameplayStartTime",
+  "checksum": 422586278,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/Characters/AggroBot/S0/Ability_4/Patch_Aggrobot_C_ExplodeyPatch.Patch_Aggrobot_C_ExplodeyPatch_C",
+  "field": "Has Succesfully Hit",
+  "checksum": 1717661931,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Cable/S0/Ability_4/Patch_Cable_4_NetToss.Patch_Cable_4_NetToss_C",
+  "field": "Has Succesfully Hit",
+  "checksum": 1717661931,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Deadeye/S0/Ability_4/Patch_Deadeye_E_Slow_Large.Patch_Deadeye_E_Slow_Large_C",
+  "field": "Has Succesfully Hit",
+  "checksum": 1717661931,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Pandemic/S0/Ability_Q/Patch_Pandemic_AcidMolotov_NewMolotov.Patch_Pandemic_AcidMolotov_NewMolotov_C",
+  "field": "Has Succesfully Hit",
+  "checksum": 1717661931,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Phoenix/S0/Ability_4/Production/NewMolotov/Patch_Phoenix_MolotovFire.Patch_Phoenix_MolotovFire_C",
+  "field": "Has Succesfully Hit",
+  "checksum": 1717661931,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Sarge/S0/Ability_Molotov/Patch_Sarge_Q_Molotov_Production.Patch_Sarge_Q_Molotov_Production_C",
+  "field": "Has Succesfully Hit",
+  "checksum": 1717661931,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Interactable/Switch_BlackMarket_2.Switch_BlackMarket_2_C",
+  "field": "HasPlayed",
+  "checksum": 1537044997,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/Rogue/Desturctible/FXC_Rogue_Finisher_Destructible.FXC_Rogue_Finisher_Destructible_C",
+  "field": "Hidden in Game",
+  "checksum": 6924581,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/WaterBlaster/Functions/FXC_WaterBlaster_Finisher_Destructible.FXC_WaterBlaster_Finisher_Destructible_C",
+  "field": "Hidden in Game",
+  "checksum": 6924581,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "Hidden in Game",
+  "checksum": 6924581,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Iris/S0/Ability_4/Ability_Iris_Thumper.Ability_Iris_Thumper_C",
+  "field": "Is State Concuss",
+  "checksum": 501730740,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/States/ActivatableActorComponent.ActivatableActorComponent_C",
+  "field": "IsActivated",
+  "checksum": 1939830999,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/States/ActivatableActor_Selectable_Component.ActivatableActor_Selectable_Component_C",
+  "field": "IsActivated",
+  "checksum": 1939830999,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Thorne/S0/Ability_E/GameObject_Thorne_E_Wall_Segment_Fortifying.GameObject_Thorne_E_Wall_Segment_Fortifying_C",
+  "field": "IsAlive_0",
+  "checksum": 445799890,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Killjoy/S0/Ability_Q/Pawn_Killjoy_Q_StealthAlarmbot.Pawn_Killjoy_Q_StealthAlarmbot_C",
+  "field": "IsArmed",
+  "checksum": 3166326863,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Killjoy/S0/Ability_Q/Pawn_Killjoy_Q_StealthAlarmbot.Pawn_Killjoy_Q_StealthAlarmbot_C",
+  "field": "IsBurrowed",
+  "checksum": 2671071791,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C",
+  "field": "IsCurrentlyDoingInitialFlyOut",
+  "checksum": 1136330846,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Interactable/Switch_BlackMarket_2.Switch_BlackMarket_2_C",
+  "field": "IsDisabled",
+  "checksum": 2206903017,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Interactable/Switch_BlackMarket_2.Switch_BlackMarket_2_C",
+  "field": "LastUsedTime",
+  "checksum": 1443783453,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/Interactable/Switch_BlackMarket_2.Switch_BlackMarket_2_C",
+  "field": "LeverDown",
+  "checksum": 3871083543,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Sequoia/S0/Ability_Q/Ability_Sequoia_Q_FragileMissilePrototypeEquipped.Ability_Sequoia_Q_FragileMissilePrototypeEquipped_C",
+  "field": "Projectile",
+  "checksum": 2321996340,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Wraith/S0/Ability_Q/Ability_Wraith_Q_NearsightMissile.Ability_Wraith_Q_NearsightMissile_C",
+  "field": "Projectile",
+  "checksum": 2321996340,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/ThriftyCeremony.ThriftyCeremony_C",
+  "field": "RedTeamStartingAvgInventoryValue",
+  "checksum": 1159482238,
+  "type": "Int32"
+ },
+ {
+  "group": "/Game/Characters/Cashew/S0/Ability_E/AIPawn_Cashew_E_SeekingTargetMissile.AIPawn_Cashew_E_SeekingTargetMissile_C",
+  "field": "RocketIndex",
+  "checksum": 244340520,
+  "type": "Int32"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "Rotate Axis Location",
+  "checksum": 2055764079,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "Rotate Offset",
+  "checksum": 3642914479,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "Rotate Speed",
+  "checksum": 6804471,
+  "type": "Double"
+ },
+ {
+  "group": "/Game/ThriftyCeremony.ThriftyCeremony_C",
+  "field": "SalvagingTeam",
+  "checksum": 936511401,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Cashew/S0/Ability_E/GameObject_Cashew_E_MapMissileMarker.GameObject_Cashew_E_MapMissileMarker_C",
+  "field": "Seeking Missile Actor",
+  "checksum": 1905883563,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Cashew/S0/Ability_E/GameObject_Cashew_E_MapMissileMarker_SecondRocket.GameObject_Cashew_E_MapMissileMarker_SecondRocket_C",
+  "field": "Seeking Missile Actor",
+  "checksum": 1905883563,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Cable/S0/Ability_4/GameObject_Cable_4_RemovableNet.GameObject_Cable_4_RemovableNet_C",
+  "field": "Target",
+  "checksum": 2924225553,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Gumshoe/S0/Ability_E/GameObject_RemovableObject_GumshoeTrackingDart.GameObject_RemovableObject_GumshoeTrackingDart_C",
+  "field": "Target",
+  "checksum": 2924225553,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Hunter/S0/Ability_E/Drone/GameObject_Hunter_E_Drone_RevealDart.GameObject_Hunter_E_Drone_RevealDart_C",
+  "field": "Target",
+  "checksum": 2924225553,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/States/Contexts/EquipRequestTransitionContext.EquipRequestTransitionContext_C",
+  "field": "TargetEquippable",
+  "checksum": 4028634209,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/TeamAceCeremony.TeamAceCeremony_C",
+  "field": "TeamAcingTeam",
+  "checksum": 1655581842,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/WaterBlaster/Functions/FXC_WaterBlaster_Finisher_Destructible.FXC_WaterBlaster_Finisher_Destructible_C",
+  "field": "VFX Offset Position",
+  "checksum": 470315408,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/_Core/FXC_Finisher_Destructible.FXC_Finisher_Destructible_C",
+  "field": "VFX Offset Position",
+  "checksum": 470315408,
+  "type": "VectorDouble"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/Ninja/Finisher_Ninja_Destructible.Finisher_Ninja_Destructible_C",
+  "field": "VFX_Destroy",
+  "checksum": 1424672044,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/Ninja/Finisher_Ninja_Destructible.Finisher_Ninja_Destructible_C",
+  "field": "VFX_Duration_Ground",
+  "checksum": 2949030953,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/Ninja/Finisher_Ninja_Destructible.Finisher_Ninja_Destructible_C",
+  "field": "VFX_Duration_Water",
+  "checksum": 2234578776,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/Ninja/Finisher_Ninja_Destructible.Finisher_Ninja_Destructible_C",
+  "field": "VFX_Ground",
+  "checksum": 2642729003,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Equippables/Finishers/Ninja/Finisher_Ninja_Destructible.Finisher_Ninja_Destructible_C",
+  "field": "VFX_Spawn",
+  "checksum": 1816143426,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Personalization/Prototypes/OnKillEffect_Base.OnKillEffect_Base_C",
+  "field": "Victim FXC",
+  "checksum": 3224851082,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Personalization/Prototypes/OnKillEffect_Base.OnKillEffect_Base_C",
+  "field": "VictimFXC_Planted",
+  "checksum": 3421571079,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Sequoia/S0/Ability_Q/Ability_Sequoia_Q_FragileMissilePrototypeEquipped.Ability_Sequoia_Q_FragileMissilePrototypeEquipped_C",
+  "field": "WarningActor",
+  "checksum": 475466788,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Wraith/S0/Ability_Q/Ability_Wraith_Q_NearsightMissile.Ability_Wraith_Q_NearsightMissile_C",
+  "field": "WarningActor",
+  "checksum": 475466788,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/CloserCeremony.CloserCeremony_C",
+  "field": "bShouldDisplayCeremony",
+  "checksum": 2636440541,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/ClutchCeremony.ClutchCeremony_C",
+  "field": "bShouldDisplayCeremony",
+  "checksum": 2636440541,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/DefaultCeremony.DefaultCeremony_C",
+  "field": "bShouldDisplayCeremony",
+  "checksum": 2636440541,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/FlawlessCeremony.FlawlessCeremony_C",
+  "field": "bShouldDisplayCeremony",
+  "checksum": 2636440541,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/TeamAceCeremony.TeamAceCeremony_C",
+  "field": "bShouldDisplayCeremony",
+  "checksum": 2636440541,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/ThriftyCeremony.ThriftyCeremony_C",
+  "field": "bShouldDisplayCeremony",
+  "checksum": 2636440541,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/UI/InGame/HUD/Ceremonies/AceCeremony.AceCeremony_C",
+  "field": "bShouldDisplayCeremony",
+  "checksum": 2636440541,
+  "type": "Bool"
  }
 ]

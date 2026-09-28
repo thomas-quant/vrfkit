@@ -374,3 +374,148 @@ fn match_timer_text_decodes_both_observed_histories() {
     );
     assert_eq!(stats.decoded_err, 1);
 }
+
+const DEFAULT_CEREMONY: &str = "/Game/DefaultCeremony.DefaultCeremony_C";
+const CLUTCH_CEREMONY: &str = "/Game/ClutchCeremony.ClutchCeremony_C";
+const THRIFTY_CEREMONY: &str = "/Game/ThriftyCeremony.ThriftyCeremony_C";
+const ON_KILL_EFFECT: &str =
+    "/Game/Personalization/Prototypes/OnKillEffect_Base.OnKillEffect_Base_C";
+const FLOAT_CONTEXT: &str = "/Game/Characters/States/Contexts/\
+FloatTransitionContext.FloatTransitionContext_C";
+const EQUIP_CONTEXT: &str = "/Game/Characters/States/Contexts/\
+EquipRequestTransitionContext.EquipRequestTransitionContext_C";
+const THORNE_SEGMENT: &str = "/Game/Characters/Thorne/S0/Ability_E/\
+GameObject_Thorne_E_Wall_Segment_Fortifying.GameObject_Thorne_E_Wall_Segment_Fortifying_C";
+const BREACH_FISSURE: &str = "/Game/Characters/Breach/S0/Ability_E/\
+GameObject_Breach_E_SweetSpotFissure.GameObject_Breach_E_SweetSpotFissure_C";
+
+/// A sample of the other Blueprint identities, one per type and payload
+/// shape, each a real 13.06 payload with the value the independent reader
+/// gave it. The full list and its evidence are in the fixture;
+/// `test_compatible_checksum_facts.py` holds every entry to its checksum.
+#[test]
+fn other_blueprint_payloads_decode_to_the_independent_values() {
+    let mut stats = OverlayStats::default();
+    let fissure = [
+        0x00, 0x00, 0x00, 0x80, 0x23, 0x3b, 0x91, 0xc0, 0x00, 0x00, 0x00, 0xa0, 0xf9, 0x30, 0xac,
+        0xc0, 0x00, 0x00, 0x00, 0x80, 0x66, 0x02, 0x79, 0x40,
+    ];
+    let cases: [Case<'_>; 10] = [
+        (
+            DEFAULT_CEREMONY,
+            "bShouldDisplayCeremony",
+            2_636_440_541,
+            &[1],
+            1,
+            bool_(true),
+        ),
+        // An 8-bit reference is not always null: 0x80 is GUID 64.
+        (
+            CLUTCH_CEREMONY,
+            "ClutchPlayer",
+            829_915_424,
+            &[0x80],
+            8,
+            int(64),
+        ),
+        (
+            CLUTCH_CEREMONY,
+            "ClutchPlayer",
+            829_915_424,
+            &[0xb1, 0x04],
+            16,
+            int(344),
+        ),
+        // An odd GUID: a static object, here an FXC class in net_guids.
+        (
+            ON_KILL_EFFECT,
+            "Victim FXC",
+            3_224_851_082,
+            &[0xa3, 0x2c],
+            16,
+            int(2_897),
+        ),
+        (
+            FLOAT_CONTEXT,
+            "Float",
+            3_878_297_219,
+            &[0x00, 0x00, 0x00, 0x00, 0x54, 0x00, 0xc4, 0x3f],
+            64,
+            float(0.15626001358032227),
+        ),
+        (
+            EQUIP_CONTEXT,
+            "TargetEquippable",
+            4_028_634_209,
+            &[0xf9, 0xdf, 0x02],
+            24,
+            int(30_716),
+        ),
+        (
+            THORNE_SEGMENT,
+            "IsAlive_0",
+            445_799_890,
+            &[0],
+            1,
+            bool_(false),
+        ),
+        (
+            THRIFTY_CEREMONY,
+            "BlueTeamStartingAvgInventoryValue",
+            2_511_444_522,
+            &[0x52, 0x0d, 0x00, 0x00],
+            32,
+            int(3_410),
+        ),
+        (
+            BREACH_FISSURE,
+            "CharacterLocation",
+            3_040_835_906,
+            &fissure,
+            192,
+            string("(-1102.78466796875,-3608.487548828125,400.1500244140625)"),
+        ),
+        (
+            THRIFTY_CEREMONY,
+            "bShouldDisplayCeremony",
+            2_636_440_541,
+            &[0],
+            1,
+            bool_(false),
+        ),
+    ];
+    for (group, field, checksum, raw, bits, want) in cases {
+        assert_eq!(
+            resolve(group, field, Some(checksum ^ 1)),
+            None,
+            "{group} {field}"
+        );
+        assert_eq!(
+            decode(&mut stats, group, field, checksum, raw, bits),
+            want,
+            "{group} {field}"
+        );
+    }
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (10, 0));
+}
+
+type Values = (Option<i64>, Option<f64>, Option<bool>, Option<String>);
+
+/// (group, field, checksum, payload, bit count, the independent values).
+type Case<'a> = (&'a str, &'a str, u32, &'a [u8], u32, Values);
+
+fn int(value: i64) -> Values {
+    (Some(value), None, None, None)
+}
+
+fn float(value: f64) -> Values {
+    (None, Some(value), None, None)
+}
+
+fn bool_(value: bool) -> Values {
+    (None, None, Some(value), None)
+}
+
+fn string(value: &str) -> Values {
+    (None, None, None, Some(value.to_owned()))
+}
