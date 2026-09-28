@@ -7,7 +7,7 @@ pools, death, or player credit.
 """
 from __future__ import annotations
 
-import argparse, collections, hashlib, json, math, os, re, struct, sys
+import argparse, collections, json, math, re, struct, sys
 from pathlib import Path
 
 import pyarrow as pa
@@ -144,6 +144,7 @@ def parse_group(route, key, rows, paths, segments, declared):
     handle, crc, parent_name, parent_handle, scalar_name, scalar_handle, members, relation = ROUTES[route]
     expected_parent = route + "." + parent_name
     child_rx = re.compile("^" + re.escape(expected_parent) + r"\[(\d+)\]\.([A-Za-z0-9_]+)$")
+    name_to_handle = {v: h for h, v in members.items()}
     by = collections.defaultdict(list); errors = []
     for ordinal, r in rows:
         name = r.get("field_name") or ""
@@ -161,7 +162,7 @@ def parse_group(route, key, rows, paths, segments, declared):
             child = child_rx.match(name)
             if child:
                 child_name = child.group(2)
-                member_handle = {v: h for h, v in members.items()}.get(child_name)
+                member_handle = name_to_handle.get(child_name)
                 if member_handle is None:
                     errors.append({"source_row": ordinal, "error": "unknown section child name"})
                 elif fields.get(member_handle) != (child_name, VALUE_CHECKSUMS[route][member_handle]):
@@ -213,7 +214,6 @@ def parse_group(route, key, rows, paths, segments, declared):
             m = child_rx.match(name)
             if m:
                 if len(q) != 1: raise InputError("duplicate emitted child")
-                name_to_handle = {v: h for h, v in members.items()}
                 if m.group(2) not in name_to_handle:
                     raise InputError("unknown section child name")
                 emitted[(int(m.group(1)), name_to_handle[m.group(2)])] = q[0]
@@ -224,7 +224,7 @@ def parse_group(route, key, rows, paths, segments, declared):
         order = []
         for _, r in sorted(rows):
             m = child_rx.match(r.get("field_name") or "")
-            if m: order.append((int(m.group(1)), {v:h for h,v in members.items()}[m.group(2)]))
+            if m: order.append((int(m.group(1)), name_to_handle[m.group(2)]))
         if order != [(i,h) for i,h,_,_ in leaves]: raise InputError("child physical order differs from parent wire order")
         grouped = collections.defaultdict(dict)
         for (index, h), (width, payload) in parsed.items():
@@ -284,10 +284,10 @@ def extract(export):
     path_sets = collections.defaultdict(set)
     for r in pq.read_table(export / "net_guids.parquet", columns=["net_guid","path"], use_threads=False).to_pylist(): path_sets[r["net_guid"]].add(r["path"])
     paths = {guid: next(iter(values)) if len(values) == 1 else None for guid, values in path_sets.items()}
-    groups = collections.OrderedDict(); segments = collections.Counter(); selected = []; last = None; last_o = None
+    groups = {}; segments = collections.Counter(); selected = []; last = None; last_o = None
     for o, r in selected_rows(export / "fields.parquet", FIELDS):
+        # selected_rows yields only rows named `<route>.`, so this is a route.
         route = route_name(r.get("field_name"))
-        if route not in ROUTES: last = None; continue
         key = (r["time_ms"],r["packet_id"],r["channel_index"],r["actor_net_guid"],r["object_net_guid"],r["group_path"],r["handle"])
         groups.setdefault((route,key), []).append((o,r)); selected.append((o,r))
         if (route,key) != last or last_o is None or o != last_o + 1: segments[(route,key)] += 1
@@ -300,11 +300,14 @@ def extract(export):
     if before != after: raise IntegrityError("input changed during extraction")
     if impl_before != impl_after: raise IntegrityError("implementation changed during extraction")
     public_decl={k:{n:v for n,v in x.items() if n != "_fields"} for k,x in decl.items()}
+    def tally(obs, ambiguous_key):
+        status = collections.Counter(x["section_state"]["status"] for x in obs)
+        return {"validated_arrays": status["validated_array"], "invalid_arrays": status["invalid"], "parentless_rpcs": status["parentless_rpc"], "schema_invalid": sum(bool(x["schema_errors"]) for x in obs), ambiguous_key: sum(bool(x["ambiguity_reasons"]) for x in obs), "relation_mismatch": sum("scalar_delta_relation_mismatch" in x["ambiguity_reasons"] for x in obs)}
     by_route = {}
     for route in ROUTES:
         route_rows = [x for x in observations if x["route"] == route]
-        by_route[route] = {"coordinate_groups": len(route_rows), "selected_rows": sum(len(x["source_rows"]) for x in route_rows), "validated_arrays": sum(x["section_state"]["status"] == "validated_array" for x in route_rows), "parentless_rpcs": sum(x["section_state"]["status"] == "parentless_rpc" for x in route_rows), "invalid_arrays": sum(x["section_state"]["status"] == "invalid" for x in route_rows), "schema_invalid": sum(bool(x["schema_errors"]) for x in route_rows), "ambiguous": sum(bool(x["ambiguity_reasons"]) for x in route_rows), "relation_mismatch": sum("scalar_delta_relation_mismatch" in x["ambiguity_reasons"] for x in route_rows)}
-    counts={"main_coordinate_groups":len(observations),"main_selected_rows":len(selected),"checkpoint_selected_rows":len(checkpoint),"validated_arrays":sum(x["section_state"]["status"]=="validated_array" for x in observations),"invalid_arrays":sum(x["section_state"]["status"]=="invalid" for x in observations),"parentless_rpcs":sum(x["section_state"]["status"]=="parentless_rpc" for x in observations),"schema_invalid":sum(bool(x["schema_errors"]) for x in observations),"ambiguous_groups":sum(bool(x["ambiguity_reasons"]) for x in observations),"relation_mismatch":sum("scalar_delta_relation_mismatch" in x["ambiguity_reasons"] for x in observations),"by_route":by_route}
+        by_route[route] = {"coordinate_groups": len(route_rows), "selected_rows": sum(len(x["source_rows"]) for x in route_rows), **tally(route_rows, "ambiguous")}
+    counts = {"main_coordinate_groups": len(observations), "main_selected_rows": len(selected), "checkpoint_selected_rows": len(checkpoint), **tally(observations, "ambiguous_groups"), "by_route": by_route}
     return {"schema_version":SCHEMA_VERSION,"kind":"vrfkit_section_observations","export_id":export.name,"source":str(export.resolve()),"route_declarations":public_decl,"provenance":{"replay_build":manifest.get("replay_build"),"input_sha256_before":before,"input_sha256_after":after,"implementation_sha256_before":impl_before,"implementation_sha256_after":impl_after},"observations":observations,"checkpoint_observations":checkpoint,"counts":counts}
 
 

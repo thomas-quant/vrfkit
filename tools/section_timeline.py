@@ -53,9 +53,9 @@ def active_at(history, coordinate):
     return active, "active"
 
 
-def _lifetime(actors, channels, ident):
-    actor, a_status = active_at(actors.get(ident["actor_net_guid"], []), ident)
-    channel, c_status = active_at(channels.get(ident["channel_index"], []), ident)
+def _lifetime(actors, channels, ident, active=active_at):
+    actor, a_status = active(actors.get(ident["actor_net_guid"], []), ident)
+    channel, c_status = active(channels.get(ident["channel_index"], []), ident)
     matched = actor is not None and channel is not None and actor == channel
     return {"status": "active" if matched else "unresolved", "actor_status": a_status,
             "channel_status": c_status, "actor_open": actor, "channel_open": channel}

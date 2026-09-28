@@ -1,6 +1,6 @@
 """Build a compact, conservative section timeline directly from an export."""
 from __future__ import annotations
-import argparse, hashlib, json, sys
+import argparse, json, sys
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
