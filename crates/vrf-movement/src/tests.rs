@@ -435,6 +435,53 @@ fn a_component_stream_shorter_than_its_u16_header_is_not_a_valid_empty_update() 
     assert_eq!(result.error_count, 1, "short component must be a loss");
 }
 
+/// One update carrying the shooter GUID field and then `stream`.
+fn update_with_stream(shooter_guid: u32, stream: &BitWriter) -> BitWriter {
+    let mut update = BitWriter::new();
+    update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
+    update.write_int_packed(32);
+    update.write_u32(shooter_guid);
+    update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
+    update.write_int_packed(stream.bit_count());
+    update.write_other(stream);
+    update.write_int_packed(0);
+    update
+}
+
+#[test]
+fn a_stream_that_fails_to_decode_does_not_drop_the_updates_after_it() {
+    // The stream is a length-delimited field, and the decoder is past all of
+    // it before it reads the first bit, so a failure inside cannot misplace
+    // the next handle. The C# reference records the error and seeks to the
+    // field's end. This decoder gave up on the rest of the array instead, so
+    // one bad stream cost every update queued behind it.
+    let mut bad_magic = BitWriter::new();
+    bad_magic.write_u16(0);
+    bad_magic.write_u8(0x00); // not MOVEMENT_MAGIC
+    let bad_magic = byte_wrapped(&bad_magic, ENVELOPE_TRAILER_BITS);
+    let mut short_header = BitWriter::new();
+    short_header.write_u8(0x52); // fewer than the 16 header bits
+    let good = build_component_data_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)]);
+
+    for (name, bad) in [("bad magic", bad_magic), ("short header", short_header)] {
+        let mut array = BitWriter::new();
+        array.write_int_packed(2); // updateCount = 2
+        array.write_int_packed(1); // index 0
+        array.write_other(&update_with_stream(1111, &bad));
+        array.write_int_packed(2); // index 1
+        array.write_other(&update_with_stream(2222, &good));
+        array.write_int_packed(0);
+
+        let (result, moves) = decode(&wrap_updates_array(&array));
+
+        assert_eq!(result.update_count, 2, "{name}");
+        assert_eq!(result.error_count, 1, "{name}: the failed stream, once");
+        assert_eq!(result.total_moves, 1, "{name}: the next update's move");
+        assert_eq!(moves.len(), 1, "{name}");
+        assert_eq!(moves[0].shooter_character_net_guid, 2222, "{name}");
+    }
+}
+
 #[test]
 fn a_malformed_trailing_padding_byte_is_counted() {
     // After the array terminator exactly 8 bits remain, so the decoder spends

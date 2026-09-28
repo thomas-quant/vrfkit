@@ -138,8 +138,9 @@ fn decode_updates_array(
 
         if decode_single_update(reader, result, emit).is_err() {
             result.error_count += 1;
-            // After a parse error we cannot reliably continue (bit position
-            // is indeterminate). Skip remaining bits in this array.
+            // Only a framing read (a handle or a payload length) fails out of
+            // an update, and after one the position of the next index is
+            // unknown. Skip remaining bits in this array.
             reader.skip_remaining();
             break;
         }
@@ -192,7 +193,13 @@ fn decode_single_update(
             COMPONENT_DATA_STREAM_HANDLE => {
                 let mut sub = reader.sub_reader(u64::from(payload_bits))?;
                 if let Some(guid) = shooter_guid {
-                    decode_component_data_stream(&mut sub, guid, result, emit)?;
+                    // `sub_reader` has already moved `reader` past the whole
+                    // stream, so a failure inside it cannot misplace the next
+                    // handle: count it and go on, as the C# reference does
+                    // (it records the error and seeks to the field's end).
+                    if decode_component_data_stream(&mut sub, guid, result, emit).is_err() {
+                        result.error_count += 1;
+                    }
                 } else {
                     // A stream with no GUID: either handle 2 was undersized
                     // (counted just above) or it has not arrived yet. The

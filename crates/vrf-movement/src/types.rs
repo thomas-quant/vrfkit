@@ -55,9 +55,12 @@ pub struct RpcDecodeResult {
     pub update_count: u32,
     /// Number of decode problems that cost data, counted per occurrence.
     ///
-    /// An update that fails mid-parse leaves the bit cursor at an
-    /// indeterminate position, so the rest of its array is skipped rather than
-    /// guessed at. The count is what makes that skip visible instead of silent.
+    /// A component stream that fails mid-parse loses the rest of that stream
+    /// only: it is a length-delimited field, so decoding goes on with the next
+    /// field and update. A framing read that fails inside an update leaves
+    /// the bit cursor at an indeterminate position, so the rest of its array
+    /// is skipped rather than guessed at. The count is what makes either loss
+    /// visible instead of silent.
     ///
     /// It covers the framing anomalies too, and for the same reason: an update
     /// index past the declared count, a field declaring more bits than its
