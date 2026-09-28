@@ -1,28 +1,7 @@
-//! The replay-wide accumulator for all dynamically-received schema state.
-//!
-//! [`NetGuidCache`] is the central authority for:
-//!
-//! - **path -> group**: find an export group by its full path string.
-//! - **path_name_index -> group**: find an export group by the numeric index the
-//!   engine assigns once and reuses for the rest of the replay.
-//! - **NetGUID -> object path**: map the 32-bit runtime object ID to its
-//!   human-readable path (populated from export-GUID bunches).
-//! - **NetGUID -> outer NetGUID**: track the containment hierarchy so callers can
-//!   walk from a component to its owning actor.
-//! - **GameplayTag index -> name**: the `NetworkGameplayTagNodeIndex` group's
-//!   fields double as a tag name table.
-//!
-//! This state accumulates over the entire replay and is never reset.
-//!
-//! The bare-name resolvers that sit on top of the leaf index
-//! ([`NetGuidCache::unique_leaf_match`] and
-//! [`NetGuidCache::resolve_cnc_for_instance_name`]) live in
-//! [`crate::resolve`]; this module is the storage and the direct lookups.
-//!
-//! # Hashing
-//!
-//! Every map here uses [`FxHashMap`] rather than the standard hasher. See
-//! [`crate::hash`] for the measurement and the security trade that motivates it.
+//! The replay-wide schema accumulator: export groups by path, index and leaf,
+//! and the NetGUID -> path and -> outer maps. State accumulates for the whole
+//! replay. The bare-name resolvers over the leaf index live in `resolve`; this
+//! module is the storage and the direct lookups.
 
 use crate::error::{Result, SchemaError};
 use crate::export::{NetFieldExport, NetFieldExportGroup};
@@ -34,25 +13,16 @@ use crate::resolve::register_leaf;
 /// The path used for the gameplay-tag name table group.
 const GAMEPLAY_TAG_GROUP_PATH: &str = "NetworkGameplayTagNodeIndex";
 
-/// Replay-wide schema accumulator.
-///
-/// All lookups are O(1) via `HashMap`. Field access within a group is O(1) via
-/// direct `Vec` indexing (see [`NetFieldExportGroup::get_field`]).
+/// Replay-wide schema accumulator: hashed lookups, and fields indexed by
+/// handle within a group ([`NetFieldExportGroup::get_field`]).
 #[derive(Default)]
 pub struct NetGuidCache {
     /// path (String, ordinal) -> group index into `groups`.
     by_path: FxHashMap<String, usize>,
     /// path_name_index (u32) -> group index into `groups`.
     by_index: FxHashMap<u32, usize>,
-    /// leaf name -> group index. Used by
-    /// [`unique_leaf_match`](NetGuidCache::unique_leaf_match) to resolve bare
-    /// class names (e.g. `AresAttributeSet`) to their full export group path
-    /// (e.g. `/Script/ShooterGame.AresAttributeSet`).
-    ///
-    /// Mirrors the C# `ContentBlockPathResolver.UniqueLeafMatch` logic: a bare
-    /// name is only resolved if exactly ONE group has a path ending with
-    /// `.{name}`. Ambiguous names (multiple groups sharing the same leaf) are
-    /// stored as `usize::MAX` to signal rejection.
+    /// Leaf (the text after a path's last `.`) -> group index, or
+    /// [`Self::AMBIGUOUS_LEAF`] when two or more groups claim it.
     by_leaf: FxHashMap<String, usize>,
     /// Central storage for all groups.
     groups: Vec<NetFieldExportGroup>,
@@ -66,24 +36,12 @@ pub struct NetGuidCache {
     /// Bumped whenever `guid_to_path` or `guid_to_outer` changes. See
     /// [`Self::guid_generation`].
     guid_generation: u64,
-    /// Net-field exports [`Self::set_field_on_group`] could not place --
-    /// either the group was not found or, the only way that can happen from
-    /// [`crate::reader::read_net_field_exports`] (which validates the group
-    /// exists before this is called), the handle exceeded the group's
-    /// declared length. The C# reference logs a warning and moves on; this
-    /// crate had no equivalent, so a field dropped this way vanished with no
-    /// counter. See [`Self::dropped_field_exports`].
-    ///
-    /// Scoped to whichever `NetGuidCache` this is: the checkpoint pass builds
-    /// a fresh one per chunk (`driver::checkpoints::process_chunk`) and drops
-    /// it after, so a drop there never reaches the ReplayData-pass cache this
-    /// counter is read from in the manifest.
+    /// See [`Self::dropped_field_exports`].
     dropped_field_exports: u64,
 }
 
 impl NetGuidCache {
-    /// Sentinel value in `by_leaf` indicating an ambiguous leaf (multiple
-    /// groups share the same trailing class name).
+    /// `by_leaf` sentinel: two or more groups share the leaf.
     pub(crate) const AMBIGUOUS_LEAF: usize = usize::MAX;
 
     /// Create an empty cache.
@@ -97,32 +55,19 @@ impl NetGuidCache {
         &self.by_leaf
     }
 
-    /// A counter that changes whenever the set of group paths changes.
-    ///
-    /// Callers that memoise a *pure function of the group paths* -- "which group
-    /// does this path resolve to", "is this function name unique across all
-    /// groups" -- can stamp the memo with this value and discard it when the
-    /// value moves. It is bumped by every [`Self::add_export_group`] and by
-    /// [`Self::clear`], which are the only operations that add a path, add a
-    /// path alias, or remove one.
-    ///
-    /// It deliberately does NOT track field mutations
-    /// ([`Self::set_field_on_group`]): a memo of field contents would be unsound
-    /// to key on this. Only path-set queries may use it. A successful
-    /// `add_export_group` always bumps the generation because a supported merge
-    /// can replace canonical path metadata and its aliases.
+    /// A counter that changes whenever the set of group paths changes, for
+    /// memos over that set: bumped by every successful
+    /// [`Self::add_export_group`] (a merge can replace a canonical path and its
+    /// aliases) and by [`Self::clear`]. It never tracks field mutations, so a
+    /// memo of field contents must not key on it.
     #[must_use]
     pub fn schema_generation(&self) -> u64 {
         self.schema_generation
     }
 
-    /// Register a new export group or merge it with an existing one.
-    ///
-    /// If exactly one coordinate already exists, that canonical group adopts
-    /// both incoming coordinates and merges the fields. If the path and index
-    /// identify different groups, the update fails without mutating the cache.
-    ///
-    /// Returns the index of the canonical group.
+    /// Register a new export group or merge it into the one its path or index
+    /// already names, returning that group's index. A path and index naming
+    /// two different groups fail without mutating the cache.
     pub fn add_export_group(&mut self, group: NetFieldExportGroup) -> Result<usize> {
         let existing_by_path = self.by_path.get(&group.path).copied();
         let existing_by_index = self.by_index.get(&group.path_name_index).copied();
@@ -139,9 +84,8 @@ impl NetGuidCache {
         }
 
         let idx = if let Some(idx) = existing_by_path {
-            // Same path: this is the same class re-declaring (or extending)
-            // its own export group, so its previously-set handle slots are
-            // still valid and are preserved.
+            // The same class re-declaring or extending its group: its handle
+            // slots stay valid and are kept.
             self.groups[idx].merge_from(&group);
             self.groups[idx].path = group.path;
             self.groups[idx].path_name_index = group.path_name_index;
@@ -150,24 +94,16 @@ impl NetGuidCache {
             self.rebuild_group_indexes();
             idx
         } else if let Some(idx) = existing_by_index {
-            // Index matched, path did not: `path_name_index` was reused for a
-            // path this cache has never seen, which the module doc says the
-            // engine does over a replay's lifetime as old FNames are freed and
-            // reassigned. The group at `idx` belongs to whatever class held
-            // that index before -- merging would let its handle slots (field
-            // names, `compatible_checksum`) survive into the new class, so a
-            // content block resolved against the new path would read the OLD
-            // class's field name/type at a handle the NEW class never
-            // declared. Replace the group outright instead of merging into
-            // it.
+            // The index was reused for a path never seen: replace the group,
+            // because merging would let the old class's slots name handles the
+            // new class never declared.
             self.groups[idx] = group;
             // The old class's spellings and leaf claim go with it.
             self.rebuild_group_indexes();
             idx
         } else {
-            // Neither coordinate is known: a new group. It retires no key, so
-            // it is registered on its own rather than by rebuilding every
-            // group; `index_group` says why both leave the same lookups.
+            // A new group retires no key, so it registers alone rather than by
+            // a rebuild; `index_group` says why both leave the same lookups.
             let idx = self.groups.len();
             self.groups.push(group);
             self.index_group(idx);
@@ -178,14 +114,10 @@ impl NetGuidCache {
         Ok(idx)
     }
 
-    /// Rebuild every group-derived lookup after a canonical identity changes.
-    ///
-    /// A merge or a replacement can retire keys: a group's old spellings, its
-    /// old index, its claim on a leaf. None of that can be taken back one key
-    /// at a time -- `AMBIGUOUS_LEAF` does not record which groups claimed the
-    /// leaf, and a spelling given up by one group may belong to another that
-    /// `by_path` no longer names -- so those two arms rebuild from `groups`.
-    /// A new group retires nothing; see [`Self::index_group`].
+    /// Rebuild every lookup from `groups` after a merge or replacement, which
+    /// can retire keys that cannot be taken back one at a time:
+    /// `AMBIGUOUS_LEAF` does not record its claimants, and a spelling one
+    /// group gives up may belong to another that `by_path` no longer names.
     fn rebuild_group_indexes(&mut self) {
         self.by_path.clear();
         self.by_index.clear();
@@ -196,27 +128,16 @@ impl NetGuidCache {
     }
 
     /// Register group `idx` in the lookups: every spelling of its path, its
-    /// `path_name_index`, and its leaf. A later registration wins a spelling
-    /// or an index; a second claimant turns a leaf ambiguous.
+    /// `path_name_index`, and its leaf. A later registration wins a spelling or
+    /// an index; a second claimant turns a leaf ambiguous.
     ///
-    /// [`Self::rebuild_group_indexes`] is this, called for every group in
-    /// storage order. Calling it once, for a group just pushed, leaves the
-    /// maps that rebuild would, because:
-    ///
-    /// - the maps already equal a rebuild of the older groups. Every successful
-    ///   `add_export_group` ends in one of the two, an error returns before it
-    ///   touches anything, `clear` empties both sides, and nothing else writes
-    ///   these maps or a group's path or index; and
-    /// - a rebuild registers the new group last, and each write here is final
-    ///   for the last group either way: a spelling or index it shares with an
-    ///   older group ends up pointing at it, and a leaf it shares ends up
-    ///   ambiguous.
-    ///
-    /// The cache tests hold every arm of `add_export_group` to a full rebuild
-    /// after every call. The rebuild this spares a new group re-registers every
-    /// existing group, and the checkpoint pass -- a fresh cache per checkpoint,
-    /// every group new -- paid it once per group; the measured cost is in
-    /// docs/PERFORMANCE_NOTES.md#registering-a-new-export-group.
+    /// Called once for a group just pushed, it leaves the maps a full rebuild
+    /// would: they already equal a rebuild of the older groups (every success
+    /// ends in one of the two, errors touch nothing, `clear` empties both
+    /// sides), and each write here is final for the last group, which a rebuild
+    /// registers last. The cache tests hold every arm to a full rebuild; the
+    /// rebuild this spares cost the checkpoint pass once per group
+    /// (docs/PERFORMANCE_NOTES.md#registering-a-new-export-group).
     fn index_group(&mut self, idx: usize) {
         let group = &self.groups[idx];
         for_each_replay_path_key(&group.path, |key| {
@@ -234,11 +155,8 @@ impl NetGuidCache {
             .map(|&i| &self.groups[i])
     }
 
-    /// Get a mutable reference to a group by its `path_name_index`.
-    ///
-    /// For its field slots only. The lookups are keyed on the group's `path`
-    /// and `path_name_index`; changing either through this reference would
-    /// leave them naming the old values.
+    /// A group by its `path_name_index`, mutably, for its field slots only:
+    /// changing its `path` or `path_name_index` would leave the lookups stale.
     #[must_use]
     pub fn get_group_by_index_mut(
         &mut self,
@@ -259,37 +177,19 @@ impl NetGuidCache {
         self.by_path.get(path).map(|&i| &self.groups[i])
     }
 
-    /// A counter that changes whenever a NetGUID -> path or NetGUID -> outer
-    /// mapping changes.
-    ///
-    /// `set_net_guid_path` is called both through
-    /// [`crate::reader::read_export_guids`] (frame-level ExportData, run once
-    /// per frame ahead of that frame's packet loop) and through per-block
-    /// export-GUID bunches during packet processing; neither caller routes
-    /// through the same object that owns a group-path resolution memo, so a
-    /// memo built from those resolutions has no other way to see this map
-    /// change. Callers that memoise a function of `guid_to_path` /
-    /// `guid_to_outer` must stamp with this and discard on a mismatch, the
-    /// same pattern as [`Self::schema_generation`].
+    /// A counter that changes whenever a NetGUID -> path or -> outer mapping
+    /// changes. Frame ExportData and per-block export bunches both write those
+    /// maps, so a memo over them must stamp with this and discard on a
+    /// mismatch, as with [`Self::schema_generation`].
     #[must_use]
     pub fn guid_generation(&self) -> u64 {
         self.guid_generation
     }
 
-    /// Register a NetGUID -> path mapping (from export GUID bunches).
-    ///
-    /// A no-op write -- the same path and outer this GUID already has -- does
-    /// not bump [`Self::guid_generation`]. This isn't only about the redundant
-    /// hashmap writes: [`crate::read_checkpoint_tables`] reads a fresh `NetGuidCache` per
-    /// checkpoint, but the frame-level ExportData section
-    /// ([`crate::read_export_guids`]) calls this once per exported
-    /// GUID on *every* frame that re-declares one, with no pre-check of its
-    /// own (unlike `vrfkit`'s `register_path`, which skips the call entirely
-    /// when nothing changed, for its own reason -- an allocation, not this
-    /// one). Without the check here, a replay that keeps re-sending a GUID's
-    /// path bumps `guid_generation` every such frame, which -- now that a
-    /// group-path resolution memo keys on this generation -- would collapse
-    /// the memo's hit rate to near zero on exactly that traffic.
+    /// Register a NetGUID -> path mapping. A write that changes nothing does
+    /// not bump [`Self::guid_generation`]: frame ExportData re-declares GUIDs
+    /// every frame with no pre-check of its own, and bumping there would
+    /// collapse the hit rate of a memo keyed on the generation.
     pub fn set_net_guid_path(&mut self, net_guid: u32, path: String, outer: Option<NetworkGuid>) {
         let outer = outer.filter(|g| g.is_valid());
         if self.guid_to_path.get(&net_guid).map(String::as_str) == Some(path.as_str())
@@ -321,10 +221,8 @@ impl NetGuidCache {
         self.guid_to_outer.get(&net_guid).copied()
     }
 
-    /// Every registered NetGUID with its path and outer GUID.
-    ///
-    /// Order is unspecified (backed by a `HashMap`); sort if determinism
-    /// matters.
+    /// Every registered NetGUID with its path and outer GUID, in unspecified
+    /// (hash) order; sort if determinism matters.
     #[must_use]
     pub fn net_guid_entries(&self) -> Vec<NetGuidEntry<'_>> {
         self.guid_to_path
@@ -344,19 +242,16 @@ impl NetGuidCache {
         self.get_path_by_guid(outer.0)
     }
 
-    /// Look up a gameplay-tag name by its network index.
-    ///
-    /// Tags are stored in the `NetworkGameplayTagNodeIndex` export group, where
-    /// each field's handle is the tag index and its name is the tag string.
+    /// A gameplay-tag name by network index: the `NetworkGameplayTagNodeIndex`
+    /// group's field handles are tag indices and its names the tags.
     #[must_use]
     pub fn get_gameplay_tag_name(&self, tag_index: u32) -> Option<&str> {
         let group = self.get_group_by_path(GAMEPLAY_TAG_GROUP_PATH)?;
         group.get_field(tag_index).map(|f| f.name.as_str())
     }
 
-    /// Set a field directly on the group identified by `path_name_index`.
-    ///
-    /// Returns `true` if the group was found and the field handle was in range.
+    /// Set a field on the group at `path_name_index`. `false`, counted in
+    /// [`Self::dropped_field_exports`], when the group or the handle is absent.
     pub fn set_field_on_group(&mut self, path_name_index: u32, field: NetFieldExport) -> bool {
         let placed = if let Some(group) = self.get_group_by_index_mut(path_name_index) {
             group.set_field(field)
@@ -369,13 +264,16 @@ impl NetGuidCache {
         placed
     }
 
-    /// Net-field exports dropped by [`Self::set_field_on_group`]. See its doc.
+    /// Net-field exports [`Self::set_field_on_group`] could not place (an
+    /// unknown index, or a handle past the declared slots), which C# only
+    /// logs; the manifest reports this.
     #[must_use]
     pub fn dropped_field_exports(&self) -> u64 {
         self.dropped_field_exports
     }
 
-    /// Remove all state. Intended for tests or replay-boundary resets.
+    /// Remove all groups and GUID mappings (not the `dropped_field_exports`
+    /// tally) and bump both generations. For tests or replay-boundary resets.
     pub fn clear(&mut self) {
         self.schema_generation = self.schema_generation.wrapping_add(1);
         self.guid_generation = self.guid_generation.wrapping_add(1);
@@ -393,10 +291,8 @@ impl NetGuidCache {
         self.groups.len()
     }
 
-    /// Read-only access to all registered groups.
-    ///
-    /// Insertion-ordered, so it is stable across runs regardless of how the
-    /// maps above hash their keys.
+    /// All registered groups, in insertion order, so stable across runs
+    /// regardless of hashing.
     #[must_use]
     pub fn groups(&self) -> &[NetFieldExportGroup] {
         &self.groups
@@ -407,7 +303,6 @@ impl NetGuidCache {
 mod tests {
     use super::*;
     use crate::export::NetFieldExport;
-    // -- NetGuidCache unit tests (ported from NetGuidCacheTests.cs) -----------
 
     #[test]
     fn property_exports_never_shadow_the_class_net_cache_group() {
@@ -469,7 +364,6 @@ mod tests {
         });
         cache.add_export_group(group).unwrap();
 
-        // Re-add with larger capacity.
         let expanded = NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 4);
         cache.add_export_group(expanded).unwrap();
 
@@ -478,12 +372,8 @@ mod tests {
         assert_eq!(result.get_field(1).unwrap().name, "ExistingField");
     }
 
-    /// A `path_name_index` reused for a genuinely different path must not
-    /// hand the new class the old class's handle table. Before the fix, the
-    /// index-only match merged into the existing group (preserving whatever
-    /// slots the old class had set), so a content block resolved against the
-    /// new path could read the old class's field name/type at a handle the
-    /// new class never declared.
+    /// A `path_name_index` reused for another path must not hand the new class
+    /// the old class's handle table.
     #[test]
     fn same_index_with_new_path_does_not_inherit_old_fields() {
         let mut cache = NetGuidCache::new();
@@ -512,10 +402,9 @@ mod tests {
         );
     }
 
-    /// `set_field_on_group` against a `path_name_index` no group holds must
-    /// refuse the field and count the drop. `read_net_field_exports` checks
-    /// that the group exists before it gets here, so no reader test reaches
-    /// this branch; only a direct call does.
+    /// An unknown `path_name_index` refuses the field and counts the drop.
+    /// `read_net_field_exports` checks the group first, so only a direct call
+    /// reaches this branch.
     #[test]
     fn set_field_on_unregistered_group_returns_false_and_counts_the_drop() {
         let mut cache = NetGuidCache::new();
@@ -549,12 +438,8 @@ mod tests {
         assert_eq!(cache.get_path_by_guid(17).unwrap(), "/Game/Test.Test_C");
     }
 
-    /// A redundant `set_net_guid_path` call -- same path, same outer -- must
-    /// not bump `guid_generation`. Frame-level ExportData re-declares a GUID's
-    /// path on every frame that re-exports it, with no pre-check of its own
-    /// (unlike `vrfkit::sink::register_path`'s deliberate one); without this,
-    /// a memo keyed on `guid_generation` would be invalidated on every such
-    /// frame regardless of whether the mapping actually changed.
+    /// A redundant `set_net_guid_path` (same path, same outer) must not bump
+    /// `guid_generation`; see the method.
     #[test]
     fn a_redundant_set_net_guid_path_call_does_not_bump_guid_generation() {
         let mut cache = NetGuidCache::new();
@@ -633,8 +518,6 @@ mod tests {
         assert!(cache.get_gameplay_tag_name(99).is_none()); // out of range
     }
 
-    // -- The lookups after any sequence of registrations ------------------------
-
     use std::collections::BTreeMap;
 
     /// `by_path`, `by_index` and `by_leaf`, sorted so a mismatch prints as a
@@ -676,15 +559,11 @@ mod tests {
         Some(&path[dot + 1..]).filter(|leaf| !leaf.is_empty())
     }
 
-    /// `add_export_group`'s contract restated without an index of any kind.
-    ///
-    /// Every lookup is a scan over the groups, answered from the definition: a
-    /// path spelling belongs to the LAST group that has it (a later
-    /// registration overwrites an earlier one), an index to the last group
-    /// holding it, and a leaf to its group only when exactly one group ends in
-    /// it -- two or more claimants give `AMBIGUOUS_LEAF`. Nothing here depends
-    /// on the order in which the cache wrote its maps, so the cache agrees with
-    /// this model only if its maps hold what a full rebuild would put there.
+    /// `add_export_group`'s contract without an index: each lookup is a scan
+    /// that answers from the definition. A spelling or an index belongs to the
+    /// last group that has it, a leaf to its group only when exactly one group
+    /// ends in it (else `AMBIGUOUS_LEAF`). Nothing depends on the order the
+    /// cache wrote its maps, so agreeing means they hold what a rebuild would.
     #[derive(Default)]
     struct Model {
         groups: Vec<(String, u32, usize)>,
@@ -756,12 +635,11 @@ mod tests {
         leaves_disambiguated: usize,
     }
 
-    /// Apply one `add_export_group` to the cache and to the model, and hold the
-    /// cache to the model on everything a caller can observe: the returned
-    /// index or the exact error, the groups, the generation (one bump per
-    /// success, none for an error), and the lookups -- which must equal both
-    /// the model's and what `rebuild_group_indexes` makes of the cache's own
-    /// groups. An error must also leave the groups and lookups untouched.
+    /// Apply one `add_export_group` to the cache and the model, and hold the
+    /// cache to the model on all a caller can observe: the index or exact
+    /// error, the groups, one generation bump per success, and lookups equal
+    /// to the model's and to a rebuild of the cache's own groups. An error
+    /// must leave the groups and lookups untouched.
     fn apply(
         cache: &mut NetGuidCache,
         model: &mut Model,
@@ -862,10 +740,9 @@ mod tests {
         }
     }
 
-    /// Every arm of `add_export_group`, with the effect each call is there for
-    /// written above it. The arm and the effect columns are checked against the
-    /// model, so a step that stops reaching the case its comment names fails
-    /// here rather than quietly testing something easier.
+    /// Every arm of `add_export_group`, each call's intended effect written
+    /// above it. The arm and effect columns are checked against the model, so
+    /// a step that stops reaching its case fails instead of testing less.
     #[test]
     fn every_registration_arm_leaves_the_lookups_a_full_rebuild_would_build() {
         use Arm::*;
@@ -952,14 +829,11 @@ mod tests {
     }
 
     /// Random registration sequences over a small universe, so paths, indexes
-    /// and leaves collide constantly. The universe holds three claimants of one
-    /// leaf, both `Default__` directions, a doubled prefix whose alias is
-    /// another member's path, three spellings of one `/_Core/` class, a second
-    /// class on the same leaf, an empty leaf and a `:` path.
-    ///
-    /// Every arm and every effect is tallied, and each tally must be non-zero:
-    /// the equality `apply` checks is only evidence for a case the sequences
-    /// actually reached.
+    /// and leaves collide constantly: three claimants of one leaf, both
+    /// `Default__` directions, a doubled prefix whose alias is another member's
+    /// path, three spellings of one `/_Core/` class, a second class on the same
+    /// leaf, an empty leaf and a `:` path. Every arm and effect is tallied and
+    /// must be non-zero: `apply`'s checks only count for cases reached.
     #[test]
     fn random_registration_sequences_leave_the_lookups_a_full_rebuild_would_build() {
         const PATHS: [&str; 14] = [

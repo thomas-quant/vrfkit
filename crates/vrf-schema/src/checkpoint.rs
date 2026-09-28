@@ -1,12 +1,9 @@
 //! The two schema tables a Checkpoint chunk carries ahead of its DemoFrame.
 //!
-//! A checkpoint archive is self-contained: it restates the server's NetGUID
-//! cache and its whole net-field export map, then a single DemoFrame. Nothing
-//! in it references the ReplayData stream, so it is read into its own
-//! [`NetGuidCache`] rather than merged into the live one -- the frame that
-//! follows re-opens every actor alive at that instant, and replaying those
-//! channel opens through the live reader would corrupt the running channel
-//! table.
+//! A checkpoint archive is self-contained (the server's NetGUID cache and
+//! whole export map, then one DemoFrame), so it is read into its own
+//! [`NetGuidCache`]: its frame re-opens every live actor, and replaying those
+//! opens through the live reader would corrupt the running channel table.
 //!
 //! # Archive layout
 //!
@@ -22,8 +19,7 @@
 //!      <- the DemoFrame starts here, and this offset must equal (+0) + 8
 //! ```
 //!
-//! All reads are byte-aligned `FBinaryArchive` semantics, as in the DemoFrame
-//! grammar itself.
+//! All reads are byte-aligned `FBinaryArchive`, as in the DemoFrame grammar.
 //!
 //! # GuidCacheEntry
 //!
@@ -36,10 +32,8 @@
 //! Flags        : u8
 //! ```
 //!
-//! **The polarity is the opposite of an FName's.** In [`read_fname`] a leading
-//! `1` means "hardcoded index"; here a leading `1` means "a string follows".
-//! They are different fields and the FName reader must not be pointed at this
-//! one.
+//! `PathIsString`'s polarity is the opposite of an FName's leading byte, where
+//! nonzero means "hardcoded index"; neither FName reader may be pointed at it.
 //!
 //! # NetFieldExportGroup
 //!
@@ -56,12 +50,10 @@
 //!         ExportName         : FName
 //! ```
 //!
-//! The two counts in this section use different encodings, and that is the
-//! detail that defeats a first implementation: reading `NumNetFieldExports` as
-//! a `u32` yields exactly twice the true value for small counts, because
-//! `IntPacked` shifts left by one. The cursor then overruns into the next
-//! record and produces plausible garbage rather than an error, which is why
-//! [`read_checkpoint_tables`] ends by asserting the prologue's frame offset.
+//! `NumNetFieldExports` is IntPacked while the section count is a u32. Read as
+//! a u32 it doubles small counts (IntPacked shifts left by one) and overruns
+//! into plausible garbage, which is why [`read_checkpoint_tables`] ends by
+//! asserting the prologue's frame offset.
 
 use vrf_bitio::{BitError, BitReader};
 
@@ -123,11 +115,11 @@ pub enum CheckpointReadError<E> {
     Sink(E),
 }
 
-/// Sanity bound on the guid-cache entry count. The largest corpus checkpoint
-/// carries roughly 12,000; a million would mean a mis-read length.
+/// Sanity bound on the guid-cache entry count; the largest corpus checkpoint
+/// carries about 12,000.
 const MAX_GUID_ENTRIES: u32 = 1_000_000;
 
-/// Sanity bound on the export-group count. The largest corpus checkpoint
+/// Sanity bound on the export-group count; the largest corpus checkpoint
 /// declares 543.
 const MAX_GROUPS: u32 = 100_000;
 
@@ -142,16 +134,14 @@ pub struct CheckpointTables {
     pub exported_fields: u32,
     /// Byte offset where the DemoFrame begins.
     pub frame_offset: usize,
-    /// Entries whose path arrived as a GUID-path name-table index rather than
-    /// a string. The historical field name is retained for API compatibility;
-    /// these indices are not hardcoded Unreal EName values.
+    /// Entries whose path arrived as a GUID-path table index, not a string.
+    /// The name is historical: these are not hardcoded Unreal EName values.
     pub hardcoded_paths: u32,
     /// Literal GUID-path entries read, in either mode.
     pub literal_paths: u32,
     /// Wire indices resolved through preceding literal paths.
     pub resolved_path_indices: u32,
-    /// Export-group collisions. Always zero on success: a collision makes the
-    /// checkpoint cache untrusted and returns
+    /// Always zero on success: a collision returns
     /// [`SchemaError::CheckpointGroupCollision`] before frame decode.
     pub group_collisions: u32,
 }
@@ -161,56 +151,37 @@ pub struct CheckpointTables {
 pub enum CheckpointPathMode {
     /// Retain the former decimal rendering for callers comparing legacy output.
     LegacyDecimal,
-    /// Resolve zero-based indices into preceding literal GUID paths in this
-    /// checkpoint. This is the default. It was first measured on builds 13.01
-    /// through 13.05; the main-stream cross-check described at
-    /// [`read_checkpoint_tables`] covers all 24 supported builds.
+    /// Resolve zero-based indices into this checkpoint's preceding literal GUID
+    /// paths: the default, measured as described at [`read_checkpoint_tables`].
     LiteralPathTable,
 }
 
 /// Read a checkpoint archive's guid cache and export-group map into `cache`,
 /// and report where its DemoFrame begins.
 ///
-/// `data` is the decompressed archive from
-/// `vrf_container::decompress_checkpoint`. `cache` should be **fresh**: a
-/// checkpoint restates the whole schema, and merging it into the live
-/// ReplayData cache would combine independent schema snapshots.
+/// `data` is the decompressed archive (`vrf_container::decompress_checkpoint`).
+/// `cache` must be fresh: a checkpoint restates the whole schema, and merging
+/// it into the live cache would combine independent snapshots.
 ///
 /// # GUID path indices
 ///
-/// An indexed path selects a preceding literal path in this checkpoint, using
-/// zero-based order. References do not append to the table, and the table resets
-/// for every call. This rule resolved all 14,403,610 indexed entries in 714
-/// measured replays from builds 13.01, 13.02, 13.04 and 13.05 (2026-09-08).
-///
-/// The main replay stream is an independent check on it: it declares the same
-/// server GUIDs through [`crate::read_export_guids`] into a separate cache, so
-/// its paths never pass through this rule. On 2026-09-28, in 1,018 replays
-/// covering all 24 supported builds, the path this rule selects equalled the
-/// main stream's path for all 19,993,994 indexed entries whose GUID the main
-/// stream also declared, while a one-based index, references appended to the
-/// table, and one table shared across checkpoints each disagreed on most of
-/// them. `tools/check_export_baseline.py --checkpoints` and
-/// `tools/verify_build_corpus.py` repeat the comparison on every export they
-/// check; docs/CHECKPOINT_PATH_RESOLUTION.md has the method. That is
-/// agreement between two readers of the same files: the exact current engine
-/// serializer is still not available as an independent specification. Raw
-/// indices remain available to [`CheckpointTableSink`].
-///
-/// An index outside the preceding literals is rejected before decoding the
-/// frame. Call [`read_checkpoint_tables_with_sink_mode`] with
-/// [`CheckpointPathMode::LegacyDecimal`] only when reproducing legacy paths.
+/// An indexed path is a zero-based position among the literal paths before it
+/// in this checkpoint; references are not appended, and the table resets per
+/// call. Measured on 714 replays of 13.01-13.05 (2026-09-08), then matched
+/// against the main stream's own paths on 1,018 replays of all 24 builds
+/// (2026-09-28); counts and method are in docs/CHECKPOINT_PATH_RESOLUTION.md,
+/// and the export guards repeat the comparison. That is agreement between two
+/// readers, not an engine specification. An index past the preceding literals
+/// is rejected before the frame; raw indices stay available to
+/// [`CheckpointTableSink`], and [`CheckpointPathMode::LegacyDecimal`] (via
+/// [`read_checkpoint_tables_with_sink_mode`]) reproduces legacy paths.
 ///
 /// # Errors
 ///
-/// Beyond truncation: a path discriminator outside `{0, 1}`, a slot whose
-/// declared handle is not its own index, a non-zero reserved prologue word,
-/// and a table parse that does not finish exactly where the prologue says the
-/// frame begins. Each is a check that the cursor is still aligned; without
-/// them a mis-read count yields well-formed nonsense.
-/// `PathIsString` accepts only `0` and `1`; the separate FName kind and
-/// exported-slot flag retain and accept any nonzero byte, matching the legacy
-/// reader's permissive wire behavior.
+/// Beyond truncation, each `Checkpoint*` [`SchemaError`] is a check that the
+/// cursor is still aligned. `PathIsString` accepts only 0 and 1; the FName
+/// kind and exported-slot flag accept any nonzero byte, as the legacy reader
+/// did.
 pub fn read_checkpoint_tables(data: &[u8], cache: &mut NetGuidCache) -> Result<CheckpointTables> {
     let mut sink = NoopCheckpointTableSink;
     match read_checkpoint_tables_with_sink(data, cache, &mut sink) {
@@ -267,11 +238,9 @@ impl CheckpointTableSink for NoopCheckpointTableSink {
     }
 }
 
-/// Read checkpoint tables while delivering each decoded record to `sink`.
-///
-/// The sink is invoked after a record has passed its wire checks but before it
-/// is stored in `cache`. A sink failure stops immediately and does not consume
-/// any later record or DemoFrame bytes.
+/// [`read_checkpoint_tables`], delivering each record to `sink` after its wire
+/// checks and before it is stored in `cache`. A sink error stops the read
+/// before any later record or DemoFrame byte is consumed.
 pub fn read_checkpoint_tables_with_sink<S: CheckpointTableSink>(
     data: &[u8],
     cache: &mut NetGuidCache,
@@ -289,7 +258,6 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
 ) -> core::result::Result<CheckpointTables, CheckpointReadError<S::Error>> {
     let mut reader = BitReader::new(data);
 
-    // -- Prologue ----------------------------------------------------------
     let frame_offset_word = reader.read_u32()?;
     for offset in [4usize, 8, 12] {
         let value = reader.read_u32()?;
@@ -307,7 +275,6 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         .into());
     }
 
-    // -- GUID cache --------------------------------------------------------
     let mut hardcoded_paths = 0u32;
     let mut literal_paths = Vec::new();
     let mut literal_count = 0u32;
@@ -364,7 +331,6 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         cache.set_net_guid_path(net_guid, path, Some(NetworkGuid(outer_guid)));
     }
 
-    // -- Export group map --------------------------------------------------
     let group_count = reader.read_u32()?;
     if group_count > MAX_GROUPS {
         return Err(SchemaError::CheckpointCountOverflow {
@@ -393,12 +359,10 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         sink.on_export_group(group_ordinal, path_name_index, &path, declared)
             .map_err(CheckpointReadError::Sink)?;
 
-        // Tested before the add, and with exactly the two lookups
-        // `add_export_group` merges on: `by_path` (which includes the path
-        // aliases it registers) and `by_index`. The cache is fresh per
-        // checkpoint, so a hit here means this checkpoint declared the slot
-        // twice, not that a previous frame did. Returning here prevents an
-        // ambiguous cache from reaching frame decode.
+        // Exactly the two lookups `add_export_group` merges on: `by_path`
+        // (aliases included) and `by_index`. The cache is fresh, so a hit
+        // means this checkpoint declared the group twice; refuse it before an
+        // ambiguous cache reaches frame decode.
         if cache.get_group_by_index(path_name_index).is_some()
             || cache.get_group_by_path(&path).is_some()
         {
@@ -476,17 +440,8 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
     })
 }
 
-/// Read an FName from a byte-aligned archive.
-///
-/// Duplicated from `reader.rs` rather than shared because the two callers read
-/// different fields that merely look alike: this one's leading byte is
-/// `bHardcoded`, while a guid entry's is `PathIsString` with the opposite
-/// meaning. Keeping them apart is what stops the wrong one being reused.
-///
-/// The *rendering* is shared, though -- see [`render_fname`]. The two readers
-/// may not be merged, but a name must mean the same thing whichever one
-/// produced it, and this one used to drop the instance number just as the other
-/// did.
+/// A checkpoint field's FName: the rendered name plus the raw parts the sink
+/// reports.
 struct ObservedFName {
     rendered: String,
     kind: u8,
@@ -495,6 +450,9 @@ struct ObservedFName {
     number: Option<i32>,
 }
 
+/// The FName encoding `reader.rs`'s `read_fname` reads (a kind byte, then an
+/// IntPacked index or an FString and i32 number), keeping the raw parts; both
+/// render through [`render_fname`].
 fn read_observed_fname(reader: &mut BitReader<'_>) -> Result<ObservedFName> {
     let kind = reader.read_u8()?;
     if kind != 0 {
@@ -1020,10 +978,8 @@ mod tests {
         assert!(g.get_field(0).is_none(), "unexported slot must stay empty");
     }
 
-    /// The trap that defeats a first implementation: reading the per-group
-    /// count as a u32 doubles it and overruns. The frame-offset check is the
-    /// only thing standing between that and well-formed nonsense, so it has to
-    /// be seen failing.
+    /// The frame-offset check is the only guard against a misread count, so
+    /// it has to be seen failing.
     #[test]
     fn a_desynced_table_is_rejected_not_silently_accepted() {
         let mut archive = build(
@@ -1043,11 +999,8 @@ mod tests {
         );
     }
 
-    /// The checkpoint reader discarded the FName number exactly as the
-    /// ReplayData reader did, so two slots whose base string matches came out
-    /// with one name. Both sites now render the same way: number 0 is the bare
-    /// name, and any other number is the base plus `_{number - 1}`, which is
-    /// how Unreal displays it.
+    /// FName numbers render as in the ReplayData reader: 0 bare, N as
+    /// `_{N-1}`.
     #[test]
     fn fname_numbers_survive_into_the_checkpoint_field_names() {
         // Hand-built: the shared `build` helper always writes number 0.
@@ -1072,14 +1025,9 @@ mod tests {
         assert_eq!(g.get_field(1).map(|f| f.name.as_str()), Some("Value_0"));
     }
 
-    /// A checkpoint restates the whole export map into a fresh cache, so two
-    /// groups sharing a `path_name_index` inside ONE checkpoint is not the
-    /// incremental re-export that [`NetGuidCache::add_export_group`] merges --
-    /// it is two different paths claiming one slot.
-    ///
-    /// The probe's path half is the same case from the other side: one path,
-    /// or a spelling of it the cache registers as an alias, declared again at
-    /// another index. `add_export_group` would merge that without an error.
+    /// Within one checkpoint (a fresh cache), two paths at one index are a
+    /// collision, not the re-export `add_export_group` merges; so is one path,
+    /// or an alias spelling of it, declared again at another index.
     #[test]
     fn two_groups_at_one_index_fail_before_returning_an_untrusted_cache() {
         // `build` writes path_name_index 7 for every group, so two groups is
@@ -1169,9 +1117,8 @@ mod tests {
 
     #[test]
     fn a_handle_that_is_not_its_slot_is_an_error() {
-        // Hand-build one group whose single exported slot lies about its
-        // handle. Attaching a real name to the wrong handle is the failure
-        // mode this check exists for, and it reads as valid data.
+        // One exported slot that lies about its handle: a real name on the
+        // wrong handle would read as valid data.
         let mut body = 1u32.to_le_bytes().to_vec(); // one group
         body.extend(fstring_utf16("/Script/G.Thing"));
         body.extend(int_packed(7));
