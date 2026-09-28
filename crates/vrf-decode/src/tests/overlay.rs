@@ -10,6 +10,7 @@ use crate::overlay::{
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
+use crate::test_bits::BitWriter;
 use crate::types::{RotatorQuantization, VectorQuantization};
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
 
@@ -1236,24 +1237,6 @@ fn the_error_report_names_the_cause_of_each_failure() {
     }
     /// A field payload: its bytes and its bit count.
     type Payload = (Vec<u8>, u32);
-    /// The payload of `fields`, each `(value, width)` written least
-    /// significant bit first, the order `BitReader` reads them in.
-    fn packed_bits(fields: &[(u64, u32)]) -> Payload {
-        let mut bytes = Vec::new();
-        let mut len = 0u32;
-        for &(value, width) in fields {
-            for bit in 0..width {
-                if len % 8 == 0 {
-                    bytes.push(0);
-                }
-                if (value >> bit) & 1 != 0 {
-                    bytes[(len / 8) as usize] |= 1 << (len % 8);
-                }
-                len += 1;
-            }
-        }
-        (bytes, len)
-    }
     // Generated from one list, so the list and the match cannot disagree.
     macro_rules! variants {
         ($($variant:ident),+ $(,)?) => {
@@ -1304,18 +1287,20 @@ fn the_error_report_names_the_cause_of_each_failure() {
     ];
     // An inline FName (hardcoded bit clear), "Source" with its null, then
     // instance number -1.
-    let mut fname = vec![(0, 1), (7, 32)];
-    fname.extend(b"Source\0".iter().map(|&byte| (u64::from(byte), 8)));
-    fname.push((u64::from(-1i32 as u32), 32));
-    let fname = packed_bits(&fname);
+    let mut fname = BitWriter::new();
+    fname.bits(0, 1).i32(7);
+    for byte in b"Source\0" {
+        fname.bits(u64::from(*byte), 8);
+    }
+    let fname = fname.i32(-1).finish();
     // A 7-bit SerializedInt(128) header of 0 -- no component bits, no extra
     // info -- takes the raw-f32 fallback, and the first word is a NaN.
-    let nan_vector = packed_bits(&[
-        (0, 7),
-        (0x7fc0_0000, 32),
-        (u64::from(1.0f32.to_bits()), 32),
-        (u64::from(2.0f32.to_bits()), 32),
-    ]);
+    let nan_vector = BitWriter::new()
+        .bits(0, 7)
+        .bits(0x7fc0_0000, 32)
+        .bits(u64::from(1.0f32.to_bits()), 32)
+        .bits(u64::from(2.0f32.to_bits()), 32)
+        .finish();
     let bytes = |data: &[u8]| (data.to_vec(), data.len() as u32 * 8);
     // (field, payload, variant decode_field fails with, printed label)
     let cases: Vec<(&str, Payload, &str, &str)> = vec![
