@@ -359,6 +359,25 @@ pub(crate) mod tests {
         assert!(parse_package_header(&bytes).is_err());
     }
 
+    /// An offset past the end of the header is refused by the order check.
+    /// Without it `u64_array`'s `&bytes[..end]` panics, and a panic in a scan
+    /// worker takes the whole run down: `std::thread::scope` re-raises it, so
+    /// no row and no summary is written.
+    #[test]
+    fn an_offset_past_the_header_end_is_refused_not_a_panic() {
+        let mut bytes = build_package(&sample());
+        let header_size = declared_header_size(&bytes).unwrap() as i32;
+        // The import map offset, second of the seven. Moved by a multiple of
+        // 8 so the region-size check still holds and only the order check
+        // stands between it and an out-of-range slice.
+        let at = 28;
+        let v = i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let past = v + 8 * (header_size / 8 + 1);
+        bytes[at..at + 4].copy_from_slice(&past.to_le_bytes());
+        let err = parse_package_header(&bytes).unwrap_err();
+        assert!(err.0.contains("import map offset"), "{err}");
+    }
+
     /// Nothing after the name map is read from the cursor -- every later
     /// region is found through its own offset -- so a bulk data map of the
     /// wrong size would go unnoticed without the explicit position check.
