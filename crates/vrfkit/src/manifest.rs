@@ -78,127 +78,65 @@ pub fn write_manifest(
     let mut out = String::with_capacity(64 * 1024 + gsd_bytes * 2);
     out.push_str("{\n");
 
-    // Top-level metadata.
-    //
     // The first five keys are read by tools/to_valplay_bundle.py; keep their
     // names and types stable.
-    wkv(&mut out, "source_file", &json_str(source_file), 1);
-    wkv(&mut out, "source_size_bytes", &file_size.to_string(), 1);
-    wkv(&mut out, "replay_build", &json_str(&ver.branch), 1);
-    wkv(
+    wkvs(
         &mut out,
-        "replay_version",
-        &json_str(&format!("{}.{}.{}", ver.major, ver.minor, ver.patch)),
-        1,
-    );
-    wkv(
-        &mut out,
-        "replay_changelist",
-        &ver.changelist.to_string(),
-        1,
-    );
-    wkv(&mut out, "duration_ms", &info.length_in_ms.to_string(), 1);
-    wkv(&mut out, "elapsed_ms", &elapsed.as_millis().to_string(), 1);
-
-    // --- Replay info section ----------------------------------------------
-    wkv(&mut out, "friendly_name", &json_str(&info.friendly_name), 1);
-    wkv(&mut out, "is_live", json_bool(info.is_live), 1);
-    wkv(&mut out, "compressed", json_bool(info.compressed), 1);
-    wkv(&mut out, "encrypted", json_bool(info.encrypted), 1);
-    // Unreal FDateTime ticks: 100-nanosecond intervals since 0001-01-01, NOT
-    // the Windows FILETIME epoch of 1601-01-01. On the reference replay the
-    // 1601 reading lands in the year 3626, so the epoch is not a guess.
-    // Emitted raw: the wire records no timezone, so any derived calendar
-    // string would have to assert a UTC-vs-local fact this file cannot know.
-    wkv(&mut out, "timestamp_ticks", &info.timestamp.to_string(), 1);
-    // Named for its source, not "network_version": this is the info section's
-    // copy, which nothing validates and which does not hold the protocol
-    // version 19 on real replays. The header's validated copy is a different
-    // number; see `game_network_protocol_version` below.
-    wkv(
-        &mut out,
-        "info_network_version",
-        &info.network_version.to_string(),
-        1,
-    );
-
-    // --- Replay header ----------------------------------------------------
-    wkv(
-        &mut out,
-        "network_checksum",
-        &header.network_checksum.to_string(),
-        1,
-    );
-    wkv(
-        &mut out,
-        "game_network_protocol_version",
-        &header.game_network_protocol_version.to_string(),
-        1,
-    );
-    // Four u32 words in Unreal serialisation order, exactly as stored. Not
-    // rendered as a canonical GUID string: that formatting imposes a byte
-    // order this crate has no way to confirm.
-    wkv(
-        &mut out,
-        "guid",
-        &format!(
-            "[{}, {}, {}, {}]",
-            header.guid[0], header.guid[1], header.guid[2], header.guid[3]
-        ),
-        1,
-    );
-    wkv(&mut out, "ue4_version", &header.ue4_version.to_string(), 1);
-    wkv(&mut out, "ue5_version", &header.ue5_version.to_string(), 1);
-    wkv(
-        &mut out,
-        "package_version_license",
-        &header.package_version_license.to_string(),
-        1,
-    );
-    wkv(&mut out, "flags", &header.flags.to_string(), 1);
-    wkv(&mut out, "platform", &json_str(&header.platform), 1);
-    wkv(
-        &mut out,
-        "build_config",
-        &header.build_config.to_string(),
-        1,
-    );
-    wkv(
-        &mut out,
-        "build_target_type",
-        &header.build_target_type.to_string(),
-        1,
-    );
-    // Reported so a header extension is visible rather than skipped in
-    // silence; see `ReplayHeader::trailing_bytes`'s own doc. Expected zero.
-    wkv(
-        &mut out,
-        "header_trailing_bytes",
-        &header.trailing_bytes.to_string(),
-        1,
-    );
-    wkv(
-        &mut out,
-        "min_record_hz",
-        &json_f32(header.min_record_hz),
-        1,
-    );
-    wkv(
-        &mut out,
-        "max_record_hz",
-        &json_f32(header.max_record_hz),
-        1,
-    );
-    wkv(
-        &mut out,
-        "frame_limit_in_ms",
-        &json_f32(header.frame_limit_in_ms),
-        1,
-    );
-    wkv(
-        &mut out,
-        "checkpoint_limit_in_ms",
-        &json_f32(header.checkpoint_limit_in_ms),
+        &[
+            ("source_file", json_str(source_file)),
+            ("source_size_bytes", file_size.to_string()),
+            ("replay_build", json_str(&ver.branch)),
+            (
+                "replay_version",
+                json_str(&format!("{}.{}.{}", ver.major, ver.minor, ver.patch)),
+            ),
+            ("replay_changelist", ver.changelist.to_string()),
+            ("duration_ms", info.length_in_ms.to_string()),
+            ("elapsed_ms", elapsed.as_millis().to_string()),
+            ("friendly_name", json_str(&info.friendly_name)),
+            ("is_live", json_bool(info.is_live).to_owned()),
+            ("compressed", json_bool(info.compressed).to_owned()),
+            ("encrypted", json_bool(info.encrypted).to_owned()),
+            // Unreal FDateTime ticks (100 ns since 0001-01-01, not FILETIME's
+            // 1601: read as FILETIME the reference replay dates to 3626).
+            // Raw, because the wire records no timezone.
+            ("timestamp_ticks", info.timestamp.to_string()),
+            // The info section's unvalidated copy, not the header's.
+            ("info_network_version", info.network_version.to_string()),
+            ("network_checksum", header.network_checksum.to_string()),
+            (
+                "game_network_protocol_version",
+                header.game_network_protocol_version.to_string(),
+            ),
+            // Four u32 words in serialisation order; a canonical GUID string
+            // would impose a byte order nothing here can confirm.
+            (
+                "guid",
+                format!(
+                    "[{}, {}, {}, {}]",
+                    header.guid[0], header.guid[1], header.guid[2], header.guid[3]
+                ),
+            ),
+            ("ue4_version", header.ue4_version.to_string()),
+            ("ue5_version", header.ue5_version.to_string()),
+            (
+                "package_version_license",
+                header.package_version_license.to_string(),
+            ),
+            ("flags", header.flags.to_string()),
+            ("platform", json_str(&header.platform)),
+            ("build_config", header.build_config.to_string()),
+            ("build_target_type", header.build_target_type.to_string()),
+            // Expected zero; see `ReplayHeader::trailing_bytes`.
+            ("header_trailing_bytes", header.trailing_bytes.to_string()),
+            ("min_record_hz", json_f32(header.min_record_hz)),
+            ("max_record_hz", json_f32(header.max_record_hz)),
+            ("frame_limit_in_ms", json_f32(header.frame_limit_in_ms)),
+            (
+                "checkpoint_limit_in_ms",
+                json_f32(header.checkpoint_limit_in_ms),
+            ),
+        ],
         1,
     );
 
@@ -218,26 +156,19 @@ pub fn write_manifest(
         .collect();
     wkv_array(&mut out, "game_specific_data", &gsd, 1);
 
-    // Stats
     out.push_str("  \"stats\": {\n");
-    wkv(&mut out, "packet_count", &total_packets.to_string(), 2);
-    wkv(&mut out, "bunch_count", &stats.bunches.to_string(), 2);
-    wkv(
+    wkvs(
         &mut out,
-        "malformed_packet_count",
-        &stats.malformed_packets.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "partial_error_count",
-        &stats.partial_errors.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "partial_fragments",
-        &stats.partial_fragments.to_string(),
+        &[
+            ("packet_count", total_packets.to_string()),
+            ("bunch_count", stats.bunches.to_string()),
+            (
+                "malformed_packet_count",
+                stats.malformed_packets.to_string(),
+            ),
+            ("partial_error_count", stats.partial_errors.to_string()),
+            ("partial_fragments", stats.partial_fragments.to_string()),
+        ],
         2,
     );
     wkvl(
@@ -248,43 +179,26 @@ pub fn write_manifest(
     );
     out.push_str("  },\n");
 
-    // Counts
     out.push_str("  \"counts\": {\n");
-    wkv(
+    wkvs(
         &mut out,
-        "content_blocks",
-        &stats.content_blocks.to_string(),
+        &[
+            ("content_blocks", stats.content_blocks.to_string()),
+            ("rep_layout_blocks", stats.rep_layout_blocks.to_string()),
+            (
+                "class_net_cache_blocks",
+                stats.class_net_cache_blocks.to_string(),
+            ),
+            ("deleted_blocks", stats.deleted_blocks.to_string()),
+            ("fields", stats.fields.to_string()),
+            ("rpcs", stats.rpcs.to_string()),
+            ("actor_opens", stats.actor_opens.to_string()),
+            ("actor_closes", stats.actor_closes.to_string()),
+            ("exported_guids", stats.exported_guids.to_string()),
+            ("skipped_bits", stats.skipped_bits.to_string()),
+        ],
         2,
     );
-    wkv(
-        &mut out,
-        "rep_layout_blocks",
-        &stats.rep_layout_blocks.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "class_net_cache_blocks",
-        &stats.class_net_cache_blocks.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "deleted_blocks",
-        &stats.deleted_blocks.to_string(),
-        2,
-    );
-    wkv(&mut out, "fields", &stats.fields.to_string(), 2);
-    wkv(&mut out, "rpcs", &stats.rpcs.to_string(), 2);
-    wkv(&mut out, "actor_opens", &stats.actor_opens.to_string(), 2);
-    wkv(&mut out, "actor_closes", &stats.actor_closes.to_string(), 2);
-    wkv(
-        &mut out,
-        "exported_guids",
-        &stats.exported_guids.to_string(),
-        2,
-    );
-    wkv(&mut out, "skipped_bits", &stats.skipped_bits.to_string(), 2);
     wkvl(
         &mut out,
         "malformed_content_blocks",
@@ -396,102 +310,62 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
     //
     // Zero is printed, not omitted. A line that appears only when non-zero
     // cannot distinguish "nothing was lost" from "this code stopped running".
-    wkv(
+    let q = quality;
+    wkvs(
         &mut out,
-        "content_blocks_lost",
-        &quality.net.lost_content_blocks().to_string(),
+        &[
+            (
+                "content_blocks_lost",
+                q.net.lost_content_blocks().to_string(),
+            ),
+            ("chunks_processed", q.chunks_processed.to_string()),
+            ("export_groups", q.export_groups.to_string()),
+            ("movement_rows", q.movement_rows.to_string()),
+            ("net_guid_rows", q.net_guid_rows.to_string()),
+            ("event_rows", q.event_rows.to_string()),
+            ("partial_rows", q.partial_rows.to_string()),
+            ("partial_bits", q.partial_bits.to_string()),
+            ("event_trailing_bytes", q.event_trailing_bytes.to_string()),
+            (
+                "replay_data_trailing_bytes",
+                q.replay_data_trailing_bytes.to_string(),
+            ),
+        ],
         2,
     );
-    wkv(
+    write_frame_skips(&mut out, "frame_", &q.frame_skips, 2);
+    wkvs(
         &mut out,
-        "chunks_processed",
-        &quality.chunks_processed.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "export_groups",
-        &quality.export_groups.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "movement_rows",
-        &quality.movement_rows.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "net_guid_rows",
-        &quality.net_guid_rows.to_string(),
-        2,
-    );
-    wkv(&mut out, "event_rows", &quality.event_rows.to_string(), 2);
-    wkv(
-        &mut out,
-        "partial_rows",
-        &quality.partial_rows.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "partial_bits",
-        &quality.partial_bits.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "event_trailing_bytes",
-        &quality.event_trailing_bytes.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "replay_data_trailing_bytes",
-        &quality.replay_data_trailing_bytes.to_string(),
-        2,
-    );
-    write_frame_skips(&mut out, "frame_", &quality.frame_skips, 2);
-    wkv(
-        &mut out,
-        "event_layout_mismatches",
-        &quality.event_layout_mismatches.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "event_first_layout_mismatch",
-        &json_option(quality.event_first_layout_mismatch),
-        2,
-    );
-    wkv(
-        &mut out,
-        "event_payloads_decoded",
-        &quality.event_payloads_decoded.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "event_payload_unknown_groups",
-        &quality.event_payload_unknown_groups.to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "overlay_error_buckets",
-        &quality.error_report.bucket_count().to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "overlay_errors_reported",
-        &quality.error_report.total_errors().to_string(),
-        2,
-    );
-    wkv(
-        &mut out,
-        "checkpoints_enabled",
-        json_bool(quality.checkpoints.is_some()),
+        &[
+            (
+                "event_layout_mismatches",
+                q.event_layout_mismatches.to_string(),
+            ),
+            (
+                "event_first_layout_mismatch",
+                json_option(q.event_first_layout_mismatch),
+            ),
+            (
+                "event_payloads_decoded",
+                q.event_payloads_decoded.to_string(),
+            ),
+            (
+                "event_payload_unknown_groups",
+                q.event_payload_unknown_groups.to_string(),
+            ),
+            (
+                "overlay_error_buckets",
+                q.error_report.bucket_count().to_string(),
+            ),
+            (
+                "overlay_errors_reported",
+                q.error_report.total_errors().to_string(),
+            ),
+            (
+                "checkpoints_enabled",
+                json_bool(q.checkpoints.is_some()).to_owned(),
+            ),
+        ],
         2,
     );
     write_net_quality(&mut out, "net", quality.net, 2, true);
@@ -500,131 +374,69 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
     match quality.checkpoints {
         Some(checkpoints) => {
             out.push_str("    \"checkpoints\": {\n");
-            wkv(
+            let cp = checkpoints;
+            wkvs(
                 &mut out,
-                "checkpoint_path_resolution_mode",
-                &json_str("preceding_literal_zero_based"),
+                &[
+                    (
+                        "checkpoint_path_resolution_mode",
+                        json_str("preceding_literal_zero_based"),
+                    ),
+                    ("checkpoint_literal_paths", cp.literal_paths.to_string()),
+                    ("checkpoint_indexed_paths", cp.indexed_paths.to_string()),
+                    (
+                        "checkpoint_resolved_path_indices",
+                        cp.resolved_path_indices.to_string(),
+                    ),
+                    ("checkpoint_chunks", cp.chunks.to_string()),
+                    ("checkpoint_guid_entries", cp.guid_entries.to_string()),
+                    ("checkpoint_group_records", cp.group_records.to_string()),
+                    ("checkpoint_exported_fields", cp.exported_fields.to_string()),
+                    ("checkpoint_frames", cp.frames.to_string()),
+                ],
                 3,
             );
-            wkv(
+            write_frame_skips(&mut out, "checkpoint_frame_", &cp.frame_skips, 3);
+            wkvs(
                 &mut out,
-                "checkpoint_literal_paths",
-                &checkpoints.literal_paths.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_indexed_paths",
-                &checkpoints.indexed_paths.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_resolved_path_indices",
-                &checkpoints.resolved_path_indices.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_chunks",
-                &checkpoints.chunks.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_guid_entries",
-                &checkpoints.guid_entries.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_group_records",
-                &checkpoints.group_records.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_exported_fields",
-                &checkpoints.exported_fields.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_frames",
-                &checkpoints.frames.to_string(),
-                3,
-            );
-            write_frame_skips(&mut out, "checkpoint_frame_", &checkpoints.frame_skips, 3);
-            wkv(
-                &mut out,
-                "checkpoint_packets",
-                &checkpoints.packets.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_field_rows",
-                &checkpoints.field_rows.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_actor_rows_written",
-                &checkpoints.actor_rows_written.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_net_guid_rows_written",
-                &checkpoints.net_guid_rows_written.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_block_rows_written",
-                &checkpoints.block_rows_written.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_guid_entry_rows_written",
-                &checkpoints.guid_entry_rows_written.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_export_group_rows_written",
-                &checkpoints.export_group_rows_written.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_export_field_rows_written",
-                &checkpoints.export_field_rows_written.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_partial_rows",
-                &checkpoints.partial_rows.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_partial_bits",
-                &checkpoints.partial_bits.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_actor_rows_dropped",
-                &checkpoints.actor_rows_dropped.to_string(),
-                3,
-            );
-            wkv(
-                &mut out,
-                "checkpoint_movement_rows_dropped",
-                &checkpoints.movement_rows_dropped.to_string(),
+                &[
+                    ("checkpoint_packets", cp.packets.to_string()),
+                    ("checkpoint_field_rows", cp.field_rows.to_string()),
+                    (
+                        "checkpoint_actor_rows_written",
+                        cp.actor_rows_written.to_string(),
+                    ),
+                    (
+                        "checkpoint_net_guid_rows_written",
+                        cp.net_guid_rows_written.to_string(),
+                    ),
+                    (
+                        "checkpoint_block_rows_written",
+                        cp.block_rows_written.to_string(),
+                    ),
+                    (
+                        "checkpoint_guid_entry_rows_written",
+                        cp.guid_entry_rows_written.to_string(),
+                    ),
+                    (
+                        "checkpoint_export_group_rows_written",
+                        cp.export_group_rows_written.to_string(),
+                    ),
+                    (
+                        "checkpoint_export_field_rows_written",
+                        cp.export_field_rows_written.to_string(),
+                    ),
+                    ("checkpoint_partial_rows", cp.partial_rows.to_string()),
+                    ("checkpoint_partial_bits", cp.partial_bits.to_string()),
+                    (
+                        "checkpoint_actor_rows_dropped",
+                        cp.actor_rows_dropped.to_string(),
+                    ),
+                    (
+                        "checkpoint_movement_rows_dropped",
+                        cp.movement_rows_dropped.to_string(),
+                    ),
+                ],
                 3,
             );
             write_net_quality(&mut out, "net", &checkpoints.net, 3, true);
@@ -868,6 +680,13 @@ fn push_indent(out: &mut String, indent: usize) {
 fn wkv(out: &mut String, key: &str, value: &str, indent: usize) {
     push_indent(out, indent);
     out.push_str(&format!("\"{key}\": {value},\n"));
+}
+
+/// [`wkv`] for each member, in order.
+fn wkvs(out: &mut String, members: &[(&str, String)], indent: usize) {
+    for (key, value) in members {
+        wkv(out, key, value, indent);
+    }
 }
 
 /// Write key-value pair WITHOUT trailing comma (last in object).
