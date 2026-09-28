@@ -15,21 +15,17 @@ The first alone cannot tell a missing record from one the other side has at
 another packet with the same values; the record check can, and it is what an
 expected difference (below) is keyed on.
 
-The C# side is CliReader's `export` of the 13.01 reference replay,
-kept machine-local because it carries per-player values; docs/USAGE.md section
-6 has the commands that produce it. It used to be a slimmed C# export under
-valplay's pipeline/exports, which no longer holds it -- and valplay now builds
-its bundles from vrfkit's own output, so that path would not be an independent
-reference any more.
+The C# side is CliReader's `export` of the 13.01 reference replay, kept
+machine-local because it carries per-player values; docs/USAGE.md section 6
+has the commands that produce it.
 
-Expected differences: `EXPECTED_DIFFERENCES` lists records whose absence from
-the C# export is explained, each keyed by the replay's SHA-256 -- read from the
-`manifest.json` CliReader writes next to the reference, which must therefore be
-kept there -- and the record's identity and values. An entry is excluded from
-both checks only when all of that holds exactly. On its replay, an entry that
-does not occur exactly as listed is STALE and fails the run. Without a readable
-manifest the replay is unknown: no entry is applied, and since none can be
-checked for staleness either, the run is incomplete rather than a pass.
+`EXPECTED_DIFFERENCES` lists records whose absence from the C# export is
+explained, keyed by the replay's SHA-256 (from the `manifest.json` CliReader
+writes beside the reference, which must stay there), the record's identity and
+its values; an entry is excluded from both checks only when all of that holds
+exactly. On its replay, an entry that does not occur exactly as listed is
+STALE and fails the run. Without a readable manifest the replay is unknown:
+nothing is applied or checked for staleness, and the run is incomplete.
 
 Exit status:
   0  every parameter and every record matched, after the expected differences
@@ -63,10 +59,8 @@ DEFAULT_REFERENCE = (r"%LOCALAPPDATA%\vrfkit\csharp-reference\8824794"
 #: vrfkit's export of the same replay.
 DEFAULT_OURS = "out/nested/fields.parquet"
 
-# RPC functions and the parameters to compare.
-# For each function: list of (param_name, value_type) where value_type is how
-# the C# JSON stores it ('int', 'float', 'bool', 'str').
-# Special: 'enum_byte' means the C# stores as string but Rust stores as i64.
+# (param_name, value_type) per function, value_type being how the C# JSON
+# stores it; 'enum_byte' is a C# string that vrfkit stores as i64.
 RPCS_TO_CHECK = {
     "MulticastNotifyKilledEnemy": [
         ("KillerCharacter", "int"),
@@ -95,9 +89,7 @@ REGIONAL_DAMAGE_MAP = {
     "regional_damage__invalid": 5,
 }
 
-# C# field name aliases: the C# export may use different names than the replay
-# schema exports (e.g. "DamageKilledTarget" in JSON payload vs
-# "bDamageKilledTarget" in the export group field name table).
+# C# payload names that differ from the replay's export field names.
 CS_FIELD_ALIASES = {
     "MulticastNotifyDamage_Point": {
         "DamageKilledTarget": "bDamageKilledTarget",
@@ -113,10 +105,8 @@ RUST_VALUE_COLUMN = {
 }
 
 
-#: Decimal places float parameters are rounded to before comparison. `MATCH`
-#: means equal to this precision and no further, so the verdict line states it
-#: rather than leaving it buried here. (`compare_combat_report.py` uses 3 for
-#: the same job; neither number was written down anywhere the reader sees.)
+#: Decimal places float parameters are rounded to before comparison; `MATCH`
+#: means equal to this precision and no further, as the verdict line states.
 FLOAT_PLACES = 2
 
 #: How many differing records each side lists before summarising.
@@ -145,11 +135,9 @@ def norm(v, vtype):
 class ExpectedDifference:
     """A record vrfkit exports and the C# reference, for a known reason, does not.
 
-    It is excluded only when every field holds: the replay, exactly one vrfkit
-    record at `key` carrying exactly `values`, and no C# record at `key` at
-    all. `values` holds every compared parameter of `function`, normalised by
-    `norm`, so the entry cannot excuse a different record that happens to sit
-    at the same identity. Anything else on this replay is STALE.
+    Excluded only when the replay matches, exactly one vrfkit record at `key`
+    carries exactly `values` (every compared parameter, normalised by `norm`)
+    and no C# record sits at `key`. Anything else on this replay is STALE.
     """
 
     replay_sha256: str
@@ -201,12 +189,9 @@ EXPECTED_DIFFERENCES = (
 
 
 def record_key(packet_id, actor_net_guid, object_net_guid, channel, function):
-    """The identity both sides share.
-
-    An RPC on the actor itself has no subobject: the C# export reports the
-    actor GUID as its object, vrfkit leaves `object_net_guid` null. Both are
-    read as the actor here.
-    """
+    """The identity both sides share. An RPC on the actor itself has no
+    subobject: the C# export reports the actor GUID as its object and vrfkit
+    leaves `object_net_guid` null, so both are read as the actor."""
     if object_net_guid is None:
         object_net_guid = actor_net_guid
     return (packet_id, actor_net_guid, object_net_guid, channel, function)
@@ -231,10 +216,8 @@ def load_cs_records(path):
             func_aliases = CS_FIELD_ALIASES.get(func, {})
             params = {}
             for pname, vtype in RPCS_TO_CHECK[func]:
-                # Try the canonical name first, then check aliases
                 val = payload.get(pname)
                 if val is None:
-                    # Try reverse alias lookup
                     for cs_name, our_name in func_aliases.items():
                         if our_name == pname:
                             val = payload.get(cs_name)
@@ -250,10 +233,9 @@ def load_cs_records(path):
 def load_rust_records(path):
     """vrfkit's parameter rows as `[(key, {param: normalised value})]`.
 
-    One row per parameter, so a record is the run of consecutive rows sharing
-    a key; a parameter repeating inside the run starts the next record (two
-    invocations in one bunch). A null value is kept as None: it is a value the
-    C# side has and vrfkit did not type, and it must show as a difference.
+    A record is the run of consecutive rows sharing a key; a parameter
+    repeating inside the run starts the next record (two invocations in one
+    bunch). A null stays None: a value vrfkit did not type is a difference.
     """
     columns = ["packet_id", "channel_index", "actor_net_guid", "object_net_guid",
                "field_name", "value_i64", "value_f64", "value_bool", "value_str"]
@@ -309,11 +291,9 @@ def record_differences(cs_records, rust_records):
 
 def apply_expected_differences(cs_records, rust_records, replay_sha256,
                                expected=EXPECTED_DIFFERENCES):
-    """`(vrfkit records kept, applied, stale, not for this replay)`.
-
-    `stale` is `[(entry, why)]`. An entry is only ever applied to the replay
-    it names, so an unknown replay (`replay_sha256` None) applies nothing.
-    """
+    """`(vrfkit records kept, applied, stale, not for this replay)`, `stale`
+    as `[(entry, why)]`. An unknown replay (`replay_sha256` None) applies
+    nothing."""
     kept = list(rust_records)
     applied, stale, other = [], [], []
     for entry in expected:
@@ -339,11 +319,9 @@ def apply_expected_differences(cs_records, rust_records, replay_sha256,
 
 
 def reference_replay_sha256(reference):
-    """`(SHA-256 or None, where it came from or why there is none)`.
-
-    Read from the manifest.json CliReader writes beside its export -- the
-    only statement in the reference directory of which replay it describes.
-    """
+    """`(SHA-256 or None, where it came from or why there is none)`, from the
+    manifest.json beside the reference: the only statement there of which
+    replay it describes."""
     manifest = Path(reference).with_name("manifest.json")
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -359,15 +337,9 @@ def reference_replay_sha256(reference):
 def compare(cs, rust, rpcs=None):
     """`(printable rows, everything matched, how many were compared)`.
 
-    Split out of `main` so the verdict can be asserted on -- it could not be
-    before, which is the same shape `compare_combat_report.py` had.
-
-    Emptiness is tested BEFORE equality. Two empty Counters satisfy
-    `cs_vals == rust_vals`, so the `both empty` arm sat below it and could
-    never be reached: every parameter of a replay carrying none of these RPCs
-    reported `MATCH`. The third return value is what stops that reading as a
-    result -- `all_match` stays True for an empty pair, because per parameter
-    that is not a disagreement; it is simply not a comparison.
+    Emptiness is tested before equality, because two empty Counters are
+    equal. An empty pair leaves `all_match` True (it is no disagreement) but
+    is not counted as compared.
     """
     rows, all_match, checked = [], True, 0
     for func_name, params in (rpcs or RPCS_TO_CHECK).items():
@@ -421,15 +393,10 @@ def print_records(label, differing):
 
 def main(argv=None, *, cs_records=None, rust_records=None, rpcs=None,
          replay_sha256=None, expected=EXPECTED_DIFFERENCES):
-    """Exit 0 only if every parameter and record matches and nothing is stale.
-
-    A run in which any parameter carried nothing on either side exits 2: that
-    parameter was not compared, and a run that compared nothing at all used to
-    print `ALL RPC PARAMETER VALUES MATCH`. Every parameter is present in the
-    reference replay.
-
-    `cs_records` / `rust_records` (as the loaders return them) and
-    `replay_sha256` stand in for the files, for tests.
+    """Exit 0 only if every parameter and record matches and nothing is stale;
+    exit 2 when a parameter carried nothing on either side, since it was not
+    compared (every one is present in the reference replay). `cs_records` /
+    `rust_records` and `replay_sha256` stand in for the files, for tests.
     """
     if cs_records is None or rust_records is None:
         args = parse_args(argv)
@@ -517,7 +484,6 @@ def main(argv=None, *, cs_records=None, rust_records=None, rpcs=None,
               f"RECORDS MATCH (floats to {FLOAT_PLACES} decimal places; "
               f"{len(applied)} expected difference(s) excluded)")
 
-    # Print sample values for verification
     print()
     print("=== Sample values (first 5 per function) ===")
     for func_name, params in checked_rpcs.items():

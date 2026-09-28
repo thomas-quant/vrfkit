@@ -1,22 +1,10 @@
 """Guards for the RPC parameter comparison.
 
-Two holes, and the second is the one that matters.
-
-The comparison ran entirely inside `main`, so the verdict could not be
-asserted on -- the same shape `compare_combat_report.py` had.
-
-And BOTH SIDES EMPTY counted as a match. Two empty Counters compare equal, so
-every parameter of a replay containing none of these RPCs reported `MATCH`,
-`all_match` stayed True, and the script printed `ALL RPC PARAMETER VALUES
-MATCH` having compared nothing at all. The `both empty` arm that was supposed
-to name that case sat below the equality test and could never be reached.
-
-Then one explained difference. On 02d4d478 vrfkit has one damage record the C#
-reference lacks, for a reason docs/FOLLOWUP.md establishes, and the tool
-exited 1 on it forever. It is now excluded, but only exactly: the tests below
-drive the real loaders over written files and check that the exclusion cannot
-widen (another record, other values, another packet, another replay, no
-manifest) and cannot outlive what it describes (STALE fails the run).
+Both sides empty must not read as a match: two empty Counters compare equal.
+The one expected difference (a 02d4d478 damage record only vrfkit emits; see
+docs/FOLLOWUP.md) is driven through the real loaders over written files, and
+must not widen (another record, other values, another packet, another replay,
+no manifest) or outlive what it describes (STALE fails the run).
 """
 import collections
 import io
@@ -80,7 +68,7 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(checked, 0)
 
     def test_both_sides_empty_is_reported_as_such_not_as_a_match(self):
-        """The dead arm, now reachable: it sat below `cs_vals == rust_vals`."""
+        """The `both empty` arm is reached before `cs_vals == rust_vals`."""
         rows, _ok, _checked = guard.compare(side(), side(), ONE_RPC)
         self.assertIn("both empty", " ".join(rows))
         self.assertNotIn("MATCH", " ".join(rows))
@@ -104,7 +92,7 @@ class ExitCodeTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
     def test_one_parameter_missing_from_both_sides_is_not_a_pass(self):
-        """A matching parameter used to carry the run past one nobody compared."""
+        """A matching parameter must not carry the run past one nobody compared."""
         two = {"MulticastEndRound": [("NewRoundNumber", "int"), ("Other", "int")]}
         code, _ = run(cs_records=records({1: 2}), rust_records=records({1: 2}),
                       rpcs=two, expected=())
@@ -112,8 +100,6 @@ class ExitCodeTests(unittest.TestCase):
 
 
 class InputTests(unittest.TestCase):
-    """The reference used to be a valplay path that no longer held it."""
-
     def test_a_missing_reference_exits_2_and_says_where_it_looked(self):
         missing = Path(__file__).with_name("no-such-reference.ndjson")
         with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
@@ -122,13 +108,13 @@ class InputTests(unittest.TestCase):
         self.assertIn(str(missing), err.getvalue())
 
     def test_the_parquet_path_is_not_read_from_argv_at_import(self):
-        """It was `Path(sys.argv[1])` at module level, so importing the module
-        under a test runner took the runner's first argument as the parquet."""
+        """`Path(sys.argv[1])` at module level would take a test runner's first
+        argument as the parquet."""
         self.assertFalse(hasattr(guard, "PARQUET_PATH"))
         self.assertNotIn("valplay", guard.DEFAULT_REFERENCE.lower())
 
 
-# --- files shaped like the real inputs -------------------------------------
+# Files shaped like the real inputs.
 
 LISTED = guard.EXPECTED_DIFFERENCES[0]
 OTHER_REPLAY = "0" * 64
