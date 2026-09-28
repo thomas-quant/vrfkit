@@ -2307,34 +2307,98 @@ mod tests {
         assert_eq!(reader.stats().malformed_packets, 1);
     }
 
-    /// The unresolved callback receives the exact decoded block, not the wire
-    /// bytes or the reusable scratch tail. The 7-bit literal is a golden V13.01
-    /// transform vector: wire 0xBF for actor 2 decodes to 0x66.
-    #[test]
-    fn unresolved_class_net_cache_exposes_the_decoded_whole_payload() {
-        let wire = [0xBF];
-        let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
-        let mut scratch = vec![0xFF; 16];
+    /// One block handed straight to `decode_and_parse_*`, bypassing framing.
+    struct Run {
+        /// What the call returned: `false` only for a failed transform.
+        transformed: bool,
+        stats: NetStats,
+        sink: TestSink,
+        /// Where the bunch reader stood afterwards.
+        position: u64,
+    }
+
+    /// Decode a `bit_count`-bit block for actor 2 from the first
+    /// `window_bits` of `wire`: RepLayout when `function_count` is `None`,
+    /// ClassNetCache with that count otherwise. The scratch buffer starts as
+    /// `scratch`.
+    fn decode_block(
+        wire: &[u8],
+        window_bits: u64,
+        bit_count: usize,
+        function_count: Option<u32>,
+        mut scratch: Vec<u8>,
+        mut sink: TestSink,
+    ) -> Run {
+        let mut payload = BitReader::with_bit_len(wire, window_bits).unwrap();
         let mut stats = NetStats::default();
         let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
         let mut stage = Stage {
             stats: &mut stats,
             channels: &mut channels,
             transform: TransformVersion::V1301,
             scratch: &mut scratch,
         };
+        let actor = NetworkGuid(2);
+        let transformed = match function_count {
+            None => framing::decode_and_parse_rep_layout(
+                &mut payload,
+                bit_count,
+                actor,
+                &mut stage,
+                &mut sink,
+            ),
+            Some(count) => framing::decode_and_parse_class_net_cache(
+                &mut payload,
+                bit_count,
+                actor,
+                count,
+                &mut stage,
+                &mut sink,
+            ),
+        };
+        Run {
+            transformed,
+            stats,
+            sink,
+            position: payload.position(),
+        }
+    }
 
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            7,
-            NetworkGuid(2),
-            0,
-            &mut stage,
-            &mut sink,
-        );
+    /// The golden V13.01 vector: wire 0xBF for actor 2 decodes to 0x66, seven
+    /// bits. The scratch buffer starts full of 0xFF, so a leaked tail shows.
+    fn decode_golden(bit_count: usize, function_count: Option<u32>) -> Run {
+        let sink = TestSink::default();
+        decode_block(&[0xBF], 7, bit_count, function_count, vec![0xFF; 16], sink)
+    }
 
-        assert_eq!(payload.position(), 7);
+    /// Decode the block whose decoded bits are `decoded_bits`, starting from
+    /// an empty scratch buffer.
+    fn decode_bits(decoded_bits: &[bool], function_count: Option<u32>, sink: TestSink) -> Run {
+        let bit_count = decoded_bits.len();
+        let wire = wire_for_short_decoded(&pack(decoded_bits), bit_count, 2);
+        decode_block(
+            &wire,
+            bit_count as u64,
+            bit_count,
+            function_count,
+            Vec::new(),
+            sink,
+        )
+    }
+
+    /// The unresolved callback receives the exact decoded block, not the wire
+    /// bytes or the reusable scratch tail. The 7-bit literal is a golden V13.01
+    /// transform vector: wire 0xBF for actor 2 decodes to 0x66.
+    #[test]
+    fn unresolved_class_net_cache_exposes_the_decoded_whole_payload() {
+        let Run {
+            stats,
+            sink,
+            position,
+            ..
+        } = decode_golden(7, Some(0));
+
+        assert_eq!(position, 7);
         assert_eq!(sink.unresolved_payloads.len(), 1);
         let (failure, decoded) = &sink.unresolved_payloads[0];
         assert_eq!(failure.kind, StreamKind::Rpc);
@@ -2359,47 +2423,27 @@ mod tests {
     /// 7-bit payload, called directly, is the way in.
     #[test]
     fn a_transform_failure_is_reported_back_to_framing() {
-        fn decode(rep_layout: bool, bit_count: usize) -> (bool, NetStats, TestSink) {
-            let wire = [0xBF];
-            let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
-            let mut scratch = vec![0xFF; 16];
-            let mut stats = NetStats::default();
-            let mut channels = ChannelTable::default();
-            let mut sink = TestSink::default();
-            let mut stage = Stage {
-                stats: &mut stats,
-                channels: &mut channels,
-                transform: TransformVersion::V1301,
-                scratch: &mut scratch,
-            };
-            let decoded = if rep_layout {
-                framing::decode_and_parse_rep_layout(
-                    &mut payload,
-                    bit_count,
-                    NetworkGuid(2),
-                    &mut stage,
-                    &mut sink,
-                )
-            } else {
-                framing::decode_and_parse_class_net_cache(
-                    &mut payload,
-                    bit_count,
-                    NetworkGuid(2),
-                    2,
-                    &mut stage,
-                    &mut sink,
-                )
-            };
-            (decoded, stats, sink)
-        }
-
-        for rep_layout in [true, false] {
-            let (decoded, stats, _) = decode(rep_layout, 7);
-            assert!(decoded, "a payload whose transform ran is reported decoded");
+        // RepLayout, then ClassNetCache with a resolved function count.
+        for function_count in [None, Some(2)] {
+            let Run {
+                transformed, stats, ..
+            } = decode_golden(7, function_count);
+            assert!(
+                transformed,
+                "a payload whose transform ran is reported decoded"
+            );
             assert_eq!(stats.transform_failures, 0);
 
-            let (decoded, stats, sink) = decode(rep_layout, 8);
-            assert!(!decoded, "an 8-bit block cannot be copied out of 7 bits");
+            let Run {
+                transformed,
+                stats,
+                sink,
+                ..
+            } = decode_golden(8, function_count);
+            assert!(
+                !transformed,
+                "an 8-bit block cannot be copied out of 7 bits"
+            );
             assert_eq!(stats.transform_failures, 1);
             assert_eq!(stats.skipped_bits, 8, "the block's whole declared length");
             assert_eq!(
@@ -2449,29 +2493,14 @@ mod tests {
     /// those 6 bits. They must be accounted.
     #[test]
     fn class_net_cache_overrun_ok_path_is_a_stream_failure() {
-        let wire = [0xBF];
-        let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
-        let mut scratch = vec![0xFF; 16];
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
+        let Run {
+            stats,
+            sink,
+            position,
+            ..
+        } = decode_golden(7, Some(2));
 
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            7,
-            NetworkGuid(2),
-            2,
-            &mut stage,
-            &mut sink,
-        );
-
-        assert_eq!(payload.position(), 7);
+        assert_eq!(position, 7);
         assert_eq!(stats.rpc_stream_failures, 1);
         assert_eq!(stats.unresolved_rpc_payloads_preserved, 0);
         assert_eq!(stats.rpcs, 0);
@@ -2527,35 +2556,11 @@ mod tests {
         write_int_packed(&mut decoded_bits, 0); // RepLayout terminator
         decoded_bits.extend((0..13).map(|index| index % 2 == 0));
 
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink {
+        let sink = TestSink {
             rep_layout_tail_outcome: Some(RepLayoutTailOutcome::Decoded { rpc_count: 1 }),
             ..TestSink::default()
         };
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, sink);
 
         assert!(sink.fields.is_empty());
         assert_eq!(sink.rep_layout_tails, vec![(13, vec![0x55, 0x15])]);
@@ -2572,37 +2577,13 @@ mod tests {
         let mut decoded_bits = vec![false]; // property checksum
         write_int_packed(&mut decoded_bits, 0); // RepLayout terminator
         decoded_bits.extend((0..13).map(|index| index % 2 == 0));
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink {
+        let sink = TestSink {
             rep_layout_tail_outcome: Some(RepLayoutTailOutcome::Preserved {
                 cause: StreamFailureCause::UnverifiedRepLayoutTail,
             }),
             ..TestSink::default()
         };
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, sink);
 
         assert_eq!(stats.field_stream_failures, 0);
         assert_eq!(stats.rpc_stream_failures, 1);
@@ -2623,32 +2604,7 @@ mod tests {
         write_int_packed(&mut decoded_bits, 32); // overruns the remaining 8 bits
         decoded_bits.extend(std::iter::repeat_n(false, 8));
         assert_eq!(decoded_bits.len(), 25);
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
         assert_eq!(stats.field_stream_failures, 1);
         assert_eq!(stats.skipped_bits, 24);
@@ -2672,26 +2628,7 @@ mod tests {
         // Arm 1: an unresolved ClassNetCache group (function_count = 0). The
         // walk never begins, so the failing record is offset 0, no handle --
         // and the payload reached the sink as preserved.
-        let wire = [0xBF];
-        let mut payload = BitReader::with_bit_len(&wire, 7).unwrap();
-        let mut scratch = vec![0xFF; 16];
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            7,
-            NetworkGuid(2),
-            0,
-            &mut stage,
-            &mut sink,
-        );
+        let Run { sink, .. } = decode_golden(7, Some(0));
         assert_eq!(sink.stream_failures.len(), 1);
         let failure = &sink.stream_failures[0];
         assert_eq!(failure.cause, StreamFailureCause::UnresolvedFunctionCount);
@@ -2707,31 +2644,7 @@ mod tests {
         write_int_packed(&mut decoded_bits, 1); // handle 0
         write_int_packed(&mut decoded_bits, 32); // overruns the remaining 8 bits
         decoded_bits.extend(std::iter::repeat_n(false, 8));
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
         assert_eq!(sink.stream_failures.len(), 1);
         let failure = &sink.stream_failures[0];
         assert_eq!(failure.cause, StreamFailureCause::AbandonedTail);
@@ -2757,38 +2670,11 @@ mod tests {
     #[test]
     fn rep_layout_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = vec![false]; // property checksum
-        // 0x01 LSB-first: continuation set, payload bits all zero.
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        // 0x01: continuation set, payload bits all zero.
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 9);
 
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
         assert_eq!(stats.field_stream_failures, 1);
         assert_eq!(stats.fields, 0, "no field was emitted");
@@ -2808,36 +2694,9 @@ mod tests {
         let mut decoded_bits = vec![false]; // property checksum
         write_int_packed(&mut decoded_bits, 1); // handle 0
         write_int_packed(&mut decoded_bits, 0); // valid zero-bit payload
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 25);
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_rep_layout(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
         assert_eq!(sink.fields, vec![(0, 0)], "the valid prefix row remains");
         assert_eq!(stats.fields, 1, "NetStats matches the emitted prefix");
@@ -2858,38 +2717,10 @@ mod tests {
     fn class_net_cache_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = Vec::new();
         write_serialized_int(&mut decoded_bits, 0, 2); // one handle bit
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 9);
 
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            2,
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, Some(2), TestSink::default());
 
         assert_eq!(stats.rpc_stream_failures, 1);
         assert_eq!(stats.rpcs, 0, "no RPC was emitted");
@@ -2911,37 +2742,9 @@ mod tests {
         write_serialized_int(&mut decoded_bits, 0, 2);
         write_int_packed(&mut decoded_bits, 0); // valid zero-bit RPC
         write_serialized_int(&mut decoded_bits, 0, 2);
-        for index in 0..8 {
-            decoded_bits.push((0x01u8 & (1 << index)) != 0);
-        }
+        write_byte(&mut decoded_bits, 0x01);
         assert_eq!(decoded_bits.len(), 18);
-        let mut decoded = vec![0u8; decoded_bits.len().div_ceil(8)];
-        for (index, bit) in decoded_bits.iter().copied().enumerate() {
-            if bit {
-                decoded[index / 8] |= 1 << (index % 8);
-            }
-        }
-        let wire = wire_for_short_decoded(&decoded, decoded_bits.len(), 2);
-        let mut payload = BitReader::with_bit_len(&wire, decoded_bits.len() as u64).unwrap();
-        let mut scratch = Vec::new();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let mut sink = TestSink::default();
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: TransformVersion::V1301,
-            scratch: &mut scratch,
-        };
-
-        framing::decode_and_parse_class_net_cache(
-            &mut payload,
-            decoded_bits.len(),
-            NetworkGuid(2),
-            2,
-            &mut stage,
-            &mut sink,
-        );
+        let Run { stats, sink, .. } = decode_bits(&decoded_bits, Some(2), TestSink::default());
 
         assert_eq!(sink.rpcs, vec![(0, 0)], "the valid prefix row remains");
         assert_eq!(stats.rpcs, 1, "NetStats matches the emitted prefix");
