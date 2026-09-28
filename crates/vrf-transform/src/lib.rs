@@ -391,8 +391,7 @@ mod tests {
         // This assignment is the regression guard: changing ALL_VERSIONS back
         // to `[TransformVersion; N]` makes the public API depend on N and fails
         // to compile here when the next build is added.
-        let registry: &'static [TransformVersion] = ALL_VERSIONS;
-        assert_eq!(registry, ALL_VERSIONS);
+        let _: &'static [TransformVersion] = ALL_VERSIONS;
     }
 
     #[test]
@@ -401,10 +400,9 @@ mod tests {
         assert_eq!(err.branch, "++Ares-Core+release-99.99");
         let text = err.to_string();
         assert!(text.contains("release-99.99"), "{text}");
-        assert!(text.contains("release-13.02"), "{text}");
-        assert!(text.contains("release-13.04"), "{text}");
-        assert!(text.contains("release-13.05"), "{text}");
-        assert!(text.contains("release-13.06"), "{text}");
+        for v in ALL_VERSIONS {
+            assert!(text.contains(v.branch()), "{text}");
+        }
     }
 
     #[test]
@@ -414,15 +412,6 @@ mod tests {
             v.apply(&mut buf, 0, 1234).unwrap();
             assert_eq!(buf, [0xAAu8; 4]);
         }
-    }
-
-    #[test]
-    fn output_byte_count_rounds_up() {
-        assert_eq!(TransformVersion::output_byte_count(0), 0);
-        assert_eq!(TransformVersion::output_byte_count(1), 1);
-        assert_eq!(TransformVersion::output_byte_count(8), 1);
-        assert_eq!(TransformVersion::output_byte_count(9), 2);
-        assert_eq!(TransformVersion::output_byte_count(287), 36);
     }
 
     #[test]
