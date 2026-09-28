@@ -17,9 +17,15 @@ totals   : 136,545,822 content blocks / 98,884,839 fields / 75,571,092 RPCs
            malformed framing 0        unattributed 1,972,019,383 bits
 ```
 
-97.283437% of the unattributed bits were `AbilitiesAndBuffsComponent`, for
-which the replay declares no cache group; `MeleeAttackState1`-`4` and `_Alt`
-already resolved through the shared `MeleeAttackStateComponent_ClassNetCache`.
+PROJECT_STATUS.md section 4 records the same pass rates and totals at
+`8be0b8d` (2026-08-02), but 1,972,018,965 unattributed bits. The figure above
+is a re-measurement recorded in commit `0007449` (2026-08-06); no record says
+what moved the 418 bits.
+
+In the `8be0b8d` run, 97.283437% of the unattributed bits were
+`AbilitiesAndBuffsComponent`, for which the replay declares no cache group;
+`MeleeAttackState1`-`4` and `_Alt` already resolved through the shared
+`MeleeAttackStateComponent_ClassNetCache`.
 An even older implementation printed 100% for the wrong reason: it silently
 dropped blocks whose group it could not find and counted nothing. The exact
 `185d452`/`a73ee3a` comparison reproduces that accounting change on two 13.01

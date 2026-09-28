@@ -116,7 +116,7 @@ registrations. Missing first samples remain left-censored.
 
 ## Validation
 
-Both documented corpus guards and the export/checkpoint baselines passed on all
-714 files. The block oracle still excludes unreassembled partials from its
-denominator; preserving their raw bytes does not make that score end-to-end
-completeness.
+Both documented corpus guards passed on all 714 files, and the
+export/checkpoint baselines passed on the pinned reference replay. The block
+oracle still excludes unreassembled partials from its denominator; preserving
+their raw bytes does not make that score end-to-end completeness.

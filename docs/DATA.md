@@ -823,8 +823,9 @@ intervals carried that player's subject; now none does.
   `08aec1e1` packet 28115 a `BP_Destructible_Snowman_B1` decoded as
   `Projectile_Pandemic_4_SmokeGrenade_C`, with typed `215`/`216` fields (13 of
   215 replays, 98 rows). Archetypes are now stamped with the actor GUID they
-  were read for, so those rows report the bare group: corpus `Decoded OK` fell
-  169,335,818 -> 169,335,720 with every other bucket steady.
+  were read for, so those rows report the bare group with no field name:
+  corpus `Decoded OK` fell 169,335,818 -> 169,335,720 while `raw/skip`,
+  `not in table` and `rows offered` held exactly steady.
 - **spikeExploded** — not a limitation: `events.spikeExploded` is the canonical
   detonation signal and is always emitted. `RoundResults` records the round
   *win reason* (elimination/detonate/defuse), not whether the spike detonated,

@@ -64,9 +64,9 @@ A direct scan of all four typed columns in all 714 exports measured (historical:
 Parent and child rows can describe the same input; this is physical presence,
 not semantic coverage.
 
-The full-corpus independent comparison passed all 714 files, as did both corpus
-guards and both pinned reference exports. The frozen full-corpus executable
-SHA-256 is
+The full-corpus independent comparison passed all 714 files. Both corpus
+guards and both pinned reference exports also passed. The frozen full-corpus
+executable SHA-256 is
 `569b6cff14e873a75956b7bbfba918d6a340279e7ed8f540c059d769deeddbb8`.
 The comparison requires existing coordinates, raw windows, rows and all other
 values to remain exact; the eleven other Parquet tables must be byte-identical.
