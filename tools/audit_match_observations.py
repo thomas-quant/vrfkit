@@ -33,36 +33,17 @@ import pyarrow.parquet as pq
 if __package__:
     from .atomic_io import atomic_write_text
     from .export_scan import child_exports, leftover_note, skipped_report
+    from .extract_match_observations import _collapse
 else:
     from atomic_io import atomic_write_text
     from export_scan import child_exports, leftover_note, skipped_report
+    from extract_match_observations import _collapse
 
 
 AMMO_FIELD = "AuthResourceAmount"
 EFFECT_FIELD = "MulticastPlayContinuousEffectFromClient.EffectID"
 MAGAZINE_PATH = "MagazineAmmo"
 GUN_PATH_PREFIX = "/Game/Equippables/Guns/"
-
-
-def _collapse(samples: list[tuple[int, int, int, int]]) -> tuple[list[tuple[int, int, int | None]], int]:
-    """Collapse scalar samples without inventing an order inside one packet."""
-    by_position: dict[tuple[int, int], set[int]] = defaultdict(set)
-    for time_ms, packet_id, _row, value in samples:
-        by_position[(time_ms, packet_id)].add(value)
-    collapsed: list[tuple[int, int, int | None]] = []
-    ambiguous = 0
-    previous = object()
-    for (time_ms, packet_id), values in sorted(by_position.items()):
-        if len(values) != 1:
-            ambiguous += 1
-            collapsed.append((time_ms, packet_id, None))
-            previous = object()
-            continue
-        value = next(iter(values))
-        if value != previous:
-            collapsed.append((time_ms, packet_id, value))
-            previous = value
-    return collapsed, ambiguous
 
 
 def _read_relevant_fields(path: Path):
