@@ -89,9 +89,12 @@ pub struct NetStats {
     pub fields: u64,
     /// Total RPC invocations emitted.
     pub rpcs: u64,
-    /// Bits not walked into a field or RPC: failed or abandoned block payloads
-    /// (unresolved ones included, even when preserved whole), abandoned
-    /// bunches, and refused or discarded partial fragments.
+    /// Bits not walked into a field or RPC because of one of these: a failed
+    /// or abandoned block payload (unresolved ones included, even when
+    /// preserved whole), an abandoned bunch, or a refused or discarded partial
+    /// fragment. Not every unwalked bit: the losses behind
+    /// [`Self::unfinished_partial_bits`], [`Self::unopened_channel_bits`] and
+    /// [`Self::rep_layout_export_bunches`] are among those kept out.
     pub skipped_bits: u64,
     /// Content blocks whose header, or `content_bits` IntPacked, did not read:
     /// the framing depths before [`Self::malformed_content_blocks`] can apply,
