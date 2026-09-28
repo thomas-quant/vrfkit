@@ -357,13 +357,9 @@ fn decode_object_ref_array_reader(
             break;
         }
         if elements_seen == MAX_ELEMENTS {
-            let mut probe = reader.clone();
-            match probe.read_int_packed() {
-                Ok(0) => {
-                    *reader = probe;
-                    consume_optional_trailing_int_packed(reader, stats);
-                }
-                Ok(_) => stats.truncations += 1,
+            match take_zero_int_packed(reader) {
+                Ok(true) => consume_optional_trailing_int_packed(reader, stats),
+                Ok(false) => stats.truncations += 1,
                 Err(_) => stats.errors += 1,
             }
             return out;
@@ -415,13 +411,9 @@ fn decode_object_ref_array_reader(
                 break;
             }
             if field_idx == MAX_FIELDS_PER_ELEMENT {
-                let mut probe = reader.clone();
-                match probe.read_int_packed() {
-                    Ok(0) => {
-                        *reader = probe;
-                        element_complete = true;
-                    }
-                    Ok(_) => stats.truncations += 1,
+                match take_zero_int_packed(reader) {
+                    Ok(true) => element_complete = true,
+                    Ok(false) => stats.truncations += 1,
                     Err(_) => stats.errors += 1,
                 }
                 break;
@@ -512,15 +504,12 @@ fn decode_array_level(
             break;
         }
         if elements_seen == MAX_ELEMENTS {
-            let mut probe = reader.clone();
-            match probe.read_int_packed() {
-                Ok(0) => {
-                    *reader = probe;
-                    if walk.allow_trailing_int_packed {
-                        consume_optional_trailing_int_packed(reader, stats);
-                    }
+            match take_zero_int_packed(reader) {
+                Ok(true) if walk.allow_trailing_int_packed => {
+                    consume_optional_trailing_int_packed(reader, stats);
                 }
-                Ok(_) => {
+                Ok(true) => {}
+                Ok(false) => {
                     stats.truncations += 1;
                     emit_remaining_raw(reader, walk, stats);
                 }
@@ -586,13 +575,9 @@ fn decode_struct_fields(
         }
 
         if field_idx == MAX_FIELDS_PER_ELEMENT {
-            let mut probe = reader.clone();
-            match probe.read_int_packed() {
-                Ok(0) => {
-                    *reader = probe;
-                    return true;
-                }
-                Ok(_) => {
+            match take_zero_int_packed(reader) {
+                Ok(true) => return true,
+                Ok(false) => {
                     stats.truncations += 1;
                     emit_remaining_raw(reader, walk, stats);
                 }
@@ -714,15 +699,22 @@ fn consume_optional_trailing_int_packed(reader: &mut BitReader<'_>, stats: &mut 
     if reader.bits_remaining() != 8 {
         return;
     }
-    let mut probe = reader.clone();
-    match probe.read_int_packed() {
-        Ok(0) => *reader = probe,
-        Ok(_) => {}
-        Err(_) => {
-            stats.errors += 1;
-            reader.skip_remaining();
-        }
+    if take_zero_int_packed(reader).is_err() {
+        stats.errors += 1;
+        reader.skip_remaining();
     }
+}
+
+/// Consume the next IntPacked only if it is `0`: `Ok(true)` when it was, and
+/// `Ok(false)` or `Err` -- another value, or a failed read -- with the reader
+/// untouched. The one probe every limit check and the trailer share.
+fn take_zero_int_packed(reader: &mut BitReader<'_>) -> vrf_bitio::Result<bool> {
+    let mut probe = reader.clone();
+    let zero = probe.read_int_packed()? == 0;
+    if zero {
+        *reader = probe;
+    }
+    Ok(zero)
 }
 
 /// Take `payload_bits` bits out of `reader` as owned bytes.
