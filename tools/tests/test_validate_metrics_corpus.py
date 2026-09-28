@@ -1,17 +1,6 @@
-"""Guards for the metrics cross-validation run.
-
-Two independent ways this reported success it had not earned.
-
-Its exit status was `return 0` on any run where at least one replay completed.
-A corpus where nineteen of twenty replays died at export and the twentieth
-disagreed on every section still exited 0.
-
-And its output directories persist between runs. `compute_metrics.py` is
-invoked without `-o`, so the comparison reads `metrics.json` from inside the
-bundle directory -- and if a run leaves that file behind, the NEXT run reads it
-whenever compute_metrics exits 0 without writing. `check_export_baseline.py`
-already states the rule: "Exporting over a previous run would leave a file the
-exporter has stopped writing sitting there with last run's contents".
+"""Guards for the metrics cross-validation run: one dead replay fails the run
+even when another completes, and a previous run's output is never read as
+this run's (see `fresh_dir`).
 """
 import contextlib
 import io
@@ -135,16 +124,9 @@ class FailureTests(unittest.TestCase):
 
 
 class _SyncPool:
-    """Stands in for `ProcessPoolExecutor` and runs `submit()` in-process.
-
-    `process()` runs under a REAL `ProcessPoolExecutor` in production, which
-    spawns a fresh interpreter that re-imports this module from the real
-    environment -- a patched `guard.VRFKIT`/`guard.REPO`/etc. in the test
-    process would not be visible there. Running synchronously instead means
-    `process()` sees this test's patched module globals directly, which is
-    what makes `main()` testable at all without a real corpus, a compiled
-    `vrfkit` binary, or a valplay checkout.
-    """
+    """Stands in for `ProcessPoolExecutor` and runs `submit()` in-process: the
+    real pool re-imports the module in a fresh interpreter, where this test's
+    patched globals (`guard.VRFKIT`, `guard.REPO`, ...) are invisible."""
 
     def __init__(self, max_workers=None):
         pass
@@ -165,11 +147,8 @@ class _SyncPool:
 
 
 class MainWiringTests(unittest.TestCase):
-    """`failures()` is proven correct on synthetic result dicts above; none of
-    that proves `main()` actually calls it and acts on what it returns --
-    which is exactly this file's own recorded defect ("exit status was
-    `return 0` once any single replay finished"). This is that call.
-    """
+    """`failures()` is pinned on synthetic results above; these pin that
+    `main()` calls it and acts on what it returns."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -240,7 +219,7 @@ class MainWiringTests(unittest.TestCase):
         return code, out.getvalue()
 
     def test_one_completed_replay_does_not_mask_a_dead_one(self):
-        """The recorded defect exactly: `a` finishes, `b` never does."""
+        """`a` finishes and `b` never does: the run still fails."""
         code, output = self.run_main(only=("a", "b"))
         self.assertEqual(code, 1, output)
         self.assertIn("FAILED", output)

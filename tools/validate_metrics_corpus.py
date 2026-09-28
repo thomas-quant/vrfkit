@@ -89,15 +89,11 @@ def run_stage(cmd: list[str], *, timeout: float):
 def fresh_dir(path: Path, root: Path | None = None) -> Path:
     """Delete `path` and recreate it empty.
 
-    These output directories persist between runs, and `compute_metrics.py` is
-    invoked without `-o`, so the comparison reads `metrics.json` from inside
-    the bundle directory. A previous run's file sitting there is read by the
-    next one whenever compute_metrics exits 0 without writing -- and a stale
-    metrics.json compared against its own reference looks EXACT. The same
-    applies one step earlier: a bundle built over an export that has stopped
-    writing a table silently mixes two runs.
-
-    `check_export_baseline.py` already states the rule for its own output.
+    These directories persist between runs and `compute_metrics.py` runs
+    without `-o`, so a previous run's `metrics.json` would be read whenever
+    compute_metrics exits 0 without writing -- and compared against its own
+    reference, a stale file looks EXACT. A bundle built over an export that
+    stopped writing a table would mix two runs the same way.
     """
     root = root or path.parent
     remove_tree(path, root)  # refuses a path outside `root` before deleting
@@ -106,12 +102,8 @@ def fresh_dir(path: Path, root: Path | None = None) -> Path:
 
 
 def failures(results: list[dict]) -> list[str]:
-    """Replays that did not complete the pipeline, as readable lines.
-
-    The exit status was `return 0` once any single replay finished. Nineteen
-    dead replays out of twenty exited 0, and so did a run in which every
-    section differed.
-    """
+    """Replays that did not complete the pipeline, as readable lines; any one
+    fails the run, however many others finished."""
     return [f"{r['id']}: failed at {r['stage']} -- {str(r.get('error', ''))[:160]}"
             for r in results if r["stage"] != "ok"]
 
