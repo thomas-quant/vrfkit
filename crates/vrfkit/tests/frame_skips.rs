@@ -1,29 +1,16 @@
 //! The frame-skip tallies, followed from the DemoFrame walk to every output.
 //!
-//! # Why this file exists
-//!
-//! `vrf_frame::walk_demo_frames` counts the ExternalData and
-//! GameSpecificFrameData bytes it steps over, and five passes carry that
-//! tally to an output with one line of glue each: the export main and
-//! checkpoint passes (summary and manifest), `validate`, and the `diag` main
-//! and checkpoint passes. The vrf-frame tests stop at the walk and the
-//! manifest and diag tests start from a hand-built `FrameSkips`, so nothing
-//! tested the glue. Nothing on real data can either: the true value is 0 on
-//! every replay measured, `check_export_baseline.py` pins that 0 for one
-//! 13.01 replay, and its summary-vs-manifest reconciliation compares two
-//! outputs each pass feeds from one variable. A cut line reads 0 everywhere
-//! and every guard stays green.
-//!
-//! So this builds an uncompressed replay whose ReplayData and Checkpoint
-//! frames carry both sections -- two chunks per pass, and a different total
-//! for each pass and each tally -- runs the real binary, and requires every
-//! output to report its own pass's totals. A pass that stops absorbing its
-//! walk reads 0; one fed the other pass's walk reads the other's numbers;
-//! one that keeps only the last chunk reads that chunk's. Each fails here.
-//!
-//! The replay carries no packets, so nothing below it runs: `validate` ends
-//! in its no-content-blocks verdict (exit 2), which is asserted so a crash
-//! (exit 1) cannot pass for it.
+//! Five passes carry `walk_demo_frames`' skip tally to an output with one line
+//! of glue each: export's main and checkpoint passes (summary and manifest),
+//! `validate`, and `diag`'s two passes. No corpus guard can see a cut line:
+//! the value is 0 on every replay measured, and the baseline's
+//! summary-vs-manifest reconciliation compares two outputs fed from one
+//! variable. So this builds an uncompressed replay whose frames carry both
+//! sections, two chunks per pass with distinct totals per pass and tally, runs
+//! the real binary, and requires each output to report its own pass's totals:
+//! a pass that absorbs nothing, the other pass's walk or only its last chunk
+//! reads the wrong numbers. With no packets, `validate` ends in exit 2 (no
+//! content blocks), asserted so a crash (exit 1) cannot pass for it.
 
 mod common;
 
@@ -36,12 +23,9 @@ use common::{
 /// What the ReplayData pass must report: `(blobs, bytes, game-specific
 /// bytes)`, summed over its two chunks -- (2, 5, 4) and (1, 1, 7).
 const MAIN: (u64, u64, u64) = (3, 6, 11);
-/// What the checkpoint pass must report, summed over its two chunks --
-/// (1, 2, 3) and (0, 0, 2). Every one of the six values differs from the
-/// other five, so a swapped field or pass cannot match by accident.
+/// What the checkpoint pass must report, summed over (1, 2, 3) and (0, 0, 2).
+/// All six values differ, so a swapped field or pass cannot match by accident.
 const CHECKPOINT: (u64, u64, u64) = (1, 2, 5);
-
-// --- the replay ------------------------------------------------------------
 
 fn add_u64(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_le_bytes());
@@ -135,8 +119,6 @@ fn replay() -> Vec<u8> {
     data
 }
 
-// --- running the binary ----------------------------------------------------
-
 /// A fresh directory under Cargo's per-target scratch area, and the replay
 /// written into it.
 fn scratch(name: &str) -> (PathBuf, PathBuf) {
@@ -151,10 +133,9 @@ fn scratch(name: &str) -> (PathBuf, PathBuf) {
     (dir, replay_path)
 }
 
-/// The one line that starts with `label` once its indent is trimmed, with
-/// the label removed and its spacing normalised. Column padding differs
-/// between the summary and `validate`; the numbers must not. Exactly one
-/// such line may exist -- a second would make the reading ambiguous.
+/// The one line starting with `label` after its indent, label removed and
+/// spacing normalised: padding differs between the summary and `validate`,
+/// the numbers must not. A second such line would make the reading ambiguous.
 fn skips_line(output: &str, label: &str) -> String {
     let lines: Vec<&str> = output
         .lines()
@@ -197,8 +178,6 @@ fn json_skips(json: &str, prefix: &str) -> (u64, u64, u64) {
     )
 }
 
-// --- the five passes ---------------------------------------------------------
-
 /// `validate` walks ReplayData only; its line must carry the main totals.
 #[test]
 fn validate_reports_the_replay_data_frame_skips() {
@@ -217,9 +196,8 @@ fn validate_reports_the_replay_data_frame_skips() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// `diag` walks both passes into one JSON document: the main pass under
-/// `chunks` with a `replay_data_` prefix, the checkpoint pass under
-/// `checkpoint_meta` with none.
+/// `diag` reports the main pass under `chunks` with a `replay_data_` prefix,
+/// the checkpoint pass under `checkpoint_meta` with none.
 #[test]
 fn diag_reports_each_pass_frame_skips() {
     let (dir, replay_path) = scratch("diag");
