@@ -493,13 +493,9 @@ fn table_is_sorted() {
     );
 }
 
-/// Live per-player economy replicates under `MoneyManagementComponent` on both
-/// 13.01 and 13.02, which no C# descriptor declares: `Money` is 800 across all
-/// actors at pistol-round start and runs 0..9000 in multiples of 50,
-/// `StartOfRoundMoney` is 800 active / 0 inactive, `TotalMoneyGranted` is
-/// cumulative 800..34200. `StartOfRoundMoney`'s type is descriptor-corroborated
-/// (Int32 under OwnerExclusivePlayerInfo, OwnerExclusivePlayerInfoDescriptor.cs:93,
-/// a separate end-of-round path). ADDITIONS in tools/apply_type_corrections.py.
+/// Live per-player credits under `MoneyManagementComponent`, a group no C#
+/// descriptor declares, read as Int32. Evidence: the MoneyManagementComponent
+/// entries in tools/apply_type_corrections.py.
 #[test]
 fn money_management_economy_is_typed() {
     let group = "/Script/ShooterGame.MoneyManagementComponent";
@@ -508,15 +504,10 @@ fn money_management_economy_is_typed() {
     assert_typed(group, "TotalMoneyGranted", Some(FieldType::Int32));
 }
 
-/// Concussion state replicates under a SHARED component attached to every
-/// player character, not an agent-specific one: on the 98605b1b Demos export
-/// it is on 9 distinct actors spanning eight agents (Phoenix, Breach, Smonk,
-/// Clay, Guide, Wushu, Terra, Pandemic, Deadeye) plus Guide's PossessableScout
-/// pawn, with identical names and widths. The widths self-check over all 375
-/// rows: ConcussStartTime and ConcussEndTime are 32 bits on all 39 rows each
-/// (Float: game-seconds 389.5/392.0 ... 1916.7/1919.2, the ~2.5 s gap being the
-/// concussion), ConcussLevel 64 bits on all 297 (Double: the 0..1 intensity
-/// ramp). No descriptor declares the group: ADDITIONS, like `Money` and `Ping`.
+/// Concussion state lives on one shared component on every player character,
+/// so one group types it for every agent: Start/EndTime Float, Level Double.
+/// Evidence: the Comp_Actor_Concussable entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn concussion_fields_are_typed() {
     let group = "/Game/Characters/Components/Comp_Actor_Concussable\
@@ -526,12 +517,9 @@ fn concussion_fields_are_typed() {
     assert_typed(group, "ConcussLevel", Some(FieldType::Double));
 }
 
-/// `Comp_AbilityFuelSystem` is a generic per-ability component (on 98605b1b,
-/// Sage/Guide's heal `Ability_Guide_4_Heal` and Viper/Pandemic's smoke screen)
-/// under one shared path. CurrentFuel is 64 bits on all 5702 rows and reads as
-/// Double a smooth 1.0 -> 0.0 drain (1.0, 0.9993, 0.9909, 0.9824, ...), not the
-/// Float a task note guessed; IsFuelDraining is 1 bit on all 60 rows, raw
-/// 0x00/0x01, a Bool. No descriptor declares the group: ADDITIONS.
+/// `Comp_AbilityFuelSystem`, one shared per-ability component: CurrentFuel is a
+/// Double, IsFuelDraining a Bool. Evidence: the Comp_AbilityFuelSystem entries
+/// in tools/apply_type_corrections.py.
 #[test]
 fn ability_fuel_fields_are_typed() {
     let group = "/Game/Characters/Components/Comp_AbilityFuelSystem\
@@ -573,13 +561,10 @@ fn equippable_used_is_an_object_net_guid() {
 }
 
 /// Both damage RPCs' death-montage parameters are IntPacked GUIDs, not the
-/// opaque payload the descriptor's `AddRaw` declares. Over the 1,018-replay
-/// audit (959,445 rows each) 8-bit rows are all the null GUID and the rest
-/// resolve 100%: `DeathMontageEffectOverride` through `net_guids` to an
-/// `FXC_*_C` finisher effect class, `...Context` through `actors.parquet` to a
-/// `*_PC_C` pawn open at the event. `Raw` entries win before the checksum and
-/// the scoped types, so it is a table correction, which must not reach
-/// `...IsQueued` (a Bool).
+/// opaque payload the descriptor's `AddRaw` declares. A `Raw` entry wins before
+/// the checksum and the scoped types, so this is a table correction, and it
+/// must not reach `...IsQueued` (a Bool). Evidence: the
+/// DeathMontageEffectOverride(Context) rules in tools/apply_type_corrections.py.
 #[test]
 fn the_death_montage_parameters_are_object_net_guids() {
     for group in [DAMAGE_BASE, DAMAGE_POINT] {
@@ -599,11 +584,9 @@ fn the_death_montage_parameters_are_object_net_guids() {
     assert_checksum(2397897524, Some(FieldType::ObjectNetGuid));
 }
 
-/// `AresEquippableDataTracker.OriginalBuyerTeam` is an inline FName: 97 bits
-/// is 1 (isHardcoded = 0) + 32 (length 4) + `Red\0` + 32 (number 0), 105 the
-/// same around `Blue\0`. Those are the only two payloads in the 1,018-replay
-/// audit (748,381 rows, main and checkpoint); the descriptor's EnumByte could
-/// read neither (no row is 8 bits).
+/// `AresEquippableDataTracker.OriginalBuyerTeam` is an inline FName (`Red` or
+/// `Blue`), which the descriptor's EnumByte cannot read. Evidence: the
+/// OriginalBuyerTeam rule in tools/apply_type_corrections.py.
 #[test]
 fn original_buyer_team_is_an_fname() {
     assert_typed(
@@ -637,11 +620,9 @@ fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
 }
 
 /// HawkFlash's `ReplicatedMovement` reads byte rotator components and its
-/// `Banking` a double, on that exact group only. Over the 1,018-replay audit the
-/// byte reading consumes all 1,033,952 movement payloads (71-118 bits) exactly,
-/// while 54.6% overrun or leave residue under the short one; `Banking` is 64
-/// bits on all 801,700 rows, reading -180..180. The location is whole units
-/// (spawn-matched, see REP_MOVEMENT_LOCATION_EVIDENCE).
+/// `Banking` a Double, on that exact group only; the location is whole units
+/// (REP_MOVEMENT_LOCATION_EVIDENCE). Evidence: the HawkFlash ReplicatedMovement
+/// and Banking entries in tools/apply_type_corrections.py.
 #[test]
 fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     assert_typed(
@@ -656,12 +637,11 @@ fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     assert_checksum(677106858, Some(FieldType::Double));
 }
 
-/// Cypher's trapwire and cage classes were renamed in 13.01, and the five
-/// descriptor-typed fields follow with the same name, checksum and width
-/// (apply_type_corrections.py). The old paths keep their entries (11.06-12.08
-/// carry them), and `Deployed`'s checksum is learned to catch the next rename.
-/// `CreatedByCharacter` (2035145197) and `RelativeScale3D` (1992268157) are
-/// deliberately not learned: every agent's ability classes carry them.
+/// Cypher's trapwire and cage classes were renamed in 13.01: the five
+/// descriptor-typed fields follow on the new paths, the old paths keep their
+/// entries, and only `Deployed`'s checksum is learned, so a future path still
+/// resolves. Evidence: the Gumshoe TripWire/CageTrap entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn cypher_trap_fields_follow_the_13_01_rename() {
     const OLD_E: &str = "/Game/Characters/Gumshoe/S0/Ability_E/";
@@ -709,14 +689,10 @@ fn cypher_trap_fields_follow_the_13_01_rename() {
 
 /// The five AGameObject smoke and zone classes read byte rotator components;
 /// the only table entry left with short ones is Gekko's Wingman, an
-/// AShooterCharacter pawn. The descriptors' bare `.ReplicatedMovement()` gives
-/// the five the ShortComponents default, and none ever replicates a rotation,
-/// so the wire cannot choose (13-J, 16-D); the game's 13.06 class data does:
-/// all five derive natively from AGameObject > AActor, no Blueprint default in
-/// their chains writes `ReplicatedMovement`, and every AGameObject class whose
-/// rotation is observable decodes at byte width only (AProjectile 38 of 38
-/// byte, AShooterCharacter 7 of 7 short). Evidence and bound:
-/// `GAME_OBJECT_BYTE_ROTATOR_GROUPS` in `apply_type_corrections.py`.
+/// AShooterCharacter pawn. None of the five ever replicates a rotation, so the
+/// wire cannot choose the width (13-J, 16-D); the game's 13.06 class data does.
+/// Evidence and bound: `GAME_OBJECT_BYTE_ROTATOR_GROUPS` in
+/// `apply_type_corrections.py`.
 #[test]
 fn only_the_seeker_nade_keeps_short_rotator_components() {
     const GAME_OBJECTS: [&str; 5] = [
@@ -758,12 +734,10 @@ fn only_the_seeker_nade_keeps_short_rotator_components() {
 
 #[test]
 fn damage_geometry_fields_are_quantized_vectors() {
-    // Typed like EquippableUsed: the VectorNetQuantize* decoders attached at
-    // DamageParameters.cs:50 and MulticastNotifyDamagePointParameters.cs:40-46
-    // map through extract_descriptors.py's PAYLOAD_DECODER_TYPES, and
-    // apply_type_corrections.py EXPECTED only verifies them. Scales are the C#
-    // call sites: VectorNetQuantize = 1, VectorNetQuantize100 = 100,
-    // VectorNetQuantizeNormal = unit vector.
+    // Typed from the C# decoders' names, like EquippableUsed. Scales are the
+    // C# call sites: VectorNetQuantize = 1, VectorNetQuantize100 = 100,
+    // VectorNetQuantizeNormal = unit vector. Evidence: the damage-vector
+    // EXPECTED rows in tools/apply_type_corrections.py.
     const BASE: &str = DAMAGE_BASE;
     const POINT: &str = DAMAGE_POINT;
 
@@ -1505,24 +1479,20 @@ fn blind_duration_is_typed() {
     );
 }
 
-/// The `MulticastNotifyHeal` and `MulticastNotifyOverhealDecay` parameters
+/// The `MulticastNotifyHeal` / `MulticastNotifyOverhealDecay` parameters
 /// resolve under their colon-group paths by bare name (the EquippableUsed
-/// shape); the C# descriptor (DamageableComponentClassNetCacheDescriptor.cs)
-/// declares only the two `MulticastNotifyDamage_*` handles. On the 98605b1b
-/// Demos export `HealTaken` is 32 bits on all 1252 rows, reading as Float a
-/// 0.05..400 heal magnitude with the recurring 0x3f800000 (1.0f) no int read
-/// produces; `DecayApplied` is 32 bits on all 699 rows, a Float 0.07..50
-/// overheal decay clustering around 0.195 (per tick). ADDITIONS, like `Money`.
+/// shape): `HealTaken` a Float heal magnitude, `DecayApplied` a Float overheal
+/// decay per tick. Evidence: the HealTaken and DecayApplied entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn heal_and_overheal_decay_scalars_are_typed() {
     assert_typed(HEAL_PARAMS, "HealTaken", Some(FieldType::Float));
     assert_typed(DECAY_PARAMS, "DecayApplied", Some(FieldType::Float));
 }
 
-/// `PlayerScoreComponent.Score`, the per-player combat score, in no C#
-/// descriptor: on 98605b1b 32 bits on all 430 rows, denormal slop (~1e-44) as
-/// Float but 21..5833 with 415 distinct values as Int32, a cumulative score
-/// across a match. ADDITION, like `Money`.
+/// `PlayerScoreComponent.Score`, the per-player cumulative combat score, reads
+/// as Int32. Evidence: the PlayerScoreComponent/Score entry in
+/// tools/apply_type_corrections.py.
 #[test]
 fn player_score_is_typed() {
     assert_typed(
@@ -1532,8 +1502,9 @@ fn player_score_is_typed() {
     );
 }
 
-/// The scoreboard's authoritative cumulative K/D/A counters, 32-bit LE
-/// integers; untyped, consumers would rebuild them from lossy kill RPCs.
+/// The scoreboard's authoritative cumulative K/D/A counters, Int32; untyped,
+/// consumers would rebuild them from lossy kill RPCs. Evidence: the
+/// BasicCombatStatsComponent entries in tools/apply_type_corrections.py.
 #[test]
 fn basic_combat_stats_are_typed() {
     let group = "/Script/ShooterGame.BasicCombatStatsComponent";
@@ -1542,13 +1513,10 @@ fn basic_combat_stats_are_typed() {
     }
 }
 
-/// `ZoomMultiplierComponent` drives the ADS/scope FOV transition; no C#
-/// descriptor declares it. On 98605b1b all five fields are 32 bits on every row
-/// with zero NaN: SourceFov/TargetFov 20.6..103.0 (103.0 is Valorant's default
-/// hip-fire FOV, which a wrong type cannot produce), SourceFov1P/TargetFov1P
-/// 5.0..70.0 (70.0 the default 1P FOV), TotalTransitionTimeDuration 0.0..0.25.
-/// SourceZoomLevel/TargetZoomLevel stay untyped: ~70% of rows are the
-/// 0xFFFFFFFF sentinel (NaN as Float) and the rest 0.0. ADDITIONS, like `Money`.
+/// `ZoomMultiplierComponent`'s five FOV-transition fields read as Float.
+/// `SourceZoomLevel`/`TargetZoomLevel` stay untyped: the rows that are not the
+/// 0xFFFFFFFF sentinel are 0.0. Evidence: the ZoomMultiplierComponent entries
+/// and the DELIBERATELY NOT ADDED list in tools/apply_type_corrections.py.
 #[test]
 fn zoom_multiplier_fov_fields_are_typed() {
     let group = "/Script/ShooterGame.ZoomMultiplierComponent";
@@ -1559,11 +1527,10 @@ fn zoom_multiplier_fov_fields_are_typed() {
     assert_typed(group, "TotalTransitionTimeDuration", Some(FieldType::Float));
 }
 
-/// `UsableComponent` (spike plant/defuse, ultimate orbs, doors), in no C#
-/// descriptor: on a bomb replay `HighestProgress` is 32 bits on ~12k rows, a
-/// clean 0..1 Float ramp of 1/128 per tick (a u32 read is non-monotonic), and
-/// `bIsActive` one 0x01 bit on ~150 rows, the "someone is interacting" flag.
-/// ADDITIONS, like `Money`.
+/// `UsableComponent` (spike plant/defuse, ultimate orbs, doors): on a bomb
+/// replay `HighestProgress` is 32 bits on ~12k rows and `bIsActive` one 0x01
+/// bit on ~150 rows. Evidence for the Float ramp and the Bool flag: the
+/// UsableComponent entries in tools/apply_type_corrections.py.
 #[test]
 fn usable_component_interaction_is_typed() {
     let group = "/Script/ShooterGame.UsableComponent";
@@ -1597,10 +1564,10 @@ fn the_ammo_component_declares_the_handle_the_bare_groups_land_on() {
     assert_eq!(stats.not_in_table, 0);
 }
 
-/// `FiniteSpeedMovementComponent.MaximumRange`, a projectile's max travel in
-/// Unreal units, in no C# descriptor: 32 bits on all 11699 rows on 98605b1b, a
-/// Float 397.6..49986.1 with the mode at ~19993 UU (~500 m). `bIsActive` stays
-/// untyped: all 574 rows are 0x01, a constant. ADDITION, like `Money`.
+/// `FiniteSpeedMovementComponent.MaximumRange`, a projectile's travel limit in
+/// Unreal units, reads as Float; `bIsActive` stays untyped. Evidence: the
+/// MaximumRange entry and the DELIBERATELY NOT ADDED list in
+/// tools/apply_type_corrections.py.
 #[test]
 fn finite_speed_movement_max_range_is_typed() {
     assert_typed(
@@ -1645,13 +1612,8 @@ fn the_engine_fallback_does_not_invent_other_names() {
 
 /// The 192-bit RPC vectors: Unreal splits an `FTransform` parameter into three
 /// double vectors, which no descriptor declares (54,859 raw rows on 02d4d478).
-/// As 3 x f64 they are unambiguous: `Scale3D` is exactly (1,1,1) on every row.
-/// ADDITIONS, like `Money`. The checksums agree and were not used to derive
-/// the grouping: `248` is 598402184 wherever it appears, `249` 747197698,
-/// `Translation` 2235276067, `Scale3D` 2983776962. `249` here is the
-/// transform's `Rotation`, an FQuat sent as X/Y/Z (W implied), not a rotator:
-/// 747197698 reproduces as `Transform: FTransform -> Rotation: FQuat`
-/// (tools/tests/test_compatible_checksum_facts.py).
+/// `249` here is the transform's `Rotation` FQuat, not a rotator. Evidence: the
+/// RPC vector entries in tools/apply_type_corrections.py.
 #[test]
 fn the_rpc_transform_vectors_are_typed() {
     for (group, field) in [
@@ -1780,15 +1742,11 @@ fn an_unlearned_checksum_resolves_nothing() {
     assert_eq!(resolve("/Game/Nope.Nope_C", "Whatever", Some(1)), None,);
 }
 
-/// `AllianceFilter`, checksum 2270825073, is declared by three effect RPCs and
-/// received by five more (the weapon `...FromClient` pair,
-/// `ReplayPlayOneShotEffectAtLocation`, both `ReplayRecord*Effect`). The donors
-/// were typed two ways (`EnumByte` on the two `EffectManagerComponent`
-/// multicasts, `EnumRemainingBits` on `ReplayPlayContinuousEffectAtLocation`),
-/// so the learner dropped the checksum and 4,560,248 receiver rows shipped raw
-/// over the 1,018 replays audited at 259ed10; all 16,030,813 rows under it are
-/// 3 bits, where both readers agree. A correction makes the donors agree; both
-/// the donors and the regenerated `checksum_table.rs` are pinned.
+/// `AllianceFilter` (checksum 2270825073) is declared by three effect RPCs and
+/// received by five more; its donors were typed two ways, so the learner
+/// dropped the checksum. A correction makes the donors agree; both the donors
+/// and the regenerated `checksum_table.rs` are pinned. Evidence: the
+/// AllianceFilter rule in tools/apply_type_corrections.py.
 #[test]
 fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
     for group in [
@@ -1816,11 +1774,10 @@ fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
     );
 }
 
-/// The weapon effect RPCs name the holder's `EffectManager` (checksum
-/// 1051633025, these two functions only): all 3,112,054 rows in the 1,018-replay
-/// audit are IntPacked 16/24-bit GUIDs resolving in `net_guids` to
-/// `EffectManager`, whose outer is the holder's `*_PC_C` (or Yoru's decoy).
-/// Both twins are pinned, against the "Viper typed, Phoenix not" shape.
+/// The weapon effect RPCs' `EffectManagerComponent` is an IntPacked reference
+/// to the holder's `EffectManager`. Both twins are pinned, against the "Viper
+/// typed, Phoenix not" shape. Evidence: the EffectManagerComponent entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn the_weapon_effect_rpcs_type_their_effect_manager_reference() {
     for group in [
@@ -2044,15 +2001,11 @@ fn the_checksum_table_is_populated_and_sorted() {
     assert!(CHECKSUM_TYPES.windows(2).all(|w| w[0].0 < w[1].0));
 }
 
-/// `StopMovementTime` pairs with the Float `StartMovementTime`: 32 bits on all
-/// 13,316 rows, a -1.0 sentinel on 5,371 and 0.76..136.98 on the rest as f32
-/// (the sibling reads -1.0..1771.83). `HandleNumber` names a force module for a
-/// later Remove/Cleanup: as u32 its 3,741 rows hold 1..765 with every value
-/// present, a dense sequential id. The checksums carry them to
-/// `ReplayStopContinuousEffectAtLocation` (244888268) and
-/// `NetMulticastRemoveForceModule` (3336285386); 3336285386 reproduces only as
-/// `Handle: FForceModuleHandle -> HandleNumber: uint32`
-/// (tools/tests/test_compatible_checksum_facts.py), hence `UInt32`.
+/// `StopMovementTime` (Float, like its sibling `StartMovementTime`) and the
+/// force module `HandleNumber` (UInt32: its checksum 3336285386 reproduces only
+/// as `HandleNumber: uint32`) are typed, and the checksums carry them to the
+/// Stop/Remove RPCs. Evidence: the StopMovementTime and HandleNumber entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn the_movement_time_pair_and_force_module_handle_are_typed() {
     assert_typed(STOP_CONTINUOUS, "StopMovementTime", Some(FieldType::Float));
@@ -2060,14 +2013,10 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
     assert_checksum(3336285386, Some(FieldType::UInt32));
 }
 
-/// `EffectID` is `FEffectID`'s `int64`, not the descriptors' `ulong`: each
-/// checksum below reproduces with `int64` only
-/// (tools/tests/test_compatible_checksum_facts.py), as the 13.06 executable's
-/// reflection agrees. The table entries donate it, through the checksum table,
-/// to `MulticastStopContinuousEffect`, the weapons'
-/// `MulticastPlayContinuousEffectFromClient` and
-/// `ReplayStopContinuousEffectAtLocation`; both halves are pinned because CI's
-/// one-group checksum guard cannot see a stale checksum table.
+/// `EffectID` is `FEffectID`'s `int64`, not the descriptors' `ulong`. The table
+/// entries donate it through the checksum table; both halves are pinned because
+/// CI's one-group checksum guard cannot see a stale checksum table. Evidence:
+/// `EFFECT_ID_INT64` in tools/apply_type_corrections.py.
 #[test]
 fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
     for (group, checksum) in [
@@ -2094,16 +2043,11 @@ fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
     );
 }
 
-/// The rest of `NetMulticastApplyForceModule`'s parameters, over the
-/// 1,018-replay audit (665,519 Apply rows, all main stream): `RespawnNumber` is
-/// 32 bits reading 0..38, equal to the character's typed
-/// `AresInventory.RespawnNumber` on 665,363 of 665,370 comparable rows;
-/// `NetTimestamp` 32 bits of finite f32 on the 1/128 s grid; `ModuleType` 3
-/// bits reading {0, 2}; `Module` and `Character` IntPacked GUIDs (every
-/// `Module` a `ForceModule_*` class, every `Character` the row's own actor).
-/// Remove's `ModuleType` (checksum 3263282135, 2,743,504 rows) is typed only
-/// through the checksum table learning the Apply donor; paired by (object,
-/// handle), Remove and Apply agree on 647,381 of 647,381 rows.
+/// The rest of `NetMulticastApplyForceModule`'s parameters are typed on Apply.
+/// Remove's `ModuleType` (2,743,504 rows) is typed only through the checksum
+/// table learning the Apply donor; paired by (object, handle), Remove and Apply
+/// agree on 647,381 of 647,381 rows. Evidence: the NetMulticastApplyForceModule
+/// entries in tools/apply_type_corrections.py.
 #[test]
 fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() {
     const APPLY: &str = FORCE_APPLY;
@@ -2136,12 +2080,10 @@ fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() 
     );
 }
 
-/// Over the 1,018-replay audit: `ReadyingStateComponent.AuthEquipSpeed` is 3
-/// bits on all 1,015,515 rows (main {0,1,2}, checkpoints 0), matching the
-/// descriptor-typed `AutoEquipTransitionContext.AutoEquipSpeed` in the same
-/// packet; the inventory's `CorrectionIndex` and `LastSeenClientCorrectionIndex`
-/// are 32 bits on all 1,222,930 / 1,129,599 rows, strictly increasing per actor,
-/// with `LastSeen <= Correction - 1` on every paired row.
+/// `ReadyingStateComponent.AuthEquipSpeed` (EnumByte) and the inventory's
+/// `CorrectionIndex` / `LastSeenClientCorrectionIndex` (Int32) are typed, by
+/// name and by checksum. Evidence: the AuthEquipSpeed and AresInventory entries
+/// in tools/apply_type_corrections.py.
 #[test]
 fn readying_speed_and_inventory_correction_counters_are_typed() {
     for (group, field, expected) in [
@@ -2172,11 +2114,10 @@ fn readying_speed_and_inventory_correction_counters_are_typed() {
     }
 }
 
-/// The named map area a player stands in ("A Site", "Mid", the game's own
-/// callouts; nothing else in the export gives a position in map terms),
-/// reachable since the `CalloutRegionTracker` leaf was remapped to its native
-/// class. An `ObjectNetGuid`: all 1,957 non-zero rows resolve through
-/// `net_guids.parquet` to a `CalloutRegion_*` path, 22 distinct regions.
+/// The callout region a player stands in, reachable since the
+/// `CalloutRegionTracker` leaf was remapped: an `ObjectNetGuid` naming the
+/// region actor. Evidence: the CurrentRegion entry in
+/// tools/apply_type_corrections.py.
 #[test]
 fn the_callout_region_is_typed() {
     assert_typed(
@@ -2186,14 +2127,11 @@ fn the_callout_region_is_typed() {
     );
 }
 
-/// The per-cast ability log: `Comp_AbilityStatisticsReplicator` replicates one
-/// record per cast, flattened into `AbilityCastsThisRound[i].<member>` rows.
-/// The member names carry Blueprint property GUIDs, byte-identical on 13.01 and
-/// 13.02, which makes pinning them safe. Each member is corroborated outside
-/// itself: `Player`'s 352 values are UUIDs matching `manifest.players.subject`,
-/// `Round` covers exactly 0..17 for an 18-round match, `CastLocation` reads as
-/// 3 x f64 inside the map bounds `movement.parquet` describes, and `Slot` takes
-/// four values (three abilities and an ultimate).
+/// The per-cast ability log's members, flattened into
+/// `AbilityCastsThisRound[i].<member>` rows. Their names carry Blueprint
+/// property GUIDs, byte-identical on 13.01 and 13.02, which makes pinning them
+/// safe. Evidence: the Comp_AbilityStatisticsReplicator entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn the_ability_cast_log_is_typed() {
     const GROUP: &str = "/Game/Characters/_Core/Comp_AbilityStatisticsReplicator\
@@ -2222,13 +2160,10 @@ fn the_ability_cast_log_is_typed() {
 }
 
 /// Both classes declaring `MulticastAddSmokeScreenPoint` are typed: Viper's
-/// `SmokeScreenManager` and Phoenix's `FlameWallManager`, whose `Translation`
-/// and `Scale3D` were null on 2,791 rows across 31 replays with decode errors
-/// at 0 while only Viper's was in the table. The checksum fallback correctly
-/// refused Phoenix's (2794273677 / 1639439377 against Viper's 2235276067 /
-/// 2983776962), so it takes a name-level entry. Every row is 192 bits,
-/// `Translation` decodes to map coordinates (7211.7, 1670.3, 96.0) and `Scale3D`
-/// is (1,1,1) on every row.
+/// `SmokeScreenManager` and Phoenix's `FlameWallManager`, which the checksum
+/// fallback rightly refused to type from Viper's, so it takes a name-level
+/// entry. Evidence: the FlameWallManager Translation/Scale3D entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn both_classes_declaring_the_smoke_point_rpc_are_typed() {
     const VIPER: &str = "/Game/Characters/Pandemic/S0/Ability_E/\
@@ -2244,12 +2179,10 @@ GameObject_Phoenix_Q_FlameWallManager_Production_C:MulticastAddSmokeScreenPoint"
     }
 }
 
-/// `"215"` and `"216"` are field *names* (unresolved hardcoded FName indexes),
-/// decoded on 353 groups but pinned `Raw` on 17 weapon groups, where a name hit
-/// wins before the checksum: 48,010 rows over 20 replays. The checksums
-/// `1710918439` and `4109980037` are the same on every group at a uniform 3
-/// bits, decoding to 3 and 1 where they decode: the same property, so the
-/// weapons' `Raw` was a guess.
+/// `"215"` and `"216"` are field names, decoded on 353 groups but pinned `Raw`
+/// on 17 weapon groups, where a name hit wins before the checksum. Evidence
+/// that every group carries the same property: the "215"/"216" rules in
+/// tools/apply_type_corrections.py.
 #[test]
 fn the_weapon_classes_type_215_and_216_like_everything_else() {
     const WEAPONS: [&str; 3] = [
@@ -2265,13 +2198,10 @@ fn the_weapon_classes_type_215_and_216_like_everything_else() {
     }
 }
 
-/// `249`, after the `VectorDouble` placement location `248`, is the rotation on
-/// all five RPCs that send it (441,814 rows over 20 replays): its widths are
-/// exactly `3 + 16 x (flags set)` (3, 19, 35, 51) for `RotationShort`, which
-/// consumes every payload exactly, and the same UFunction names it `Rotation`
-/// (`RotationShort` in the table) where the replay names it. Not the FQuat
-/// `249` of an FTransform (747197698): this family shares 2526428638, a
-/// top-level `Rotation: FRotator`, and is 19 bits, not 192.
+/// `249`, after the `VectorDouble` placement location `248`, is the
+/// `RotationShort` rotation on all five RPCs that send it, and not the FQuat
+/// `249` of an FTransform. Evidence: the `249` RotationShort entries in
+/// tools/apply_type_corrections.py.
 #[test]
 fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
     const GROUPS: [&str; 5] = [
@@ -2300,10 +2230,8 @@ fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
     }
 }
 
-/// The RNG component's seed: 120,853 rows, one group, one checksum, 32 bits on
-/// every row, 120,852 distinct values across the full i32 range, as the sibling
-/// `AuthInitialRandomSeed` also shows. Int32 over UInt32 follows Unreal's
-/// `FRandomStream` (an `int32` seed); the bits read either way.
+/// The RNG component's seed reads as Int32, following Unreal's `FRandomStream`.
+/// Evidence: the AuthCurrentRandomSeed entry in tools/apply_type_corrections.py.
 #[test]
 fn the_random_number_generator_seed_is_typed() {
     assert_typed(
