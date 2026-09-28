@@ -3,10 +3,12 @@ import contextlib
 import io
 import json
 import math
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy
 import pyarrow as pa
@@ -274,9 +276,12 @@ TEXT_RULE_EDGES = (
 
 
 def column_text(values, *, shorten):
-    """Per-row text `_json_scalar_column` produces for `values` as float32."""
+    """Per-row text `_json_scalar_column` produces for `values` as float32:
+    its distinct texts fanned back out through its inverse, as the writer
+    does."""
     arr = numpy.array(values, dtype=numpy.float32)
-    return list(bundle._json_scalar_column(arr, shorten=shorten))
+    texts, inverse = bundle._json_scalar_column(arr, shorten=shorten)
+    return texts.take(inverse).to_pylist()
 
 
 def per_value_text(values, *, shorten):
@@ -335,6 +340,147 @@ class MovementTextRuleTests(unittest.TestCase):
                                  per_value_text(values, shorten=False))
                 self.assertEqual(column_text(values, shorten=True),
                                  per_value_text(values, shorten=True))
+
+
+#: The movement line as the per-row writer spelled it before the lines were
+#: assembled in Arrow -- a COPY, deliberately not `_MOVEMENT_LINE`, so that a
+#: change to the constant or to how the writer derives its fragments turns
+#: the oracle test red instead of moving both sides at once.
+ORACLE_MOVEMENT_LINE = (
+    '{"time_ms":%s,"shooter_character_net_guid":%s,'
+    '"position":{"x":%s,"y":%s,"z":%s},'
+    '"velocity":{"x":%s,"y":%s,"z":%s},'
+    '"yaw":%s,"pitch":%s}\n'
+)
+
+
+def oracle_movement_bytes(rows: list[dict]) -> bytes:
+    """movement.ndjson as the per-row writer produced it, value by value.
+
+    Keeps the last row per (packet_id, character) in row order -- the
+    collapse rule -- encodes every value with its own encoder call, and ends
+    lines the way the old text-mode file did: os.linesep.
+    """
+    last = {}
+    for i, row in enumerate(rows):
+        last[(row.get("packet_id", 0), row.get("char", 0))] = i
+    encode = bundle._JSON.encode
+
+    def f32(row, name):
+        return float(numpy.float32(row.get(name, 0.0)))
+
+    lines = []
+    for i in sorted(last.values()):
+        row = rows[i]
+        lines.append(ORACLE_MOVEMENT_LINE % (
+            row.get("time_ms", 0), row.get("char", 0),
+            *(encode(bundle._f32_shortest(f32(row, n)))
+              for n in ("pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z")),
+            encode(f32(row, "yaw")), encode(f32(row, "pitch")),
+        ))
+    return "".join(lines).replace("\n", os.linesep).encode("ascii")
+
+
+def oracle_rows() -> list[dict]:
+    """Integral, -0.0, exponent-form, large, non-finite and ordinary values,
+    sub-moves to collapse, two characters, and large ids -- enough rows to
+    span several write blocks at the block sizes the test patches in."""
+    values = [0.0, -0.0, 1.0, -3.0, 1e-05, 1e-07, 2382.2, 349.99, -349.99,
+              0.1, 1234567.5, 123456792.0, 16777215.0, 1e-4, 51292.77,
+              float("inf"), float("-inf"), float("nan"), 253.289794921875]
+    rows = []
+    for i in range(61):
+        v = values[i % len(values)]
+        w = values[(i * 7 + 3) % len(values)]
+        rows.append({
+            "time_ms": 1000 + i // 3, "packet_id": 1 + i // 3,
+            "char": (40, 4294967295)[i % 2],
+            "pos_x": v, "pos_y": w, "pos_z": -v,
+            "vel_x": w, "vel_y": v * 0.5, "vel_z": 0.0 if i % 5 else -0.0,
+            "yaw": (0.0, -0.0, 359.9945068359375, 253.289794921875)[i % 4],
+            "pitch": (-0.0, 0.0, 1e-05, 90.5)[i % 4],
+        })
+    return rows
+
+
+class MovementLineAssemblyTests(unittest.TestCase):
+    """movement.ndjson is the per-row writer's bytes, block by block.
+
+    The lines are assembled in Arrow from per-distinct texts; the oracle
+    builds them one row and one encoder call at a time.
+    """
+
+    def write(self, rows: list[dict], block_rows: int) -> bytes:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_movement_parquet(root / "movement.parquet", rows)
+            out = root / "out"
+            out.mkdir()
+            with mock.patch.object(bundle, "_MOVEMENT_BLOCK_ROWS", block_rows):
+                bundle._write_movement(root / "movement.parquet", out, False)
+            return (out / "movement.ndjson").read_bytes()
+
+    def test_bytes_equal_the_per_row_writer(self):
+        rows = oracle_rows()
+        expected = oracle_movement_bytes(rows)
+        # Guards on the oracle itself: sub-moves were collapsed, and the kept
+        # lines span several of the 7-row blocks below with a partial last one.
+        lines = expected.count(os.linesep.encode())
+        self.assertLess(lines, len(rows))
+        self.assertGreater(lines, 14)
+        self.assertNotEqual(lines % 7, 0)
+        # One block, full blocks plus a partial last one, one row per block.
+        for block_rows in (1 << 18, 7, 1):
+            with self.subTest(block_rows=block_rows):
+                self.assertEqual(self.write(rows, block_rows), expected)
+
+    def test_lines_end_the_way_the_text_mode_file_ended_them(self):
+        data = self.write(oracle_rows(), 7)
+        self.assertEqual(data.count(os.linesep.encode()), data.count(b"\n"))
+        self.assertTrue(data.endswith(os.linesep.encode()))
+
+    def test_an_empty_table_writes_an_empty_file(self):
+        self.assertEqual(self.write([], 7), b"")
+
+    def test_a_null_in_a_movement_column_stops_the_conversion(self):
+        """Every movement column is declared non-null. `to_numpy` would turn a
+        null uint32 into a float64 NaN, and every line would then carry a
+        float-spelled time -- plausible text, wrong type."""
+        for column in ("time_ms", "pos_x"):
+            with self.subTest(column=column):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    path = root / "movement.parquet"
+                    write_movement_parquet(path, oracle_rows()[:3])
+                    table = pq.read_table(path)
+                    index = table.schema.get_field_index(column)
+                    values = table.column(column).to_pylist()
+                    values[1] = None
+                    table = table.set_column(index, column, pa.array(
+                        values, type=table.schema.field(column).type))
+                    pq.write_table(table, path)
+                    out = root / "out"
+                    out.mkdir()
+                    with self.assertRaisesRegex(ValueError, column):
+                        bundle._write_movement(path, out, False)
+
+    def test_a_null_line_is_refused_rather_than_dropped(self):
+        """`binary_join_element_wise` emits NULL for a row with a null input,
+        and a null adds no bytes to the data buffer: the line would vanish
+        while movement_rows_written still counted it."""
+        texts = pa.array(["1", None, "3"], type=pa.string())
+        with self.assertRaises(RuntimeError):
+            bundle._join_movement_block([pa.scalar("<"), texts, pa.scalar(">")])
+        self.assertEqual(
+            bytes(bundle._join_movement_block(
+                [pa.scalar("<"), texts.fill_null("2"), pa.scalar(">")])),
+            b"<1><2><3>")
+
+    def test_only_the_arrays_own_bytes_are_written(self):
+        """A slice shares its parent's data buffer, so the buffer holds bytes
+        before and after the slice's values; only the values are the text."""
+        sliced = pa.array(["a", "bb", "ccc", "dddd"], type=pa.string()).slice(1, 2)
+        self.assertEqual(bytes(bundle._string_bytes(sliced)), b"bbccc")
 
 
 class TransactionalConversionTests(unittest.TestCase):

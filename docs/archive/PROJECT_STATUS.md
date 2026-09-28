@@ -6547,6 +6547,11 @@ would have replaced the scan outright. numpy is not installed -- recent pyarrow
 does not require it -- and adding a dependency to a tool for one function is a
 worse trade than the memo.
 
+SUPERSEDED 2026-09-28: numpy became a hard dependency (`requirements.txt`) and
+the adapter's movement text has used it since cecea64. Its bulk text equals the
+per-value rule only on part of the float32 range; `_json_scalar_column` in
+`tools/to_valplay_bundle.py` records where, and how that was proven.
+
 ### 35-D. Where the time goes now
 
 ```
@@ -6562,6 +6567,12 @@ Flat. Nothing left is more than ~18% of the run, and the two structural wins
 either a different serialization contract -- which the consumer fixes -- or
 parallelism, which belongs to the caller processing several replays, not to a
 converter handling one.
+
+SUPERSEDED IN PART, 2026-09-28: the movement writer had grown back to ~40% of
+a conversion, and a third route existed -- same contract, same bytes, with the
+lines assembled in Arrow's C++ from the per-distinct texts instead of by
+Python string formatting. See `_write_movement` and `docs/USAGE.md` for the
+measurements.
 
 ---
 

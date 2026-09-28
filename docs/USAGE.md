@@ -832,18 +832,26 @@ python tools/to_valplay_bundle.py <export_dir> -o <bundle_dir>
 python "<valplay>/pipeline/metrics/compute_metrics.py" <bundle_dir> -o metrics.json
 ```
 
-**This is the pipeline bottleneck.** For a single 48 MB replay:
+For the 48 MB reference replay (02d4d478), each stage run alone, median of 3
+runs, 2026-09-28, on a machine ~90% busy with other jobs:
 
 | Stage | Time |
 |---|---|
-| `vrfkit export` | 0.85 s |
-| `to_valplay_bundle.py` | **21.7 s** |
-| `compute_metrics.py` | ~14 s |
+| `vrfkit export` | 0.93 s |
+| `to_valplay_bundle.py` | **6.8 s** (8.2 s before the Arrow movement writer, same interleaved runs) |
+| `compute_metrics.py` | 13.6 s |
 
-Bundle conversion is ~25x the parse (figure after the 1.9x improvement in
-section 35). If you process multiple replays, **parallelizing is the biggest
-lever** -- each replay is fully independent, and the measurements above are
-deliberately sequential for accuracy.
+Bundle conversion is ~7x the parse, and valplay's `compute_metrics.py` is now
+the largest stage. The conversion's biggest phase was writing movement.ndjson
+(~40% of it on 02d4d478 and f73d4475, writer timed alone against the whole
+run); its lines are now assembled in Arrow from the per-distinct value texts
+instead of formatted row by row in Python. Interleaved with the 259ed10 adapter
+on 11 exports over 9 builds, conversion was 1.07-1.58x faster (sum of medians
+92.0 -> 76.3 s), peak working set fell 300-570 MB on every full-size export,
+and events.ndjson and movement.ndjson were byte-identical. If you process
+multiple replays, **parallelizing is the biggest lever** -- each replay is
+fully independent, and the measurements above are deliberately sequential for
+accuracy.
 
 > **The time figures fluctuate by +/-10%.** On the same machine and commit,
 > export was 0.79 s on 2026-08-04 and 0.85 s on 2026-08-05. At section 36-F the
@@ -1031,7 +1039,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 147 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 932 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 938 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 187 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check

@@ -50,7 +50,6 @@ import time
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from functools import lru_cache
-from itertools import islice
 from pathlib import Path
 from typing import NamedTuple
 
@@ -394,16 +393,26 @@ def _f32_shortest(value):
 #: instance is the same code path with the same output.
 _JSON = json.JSONEncoder(separators=(',', ':'), ensure_ascii=True)
 
-#: The movement record, as a format string. Key order is the order the record
-#: dict used, which is what `json.dumps` emitted; every slot is filled with
-#: text `_JSON.encode` produced for that value, so the line is byte-for-byte
-#: what encoding the dict would have written.
+#: The movement record, as a template with one `%s` per slot. Key order is the
+#: order the record dict used, which is what `json.dumps` emitted; every slot
+#: is filled with text `_JSON.encode` produced for that value, so the line is
+#: byte-for-byte what encoding the dict would have written. `_write_movement`
+#: splits it on `%s` into the literal fragments it interleaves with the slot
+#: texts, so this stays the one place the line is spelled.
 _MOVEMENT_LINE = (
     '{"time_ms":%s,"shooter_character_net_guid":%s,'
     '"position":{"x":%s,"y":%s,"z":%s},'
     '"velocity":{"x":%s,"y":%s,"z":%s},'
     '"yaw":%s,"pitch":%s}\n'
 )
+
+#: Rows per block of movement.ndjson assembled in Arrow and written at once.
+#: Bounds the text held at any moment to one block's worth -- ~48 MB at the
+#: ~184 bytes a line measures on the reference exports -- instead of the
+#: whole file's. Measured on f73d4475's writer alone, 3 runs each: 2**16 and
+#: 2**18 are equal within noise (~3.4 s, ~665 MB peak, which the per-column
+#: dedup sets, not the block), 2**14 is ~4% slower, 2**20 adds 50-80 MB.
+_MOVEMENT_BLOCK_ROWS = 1 << 18
 
 
 #: Below this magnitude every integer is exactly representable in float32, so
@@ -423,11 +432,15 @@ _F32_POSITIONAL_BAND = (1e-4, 1e6)
 def _json_scalar_column(arr, *, shorten=False):
     """The JSON TEXT of each value, computed once per distinct value.
 
-    `arr` is a 1-D numpy float array. `numpy.unique` collapses it to its
-    distinct values in C; the text is built once per distinct value and a
-    fancy-index gather fans it back out to every row, all vectorised. This is
-    what lets `_write_movement` skip building 1.8 million dicts and calling
-    the encoder 1.8 million times -- there is no per-row Python loop here.
+    `arr` is a 1-D numpy float array. Returns ``(texts, inverse)``: `texts`
+    is a pa.string() array with the text of each distinct value, `inverse` a
+    pa.int32() array mapping every row of `arr` to its entry, so
+    `texts.take(inverse)` is the column's text row by row. `numpy.unique`
+    collapses the column in C and the caller fans the text back out with
+    Arrow's `take`, one write block at a time -- there is no per-row Python
+    loop anywhere, which is what lets `_write_movement` skip building 1.8
+    million dicts and calling the encoder 1.8 million times. The fan-out is
+    the caller's; the text rule is here, and only here.
 
     The contract is per value, and it is checked, not assumed: every row's
     text is what the per-element version this replaced wrote for that row's
@@ -500,9 +513,16 @@ def _json_scalar_column(arr, *, shorten=False):
         # The bit-pattern view below needs a same-width unsigned type, and a
         # silent mis-view would print plausible numbers. Refuse instead.
         raise TypeError(f"_json_scalar_column wants float32/float64, got {arr.dtype}")
+    if arr.shape[0] > numpy.iinfo(numpy.int32).max:
+        # The int32 inverse below would wrap and point rows at wrong texts.
+        raise ValueError(f"{arr.shape[0]:,} rows is more than an int32 index can address")
     ubits, inverse = numpy.unique(
         arr.view(numpy.dtype(f"u{arr.dtype.itemsize}")), return_inverse=True
     )
+    # int32 halves what the caller holds per column until the write, and the
+    # int64 original is dropped at once: peak memory is the acceptance bar
+    # for this function as much as speed is.
+    inverse = pa.array(inverse.astype(numpy.int32))
     uniq = ubits.view(arr.dtype)
     if shorten:
         # The two shortcut domains, then the per-value encoder for the rest.
@@ -524,13 +544,10 @@ def _json_scalar_column(arr, *, shorten=False):
             encode = _JSON.encode
             texts[per_value] = [encode(_f32_shortest(v))
                                 for v in uniq[per_value].tolist()]
-        texts = texts.tolist()
     else:
         encode = _JSON.encode
         texts = [encode(float(v)) for v in uniq.tolist()]
-    gathered = numpy.empty(uniq.shape[0], dtype=object)
-    gathered[:] = texts
-    return gathered[inverse].tolist()
+    return pa.array(texts, type=pa.string()), inverse
 
 
 def _vec3(x, y, z) -> dict:
@@ -2886,6 +2903,48 @@ def _write_events(events: list, output_dir: Path, verbose: bool) -> tuple[int, i
     return events_written, regressions
 
 
+#: Every movement.parquet column `_write_movement` reads. The export declares
+#: all of them non-null (vrf-export/src/tables/movement.rs).
+_MOVEMENT_COLUMNS = ("time_ms", "packet_id", "character_net_guid",
+                     "pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z",
+                     "yaw", "pitch")
+
+
+def _join_movement_block(pieces) -> memoryview:
+    """Concatenate one block's line pieces row by row; return the text's bytes.
+
+    `pieces` alternate literal fragments (scalars) and slot texts (arrays of
+    one block's length). The joined lines sit back to back in the result's
+    data buffer, so the block is written as that buffer's used span.
+
+    A NULL line is refused, not written. `binary_join_element_wise` emits
+    NULL for a row with any null input, and a null contributes no bytes to
+    the data buffer: the line would vanish from the file while
+    `movement_rows_written` still counted it. `_write_movement` refuses null
+    input columns before it gets here, so this is the second line of defence.
+    """
+    lines = pc.binary_join_element_wise(*pieces, "")
+    if lines.null_count:
+        raise RuntimeError(
+            f"{lines.null_count:,} movement lines came out NULL; writing the "
+            "block would drop them while still counting them as written")
+    return _string_bytes(lines)
+
+
+def _string_bytes(arr) -> memoryview:
+    """The values of a pa.string() array as one span of bytes, back to back.
+
+    That is the data buffer between the array's first and last offsets --
+    not the whole buffer, which for a slice starts before the array's first
+    value, and which Arrow may allocate larger than it fills.
+    """
+    if arr.type != pa.string():
+        raise RuntimeError(f"expected a string array, got {arr.type}")
+    offsets = numpy.frombuffer(arr.buffers()[1], dtype=numpy.int32,
+                               count=len(arr) + 1, offset=arr.offset * 4)
+    return memoryview(arr.buffers()[2])[offsets[0]:offsets[-1]]
+
+
 def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tuple:
     """Write movement.ndjson, keeping the last sub-move per (packet, character).
 
@@ -2924,15 +2983,25 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     t0 = time.time()
     if verbose:
         print("Converting movement.parquet...")
-    mv_table = pq.read_table(movement_path)
+    mv_table = pq.read_table(movement_path, columns=list(_MOVEMENT_COLUMNS))
     n_mv = len(mv_table)
+
+    # Every movement column is declared non-null, and that is load-bearing:
+    # `to_numpy` turns a uint32 column with a null into float64 with NaN, and
+    # every line of it would then carry `1000.0`-style times, or `nan`. It
+    # used to be assumed. A null is now refused here, naming the column.
+    for name in _MOVEMENT_COLUMNS:
+        nulls = mv_table.column(name).null_count
+        if nulls:
+            raise ValueError(f"movement.parquet column {name!r} carries "
+                             f"{nulls:,} nulls; the export declares it non-null")
 
     # Batch-extract every column to a numpy array. `to_numpy` hands over the
     # raw buffer; `to_pylist` boxes one Python float/int per row through
     # pyarrow's per-element type dispatch (~14x slower on these 1.84M-row
     # columns, the same win the fields path gets via _numeric_column_to_pylist).
-    # All movement columns are non-nullable, so zero_copy_only=False never
-    # widens ints to float64 -- uint32 stays uint32, float32 stays float32.
+    # With no nulls, zero_copy_only=False never widens ints to float64 --
+    # uint32 stays uint32, float32 stays float32.
     mv_time = mv_table.column('time_ms').to_numpy(zero_copy_only=False)
     mv_pid = mv_table.column('packet_id').to_numpy(zero_copy_only=False)
     mv_char = mv_table.column('character_net_guid').to_numpy(zero_copy_only=False)
@@ -2987,8 +3056,9 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # original -- exactly what the per-row dict overwrite computed. `np.sort`
     # restores row order. Both keys are uint32 so the shift cannot collide.
     key64 = (mv_pid.astype(numpy.uint64) << numpy.uint64(32)) | mv_char.astype(numpy.uint64)
-    _, first_in_rev = numpy.unique(key64[::-1], return_index=True)
+    first_in_rev = numpy.unique(key64[::-1], return_index=True)[1]
     keep = numpy.sort((n_mv - 1) - first_in_rev)
+    del key64, first_in_rev
     movement_collapsed = n_mv - len(keep)
 
     # Every position and velocity component is Float32 on the wire and in
@@ -3007,20 +3077,11 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # pitch rows away from the reference. It changed no metric, which is
     # exactly why it survived.
     #
-    # Select the kept rows once per column via numpy fancy indexing (C-level),
-    # so neither the text builder nor the write loop indexes anything. Then
-    # turn each kept column into its JSON TEXT once per distinct value (see
-    # _json_scalar_column) and let the write loop concatenate strings that
-    # already exist instead of building dicts and encoding each one.
-    #
-    # time_ms and character_net_guid are uint32 and nearly all distinct:
-    # `int.__repr__` is the same text the JSON encoder uses for an int, so
-    # `astype(str)` on the uint32 array is the line's text directly -- no
-    # encoder, no memo.
-    #
-    # One float column at a time, in `_MOVEMENT_LINE`'s slot order, so only
-    # one kept copy is alive at once; holding all eight cost +35-83 MB of peak
-    # working set across 11 exports.
+    # Select the kept rows once per column via numpy fancy indexing (C-level)
+    # and turn each kept float column into its JSON TEXT once per distinct
+    # value (see _json_scalar_column). One float column at a time, in
+    # `_MOVEMENT_LINE`'s slot order, so only one kept copy is alive at once;
+    # holding all eight cost +35-83 MB of peak working set across 11 exports.
     non_finite = numpy.zeros(len(keep), dtype=bool)
     float_texts = []
     for column, shorten in ((mv_px, True), (mv_py, True), (mv_pz, True),
@@ -3029,27 +3090,46 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
         kept = column[keep]
         non_finite |= ~numpy.isfinite(kept)
         float_texts.append(_json_scalar_column(kept, shorten=shorten))
-    del kept
+        del kept
     non_finite_rows = int(numpy.count_nonzero(non_finite))
-    cols = (
-        mv_time[keep].astype(str).tolist(),
-        mv_char[keep].astype(str).tolist(),
-        *float_texts,
-    )
     movement_written = len(keep)
+    # time_ms and character_net_guid are uint32 and nearly all distinct, so
+    # they are not deduplicated: Arrow's integer-to-string cast writes the
+    # plain decimal digits, the same text `int.__repr__` -- and so the JSON
+    # encoder -- gives an int.
+    int_slots = (pa.array(mv_time[keep]), pa.array(mv_char[keep]))
+    # The table and its column views are no longer needed; what the write
+    # loop reads is above. Dropping them now keeps them out of its peak.
+    del (mv_table, mv_time, mv_pid, mv_char, mv_px, mv_py, mv_pz,
+         mv_vx, mv_vy, mv_vz, mv_yaw, mv_pitch, keep, non_finite)
 
-    # `%` against a tuple formats in C, where a Python-level chain of `+`
-    # does not; and lines go out in blocks because 1.8 million pairs of
-    # `write` calls on a TextIOWrapper cost more than the joins do. The block
-    # is bounded so peak memory stays flat instead of holding 340 MB of text.
-    with open(output_dir / "movement.ndjson", 'w', encoding='utf-8') as f:
-        write = f.write
-        rows = zip(*cols)
-        while True:
-            block = [_MOVEMENT_LINE % r for r in islice(rows, 16384)]
-            if not block:
-                break
-            write(''.join(block))
+    # The lines are assembled in Arrow's C++, one block at a time: each slot's
+    # texts are taken for the block's rows (`take` for the deduplicated
+    # floats, a cast for the ints) and `binary_join_element_wise` interleaves
+    # them with `_MOVEMENT_LINE`'s literal fragments, so no Python object is
+    # made per row -- only per distinct value. The text of every slot is
+    # what the per-row `_MOVEMENT_LINE % (...)` join put there, so the bytes
+    # are too (`MovementLineAssemblyTests`; sha256-identical on 11 exports).
+    #
+    # The file is written in binary mode, so the line ending is spelled
+    # here: it was opened in text mode, which turns '\n' into os.linesep --
+    # CRLF on Windows -- and the fragments carry that same os.linesep so each
+    # platform keeps the bytes it had.
+    fragments = [pa.scalar(text, type=pa.string()) for text in
+                 _MOVEMENT_LINE.replace("\n", os.linesep).split("%s")]
+    if len(fragments) != 2 + len(float_texts) + 1:
+        raise RuntimeError("_MOVEMENT_LINE's slots no longer match the columns")
+    with open(output_dir / "movement.ndjson", "wb") as f:
+        for start in range(0, movement_written, _MOVEMENT_BLOCK_ROWS):
+            length = min(_MOVEMENT_BLOCK_ROWS, movement_written - start)
+            slots = [pc.cast(values.slice(start, length), pa.string())
+                     for values in int_slots]
+            slots += [texts.take(inverse.slice(start, length))
+                      for texts, inverse in float_texts]
+            pieces = [fragments[0]]
+            for slot, fragment in zip(slots, fragments[1:]):
+                pieces += (slot, fragment)
+            f.write(_join_movement_block(pieces))
 
     if verbose and movement_collapsed:
         print(f"  {movement_collapsed:,} intra-packet sub-moves collapsed "
