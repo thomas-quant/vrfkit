@@ -10,40 +10,30 @@ use super::{EffectArrayKind, EffectBlobError, EffectHandles, Result};
 
 /// Decode one effect-array blob and render it as a JSON array.
 ///
-/// Each element becomes `{"tag":<u32|null>,"value":<value|null>}`, where the
-/// value is a number for [`EffectArrayKind::Float`] and
-/// [`EffectArrayKind::Object`] and `{"x":..,"y":..,"z":..}` for
-/// [`EffectArrayKind::Vector`]. A sparse array's unpopulated slots keep their
-/// position and render both members as `null`, so an element's index in the
-/// JSON is its index on the wire.
-///
-/// # Arguments
-/// - `raw`: the parameter payload, as `fields.parquet` stores it.
-/// - `bit_count`: the payload's exact bit length. This is the RPC parameter's
-///   declared `payload_bits`, **not** `raw.len() * 8` -- the last byte is
-///   padded, and feeding the padding in as data is a latent bug the audit in
-///   `docs/archive/PROJECT_STATUS.md` 12-D calls out on the Python side.
+/// Each element becomes `{"tag":<u32|null>,"value":<value|null>}`, the value a
+/// number for [`EffectArrayKind::Float`] and [`EffectArrayKind::Object`] and
+/// `{"x":..,"y":..,"z":..}` for [`EffectArrayKind::Vector`]. Unpopulated slots
+/// keep their position, so the JSON index is the wire index. `raw` is the
+/// parameter payload as `fields.parquet` stores it; `bit_count` is its declared
+/// `payload_bits`, **not** `raw.len() * 8`: the padding is not data
+/// (`docs/archive/PROJECT_STATUS.md` 12-D).
 ///
 /// # Errors
-/// Returns [`EffectBlobError`] if the payload is not a well-formed array of
-/// this kind, does not consume its window, or contains a float that JSON
-/// cannot represent. The caller keeps the raw bits and counts the failure; it
-/// must not substitute a partial or plausible-looking structure.
+/// [`EffectBlobError`] if the payload is not a well-formed array of this kind,
+/// does not consume its window, or holds a float JSON cannot represent. The
+/// caller keeps the raw bits and counts the failure.
 pub fn decode_effect_blob_json(
     kind: EffectArrayKind,
     raw: &[u8],
     bit_count: u32,
 ) -> Result<String> {
-    // First pass: which handles does *this* function put the element's members
-    // under. `None` means no element carries a field, so the pair is both
-    // underivable and unused -- any pair decodes such a blob identically.
+    // Which handles does *this* function use? `None` means no element carries
+    // a field, so any pair decodes the blob identically.
     let handles = scan_element_handles(raw, bit_count)?.unwrap_or(EffectHandles::from_base(0));
     let mut reader = new_blob_reader(raw, bit_count)?;
 
-    // Grown on demand rather than pre-reserved: a reservation sized from the
-    // element count was tried and measured no faster end to end, while
-    // costing resident memory -- these strings sit in the export's row
-    // buffer until the Parquet write.
+    // Not pre-reserved: sizing from the element count measured no faster end
+    // to end and cost resident memory in the export's row buffer.
     let mut out = String::new();
     match kind {
         EffectArrayKind::Float => {
@@ -84,18 +74,9 @@ pub fn decode_effect_blob_json(
         }
     }
 
-    // Checked after the decode, not during: the decoders stop at the array
-    // terminator by design, so "did it consume the window" is only answerable
-    // once they have returned.
-    //
-    // Every remaining bit counts, including a sub-byte tail. This used to
-    // tolerate 1-7 bits on the grounds that byte padding cannot carry an
-    // element -- but `bit_count` here is the RPC parameter's exact declared
-    // payload length, not `raw.len() * 8`, so the storage padding was already
-    // excluded before this function saw the blob (see this function's own
-    // `bit_count` argument note). Anything left inside the window is declared
-    // payload that nothing accounted for, which is the same evidence of a wrong
-    // read at four bits as at forty.
+    // Checked after the decode, which stops at the terminator by design.
+    // Every remaining bit counts, a sub-byte tail included: `bit_count` is the
+    // declared payload, so four unread bits are as wrong as forty.
     let remaining = reader.bits_remaining();
     if remaining > 0 {
         return Err(EffectBlobError::ResidualBits { remaining });
@@ -104,10 +85,9 @@ pub fn decode_effect_blob_json(
     Ok(out)
 }
 
-/// Write `elements` as the JSON array: comma-separated
-/// `{"tag":..,"value":..}` objects, where `push_value` renders a present value
-/// and an absent one is `null`. One loop for the three element types, so the
-/// framing of the array cannot drift between them.
+/// Write `elements` as comma-separated `{"tag":..,"value":..}` objects in a
+/// JSON array; `push_value` renders a present value, an absent one is `null`.
+/// One loop for the three element types, so their framing cannot drift.
 fn push_elements<V>(
     out: &mut String,
     elements: impl Iterator<Item = (Option<u32>, Option<V>)>,
@@ -129,14 +109,10 @@ fn push_elements<V>(
     Ok(())
 }
 
-/// Open one element object and write its `tag` member.
-///
-/// A hand-written `u32`-to-decimal writer was tried here and for the object
-/// value, on the reasoning that `write!` builds a `format_args` and
-/// dispatches through `Display` for each of a replay's ~128,000 tags. It
-/// measured neutral in an interleaved A/B of the whole export -- the effect
-/// path's time is in `push_json_f64`, not here -- so the twenty lines went
-/// away again and `write!` stayed.
+/// Open one element object and write its `tag` member. A hand-written
+/// `u32` writer (here and for the object value, ~128,000 tags a replay)
+/// measured neutral in an interleaved A/B of the whole export -- the time is in
+/// `push_json_f64` -- so `write!` stayed.
 fn push_tag(out: &mut String, tag_index: Option<u32>) {
     match tag_index {
         Some(t) => {
@@ -146,18 +122,12 @@ fn push_tag(out: &mut String, tag_index: Option<u32>) {
     }
 }
 
-/// Append a JSON number for a finite `f64`.
-///
-/// Rust's `Display` for floats is the shortest representation that round-trips,
-/// which is always a valid JSON number for a finite value. `1.0` renders as
-/// `1`; that is a JSON number too, so no consumer sees a type it cannot read.
-///
-/// Deliberately still `write!`: a dedicated shortest-float printer would be
-/// faster, but the ones available render large magnitudes in exponent form
-/// (`1E20` where Rust writes `100000000000000000000`), and this output is
-/// pinned byte-for-byte by the export oracle.
+/// Append a JSON number for a finite `f64`: `Display` is the shortest
+/// round-trip form, always valid JSON (`1.0` renders `1`). Deliberately
+/// `write!`: the faster shortest-float printers write large magnitudes as
+/// `1E20` where Rust writes `100000000000000000000`, and the export oracle pins
+/// these bytes.
 fn push_json_f64(out: &mut String, v: f64) {
-    // Writing into a String is infallible; the Result exists only to satisfy
-    // the `fmt::Write` signature.
+    // Writing into a String is infallible.
     let _ = write!(out, "{v}");
 }

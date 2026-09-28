@@ -1,16 +1,13 @@
-//! Pinned wire vectors for the effect decoders.
-//!
-//! These are the repo's only executable specification of this wire format:
-//! hex blobs lifted from real packets, with values checked against the C#
-//! reference. `tools/check_effect_decoder.py` re-checks the same blobs against
-//! the independent Python port that produces the valplay bundle.
+//! Pinned wire vectors for the effect decoders: hex blobs from real packets,
+//! values checked against the C# reference. `tools/check_effect_decoder.py`
+//! re-checks the same blobs on the Python port that produces the valplay
+//! bundle.
 
 use super::*;
 use crate::test_bits::hex as decode_hex;
 use vrf_bitio::BitReader;
 
-/// Helper to create a BitReader from a hex string, using only the specified
-/// number of bits.
+/// A reader over the first `bit_count` bits of a hex string.
 fn reader_from_hex(hex: &str, bit_count: u64) -> BitReader<'static> {
     let data = decode_hex(hex);
     let leaked: &'static [u8] = Box::leak(data.into_boxed_slice());
@@ -28,31 +25,26 @@ const VECTORS_4368: &str = "0202182013041a81026b7b179c16f0e8bf11e6b45fc0eee33f\
 
 // ---- FloatValues tests ----
 
-/// Pin: packet 4368, Sheriff shot. 4 elements:
-/// tag 284=NumProjectiles(1.0), tag 263=AmmoRemaining(5.0),
-/// tag 286=TracerOption(1.0), tag 285=RandomSeed(-1509722752.0)
+/// Packet 4368, Sheriff shot: tags 284 NumProjectiles, 263 AmmoRemaining,
+/// 286 TracerOption, 285 RandomSeed.
 #[test]
 fn decode_float_values_sheriff_basic() {
     let mut reader = reader_from_hex(FLOATS_4368, 400);
     let result = decode_effect_floats(&mut reader).unwrap();
 
     assert_eq!(result.len(), 4);
-    // Element 0: tag 284, float 1.0 (NumProjectiles)
     assert_eq!(result[0].tag_index, Some(284));
     assert_eq!(result[0].value, Some(1.0));
-    // Element 1: tag 263, float 5.0 (AmmoRemaining)
     assert_eq!(result[1].tag_index, Some(263));
     assert_eq!(result[1].value, Some(5.0));
-    // Element 2: tag 286, float 1.0 (TracerOption)
     assert_eq!(result[2].tag_index, Some(286));
     assert_eq!(result[2].value, Some(1.0));
-    // Element 3: tag 285, float -1509722752.0 (RandomSeed)
     assert_eq!(result[3].tag_index, Some(285));
     assert_eq!(result[3].value, Some(-1509722752.0));
 }
 
-/// Pin: packet 17421, Classic shot with YawSwitch. 5 elements including
-/// tag 287 = 16.0 (YawSwitch).
+/// Packet 17421, Classic shot: five elements, AmmoRemaining (263) 7 and
+/// YawSwitch (287) 16 among them.
 #[test]
 fn decode_float_values_with_yaw_switch() {
     let hex = "0a021020390412400000803f000410200f0412400000e040\
@@ -62,17 +54,14 @@ fn decode_float_values_with_yaw_switch() {
     let result = decode_effect_floats(&mut reader).unwrap();
 
     assert_eq!(result.len(), 5);
-    // Element 4: tag 287, float 16.0 (YawSwitch)
     assert_eq!(result[4].tag_index, Some(287));
     assert_eq!(result[4].value, Some(16.0));
-    // Element 1: tag 263, float 7.0 (AmmoRemaining)
     assert_eq!(result[1].tag_index, Some(263));
     assert_eq!(result[1].value, Some(7.0));
 }
 
-/// Pin: packet 30968, Judge shotgun. 3 elements:
-/// NumProjectiles=12, AmmoRemaining=4, RandomSeed=480247136.0
-/// (no TracerOption for shotguns)
+/// Packet 30968, Judge shotgun: NumProjectiles 12, AmmoRemaining 4,
+/// RandomSeed 480247136 (no TracerOption for shotguns).
 #[test]
 fn decode_float_values_shotgun() {
     let hex = "060210203904124000004041000410200f04124000008040\
@@ -81,46 +70,37 @@ fn decode_float_values_shotgun() {
     let result = decode_effect_floats(&mut reader).unwrap();
 
     assert_eq!(result.len(), 3);
-    // Element 0: tag 284, float 12.0 (NumProjectiles)
     assert_eq!(result[0].tag_index, Some(284));
     assert_eq!(result[0].value, Some(12.0));
-    // Element 1: tag 263, float 4.0 (AmmoRemaining)
     assert_eq!(result[1].tag_index, Some(263));
     assert_eq!(result[1].value, Some(4.0));
-    // Element 2: tag 285, float 480247136.0 (RandomSeed)
     assert_eq!(result[2].tag_index, Some(285));
     assert_eq!(result[2].value, Some(480247136.0));
 }
 
 // ---- ObjectValues tests ----
 
-/// Pin: packet 4368. 4 elements:
-/// tag 283=FiringState(3086), tag 282=FiringPlayerState(268),
-/// tag 65535=unknown(2731), tag 306=unknown(1466)
+/// Packet 4368: tags 283 FiringState, 282 FiringPlayerState, then 65535 and
+/// 306 (unnamed).
 #[test]
 fn decode_object_values_basic() {
     let mut reader = reader_from_hex(OBJECTS_4368, 344);
     let result = decode_effect_objects(&mut reader).unwrap();
 
     assert_eq!(result.len(), 4);
-    // Element 0: tag 283, object 3086 (FiringState)
     assert_eq!(result[0].tag_index, Some(283));
     assert_eq!(result[0].value, Some(3086));
-    // Element 1: tag 282, object 268 (FiringPlayerState)
     assert_eq!(result[1].tag_index, Some(282));
     assert_eq!(result[1].value, Some(268));
-    // Element 2: tag 65535
     assert_eq!(result[2].tag_index, Some(65535));
     assert_eq!(result[2].value, Some(2731));
-    // Element 3: tag 306
     assert_eq!(result[3].tag_index, Some(306));
     assert_eq!(result[3].value, Some(1466));
 }
 
 // ---- VectorValues tests ----
 
-/// Pin: packet 4368, single attack vector for a Sheriff shot.
-/// Expected: (-0.7793076561609785, 0.6228944653768754, -0.06842559500463913)
+/// Packet 4368: the Sheriff shot's single attack vector.
 #[test]
 fn decode_vector_values_single_pellet() {
     let mut reader = reader_from_hex(VECTORS_4368, 280);
@@ -134,8 +114,7 @@ fn decode_vector_values_single_pellet() {
     assert!((v.z - (-0.06842559500463913)).abs() < 1e-15);
 }
 
-/// Pin: packet 30968, Judge shotgun with 12 attack vectors.
-/// Verifies element count and first/last vectors.
+/// Packet 30968: the Judge shotgun's 12 attack vectors, first and last checked.
 #[test]
 fn decode_vector_values_shotgun_12_pellets() {
     let hex = "1802182013041a8102dbc17bd5d196e5bfe0a5c85f789ee73f\
@@ -158,13 +137,11 @@ fn decode_vector_values_shotgun_12_pellets() {
     let result = decode_effect_vectors(&mut reader).unwrap();
 
     assert_eq!(result.len(), 12);
-    // First vector: x=-0.6746606034849337, y=0.7380945082451795, z=-0.0070403837716193456
     let v0 = result[0].value.unwrap();
     assert!((v0.x - (-0.6746606034849337)).abs() < 1e-12);
     assert!((v0.y - 0.7380945082451795).abs() < 1e-12);
     assert!((v0.z - (-0.0070403837716193456)).abs() < 1e-12);
 
-    // Last vector (index 11): x=-0.6034491419288359, y=0.796167975209223, z=-0.04433608413693601
     let v11 = result[11].value.unwrap();
     assert!((v11.x - (-0.6034491419288359)).abs() < 1e-12);
     assert!((v11.y - 0.796167975209223).abs() < 1e-12);
@@ -250,8 +227,7 @@ fn an_empty_blob_renders_as_an_empty_array() {
 }
 
 /// A payload that is not this format usually parses into something and
-/// leaves a tail. That tail is the only thing separating a decode from a
-/// plausible-looking fabrication, so it must be an error, not a warning.
+/// leaves a tail, so the tail must be an error (`ResidualBits`).
 #[test]
 fn a_tail_after_the_terminator_is_an_error() {
     // A well-formed 1-element float array followed by 6 spare bytes.
@@ -264,8 +240,7 @@ fn a_tail_after_the_terminator_is_an_error() {
     );
 }
 
-/// A bad public bit length must stay a row-level error rather than taking the
-/// export path down over one malformed row.
+/// A bad bit length is a row-level error, not a panic on the export path.
 #[test]
 fn a_bit_length_past_the_buffer_is_an_error_not_a_panic() {
     let err = decode_effect_blob_json(EffectArrayKind::Float, &[0u8], 4096).unwrap_err();
@@ -281,9 +256,8 @@ fn a_bit_length_past_the_buffer_is_an_error_not_a_panic() {
     );
 }
 
-/// JSON has no literal for NaN or an infinity. Rendering one bare would
-/// produce a document no strict reader accepts; coercing it to `null` or
-/// `0` would fabricate. The blob is rejected so the caller counts it.
+/// JSON has no literal for NaN or an infinity, and `null` or `0` would
+/// fabricate, so the blob is rejected and the caller counts it.
 #[test]
 fn a_non_finite_float_is_rejected_rather_than_rendered() {
     // Element 0, tag 284, value = f32::NAN (0x7fc00000).
@@ -297,10 +271,8 @@ fn a_non_finite_float_is_rejected_rather_than_rendered() {
 
 // ---- Handle derivation ----
 
-/// The pinned vectors come from `ReplayPlayContinuousEffectAtLocation`, so
-/// the scan must recover exactly the constants the fixed-handle decoders
-/// use -- derivation and declaration agreeing on the one function where
-/// both are known.
+/// The pinned vectors come from `ReplayPlayContinuousEffectAtLocation`, the
+/// one function whose handles are both declared and derivable: they must agree.
 #[test]
 fn scanning_recovers_the_declared_handles() {
     for (blob, bits, handles) in [
@@ -319,11 +291,10 @@ fn an_empty_array_has_no_handles_to_derive() {
     assert_eq!(scan_element_handles(&[0u8], 8).unwrap(), None);
 }
 
-/// The whole point of the scan: the same struct under a different function
-/// arrives at a different handle pair, and the fixed constants would read
-/// it as all-null (or worse -- see `EffectHandles`). This is the pinned
-/// Sheriff FloatValues blob with its handles rewritten from 7/8 to 3/4,
-/// which is where `ClientPlayOneShotEffectAtLocation` puts them.
+/// The same struct under another function arrives at another handle pair,
+/// which the fixed constants read as all-null (see `EffectHandles`): the
+/// pinned Sheriff FloatValues blob with its handles rewritten from 7/8 to 3/4,
+/// where `ClientPlayOneShotEffectAtLocation` puts them.
 #[test]
 fn a_rebased_blob_decodes_through_derivation_and_not_through_the_constants() {
     // Handle bytes are IntPacked(handle + 1): 0x10 -> 7 and 0x12 -> 8
@@ -337,7 +308,7 @@ fn a_rebased_blob_decodes_through_derivation_and_not_through_the_constants() {
     );
 
     // Through the constants: every field is an unknown handle, so the
-    // elements come back empty. This is what shipped before derivation.
+    // elements come back empty.
     let mut reader = BitReader::with_bit_len(&raw, 400).unwrap();
     let blind = decode_effect_floats(&mut reader).unwrap();
     assert_eq!(blind.len(), 4);
@@ -358,8 +329,8 @@ fn a_rebased_blob_decodes_through_derivation_and_not_through_the_constants() {
     );
 }
 
-/// A float value field must declare 32 bits. Without the check the decoder
-/// reads 32 bits regardless and runs off the end of its own field.
+/// A float value field must declare 32 bits; otherwise the 32-bit read runs
+/// off the end of its own field.
 #[test]
 fn a_value_field_of_the_wrong_width_is_rejected() {
     // Element 0: tag at handle 3 (16 bits), value at handle 4 declaring
@@ -380,16 +351,8 @@ fn a_value_field_of_the_wrong_width_is_rejected() {
     );
 }
 
-/// A tail of 1-7 bits was categorically accepted, and it should not be.
-///
-/// The nearby rationale for tolerating sub-byte leftovers is that byte padding
-/// "cannot carry an element". That reasoning does not apply here: this function
-/// is handed the RPC parameter's exact declared `payload_bits`, which already
-/// excludes the storage padding -- the doc comment on
-/// `decode_effect_blob_json` says so in as many words, and warns that feeding
-/// `raw.len() * 8` in instead is a latent bug. So every bit inside this window
-/// is declared payload, and four declared bits nobody could account for are
-/// the same evidence of a wrong read that forty would be.
+/// A sub-byte tail inside the declared window is `ResidualBits` too: the
+/// window excludes storage padding, so every bit in it is declared payload.
 #[test]
 fn a_sub_byte_tail_inside_the_declared_window_is_an_error() {
     // count = 0, array terminator = 0, then four declared bits left over.
@@ -402,14 +365,8 @@ fn a_sub_byte_tail_inside_the_declared_window_is_an_error() {
     );
 }
 
-/// An `IntPacked` member that does not fill its declared window must be
-/// rejected, exactly as a mis-sized float already is.
-///
-/// The fixed-width members check their width up front (`UnexpectedPayloadWidth`)
-/// while the tag and object-GUID members read an `IntPacked` and let
-/// `settle_field` skip whatever was left. The skip kept the stream aligned, so
-/// the blob decoded and no counter moved -- the accounting depended on which
-/// member happened to be reading rather than on the data.
+/// An `IntPacked` member that underfills its declared window is rejected,
+/// as a mis-sized float is (`settle_field`, `PayloadUnderread`).
 #[test]
 fn an_int_packed_member_that_underfills_its_window_is_rejected() {
     // The well-formed one-element blob, with the TAG field's declared width
@@ -432,12 +389,8 @@ fn an_int_packed_member_that_underfills_its_window_is_rejected() {
     );
 }
 
-/// An array whose payload stops before its terminator is a truncated array,
-/// and must not read as a complete one.
-///
-/// These arrays are sparse by design, so an element that never arrived renders
-/// as `{"tag":null,"value":null}` -- which is exactly what a truncated tail
-/// also produces. The terminator is the only thing that tells them apart.
+/// A payload that stops before its terminator is truncated, not sparse
+/// (`MissingTerminator`).
 #[test]
 fn an_array_that_ends_without_its_terminator_is_rejected() {
     // count=2, element 0 complete and closed, then the window simply ends --
@@ -453,12 +406,8 @@ fn an_array_that_ends_without_its_terminator_is_rejected() {
     );
 }
 
-/// The byte after the array terminator has to actually be a terminator.
-///
-/// It was read with `let _ = ...`, discarding both the value and any error, so
-/// an arbitrary appended byte was consumed as though it were the expected zero
-/// and the blob passed. The C# reference discards it too; mirroring a reference
-/// that is silently permissive is the thing this crate declines to do.
+/// The byte after the array terminator must be zero
+/// (`consume_trailing_terminator`), unlike the C# reference.
 #[test]
 fn a_non_zero_trailing_terminator_is_rejected() {
     // A well-formed 1-element float array, then one spare non-zero byte that
