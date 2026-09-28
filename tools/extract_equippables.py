@@ -97,10 +97,8 @@ def pascal_to_snake(name: str) -> str:
 
 def parse_definitions(source: str) -> list[tuple[str, str, str]]:
     """Extract (class_path, display_name, category) triples in source order."""
-    out = []
-    for class_path, display_name, category in DEFINE_RE.findall(source):
-        out.append((class_path, display_name, pascal_to_snake(category)))
-    return out
+    return [(class_path, display_name, pascal_to_snake(category))
+            for class_path, display_name, category in DEFINE_RE.findall(source)]
 
 
 def path_aliases(class_path: str) -> tuple[str, ...]:
@@ -117,7 +115,7 @@ def render(definitions: list[tuple[str, str, str]], source_rel: str) -> str:
         '"""Equippable class path -> display name and category.',
         "",
         "GENERATED FILE -- DO NOT EDIT BY HAND.",
-        f"Regenerate with: python tools/extract_equippables.py",
+        "Regenerate with: python tools/extract_equippables.py",
         f"Source: {source_rel}",
         "",
         "Keys cover the three path shapes that appear in replay data, mirroring",
