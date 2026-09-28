@@ -152,9 +152,21 @@ reference 13.01 replay:
   the three public fixtures, the CI audit, pass.
 
 The pinned table is tested for every supported branch, and wiring tests check
-that a legacy branch expands exactly its admitted routes for both the
-flattened arrays and the projectile-path RPC. Seven deliberate gate mutations
-each failed at least one of them.
+that a branch expands exactly its admitted routes for both the flattened
+arrays and the projectile-path RPC. Seven deliberate gate mutations each
+failed at least one of them. The flattened-array test first covered four of
+the seven routes on five branches, and an admission arm reading another
+route's bit passed it wherever the two routes agreed on those five:
+ServerActiveEffects reading SelectedV2's bit dropped its children on
+11.06-11.08, RequestedIgnoreActors reading the projectile path's on 11.06,
+12.06 and 12.07, and AllPlayersObfuscatedPlayerInformation reading
+ActiveBlinds' on 12.04-13.00, with no counter moving. It now runs a case for
+every flattened route on every supported branch and checks each case's
+identity against the route map that selects the exact walker; those
+mutations, and a mis-mapped identity, fail it.
+AllPlayersObfuscatedPlayerInformation and TrackedRewards, and KillData and
+RequestedIgnoreActors, are admitted on identical branch sets, so a swap
+within either pair changes no output on any build.
 
 To reproduce, export with checkpoints and audit with the repository tools:
 
