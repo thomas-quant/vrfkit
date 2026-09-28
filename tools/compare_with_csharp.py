@@ -61,14 +61,6 @@ def iter_ndjson(path: Path) -> Iterator[dict]:
 def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
     """Compare packet/bunch/actor/export-group counts from both manifests."""
     lines = ["## 1. Total-count comparison\n"]
-    # Map C# keys → vrfkit keys
-    mapping = [
-        ("Packets",        "packet_count",        "packet_count"),
-        ("Bunches",        "packets_with_bunches","bunch_count"),
-        ("Actor opens",    "actor_spawned",       "actor_opens"),
-        ("Actor closes",   "actor_closed",        "actor_closes"),
-        ("Export groups",  None,                  None),  # special
-    ]
     cs_stats = cs_manifest.get("stats", {})
     cs_counts = cs_manifest.get("counts", {})
     vk_stats = vk_manifest.get("stats", {})
@@ -440,13 +432,9 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
 
     # Build vrfkit lookup — (time_ms, character_net_guid)
     vk_sample: defaultdict[tuple[int, int], deque[int]] = defaultdict(deque)
-    # Determine the character GUID column name in vrfkit
-    char_col = None
-    for candidate in ["character_net_guid", "shooter_character_net_guid", "char_net_guid"]:
-        if candidate in vk_cols:
-            char_col = candidate
-            break
-    if char_col is None:
+    # movement.parquet has always named it this (vrf-export's movement_schema).
+    char_col = "character_net_guid"
+    if char_col not in vk_cols:
         lines.append(f"Cannot find character GUID column in vrfkit. Columns: {vk_cols}")
         return "\n".join(lines)
 
@@ -486,10 +474,6 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
             vk_x = vk_columns_data["pos_x"][vk_idx]
             vk_y = vk_columns_data["pos_y"][vk_idx]
             vk_z = vk_columns_data["pos_z"][vk_idx]
-        elif "position_x" in vk_cols:
-            vk_x = vk_columns_data["position_x"][vk_idx]
-            vk_y = vk_columns_data["position_y"][vk_idx]
-            vk_z = vk_columns_data["position_z"][vk_idx]
         else:
             vk_x = vk_y = vk_z = None
 
@@ -514,10 +498,6 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
             vvx = vk_columns_data["vel_x"][vk_idx]
             vvy = vk_columns_data["vel_y"][vk_idx]
             vvz = vk_columns_data["vel_z"][vk_idx]
-        elif "velocity_x" in vk_cols:
-            vvx = vk_columns_data["velocity_x"][vk_idx]
-            vvy = vk_columns_data["velocity_y"][vk_idx]
-            vvz = vk_columns_data["velocity_z"][vk_idx]
         else:
             vvx = vvy = vvz = None
 
@@ -586,13 +566,9 @@ def compare_raw_blobs(cs_events_path: Path, vk_parquet_path: Path) -> str:
     if vk_parquet_path.exists():
         schema = pq.read_schema(vk_parquet_path)
         col_names = [f.name for f in schema]
+        # Never empty: fields.parquet always has its raw_bits column.
         raw_cols = [c for c in col_names if "raw" in c.lower() or "blob" in c.lower() or "bits" in c.lower()]
-        if raw_cols:
-            lines.append(f"\nvrfkit parquet raw-related columns: {raw_cols}")
-        else:
-            lines.append(f"\nvrfkit parquet has NO raw_bits/blob columns.")
-            lines.append(f"  Available columns: {col_names}")
-            lines.append("  → Raw blobs are likely stored as the field value itself (binary type)")
+        lines.append(f"\nvrfkit parquet raw-related columns: {raw_cols}")
     else:
         lines.append("\nfields.parquet not found.")
 
