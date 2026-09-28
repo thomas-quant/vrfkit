@@ -1,25 +1,17 @@
 """Assert that each BUILD's preserved replay still produces sane MATCH METRICS.
 
-Every other check in this project reads counters that describe the FRAMING --
-blocks, fields, RPCs, malformed packets, skipped bits -- or compares bytes
-against a frozen export. None of them can see a semantic break, because a
-decoder that stops producing values emits no rows and moves no framing counter.
-
-Section 26 is the worked example. Build 13.02 shifted `RoundResults` from
-handle 93 to 81, the decoder matched on the old numbers, and the match score
-stopped being written. `validate_corpus.py`, `check_corpus_baseline.py`,
-`check_export_baseline.py` and the byte oracle were ALL green, because every
-number they read was identical. The break was only visible one layer up, where
-the rows become a scoreboard.
-
-So this guard runs the layer that could see it:
+Every other check reads counters that describe the FRAMING -- blocks, fields,
+RPCs, malformed packets, skipped bits -- or compares bytes against a frozen
+export, and a decoder that stops producing values emits no rows and moves no
+framing counter. Build 13.02 shifted `RoundResults` from handle 93 to 81, the
+match score stopped being written, and every framing guard stayed green. The
+break shows one layer up, where the rows become a scoreboard, so this guard
+runs that layer:
 
     vrfkit export -> tools/to_valplay_bundle.py -> valplay compute_metrics.py
 
-VERIFIABLE CLAIM: the 13.02 fixture would have FAILED this guard before commit
-bcc7d70. Measured in that session -- `RoundResults[N].*` leaves were 0 on
-`1.vrf`, so `objective.round_count` was 0 while `rounds.round_count` was 21.
-That is invariant R2 below.
+Before bcc7d70 the 13.02 fixture failed it: `objective.round_count` was 0
+while `rounds.round_count` was 21 (invariants R1 and R2 below).
 
 Two kinds of check, and the first matters more
 ---------------------------------------------
@@ -29,27 +21,21 @@ survive legitimate changes that move counts, which pinned numbers do not, and
 they are the ones that encode the section-26 failure directly.
 
 **Pinned values** are drift detection for everything else. They live in ONE
-file covering every build rather than one file per build, so that a build
-disappearing from the set is itself a failure. Per-file baselines cannot see
-that -- which is exactly how `check_corpus_baseline.py` was silently guarding
-nothing when the game rotated four pinned replays out of `Saved\\Demos`.
+file covering every build, so a build disappearing from the set is itself a
+failure, which per-file baselines cannot see.
 
-`kills == deaths` is deliberately NOT an invariant, and section 34 measured the
-real reason. RESURRECTION breaks it structurally: a resurrected player who dies
-again in the same round gets two `bDied` reports, so `deaths` counts both,
-while `kills` counts DidKill per (round, subject) interaction, which collapses
-them into one. Across five Swiftplay replays the gap was 0 where there were no
-resurrections and exactly 1 in each of the two that had one -- so an equality
-assertion would fail on correct data every time an agent resurrects. It is
-pinned instead.
+`kills == deaths` is deliberately NOT an invariant: a resurrected player who
+dies again in the same round gets two `bDied` reports, so `deaths` counts both,
+while `kills` counts DidKill per (round, subject) interaction and collapses
+them. Across five Swiftplay replays the gap was 0 without a resurrection and
+exactly 1 in each of the two with one. It is pinned instead.
 
 Cost
 ----
 
 This is the slowest check in the repo: it exports, re-nests and recomputes five
 full 44-65 MB matches (13.01, 13.02, 13.04, 13.05, 13.06) besides three sub-MB
-public fixtures. Run it after a non-trivial change, not in a fast sweep. Its
-value is the layer it exercises, not its speed.
+public fixtures. Run it after a non-trivial change, not in a fast sweep.
 
 Usage:
     python tools/check_metrics_baseline.py
@@ -86,27 +72,13 @@ COMPUTE_METRICS = Path(
     os.environ.get("VRFKIT_VALPLAY_DIR", "")
 ) / "pipeline" / "metrics" / "compute_metrics.py"
 
-#: One replay per build. 13.01 has no preserved fixture of its own -- it is the
-#: reference replay the whole project is developed against, and it lives in the
-#: read-only valplay corpus.
-#:
-#: The others point at %LOCALAPPDATA%\vrfkit\baseline-corpora and MUST keep
-#: doing so. They used to point at %LOCALAPPDATA%\VALORANT\Saved\Demos, which
-#: the GAME owns and rotates; on 2026-08-02 all four pinned replays were gone.
-#: A baseline over a directory another program writes to guards nothing.
-#:
-#: 13.04 and 13.05 were added 2026-09-13. Until then the two newest supported
-#: builds had no semantic guard at all; each fixture is a full ranked match that
-#: had already been through export -> bundle -> compute_metrics end to end.
-#:
-#: 13.06 was added 2026-09-28, after it had been in the same position: listed
-#: as supported, its framing pinned by build_1306.json, and absent here.
-#: The fixture was chosen by running all six preserved 13.06 replays through
-#: this pipeline: all six pass R1-R5, but abf07066 (7 rounds, 7-0) and
-#: ee4c3f26 (10 rounds, 8-2) are not full matches. 2a7d2c4c is a full match
-#: (22 rounds, 13-9, 10 players, 170 kills = 170 deaths) at 59.6 MB, inside
-#: the other full matches' size range; 57881928, a4b7406f (72.8 MB) and
-#: e02e6230 are the alternatives.
+#: One replay per build. 13.01 is the reference replay, which lives in the
+#: read-only valplay corpus. Never point one at the game's own Saved\Demos:
+#: the game rotates it, and on 2026-08-02 all four replays pinned there were
+#: gone. 13.06's fixture was chosen from six preserved replays run through this
+#: pipeline (all pass R1-R5): 2a7d2c4c is a full match (22 rounds, 13-9, 10
+#: players, 170 kills = 170 deaths, 59.6 MB); abf07066 (7-0) and ee4c3f26
+#: (8-2) are not, and 57881928, a4b7406f and e02e6230 are the alternatives.
 REPLAYS = {
     "12.10": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1210"
              r"\9f8b32c5-c243-41ec-bbbb-832582edf652.12_10.vrf",
@@ -124,10 +96,6 @@ REPLAYS = {
              r"\2a7d2c4c-952b-444e-9e45-c45c5ae77610.vrf",
 }
 
-
-# ---------------------------------------------------------------------------
-# metric extraction
-# ---------------------------------------------------------------------------
 
 def _resolve_replay(raw: str) -> Path:
     """Expand env vars in a REPLAYS entry; anchor a bare filename in
@@ -178,8 +146,8 @@ def extract(m: dict) -> dict:
 def invariants(v: dict) -> list[str]:
     """Checks that need no baseline. Each returns a message when it FAILS.
 
-    R1-R3 are the section-26 break stated three ways. Before bcc7d70 the 13.02
-    fixture violated R2 and R3 (objective 0 vs rpc 21) and R1.
+    R1-R3 state the 13.02 break three ways; before bcc7d70 the 13.02 fixture
+    violated R1 and R2 (objective 0 vs rpc 21). R3 does not fire on it.
     """
     bad = []
     if v["rounds_objective"] <= 0:
@@ -212,23 +180,12 @@ def invariants(v: dict) -> list[str]:
 
 
 def invariant_count() -> int:
-    """How many checks `invariants()` runs, for the pass-message at the end.
-
-    `invariants()` returns only the FAILURES, so `len(invariants(v))` is 0 on
-    a clean build and cannot answer "how many checks ran". The call site used
-    to restate that as a bare literal `5`, a second number with no connection
-    to the first -- add an R6 (or drop one) and the pass message keeps
-    claiming the old count while having run a different one. Counting the
-    distinct `R<n>` labels `invariants()` itself prints keeps the two numbers
-    unable to disagree.
-    """
+    """How many checks `invariants()` runs, for the pass-message at the end:
+    the distinct `R<n>` labels in its source, since it returns only failures
+    and a literal would not move when a check is added or dropped."""
     import inspect
     return len(set(re.findall(r"\bR\d+\b", inspect.getsource(invariants))))
 
-
-# ---------------------------------------------------------------------------
-# pipeline
-# ---------------------------------------------------------------------------
 
 def pipeline_paths(root: Path) -> tuple[Path, Path, Path]:
     """Return sibling paths so the adapter input and output never overlap."""
@@ -269,16 +226,10 @@ def run_one(build: str, replay: Path, exe: Path) -> tuple[str, dict | None, str]
 def merged_metrics(stored: dict, fresh: dict, only) -> dict:
     """The metrics to write on `--update`, given what was already pinned.
 
-    A scoped run (`--only 13.02`) looked at one build and knows nothing about
-    the others, so it must not delete them. It used to: the payload was built
-    from this run's results alone, so re-pinning after inspecting a single
-    build left a one-build baseline and the docstring's guarantee -- "a build
-    disappearing from the set is itself a failure" -- was silently retired.
-
-    An unscoped run is the opposite case: it looked at every build in REPLAYS,
-    so it is the only thing allowed to retire one. Merging there would keep a
-    build pinned after it left REPLAYS and fail every later run with
-    "MISSING from this run".
+    A scoped run (`--only 13.02`) knows nothing about the other builds, so it
+    keeps them. An unscoped run looked at every build in REPLAYS, so it alone
+    may retire one: merging there would keep a build pinned after it left
+    REPLAYS and fail every later run with "MISSING from this run".
     """
     return dict(fresh) if only is None else {**stored, **fresh}
 
