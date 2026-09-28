@@ -1,17 +1,5 @@
-"""Guards for the coverage analysis.
-
-This is an analysis script, not a gate, and it stays one: overlay coverage is
-known-incomplete by design, so failing on an extractor miss would make it
-permanently red and it would be switched off.
-
-What it may not do is print an unmeasured figure as a zero. Without the C#
-descriptor directory `csharp_paths` is empty, so EVERY uncovered group falls
-into "no descriptor" and the line
-
-    C# descriptor exists but extractor missed: 0
-
-is printed on a machine that never looked. That is the same vacuous zero the
-malformed counter had for the project's whole history.
+"""Guards for the coverage analysis: never fatal on a measured miss, never an
+unmeasured zero (see `missed_report`), and an argv parsed in full.
 """
 import contextlib
 import io
@@ -62,10 +50,8 @@ class ClassifyTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    """argv was matched by hand against the exact two-token `--csharp-dir PATH`
-    form. `--csharp-dir=PATH`, a flag with no value, `--help` and typos were
-    dropped silently and the run classified against the vendored descriptors,
-    printing a measured-looking count for an input nobody chose."""
+    """`--csharp-dir=PATH`, a valueless flag, `--help` and typos are parsed or
+    rejected, never dropped in favour of the vendored descriptors."""
 
     def run_main(self, *args: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()

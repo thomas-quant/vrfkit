@@ -1,19 +1,9 @@
 """Analyze overlay coverage gaps: classify 'Not in table' fields into
 'C# descriptor missing' vs 'extractor failure'.
 
-Reads:
-  - out/nested/manifest.json  (replay groups + fields)
-  - crates/vrf-decode/src/table.rs  (current overlay entries)
-  - C# descriptor directory (to list which groups have descriptors); the
-    vendored third_party/vrp/Replay.Valorant unless --csharp-dir says otherwise
-
-Outputs:
-  - Groups in replay with no overlay entry, split by whether a C# descriptor
-    exists for that group.
-  - Top uncovered groups by field count.
-
-Usage:
-    python tools/analyze_coverage.py [--csharp-dir <path>]
+Groups of out/nested/manifest.json with no entry in table.rs are split by
+whether a C# descriptor exists for them (the vendored Replay.Valorant, or
+--csharp-dir).
 """
 from __future__ import annotations
 
@@ -27,10 +17,8 @@ VRFKIT_ROOT = Path(__file__).parent.parent
 MANIFEST_PATH = VRFKIT_ROOT / "out" / "nested" / "manifest.json"
 TABLE_RS_PATH = VRFKIT_ROOT / "crates" / "vrf-decode" / "src" / "table.rs"
 
-# The descriptors table.rs is generated from, vendored in the tree
-# (third_party/vrp/README.md). This used to come from VRFKIT_CSHARP_DIR, which
-# no one set, so the extractor-missed count read NOT MEASURED by default.
-# --csharp-dir points at another Replay.Valorant directory, e.g. upstream's.
+# The vendored descriptors table.rs is generated from (third_party/vrp/
+# README.md); --csharp-dir points at another Replay.Valorant, e.g. upstream's.
 DEFAULT_CSHARP_DIR = VRFKIT_ROOT / "third_party" / "vrp" / "Replay.Valorant"
 
 PATH_RE = re.compile(r'override\s+string\s+Path\s*=>\s*"(?P<path>[^"]+)"')
@@ -57,10 +45,7 @@ def extract_overlay_groups(table_rs: Path) -> set[str]:
 
 
 def classify(groups_in_replay, overlay_groups: set, csharp_paths: set):
-    """`(counts, extractor-missed groups, no-descriptor groups)`.
-
-    Split out of `main` so the classification can be tested without an export.
-    """
+    """`(counts, extractor-missed groups, no-descriptor groups)`."""
     counts = {"covered": 0, "extractor_missed": 0, "no_descriptor": 0}
     missed: list[tuple[str, int]] = []
     no_desc: list[tuple[str, int]] = []
@@ -79,17 +64,10 @@ def classify(groups_in_replay, overlay_groups: set, csharp_paths: set):
 
 
 def missed_report(extractor_missed: int, measured: bool) -> str:
-    """The extractor-missed line, which must not print an unmeasured zero.
-
-    Without the C# descriptor directory `csharp_paths` is empty, so every
-    uncovered group falls into "no descriptor" and this line reads
-    "extractor missed: 0" on a machine that never looked -- the same vacuous
-    zero the malformed counter carried for the project's whole history.
-
-    The count is deliberately NOT fatal when it IS measured: overlay coverage
-    is known-incomplete by design, so failing on it would make this analysis
-    permanently red and it would simply stop being run.
-    """
+    """The extractor-missed line: NOT MEASURED without descriptors (every
+    uncovered group would read "no descriptor", printing a vacuous 0). A
+    measured count is deliberately not fatal: coverage is incomplete by
+    design, and an always-red analysis would stop being run."""
     if not measured:
         return ("  C# descriptor exists but extractor missed: NOT MEASURED "
                 "(no C# descriptor dir; pass --csharp-dir)")
@@ -97,9 +75,6 @@ def missed_report(extractor_missed: int, measured: bool) -> str:
 
 
 def main(argv: list[str]) -> int:
-    # argparse, not a hand match on the two-token form: that dropped
-    # `--csharp-dir=PATH`, a valueless flag, `--help` and typos silently and
-    # classified against the vendored descriptors instead.
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--csharp-dir", type=Path, default=DEFAULT_CSHARP_DIR,
                         help="C# descriptor directory (default: the vendored "
@@ -140,7 +115,6 @@ def main(argv: list[str]) -> int:
           + ("" if measured else "  <- every uncovered group, unclassified"))
     print()
 
-    # Count total fields in each category
     total_fields_in_replay = sum(len(g["fields"]) for g in groups_in_replay)
     covered_fields = sum(
         len(g["fields"]) for g in groups_in_replay if g["path"] in overlay_groups
