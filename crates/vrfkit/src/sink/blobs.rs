@@ -13,7 +13,7 @@
 
 use smallvec::SmallVec;
 use vrf_bitio::BitReader;
-use vrf_decode::{ABILITY_CASTS_SCHEMA, COMBAT_ROUNDS_SCHEMA, FieldType};
+use vrf_decode::{ABILITY_CASTS_SCHEMA, COMBAT_ROUNDS_SCHEMA, FieldType, structs};
 use vrf_schema::NetGuidCache;
 
 use super::intern::put;
@@ -1094,29 +1094,36 @@ impl ExportSink<'_> {
         emitted
     }
 
-    /// Record a struct-blob decode failure instead of dropping it.
-    ///
-    /// Returns `false` so a call site can `return self.record_blob_failure(..)`
-    /// -- the decoders are additive and a failure emits no rows, which is the
-    /// same return value the discarding version produced. What is new is that
-    /// the run says so.
-    fn record_blob_failure(&mut self, err: &dyn std::fmt::Display) -> bool {
+    /// Record a struct-blob decode failure instead of dropping it. The
+    /// decoders are additive, so a failure emits no rows; it must not also go
+    /// unsaid.
+    fn record_blob_failure(&mut self, err: &dyn std::fmt::Display) {
         self.stats.struct_blobs_failed += 1;
         if self.stats.struct_blob_first_error.is_none() {
             self.stats.struct_blob_first_error = Some(err.to_string());
         }
-        false
     }
 
-    /// Open a bit reader over a struct blob's declared bit length, or record
-    /// the failure and hand back `None`. All three struct-blob decoders start
-    /// this way; one guard here keeps the "declared bit length exceeds
-    /// buffer" wording from drifting between copies.
-    fn blob_bit_reader<'a>(&mut self, raw: &'a [u8], bit_count: u32) -> Option<BitReader<'a>> {
-        match BitReader::with_bit_len(raw, u64::from(bit_count)) {
-            Ok(reader) => Some(reader),
-            Err(_) => {
-                self.record_blob_failure(&"declared bit length exceeds buffer");
+    /// Run one struct-blob decoder over the blob's declared bit length and
+    /// the group's declared names. Every failure, the reader's included, is
+    /// recorded here, so the wording cannot drift between the decoders.
+    fn decode_blob<T>(
+        &mut self,
+        raw: &[u8],
+        bit_count: u32,
+        decode: impl FnOnce(&mut BitReader<'_>, &[Option<&str>]) -> structs::Result<Vec<T>>,
+    ) -> Option<Vec<T>> {
+        let Ok(mut reader) = BitReader::with_bit_len(raw, u64::from(bit_count)) else {
+            self.record_blob_failure(&"declared bit length exceeds buffer");
+            return None;
+        };
+        // The decoded elements own their strings, so once `decode` returns
+        // nothing borrows `self.cache` and a failure can be recorded.
+        let declared = Self::declared_handle_names(self.cache, &self.current_group_path);
+        match decode(&mut reader, &declared) {
+            Ok(results) => Some(results),
+            Err(err) => {
+                self.record_blob_failure(&err);
                 None
             }
         }
@@ -1124,21 +1131,8 @@ impl ExportSink<'_> {
 
     /// Decode RoundResults blob and emit sub-field rows.
     fn decode_round_results_blob(&mut self, raw: &[u8], bit_count: u32) -> bool {
-        use vrf_decode::structs::decode_round_results;
-
-        let Some(mut reader) = self.blob_bit_reader(raw, bit_count) else {
+        let Some(results) = self.decode_blob(raw, bit_count, structs::decode_round_results) else {
             return false;
-        };
-        // Scoped so the borrow of `self.cache` ends before the emit loop needs
-        // `&mut self`. The decoded elements own their strings, so nothing
-        // outlives the declaration.
-        let decoded = {
-            let declared = Self::declared_handle_names(self.cache, &self.current_group_path);
-            decode_round_results(&mut reader, &declared)
-        };
-        let results = match decoded {
-            Ok(results) => results,
-            Err(err) => return self.record_blob_failure(&err),
         };
 
         for rr in &results {
@@ -1177,18 +1171,9 @@ impl ExportSink<'_> {
 
     /// Decode TeamEconomy blob and emit sub-field rows.
     fn decode_team_economy_blob(&mut self, raw: &[u8], bit_count: u32) -> bool {
-        use vrf_decode::structs::decode_team_economy_declared;
-
-        let Some(mut reader) = self.blob_bit_reader(raw, bit_count) else {
+        let Some(results) = self.decode_blob(raw, bit_count, structs::decode_team_economy_declared)
+        else {
             return false;
-        };
-        let decoded = {
-            let declared = Self::declared_handle_names(self.cache, &self.current_group_path);
-            decode_team_economy_declared(&mut reader, &declared)
-        };
-        let results = match decoded {
-            Ok(results) => results,
-            Err(err) => return self.record_blob_failure(&err),
         };
 
         for te in &results {
@@ -1223,18 +1208,8 @@ impl ExportSink<'_> {
 
     /// Decode RoundInfos blob and emit sub-field rows.
     fn decode_round_infos_blob(&mut self, raw: &[u8], bit_count: u32) -> bool {
-        use vrf_decode::structs::decode_round_infos;
-
-        let Some(mut reader) = self.blob_bit_reader(raw, bit_count) else {
+        let Some(results) = self.decode_blob(raw, bit_count, structs::decode_round_infos) else {
             return false;
-        };
-        let decoded = {
-            let declared = Self::declared_handle_names(self.cache, &self.current_group_path);
-            decode_round_infos(&mut reader, &declared)
-        };
-        let results = match decoded {
-            Ok(results) => results,
-            Err(err) => return self.record_blob_failure(&err),
         };
 
         for ri in &results {
