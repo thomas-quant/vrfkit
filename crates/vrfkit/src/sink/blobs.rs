@@ -24,6 +24,12 @@ use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 /// rather than a union.
 type DecodedColumns = (Option<i64>, Option<f64>, Option<bool>, Option<String>);
 
+/// What the replay declares at `handle`: one slot of
+/// `ExportSink::declared_handle_names` or `declared_handle_checksums`.
+fn declared_at<T: Copy>(slots: &[Option<T>], handle: u32) -> Option<T> {
+    slots.get(handle as usize).copied().flatten()
+}
+
 #[derive(Clone, Copy)]
 enum VerifiedArrayLeaf {
     Field(FieldType),
@@ -147,14 +153,8 @@ fn decode_verified_nested_array(
     vrf_decode::ArrayDecodeStats,
     u64,
 ) {
-    let declared_name = declared_names
-        .get(container.handle as usize)
-        .copied()
-        .flatten();
-    let declared_checksum = declared_checksums
-        .get(container.handle as usize)
-        .copied()
-        .flatten();
+    let declared_name = declared_at(declared_names, container.handle);
+    let declared_checksum = declared_at(declared_checksums, container.handle);
     let resolved =
         vrf_decode::resolve_field_type(&TABLE, group_path, declared_name, Some(container.handle));
     if !verified_nested_container(
@@ -193,11 +193,8 @@ fn decode_verified_nested_array(
 
     let mut decoded = Vec::with_capacity(flattened.len());
     for leaf in flattened {
-        let declared_name = declared_names.get(leaf.handle as usize).copied().flatten();
-        let declared_checksum = declared_checksums
-            .get(leaf.handle as usize)
-            .copied()
-            .flatten();
+        let declared_name = declared_at(declared_names, leaf.handle);
+        let declared_checksum = declared_at(declared_checksums, leaf.handle);
         let resolved =
             vrf_decode::resolve_field_type(&TABLE, group_path, declared_name, Some(leaf.handle));
         if !verified_nested_member(
@@ -773,11 +770,8 @@ impl ExportSink<'_> {
             }
             if parent_name == "ActiveBlinds"
                 && flattened.iter().any(|field| {
-                    let name = declared.get(field.handle as usize).copied().flatten();
-                    let checksum = declared_checksums
-                        .get(field.handle as usize)
-                        .copied()
-                        .flatten();
+                    let name = declared_at(&declared, field.handle);
+                    let checksum = declared_at(&declared_checksums, field.handle);
                     let resolved = vrf_decode::resolve_field_type(
                         &TABLE,
                         &self.current_group_path,
@@ -818,7 +812,7 @@ impl ExportSink<'_> {
                 // then handle -> descriptor name -> type -- and a flattened
                 // leaf was getting only the first, so the same property could
                 // be typed outside an array and untyped inside one.
-                let name = declared.get(f.handle as usize).copied().flatten();
+                let name = declared_at(&declared, f.handle);
                 let declared_resolved = vrf_decode::resolve_field_type(
                     &TABLE,
                     &self.current_group_path,
@@ -832,8 +826,7 @@ impl ExportSink<'_> {
                 // an `Option` read off a slice -- so evaluating it on the
                 // branches that never use it (the `verified_array_leaf_type`
                 // and plain-`resolved` fallbacks) costs nothing observable.
-                let declared_checksum =
-                    declared_checksums.get(f.handle as usize).copied().flatten();
+                let declared_checksum = declared_at(&declared_checksums, f.handle);
                 if measured && parent_name == "TrackedRewards" {
                     if verified_reward_localized_text(
                         f.handle,
