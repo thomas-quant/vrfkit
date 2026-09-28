@@ -562,9 +562,14 @@ the timeline. In vrfkit the timeline itself is complete.
 The one extra damage record is a killing blow (29.45 dealt, 20 taken) on the
 `DamageableComponent` of Gekko's E-ability projectile -- actor 27232, packet
 391880, channel 194 -- whose actor closes six packets later. Neither C# build
-emits any event for packet 391880, and why is not established
-([follow-up](docs/FOLLOWUP.md#remaining-work)). vrfkit already produced it at
-`d4731c8`, before the partial header correction, so that is not the cause.
+can name that component's class: it is stably named `Damageable`, so the wire
+carries no class GUID for it, and the C# resolver's fixed table of
+stably-named components lacks the name, so the block is skipped undecoded.
+With that one name added, C# emits the record with the same 35 values
+([how this was established](docs/FOLLOWUP.md#the-damage-record-only-vrfkit-emits)).
+`compare_rpc_params.py` lists it as its one expected difference, keyed by
+replay, packet, actor, subobject, channel, function and values, and fails if
+it stops occurring exactly so.
 
 ## The Event chunk -- the server's own timeline
 
