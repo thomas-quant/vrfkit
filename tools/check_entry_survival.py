@@ -147,9 +147,10 @@ What fails
 Exit 1 for an evidenced field-missing finding and for an evidenced move that
 is `lost`, unless it is listed in `tools/fixtures/entry_survival_expected.json`
 with a reason and the evidence for it; also for a listed item that matches no
-such finding (`STALE`), a checkpoint field row that joins no group, and a Rust
-table that does not parse completely. A covered move, a vanished group and
-every weak finding are printed and never fail. Every kind of entry is judged,
+such finding (`STALE`), a checkpoint field row that joins no group, a
+main-stream field declaration without a name or checksum, and a Rust table
+that does not parse completely. A covered move, a vanished group and every
+weak finding are printed and never fail. Every kind of entry is judged,
 `Raw` and `Skip` included: `TeamEconomy` is `Raw` in the table, and its loss
 at 13.02 silenced the struct-blob decoder keyed on that name.
 
