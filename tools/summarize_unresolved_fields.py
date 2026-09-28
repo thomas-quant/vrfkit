@@ -1,14 +1,11 @@
 """Prioritize physical field rows whose typed overlay is wholly absent.
 
-This is an inventory of raw/untyped *wire rows*, not a decoder and not a
-semantic claim.  A row is untyped only when all four ``value_*`` columns are
-null; zero, ``False``, and empty strings are therefore typed.  ``raw_bit_sum``
-is the sum of ``bit_count`` for those rows, not a comparison of payload values.
-
-Inputs are export directories or parents with direct export children.  Sources
-are opened read-only.  The output directory receives a concise summary and a
-complete, deterministic JSON catalog.  Main and checkpoint tables retain
-separate catalog entries because checkpoint rows are a different decode path.
+An inventory of raw/untyped wire rows, not a decoder or a semantic claim. A
+row is untyped only when all four ``value_*`` columns are null (0, ``False``
+and "" are typed); ``raw_bit_sum`` sums their declared ``bit_count``, not
+payload values. Inputs are exports or parents of exports, read-only; the
+output directory gets a summary and a deterministic JSON catalog, with main
+and checkpoint entries apart because they are different decode paths.
 """
 from __future__ import annotations
 
@@ -187,9 +184,8 @@ def _scan_table(connection: sqlite3.Connection, directory: Path, export_id: str,
 
 
 def _database(connection: sqlite3.Connection) -> None:
-    # The catalog can have high cardinality.  Keep SQLite's page cache bounded
-    # and spill temporary sort/index pages to the per-run directory instead of
-    # allowing the process cache to grow with the corpus.
+    # A high-cardinality catalog: SQLite's page cache stays bounded, and temp
+    # sort/index pages spill to the per-run directory, not process memory.
     connection.execute("PRAGMA cache_size = -32768")
     connection.execute("PRAGMA temp_store = FILE")
     connection.executescript(

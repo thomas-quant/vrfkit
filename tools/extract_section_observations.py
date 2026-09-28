@@ -120,13 +120,11 @@ def declarations(manifest):
         outer[h] = (x.get("name"), x.get("compatible_checksum"))
     result = {}
     for route, (handle, crc, parent, parent_handle, scalar, scalar_handle, members, relation) in ROUTES.items():
-        # A route can be absent from an export entirely.  It becomes an error
-        # only if a selected row claims an absent or different outer entry.
+        # A route, or its parameter group, can be absent from an export: an
+        # error only if a selected row claims it or a different outer entry.
         outer_entry = outer.get(handle)
         path = "/Script/ShooterGame.DamageableComponent:" + route
         if len(groups[path]) > 1: raise InputError("duplicate route declaration group: " + route)
-        # Parameter groups are not universal across the measured exports.  An
-        # absent group is valid only when no row later claims this route.
         fields = None if not groups[path] else {}
         if fields is not None:
             for x in groups[path][0].get("fields", []):
@@ -175,9 +173,7 @@ def parse_group(route, key, rows, paths, segments, declared):
             if r.get("compatible_checksum") is None: errors.append({"source_row": ordinal, "error": "top-level checksum absent"})
         elif child_rx.match(name):
             if r.get("compatible_checksum") is not None: errors.append({"source_row": ordinal, "error": "flattened child has checksum"})
-        # Other declared top-level parameters and nested arrays are retained
-        # raw. They are not section-state members, but neither are they schema
-        # errors merely because this extractor does not interpret them.
+        # Other declared parameters and nested arrays are kept raw, not errors.
         by[name].append((ordinal, r))
     reasons = []
     if segments > 1: reasons.append("disjoint_physical_segments")
@@ -240,9 +236,8 @@ def parse_group(route, key, rows, paths, segments, declared):
             q = by.get(route + "." + scalar_name, [])
             if len(q) != 1: raise InputError("missing or duplicate scalar")
             scalar = f32(q[0][1])
-            # Keep both arithmetic methods visible.  The f64 accumulation is
-            # rounded once; iterative f32 is reported separately, never used
-            # to silently choose a universal wire rule.
+            # Both methods reported: f64 accumulated then rounded once, and
+            # iterative f32, never silently chosen as the wire rule.
             values = [s["delta_life"] for s in sections]
             f64_sum = values[0] if values else 0.0
             for value in values[1:]: f64_sum += value

@@ -1,12 +1,11 @@
 """Count physical typed rows, with optional reviewed semantic-evidence rows.
 
-Inputs are export directories or parents whose direct children are exports.
-Read-only: the JSON report goes to stdout, and no export is modified. A typed
-row has at least one non-null value_i64/f64/bool/str, including 0, False and
-empty strings. Multiple populated columns still count as one typed row and
-are reported separately. This is not a percentage of game facts understood.
-``--semantic-evidence`` accepts an explicit reviewed-evidence catalog; it
-never promotes a field name or typed value to a semantic verdict on its own.
+Inputs are exports or parents of exports, read-only; the JSON report goes to
+stdout. A typed row has at least one non-null value_i64/f64/bool/str, 0,
+False and "" included; several populated columns count once and are
+reported separately. Not a percentage of game facts understood.
+``--semantic-evidence`` takes a reviewed catalog; a field name or typed value
+alone never becomes a semantic verdict.
 """
 from __future__ import annotations
 
@@ -79,13 +78,8 @@ def _require_string(value: object, location: str) -> str:
 
 
 def load_semantic_evidence(path: Path) -> dict:
-    """Read an explicit catalog of reviewed semantic assertions.
-
-    Each source records provenance; each reviewed claim selects rows by exact
-    JSON-scalar equality or a schema-2 literal indexed path template. Unknown
-    and unsupported claims remain visible but are never counted as semantic
-    verification.
-    """
+    """Read an explicit catalog of reviewed semantic assertions; unknown and
+    unsupported claims stay visible but never count as verification."""
     try:
         raw_document = path.read_bytes()
         document = json.loads(raw_document)
