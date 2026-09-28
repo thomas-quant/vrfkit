@@ -7,8 +7,9 @@
 //! object's global index is `CityHash64` of its lowercased path, and a
 //! package's chunk id is `CityHash64` of its lowercased name. Rebuilding those
 //! from the strings this tool decoded and getting the game's own number back is
-//! evidence the name batch, the outer walk and the separators are all right --
-//! a wrong separator or an off-by-one name index changes the hash.
+//! evidence the name batch and the outer walk are right -- an off-by-one name
+//! index changes the hash. It is no evidence about the separators: the path
+//! hash folds `.` and `:` alike into `/`, as the engine does.
 //!
 //! Unreal hashes `TCHAR` text, which on Windows is UTF-16, so callers hash the
 //! UTF-16LE bytes of the string (see [`hash_path`]).
