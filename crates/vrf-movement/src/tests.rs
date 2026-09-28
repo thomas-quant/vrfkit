@@ -9,6 +9,7 @@ use vrf_bitio::BitReader;
 
 use crate::error::MovementError;
 use crate::moves::{MOVEMENT_MAGIC, next_marker};
+use crate::primitives::{read_quantized_vector, read_signed_quantized_components};
 use crate::rpc::{
     COMPONENT_DATA_STREAM_HANDLE, REMOTE_CHARACTER_UPDATES_HANDLE,
     SHOOTER_CHARACTER_NET_GUID_HANDLE, decode_movement_rpc,
@@ -239,46 +240,41 @@ fn build_direct_component_data_stream(moves: &[BitWriter]) -> BitWriter {
 
 /// Build a full RPC payload with one character update.
 fn build_rpc_payload(shooter_guid: u32, component_stream: &BitWriter) -> BitWriter {
-    // Build the single update's property stream
+    wrap_updates_array(&single_update_array(&update_with_stream(
+        shooter_guid,
+        component_stream,
+    )))
+}
+
+/// One update carrying the shooter GUID field (handle 2, 32 bits) and then
+/// `stream` as the ComponentDataStream (handle 3).
+fn update_with_stream(shooter_guid: u32, stream: &BitWriter) -> BitWriter {
     let mut update = BitWriter::new();
-    // handle 2 (ShooterCharacterNetGuidValue): encodedHandle=3, payload=32 bits
     update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
     update.write_int_packed(32);
     update.write_u32(shooter_guid);
-    // handle 3 (ComponentDataStream): encodedHandle=4, payload=stream bits
     update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.write_int_packed(component_stream.bit_count());
-    update.write_other(component_stream);
-    // terminator
+    update.write_int_packed(stream.bit_count());
+    update.write_other(stream);
     update.write_int_packed(0);
+    update
+}
 
-    // Build the updates array
+/// An updates array that declares one update and holds `update` at index 0.
+fn single_update_array(update: &BitWriter) -> BitWriter {
     let mut array = BitWriter::new();
     array.write_int_packed(1); // updateCount = 1
     array.write_int_packed(1); // encodedIndex = 1 -> index 0
-    array.write_other(&update);
+    array.write_other(update);
     array.write_int_packed(0); // array terminator
-
-    // Build the RPC wrapper
-    let mut rpc = BitWriter::new();
-    rpc.write_bit(false); // first bit (consumed, value discarded per C# TryReadBit(out _))
-    // Property-style: handle 1 (RemoteCharacterUpdates)
-    rpc.write_int_packed(REMOTE_CHARACTER_UPDATES_HANDLE + 1); // encodedHandle = 2
-    rpc.write_int_packed(array.bit_count()); // payload bits
-    rpc.write_other(&array);
-    rpc.write_int_packed(0); // terminator
-
-    rpc
+    array
 }
 
-/// Wrap an already-built RemoteCharacterUpdates array in the RPC envelope.
-///
-/// `build_rpc_payload` builds the array too, which is what most tests want.
-/// The framing tests below need to deform the array itself, so the envelope is
-/// available on its own.
+/// Wrap a RemoteCharacterUpdates array in the RPC envelope. The framing
+/// tests below deform the array itself and call this directly.
 fn wrap_updates_array(array: &BitWriter) -> BitWriter {
     let mut rpc = BitWriter::new();
-    rpc.write_bit(false); // first bit, consumed and discarded
+    rpc.write_bit(false); // first bit, consumed and discarded (C# TryReadBit(out _))
     rpc.write_int_packed(REMOTE_CHARACTER_UPDATES_HANDLE + 1);
     rpc.write_int_packed(array.bit_count());
     rpc.write_other(array);
@@ -366,13 +362,7 @@ fn an_undersized_shooter_guid_field_and_its_orphaned_stream_are_counted() {
     update.write_other(&stream);
     update.write_int_packed(0);
 
-    let mut array = BitWriter::new();
-    array.write_int_packed(1);
-    array.write_int_packed(1);
-    array.write_other(&update);
-    array.write_int_packed(0);
-
-    let (result, moves) = decode(&wrap_updates_array(&array));
+    let (result, moves) = decode(&wrap_updates_array(&single_update_array(&update)));
 
     assert_eq!(result.total_moves, 0);
     assert!(moves.is_empty());
@@ -399,13 +389,7 @@ fn a_component_stream_ahead_of_its_guid_is_counted() {
     update.write_u32(4321);
     update.write_int_packed(0);
 
-    let mut array = BitWriter::new();
-    array.write_int_packed(1);
-    array.write_int_packed(1);
-    array.write_other(&update);
-    array.write_int_packed(0);
-
-    let (result, moves) = decode(&wrap_updates_array(&array));
+    let (result, moves) = decode(&wrap_updates_array(&single_update_array(&update)));
 
     assert_eq!(result.total_moves, 0);
     assert!(moves.is_empty());
@@ -414,38 +398,12 @@ fn a_component_stream_ahead_of_its_guid_is_counted() {
 
 #[test]
 fn a_component_stream_shorter_than_its_u16_header_is_not_a_valid_empty_update() {
-    let mut update = BitWriter::new();
-    update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
-    update.write_int_packed(32);
-    update.write_u32(4321);
-    update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.write_int_packed(8);
-    update.write_u8(0x52); // fewer than the mandatory 16 header bits
-    update.write_int_packed(0);
-
-    let mut array = BitWriter::new();
-    array.write_int_packed(1);
-    array.write_int_packed(1);
-    array.write_other(&update);
-    array.write_int_packed(0);
-
-    let (result, moves) = decode(&wrap_updates_array(&array));
+    let mut short = BitWriter::new();
+    short.write_u8(0x52); // fewer than the mandatory 16 header bits
+    let (result, moves) = decode(&build_rpc_payload(4321, &short));
 
     assert!(moves.is_empty());
     assert_eq!(result.error_count, 1, "short component must be a loss");
-}
-
-/// One update carrying the shooter GUID field and then `stream`.
-fn update_with_stream(shooter_guid: u32, stream: &BitWriter) -> BitWriter {
-    let mut update = BitWriter::new();
-    update.write_int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
-    update.write_int_packed(32);
-    update.write_u32(shooter_guid);
-    update.write_int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.write_int_packed(stream.bit_count());
-    update.write_other(stream);
-    update.write_int_packed(0);
-    update
 }
 
 #[test]
@@ -505,14 +463,8 @@ fn a_malformed_trailing_padding_byte_is_counted() {
 
 #[test]
 fn decodes_single_variant0_move() {
-    let mv = build_move(false, 42, 1.25, 2.5, 3.75);
-    let stream = build_component_data_stream(&[mv]);
-    let rpc = build_rpc_payload(1234, &stream);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
+    let stream = build_component_data_stream(&[build_move(false, 42, 1.25, 2.5, 3.75)]);
+    let (result, moves) = decode(&build_rpc_payload(1234, &stream));
 
     assert_eq!(result.total_moves, 1);
     assert_eq!(result.update_count, 1);
@@ -531,14 +483,8 @@ fn decodes_single_variant0_move() {
 
 #[test]
 fn decodes_single_variant1_move_with_velocity() {
-    let mv = build_move(true, 42, 1.25, 2.5, 3.75);
-    let stream = build_component_data_stream(&[mv]);
-    let rpc = build_rpc_payload(5678, &stream);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
+    let stream = build_component_data_stream(&[build_move(true, 42, 1.25, 2.5, 3.75)]);
+    let (result, moves) = decode(&build_rpc_payload(5678, &stream));
 
     assert_eq!(result.total_moves, 1);
     assert_eq!(moves[0].move_type, 1);
@@ -549,15 +495,11 @@ fn decodes_single_variant1_move_with_velocity() {
 
 #[test]
 fn decodes_two_moves_in_one_update() {
-    let mv1 = build_move(false, 42, 1.0, 2.0, 3.0);
-    let mv2 = build_move(false, 84, 10.0, 11.0, 12.0);
-    let stream = build_component_data_stream(&[mv1, mv2]);
-    let rpc = build_rpc_payload(9999, &stream);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
+    let stream = build_component_data_stream(&[
+        build_move(false, 42, 1.0, 2.0, 3.0),
+        build_move(false, 84, 10.0, 11.0, 12.0),
+    ]);
+    let (result, moves) = decode(&build_rpc_payload(9999, &stream));
 
     assert_eq!(result.total_moves, 2);
     assert_eq!(moves.len(), 2);
@@ -591,38 +533,22 @@ fn decodes_the_direct_component_form() {
 #[test]
 fn empty_rpc_returns_zero() {
     // Zero bits -> empty
-    let data = [0u8; 0];
-    let mut reader = BitReader::with_bit_len(&data, 0).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m)).unwrap();
+    let (result, moves) = decode(&BitWriter::new());
     assert_eq!(result.total_moves, 0);
     assert!(moves.is_empty());
 }
 
 #[test]
 fn invalid_magic_returns_error() {
-    // Build a stream with wrong magic
-    let mut movement = BitWriter::new();
-    movement.write_u8(0x00); // wrong magic
-
+    // A direct-form stream whose 8-bit section holds the wrong magic. The
+    // stream is counted as a loss inside the update, so the RPC itself is Ok.
     let mut payload = BitWriter::new();
-    payload.write_u16(movement.bit_count() as u16);
-    payload.write_other(&movement);
+    payload.write_u16(8); // movementBitCount
+    payload.write_u8(0x00); // wrong magic
 
-    let rpc = build_rpc_payload(1234, &payload);
-    let bytes = rpc.to_bytes();
-    let mut reader = BitReader::with_bit_len(&bytes, rpc.bit_count() as u64).unwrap();
-
-    let mut moves = Vec::new();
-    let result = decode_movement_rpc(&mut reader, |m| moves.push(m));
-    // The error should be caught at the update level, incrementing error_count.
-    // Since we catch errors in decode_single_update, it returns Ok with error_count > 0.
-    match result {
-        Ok(r) => assert_eq!(r.error_count, 1),
-        Err(MovementError::InvalidMagic(0x00)) => {} // also acceptable
-        Err(e) => panic!("unexpected error: {e}"),
-    }
+    let (result, moves) = decode(&build_rpc_payload(1234, &payload));
+    assert!(moves.is_empty());
+    assert_eq!(result.error_count, 1);
 }
 
 /// A movement section: the magic, then `moves` variant-1 moves under the
@@ -764,4 +690,95 @@ fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
         assert_eq!(result.error_count, 0);
         assert_eq!(tails(&result), (0, 0, 0, 0), "{moves_before} move(s)");
     }
+}
+
+// --- QuantizedVector component widths ---------------------------------------
+
+/// Build a QuantizedVector payload: the `SerializedInt(128)` header followed
+/// by three components of `component_bits` each.
+fn quantized(component_bits: u32, extra_info: u64, comps: [u64; 3]) -> BitWriter {
+    let mut w = BitWriter::new();
+    // `read_serialized_int(128)` spends `128.ilog2() == 7` bits and never
+    // the extra one, because `value + 128 >= 128` holds for every value.
+    w.write_bits_u64((extra_info << 6) | u64::from(component_bits), 7);
+    for c in comps {
+        w.write_bits_u64(c, component_bits);
+    }
+    w
+}
+
+#[test]
+fn component_bits_of_63_reads_all_189_declared_bits() {
+    // 63 is the largest value `info & 63` can produce, and every part of
+    // reading it is in range: `read_bits(63)` is legal and `sign_extend`'s
+    // sign bit lands at `1 << 62`. The old bound of 62 fabricated a
+    // world-origin `(0, 0, 0)` here *without consuming the 189 bits the
+    // header declared*, so the move still decoded, `error_count` stayed 0,
+    // and every field after it came from the wrong bit offset.
+    let most_negative = 1u64 << 62; // -2^62 in 63-bit two's complement
+    let minus_one = (1u64 << 63) - 1; // all 63 bits set
+    let w = quantized(63, 0, [1, minus_one, most_negative]);
+    let bytes = w.to_bytes();
+    let mut r = BitReader::with_bit_len(&bytes, u64::from(w.bit_count())).unwrap();
+
+    let (x, y, z) = read_quantized_vector(&mut r, 100).unwrap();
+
+    assert_eq!(x, 1.0);
+    assert_eq!(y, -1.0);
+    assert_eq!(z, -(2f64.powi(62)));
+    assert_eq!(r.position(), 7 + 189, "all three components must be read");
+    assert!(r.at_end());
+}
+
+#[test]
+fn component_bits_of_62_still_reads_its_186_bits() {
+    // Regression guard, not TDD credit: 62 already worked. It pins the
+    // boundary that used to separate "read" from "fabricated" so a future
+    // bound change has to break a test rather than a corpus.
+    let w = quantized(62, 0, [7, (1u64 << 62) - 1, 1u64 << 61]);
+    let bytes = w.to_bytes();
+    let mut r = BitReader::with_bit_len(&bytes, u64::from(w.bit_count())).unwrap();
+
+    let (x, y, z) = read_quantized_vector(&mut r, 100).unwrap();
+
+    assert_eq!(x, 7.0);
+    assert_eq!(y, -1.0);
+    assert_eq!(z, -(2f64.powi(61)));
+    assert_eq!(r.position(), 7 + 186);
+}
+
+#[test]
+#[should_panic(expected = "component_bits must be 1..=63")]
+fn a_width_the_header_cannot_express_is_refused_even_without_debug_assertions() {
+    // Replacing the old `> 62` bound removed a *total* guard, and a
+    // `debug_assert` does not restore it: `[profile.release]` in the
+    // workspace manifest does not enable debug assertions, so the binary
+    // that exports the corpus compiles it away. Above 64 the arithmetic
+    // does not merely mis-answer, it goes out of range --
+    // `mask_u64(65)` is `u64::MAX >> (64 - 65)`, an over-wide shift that
+    // release masks into a nonsense mask rather than trapping.
+    //
+    // This is the call-site-bug shape `copy_bits_to` already treats as a
+    // hard assert rather than a recoverable error, for the same reason:
+    // the only caller masks the width to six bits, so reaching here means
+    // a programming error and not malformed input. Run this file with
+    // `-C debug-assertions=off` to see the guard actually hold.
+    let data = [0xFFu8; 32];
+    let mut r = BitReader::with_bit_len(&data, 256).unwrap();
+    let _ = read_signed_quantized_components(&mut r, 64);
+}
+
+#[test]
+fn a_truncated_63_bit_vector_reports_eof_rather_than_a_zero_vector() {
+    // The other half of the same fix: refusing to fabricate means a short
+    // payload has to fail, not quietly return the origin.
+    let mut w = quantized(63, 0, [1, 1, 1]);
+    w.bits.truncate(7 + 100);
+    let bytes = w.to_bytes();
+    let mut r = BitReader::with_bit_len(&bytes, u64::from(w.bit_count())).unwrap();
+
+    assert!(matches!(
+        read_quantized_vector(&mut r, 100),
+        Err(MovementError::Bit(_))
+    ));
 }
