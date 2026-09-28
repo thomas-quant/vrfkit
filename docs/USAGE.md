@@ -748,6 +748,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `corpus_scan.py` | Not a check -- the `.vrf` discovery `validate_corpus.py` and `check_decode_errors_corpus.py` share, so the two can no longer glob a directory two different ways and disagree about what "the corpus" is without saying so. Non-recursive by default; read its docstring for why. |
 | `export_scan.py` | Not a check -- the export discovery the tools that read a directory of exports share: it names the staging and backup directories an interrupted `vrfkit export` leaves behind ([section 2](#if-an-export-is-interrupted)), so none of those tools can count one as an export. A Python test reads the names back out of the Rust code that creates them. |
 | `check_component_remaps.py` | Whether each component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. Fails, too, when an entry of the Rust table does not parse, since that pair would otherwise go unchecked. Re-derive a broken or renamed pair with `extract_component_classes` ([below](#reading-the-installed-game)). |
+| `check_entry_survival.py` | Whether every name-keyed entry -- `table.rs` (names and handles), `scoped_types.rs`, `checksum_table.rs`, the measured array routes, the component-remap targets and the group aliases -- is still declared build after build, read from the `manifest.json` and checkpoint declaration tables of a directory of exports. Separates a field the group stopped declaring, a group that moved (naming the successor, and whether the successor's field is still typed), and a class nobody used; judges each absence by the chance that it is sampling, so a three-replay build can never fail. Fails on an evidenced loss that is neither still typed nor listed with its reason in `tools/fixtures/entry_survival_expected.json`. Run it on every new build ([section 7](#checking-a-new-build-still-matches-every-entry)). |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
 | `compare_combat_report.py` | Metrics-input multiset |
 | `compare_rpc_params.py` | RPC parameters and records against the C# export, with its listed expected differences |
@@ -1202,7 +1203,7 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 159 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1121 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1158 tests
 python -W error tools/check_docs.py --fast
 python -W error tools/apply_type_corrections.py --check              # 205 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
@@ -1409,6 +1410,38 @@ Adding a new build takes one `SeededTransform` impl -- two constants and three
 word functions. See the README's
 [Supported builds and the cost of a new build](../README.md#supported-builds-and-the-cost-of-a-new-build)
 section.
+
+### Checking a new build still matches every entry
+
+A build that decodes cleanly can still have moved a class the overlay names:
+the rows then arrive untyped with every counter at zero. Cypher's tripwire did
+exactly that between 13.00 and 13.01 (`.../Gumshoe/S0/Ability_E/` became
+`.../Ability_4/`), and `Deployed` has been raw since. After the new build
+exports, compare its declarations with the builds before it:
+
+```bash
+# Export the new build's replays beside the earlier builds' exports.
+for f in <new-build-replays>/*.vrf; do
+  ./target/release/vrfkit export "$f" --checkpoints --out "<exports>/$(basename "$f" .vrf)"
+done
+python tools/check_entry_survival.py --root <exports>
+python tools/check_entry_survival.py --root <exports> --show 'Gumshoe'   # one entry's history
+```
+
+The previous build must be in the same root: each build is judged against the
+builds before it, gathered back to at least 30 replays. Read three lists. A
+structural finding is a field its group stopped declaring; a move names the
+group that took over and says, entry by entry, whether the successor's field
+still resolves to the same type (`covered`) or not (`lost`); a vanished group
+had no successor and is reported only. An absence fails only with evidence:
+at least 10 replays of the new build declaring the group (for a move, 10
+replays at all) and a sampling probability of 0.001 or less, so a build
+exported from a handful of replays reports everything as weak. Fix a `lost`
+entry by typing the successor (`apply_type_corrections.py`, or the checksum or
+scoped tables), not by listing it; list a finding in
+`tools/fixtures/entry_survival_expected.json` only when the loss is correct,
+with the reason and the evidence. A listed item that stops matching fails as
+`STALE`.
 
 **When pinning a replay as a baseline, do not point at
 `%LOCALAPPDATA%\VALORANT\Saved\Demos`.** The game owns and rotates that
