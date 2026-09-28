@@ -36,7 +36,7 @@ SOFTWARE.
 
 | Area | Relationship |
 |---|---|
-| `crates/vrf-transform` | The six per-build payload transforms and their constants are a port of `Replay.Encoding/PayloadEncryption`. The substitution tables and golden test vectors are extracted mechanically from that source (`tools/extract_sboxes.py`, `tools/extract_golden.py`). |
+| `crates/vrf-transform` | The eight 12.10--13.06 per-build payload transforms and their constants are a port of `Replay.Encoding/PayloadEncryption`. The substitution tables and golden test vectors are extracted mechanically from that source (`tools/extract_sboxes.py`, `tools/extract_golden.py`). |
 | `crates/vrf-bitio` | The Unreal wire primitives (`IntPacked`, bounded `SerializedInt`, `FString`, bit copying) follow the semantics implemented in `Replay.Encoding/Archives`. |
 
 The reverse engineering of VALORANT's payload transformation originates with that
