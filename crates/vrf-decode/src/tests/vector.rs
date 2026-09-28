@@ -1,190 +1,101 @@
 //! Vector, rotator and replicated-movement decoders, ported from the C#
-//! reference's `PrimitiveDecodersVectorTests.cs`.
-//!
-//! The `write_*` helpers are the encoder side of each wire format, so a
-//! test here specifies the layout in both directions.
+//! reference's `PrimitiveDecodersVectorTests.cs`. The helpers below write each
+//! wire format with `crate::test_bits`, so a test pins the layout both ways.
 
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
+use crate::test_bits::BitWriter;
 use crate::types::{RotatorQuantization, VectorQuantization};
 
-/// Helper: build a quantized vector bitstream.
-/// Format: SerializedInt(128) header + 3 x componentBitCount signed components.
-fn write_quantized_vector(
-    x: f64,
-    y: f64,
-    z: f64,
-    scale_factor: u32,
-    component_bit_count: u32,
-) -> (Vec<u8>, u32) {
-    let mut bits: Vec<bool> = Vec::new();
-    // Header: info = componentBitCount | (1 << 6) -- indicates scaled integer
-    let info = component_bit_count | (1 << 6);
-    write_serialized_int(&mut bits, info, 1 << 7);
-    // Components
-    let xi = (x * f64::from(scale_factor)).round() as i64;
-    let yi = (y * f64::from(scale_factor)).round() as i64;
-    let zi = (z * f64::from(scale_factor)).round() as i64;
-    write_signed_bits(&mut bits, xi, component_bit_count);
-    write_signed_bits(&mut bits, yi, component_bit_count);
-    write_signed_bits(&mut bits, zi, component_bit_count);
-    bits_to_bytes(&bits)
-}
-
-fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max: u32) {
-    let mut written_value = 0u32;
-    let mut mask = 1u32;
-    while written_value + mask < max {
-        let bit = (value & mask) != 0;
-        bits.push(bit);
-        if bit {
-            written_value |= mask;
-        }
-        mask <<= 1;
+/// A scaled packed vector: a SerializedInt(128) header of `width | 1 << 6`
+/// (the "scaled integer" flag), then three `width`-bit signed components.
+fn packed_vector(bits: &mut BitWriter, components: [i64; 3], width: u32) {
+    bits.serialized_int(width | (1 << 6), 1 << 7);
+    for component in components {
+        bits.bits(component as u64, width);
     }
 }
 
-fn write_signed_bits(bits: &mut Vec<bool>, value: i64, count: u32) {
-    let mask = if count == 64 {
-        u64::MAX
-    } else {
-        (1u64 << count) - 1
-    };
-    let raw = (value as u64) & mask;
-    for i in 0..count {
-        bits.push((raw >> i) & 1 != 0);
-    }
-}
-
-fn write_compressed_short_rotator_component(bits: &mut Vec<bool>, value: u16) {
-    bits.push(value != 0);
+/// A compressed rotator component: a presence bit, then `width` bits if set.
+fn rotator_component(bits: &mut BitWriter, value: u16, width: u32) {
+    bits.bits(u64::from(value != 0), 1);
     if value != 0 {
-        for i in 0..16 {
-            bits.push((value >> i) & 1 != 0);
-        }
+        bits.bits(value.into(), width);
     }
 }
 
-fn write_compressed_byte_rotator_component(bits: &mut Vec<bool>, value: u8) {
-    bits.push(value != 0);
-    if value != 0 {
-        for i in 0..8 {
-            bits.push((value >> i) & 1 != 0);
-        }
-    }
+fn decode_bits(field_type: FieldType, bits: &BitWriter) -> Result<DecodedValue, DecodeError> {
+    let (data, bit_count) = bits.finish();
+    decode_field(field_type, &data, bit_count)
 }
 
-fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-    loop {
-        let mut byte_val = ((value & 0x7F) << 1) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte_val |= 1;
-        }
-        for i in 0..8 {
-            bits.push((byte_val >> i) & 1 != 0);
-        }
-        if value == 0 {
-            break;
-        }
-    }
+fn movement(rotation: RotatorQuantization, location: VectorQuantization) -> FieldType {
+    FieldType::RepMovement { rotation, location }
 }
 
-fn bits_to_bytes(bits: &[bool]) -> (Vec<u8>, u32) {
-    let byte_count = bits.len().div_ceil(8);
-    let mut bytes = vec![0u8; byte_count];
-    for (i, &b) in bits.iter().enumerate() {
-        if b {
-            bytes[i / 8] |= 1 << (i % 8);
-        }
-    }
-    (bytes, bits.len() as u32)
+fn str_value(s: &str) -> DecodedValue {
+    DecodedValue::Str(s.to_owned())
 }
 
 #[test]
 fn vector_float_reads_three_floats() {
-    let mut data = Vec::new();
-    data.extend_from_slice(&1.25f32.to_le_bytes());
-    data.extend_from_slice(&(-2.5f32).to_le_bytes());
-    data.extend_from_slice(&3.75f32.to_le_bytes());
+    let data: Vec<u8> = [1.25f32, -2.5, 3.75]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let result = decode_field(FieldType::VectorFloat, &data, 96).unwrap();
-    match result {
-        DecodedValue::Str(s) => assert_eq!(s, "(1.25,-2.5,3.75)"),
-        _ => panic!("expected Str"),
-    }
+    assert_eq!(result, str_value("(1.25,-2.5,3.75)"));
 }
 
 #[test]
 fn vector_double_reads_three_doubles() {
-    let mut data = Vec::new();
-    data.extend_from_slice(&1.25f64.to_le_bytes());
-    data.extend_from_slice(&(-2.5f64).to_le_bytes());
-    data.extend_from_slice(&3.75f64.to_le_bytes());
+    let data: Vec<u8> = [1.25f64, -2.5, 3.75]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let result = decode_field(FieldType::VectorDouble, &data, 192).unwrap();
-    match result {
-        DecodedValue::Str(s) => assert_eq!(s, "(1.25,-2.5,3.75)"),
-        _ => panic!("expected Str"),
-    }
+    assert_eq!(result, str_value("(1.25,-2.5,3.75)"));
 }
 
+/// Each `VectorNetQuantize` level divides the packed integers by its scale,
+/// and the `VectorQuantization` levels are Unreal's divisors, in order.
 #[test]
-fn quantized_vector_scale1() {
-    let (data, bit_count) = write_quantized_vector(10.0, -2.0, 3.0, 1, 6);
-    let result = decode_field(FieldType::VectorNetQuantize { scale: 1 }, &data, bit_count).unwrap();
-    match result {
-        DecodedValue::Str(s) => assert_eq!(s, "(10,-2,3)"),
-        _ => panic!("expected Str"),
-    }
-}
-
-#[test]
-fn quantized_vector_scale10() {
-    let (data, bit_count) = write_quantized_vector(1.2, -3.4, 5.6, 10, 7);
-    let result =
-        decode_field(FieldType::VectorNetQuantize { scale: 10 }, &data, bit_count).unwrap();
-    match result {
-        DecodedValue::Str(s) => {
-            // Parse back to check within tolerance
-            let nums: Vec<f64> = s
-                .trim_matches(|c| c == '(' || c == ')')
-                .split(',')
-                .map(|n| n.parse::<f64>().unwrap())
-                .collect();
-            assert!((nums[0] - 1.2).abs() < 1e-9, "x={}", nums[0]);
-            assert!((nums[1] - (-3.4)).abs() < 1e-9, "y={}", nums[1]);
-            assert!((nums[2] - 5.6).abs() < 1e-9, "z={}", nums[2]);
-        }
-        _ => panic!("expected Str"),
-    }
-}
-
-#[test]
-fn quantized_vector_scale100() {
-    let (data, bit_count) = write_quantized_vector(1.23, -4.56, 7.89, 100, 11);
-    let result = decode_field(
-        FieldType::VectorNetQuantize { scale: 100 },
-        &data,
-        bit_count,
-    )
-    .unwrap();
-    match result {
-        DecodedValue::Str(s) => {
-            let nums: Vec<f64> = s
-                .trim_matches(|c| c == '(' || c == ')')
-                .split(',')
-                .map(|n| n.parse::<f64>().unwrap())
-                .collect();
-            assert!((nums[0] - 1.23).abs() < 1e-9);
-            assert!((nums[1] - (-4.56)).abs() < 1e-9);
-            assert!((nums[2] - 7.89).abs() < 1e-9);
-        }
-        _ => panic!("expected Str"),
+fn quantized_vector_divides_by_its_scale() {
+    for (level, scale, width, packed, want) in [
+        (
+            VectorQuantization::RoundWholeNumber,
+            1,
+            6,
+            [10, -2, 3],
+            "(10,-2,3)",
+        ),
+        (
+            VectorQuantization::RoundOneDecimal,
+            10,
+            7,
+            [12, -34, 56],
+            "(1.2,-3.4,5.6)",
+        ),
+        (
+            VectorQuantization::RoundTwoDecimals,
+            100,
+            11,
+            [123, -456, 789],
+            "(1.23,-4.56,7.89)",
+        ),
+    ] {
+        assert_eq!(level.scale(), scale, "{level:?}");
+        let mut bits = BitWriter::new();
+        packed_vector(&mut bits, packed, width);
+        let result = decode_bits(FieldType::VectorNetQuantize { scale }, &bits);
+        assert_eq!(result.unwrap(), str_value(want), "scale {scale}");
     }
 }
 
 #[test]
 fn quantized_vector_rejects_a_zero_scale() {
-    let (data, bit_count) = write_quantized_vector(1.0, -2.0, 3.0, 1, 4);
-    let err = decode_field(FieldType::VectorNetQuantize { scale: 0 }, &data, bit_count)
+    let mut bits = BitWriter::new();
+    packed_vector(&mut bits, [1, -2, 3], 4);
+    let err = decode_bits(FieldType::VectorNetQuantize { scale: 0 }, &bits)
         .expect_err("a zero divisor must not decode to infinite components");
     assert!(
         matches!(err, DecodeError::InvalidQuantizationScale { scale: 0 }),
@@ -192,206 +103,98 @@ fn quantized_vector_rejects_a_zero_scale() {
     );
 }
 
-#[test]
-fn rep_movement_decodes_required_fields() {
-    let mut bits: Vec<bool> = Vec::new();
-    // 4 flag bits: all false
-    bits.extend([false, false, false, false]);
-    // Location at two decimals (packed = round(x * 100), componentBitCount=11)
-    let info = 11u32 | (1 << 6);
-    write_serialized_int(&mut bits, info, 1 << 7);
-    let xi = (1.23_f64 * 100.0).round() as i64;
-    let yi = (-4.56_f64 * 100.0).round() as i64;
-    let zi = (7.89_f64 * 100.0).round() as i64;
-    write_signed_bits(&mut bits, xi, 11);
-    write_signed_bits(&mut bits, yi, 11);
-    write_signed_bits(&mut bits, zi, 11);
-    // Rotation short: all zero (3 bits, all false = no rotation data)
-    write_compressed_short_rotator_component(&mut bits, 0);
-    write_compressed_short_rotator_component(&mut bits, 0);
-    write_compressed_short_rotator_component(&mut bits, 0);
-    // Linear velocity: VectorNetQuantize(1), scale=1, componentBitCount=6
-    let linfo = 6u32 | (1 << 6);
-    write_serialized_int(&mut bits, linfo, 1 << 7);
-    write_signed_bits(&mut bits, 10, 6);
-    write_signed_bits(&mut bits, -2, 6);
-    write_signed_bits(&mut bits, 3, 6);
-
-    let (data, bit_count) = bits_to_bytes(&bits);
-    let result = decode_field(
-        FieldType::RepMovement {
-            rotation: RotatorQuantization::ShortComponents,
-            location: VectorQuantization::RoundTwoDecimals,
-        },
-        &data,
-        bit_count,
-    )
-    .unwrap();
-    // Assert the whole string, not substrings: the members that carry no
-    // data here (angular_velocity, the two counters) are exactly the ones a
-    // substring check cannot notice going missing.
-    match result {
-        DecodedValue::Str(s) => assert_eq!(
-            s,
-            concat!(
-                r#"{"linear_velocity":{"x":10,"y":-2,"z":3},"#,
-                r#""angular_velocity":null,"#,
-                r#""location":{"x":1.23,"y":-4.56,"z":7.89},"#,
-                r#""rotation":{"pitch":0,"yaw":0,"roll":0},"#,
-                r#""simulated_physics_sleep":false,"rep_physics":false,"#,
-                r#""server_frame":null,"server_physics_handle":null}"#
-            )
-        ),
-        _ => panic!("expected Str"),
+/// A `ReplicatedMovement` payload: the four flags, `location` packed at
+/// `location_bits`, three rotator components of `rotation_width` bits, and a
+/// linear velocity of (10, -2, 3). The optional members are appended after.
+fn rep_movement_bits(
+    flags: [bool; 4],
+    location: [i64; 3],
+    location_bits: u32,
+    rotation: [u16; 3],
+    rotation_width: u32,
+) -> BitWriter {
+    let mut bits = BitWriter(flags.to_vec());
+    packed_vector(&mut bits, location, location_bits);
+    for component in rotation {
+        rotator_component(&mut bits, component, rotation_width);
     }
+    packed_vector(&mut bits, [10, -2, 3], 6);
+    bits
+}
+
+/// The whole JSON of a payload with every flag clear. Whole-string asserts, not
+/// substrings: the null members are the ones a substring check cannot miss.
+fn flags_clear_json(location: &str, rotation: &str) -> String {
+    format!(
+        concat!(
+            r#"{{"linear_velocity":{{"x":10,"y":-2,"z":3}},"#,
+            r#""angular_velocity":null,"location":{},"rotation":{},"#,
+            r#""simulated_physics_sleep":false,"rep_physics":false,"#,
+            r#""server_frame":null,"server_physics_handle":null}}"#
+        ),
+        location, rotation
+    )
 }
 
 #[test]
-fn rep_movement_decodes_optional_fields() {
-    let mut bits: Vec<bool> = Vec::new();
-    // 4 flag bits: all true
-    bits.extend([true, true, true, true]);
-    // Location
-    let info = 11u32 | (1 << 6);
-    write_serialized_int(&mut bits, info, 1 << 7);
-    let xi = (1.23_f64 * 100.0).round() as i64;
-    let yi = (-4.56_f64 * 100.0).round() as i64;
-    let zi = (7.89_f64 * 100.0).round() as i64;
-    write_signed_bits(&mut bits, xi, 11);
-    write_signed_bits(&mut bits, yi, 11);
-    write_signed_bits(&mut bits, zi, 11);
-    // Rotation short: pitch=90deg(16384), yaw=180deg(32768), roll=270deg(49152)
-    write_compressed_short_rotator_component(&mut bits, 16384);
-    write_compressed_short_rotator_component(&mut bits, 32768);
-    write_compressed_short_rotator_component(&mut bits, 49152);
-    // Linear velocity
-    let linfo = 6u32 | (1 << 6);
-    write_serialized_int(&mut bits, linfo, 1 << 7);
-    write_signed_bits(&mut bits, 10, 6);
-    write_signed_bits(&mut bits, -2, 6);
-    write_signed_bits(&mut bits, 3, 6);
-    // Angular velocity (bRepPhysics=true)
-    let ainfo = 5u32 | (1 << 6);
-    write_serialized_int(&mut bits, ainfo, 1 << 7);
-    write_signed_bits(&mut bits, -4, 5);
-    write_signed_bits(&mut bits, 5, 5);
-    write_signed_bits(&mut bits, -6, 5);
-    // Server frame (bRepServerFrame=true)
-    write_int_packed(&mut bits, 123);
-    // Server physics handle (bRepServerHandle=true)
-    write_int_packed(&mut bits, 456);
+fn rep_movement_decodes_required_fields() {
+    let bits = rep_movement_bits([false; 4], [123, -456, 789], 11, [0; 3], 16);
+    let field_type = movement(
+        RotatorQuantization::ShortComponents,
+        VectorQuantization::RoundTwoDecimals,
+    );
+    let want = flags_clear_json(
+        r#"{"x":1.23,"y":-4.56,"z":7.89}"#,
+        r#"{"pitch":0,"yaw":0,"roll":0}"#,
+    );
+    assert_eq!(decode_bits(field_type, &bits).unwrap(), str_value(&want));
+}
 
-    let (data, bit_count) = bits_to_bytes(&bits);
-    let result = decode_field(
-        FieldType::RepMovement {
-            rotation: RotatorQuantization::ShortComponents,
-            location: VectorQuantization::RoundTwoDecimals,
-        },
-        &data,
-        bit_count,
-    )
-    .unwrap();
-    // server_physics_handle=456 is asserted here for the same reason: the
-    // old compact form had no slot for it at all, so no test could see it.
-    match result {
-        DecodedValue::Str(s) => assert_eq!(
-            s,
-            concat!(
-                r#"{"linear_velocity":{"x":10,"y":-2,"z":3},"#,
-                r#""angular_velocity":{"x":-4,"y":5,"z":-6},"#,
-                r#""location":{"x":1.23,"y":-4.56,"z":7.89},"#,
-                r#""rotation":{"pitch":90,"yaw":180,"roll":270},"#,
-                r#""simulated_physics_sleep":true,"rep_physics":true,"#,
-                r#""server_frame":123,"server_physics_handle":456}"#
-            )
-        ),
-        _ => panic!("expected Str"),
-    }
+/// Every optional member present; `server_physics_handle` had no slot at all
+/// in the old compact form, so no test could see it.
+#[test]
+fn rep_movement_decodes_optional_fields() {
+    let mut bits = rep_movement_bits([true; 4], [123, -456, 789], 11, [16384, 32768, 49152], 16);
+    packed_vector(&mut bits, [-4, 5, -6], 5);
+    bits.int_packed(123).int_packed(456);
+    let field_type = movement(
+        RotatorQuantization::ShortComponents,
+        VectorQuantization::RoundTwoDecimals,
+    );
+    let want = concat!(
+        r#"{"linear_velocity":{"x":10,"y":-2,"z":3},"#,
+        r#""angular_velocity":{"x":-4,"y":5,"z":-6},"#,
+        r#""location":{"x":1.23,"y":-4.56,"z":7.89},"#,
+        r#""rotation":{"pitch":90,"yaw":180,"roll":270},"#,
+        r#""simulated_physics_sleep":true,"rep_physics":true,"#,
+        r#""server_frame":123,"server_physics_handle":456}"#
+    );
+    assert_eq!(decode_bits(field_type, &bits).unwrap(), str_value(want));
 }
 
 #[test]
 fn rep_movement_byte_quantized_rotation() {
-    let mut bits: Vec<bool> = Vec::new();
-    // 4 flag bits: all false
-    bits.extend([false, false, false, false]);
-    // Location
-    let info = 11u32 | (1 << 6);
-    write_serialized_int(&mut bits, info, 1 << 7);
-    let xi = (1.23_f64 * 100.0).round() as i64;
-    let yi = (-4.56_f64 * 100.0).round() as i64;
-    let zi = (7.89_f64 * 100.0).round() as i64;
-    write_signed_bits(&mut bits, xi, 11);
-    write_signed_bits(&mut bits, yi, 11);
-    write_signed_bits(&mut bits, zi, 11);
-    // Rotation byte: 64->90deg, 128->180deg, 192->270deg
-    write_compressed_byte_rotator_component(&mut bits, 64);
-    write_compressed_byte_rotator_component(&mut bits, 128);
-    write_compressed_byte_rotator_component(&mut bits, 192);
-    // Linear velocity
-    let linfo = 6u32 | (1 << 6);
-    write_serialized_int(&mut bits, linfo, 1 << 7);
-    write_signed_bits(&mut bits, 10, 6);
-    write_signed_bits(&mut bits, -2, 6);
-    write_signed_bits(&mut bits, 3, 6);
-
-    let (data, bit_count) = bits_to_bytes(&bits);
-    let result = decode_field(
-        FieldType::RepMovement {
-            rotation: RotatorQuantization::ByteComponents,
-            location: VectorQuantization::RoundTwoDecimals,
-        },
-        &data,
-        bit_count,
-    )
-    .unwrap();
-    match result {
-        DecodedValue::Str(s) => {
-            assert!(
-                s.contains(r#""rotation":{"pitch":90,"yaw":180,"roll":270}"#),
-                "got: {s}"
-            );
-        }
-        _ => panic!("expected Str"),
-    }
+    let bits = rep_movement_bits([false; 4], [123, -456, 789], 11, [64, 128, 192], 8);
+    let field_type = movement(
+        RotatorQuantization::ByteComponents,
+        VectorQuantization::RoundTwoDecimals,
+    );
+    let want = flags_clear_json(
+        r#"{"x":1.23,"y":-4.56,"z":7.89}"#,
+        r#"{"pitch":90,"yaw":180,"roll":270}"#,
+    );
+    assert_eq!(decode_bits(field_type, &bits).unwrap(), str_value(&want));
 }
 
-/// A `ReplicatedMovement` payload whose location is the packed integers
-/// `packed` (header "scaled" flag set, `location_bits` per component), with
-/// no rotator components and a linear velocity of `(10, -2, 3)`.
-fn rep_movement_with_packed_location(packed: [i64; 3], location_bits: u32) -> (Vec<u8>, u32) {
-    let mut bits: Vec<bool> = Vec::new();
-    bits.extend([false, false, false, false]);
-    write_serialized_int(&mut bits, location_bits | (1 << 6), 1 << 7);
-    for component in packed {
-        write_signed_bits(&mut bits, component, location_bits);
-    }
-    // Rotation: three cleared presence flags read the same at either width.
-    bits.extend([false, false, false]);
-    write_serialized_int(&mut bits, 6 | (1 << 6), 1 << 7);
-    for component in [10, -2, 3] {
-        write_signed_bits(&mut bits, component, 6);
-    }
-    bits_to_bytes(&bits)
-}
-
-/// The location's divisor is the table entry's quantization level, not a
-/// constant. The wire carries only "the integer was scaled"; Unreal's sender
-/// packs `round(world * scale)` for its class's level, so a reader that
-/// divides by a fixed 100 returns world/100 for every whole-unit class --
-/// which is what shipped, measured against actor spawn positions on 25 of
-/// the 26 classes the table declares.
-///
-/// Each case packs one known world location the way that level packs it and
-/// requires the entry declaring that level to return the world location. A
-/// fixed divisor can satisfy at most one of the three. The velocity is whole
-/// units on every level, so a reader that applied the location's level to
-/// the velocity fails too.
+/// The location divisor is the entry's quantization level, never a constant:
+/// a fixed 100 returned world/100 on every whole-unit class (25 of the 26 the
+/// table declares, measured against spawn positions). A fixed divisor passes
+/// at most one level, and the velocity stays whole units on all three.
 #[test]
 fn rep_movement_location_is_divided_by_the_declared_quantization() {
-    // Every level is checked before failing, so a regression reports all of
-    // the levels it breaks rather than only the first.
+    // Every level is checked before failing, so a regression names them all.
     let mut wrong = Vec::new();
-    for (level, packed, bits, world) in [
+    for (level, packed, width, world) in [
         (
             VectorQuantization::RoundWholeNumber,
             [930, -545, 1175],
@@ -411,79 +214,36 @@ fn rep_movement_location_is_divided_by_the_declared_quantization() {
             r#"{"x":6215.41,"y":-5707.61,"z":500.41}"#,
         ),
     ] {
-        let (data, bit_count) = rep_movement_with_packed_location(packed, bits);
-        let decoded = decode_field(
-            FieldType::RepMovement {
-                rotation: RotatorQuantization::ByteComponents,
-                location: level,
-            },
-            &data,
-            bit_count,
-        )
-        .unwrap_or_else(|e| panic!("{level:?}: {e}"));
-        let expected = format!(
-            concat!(
-                r#"{{"linear_velocity":{{"x":10,"y":-2,"z":3}},"#,
-                r#""angular_velocity":null,"location":{},"#,
-                r#""rotation":{{"pitch":0,"yaw":0,"roll":0}},"#,
-                r#""simulated_physics_sleep":false,"rep_physics":false,"#,
-                r#""server_frame":null,"server_physics_handle":null}}"#
-            ),
-            world
-        );
-        if decoded != DecodedValue::Str(expected) {
+        let bits = rep_movement_bits([false; 4], packed, width, [0; 3], 8);
+        let decoded = decode_bits(movement(RotatorQuantization::ByteComponents, level), &bits)
+            .unwrap_or_else(|e| panic!("{level:?}: {e}"));
+        let want = flags_clear_json(world, r#"{"pitch":0,"yaw":0,"roll":0}"#);
+        if decoded != str_value(&want) {
             wrong.push(format!("{level:?}: got {decoded:?}, want location {world}"));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("; "));
 }
 
-/// The three levels are Unreal's `EVectorQuantization` divisors, in order.
-#[test]
-fn vector_quantization_scales_are_unreals() {
-    assert_eq!(VectorQuantization::RoundWholeNumber.scale(), 1);
-    assert_eq!(VectorQuantization::RoundOneDecimal.scale(), 10);
-    assert_eq!(VectorQuantization::RoundTwoDecimals.scale(), 100);
-}
-
-/// A `ReplicatedMovement` whose quantized vector takes the raw-`f32` fallback
-/// (`componentBitCount == 0`, `extraInfo == 0`) can carry any bit pattern,
-/// including a NaN. `FRepMovement`'s `Display` renders a JSON object, and
-/// `NaN` is not a JSON literal -- so a payload like this used to emit
-/// `"x":NaN` into `value_str` while every decode counter reported success.
-///
-/// The doc comment at `types.rs` asserted "every component is finite by
-/// construction"; that reasoning covers only the quantized path and not this
-/// fallback.
+/// The raw-`f32` fallback (`componentBitCount == 0`, `extraInfo == 0`) can
+/// carry a NaN, which is not a JSON literal: rejected, not rendered. See
+/// docs/OVERLAY_RESOLUTION.md "FRepMovement finiteness is enforced".
 #[test]
 fn rep_movement_with_a_non_finite_component_is_rejected() {
-    let mut bits: Vec<bool> = Vec::new();
-    // Four leading flags, all clear: no physics, no server frame, no handle.
-    bits.extend(std::iter::repeat_n(false, 4));
-    // Location: header 0 -> componentBitCount 0, extraInfo 0 -> three raw f32.
-    write_serialized_int(&mut bits, 0, 1 << 7);
+    let mut bits = BitWriter(vec![false; 4]);
+    // Location: header 0 selects three raw f32 words; the first is a NaN.
+    bits.serialized_int(0, 1 << 7);
     for word in [0x7fc0_0000u32, 1.0f32.to_bits(), 2.0f32.to_bits()] {
-        for i in 0..32 {
-            bits.push((word >> i) & 1 != 0);
-        }
+        bits.bits(word.into(), 32);
     }
-    // Rotation (byte-quantized): three cleared presence flags.
-    bits.extend(std::iter::repeat_n(false, 3));
-    // Linear velocity: componentBitCount 1, extraInfo 1, three 1-bit values.
-    write_serialized_int(&mut bits, 1 | (1 << 6), 1 << 7);
-    bits.extend(std::iter::repeat_n(false, 3));
-
-    let (data, bit_count) = bits_to_bytes(&bits);
-    let result = decode_field(
-        FieldType::RepMovement {
-            rotation: RotatorQuantization::ByteComponents,
-            location: VectorQuantization::RoundTwoDecimals,
-        },
-        &data,
-        bit_count,
+    // Byte rotation: three cleared presence flags. Velocity: 1-bit zeros.
+    bits.repeat(false, 3);
+    packed_vector(&mut bits, [0; 3], 1);
+    let field_type = movement(
+        RotatorQuantization::ByteComponents,
+        VectorQuantization::RoundTwoDecimals,
     );
-
-    let err = result.expect_err("a NaN component must not decode as success");
+    let err = decode_bits(field_type, &bits).expect_err("a NaN component must not decode");
     assert!(
         matches!(err, DecodeError::NonFiniteComponent { .. }),
         "expected NonFiniteComponent, got {err:?}"
