@@ -26,6 +26,8 @@ else:
     from atomic_io import atomic_write_text, sha256_file as file_sha
     from extract_kill_observations import InputError, exact_ref
 
+#: Matched lags measure 5-41 ms on the 714-export corpus, and a 100 ms cap
+#: changed no match (docs/KILL_LEDGER.md, "Validation scope").
 MAX_REPLICATION_LAG_MS = 50
 #: This file and the modules it runs, hashed as provenance and refused as --out.
 SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')
