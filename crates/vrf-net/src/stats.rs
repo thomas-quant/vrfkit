@@ -374,14 +374,19 @@ impl NetStats {
     /// published tables are missing replicated state, so any coverage claim
     /// derived by recounting them is an undercount of unknown size.
     pub fn lost_content_blocks(&self) -> u64 {
-        let rpc_payloads_lost = self
-            .rpc_stream_failures
-            .saturating_sub(self.unresolved_rpc_payloads_preserved);
         self.content_block_framing_failures
             + self.malformed_content_blocks
             + self.transform_failures
             + self.field_stream_failures
-            + rpc_payloads_lost
+            + self.rpc_payloads_lost()
+    }
+
+    /// RPC stream failures whose payload was not preserved: the RPC share of
+    /// [`Self::lost_content_blocks`], netted as that doc explains.
+    #[must_use]
+    pub fn rpc_payloads_lost(&self) -> u64 {
+        self.rpc_stream_failures
+            .saturating_sub(self.unresolved_rpc_payloads_preserved)
     }
 
     /// Record one diagnostic event, or count it as dropped if the log is full.
@@ -604,6 +609,7 @@ mod loss_tests {
             unresolved_rpc_payloads_preserved: 7889,
             ..NetStats::default()
         };
+        assert_eq!(stats.rpc_payloads_lost(), 0);
         assert_eq!(stats.lost_content_blocks(), 0);
 
         let partly_preserved = NetStats {
@@ -611,6 +617,7 @@ mod loss_tests {
             unresolved_rpc_payloads_preserved: 7000,
             ..NetStats::default()
         };
+        assert_eq!(partly_preserved.rpc_payloads_lost(), 889);
         assert_eq!(
             partly_preserved.lost_content_blocks(),
             889,
@@ -627,6 +634,7 @@ mod loss_tests {
             unresolved_rpc_payloads_preserved: 5,
             ..NetStats::default()
         };
+        assert_eq!(stats.rpc_payloads_lost(), 0);
         assert_eq!(stats.lost_content_blocks(), 0);
     }
 
