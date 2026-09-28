@@ -1,35 +1,28 @@
-//! The opt-in, bounded aggregate of stream failures.
+//! The opt-in, bounded aggregate of stream failures. Only `diag` enables and
+//! reads it; it feeds no verdict, summary counter or table row.
 //!
 //! [`ChannelState::push_stream_failure`](super::ChannelState::push_stream_failure)
-//! keeps the first `MAX_STREAM_FAILURE_RECORDS` failure lines and silently
-//! drops the rest: that buffer exists for a human reading one replay's
-//! `validate` output, and on the 2026-09-07 corpus every one of 714 replays
-//! saturated it, so what the window showed was "the first 32 failures, all
-//! from the match's opening seconds" -- a biased sample that no reweighting
-//! can turn into a population figure.
+//! keeps the first `MAX_STREAM_FAILURE_RECORDS` (32) lines for a human; on the
+//! 2026-09-07 corpus all 714 replays saturated it with failures from the
+//! match's opening seconds, a biased sample no reweighting turns into a
+//! population figure. This counts every failure, one cell per (kind, cause,
+//! group path, function count, handle, consumed bits, preservation state):
+//! totals exact, cells and payload samples capped so malformed input cannot
+//! grow memory without bound.
 //!
-//! This module is the counterpart the window can never be: one cell per
-//! distinct (kind, cause, group path, function count, handle, consumed bits,
-//! preservation state) combination,
-//! counting every failure. The total counters are exact; distinct cells and
-//! optional payload samples are capped so malformed input cannot make memory
-//! grow without bound. The two invariants
-//! the rest of the code relies on:
+//! Invariants, per pass:
 //!
-//! 1. `total_failures` == `field_stream_failures + rpc_stream_failures` for
-//!    the same pass. Every site that bumps one of those counters also calls
-//!    [`FailureAggregate::note_failure`] (see `framing.rs` in `vrf-net` and
-//!    `stream.rs` here), so a mismatch is a wiring bug, not sampling noise.
-//! 2. `preserved_unresolved` is the historical counter name for failures whose
-//!    whole decoded stream reached a raw preservation row. It includes both
-//!    unresolved ClassNetCache blocks and unparsed post-RepLayout tails. They
-//!    are a subset of `total_failures`, never part of real loss; the counterpart is
-//!    `real_loss()` == `total_failures - preserved_unresolved`, comparable
-//!    with `field_stream_failures + max(0, rpc_stream_failures -
+//! 1. `total_failures == field_stream_failures + rpc_stream_failures`: every
+//!    site that bumps either also calls [`FailureAggregate::note_failure`]
+//!    (`framing.rs` in `vrf-net`, `stream.rs` here), so a mismatch is a wiring
+//!    bug, not sampling noise.
+//! 2. `preserved_unresolved` -- a historical name: failures whose whole stream
+//!    reached a raw preservation row, unresolved ClassNetCache blocks and
+//!    unparsed post-RepLayout tails alike -- is a subset of `total_failures`,
+//!    reconciles with `unresolved_rpc_payloads_preserved` and is never loss:
+//!    `real_loss() == total_failures - preserved_unresolved`, comparable with
+//!    `field_stream_failures + max(0, rpc_stream_failures -
 //!    unresolved_rpc_payloads_preserved)`.
-//!
-//! Nothing here feeds a verdict, a counter the summary prints, or any row the
-//! tables carry. It is enabled and read only by the `diag` subcommand.
 
 use std::sync::Arc;
 
@@ -40,15 +33,13 @@ use vrf_schema::FxHashMap;
 /// retention stops.
 pub const MAX_SAMPLES_PER_CELL: usize = 3;
 
-/// Maximum number of distinct keyed cells retained for one pass. Exact totals
-/// continue in `overflow` after this limit, but new attacker-controlled group
-/// paths cannot grow the map indefinitely.
+/// Distinct keyed cells retained per pass; past it exact totals continue in
+/// `overflow`, so hostile group paths cannot grow the map without bound.
 pub const MAX_FAILURE_CELLS: usize = 4096;
 
-/// Longest payload retained by one sample, in bytes. The unresolved RPC
-/// payloads worth reading (the AbilitiesAndBuffs GAS state-sync stream, the
-/// brute-forceable ClassNetCache blocks) are far below this; the cap only
-/// stops one huge block from dominating the output.
+/// Longest payload a sample keeps, in bytes: far above the unresolved payloads
+/// worth reading (the AbilitiesAndBuffs GAS state-sync stream, the
+/// brute-forceable ClassNetCache blocks), so it only stops one huge block.
 pub const MAX_SAMPLE_PAYLOAD_BYTES: usize = 96;
 
 /// Payloads longer than this are not retained at all rather than truncated to
@@ -58,15 +49,10 @@ const MAX_SAMPLE_PAYLOAD_BLOCK_BITS: u64 = 8 * 1024;
 /// One aggregate cell: every failure sharing one key.
 #[derive(Debug, Default, Clone)]
 pub struct FailureCell {
-    /// How many failures landed here. Never sampled.
     pub count: u64,
-    /// Sum of the blocks' declared bit lengths.
     pub bit_count_total: u64,
-    /// Sum of bits consumed before each failure.
     pub consumed_bits_total: u64,
-    /// Sum of bits abandoned by each failure.
     pub abandoned_bits_total: u64,
-    /// First samples, bounded by [`MAX_SAMPLES_PER_CELL`].
     pub samples: Vec<FailureSample>,
 }
 
@@ -96,30 +82,22 @@ pub struct FailureSample {
     pub payload_truncated: bool,
 }
 
-/// The dimensions every failure is aggregated under.
-///
-/// `consumed_bits` is part of the key, not a sum: it is the dimension that
-/// separates a grammar drift that always stops at the same offset (e.g. a
-/// field stream that consumes 185 of 200 bits) from one that stops at random
-/// offsets, and a sum could only give an average over a mixture. In practice
-/// a group fails at very few distinct offsets, so the cell count stays small.
+/// The dimensions every failure is aggregated under. `consumed_bits` is a key,
+/// not a sum: it separates a drift that always stops at one offset (a field
+/// stream consuming 185 of 200 bits) from random offsets, which a sum would
+/// average away. A group fails at very few distinct offsets, so cells stay few.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FailureKey {
-    /// Which grammar failed.
     pub kind: StreamKind,
-    /// Which stage of the walk failed.
     pub cause: StreamFailureCause,
-    /// Group path resolved for the block at failure time. A path the resolver
-    /// could not name appears as whatever the resolver left -- a bare instance
-    /// name or `<unknown:{guid}>` -- which is recorded as-is rather than
-    /// guessed into a class.
+    /// As the resolver left it -- a bare instance name or `<unknown:{guid}>`
+    /// stays as-is, never guessed into a class.
     pub group_path: Arc<str>,
-    /// Function count the RPC handle read used (0 for RepLayout and for
+    /// The function count the RPC handle read used (0 for RepLayout and for
     /// unresolved groups).
     pub function_count: u32,
     /// Handle of the failing record, when the walk tracked one.
     pub record_handle: Option<u32>,
-    /// Bits consumed before the failure, exact.
     pub consumed_bits: u64,
     /// Whether every bit in the failed stream reached a raw preservation row.
     pub payload_preserved: bool,
@@ -145,13 +123,8 @@ pub struct FailureAggregate {
     cells: FxHashMap<FailureKey, FailureCell>,
     /// Failures whose key arrived after the distinct-cell cap was reached.
     overflow: FailureCell,
-    /// Every failure counted. Reconciles with
-    /// `field_stream_failures + rpc_stream_failures`.
+    /// The two reconciled totals; see the module doc.
     total_failures: u64,
-    /// The subset whose failed stream was preserved as a whole. The name is
-    /// historical; it includes unresolved ClassNetCache blocks and unparsed
-    /// post-RepLayout tails. Reconciles with
-    /// `unresolved_rpc_payloads_preserved`.
     preserved_unresolved: u64,
     /// Whether decoded payload bytes may be retained in bounded samples.
     retain_payloads: bool,
@@ -164,8 +137,8 @@ impl Default for FailureAggregate {
 }
 
 impl FailureAggregate {
-    /// Create an aggregate. Payload retention is disabled unless the caller
-    /// explicitly opts in; all counters and non-payload dimensions remain.
+    /// Payload retention is off unless the caller opts in; all counters and
+    /// non-payload dimensions remain either way.
     pub fn new(retain_payloads: bool) -> Self {
         Self {
             cells: FxHashMap::default(),
@@ -181,12 +154,9 @@ impl FailureAggregate {
         MAX_FAILURE_CELLS
     }
 
-    /// Record one failure for counting. Samples are NOT taken here: they come
-    /// from [`Self::note_payload`], which only the callers that hold the
-    /// decoded bytes can serve (the unresolved-preservation callback and the
-    /// failure-payload callback). Whether the whole payload reached a
-    /// preservation row is carried by `failure` so the aggregate key and
-    /// reconciled counter cannot disagree.
+    /// Count one failure. Samples come only from [`Self::note_payload`], whose
+    /// callers hold the decoded bytes. Preservation is read from `failure`, so
+    /// the key and the reconciled counter cannot disagree.
     pub fn note_failure(&mut self, failure: &StreamFailure, group_path: Arc<str>) {
         let key = FailureKey::new(failure, group_path);
         let cell = Self::cell(&mut self.cells, key).unwrap_or(&mut self.overflow);
@@ -200,12 +170,9 @@ impl FailureAggregate {
         }
     }
 
-    /// Attach one real-payload sample to a cell. Called from the payload
-    /// callbacks (`on_unresolved_class_net_cache_payload`,
-    /// `on_stream_failure_payload`, `on_rep_layout_tail_failure_payload`), each
-    /// of which framing makes beside the block's `on_stream_failure`, before or
-    /// after it -- either way the count is moved by exactly one
-    /// [`Self::note_failure`] per failure, never here.
+    /// Attach one real-payload sample to a cell, from the three payload
+    /// callbacks framing makes beside a block's `on_stream_failure` (before or
+    /// after it). Never counts: that is one [`Self::note_failure`] per failure.
     pub fn note_payload(&mut self, failure: &StreamFailure, group_path: Arc<str>, payload: &[u8]) {
         if !self.retain_payloads {
             return;
@@ -245,9 +212,8 @@ impl FailureAggregate {
         }
     }
 
-    /// Merge another pass's aggregate in (checkpoint chunks are walked one
-    /// archive at a time, each with its own channel state). Counts and sums
-    /// add; samples fill this side up to the cap from the other's.
+    /// Merge another pass's aggregate in (each checkpoint chunk has its own
+    /// channel state): counts and sums add, samples fill up to the cap.
     pub fn absorb(&mut self, other: &mut Self) {
         self.total_failures += other.total_failures;
         self.preserved_unresolved += other.preserved_unresolved;
@@ -271,23 +237,18 @@ impl FailureAggregate {
         }
     }
 
-    /// Every failure counted. Reconciles with
-    /// `field_stream_failures + rpc_stream_failures` for the same pass.
+    /// Every failure counted (invariant 1).
     pub fn total_failures(&self) -> u64 {
         self.total_failures
     }
 
-    /// The wholly preserved subset (historical name). Reconciles with
-    /// `unresolved_rpc_payloads_preserved` for the same pass.
+    /// The wholly preserved subset (invariant 2).
     pub fn preserved_unresolved(&self) -> u64 {
         self.preserved_unresolved
     }
 
-    /// Stream failures not wholly preserved by the unresolved-RPC callback.
-    /// Earlier fields in a failed block may still have emitted rows; this is
-    /// a block count, not a count of entirely missing payloads or values.
-    /// Reconciles with `field_stream_failures +
-    /// max(0, rpc_stream_failures - unresolved_rpc_payloads_preserved)`.
+    /// Failures not wholly preserved (invariant 2). A block count: earlier
+    /// fields of a failed block may still have emitted rows.
     pub fn real_loss(&self) -> u64 {
         self.total_failures - self.preserved_unresolved
     }
@@ -302,8 +263,8 @@ impl FailureAggregate {
         self.retain_payloads
     }
 
-    /// The cells, ordered for deterministic output: count descending, then the
-    /// key's fields ascending. Ties in count must not shuffle between runs.
+    /// The cells by count descending, then key ascending, so ties in count
+    /// cannot shuffle between runs.
     pub fn cells_sorted(&self) -> Vec<(&FailureKey, &FailureCell)> {
         let mut cells: Vec<(&FailureKey, &FailureCell)> = self.cells.iter().collect();
         cells.sort_by(|(a, ac), (b, bc)| bc.count.cmp(&ac.count).then_with(|| compare_keys(a, b)));
