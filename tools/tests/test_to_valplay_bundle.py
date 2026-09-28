@@ -815,6 +815,15 @@ class EffectFramingTallyTests(unittest.TestCase):
         self.assertEqual(self.residual(b"\x00"), ([], 0))
         self.assertEqual(self.residual(b"\x00\x00"), ([], 0))
 
+    def test_a_declared_element_that_never_arrives_is_a_half_read_pair(self):
+        # Count 2, but only element 0 arrives before the array terminator.
+        tally = bundle._Tally()
+        blob = bytes.fromhex("04" + self.ONE_ELEMENT.hex()[2:])
+        elements = bundle._decode_effect_elements(blob, len(blob) * 8, self.SPEC, tally)
+        self.assertEqual(elements, [(284, 1.0), (None, None)])
+        self.assertEqual(tally["effect_half_read_pairs"], 1)
+        self.assertEqual(tally["effect_array_residual_bits"], 0)
+
 
 class ShotEffectRawSourceTests(unittest.TestCase):
     """An additive Rust JSON overlay must not replace the shot wire source."""
@@ -1774,6 +1783,106 @@ class RawGateHardeningTests(TallyTestCase):
             self.convert_rows(tmp, [row])
             (event,) = self.events_of(tmp, "rpc_received")
         self.assertEqual(event["payload"], {"MulticastSomething": 5})
+
+
+class AdapterMappingTests(TallyTestCase):
+    """The mappings that turn parser output into the reference's shape.
+
+    A mutation sweep broke each of these with the whole tools suite still
+    green, including the two enum maps that had already shipped shifted once.
+    """
+
+    GROUP = "/Game/Test/Holder.Holder_C"
+    DAMAGE = "MulticastNotifyDamage_Point"
+
+    def property_payload(self, rows: list[dict]) -> dict:
+        common = {"time_ms": 10, "packet_id": 1, "actor": 5,
+                  "group_path": self.GROUP, "bit_count": 8}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.convert_rows(tmp, [{**common, **row} for row in rows])
+            (event,) = self.events_of(tmp, "export_group_received")
+        return event["payload"]
+
+    def test_regional_damage_ordinals_follow_the_enum(self):
+        for ordinal, name in ((0, "regional_damage__normal"),
+                              (1, "regional_damage__headshot"),
+                              (2, "regional_damage__legshot"),
+                              (5, "regional_damage__invalid"),
+                              (9, "regional_damage__unknown_9")):
+            with self.subTest(ordinal=ordinal):
+                self.assertEqual(
+                    bundle._normalize_rpc_param(self.DAMAGE, "RegionalDamage", ordinal, False),
+                    {"RegionalDamage": name})
+
+    def test_alliance_ordinals_follow_the_enum(self):
+        for ordinal, name in ((0, "alliance_ally"), (1, "alliance_enemy"),
+                              (3, "alliance_any"), (9, "alliance_unknown_9")):
+            with self.subTest(ordinal=ordinal):
+                shot = bundle._build_shot_event(
+                    bundle._ShotContext(tag_table={}), 1, 2, 3, 4, 5,
+                    {"AllianceFilter": ordinal}, bundle._EffectBlobs())["shot"]
+                self.assertEqual(shot["alliance_filter"], name)
+
+    def test_damage_booleans_lose_their_b_prefix(self):
+        for wire in ("bDamageKilledTarget", "bAliveAfterDamage", "bIsWallPenetration",
+                     "bEquippableUsedZoomed", "bEquippableUsedInFocusMode"):
+            with self.subTest(param=wire):
+                self.assertEqual(bundle._normalize_rpc_param(self.DAMAGE, wire, True, False),
+                                 {wire[1:]: True})
+
+    def test_equippable_used_takes_the_reference_shape(self):
+        self.assertEqual(
+            bundle._normalize_rpc_param(self.DAMAGE, "EquippableUsed", 1234, False),
+            {"EquippableUsed": {"NetGuid": 1234, "Name": None, "ClassPath": None,
+                                "Category": "unknown"}})
+        blob = {"BitCount": 16, "Data": "fwE="}
+        self.assertEqual(
+            bundle._normalize_rpc_param(self.DAMAGE, "EquippableUsed", blob, True),
+            {"EquippableUsed": blob})
+
+    def test_fire_mode_comes_from_the_firing_state_name(self):
+        def mode(path, source_id=None):
+            return bundle._resolve_fire_mode(41, source_id, {}, {41: path} if path else {})
+        self.assertEqual(mode("FiringState"), ("primary", "firing-state:FiringState"))
+        self.assertEqual(mode("ZoomedFiringState"),
+                         ("alternate", "firing-state:ZoomedFiringState"))
+        self.assertEqual(mode("FiringState", "Gun_AltFire_1"),
+                         ("alternate", "source:Gun_AltFire_1"))
+        self.assertEqual(mode(None), ("unknown", None))
+
+    def test_package_path_drops_only_the_class_suffix(self):
+        self.assertEqual(
+            bundle._to_package_path("/Game/Characters/Hunter/Hunter_PC.Hunter_PC_C"),
+            "/Game/Characters/Hunter/Hunter_PC")
+        self.assertEqual(bundle._to_package_path("/Game/A.B/Thing"), "/Game/A.B/Thing")
+
+    def test_property_values_are_reshaped_by_name(self):
+        payload = self.property_payload([
+            {"handle": 1, "field_name": "ReplicatedGravityDirection", "value_str": "(0,0,-1)"},
+            {"handle": 2, "field_name": "ReplicatedMovement",
+             "value_str": '{"location":{"x":1,"y":2,"z":3}}'},
+            {"handle": 3, "field_name": "bUltimateActive", "value_bool": True},
+            {"handle": 4, "field_name": "bottomless", "value_bool": True},
+            {"handle": 5, "field_name": "bIsCounted", "value_i64": 2},
+        ])
+        self.assertEqual(payload, {
+            "ReplicatedGravityDirection": {"x": 0, "y": 0, "z": -1},
+            "ReplicatedMovement": {"location": {"x": 1, "y": 2, "z": 3}},
+            "UltimateActive": True,
+            "bottomless": True,
+            "bIsCounted": 2,
+        })
+
+    def test_array_fillers_are_dropped_but_scalar_positions_are_kept(self):
+        """Replication is sparse: element [1] can arrive without [0]. The `{}`
+        filler that reaches it made compute_metrics' Index sort raise
+        TypeError; a None in a scalar array is a position and stays."""
+        payload = self.property_payload([
+            {"handle": 1, "field_name": "Teams[1].Score", "value_i64": 5},
+            {"handle": 2, "field_name": "Scores[1]", "value_i64": 7},
+        ])
+        self.assertEqual(payload, {"Teams": [{"Index": 1, "Score": 5}],
+                                   "Scores": [None, 7]})
 
 
 class SummaryReportingTests(TallyTestCase):
