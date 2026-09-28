@@ -1,4 +1,14 @@
-//! Checkpoint-scoped field, actor and NetGUID tables.
+//! The seven checkpoint-scoped tables: fields, actors, NetGUIDs and blocks as
+//! decoded from each checkpoint, plus its GUID entries and export declarations.
+//!
+//! Each list's figures are dictionary/plain bytes over the 45-replay sample of
+//! `Table::DICTIONARY_COLUMNS`; below 1.00 the dictionary is smaller. The three
+//! declaration tables were measured while the byte-budget flush cut the
+//! reference replay's 74,270 GUID entries into 10 row groups; since 004ee69
+//! they are one, and a dictionary is per row group. docs/PERFORMANCE_NOTES.md's
+//! first check under one group has literal_path 0.51, rendered_name 0.79 and
+//! fname_base 0.77, with four small columns flipping, so those three lists are
+//! owed a re-measurement.
 
 use std::sync::Arc;
 
@@ -61,18 +71,10 @@ impl Table for CheckpointGuidEntriesTable {
     type Row = CheckpointGuidEntryRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
     const MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
-    // Dictionary/plain bytes over the 45-replay sample (see
-    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule although both
-    // measured larger under a dictionary on all 45 replays: checkpoint_id
-    // 1.30, literal_path 1.19. Number listed: flags 0.44. Not listed, smaller
-    // PLAIN on all 45: outer_net_guid 2.28, ordinal 2.14, net_guid 2.07,
-    // checkpoint_index 1.42, name_index 1.16.
-    //
-    // Measured under the byte-budget flush, which cuts the reference replay's
-    // 74,270 rows into 10 row groups. A dictionary is per row group, so what
-    // it saves here depends on those cuts: re-measure this table, and the two
-    // export-declaration tables below, if they change. docs/PERFORMANCE_NOTES.md
-    // records a first check with one row group per table.
+    // Strings, listed by rule although larger as a dictionary on all 45:
+    // checkpoint_id 1.30, literal_path 1.19. Number listed: flags 0.44. Not
+    // listed, smaller PLAIN on all 45: outer_net_guid 2.28, ordinal 2.14,
+    // net_guid 2.07, checkpoint_index 1.42, name_index 1.16.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &["checkpoint_id", "literal_path", "flags"];
     fn schema() -> Arc<Schema> {
         checkpoint_guid_entries_schema_ref()
@@ -108,12 +110,10 @@ impl Table for CheckpointExportGroupsTable {
     type Row = CheckpointExportGroupRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
     const MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
-    // Strings, listed by rule although both measured larger under a
-    // dictionary on all 45 replays: checkpoint_id 1.34, group_path 1.25. No
-    // number measured smaller as a dictionary; all smaller PLAIN on all 45:
-    // ordinal 3.43, path_name_index 3.43, declared_slots 1.72,
-    // checkpoint_index 1.33. Same row-group caveat as
-    // `CheckpointGuidEntriesTable`.
+    // Strings, listed by rule although larger as a dictionary on all 45:
+    // checkpoint_id 1.34, group_path 1.25. No number smaller as a dictionary;
+    // all smaller PLAIN on all 45: ordinal 3.43, path_name_index 3.43,
+    // declared_slots 1.72, checkpoint_index 1.33.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &["checkpoint_id", "group_path"];
     fn schema() -> Arc<Schema> {
         checkpoint_export_groups_schema_ref()
@@ -144,15 +144,13 @@ impl Table for CheckpointExportFieldsTable {
     type Row = CheckpointExportFieldRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
     const MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
-    // Strings, listed by rule although all three measured larger under a
-    // dictionary on all 45 replays: checkpoint_id 1.30, rendered_name 1.17,
-    // fname_base 1.15. Number listed: fname_kind 0.34. Not listed:
-    // group_ordinal 2.45, path_name_index 2.45, compatible_checksum 1.74,
-    // checkpoint_index 1.44, exported_flag 1.37, slot 1.10, handle 1.10,
-    // fname_index 1.08, fname_number 1.05. `slot` and `handle` split by build:
-    // a dictionary is 0.89 on the 37 replays from 11.06-12.09, 12.10, 12.11,
-    // 13.00 and 13.01, but 2.01 on the 8 from 13.02-13.06, which decides the
-    // total. Same row-group caveat as `CheckpointGuidEntriesTable`.
+    // Strings, listed by rule although larger as a dictionary on all 45:
+    // checkpoint_id 1.30, rendered_name 1.17, fname_base 1.15. Number listed:
+    // fname_kind 0.34. Not listed: group_ordinal 2.45, path_name_index 2.45,
+    // compatible_checksum 1.74, checkpoint_index 1.44, exported_flag 1.37,
+    // slot 1.10, handle 1.10, fname_index 1.08, fname_number 1.05. `slot` and
+    // `handle` split by build, 0.89 on the 37 replays of 11.06-13.01 but 2.01
+    // on the 8 of 13.02-13.06, which decides the total.
     const DICTIONARY_COLUMNS: &'static [&'static str] =
         &["checkpoint_id", "rendered_name", "fname_kind", "fname_base"];
     fn schema() -> Arc<Schema> {
@@ -198,17 +196,15 @@ impl Table for CheckpointExportFieldsTable {
 impl Table for CheckpointBlocksTable {
     type Row = CheckpointBlockRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
-    // Dictionary/plain bytes over the 45-replay sample (see
-    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule:
-    // group_resolution_source 0.17, resolved_group_path 0.34,
-    // actor_archetype_outer_path 0.38, function_count_source 0.40,
-    // actor_archetype_path 0.44, class_guid_path 0.60, actor_guid_path 0.63,
-    // object_outer_path 0.68, object_guid_path 0.70, checkpoint_id 1.02.
-    // Numbers listed: field_row_count 0.76, class_net_guid 0.91. Not listed:
-    // block_index 4.18, field_row_start 2.83, object_net_guid 1.71,
-    // outer_net_guid 1.52, actor_net_guid 1.50, packet_id 1.21, delete_flags
-    // 1.12, function_count 1.12, checkpoint_index 1.10, time_ms 1.09,
-    // channel_index 1.04.
+    // Strings, listed by rule: group_resolution_source 0.17,
+    // resolved_group_path 0.34, actor_archetype_outer_path 0.38,
+    // function_count_source 0.40, actor_archetype_path 0.44, class_guid_path
+    // 0.60, actor_guid_path 0.63, object_outer_path 0.68, object_guid_path
+    // 0.70, checkpoint_id 1.02. Numbers listed: field_row_count 0.76,
+    // class_net_guid 0.91. Not listed: block_index 4.18, field_row_start 2.83,
+    // object_net_guid 1.71, outer_net_guid 1.52, actor_net_guid 1.50,
+    // packet_id 1.21, delete_flags 1.12, function_count 1.12, checkpoint_index
+    // 1.10, time_ms 1.09, channel_index 1.04.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &[
         "checkpoint_id",
         "class_net_guid",
@@ -287,20 +283,16 @@ impl Table for CheckpointBlocksTable {
 impl Table for CheckpointFieldsTable {
     type Row = CheckpointFieldRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
-    // Dictionary/plain bytes over the 45-replay sample (see
-    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule: group_path 0.23,
-    // field_name 0.48, value_str 0.52, checkpoint_id 0.56. Others listed:
-    // raw_bits 0.51, handle 0.73, value_i64 0.73, bit_count 0.75, time_ms
-    // 0.87, value_f64 0.87, checkpoint_index 0.91. Not listed: object_net_guid
-    // 1.37, packet_id 1.34, compatible_checksum 1.33, channel_index 1.28,
-    // actor_net_guid 1.08.
-    //
-    // Not the same list as `fields`: raw_bits and value_f64 go the other way
-    // there. Checkpoints are snapshots that restate the same values -- on the
-    // reference replay 343,683 raw_bits values hold 7,084 distinct payloads
-    // here, against 321,735 distinct in 1,065,872 in `fields`. The old
-    // strings-only list, had it been honoured, sums to 1.40x the size this
-    // table had under the parquet-rs everything-dictionary default.
+    // Strings, listed by rule: group_path 0.23, field_name 0.48, value_str
+    // 0.52, checkpoint_id 0.56. Others listed: raw_bits 0.51, handle 0.73,
+    // value_i64 0.73, bit_count 0.75, time_ms 0.87, value_f64 0.87,
+    // checkpoint_index 0.91. Not listed: object_net_guid 1.37, packet_id 1.34,
+    // compatible_checksum 1.33, channel_index 1.28, actor_net_guid 1.08.
+    // raw_bits and value_f64 go the other way in `fields` because snapshots
+    // restate values: on the reference replay 343,683 raw_bits values hold
+    // 7,084 distinct payloads here, against 321,735 distinct in 1,065,872 in
+    // `fields`. A strings-only list would sum to 1.40x this table's size under
+    // the parquet-rs everything-dictionary default.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &[
         "checkpoint_index",
         "checkpoint_id",
@@ -326,16 +318,14 @@ impl Table for CheckpointFieldsTable {
 impl Table for CheckpointActorsTable {
     type Row = CheckpointActorRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
-    // Dictionary/plain bytes over the 45-replay sample (see
-    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule: class_path 0.32,
-    // archetype_path 0.39, and two that measured larger under a dictionary,
-    // event 1.33 and checkpoint_id 1.37 (each under 200 bytes per file).
-    // Numbers listed: spawn_y 0.77, spawn_x 0.78, spawn_yaw 0.80, spawn_z
-    // 0.83, channel_index 0.98. Not listed: packet_id 1.93, actor_net_guid
-    // 1.46, checkpoint_index 1.28, time_ms 1.22, spawn_pitch 1.07, spawn_roll
-    // 1.07. The spawn columns go the other way from `actors` because each
-    // checkpoint restates the same live actors: 2,549 spawn_x values hold 163
-    // distinct ones on the reference replay.
+    // Strings, listed by rule: class_path 0.32, archetype_path 0.39, and two
+    // larger as a dictionary, event 1.33 and checkpoint_id 1.37 (each under 200
+    // bytes a file). Numbers listed: spawn_y 0.77, spawn_x 0.78, spawn_yaw
+    // 0.80, spawn_z 0.83, channel_index 0.98. Not listed: packet_id 1.93,
+    // actor_net_guid 1.46, checkpoint_index 1.28, time_ms 1.22, spawn_pitch
+    // 1.07, spawn_roll 1.07. The spawn columns go the other way from `actors`
+    // because each checkpoint restates the live actors: 2,549 spawn_x values
+    // hold 163 distinct ones on the reference replay.
     const DICTIONARY_COLUMNS: &'static [&'static str] = &[
         "checkpoint_id",
         "channel_index",
@@ -362,10 +352,9 @@ impl Table for CheckpointActorsTable {
 impl Table for CheckpointNetGuidsTable {
     type Row = CheckpointNetGuidRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
-    // Dictionary/plain bytes over the 45-replay sample (see
-    // `Table::DICTIONARY_COLUMNS`). Strings, listed by rule: path 0.48,
-    // checkpoint_id 0.69. Number listed: checkpoint_index 0.92. Not listed,
-    // smaller PLAIN on all 45: net_guid 2.30, outer_net_guid 1.78.
+    // Strings, listed by rule: path 0.48, checkpoint_id 0.69. Number listed:
+    // checkpoint_index 0.92. Not listed, smaller PLAIN on all 45: net_guid
+    // 2.30, outer_net_guid 1.78.
     const DICTIONARY_COLUMNS: &'static [&'static str] =
         &["checkpoint_index", "checkpoint_id", "path"];
     fn schema() -> Arc<Schema> {
