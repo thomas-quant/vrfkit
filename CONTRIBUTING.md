@@ -44,7 +44,6 @@ cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D war
 cargo +1.86.0 test --workspace --locked
 cargo +1.86.0 check --workspace --all-targets --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo +1.86.0 doc --workspace --all-features --no-deps --locked
-cargo +1.86.0 check --manifest-path tools/probe_offset/Cargo.toml --locked
 cargo +1.86.0 fmt --manifest-path tools/extract_component_classes/Cargo.toml --check
 cargo +1.86.0 clippy --manifest-path tools/extract_component_classes/Cargo.toml --all-targets --locked -- -D warnings
 cargo +1.86.0 test --manifest-path tools/extract_component_classes/Cargo.toml --locked

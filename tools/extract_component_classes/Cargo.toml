@@ -6,8 +6,8 @@ rust-version = "1.86"
 license = "MIT"
 publish = false
 
-# Standalone, like tools/probe_offset: not a member of the root workspace, so it
-# builds into its own target directory and its lockfile pins only what it uses.
+# Standalone: not a member of the root workspace, so it builds into its own
+# target directory and its lockfile pins only what it uses.
 # It reads the installed game, which nothing in `crates/` does.
 [workspace]
 
