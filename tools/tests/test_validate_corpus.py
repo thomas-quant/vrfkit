@@ -1,11 +1,5 @@
-"""Guards for the corpus oracle sweep.
-
-The accumulator carries a comment saying "A counter the oracle stopped printing
-must not read as zero. That is precisely how the malformed figure stayed a
-vacuous 0 for the whole corpus while its pattern was wrong" -- and then the
-absent counter was printed as a WARNING and the run exited 0 anyway. Writing
-the argument down is not the same as acting on it.
-"""
+"""Guards for the corpus oracle sweep: a counter the oracle stopped printing
+must fail the run, not print a WARNING beside exit 0."""
 import collections
 import contextlib
 import io
@@ -30,7 +24,6 @@ class ProblemTests(unittest.TestCase):
         self.assertIn("a.vrf", " ".join(found))
 
     def test_a_counter_the_oracle_stopped_printing_is_a_problem(self):
-        """The defect: this was a WARNING beside an exit 0."""
         found = guard.problems([], collections.Counter({"malformed": 3}))
         self.assertTrue(found)
         joined = " ".join(found)
@@ -85,13 +78,11 @@ class ArgParsingTests(unittest.TestCase):
                 self.assertTrue(getattr(given, flag))
 
 
-#: Stand-in for `vrfkit.exe`, invoked exactly as `_run_one` invokes the real
-#: one -- `[str(exe), "validate", str(path)]`. Run under `sys.executable`, the
-#: first argv token becomes the script Python executes (the same trick
-#: `test_check_export_baseline.py`'s `TransactionalOutputTests` uses for its
-#: fake `export`), so a file literally named `validate`, with no extension, in
-#: the process's cwd stands in for the real binary. What it prints depends on
-#: the replay's own filename, so one script can play every scenario below.
+#: Stand-in for `vrfkit.exe`, invoked as `_run_one` invokes the real one --
+#: `[str(exe), "validate", str(path)]`. Run under `sys.executable`, the first
+#: argv token becomes the script Python executes, so a file literally named
+#: `validate` in the process's cwd stands in for the binary (other suites'
+#: fakes point here). Its output depends on the replay's filename.
 FAKE_VALIDATE_SCRIPT = '''\
 import sys
 from pathlib import Path
@@ -114,14 +105,8 @@ print("ORACLE PASS RATE: 100.000000%")
 
 
 class MainWiringTests(unittest.TestCase):
-    """`ProblemTests` above pins what `problems()` returns; nothing pinned
-    that `main()` actually reads it before choosing an exit code. That is
-    precisely the layer where the recorded defect lived: the absent-counter
-    case was computed, printed as a WARNING, and the process exited 0 anyway.
-    A helper that is provably correct in isolation says nothing about the
-    `if found: return 1` a few lines later in `main()` -- these tests are
-    that line.
-    """
+    """`ProblemTests` pins what `problems()` returns; these pin that `main()`
+    reads it before choosing an exit code."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -160,11 +145,8 @@ class MainWiringTests(unittest.TestCase):
         self.assertIn("FAILED", output)
 
     def test_a_counter_the_oracle_stopped_printing_fails_the_run(self):
-        """The recorded defect, reproduced end to end: `missingmalformed.vrf`
-        exits 0 from the fake oracle and every OTHER counter is present, so
-        the only thing that can catch it is `main()` reading `problems()`'s
-        report on the absent `malformed` counter -- not a helper being
-        correct, but `main()` acting on what the helper says."""
+        """`missingmalformed.vrf` exits 0 with every other counter present, so
+        only `main()` acting on `problems()` can catch the absent counter."""
         self.make_replay("missingmalformed.vrf")
         code, output = self.run_main()
         self.assertNotEqual(code, 0, output)
