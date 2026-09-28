@@ -1,15 +1,11 @@
 //! The optional Checkpoint pass.
 //!
-//! A checkpoint is a full-state snapshot: its own guid cache, its own export
-//! map, and one DemoFrame re-opening every actor alive at that instant.
-//! Everything about it is independent of the live stream, so it gets its own
-//! cache, reader, channel state and buffers. Sharing any of the four would let
-//! the snapshot's channel opens and archetype mappings leak into the ReplayData
-//! pass and corrupt it.
-//!
-//! Checkpoint rows go to separate tables because their packet, channel and
-//! NetGUID namespaces restart inside each snapshot. Keeping that context out
-//! of the main tables also leaves the default export byte-identical.
+//! A checkpoint is a full-state snapshot (its own GUID cache, export map and a
+//! DemoFrame re-opening every live actor), so each gets a fresh cache, reader,
+//! channel state and buffers: sharing any of them would leak snapshot opens
+//! and archetype mappings into the ReplayData pass. Its rows go to separate
+//! tables because packet, channel and NetGUID namespaces restart in each
+//! snapshot, which also leaves the main tables byte-identical either way.
 
 use std::io::Write;
 
@@ -37,12 +33,9 @@ use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 #[derive(Debug, Default)]
 pub(crate) struct CheckpointStats {
     pub chunks: u64,
-    /// Sum of [`CheckpointChunk::trailing_bytes`](vrf_container::CheckpointChunk::trailing_bytes)
-    /// across every chunk processed. Zero on every corpus checkpoint measured
-    /// so far; printed unconditionally in the summary so a format change that
-    /// starts leaving bytes after the archive is counted instead of silently
-    /// dropped on the floor, same as `replay_data_trailing_bytes` in the main
-    /// pass.
+    /// Sum of [`CheckpointChunk::trailing_bytes`](vrf_container::CheckpointChunk::trailing_bytes):
+    /// 0 on every corpus checkpoint measured, counted so bytes a format change
+    /// leaves after the archive are not dropped unseen.
     pub trailing_bytes: u64,
     pub guid_entries: u64,
     pub literal_paths: u64,
@@ -53,8 +46,7 @@ pub(crate) struct CheckpointStats {
     /// DemoFrames walked, as `walk_demo_frames` counted them -- not assumed to
     /// be one per chunk.
     pub frames: u64,
-    /// ExternalData and GameSpecificFrameData bytes the snapshot frames
-    /// stepped over; the main pass's `frame_skips` has the same meaning.
+    /// Section bytes the snapshot frames stepped over, as in the main pass.
     pub frame_skips: FrameSkips,
     pub packets: u64,
     pub field_rows: u64,
@@ -68,25 +60,12 @@ pub(crate) struct CheckpointStats {
     pub partial_bits: u64,
     /// Actor rows that never reached `checkpoint_actors.parquet`: the sink
     /// pushes one per open and one per close, so this is each chunk's opens
-    /// and closes less the rows it wrote. Measured rather than assumed, so a
-    /// discard path cannot be silent.
+    /// and closes less the rows it wrote, measured rather than assumed.
     pub actor_rows_dropped: u64,
     pub movement_rows_dropped: u64,
-    /// Everything the checkpoint sinks counted.
-    ///
-    /// Kept separately from the ReplayData pass's totals, which the export
-    /// baseline pins: mixing them would move a guarded figure by an amount that
-    /// depends on a flag. Kept *at all* because the checkpoint sink is a second
-    /// decode path, and a failure on it that reached no counter would be
-    /// exactly the silent failure this project keeps finding.
-    ///
-    /// It used to be a hand-picked subset -- overlay, effect blobs, struct
-    /// blobs, MultiContents -- and the ones left out were precisely the failure
-    /// counters: array-decode errors, truncated RPCs and movement-decode
-    /// errors. A checkpoint array that overran mid-element therefore wrote its
-    /// parent raw row, lost its flattened children, and recorded nothing
-    /// anywhere. Sharing [`SinkTotals`] with the main pass is what stops the
-    /// two from drifting again.
+    /// Everything the checkpoint sinks counted, through the same
+    /// [`SinkTotals`] as the main pass but apart from its baseline-pinned
+    /// totals, which mixing would move by a flag-dependent amount.
     pub sink: SinkTotals,
     /// Replication/framing counters from every finalized checkpoint reader.
     pub net: NetStats,
@@ -223,11 +202,9 @@ impl<W: Write + Send> CheckpointTableSink for DeclarationWriter<'_, W> {
     }
 }
 
-/// Decode one Checkpoint chunk and write its field rows.
-///
-/// `error_report` is the *shared* one: a decode error is a decode error
-/// wherever it happened, and the breakdown the summary prints is the only place
-/// a checkpoint-only failure would ever be seen.
+/// Decode one Checkpoint chunk and write its rows. `error_report` is the
+/// shared one: the summary's breakdown is the only place a checkpoint-only
+/// decode error surfaces.
 pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     payload: &[u8],
     ctx: &ReplayContext<'_>,
@@ -302,8 +279,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
             sink.time_ms = pkt.time_ms;
             sink.packet_id = packet_count as u32;
             reader.process_packet(pkt.data, packet_count as i32, &mut sink);
-            // Same aggregation the ReplayData pass uses, so the two cannot
-            // diverge on which counters they bother to read. See `sink::totals`.
+            // The ReplayData pass's aggregation, so both read the same counters.
             stats.sink.absorb(&mut sink.stats, error_report);
         }
         let result = (|| -> Result<(), CliError> {
@@ -387,11 +363,6 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.resolved_path_indices += u64::from(tables.resolved_path_indices);
     stats.group_records += u64::from(tables.group_count);
     stats.exported_fields += u64::from(tables.exported_fields);
-    // The actual DemoFrame count `walk_demo_frames` walked, not an assumed
-    // one-per-chunk. `tools/check_export_baseline.py`'s `cp_frames`/`cp_chunks`
-    // pin used to be a tautology -- always equal, because this line always
-    // added exactly 1 -- which could not have caught a build whose checkpoint
-    // carries more than one DemoFrame.
     stats.frames += u64::from(walk.frames);
     stats.frame_skips.absorb(walk.skipped);
     stats.packets += packet_count;
@@ -423,12 +394,7 @@ mod tests {
         }
     }
 
-    /// `actor_rows_dropped` was declared, printed and published but never
-    /// assigned, so `Dropped: 0 actor` and the baseline guard that requires
-    /// that 0 could not move. The sink pushes exactly one actor row per open
-    /// and per close, so a chunk's opens and closes less the rows it wrote
-    /// are the rows it dropped -- counted per chunk, so one chunk's surplus
-    /// cannot cancel another's loss.
+    /// Per chunk, so one chunk's surplus cannot cancel another's loss.
     #[test]
     fn actor_rows_a_chunk_opened_or_closed_but_did_not_write_are_dropped() {
         let mut stats = CheckpointStats::default();
