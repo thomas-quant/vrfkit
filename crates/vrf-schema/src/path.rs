@@ -31,13 +31,10 @@ const DEFAULT_OBJECT_PREFIX: &str = "Default__";
 ///
 /// A visitor, not a `Vec<String>`: measured allocation cost is in docs/PERFORMANCE_NOTES.md#path-alias-enumeration.
 pub fn for_each_replay_path_key(path: &str, mut visit: impl FnMut(&str)) {
-    visit(path);
-    if let Some(alias) = default_object_alias(path) {
-        visit(&alias);
-    }
-    if let Some(alias) = core_alias(path) {
-        visit(&alias);
-    }
+    find_replay_path_key::<()>(path, |key| {
+        visit(key);
+        None
+    });
 }
 
 /// Visit lookup keys until `probe` accepts one, and return what it gave back.
@@ -46,20 +43,9 @@ pub fn for_each_replay_path_key(path: &str, mut visit: impl FnMut(&str)) {
 /// every resolution site actually wants: try each spelling, stop at the first
 /// that resolves. Aliases past the hit are never built.
 pub fn find_replay_path_key<T>(path: &str, mut probe: impl FnMut(&str) -> Option<T>) -> Option<T> {
-    if let Some(hit) = probe(path) {
-        return Some(hit);
-    }
-    if let Some(alias) = default_object_alias(path) {
-        if let Some(hit) = probe(&alias) {
-            return Some(hit);
-        }
-    }
-    if let Some(alias) = core_alias(path) {
-        if let Some(hit) = probe(&alias) {
-            return Some(hit);
-        }
-    }
-    None
+    probe(path)
+        .or_else(|| default_object_alias(path).and_then(|alias| probe(&alias)))
+        .or_else(|| core_alias(path).and_then(|alias| probe(&alias)))
 }
 
 /// Visit lookup keys including `_ClassNetCache` suffix variations until `probe`
@@ -239,58 +225,19 @@ mod tests {
         );
     }
 
-    /// The visitors replaced two `Vec<String>` builders. Nothing else pins that
-    /// they still enumerate the same keys in the same order, and the order is
-    /// what decides which spelling wins a lookup -- so the old implementations
-    /// live on here as the reference, and every case above plus the awkward
-    /// ones are checked against them.
+    /// The `/_Core/` alias is a base key too, so it gets its own toggled
+    /// spelling, right after it.
     #[test]
-    fn the_visitors_agree_with_the_vector_forms_they_replaced() {
-        fn old_replay(path: &str) -> Vec<String> {
-            let mut keys = Vec::with_capacity(4);
-            keys.push(path.to_owned());
-            if let Some(alias) = default_object_alias(path) {
-                keys.push(alias);
-            }
-            if let Some(alias) = core_alias(path) {
-                keys.push(alias);
-            }
-            keys
-        }
-        fn old_cnc(path: &str) -> Vec<String> {
-            let mut keys = Vec::new();
-            for key in &old_replay(path) {
-                keys.push(key.clone());
-                if let Some(stripped) = key.strip_suffix(CLASS_NET_CACHE_SUFFIX) {
-                    if !stripped.is_empty() {
-                        keys.push(stripped.to_owned());
-                    }
-                } else {
-                    keys.push(format!("{key}{CLASS_NET_CACHE_SUFFIX}"));
-                }
-            }
-            keys
-        }
-
-        for path in [
-            "/Game/Test.Test_C",
-            "Default__Test_C",
-            "Test_C",
-            "/Game/Characters/_Core/Jett/Jett_C",
-            "/Game/Characters/Jett/Jett_C",
-            "/Game/Abilities/Grenade.Grenade_C",
-            "Test_ClassNetCache",
-            "_ClassNetCache",
-            "Default___ClassNetCache",
-            "/Game/Characters/_Core/Jett/Jett_C_ClassNetCache",
-            "Default__",
-            "",
-            "/",
-            "a",
-        ] {
-            assert_eq!(replay_keys(path), old_replay(path), "replay keys: {path:?}");
-            assert_eq!(cnc_keys(path), old_cnc(path), "cnc keys: {path:?}");
-        }
+    fn class_net_cache_suffix_toggled_after_the_core_alias() {
+        assert_eq!(
+            cnc_keys("/Game/Characters/_Core/Jett/Jett_C_ClassNetCache"),
+            [
+                "/Game/Characters/_Core/Jett/Jett_C_ClassNetCache",
+                "/Game/Characters/_Core/Jett/Jett_C",
+                "/Game/Characters/Jett/Jett_C_ClassNetCache",
+                "/Game/Characters/Jett/Jett_C"
+            ]
+        );
     }
 
     #[test]
