@@ -580,6 +580,30 @@ mod tests {
         assert!(reader.partial_bunches.is_empty());
     }
 
+    /// An initial on a channel whose assembly is still in flight overlaps it,
+    /// whether or not it is also final: one error, flagged on the new initial,
+    /// which replaces the tracked assembly or, as a whole bunch, leaves none.
+    #[test]
+    fn an_initial_over_one_in_flight_is_an_overlapping_initial() {
+        for last in [false, true] {
+            let mut bits = Vec::new();
+            write_bunch(&mut bits, &fragment(2, true, false), &[false; 8]);
+            write_bunch(&mut bits, &fragment(2, true, last), &[false; 8]);
+            let packet = build_packet(&bits);
+
+            let mut reader = RawPacketReader::new();
+            let mut headers = Vec::new();
+            let result = reader.read_packet(&packet, 0, |h, _| headers.push(h.clone()));
+
+            assert_eq!(headers.len(), 2);
+            assert_eq!(result.partial_error_count, 1, "last: {last}");
+            assert!(!headers[0].has_partial_error);
+            assert!(headers[1].has_partial_error, "last: {last}");
+            assert!(!headers[1].is_partial_completed, "last: {last}");
+            assert_eq!(reader.partial_bunches.len(), usize::from(!last));
+        }
+    }
+
     #[test]
     fn continuation_without_initial_reports_error() {
         let packet = build_bunch_packet(&fragment(5, false, true), &[]);
