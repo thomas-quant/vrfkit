@@ -301,21 +301,29 @@ mod tests {
     }
 
     /// A single-RPC payload at handle 1 should resolve to the minimum
-    /// function_count whose handle width matches the one it was written with.
+    /// function_count whose handle width matches the one it was written with:
+    /// every count in one handle-width band walks the same, and the search
+    /// picks the smallest.
+    ///
+    /// The one-filled fixtures are unambiguous, so `ambiguous_with` must stay
+    /// clear on them -- otherwise it would fire on every payload and mean
+    /// nothing.
     #[test]
     fn single_rpc_finds_minimum_fc() {
         // fc=34: for handle=1, ilog2(34)=5 bits, then 1+32=33 < 34, so the
         // extra bit is read: 6 bits total. The minimum fc that produces a
         // 6-bit handle for value=1 is 34 (fc=33 gives 5 bits, fc=34 forces
-        // the extra read).
-        let (data, bit_count) = build_one_rpc_stream(34, 100);
-        let result = brute_force_function_count(&data, bit_count);
-        assert!(result.is_some(), "should find a valid fc");
-        let result = result.unwrap();
-        assert_eq!(result.function_count, 34);
-        assert_eq!(result.rpcs.len(), 1);
-        assert_eq!(result.rpcs[0].handle, 1);
-        assert_eq!(result.rpcs[0].payload_bits, 100);
+        // the extra read). fc=50 is inside the same band, so it resolves to 34
+        // too.
+        for (written_with, payload_bits) in [(34, 100), (50, 64)] {
+            let (data, bit_count) = build_one_rpc_stream(written_with, payload_bits);
+            let result = brute_force_function_count(&data, bit_count).expect("a valid fc");
+            assert_eq!(result.function_count, 34, "written with {written_with}");
+            assert_eq!(result.rpcs.len(), 1);
+            assert_eq!(result.rpcs[0].handle, 1);
+            assert_eq!(result.rpcs[0].payload_bits, payload_bits);
+            assert_eq!(result.ambiguous_with, None, "{result:?}");
+        }
     }
 
     /// A stream written with a larger fc that changes the handle width should
@@ -369,18 +377,6 @@ mod tests {
         let data = vec![];
         let result = brute_force_function_count(&data, 0);
         assert!(result.is_none());
-    }
-
-    /// The brute-force returns the minimum valid fc: multiple fc values in the
-    /// same bit-width band produce the same walk, and we pick the smallest.
-    #[test]
-    fn returns_minimum_valid_fc() {
-        // fc=34 and fc=65 both produce 6-bit handles for value=1.
-        // Build with fc=50 (also 6 bits for value=1):
-        let (data, bit_count) = build_one_rpc_stream(50, 64);
-        let result = brute_force_function_count(&data, bit_count).unwrap();
-        // The minimum fc where the 6-bit handle walks cleanly is 34.
-        assert_eq!(result.function_count, 34);
     }
 
     /// Build a bit buffer from an explicit flag + a sequence of LE u32 words +
@@ -481,15 +477,5 @@ mod tests {
             Some(3),
             "fc=3 parses the same bits into nine RPCs and must be reported",
         );
-    }
-
-    /// The one-filled fixtures are unambiguous, so the flag must stay clear on
-    /// them -- otherwise it would fire on every payload and mean nothing.
-    #[test]
-    fn an_unambiguous_payload_reports_no_competitor() {
-        let (data, bit_count) = build_one_rpc_stream(34, 100);
-        let result = brute_force_function_count(&data, bit_count).unwrap();
-        assert_eq!(result.function_count, 34);
-        assert_eq!(result.ambiguous_with, None, "{result:?}");
     }
 }

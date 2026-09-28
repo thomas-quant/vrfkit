@@ -17,6 +17,15 @@ fn reader_from_hex(hex: &str, bit_count: u64) -> BitReader<'static> {
     BitReader::with_bit_len(leaked, bit_count).unwrap()
 }
 
+/// Packet 4368, a Sheriff shot, as `ReplayPlayContinuousEffectAtLocation`
+/// sends it: FloatValues (400 bits), ObjectValues (344) and VectorValues (280).
+const FLOATS_4368: &str = "08021020390412400000803f000410200f0412400000a040\
+                           000610203d0412400000803f000810203b04124015f9b3ce0000";
+const OBJECTS_4368: &str = "08022020370422201d300004202035042220190400\
+                            062030ffff062220572a000820206504222075160000";
+const VECTORS_4368: &str = "0202182013041a81026b7b179c16f0e8bf11e6b45fc0eee33f\
+                            9417c1fc5684b1bf0000";
+
 // ---- FloatValues tests ----
 
 /// Pin: packet 4368, Sheriff shot. 4 elements:
@@ -24,9 +33,7 @@ fn reader_from_hex(hex: &str, bit_count: u64) -> BitReader<'static> {
 /// tag 286=TracerOption(1.0), tag 285=RandomSeed(-1509722752.0)
 #[test]
 fn decode_float_values_sheriff_basic() {
-    let hex = "08021020390412400000803f000410200f0412400000a040\
-               000610203d0412400000803f000810203b04124015f9b3ce0000";
-    let mut reader = reader_from_hex(hex, 400);
+    let mut reader = reader_from_hex(FLOATS_4368, 400);
     let result = decode_effect_floats(&mut reader).unwrap();
 
     assert_eq!(result.len(), 4);
@@ -92,9 +99,7 @@ fn decode_float_values_shotgun() {
 /// tag 65535=unknown(2731), tag 306=unknown(1466)
 #[test]
 fn decode_object_values_basic() {
-    let hex = "08022020370422201d300004202035042220190400\
-               062030ffff062220572a000820206504222075160000";
-    let mut reader = reader_from_hex(hex, 344);
+    let mut reader = reader_from_hex(OBJECTS_4368, 344);
     let result = decode_effect_objects(&mut reader).unwrap();
 
     assert_eq!(result.len(), 4);
@@ -118,9 +123,7 @@ fn decode_object_values_basic() {
 /// Expected: (-0.7793076561609785, 0.6228944653768754, -0.06842559500463913)
 #[test]
 fn decode_vector_values_single_pellet() {
-    let hex = "0202182013041a81026b7b179c16f0e8bf11e6b45fc0eee33f\
-               9417c1fc5684b1bf0000";
-    let mut reader = reader_from_hex(hex, 280);
+    let mut reader = reader_from_hex(VECTORS_4368, 280);
     let result = decode_effect_vectors(&mut reader).unwrap();
 
     assert_eq!(result.len(), 1);
@@ -168,32 +171,13 @@ fn decode_vector_values_shotgun_12_pellets() {
     assert!((v11.z - (-0.04433608413693601)).abs() < 1e-12);
 }
 
-/// Empty blob (0 elements).
+/// Empty blob (0 elements): the count, IntPacked 0 = byte 0x00, is all of it.
 #[test]
-fn decode_empty_float_array() {
-    // IntPacked 0 = byte 0x00
-    let data = [0u8; 1];
-    let mut reader = BitReader::with_bit_len(&data, 8).unwrap();
-    let result = decode_effect_floats(&mut reader).unwrap();
-    assert!(result.is_empty());
-}
-
-/// Empty blob (0 elements) for objects.
-#[test]
-fn decode_empty_object_array() {
-    let data = [0u8; 1];
-    let mut reader = BitReader::with_bit_len(&data, 8).unwrap();
-    let result = decode_effect_objects(&mut reader).unwrap();
-    assert!(result.is_empty());
-}
-
-/// Empty blob (0 elements) for vectors.
-#[test]
-fn decode_empty_vector_array() {
-    let data = [0u8; 1];
-    let mut reader = BitReader::with_bit_len(&data, 8).unwrap();
-    let result = decode_effect_vectors(&mut reader).unwrap();
-    assert!(result.is_empty());
+fn decode_empty_arrays() {
+    let reader = || BitReader::with_bit_len(&[0u8], 8).unwrap();
+    assert!(decode_effect_floats(&mut reader()).unwrap().is_empty());
+    assert!(decode_effect_objects(&mut reader()).unwrap().is_empty());
+    assert!(decode_effect_vectors(&mut reader()).unwrap().is_empty());
 }
 
 // ---- JSON wiring tests ----
@@ -224,9 +208,7 @@ fn param_names_select_the_element_type() {
 /// data is exactly where a serialization bug hides (see 13-B).
 #[test]
 fn float_blob_renders_as_json() {
-    let hex = "08021020390412400000803f000410200f0412400000a040\
-               000610203d0412400000803f000810203b04124015f9b3ce0000";
-    let raw = decode_hex(hex);
+    let raw = decode_hex(FLOATS_4368);
     let json = decode_effect_blob_json(EffectArrayKind::Float, &raw, 400).unwrap();
     assert_eq!(
         json,
@@ -239,9 +221,7 @@ fn float_blob_renders_as_json() {
 
 #[test]
 fn object_blob_renders_as_json() {
-    let hex = "08022020370422201d300004202035042220190400\
-               062030ffff062220572a000820206504222075160000";
-    let raw = decode_hex(hex);
+    let raw = decode_hex(OBJECTS_4368);
     let json = decode_effect_blob_json(EffectArrayKind::Object, &raw, 344).unwrap();
     assert_eq!(
         json,
@@ -254,9 +234,7 @@ fn object_blob_renders_as_json() {
 
 #[test]
 fn vector_blob_renders_as_json() {
-    let hex = "0202182013041a81026b7b179c16f0e8bf11e6b45fc0eee33f\
-               9417c1fc5684b1bf0000";
-    let raw = decode_hex(hex);
+    let raw = decode_hex(VECTORS_4368);
     let json = decode_effect_blob_json(EffectArrayKind::Vector, &raw, 280).unwrap();
     assert_eq!(
         json,
@@ -277,8 +255,7 @@ fn an_empty_blob_renders_as_an_empty_array() {
 #[test]
 fn a_tail_after_the_terminator_is_an_error() {
     // A well-formed 1-element float array followed by 6 spare bytes.
-    let hex = "0202102039041240000080 3f0000 00000000000000";
-    let raw = decode_hex(&hex.replace(' ', ""));
+    let raw = decode_hex("0202102039041240000080 3f0000 00000000000000");
     let bits = (raw.len() as u32) * 8;
     let err = decode_effect_blob_json(EffectArrayKind::Float, &raw, bits).unwrap_err();
     assert!(
@@ -310,8 +287,7 @@ fn a_bit_length_past_the_buffer_is_an_error_not_a_panic() {
 #[test]
 fn a_non_finite_float_is_rejected_rather_than_rendered() {
     // Element 0, tag 284, value = f32::NAN (0x7fc00000).
-    let hex = "020210203904124000 00c07f 0000";
-    let raw = decode_hex(&hex.replace(' ', ""));
+    let raw = decode_hex("020210203904124000 00c07f 0000");
     let err = decode_effect_blob_json(EffectArrayKind::Float, &raw, 112).unwrap_err();
     assert!(
         matches!(err, EffectBlobError::NonFiniteFloat { index: 0 }),
@@ -327,32 +303,14 @@ fn a_non_finite_float_is_rejected_rather_than_rendered() {
 /// both are known.
 #[test]
 fn scanning_recovers_the_declared_handles() {
-    let floats = decode_hex(
-        "08021020390412400000803f000410200f0412400000a040\
-         000610203d0412400000803f000810203b04124015f9b3ce0000",
-    );
-    assert_eq!(
-        scan_element_handles(&floats, 400).unwrap(),
-        Some(FLOAT_HANDLES)
-    );
-
-    let objects = decode_hex(
-        "08022020370422201d300004202035042220190400\
-         062030ffff062220572a000820206504222075160000",
-    );
-    assert_eq!(
-        scan_element_handles(&objects, 344).unwrap(),
-        Some(OBJECT_HANDLES)
-    );
-
-    let vectors = decode_hex(
-        "0202182013041a81026b7b179c16f0e8bf11e6b45fc0eee33f\
-         9417c1fc5684b1bf0000",
-    );
-    assert_eq!(
-        scan_element_handles(&vectors, 280).unwrap(),
-        Some(VECTOR_HANDLES)
-    );
+    for (blob, bits, handles) in [
+        (FLOATS_4368, 400, FLOAT_HANDLES),
+        (OBJECTS_4368, 344, OBJECT_HANDLES),
+        (VECTORS_4368, 280, VECTOR_HANDLES),
+    ] {
+        let raw = decode_hex(blob);
+        assert_eq!(scan_element_handles(&raw, bits).unwrap(), Some(handles));
+    }
 }
 
 /// An array that populates no element has no pair to derive.

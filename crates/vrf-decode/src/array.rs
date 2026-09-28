@@ -850,6 +850,47 @@ mod tests {
     use super::*;
     use crate::test_bits::BitWriter;
 
+    /// Handle 4 at depth 0 is a sub-array, `Reports`, with no further nesting.
+    static INNER: ArrayFieldSchema = ArrayFieldSchema {
+        sub_arrays: &[],
+        field_names: &[],
+    };
+    static OUTER: ArrayFieldSchema = ArrayFieldSchema {
+        sub_arrays: &[(4, &INNER)],
+        field_names: &[(4, "Reports")],
+    };
+
+    /// One element carrying one field per `(handle, payload width)`, each
+    /// payload all ones, then the element and array terminators.
+    fn one_element_with_handles(handles: &[(u32, u32)]) -> BitWriter {
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // elementCount
+        bits.int_packed(1); // encodedIndex=1 -> index 0
+        for &(handle, payload) in handles {
+            bits.int_packed(handle + 1);
+            bits.int_packed(payload);
+            bits.repeat(true, payload as usize);
+        }
+        bits.int_packed(0); // end of element
+        bits.int_packed(0); // array terminator
+        bits
+    }
+
+    /// One outer element whose handle 4 (`Reports` under [`OUTER`]) is a
+    /// nested window: `inner`, then `tail` one-bits the inner array never
+    /// reads, inside the window's declared width.
+    fn nested(inner: &BitWriter, tail: usize) -> (Vec<u8>, u32) {
+        let mut bits = BitWriter::new();
+        bits.int_packed(1); // outer elementCount
+        bits.int_packed(1); // encodedIndex=1
+        bits.int_packed(5); // encodedHandle=5 -> handle 4
+        bits.int_packed(inner.bit_len() + tail as u32);
+        bits.append(inner).repeat(true, tail);
+        bits.int_packed(0); // end outer element
+        bits.int_packed(0); // outer array terminator
+        bits.finish()
+    }
+
     #[test]
     fn decode_simple_struct_array() {
         // Build: elementCount=2, element[0] has handle=3 with 32 bits,
@@ -891,46 +932,9 @@ mod tests {
 
     #[test]
     fn decode_nested_struct_array() {
-        // Build: elementCount=1, element[0] has handle=4 (sub-array) with a
-        // nested array of 1 element containing handle=7.
-        let mut bits = BitWriter::new();
-        bits.int_packed(1); // outer elementCount
-
-        // Outer element 0
-        bits.int_packed(1); // encodedIndex=1
-
-        // Inner array field: handle=4, we need to build its payload separately
-        let mut inner_bits = BitWriter::new();
-        inner_bits.int_packed(1); // inner elementCount
-        inner_bits.int_packed(1); // encodedIndex=1
-        // Inner field: handle=7, 16 bits
-        inner_bits.int_packed(8); // encodedHandle=8 -> handle=7
-        inner_bits.int_packed(16);
-        inner_bits.repeat(true, 16);
-        inner_bits.int_packed(0); // end inner element
-        inner_bits.int_packed(0); // inner array terminator
-
-        let inner_payload_bits = inner_bits.bit_len();
-        // Outer field header: encodedHandle=5 (handle=4), payloadBits=inner_payload_bits
-        bits.int_packed(5);
-        bits.int_packed(inner_payload_bits);
-        bits.append(&inner_bits);
-
-        bits.int_packed(0); // end outer element
-        bits.int_packed(0); // outer array terminator
-
-        let (data, bit_count) = bits.finish();
-
-        // Schema: handle 4 at depth 0 is a sub-array with no further nesting.
-        static INNER: ArrayFieldSchema = ArrayFieldSchema {
-            sub_arrays: &[],
-            field_names: &[],
-        };
-        static OUTER: ArrayFieldSchema = ArrayFieldSchema {
-            sub_arrays: &[(4, &INNER)],
-            field_names: &[(4, "Reports")],
-        };
-
+        // One outer element whose handle 4 is a nested array of one element
+        // carrying handle 7 with 16 bits.
+        let (data, bit_count) = nested(&one_element_with_handles(&[(7, 16)]), 0);
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &[], &mut stats);
 
@@ -941,29 +945,13 @@ mod tests {
         assert_eq!(fields[0].bit_count, 16);
     }
 
-    /// One element carrying handles 3 (schema-named), 7 (schema-unnamed) and
-    /// 40 (declared by neither).
-    fn one_element_with_handles(handles: &[(u32, u32)]) -> (Vec<u8>, u32) {
-        let mut bits = BitWriter::new();
-        bits.int_packed(1); // elementCount
-        bits.int_packed(1); // encodedIndex=1 -> index 0
-        for &(handle, payload) in handles {
-            bits.int_packed(handle + 1);
-            bits.int_packed(payload);
-            bits.repeat(true, payload as usize);
-        }
-        bits.int_packed(0); // end of element
-        bits.int_packed(0); // array terminator
-        bits.finish()
-    }
-
     /// The replay's declaration outranks the hardcoded schema on a leaf.
     ///
     /// Handle 3 is the live case: `COMBAT_ROUNDS_SCHEMA` calls it `RoundNumber`
     /// and every replay declares it `RoundNum`.
     #[test]
     fn a_declared_leaf_name_beats_the_schema_name() {
-        let (data, bit_count) = one_element_with_handles(&[(3, 32)]);
+        let (data, bit_count) = one_element_with_handles(&[(3, 32)]).finish();
         let mut declared: Vec<Option<&str>> = vec![None; 8];
         declared[3] = Some("RoundNum");
 
@@ -983,7 +971,7 @@ mod tests {
     /// A handle the schema cannot name is labelled by the replay, not `_hN`.
     #[test]
     fn a_declared_leaf_name_replaces_the_handle_placeholder() {
-        let (data, bit_count) = one_element_with_handles(&[(7, 32)]);
+        let (data, bit_count) = one_element_with_handles(&[(7, 32)]).finish();
         let mut declared: Vec<Option<&str>> = vec![None; 8];
         declared[7] = Some("StateRemainingTime");
 
@@ -1004,7 +992,7 @@ mod tests {
     /// undeclared, unschematised handle still falls through to `_hN`.
     #[test]
     fn an_undeclared_leaf_falls_back_to_schema_then_placeholder() {
-        let (data, bit_count) = one_element_with_handles(&[(3, 32), (7, 32)]);
+        let (data, bit_count) = one_element_with_handles(&[(3, 32), (7, 32)]).finish();
 
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(
@@ -1025,7 +1013,7 @@ mod tests {
     /// and must fall through, not silently mislabel.
     #[test]
     fn a_handle_past_the_end_of_the_declaration_falls_back() {
-        let (data, bit_count) = one_element_with_handles(&[(7, 32)]);
+        let (data, bit_count) = one_element_with_handles(&[(7, 32)]).finish();
         // Only handles 0..=3 declared; handle 7 is past the end.
         let declared: Vec<Option<&str>> = vec![None, None, None, Some("RoundNum")];
 
@@ -1048,25 +1036,7 @@ mod tests {
     fn a_container_segment_keeps_its_schema_name() {
         // Outer element 0 carries handle 4 (Reports, a sub-array) whose single
         // element carries handle 5.
-        let mut inner = BitWriter::new();
-        inner.int_packed(1); // inner elementCount
-        inner.int_packed(1); // encodedIndex=1
-        inner.int_packed(6); // encodedHandle=6 -> handle 5
-        inner.int_packed(32);
-        inner.repeat(true, 32);
-        inner.int_packed(0); // end inner element
-        inner.int_packed(0); // inner terminator
-
-        let mut bits = BitWriter::new();
-        bits.int_packed(1); // outer elementCount
-        bits.int_packed(1); // encodedIndex=1
-        bits.int_packed(5); // encodedHandle=5 -> handle 4
-        bits.int_packed(inner.bit_len());
-        bits.append(&inner);
-        bits.int_packed(0); // end outer element
-        bits.int_packed(0); // outer terminator
-
-        let (data, bit_count) = bits.finish();
+        let (data, bit_count) = nested(&one_element_with_handles(&[(5, 32)]), 0);
 
         // Declare a DIFFERENT name for the container handle 4, and the real
         // declared name for the leaf handle 5.
@@ -1401,40 +1371,10 @@ mod tests {
     /// window exactly.
     #[test]
     fn a_nested_array_that_leaves_bits_reports_them() {
-        let mut inner = BitWriter::new();
-        inner.int_packed(1); // inner elementCount
-        inner.int_packed(1); // encodedIndex=1
-        inner.int_packed(8); // encodedHandle=8 -> handle 7
-        inner.int_packed(16);
-        inner.repeat(true, 16);
-        inner.int_packed(0); // end inner element
-        inner.int_packed(0); // inner array terminator
         // Sixteen bits the inner array will never look at. Not 8: exactly
         // eight bits after a terminator are read as the optional trailer,
         // which is a different path with its own tests.
-        let declared_inner_bits = inner.bit_len() + 16;
-
-        let mut bits = BitWriter::new();
-        bits.int_packed(1); // outer elementCount
-        bits.int_packed(1); // encodedIndex=1
-        bits.int_packed(5); // encodedHandle=5 -> handle 4
-        bits.int_packed(declared_inner_bits);
-        bits.append(&inner);
-        bits.repeat(true, 16); // the abandoned tail
-        bits.int_packed(0); // end outer element
-        bits.int_packed(0); // outer array terminator
-
-        let (data, bit_count) = bits.finish();
-
-        static INNER: ArrayFieldSchema = ArrayFieldSchema {
-            sub_arrays: &[],
-            field_names: &[],
-        };
-        static OUTER: ArrayFieldSchema = ArrayFieldSchema {
-            sub_arrays: &[(4, &INNER)],
-            field_names: &[(4, "Reports")],
-        };
-
+        let (data, bit_count) = nested(&one_element_with_handles(&[(7, 16)]), 16);
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &[], &mut stats);
 
@@ -1475,7 +1415,7 @@ mod tests {
     /// its terminators, or it would flag every clean blob in the corpus.
     #[test]
     fn a_cleanly_terminated_array_reports_no_implicit_termination() {
-        let (data, bit_count) = one_element_with_handles(&[(3, 32)]);
+        let (data, bit_count) = one_element_with_handles(&[(3, 32)]).finish();
         let mut stats = ArrayDecodeStats::default();
         let _ = decode_struct_array(&data, bit_count, None, &[], &mut stats);
 
@@ -1568,25 +1508,7 @@ mod tests {
     /// One nested window: a one-element inner array, its terminator, then one
     /// trailing byte holding IntPacked `trailer`.
     fn nested_window_with_trailer(trailer: u32) -> (Vec<u8>, u32) {
-        let mut inner = BitWriter::new();
-        inner.int_packed(1); // inner elementCount
-        inner.int_packed(1); // encodedIndex=1
-        inner.int_packed(8); // encodedHandle=8 -> handle 7
-        inner.int_packed(16);
-        inner.repeat(true, 16);
-        inner.int_packed(0); // end inner element
-        inner.int_packed(0); // inner array terminator
-        inner.int_packed(trailer); // the optional trailer byte
-
-        let mut bits = BitWriter::new();
-        bits.int_packed(1); // outer elementCount
-        bits.int_packed(1); // encodedIndex=1
-        bits.int_packed(5); // encodedHandle=5 -> handle 4
-        bits.int_packed(inner.bit_len());
-        bits.append(&inner);
-        bits.int_packed(0); // end outer element
-        bits.int_packed(0); // outer array terminator
-        bits.finish()
+        nested(one_element_with_handles(&[(7, 16)]).int_packed(trailer), 0)
     }
 
     /// A nonzero trailer inside a nested array's window is the same anomaly as
@@ -1594,15 +1516,6 @@ mod tests {
     /// parent's window advanced past it, so nothing else would.
     #[test]
     fn a_nonzero_trailer_inside_a_nested_window_is_tallied() {
-        static INNER: ArrayFieldSchema = ArrayFieldSchema {
-            sub_arrays: &[],
-            field_names: &[],
-        };
-        static OUTER: ArrayFieldSchema = ArrayFieldSchema {
-            sub_arrays: &[(4, &INNER)],
-            field_names: &[(4, "Reports")],
-        };
-
         let (data, bit_count) = nested_window_with_trailer(1);
         let mut stats = ArrayDecodeStats::default();
         let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &[], &mut stats);
@@ -1722,6 +1635,11 @@ mod tests {
     /// The payload below is a real one off the wire, the smallest that carries
     /// an `AffectedTargetsArray`: 128 bits holding one effect element whose
     /// only field is handle 18, itself an 80-bit array.
+    ///
+    /// It also pins what the residual tallies read on REAL data, so a later
+    /// change to either counter has to face it and not only hand-built
+    /// fixtures: the nested array consumes its window exactly and the outer
+    /// level closes on its own terminator, so both stay zero.
     #[test]
     fn the_ability_effects_array_descends_into_its_targets() {
         let raw = [
@@ -1731,6 +1649,8 @@ mod tests {
         let mut stats = ArrayDecodeStats::default();
         let out = decode_struct_array(&raw, 128, Some(&ABILITY_EFFECTS_SCHEMA), &[], &mut stats);
         assert_eq!(stats.errors, 0, "{stats:?}");
+        assert_eq!(stats.unconsumed_nested_bits, 0, "{stats:?}");
+        assert_eq!(stats.implicit_terminations, 0, "{stats:?}");
 
         // Without the schema this is one opaque leaf at handle 18. With it, the
         // walker descends and the target's own members come out with an index.
@@ -1741,29 +1661,6 @@ mod tests {
         // seen value forward per (element index), the same as any delta stream.
         let paths: Vec<&str> = out.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["[0].AffectedTargetsArray[1].Value"], "{paths:?}");
-    }
-
-    /// What the two new tallies read on a REAL wire payload, pinned so that a
-    /// later change to either counter has to face real data and not only
-    /// hand-built fixtures.
-    ///
-    /// This is the same 128-bit `AbilityCastsThisRound[].Effects[]` blob the
-    /// test above walks. Its nested `AffectedTargetsArray` consumes its window
-    /// exactly, and the outer level closes on its own terminator with only byte
-    /// padding after it -- so both counters are zero, which is the evidence
-    /// that neither fires on well-formed data.
-    #[test]
-    fn the_real_effects_payload_leaves_no_unconsumed_bits() {
-        let raw = [
-            0x02, 0x02, 0x26, 0xa0, 0x04, 0x04, 0x2a, 0x40, 0x7e, 0x16, 0x12, 0x3f, 0x00, 0x00,
-            0x00, 0x00,
-        ];
-        let mut stats = ArrayDecodeStats::default();
-        let _ = decode_struct_array(&raw, 128, Some(&ABILITY_EFFECTS_SCHEMA), &[], &mut stats);
-
-        assert_eq!(stats.errors, 0, "{stats:?}");
-        assert_eq!(stats.unconsumed_nested_bits, 0, "{stats:?}");
-        assert_eq!(stats.implicit_terminations, 0, "{stats:?}");
     }
 
     /// The nesting the schema declares, checked against the replay's own

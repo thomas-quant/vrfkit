@@ -286,7 +286,7 @@ fn round_infos_row0_end_of_round1() {
 /// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:2000, EL:200}]
 #[test]
 fn round_infos_row1_different_player() {
-    let data = base64_to_bytes("AgJSQAAAAABUQAAAAABWQAAAAABYQNAHAABaQMgAAAAAAA==");
+    let data = hex("02025240000000005440000000005640000000005840d00700005a40c80000000000");
     let mut r = BitReader::with_bit_len(&data, 272).unwrap();
     let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
     assert_eq!(results.len(), 1);
@@ -303,7 +303,7 @@ fn round_infos_row1_different_player() {
 /// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:2100, EL:600}]
 #[test]
 fn round_infos_row2_another_player() {
-    let data = base64_to_bytes("AgJSQAAAAABUQAAAAABWQAAAAABYQDQIAABaQFgCAAAAAA==");
+    let data = hex("02025240000000005440000000005640000000005840340800005a40580200000000");
     let mut r = BitReader::with_bit_len(&data, 272).unwrap();
     let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
     assert_eq!(results.len(), 1);
@@ -378,53 +378,14 @@ fn round_infos_rejects_one_more_than_max_fields() {
 
 // -- Helpers --------------------------------------------------------------
 
-fn base64_to_bytes(s: &str) -> Vec<u8> {
-    // Minimal base64 decoder for tests (standard alphabet, with padding).
-    const TABLE: [u8; 128] = {
-        let mut t = [255u8; 128];
-        let mut i = 0u8;
-        while i < 26 {
-            t[(b'A' + i) as usize] = i;
-            t[(b'a' + i) as usize] = i + 26;
-            i += 1;
-        }
-        let mut d = 0u8;
-        while d < 10 {
-            t[(b'0' + d) as usize] = d + 52;
-            d += 1;
-        }
-        t[b'+' as usize] = 62;
-        t[b'/' as usize] = 63;
-        t
-    };
-
-    let input: Vec<u8> = s.bytes().filter(|&b| b != b'=').collect();
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let chunks = input.chunks(4);
-    for chunk in chunks {
-        let mut buf = [0u8; 4];
-        for (i, &b) in chunk.iter().enumerate() {
-            buf[i] = TABLE[b as usize];
-        }
-        out.push((buf[0] << 2) | (buf[1] >> 4));
-        if chunk.len() > 2 {
-            out.push((buf[1] << 4) | (buf[2] >> 2));
-        }
-        if chunk.len() > 3 {
-            out.push((buf[2] << 6) | buf[3]);
-        }
-    }
-    out
-}
-
 // -- Unknown enum values --------------------------------------------------
 
-/// One `RoundResults` element carrying a single member at `handle`, whose
-/// payload is `width` bits holding `value`.
-fn round_results_one_member(handle: u32, value: u32, width: u32) -> (Vec<u8>, u64) {
+/// One element carrying a single member at `handle`, whose payload window is
+/// `width` bits holding `value` (zero past its 32 bits).
+fn one_member(handle: u32, value: u32, width: u32) -> (Vec<u8>, u64) {
     let mut bits = BitWriter::new();
     bits.int_packed(1); // element count
-    bits.int_packed(1); // encoded index -> round 0
+    bits.int_packed(1); // encoded index -> element 0
     bits.int_packed(handle + 1);
     bits.int_packed(width);
     bits.bits(u64::from(value), width);
@@ -444,7 +405,7 @@ fn round_results_one_member(handle: u32, value: u32, width: u32) -> (Vec<u8>, u6
 #[test]
 fn round_results_unknown_team_role_is_an_error_not_an_absent_field() {
     // Handle 94 is WinningTeamRole on 13.01. Role 7 is past RoleCount (5).
-    let (data, bit_len) = round_results_one_member(94, 7, 3);
+    let (data, bit_len) = one_member(94, 7, 3);
     let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
     let err = decode_round_results(&mut r, &bomb_game_state_1301())
         .expect_err("an unknown role must not decode as an absent field");
@@ -466,7 +427,7 @@ fn round_results_unknown_team_role_is_an_error_not_an_absent_field() {
 #[test]
 fn round_results_unknown_outcome_is_an_error_not_an_absent_field() {
     // Handle 95 is RoundResult on 13.01. Outcome 8 is past Invalid (7).
-    let (data, bit_len) = round_results_one_member(95, 8, 4);
+    let (data, bit_len) = one_member(95, 8, 4);
     let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
     let err = decode_round_results(&mut r, &bomb_game_state_1301())
         .expect_err("an unknown outcome must not decode as an absent field");
@@ -487,7 +448,7 @@ fn round_results_unknown_outcome_is_an_error_not_an_absent_field() {
 /// be satisfied by rejecting everything.
 #[test]
 fn round_results_known_enum_values_still_decode() {
-    let (data, bit_len) = round_results_one_member(94, 2, 3);
+    let (data, bit_len) = one_member(94, 2, 3);
     let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
     let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
     assert_eq!(results[0].winning_team_role, Some(AresTeamRole::Defender));
@@ -495,7 +456,7 @@ fn round_results_known_enum_values_still_decode() {
 
 #[test]
 fn round_results_zero_width_enum_is_an_error_not_an_absent_field() {
-    let (data, bit_len) = round_results_one_member(94, 0, 0);
+    let (data, bit_len) = one_member(94, 0, 0);
     let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
     let err = decode_round_results(&mut r, &bomb_game_state_1301())
         .expect_err("a declared enum field with no payload cannot become absent");
@@ -545,21 +506,6 @@ fn struct_fname_rejects_a_negative_instance_number() {
 
 // -- Field windows the member did not consume -----------------------------
 
-/// One `RoundInfos` element carrying a single member at `handle`, whose payload
-/// window is `width` bits holding `value` in its low 32.
-fn round_infos_one_member(handle: u32, value: i32, width: u32) -> (Vec<u8>, u64) {
-    let mut bits = BitWriter::new();
-    bits.int_packed(1); // element count
-    bits.int_packed(1); // encoded index -> element 0
-    bits.int_packed(handle + 1);
-    bits.int_packed(width);
-    bits.bits(u64::from(value as u32), width);
-    bits.int_packed(0); // end of element
-    bits.int_packed(0); // end of array
-    let (data, bit_len) = bits.finish();
-    (data, u64::from(bit_len))
-}
-
 /// A member that reads less than its declared window must fail, not export the
 /// part it happened to read.
 ///
@@ -571,7 +517,7 @@ fn round_infos_one_member(handle: u32, value: i32, width: u32) -> (Vec<u8>, u64)
 #[test]
 fn round_infos_member_that_underreads_its_window_is_an_error() {
     // Handle 43 is EndOfRoundMoney; 64 declared bits against a 32-bit Int32.
-    let (data, bit_len) = round_infos_one_member(43, 1900, 64);
+    let (data, bit_len) = one_member(43, 1900, 64);
     let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
     let err = decode_round_infos(&mut r, &owner_exclusive_player_info())
         .expect_err("half-read money must not export as a value");
@@ -594,7 +540,7 @@ fn round_infos_member_that_underreads_its_window_is_an_error() {
 /// by rejecting every member.
 #[test]
 fn round_infos_member_with_an_exact_window_still_decodes() {
-    let (data, bit_len) = round_infos_one_member(43, 1900, 32);
+    let (data, bit_len) = one_member(43, 1900, 32);
     let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
     let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
     assert_eq!(results[0].end_of_round_money, Some(1900));
