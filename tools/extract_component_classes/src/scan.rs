@@ -260,6 +260,8 @@ pub fn scan_package(
 }
 
 /// Every class object seen, keyed by `(package id, public export hash)`.
+/// `scan_header` records public classes only, so no key has hash 0 and a
+/// non-public `ClassRef::Local` finds nothing here.
 pub type ClassTable = HashMap<(u64, u64), ClassExport>;
 
 /// The resolved class of a candidate: `(class path, how it resolved, first
@@ -272,68 +274,56 @@ pub struct Resolved {
     pub class_ref: String,
 }
 
+impl Resolved {
+    fn unresolved(class_kind: &'static str, class_ref: String) -> Self {
+        Resolved {
+            class: "?".to_owned(),
+            class_kind,
+            native_class: "?".to_owned(),
+            class_ref,
+        }
+    }
+}
+
 pub fn resolve(class: &ClassRef, script: &ScriptObjects, classes: &ClassTable) -> Resolved {
+    // A class some package defines, under `kind` when found and
+    // `unresolved_kind` when no package read defines it.
+    let defined = |key, kind, unresolved_kind, class_ref| match classes.get(&key) {
+        Some(found) => Resolved {
+            class: found.path.clone(),
+            class_kind: kind,
+            native_class: native_ancestor(&found.super_ref, script, classes),
+            class_ref,
+        },
+        None => Resolved::unresolved(unresolved_kind, class_ref),
+    };
     match class {
-        ClassRef::Script(index) => match script.path_of(*index) {
-            Some(path) => Resolved {
-                class: path.clone(),
-                class_kind: "script_import",
-                native_class: path,
-                class_ref: format!("script:{index:#018x}"),
-            },
-            None => Resolved {
-                class: "?".to_owned(),
-                class_kind: "script_import_unresolved",
-                native_class: "?".to_owned(),
-                class_ref: format!("script:{index:#018x}"),
-            },
-        },
-        ClassRef::Package(id, name, hash) => {
-            let reference = format!("package:{name}#{hash:#018x}");
-            match classes.get(&(*id, *hash)) {
-                Some(found) => Resolved {
-                    class: found.path.clone(),
-                    class_kind: "package_import",
-                    native_class: native_ancestor(&found.super_ref, script, classes),
-                    class_ref: reference,
+        ClassRef::Script(index) => {
+            let class_ref = format!("script:{index:#018x}");
+            match script.path_of(*index) {
+                Some(path) => Resolved {
+                    class: path.clone(),
+                    class_kind: "script_import",
+                    native_class: path,
+                    class_ref,
                 },
-                None => Resolved {
-                    class: "?".to_owned(),
-                    class_kind: "package_import_unresolved",
-                    native_class: "?".to_owned(),
-                    class_ref: reference,
-                },
+                None => Resolved::unresolved("script_import_unresolved", class_ref),
             }
         }
-        ClassRef::Local(id, hash, name) => {
-            let reference = format!("export:{name}");
-            match classes.get(&(*id, *hash)).filter(|_| *hash != 0) {
-                Some(found) => Resolved {
-                    class: found.path.clone(),
-                    class_kind: "export",
-                    native_class: native_ancestor(&found.super_ref, script, classes),
-                    class_ref: reference,
-                },
-                None => Resolved {
-                    class: "?".to_owned(),
-                    class_kind: "export_unresolved",
-                    native_class: "?".to_owned(),
-                    class_ref: reference,
-                },
-            }
-        }
-        ClassRef::Null => Resolved {
-            class: "?".to_owned(),
-            class_kind: "null",
-            native_class: "?".to_owned(),
-            class_ref: "null".to_owned(),
-        },
-        ClassRef::Bad(why) => Resolved {
-            class: "?".to_owned(),
-            class_kind: "bad_index",
-            native_class: "?".to_owned(),
-            class_ref: why.clone(),
-        },
+        ClassRef::Package(id, name, hash) => defined(
+            (*id, *hash),
+            "package_import",
+            "package_import_unresolved",
+            format!("package:{name}#{hash:#018x}"),
+        ),
+        ClassRef::Local(id, hash, name) => defined(
+            (*id, *hash),
+            "export",
+            "export_unresolved",
+            format!("export:{name}"),
+        ),
+        ClassRef::Null => Resolved::unresolved("null", "null".to_owned()),
+        ClassRef::Bad(why) => Resolved::unresolved("bad_index", why.clone()),
     }
 }
 
@@ -347,7 +337,7 @@ fn native_ancestor(start: &ClassRef, script: &ScriptObjects, classes: &ClassTabl
                 return script.path_of(index).unwrap_or_else(|| "?".to_owned());
             }
             ClassRef::Package(id, _, hash) | ClassRef::Local(id, hash, _) => {
-                match classes.get(&(id, hash)).filter(|_| hash != 0) {
+                match classes.get(&(id, hash)) {
                     Some(found) => at = found.super_ref.clone(),
                     None => return "?".to_owned(),
                 }
