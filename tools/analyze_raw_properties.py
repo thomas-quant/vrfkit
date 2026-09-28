@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 import corpus_scan
@@ -237,33 +239,48 @@ def analyze_export(
         list[tuple[int, int | None, int]],
     ] = defaultdict(list)
 
+    def add(counter: Counter[str], mask) -> None:
+        # Only a nonzero count creates the build's key, as a per-row += 1 did.
+        count = pc.sum(pc.cast(mask, pa.int64())).as_py() or 0
+        if count:
+            counter[build] += count
+
+    def present(column):
+        # Decoded first: a dictionary column's null can sit in its values.
+        if pa.types.is_dictionary(column.type):
+            column = pc.cast(column, pa.string())
+        return pc.is_valid(column)
+
+    # Only unnamed replicated-property rows with a payload need per-row work
+    # (1,623 of 1,648,356 rows on a 13.06 export), so the other counters are
+    # Arrow mask sums and only those rows reach Python, in physical order.
     for batch in parquet.iter_batches(columns=list(FIELD_COLUMNS)):
-        columns = batch.to_pydict()
-        for row in range(batch.num_rows):
-            inventory.field_rows[build] += 1
+        group_paths = pc.cast(batch.column("group_path"), pa.string())
+        if group_paths.null_count:
+            # What `CLASS_NET_CACHE_SUFFIX in None` raised row by row.
+            raise TypeError("argument of type 'NoneType' is not iterable")
+        if batch.num_rows:
+            inventory.field_rows[build] += batch.num_rows
+        prop = pc.invert(pc.match_substring(group_paths, CLASS_NET_CACHE_SUFFIX))
+        typed = present(batch.column(TYPED_COLUMNS[0]))
+        for name in TYPED_COLUMNS[1:]:
+            typed = pc.or_(typed, present(batch.column(name)))
+        named = present(batch.column("field_name"))
+        has_raw = present(batch.column("raw_bits"))
+        raw_only = pc.and_(prop, pc.and_(has_raw, pc.invert(typed)))
+        unnamed = pc.and_(prop, pc.invert(named))
+        add(inventory.property_rows, prop)
+        add(inventory.property_raw_only_rows, raw_only)
+        add(inventory.named_raw_only_rows, pc.and_(raw_only, named))
+        add(inventory.unnamed_rows, unnamed)
+        add(inventory.unnamed_typed_rows, pc.and_(unnamed, typed))
+        add(inventory.unnamed_without_raw_rows, pc.and_(unnamed, pc.invert(has_raw)))
+
+        selected = batch.filter(pc.and_(unnamed, has_raw))
+        columns = selected.to_pydict()
+        for row in range(selected.num_rows):
             group_path = columns["group_path"][row]
-            if CLASS_NET_CACHE_SUFFIX in group_path:
-                continue
-
-            inventory.property_rows[build] += 1
-            field_name = columns["field_name"][row]
             raw = columns["raw_bits"][row]
-            typed = any(columns[name][row] is not None for name in TYPED_COLUMNS)
-            if raw is not None and not typed:
-                inventory.property_raw_only_rows[build] += 1
-                if field_name is not None:
-                    inventory.named_raw_only_rows[build] += 1
-
-            if field_name is not None:
-                continue
-
-            inventory.unnamed_rows[build] += 1
-            if typed:
-                inventory.unnamed_typed_rows[build] += 1
-            if raw is None:
-                inventory.unnamed_without_raw_rows[build] += 1
-                continue
-
             inventory.unnamed_raw_rows[build] += 1
             bit_count = int(columns["bit_count"][row])
             if len(raw) != (bit_count + 7) // 8:
