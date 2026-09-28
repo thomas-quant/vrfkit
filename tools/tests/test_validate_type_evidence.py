@@ -282,13 +282,10 @@ class ExportDiscoveryTests(unittest.TestCase):
     SPEC = [{"group": "g", "field": "f", "type": "Int32"}]
 
     def test_a_stranded_prior_output_is_not_counted_a_second_time(self):
-        """The silent case: `.X.vrfkit-previous-*` is a complete export.
-
-        `vrfkit export` moves the prior `--out` there for one rename and leaves
-        it when it cannot delete it, or when it dies between the two renames.
-        At 259ed10 the rglob here read it as a second export: rows 2, not 1,
-        with no error -- a plausible number.
-        """
+        """The silent case: `vrfkit export` leaves the prior `--out` as a
+        complete `.X.vrfkit-previous-*` export when it cannot delete it or dies
+        between its two renames. At 259ed10 the rglob here read it as a second
+        export: rows 2, not 1, with no error -- a plausible number."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_int_export(root / "a")
