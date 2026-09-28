@@ -1,22 +1,15 @@
 //! `++Ares-Core+release-12.11`
 
 use super::SeededTransform;
-use crate::helpers::{
-    reverse_bits_u8, reverse_bits_u32, reverse_bits64_without_final_16bit_swap,
-    swap_adjacent_bits_u8, swap_adjacent_bits_u32, swap_adjacent_bits_u64,
-};
+use crate::helpers::*;
 
-/// `++Ares-Core+release-12.11`
 pub struct V12_11;
 
 impl SeededTransform for V12_11 {
     const BRANCH: &'static str = "++Ares-Core+release-12.11";
     const SEED_ADDEND: u32 = 0x409d_36a3;
     const INIT_A_OFFSET: u32 = 0x23;
-    /// Adds instead of subtracting. release-13.05 and release-13.06 also add;
-    /// `only_12_11_13_05_and_13_06_add_the_offset` pins this exception.
     const ADD_OFFSET: bool = true;
-    const TAIL_XOR: u8 = 0xa3;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         let ror2 = state.rotate_right(2);
@@ -43,7 +36,7 @@ impl SeededTransform for V12_11 {
         v = v.rotate_right((rol8 % 31) + 1);
         v = swap_adjacent_bits_u32(v);
         v = v.wrapping_add(rol6);
-        v = reverse_bits_u32(v);
+        v = v.reverse_bits();
         v = v.wrapping_sub(rol4);
         v = v.wrapping_sub(rol3);
         v = v.wrapping_sub(rol2);
@@ -56,7 +49,7 @@ impl SeededTransform for V12_11 {
         v = v.rotate_right((rotate_input % 7) + 1);
         v = swap_adjacent_bits_u8(v);
         v = v.wrapping_add(state_byte.wrapping_mul(0x29));
-        v = reverse_bits_u8(v);
+        v = v.reverse_bits();
         v = v.wrapping_add(state_byte.wrapping_mul(0x23));
         swap_adjacent_bits_u8(v)
     }

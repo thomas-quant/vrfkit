@@ -1,20 +1,15 @@
 //! `++Ares-Core+release-11.09`, recovered from the native seeded reader.
 
 use super::SeededTransform;
-use crate::helpers::{
-    substitute_bytes_u32, substitute_bytes_u64, swap_adjacent_bits_u8, swap_adjacent_bits_u32,
-    swap_adjacent_bits_u64,
-};
-use crate::sbox::{SBOX_8, SBOX_32, SBOX_64};
+use crate::helpers::*;
+use crate::sbox::*;
 
-/// `++Ares-Core+release-11.09`
 pub struct V11_09;
 
 impl SeededTransform for V11_09 {
     const BRANCH: &'static str = "++Ares-Core+release-11.09";
     const SEED_ADDEND: u32 = 0x12cf14e5;
     const INIT_A_OFFSET: u32 = 0x1b;
-    const TAIL_XOR: u8 = 0xe5;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         v = substitute_bytes_u64(v, &SBOX_64);

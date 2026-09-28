@@ -1,7 +1,6 @@
-//! The hasher the cache's internal maps use. Not HashDoS-resistant by design; rationale and figures in docs/PERFORMANCE_NOTES.md#fxhash-over-siphash.
-//!
-//! If this ever moves behind a network boundary, revert these maps to
-//! `std::collections::HashMap`'s default hasher.
+//! The hasher the cache's maps use. Not HashDoS-resistant, by design; the
+//! rationale and figures are in docs/PERFORMANCE_NOTES.md#fxhash-over-siphash.
+//! If this ever sits behind a network boundary, revert to std's default hasher.
 
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -11,16 +10,11 @@ pub type FxHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx
 /// A `HashSet` using [`FxHasher`].
 pub type FxHashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxHasher>>;
 
-/// The multiplier: the fractional bits of the golden ratio scaled to 64 bits.
-/// Taken verbatim from `rustc_hash` so the mixing quality is the one that has
-/// been exercised by rustc rather than something invented here.
+/// Copied verbatim from `rustc_hash` (2^64 / pi, rounded), so the mixing is
+/// the one rustc exercises rather than something invented here.
 const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 
 /// A fast, non-cryptographic hasher for locally-sourced keys.
-///
-/// Deliberately minimal: `write` folds the input 8 bytes at a time and the
-/// integer paths bypass the byte loop entirely, which is what makes the `u32`
-/// keyed maps cheap.
 #[derive(Default, Clone)]
 pub struct FxHasher {
     hash: u64,
@@ -83,8 +77,8 @@ impl Hasher for FxHasher {
 
     #[inline]
     fn finish(&self) -> u64 {
-        // Swapping the halves puts the well-mixed high bits where a `HashMap`
-        // reads its bucket index from.
+        // Not a half swap: rotating by 20 brings the multiply's well-mixed high
+        // bits down to the low bits hashbrown takes the bucket index from.
         self.hash.rotate_left(20)
     }
 }
@@ -102,9 +96,8 @@ mod tests {
 
     #[test]
     fn distinct_small_integers_do_not_collide() {
-        // The u32 maps are keyed by NetGUIDs, which are small and dense. A mix
-        // that collapsed them would turn every probe into a bucket walk, so
-        // this is the property that actually matters for this crate.
+        // NetGUID keys are small and dense; a mix that collapsed them would
+        // turn every probe into a bucket walk.
         let mut seen = std::collections::HashSet::new();
         for guid in 0u32..10_000 {
             assert!(seen.insert(hash_of(&guid)), "collision at {guid}");
