@@ -105,9 +105,6 @@ pub(crate) fn read_game_specific_frame_data(
         return Ok(0);
     }
     let skip_offset = reader.read_u64()?;
-    if skip_offset == 0 {
-        return Ok(0);
-    }
     // `skip_offset` is a raw u64 from the wire; `* 8` is plain wrapping
     // multiplication, so a large value silently wraps to a small skip and
     // desynchronises the frame. The flag is unset on every known replay, but a
