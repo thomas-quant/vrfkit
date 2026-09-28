@@ -25,21 +25,10 @@ pub struct PlayerRoundInfo {
     pub end_of_round_loadout_value: Option<i32>,
 }
 
-/// Decode an `OwnerExclusivePlayerInfo.RoundInfos` blob.
-///
-/// # Wire layout
-///
-/// Standard UE RepLayout dynamic-array framing (see module docs). Members are
-/// selected by declared name; these five kept their 40..=44 handles through
-/// 13.02 by luck, not guarantee. See docs/archive/PROJECT_STATUS.md 26-G.
-///
-/// # Arguments
-///
-/// * `reader` - A `BitReader` positioned at the start of the blob, with
-///   `len_bits()` equal to the declared bit count.
-/// * `declared` - The enclosing group's net field export names indexed by
-///   handle. See [`super::round_results::decode_round_results`] on why an
-///   empty slice is an error rather than a fallback.
+/// Decode an `OwnerExclusivePlayerInfo.RoundInfos` blob (arguments in the
+/// module docs). Members go by declared name: these five kept their 40..=44
+/// handles through 13.02 by luck, not guarantee (docs/archive/PROJECT_STATUS.md
+/// 26-G).
 pub fn decode_round_infos(
     reader: &mut BitReader<'_>,
     declared: &[Option<&str>],
@@ -65,9 +54,7 @@ pub fn decode_round_infos(
                 "EndOfRoundLoadoutValue" => &mut row.end_of_round_loadout_value,
                 _ => return Ok(None),
             };
-            // Every member here is a fixed 32-bit Int32, so its window is fully
-            // spoken for. A wider one means the field is not the Int32 this
-            // decoder believes it is, and the half it read is not a value.
+            // A fixed 32-bit Int32: a wider window is not this type and fails.
             *slot = Some(sub.read_i32()?);
             Ok(Some(name))
         },

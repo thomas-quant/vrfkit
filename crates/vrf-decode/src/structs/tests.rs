@@ -7,10 +7,8 @@ use vrf_bitio::BitReader;
 
 // -- Declarations ---------------------------------------------------------
 //
-// The decoders select members by the name the replay declares for a handle,
-// so every test has to supply the declaration its bytes were recorded under.
-// That is the point rather than an inconvenience: the SAME bytes decode under
-// two different handle layouts, which is what build 13.02 did to us.
+// Every test supplies the declaration its bytes were recorded under: the same
+// members sit at different handles on 13.01 and 13.02.
 
 /// `BombGameState_C` on build 13.01: RoundResults members at 93..=96.
 fn bomb_game_state_1301() -> Vec<Option<&'static str>> {
@@ -21,9 +19,8 @@ fn bomb_game_state_1301() -> Vec<Option<&'static str>> {
     d[95] = Some("RoundResult");
     d[96] = Some("EliminatedTeams");
     d[97] = Some("EliminatedTeams");
-    // Handle 50 is the match-winner scalar, NOT a RoundResults member. It
-    // shares the name, which is why resolution runs handle -> name and never
-    // the reverse: a search by name could land here.
+    // Handle 50 is the match-winner scalar, NOT a RoundResults member; it
+    // shares the name, so a search by name could land here.
     d[50] = Some("WinningTeam");
     d
 }
@@ -102,9 +99,7 @@ fn round_results_row6_blue_defender_defuse() {
 }
 
 /// A 0-bit blob is an error for all three decoders: not even the element
-/// count is there. RoundResults alone used to return an empty vector for it,
-/// which reads like a blob with nothing to report. The export path never
-/// hands a decoder zero bits: a zero-bit field keeps no raw bits to decode.
+/// count is there. (The export path never hands a decoder zero bits.)
 #[test]
 fn a_zero_bit_blob_is_an_error_for_every_decoder() {
     let eof = |err: StructBlobError| {
@@ -142,13 +137,9 @@ fn round_results_1302_round0() {
     assert_eq!(results[0].round_result, Some(AresRoundOutcome::Elimination));
 }
 
-/// The regression that motivated all of this: 13.02 bytes under the 13.01
-/// declaration must FAIL, loudly and by name.
-///
-/// It must not return an empty vector. An empty vector is indistinguishable
-/// from a round with nothing to report, and the sink treats it as "decoder had
-/// nothing to add" -- which is exactly how a whole build's worth of missing
-/// match scores looked like a clean export.
+/// 13.02 bytes under the 13.01 declaration must FAIL by name, not return an
+/// empty vector: that is how a whole build's missing match scores looked like
+/// a clean export.
 #[test]
 fn round_results_1302_bytes_under_1301_declaration_is_an_error() {
     let data = hex("0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000");
@@ -166,10 +157,8 @@ fn round_results_1302_bytes_under_1301_declaration_is_an_error() {
     );
 }
 
-/// The mirror: 13.01 bytes under the 13.02 declaration.
-///
-/// Handle 93 is undeclared there, so this fails too. Together the two prove
-/// the decoder is keyed on the declaration and not on either set of numbers.
+/// The mirror: 13.01 bytes under the 13.02 declaration fail at handle 93, so
+/// the decoder is keyed on the declaration, not on either set of numbers.
 #[test]
 fn round_results_1301_bytes_under_1302_declaration_is_an_error() {
     let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
@@ -314,20 +303,13 @@ fn round_infos_row2_another_player() {
 
 // -- TooManyFields boundary (B12) -----------------------------------------
 
-/// `MAX_FIELDS_PER_ELEMENT` from the framing module, repeated here so the
-/// boundary tests name a concrete number rather than a magic literal.
+/// The framing module's `MAX_FIELDS_PER_ELEMENT`, repeated rather than
+/// imported on purpose: a changed cap must fail the boundary tests.
 const MAX_FIELDS_PER_ELEMENT: u32 = 8;
 
-/// Build a `RoundInfos` blob whose single element carries `n` fields, each at
-/// handle 40 (`RoundNumber`, an Int32) with a zero payload.
-///
-/// IntPacked in this codebase encodes 7 value bits per byte in bits 1..=7 with
-/// the continuation in bit 0 (`value = (byte >> 1) << shift`), so a one-byte
-/// value `v` (v < 128) is written as `v << 1`. Every length and handle here is
-/// one byte; each field is `handle(1) bitcount(1) payload(4)`. The element is
-/// terminated correctly so a blob that parses does so without tripping
-/// `ensure_consumed`. Used to probe the `TooManyFields` boundary, which must
-/// allow exactly `MAX_FIELDS_PER_ELEMENT` fields and reject the `MAX + 1`-th.
+/// A `RoundInfos` blob whose single, correctly terminated element carries `n`
+/// zero `RoundNumber` fields (handle 40), each `handle(1) bitcount(1)
+/// payload(4)` bytes; a one-byte IntPacked `v < 128` is the byte `v << 1`.
 fn round_infos_with_n_fields(n: u32) -> (Vec<u8>, u64) {
     /// One-byte IntPacked for values that fit in 7 bits (no continuation).
     const fn ip1(v: u8) -> u8 {
@@ -348,7 +330,6 @@ fn round_infos_with_n_fields(n: u32) -> (Vec<u8>, u64) {
 }
 
 /// MAX fields in one element must parse: the guard rejects only the MAX+1-th.
-/// (Before the fix the guard rejected the MAX-th, allowing only MAX-1.)
 #[test]
 fn round_infos_accepts_max_fields_per_element() {
     let (bytes, bits) = round_infos_with_n_fields(MAX_FIELDS_PER_ELEMENT);
@@ -358,8 +339,7 @@ fn round_infos_accepts_max_fields_per_element() {
     assert_eq!(results[0].round_number, Some(0));
 }
 
-/// The MAX+1-th field is rejected as `TooManyFields`. Proves the guard still
-/// exists and now sits one field further out than it did before the fix.
+/// The MAX+1-th field is rejected as `TooManyFields`.
 #[test]
 fn round_infos_rejects_one_more_than_max_fields() {
     let (bytes, bits) = round_infos_with_n_fields(MAX_FIELDS_PER_ELEMENT + 1);
@@ -375,8 +355,6 @@ fn round_infos_rejects_one_more_than_max_fields() {
         "expected TooManyFields, got {err:?}"
     );
 }
-
-// -- Helpers --------------------------------------------------------------
 
 // -- Unknown enum values --------------------------------------------------
 
@@ -395,13 +373,8 @@ fn one_member(handle: u32, value: u32, width: u32) -> (Vec<u8>, u64) {
     (data, u64::from(bit_len))
 }
 
-/// An `AresTeamRole` value outside the declared variants must be reported, not
-/// turned into an absent field.
-///
-/// `from_byte` returned `None` for an unrecognised value, and `None` is also
-/// what these members use for "not sent in this update" -- so a newly added
-/// game enum variant would vanish into a null column with `Decode errors: 0`
-/// the whole time.
+/// An `AresTeamRole` value outside the declared variants is `UnknownEnumValue`,
+/// not an absent field.
 #[test]
 fn round_results_unknown_team_role_is_an_error_not_an_absent_field() {
     // Handle 94 is WinningTeamRole on 13.01. Role 7 is past RoleCount (5).
@@ -506,14 +479,9 @@ fn struct_fname_rejects_a_negative_instance_number() {
 
 // -- Field windows the member did not consume -----------------------------
 
-/// A member that reads less than its declared window must fail, not export the
-/// part it happened to read.
-///
-/// The field's `sub_reader` advances the parent past the whole window, so the
-/// blob stays aligned and `ensure_consumed` is satisfied at the end -- the
-/// dropped bits never surface. A 64-bit `EndOfRoundMoney` whose first 32 bits
-/// say 1900 exported 1900 and discarded the rest, and the blob counted as
-/// decoded rather than failed.
+/// A member that reads less than its declared window fails
+/// (`MemberNotFullyConsumed`) instead of exporting the part it read: the
+/// 64-bit `EndOfRoundMoney` whose first 32 bits say 1900.
 #[test]
 fn round_infos_member_that_underreads_its_window_is_an_error() {
     // Handle 43 is EndOfRoundMoney; 64 declared bits against a 32-bit Int32.

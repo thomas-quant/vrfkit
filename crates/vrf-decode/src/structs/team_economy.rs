@@ -21,22 +21,10 @@ pub struct TeamEconomyUpdate {
     pub average_loadout_value: Option<i32>,
 }
 
-/// Decode a `BombGameState.TeamEconomy` blob.
-///
-/// # Wire layout
-///
-/// Standard UE RepLayout dynamic-array framing (see module docs).
-/// Field handles: 56=ReplicationId(IntPacked), 57=LoadoutValue(Int32),
-/// 58=AverageLoadoutValue(Int32).
-///
-/// This compatibility entry point retains the 12.06--13.01 handle layout.
-/// Replay parsers should use [`decode_team_economy_declared`] to follow the
-/// enclosing group's declaration, including the older 53..=55 layout.
-///
-/// # Arguments
-///
-/// * `reader` - A `BitReader` positioned at the start of the blob, with
-///   `len_bits()` equal to the declared bit count.
+/// Decode a `BombGameState.TeamEconomy` blob under the fixed 12.06-13.01
+/// handles: 56 ReplicationId (IntPacked), 57 LoadoutValue and 58
+/// AverageLoadoutValue (Int32). Replay parsers should use
+/// [`decode_team_economy_declared`], which also reads the older 53..=55 layout.
 pub fn decode_team_economy(reader: &mut BitReader<'_>) -> Result<Vec<TeamEconomyUpdate>> {
     decode_members(reader, |handle| match handle {
         56 => Ok("241"),
@@ -49,11 +37,9 @@ pub fn decode_team_economy(reader: &mut BitReader<'_>) -> Result<Vec<TeamEconomy
     })
 }
 
-/// Decode TeamEconomy using the replay's enclosing-group handle declarations.
-///
-/// The replication ID is declared as hardcoded FName index `241`; it retains
-/// its existing IntPacked interpretation. Loadout members are named Int32s.
-/// Unknown or missing declarations are errors, never a numeric-handle fallback.
+/// Decode TeamEconomy under the enclosing group's declarations. The
+/// replication ID is declared as hardcoded FName index `241` (read as
+/// IntPacked); unknown or missing declarations are errors, never a fallback.
 pub fn decode_team_economy_declared(
     reader: &mut BitReader<'_>,
     declared: &[Option<&str>],
@@ -75,9 +61,8 @@ fn decode_members<'a>(
             loadout_value: None,
             average_loadout_value: None,
         },
-        // Two Int32s and one IntPacked, all self-delimiting or fixed, so each
-        // owes its whole window. The IntPacked member is declared under its
-        // hardcoded FName index and reported as `ReplicationId`.
+        // Each member owes its whole window; the IntPacked one, declared as
+        // `241`, is reported as `ReplicationId`.
         |row, name, sub| {
             Ok(Some(match name {
                 "241" => {

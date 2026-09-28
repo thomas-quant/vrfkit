@@ -1,10 +1,7 @@
-//! The RepLayout dynamic-array framing the three struct blobs share.
-//!
-//! Kept apart from the effect decoder's near-identical framing on purpose: the
-//! two disagree on the element-count ceiling (128 here, 256 there) and on what
-//! they do with a malformed element, and the acceptance bar for this crate is
-//! byte-identical output. One shared abstraction that quietly changed either
-//! would be a worse trade than two small honest copies.
+//! The RepLayout dynamic-array framing the three struct blobs share. Kept apart
+//! from the effect decoder's near-identical framing on purpose: the
+//! element-count ceilings differ (128 here, 256 there) and output must stay
+//! byte-identical.
 
 use vrf_bitio::BitReader;
 
@@ -42,14 +39,11 @@ fn read_element_index(reader: &mut BitReader<'_>, declared_count: u32) -> Result
     Ok(Some(index))
 }
 
-/// The element loop all three blobs share.
-///
-/// Per field, in this order: the header, the field-count limit, the field's
-/// window, the name `name_for` gives its handle, then `member`, which reads
-/// the window into the row and returns the name a leftover is reported under
-/// -- or `None` for a name it has no arm for -- and last the check that the
-/// window was consumed. The order decides which error a malformed blob
-/// reports, so it is written once.
+/// The element loop all three blobs share. Per field, in this order: header,
+/// field-count limit, window, `name_for(handle)`, then `member` (reads the
+/// window into the row and returns the label a leftover is reported under, or
+/// `None` for a name without an arm), then the window-consumed check. The
+/// order decides which error a malformed blob reports, so it is written once.
 pub(super) fn decode_elements<'d, R>(
     reader: &mut BitReader<'_>,
     context: &'static str,
@@ -68,8 +62,7 @@ pub(super) fn decode_elements<'d, R>(
             if field_idx == MAX_FIELDS_PER_ELEMENT {
                 return Err(StructBlobError::TooManyFields { context });
             }
-            // The sub-reader consumes the bits from the parent, so a field we
-            // do not interpret still advances the stream correctly.
+            // Advances the parent past the window, whatever `member` reads.
             let mut sub = reader.sub_reader(u64::from(bit_count))?;
             let name = name_for(handle)?;
             let Some(label) = member(&mut row, name, &mut sub)? else {
@@ -106,9 +99,8 @@ fn read_field_header(reader: &mut BitReader<'_>) -> Result<Option<(u32, u32)>> {
 }
 
 /// Read a byte-width enum whose payload carries only its significant bits.
-///
-/// Zero-width and over-wide payloads are malformed: returning no value would
-/// make a field the wire explicitly sent indistinguishable from an absent one.
+/// Zero-width and over-wide payloads are errors: no value would make a field
+/// the wire sent look absent.
 pub(super) fn read_narrow_byte(
     reader: &mut BitReader<'_>,
     name: &str,
@@ -126,22 +118,12 @@ pub(super) fn read_narrow_byte(
 }
 
 /// The name the REPLAY declares for `handle`, which is what selects a member.
-///
-/// Handle numbers are not stable across game builds. Build 13.02 deleted
-/// `TeamEconomy` and `TeamComponents` from `BombGameState` and added
-/// `TeamStates`, which moved every later handle down by eight: `RoundResults`'s
-/// members went from 93..=96 to 81..=84. A decoder keyed on the old numbers
-/// does not misread them, it reads NOTHING, because the first handle it meets
-/// is one it has no arm for. The declaration moves with the members, so it is
-/// the only key that survives a reshuffle.
-///
-/// Resolution is handle -> name and NEVER the reverse. A name can be declared
-/// at more than one handle: `WinningTeam` is both the `BombGameState` scalar
-/// naming the match winner (handle 50) and the `RoundResults` member (81 on
-/// 13.02, 93 on 13.01). Searching the declaration BY NAME can therefore match
-/// the wrong slot and yield a plausible wrong value, where asking what a
-/// handle the wire just handed us is called cannot -- handle 50 never appears
-/// inside the blob.
+/// 13.02 deleted `TeamEconomy` and `TeamComponents` from `BombGameState` and
+/// added `TeamStates`, moving every later handle down by eight (`RoundResults`
+/// 93..=96 -> 81..=84), and a handle-keyed decoder read NOTHING; the
+/// declaration moves with the members. Resolution is handle -> name, NEVER the
+/// reverse: `WinningTeam` is also the match-winner scalar at handle 50, which a
+/// search by name could match.
 pub(super) fn member_name<'d>(
     declared: &[Option<&'d str>],
     handle: u32,
@@ -154,17 +136,9 @@ pub(super) fn member_name<'d>(
         .ok_or(StructBlobError::UndeclaredHandle { handle, context })
 }
 
-/// Ensure ONE field's sub-reader consumed the whole window its header declared.
-///
-/// `reader.sub_reader(bit_count)` advances the PARENT past the entire window
-/// the moment it is created, so the blob stays aligned no matter how much of it
-/// the member actually reads -- every later member decodes and the closing
-/// [`ensure_consumed`] is satisfied. That is why a member reading half its
-/// window was invisible: alignment is preserved and only interpretation is
-/// lost.
-///
-/// Called per field rather than per blob for exactly that reason: the blob-level
-/// check cannot see inside a window the parent has already skipped.
+/// Ensure ONE field's sub-reader consumed its whole declared window: per field,
+/// because [`ensure_consumed`] cannot see inside a window the parent already
+/// skipped (see `StructBlobError::MemberNotFullyConsumed`).
 fn ensure_member_consumed(
     sub: &BitReader<'_>,
     name: &str,

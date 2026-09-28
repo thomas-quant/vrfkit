@@ -34,12 +34,8 @@ impl AresTeamRole {
         }
     }
 
-    /// The snake_case spelling exporters write.
-    ///
-    /// Here rather than at the export site so the exhaustive match sits with
-    /// the enum it enumerates: a new variant then fails to compile one file
-    /// away from where it was added, instead of in a crate that does not own
-    /// the type.
+    /// The snake_case spelling exporters write; here, with the enum, so a new
+    /// variant fails to compile where it is added.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -111,22 +107,8 @@ pub struct RoundResult {
     pub round_result: Option<AresRoundOutcome>,
 }
 
-/// Decode a `BombGameState.RoundResults` blob.
-///
-/// # Wire layout
-///
-/// Standard UE RepLayout dynamic-array framing (see module docs). Members are
-/// selected by declared name, not handle number; see
-/// docs/archive/PROJECT_STATUS.md 26-B/26-D for why.
-///
-/// # Arguments
-///
-/// * `reader` - A `BitReader` positioned at the start of the blob, with
-///   `len_bits()` equal to the declared bit count.
-/// * `declared` - The enclosing group's net field export names indexed by
-///   handle. An empty slice makes every member undeclared and the blob an
-///   error, which is the intended outcome: there is no safe fallback, only a
-///   set of build-specific numbers that would be wrong without warning.
+/// Decode a `BombGameState.RoundResults` blob; see the module docs for
+/// `reader`, `declared` and why members are selected by declared name.
 pub fn decode_round_results(
     reader: &mut BitReader<'_>,
     declared: &[Option<&str>],
@@ -144,15 +126,8 @@ pub fn decode_round_results(
         |row, name, sub| {
             match name {
                 "WinningTeam" => row.winning_team = Some(read_fname::<StructBlobError>(sub, 1024)?),
-                // A payload of no usable width is an error. Returning `None`
-                // would make a member explicitly sent by the wire look exactly
-                // like one absent from this update.
-                // A value the enum has no variant for is REPORTED, not folded
-                // back into `None`. `None` already means "this update did not
-                // send the member", so reusing it for "sent, unrecognised" made
-                // a newly added game variant indistinguishable from an absent
-                // field -- the column simply starts going null after a patch,
-                // with no counter moving.
+                // An unusable width or an unknown value is an error, never
+                // `None`, which means "not sent in this update".
                 "WinningTeamRole" => {
                     let v = read_narrow_byte(sub, name, CONTEXT)?;
                     row.winning_team_role = Some(AresTeamRole::from_byte(v).ok_or(
@@ -173,22 +148,14 @@ pub fn decode_round_results(
                         },
                     )?);
                 }
-                // Opaque nested array, skipped. Declared at two consecutive
-                // handles in both builds; one arm covers both because the
-                // match is on the name.
-                //
-                // Skipped EXPLICITLY rather than by falling out of the match:
-                // the consumption check below would otherwise read this as a
-                // member that left its window unread, which is precisely the
-                // distinction being drawn -- these bits are deliberately not
-                // interpreted, they are not accidentally dropped.
+                // Opaque nested array at two handles, skipped EXPLICITLY: the
+                // consumption check would read a fall-through as a member that
+                // left its window unread, not one deliberately uninterpreted.
                 "EliminatedTeams" => sub.skip_remaining(),
                 _ => return Ok(None),
             }
-            // `read_fname` is self-delimiting and `read_narrow_byte` takes the
-            // window's full width, so an interpreted member here consumes
-            // exactly. A leftover means the payload was not the shape the name
-            // promised; invalid enum widths are rejected at their reader.
+            // Interpreted members consume exactly (`read_fname` is
+            // self-delimiting, `read_narrow_byte` takes the whole window).
             Ok(Some(name))
         },
     )
