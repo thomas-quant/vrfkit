@@ -1,15 +1,10 @@
 """Guards for the checksum-table generator.
 
-`--check` demanded byte equality with a fresh render, which a content-addressed
-table cannot deliver: a checksum is a property of the property, so a different
-set of replays teaches a different *subset*, not a different answer. One export
-learned 415 entries, seventy-one learned 442, and the committed file holds 417.
-The check therefore failed for everyone, always, and a guard that cannot pass
-is not a guard -- it reads as a broken generator and gets ignored.
-
-What is worth catching is disagreement: a checksum both the file and the
-manifests know, mapped to two different types. That is portable, because it
-only ever compares the overlap.
+A different set of replays teaches a different subset of the same
+content-addressed table, so byte equality with a fresh render can never hold.
+`--check` catches disagreement instead -- a checksum both the file and the
+manifests know, mapped two ways -- which is portable: it compares only the
+overlap.
 """
 import json
 import sys
@@ -86,13 +81,9 @@ class MergeTests(unittest.TestCase):
 
 
 class RetypeTests(unittest.TestCase):
-    """`--retype`: the one deliberate way to change a committed type.
-
-    A correction that retypes a donor (the `EffectID`s, UInt64 -> Int64) makes
-    the manifests teach a type the file already contradicts, and `merge`
-    refuses that. Without a named exception the table could only be fixed by
-    hand, which is what it must never be.
-    """
+    """`--retype`, the one deliberate way to change a committed type: a
+    retyped donor (the `EffectID`s, UInt64 -> Int64) teaches a type `merge`
+    refuses, and the table must never be fixed by hand."""
 
     def test_a_named_disagreement_takes_the_learned_type(self):
         merged = gen.merge(
@@ -141,16 +132,9 @@ class RetypeTests(unittest.TestCase):
 
 
 class ConflictTests(unittest.TestCase):
-    """A dropped conflict never reached the verdict.
-
-    `learn()` splits its findings into `resolved` and `conflicts`, and only
-    `resolved` was reconciled against the committed file. `conflicts` was
-    printed and counted and nothing else -- so when the manifests found a
-    checksum whose donors RULE OUT the type the file commits, `--check` passed
-    and `merge()` quietly kept the committed answer. Dropping a conflict is the
-    right thing to do with NEW evidence; it is not a reason to stop looking at
-    what is already written down.
-    """
+    """`learn()`'s `conflicts` reach the verdict too: dropping a conflict is
+    right for NEW evidence, but a committed type its donors now rule out, or
+    no longer settle, must fail `--check` and leave the table on write."""
 
     def test_a_committed_type_the_evidence_rules_out_is_caught(self):
         verdict = gen.reconcile(
@@ -201,11 +185,10 @@ class ParseTests(unittest.TestCase):
             self.assertTrue(ftype.startswith("FieldType::"), ftype)
 
     def test_the_overlay_table_is_read_in_one_spelling_for_both_layouts(self):
-        """table.rs is read after cargo fmt, which breaks a braced type over
-        lines and adds a trailing comma. Read verbatim, the learned type is
-        spelled differently from the same type committed on one line, so a
-        braced donor would read as a disagreement. A key holding an escape
-        sequence is refused: the shared parser does not unescape."""
+        """cargo fmt breaks a braced type over lines with a trailing comma;
+        read verbatim, a braced donor would disagree with its own one-line
+        committed spelling. A key holding an escape is refused: the shared
+        parser does not unescape."""
         table = (
             "pub static OVERLAY_TABLE: [OverlayEntry; 2] = [\n"
             "    OverlayEntry {\n"
@@ -229,10 +212,9 @@ class ParseTests(unittest.TestCase):
             read_with("TABLE_RS", escaped, gen.load_overlay_table)
 
     def test_every_committed_row_is_read_or_reading_fails(self):
-        """A row cargo fmt broke over lines did not match the one-line pattern,
-        so it vanished from `committed` without a word: --check then compared
-        nothing for it and the next write dropped it. The declared slice
-        length is the count every read must reach."""
+        """A row cargo fmt broke over lines must still be read, or --check
+        would skip it and the next write drop it; every read must reach the
+        declared slice length."""
         head = gen.render({}).split("pub static")[0]
         rows = (
             "    (5, FieldType::Float),\n"
@@ -254,10 +236,9 @@ class ParseTests(unittest.TestCase):
 
 class RenderTests(unittest.TestCase):
     def test_a_quantized_type_brings_its_import(self):
-        """RepMovement names RotatorQuantization and VectorQuantization, which
-        the header did not import, so rendering one wrote a file that does not
-        compile. The import appears only when used: an unused `use` fails
-        clippy -D warnings."""
+        """RepMovement names RotatorQuantization and VectorQuantization, so it
+        needs their import -- only then: an unused `use` fails clippy -D
+        warnings."""
         self.assertIn(
             "use crate::types::{RotatorQuantization, VectorQuantization};",
             gen.render({1: "FieldType::Int32", 2: BYTE_WHOLE}))
@@ -266,9 +247,8 @@ class RenderTests(unittest.TestCase):
 
 class LearnTests(unittest.TestCase):
     def test_only_raw_and_skip_teach_nothing(self):
-        """Raw and Skip carry no decode, so they are not donors. The test was a
-        substring match, which would also drop any type whose name merely
-        contains Raw or Skip."""
+        """Raw and Skip carry no decode, so they are not donors; a type whose
+        name merely contains one of them still is."""
         with tempfile.TemporaryDirectory() as temp:
             manifest = Path(temp) / "manifest.json"
             manifest.write_text(json.dumps({"net_field_export_groups": [
