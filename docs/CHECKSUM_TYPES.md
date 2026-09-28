@@ -176,25 +176,26 @@ because one of the two tiers would then be wrong about that member.
 `python tools/check_checksum_types.py --corpus <declaration corpus>`, where each
 child holds one export's `manifest.json` and checkpoint declaration tables.
 Measured on the integration tree (`auto/integration-20260928`, with
-`game-evidence-typing-fixes` merged), 2026-09-28:
+`game-evidence-typing-fixes` and `bp-field-typing` merged), 2026-09-28:
 
 | | identities |
 |---|---:|
 | declared (group, name, handle, checksum) | 12,937 |
 | ClassNetCache function slots | 1,084 |
-| not typed by vrfkit (no resolution / Raw / Skip) | 6,626 / 172 / 4 |
-| **typed (group, name, checksum, FieldType)** | **4,247** |
-| match (top level 1,662, parent chain 292, sibling seed 388) | 2,342 |
+| not typed by vrfkit (no resolution / Raw / Skip) | 6,465 / 172 / 4 |
+| **typed (group, name, checksum, FieldType)** | **4,346** |
+| match (top level 1,745, parent chain 292, sibling seed 388) | 2,425 |
 | mismatch (all under a parent chain) | 8 |
-| untestable | 1,897 |
+| untestable | 1,913 |
 
-Matches by rule: 754 exact spellings, 106 `Bool` as `uint8`, 1,482 object
-references with their class. Untestable by reason: 1,597 enum-capable types,
-236 object references whose class is not among the candidates (or nested
-without a seed), 64 with no known parent seed. Tier 2 examined 792 groups:
-124 candidate agreements, 124 established, 0 refused, from 47,638 implied-parent
+Matches by rule: 822 exact spellings, 106 `Bool` as `uint8`, 1,494 object
+references with their class, 3 as `UClass*`. Untestable by reason: 1,597 enum-capable types,
+252 object references whose class is not among the candidates (or nested
+without a seed), 64 with no known parent seed. Tier 2 examined 793 groups:
+124 candidate agreements, 124 established, 0 refused, from 48,537 implied-parent
 comparisons (0.0000 chance agreements expected). `checksum_table.rs`: 459
 checksums -- 349 match, 2 mismatch, 108 untestable, 0 without a carrier.
+The run made 14,410,131 recomputations: 0.0034 chance reproductions expected.
 
 **The mismatches** -- each on every build that declares it:
 
