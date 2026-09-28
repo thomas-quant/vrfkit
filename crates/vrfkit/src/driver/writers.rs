@@ -125,24 +125,21 @@ impl<T: Send + 'static> WriterThread<T> {
                 "{table} writer had already failed: {cause}"
             )));
         }
-        let send_result = if self.batch.is_empty() {
-            Ok(())
-        } else {
-            self.ship()
-        };
+        // A `ship` that finds the writer gone has joined it and returns the
+        // writer's own error.
+        if !self.batch.is_empty() {
+            self.ship()?;
+        }
         // Dropping the sender is what ends the writer loop.
         self.tx = None;
         match self.handle.take().map(thread::JoinHandle::join) {
-            Some(Ok(Ok(()))) => send_result,
-            // The writer's own error is the real cause; it supersedes a send
-            // failure caused by that same early return.
-            Some(Ok(Err(e))) => Err(CliError::Export(e)),
+            Some(Ok(result)) => result.map_err(CliError::Export),
             Some(Err(_)) => Err(CliError::Usage(format!("{table} writer thread panicked"))),
-            // The `ship` just above found the writer gone and joined it, so
-            // its error already carries the cause. Never `Ok`: no file.
-            None => Err(send_result.err().unwrap_or_else(|| {
-                CliError::Usage(format!("{table} writer was joined before finishing"))
-            })),
+            // Only a failed `ship` joins early, and that returned above.
+            // Never `Ok` regardless: there is no file.
+            None => Err(CliError::Usage(format!(
+                "{table} writer was joined before finishing"
+            ))),
         }
     }
 }
