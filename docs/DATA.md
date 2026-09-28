@@ -191,6 +191,11 @@ Three observations from that historical 69-replay comparison:
   `PlasmaArmorItem_C`, and its maximum reads 50.00 / 25.00 / 25.00, which is the
   game's own numbers and an outside confirmation that the f32 decode is right.
   Armour absorbs 2:1 against health on 12,747 of 12,747 hits where it survived.
+  The section's own replicated properties (`bAlive`, `LastKnownDamageOwner`,
+  and `Life` in checkpoints) are exported under its Blueprint class
+  `BasicArmorAttachedDamageSection_C` -- or, in replays that also carry
+  Phoenix's `PreventDeathDamageSection`, under the native
+  `AttachedDamageSectionComponent`; see "The armour section" below.
 - **`MulticastNotifyOverhealDecay` sends `DeltaLife` positive while life goes
   down.** Its magnitude matches `DecayApplied` 33,181/33,181, and the running
   chain only closes if the sign is flipped. `life += DeltaLife` runs overheal
@@ -563,7 +568,7 @@ guessing -- which is the only reason the failure was findable.
   (equipped weapon / spike carrier) included. ZoomStateMachine, ReserveAmmo and
   CalloutRegionTracker were listed here as still needing that map; they have it.
   All three are in `KNOWN_SUBOBJECT_CLASS_PATHS` and are pinned by the test at
-  `crates/vrfkit/src/sink/paths.rs`, with 29 more added from the 13.06 game.
+  `crates/vrfkit/src/sink/paths.rs`, with 30 more added from the 13.06 game.
   The procedure that produced them, and the tool that repeats it, are under
   "Reading component classes out of the game" below. A bare component group that
   turns up on a new build still needs the same treatment, and the map is not
@@ -804,12 +809,14 @@ stay bare by design.
 | `DamageSection_Vampire_Q_BloodArmor` | Blueprint `DamageSection_Vampire_Q_Heal_BloodArmor_C` | 13,055 | 19,396 | 20,967 |
 | `ChooseTeleportSpot_StateComponent` | Blueprint `ChooseMapLocationOnNavMesh_StateComponent_C` | 14,866 | 1,939 | 3,505 |
 | `AresAttributeSet_1` | `AresAttributeSet` (wire evidence, below) | 131,014 | 2,550,032 | 0 |
+| `AttachedDamageSection` | Blueprint `BasicArmorAttachedDamageSection_C` (its own review, [below](#the-armour-section-attacheddamagesection-2026-09-28)) | 212,885 | 34,124 | 607,676 |
 
-Classes without a module are `/Script/ShooterGame`; the three Blueprint classes
+Classes without a module are `/Script/ShooterGame`; the four Blueprint classes
 are declared by the replay under their full `/Game/..._C` paths, which is what
-the pairs name. In all, 2,125,995 main-stream and 3,654,139 checkpoint
-RepLayout rows of the corpus inventory move from a bare group into a declared
-one.
+the pairs name. In all, the 29 pairs of the first pass move 2,125,995
+main-stream and 3,654,139 checkpoint RepLayout rows of the corpus inventory
+from a bare group into a declared one; the armour pair, added after its own
+review, moves 212,885 and 34,124 more.
 
 `AresAttributeSet_1` is not a component, so it is held to `AresAttributeSet_2`'s
 standard instead of the tool's: over all 536 replays that carry it, every
@@ -819,10 +826,12 @@ that replay, every checkpoint's by that checkpoint (10,455 checkpoints), and all
 (124,280 per-replay comparisons, none different). The only pair whose widths
 differ from its target's own rows is `PMAimToolingTarget`, on handle 2:
 `AttachParent` is a packed object reference, so 16 bits against 24 is the size
-of the NetGUID it carries. For four pairs the target has no rows of its own in
-any replay, so the width condition says nothing about them and the other three
-carry them alone: `StealthComp`, `Collision Static Mesh`,
+of the NetGUID it carries. For four pairs of the first pass the target has no
+rows of its own in any replay, so the width condition says nothing about them
+and the other three carry them alone: `StealthComp`, `Collision Static Mesh`,
 `DamageSection_Vampire_Q_BloodArmor` and `ChooseTeleportSpot_StateComponent`.
+The armour pair is in the same position and was held to the declared property
+types instead (below).
 
 Re-exported afterwards (92 replays: one or more for every (pair, build) that
 occurs, plus all 38 of 13.06), against the same replays exported by the parent
@@ -854,7 +863,6 @@ Not added, and why:
 | `Comp_Equippable_Subequippable` | 36,702 | No export by that name in 13.06; the group is absent from 13.05 and 13.06 replays too. |
 | `Switch_BlackMarket_5`, `RespawningPlummetShootable3_UAID_*` (two), `B_Site_Door_Switch_0`, `RespawningWallPlate2_2`, `RespawningWallPlate2_7`, `Drawbridge6` | 9,607-31,254 | Actors placed in a map, not components: no component export carries these names. |
 | `MapTargetingState` | 743,457 | Two classes: the Blueprint `StateComponent_RangeLimited_MultiMapTargeting_C` in 9 packages, native `MapTargetingStateComponent` in 7. No name remap can be right for both. |
-| `AttachedDamageSection` | 820,561 | Left out of this change on purpose -- see below. |
 
 **This is the one thing here that a game patch can silently invalidate.** A
 renamed component stops matching and its handles go quiet again, and the replay
@@ -891,17 +899,119 @@ Three names were left here with one reason -- "the replay declares neither
 group" -- and the tool shows the reason was measured on the wrong class for two
 of them. `AttachedDamageSection` is not an `AttachedDamageSectionComponent` but
 a Blueprint subclass of it, `/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C`,
-in all four armour items. The native group is indeed never declared where the
-bare group has RepLayout rows, but the Blueprint class's group is, in all 529 of
-those replays, with handles 2 and 5 (`bAlive`, `LastKnownDamageOwner`) -- exactly
-the handles the rows use, main stream and all 6,895 checkpoints that carry
-them. It meets every condition above (the width one says nothing: the class has
-no rows of its own); it was left out of this change because the change was scoped to leave the names this section
-already discussed, and a pair touching the armour rows the health-and-armour
-analysis reads deserves its own review. `MapTargetingState` names two classes
-(above), so that half of the old reason stands on different ground.
-`AresAttributeSet_2` now has `AresAttributeSet_1` beside it. Nothing changes for
-the AbilitiesAndBuffs item.
+whose group the replay does declare; it is a pair now, after the review below.
+`MapTargetingState` names two classes (above), so that half of the old reason
+stands on different ground. `AresAttributeSet_2` now has `AresAttributeSet_1`
+beside it. Nothing changes for the AbilitiesAndBuffs item.
+
+#### The armour section, `AttachedDamageSection` (2026-09-28)
+
+It met every condition of the pass above and was held back from it, because its
+rows are the armour rows the health-and-armour analysis reads. This is that
+review. Measured over the same 1,018 exports (main `259ed10`, `--checkpoints`),
+with RepLayout rows defined as above and declarations read from `manifest.json`
+for the main stream and, for a checkpoint's rows, from that checkpoint's
+`checkpoint_export_groups` / `checkpoint_export_fields` joined on
+`group_ordinal`:
+
+- **class.** `tools/extract_component_classes --name AttachedDamageSection` on
+  the 13.06 containers returns four `_GEN_VARIABLE` exports -- in
+  `BasicArmorItem`, `HeavyArmorItem`, `LightArmorItem` and `PlasmaArmorItem`
+  -- all of the Blueprint class above, whose native ancestor is
+  `AttachedDamageSectionComponent`. No other package uses the name in either
+  export shape.
+- **what the rows are.** The bare leaf holds 820,561 main-stream rows: 212,885
+  RepLayout rows in 529 replays and 607,676 ClassNetCache rows in 900. Every one
+  is on an object whose NetGUID path ends in `AttachedDamageSection`, on a
+  `PlasmaArmorItem_C` (442,987), `HeavyArmorItem_C` (301,071) or
+  `LightArmorItem_C` (76,503) actor. Checkpoints add 34,124 RepLayout rows in
+  6,895 checkpoints of the same 529 replays, and no ClassNetCache rows.
+- **declared.** The Blueprint group is declared in 1,015 replays, all 529
+  among them, always as handle 2 `bAlive` (checksum 622178691) and handle 5
+  `LastKnownDamageOwner` (205313645). Each of the 6,895 checkpoints declares it
+  as well, 6,357 of them with handle 3 `Life` (962760191) besides.
+- **handles fit.** Main-stream rows use handles 2 and 5, checkpoint rows 2, 3
+  and 5, and every one is declared by the same replay or the same checkpoint --
+  no exceptions.
+- **widths fit the declared types.** The Blueprint class has no rows of its own
+  to compare widths with, so the rows were held to what the names claim.
+  `bAlive` is 1 bit on all 103,363 rows (88,551 main, 14,812 checkpoint).
+  `LastKnownDamageOwner` is 8, 16 or 24 bits, and each of its 139,146 rows is a
+  packed NetGUID that consumes its window exactly: 0 on 35,208 (20,396 main and
+  all 14,812 checkpoint rows), otherwise the `DamageHandlerComponent` whose
+  outer is the armour item's own `Instigator` (103,938 of 103,938). `Life` is
+  32 bits on all 4,500 checkpoint rows, and read as a float it is never
+  negative and never exceeds the item's armour: at most 50.0 on
+  `HeavyArmorItem_C` (3,520 rows), 25.0 on `PlasmaArmorItem_C` (698) and 24.56
+  on `LightArmorItem_C` (282) -- the game's 50 / 25 / 25 from the armour bullet
+  near the top of this page.
+
+Typing: `bAlive` becomes `Bool` through the existing checksum fallback, and
+nothing is added to the overlay. 622178691 is the `bAlive` every damage-section
+class declares, and `checksum_table.rs` already carries it, learned from the
+three native damage-section groups the table types it on
+(`AttachedDamageSectionComponent`, `ChildDamageSectionComponent`,
+`ChildRegionDamageSectionComponent`). It reads 1 on every one of the 103,363
+rows, so the corpus never shows it change; the type rests on the width and on
+those same-checksum declarations, not on having seen both values.
+`LastKnownDamageOwner` and `Life` have no overlay type and stay named but
+untyped (`Not in table`). The checks above say what they are; typing them is a
+separate change.
+
+Re-exported with the pair (48 replays covering all 24 builds, among them 25
+that carry bare armour rows -- at least one from each of the 20 builds that
+have any), against the parent commit's export of the same replays: the other
+23 are byte-identical in every Parquet file, and their `manifest.json` is
+identical apart from timing and path fields. In the 25, every
+row of `fields.parquet` and `checkpoint_fields.parquet` keeps its identity
+(time, packet, channel, actor, object, handle, bit count, raw bits), and the
+rows that change are exactly the bare RepLayout rows -- 10,578 main-stream and
+1,829 checkpoint rows, all now on the Blueprint path. `checkpoint_blocks`
+changes only the three resolution columns of 798 blocks (now
+`subobject_object_guid_known_remap`, declared), and `manifest.json` only the
+six overlay counters: per replay and per stream, the drop in
+`overlay_no_field_name` equals the rows moved, the rise in `overlay_decoded_ok`
+equals the `bAlive` rows among them (4,341 main, 798 checkpoint), and the rise
+in `overlay_not_in_table` equals the rest (6,237 `LastKnownDamageOwner`; in
+checkpoints 798 of those and 233 `Life`). Every typed `bAlive` equals its raw
+bit (`validate_type_evidence.py --compare-typed`: 5,139 rows, 0 mismatches).
+The leaf's 40,838 ClassNetCache rows stay bare, by design. Validate's figures
+do not move. `check_component_remaps.py` reads the pair `broken` on each of
+the 25 parent exports and `ok` on each of the 25 new ones.
+
+The analysis tools that read these exports were run on both sides of 8 of those
+replays (5 with bare armour rows). The healing, section, section-timeline,
+kill, match, player-effect, spike-carrier, active-effect, ability, ammo-audit
+and FastArray tools write the same output from either export, apart from the
+input hashes they record, or refuse the same builds. That includes the healing tool's join on the heal causer's
+`class_path`: it reads `Owner` and `Instigator` rows, and the armour group
+declares neither name. Three outputs move, each by exactly the moved rows.
+`to_valplay_bundle.py` publishes the armour groups' events under the Blueprint
+path with `Alive` and `LastKnownDamageOwner` in payloads that were empty, and
+counts that many fewer `unnamed_property_rows`; valplay's metrics computed from
+the two bundles differ in that loss counter only, and `check_metrics_baseline.py`
+passes on 13.01 and 13.04 with no pinned value moving.
+`summarize_unresolved_fields.py` moves the untyped rows from the bare leaf's
+catalogue entries to the Blueprint group's `LastKnownDamageOwner` and `Life`,
+and it and `summarize_value_coverage.py` count the `bAlive` rows as typed.
+
+**It does not reach every armour block.** `unique_leaf_match` runs before this
+table and tries the leaf with `Component` appended. In 486 of the 1,018 replays
+the replay also declares the native `/Script/ShooterGame.AttachedDamageSectionComponent`
+group -- exactly the 486 that carry rows of Phoenix's `PreventDeathDamageSection`,
+a native instance -- and there every armour block already resolved to the
+native parent before this pair existed: 200,010 main-stream and 32,522
+checkpoint rows (`checkpoint_blocks` records those 13,985 checkpoint blocks as
+`subobject_object_guid_unique_leaf`). The native group declares `bAlive` only
+-- in all 486 main streams and in all 8,806 checkpoints that declare it -- so
+there handle 2 is named and typed while handle 5 (116,874 main, 13,985
+checkpoint rows) and handle 3 (4,552 checkpoint rows) stay unnamed. No replay
+has armour rows in both states. The pair changes nothing in those replays: after
+it, the section's properties are under the Blueprint path in 529 replays and
+under the native path in 486, and a consumer that wants them has to accept both.
+`check_component_remaps.py` reads the pair `absent` in the 486 although the
+component is there. Moving those rows as well is a change to the resolution
+order, not a table entry, and is not made here.
 
 ### Closed: what the three mechanisms cannot reach
 
