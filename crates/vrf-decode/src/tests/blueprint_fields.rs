@@ -519,3 +519,68 @@ fn bool_(value: bool) -> Values {
 fn string(value: &str) -> Values {
     (None, None, None, Some(value.to_owned()))
 }
+
+const PROTOTYPE_BOLT: &str = "/Game/Characters/Hunter/S0/Ability_4/AnimationUpdatePrototype/\
+Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance.Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance_C";
+const OLD_CYPHER_CAMERA: &str = "/Game/Characters/Gumshoe/S0/Ability_Q/\
+Pawn_Gumshoe_Q_PossessableCamera.Pawn_Gumshoe_Q_PossessableCamera_C";
+const NET_TOSS_DEBUFF: &str = "/Game/Characters/Cable/S0/Ability_4/\
+NetTossRemovableDebuff.NetTossRemovableDebuff_C";
+
+/// Paths the 13.06 install no longer has (the camera and tracking dart moved
+/// in 13.01; the prototype bolt and the net toss are gone). They are typed on
+/// two legs -- the checksum and the corpus -- and, being exact identities,
+/// each old path reaches its type only under its own name, not through the
+/// current class that carries the same property.
+#[test]
+fn pre_rename_blueprint_paths_decode_at_their_own_identities() {
+    let mut stats = OverlayStats::default();
+    let trail = [
+        0x00, 0x00, 0x00, 0x80, 0x0e, 0xa4, 0xa9, 0x40, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xcb, 0x7c,
+        0xc0, 0x00, 0x00, 0x00, 0xa0, 0x65, 0x72, 0x95, 0x40,
+    ];
+    assert_eq!(
+        decode(
+            &mut stats,
+            PROTOTYPE_BOLT,
+            "TrailPosition",
+            3_110_715_024,
+            &trail,
+            192
+        )
+        .3,
+        Some("(3282.0283203125,-460.695068359375,1372.5992431640625)".to_owned())
+    );
+    assert_eq!(
+        decode(
+            &mut stats,
+            OLD_CYPHER_CAMERA,
+            "Possessed",
+            2_181_339_745,
+            &[1],
+            1
+        )
+        .2,
+        Some(true)
+    );
+    assert_eq!(
+        decode(
+            &mut stats,
+            NET_TOSS_DEBUFF,
+            "Target",
+            2_924_225_553,
+            &[0x99, 0x0e],
+            16
+        )
+        .0,
+        Some(972)
+    );
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (3, 0));
+    for (group, field, checksum) in [
+        (PROTOTYPE_BOLT, "TrailPosition", 3_110_715_024),
+        (OLD_CYPHER_CAMERA, "Possessed", 2_181_339_745),
+        (NET_TOSS_DEBUFF, "Target", 2_924_225_553),
+    ] {
+        assert_eq!(resolve(group, field, Some(checksum ^ 1)), None, "{group}");
+    }
+}

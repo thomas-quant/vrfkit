@@ -6,7 +6,7 @@ use crate::decode::FieldType;
 use crate::types::{RotatorQuantization, VectorQuantization};
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 163] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 169] = [
     (
         "A",
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -489,6 +489,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 163] = [
     ),
     (
         "Has Succesfully Hit",
+        "/Game/Characters/Cable/S0/Ability_4/Patch_NetToss.Patch_NetToss_C",
+        1717661931,
+        FieldType::Bool,
+    ),
+    (
+        "Has Succesfully Hit",
         "/Game/Characters/Deadeye/S0/Ability_4/Patch_Deadeye_E_Slow_Large.Patch_Deadeye_E_Slow_Large_C",
         1717661931,
         FieldType::Bool,
@@ -590,6 +596,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 163] = [
         FieldType::Bool,
     ),
     (
+        "IsDeployed",
+        "/Game/Characters/Gumshoe/S0/Ability_Q/Pawn_Gumshoe_Q_PossessableCamera.Pawn_Gumshoe_Q_PossessableCamera_C",
+        2029268412,
+        FieldType::Bool,
+    ),
+    (
         "IsDisabled",
         "/Game/Interactable/Switch_BlackMarket_2.Switch_BlackMarket_2_C",
         2206903017,
@@ -652,6 +664,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 163] = [
     (
         "Possessed",
         "/Game/Characters/Gumshoe/S0/Ability_E/Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C",
+        2181339745,
+        FieldType::Bool,
+    ),
+    (
+        "Possessed",
+        "/Game/Characters/Gumshoe/S0/Ability_Q/Pawn_Gumshoe_Q_PossessableCamera.Pawn_Gumshoe_Q_PossessableCamera_C",
         2181339745,
         FieldType::Bool,
     ),
@@ -786,7 +804,19 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 163] = [
     ),
     (
         "Target",
+        "/Game/Characters/Cable/S0/Ability_4/NetTossRemovableDebuff.NetTossRemovableDebuff_C",
+        2924225553,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "Target",
         "/Game/Characters/Gumshoe/S0/Ability_E/GameObject_RemovableObject_GumshoeTrackingDart.GameObject_RemovableObject_GumshoeTrackingDart_C",
+        2924225553,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "Target",
+        "/Game/Characters/Gumshoe/S0/Ability_Q/GameObject_RemovableObject_GumshoeTrackingDart.GameObject_RemovableObject_GumshoeTrackingDart_C",
         2924225553,
         FieldType::ObjectNetGuid,
     ),
@@ -807,6 +837,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 163] = [
         "/Game/TeamAceCeremony.TeamAceCeremony_C",
         1655581842,
         FieldType::ObjectNetGuid,
+    ),
+    (
+        "TrailPosition",
+        "/Game/Characters/Hunter/S0/Ability_4/AnimationUpdatePrototype/Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance.Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance_C",
+        3110715024,
+        FieldType::VectorDouble,
     ),
     (
         "TrailPosition",

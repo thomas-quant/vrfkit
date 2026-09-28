@@ -634,5 +634,41 @@
   "field": "bShouldDisplayCeremony",
   "checksum": 2636440541,
   "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Cable/S0/Ability_4/Patch_NetToss.Patch_NetToss_C",
+  "field": "Has Succesfully Hit",
+  "checksum": 1717661931,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Gumshoe/S0/Ability_Q/Pawn_Gumshoe_Q_PossessableCamera.Pawn_Gumshoe_Q_PossessableCamera_C",
+  "field": "IsDeployed",
+  "checksum": 2029268412,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Gumshoe/S0/Ability_Q/Pawn_Gumshoe_Q_PossessableCamera.Pawn_Gumshoe_Q_PossessableCamera_C",
+  "field": "Possessed",
+  "checksum": 2181339745,
+  "type": "Bool"
+ },
+ {
+  "group": "/Game/Characters/Cable/S0/Ability_4/NetTossRemovableDebuff.NetTossRemovableDebuff_C",
+  "field": "Target",
+  "checksum": 2924225553,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Gumshoe/S0/Ability_Q/GameObject_RemovableObject_GumshoeTrackingDart.GameObject_RemovableObject_GumshoeTrackingDart_C",
+  "field": "Target",
+  "checksum": 2924225553,
+  "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Game/Characters/Hunter/S0/Ability_4/AnimationUpdatePrototype/Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance.Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance_C",
+  "field": "TrailPosition",
+  "checksum": 3110715024,
+  "type": "VectorDouble"
  }
 ]
