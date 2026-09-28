@@ -23,6 +23,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+if __package__:
+    from .export_scan import child_exports, leftover_note, skipped_report
+else:
+    from export_scan import child_exports, leftover_note, skipped_report
+
 VALUE_COLUMNS = ("value_i64", "value_f64", "value_bool", "value_str")
 TABLES = ("fields", "checkpoint_fields")
 SEMANTIC_STATUSES = {"reviewed", "unknown", "unsupported"}
@@ -55,7 +60,12 @@ def _count_parquet(parquet: pq.ParquetFile, filename: str) -> dict[str, int]:
     return {"rows": rows, "typed_rows": typed, "untyped_rows": rows - typed, "multi_value_rows": multi}
 
 
-def discover(inputs: list[Path]) -> list[Path]:
+def discover(inputs: list[Path], skipped: list[Path] | None = None) -> list[Path]:
+    """Exports named directly, or the direct child exports of a parent.
+
+    A parent's `vrfkit export` staging/backup leftovers are never exports
+    (see `export_scan.py`); they are appended to `skipped` when it is given.
+    """
     exports: set[Path] = set()
     for root in inputs:
         if not root.is_dir():
@@ -63,10 +73,12 @@ def discover(inputs: list[Path]) -> list[Path]:
         if (root / "fields.parquet").is_file():
             exports.add(root.resolve())
             continue
-        children = [p.parent.resolve() for p in root.glob("*/fields.parquet")]
+        children, leftovers = child_exports(root)
+        if skipped is not None:
+            skipped.extend(leftovers)
         if not children:
-            raise ValueError(f"no direct child exports in {root}")
-        exports.update(children)
+            raise ValueError(f"no direct child exports in {root}{leftover_note(leftovers)}")
+        exports.update(child.resolve() for child in children)
     return sorted(exports)
 
 
@@ -341,7 +353,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         evidence = load_semantic_evidence(args.semantic_evidence) if args.semantic_evidence else None
-        report = summarize(discover(args.inputs), args.jobs, evidence)
+        skipped: list[Path] = []
+        report = summarize(discover(args.inputs, skipped), args.jobs, evidence)
+        report["skipped_generated_dirs"] = skipped_report(skipped)
     except ValueError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2

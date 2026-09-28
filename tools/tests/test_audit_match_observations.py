@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -25,6 +27,13 @@ def write_export(root: Path, rows: list[tuple]) -> None:
     pq.write_table(pa.table({name: [row[index] for row in rows]
                              for index, name in enumerate(names)}),
                    root / "fields.parquet")
+
+
+def write_complete_export(root: Path, rows: list[tuple]) -> None:
+    """An export as `vrfkit export` publishes it: tables, then manifest.json last."""
+    root.mkdir()
+    write_export(root, rows)
+    (root / "manifest.json").write_text('{"replay_build": "13.02"}', encoding="utf-8")
 
 
 class MatchObservationAuditTests(unittest.TestCase):
@@ -81,6 +90,74 @@ class MatchObservationAuditTests(unittest.TestCase):
             bad.mkdir()
             (bad / "fields.parquet").write_bytes(b"broken")
             self.assertEqual(audit.main(["--exports", str(root), "--out", str(root / "audit.json")]), 1)
+
+    def corroborated_rows(self) -> list[tuple]:
+        return [
+            (100, 10, 20, 10, self.ammo_group, audit.AMMO_FIELD, 30),
+            (120, 12, 20, 10, self.ammo_group, audit.AMMO_FIELD, 29),
+            (121, 13, 20, 0, self.rpc_group, audit.EFFECT_FIELD, 7),
+        ]
+
+    def test_export_leftovers_are_listed_and_never_audited(self):
+        """Neither sibling `vrfkit export` leaves behind is an export.
+
+        Measured at 259ed10: `Stop-Process -Force` 1.5 s into
+        `vrfkit export ... --out pub2` left `.pub2.vrfkit-staging-55396-0`
+        with a footerless fields.parquet, and `--exports` over its parent
+        reported candidate_exports=2, exports_failed=1 and exited 1. The
+        `previous` sibling is worse: it is a complete export, manifest and
+        all, so it was audited again. Measured with that sibling alone beside
+        `pub2`: corroborated_unique_rpc 2 instead of 1, exit 0.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_complete_export(root / "pub2", self.corroborated_rows())
+            staging = root / ".pub2.vrfkit-staging-55396-0"
+            staging.mkdir()
+            (staging / "fields.parquet").write_bytes(b"PAR1 no footer")
+            write_complete_export(root / ".pub2.vrfkit-previous-55396-1", self.corroborated_rows())
+            expected_skipped = [str((root / name).resolve()) for name in (
+                ".pub2.vrfkit-previous-55396-1", ".pub2.vrfkit-staging-55396-0")]
+            result = audit.audit_exports(root)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = audit.main(["--exports", str(root), "--out", str(root / "audit.json")])
+        self.assertEqual(result["candidate_exports"], 1)
+        self.assertEqual(result["exports_scanned"], 1)
+        self.assertEqual(result["exports_failed"], 0)
+        self.assertEqual(result["aggregate_counts"]["corroborated_unique_rpc"], 1)
+        self.assertEqual(result["skipped_generated_dirs"], expected_skipped)
+        self.assertEqual(code, 0)
+
+    def test_a_clean_corpus_still_reports_an_empty_skip_list(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_complete_export(root / "one", self.corroborated_rows())
+            result = audit.audit_exports(root)
+        self.assertEqual(result["skipped_generated_dirs"], [])
+        self.assertEqual(result["exports_scanned"], 1)
+
+    def test_a_child_without_a_manifest_is_a_failure_not_an_export(self):
+        """manifest.json is written last, so its absence means unfinished."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_complete_export(root / "complete", self.corroborated_rows())
+            partial = root / "partial"
+            partial.mkdir()
+            write_export(partial, self.corroborated_rows())
+            result = audit.audit_exports(root)
+        self.assertEqual(result["candidate_exports"], 2)
+        self.assertEqual(result["exports_scanned"], 1)
+        self.assertEqual(result["exports_failed"], 1)
+        self.assertIn("manifest.json", result["failures"][0]["error"])
+
+    def test_a_parent_holding_only_leftovers_is_an_error_that_counts_them(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            staging = root / ".pub2.vrfkit-staging-55396-0"
+            staging.mkdir()
+            (staging / "fields.parquet").write_bytes(b"PAR1 no footer")
+            with self.assertRaisesRegex(ValueError, r"no export directories found.*1 "):
+                audit.audit_exports(root)
 
     def test_conflicting_weapon_identity_cannot_corroborate(self):
         with tempfile.TemporaryDirectory() as temp:

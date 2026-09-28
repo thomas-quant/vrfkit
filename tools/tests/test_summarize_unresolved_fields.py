@@ -1,6 +1,8 @@
 """Focused behavior checks for the raw/untyped priority catalog."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -92,6 +94,39 @@ class RawPriorityTests(unittest.TestCase):
             report, _catalog = priority.summarize([root])
         self.assertFalse(report["complete"])
         self.assertIn("bit_count must be uint32", report["errors"][0]["error"])
+
+    def test_export_leftovers_beside_an_export_are_not_counted(self):
+        """A `previous` sibling carries its own manifest, so the manifest
+        check at processing time does not catch it. Measured at 259ed10 with
+        only that sibling beside `pub2`: export_count 2, physical_rows 2
+        instead of 1, complete, exit 0. A killed export's footerless staging
+        table alongside at least failed the run."""
+        rows = [field("/A", "raw", 9, 8, b"\x01")]
+        with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as out:
+            parent = Path(td)
+            self.write_export(parent / "pub2", rows)
+            self.write_export(parent / ".pub2.vrfkit-previous-4242-7", rows)
+            staging = parent / ".pub2.vrfkit-staging-55396-0"
+            staging.mkdir()
+            (staging / "fields.parquet").write_bytes(b"PAR1 no footer")
+            expected_skipped = [str((parent / name).resolve()) for name in (
+                ".pub2.vrfkit-previous-4242-7", ".pub2.vrfkit-staging-55396-0")]
+
+            self.assertEqual(priority.discover([parent]), [(parent / "pub2").resolve()])
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = priority.main([str(parent), "--output-dir", out, "--jobs", "1"])
+            summary = json.loads((Path(out) / "raw_untyped_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["export_count"], 1)
+        self.assertEqual(summary["tables"]["fields"]["physical_rows"], 1)
+        self.assertEqual(summary["skipped_generated_dirs"], expected_skipped)
+
+    def test_a_parent_holding_only_leftovers_is_an_error_that_counts_them(self):
+        with tempfile.TemporaryDirectory() as td:
+            parent = Path(td)
+            self.write_export(parent / ".pub2.vrfkit-previous-4242-7", [field("/A", "raw", 9, 8, b"\x01")])
+            with self.assertRaisesRegex(priority.InputError, r"no direct child exports.*1 "):
+                priority.discover([parent])
 
     def test_missing_fields_or_required_schema_is_an_error(self):
         with tempfile.TemporaryDirectory() as td:

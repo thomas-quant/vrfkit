@@ -189,6 +189,41 @@ original tables (`fields`, `movement`, `actors`, `net_guids`, `events`) are
 byte-for-byte identical.** `partials.parquet` is shared by both passes: any
 checkpoint partial rejections land there too, distinguished by `source`.
 
+#### If an export is interrupted
+
+`export` never writes into `--out` itself. Every table goes into a sibling
+directory, `.<out>.vrfkit-staging-<pid>-<n>`, and only once the manifest --
+the last file written -- is complete is that directory renamed to `--out`. A
+prior `--out` is moved aside to `.<out>.vrfkit-previous-<pid>-<n>` for the
+length of that rename and deleted after it. `--out` therefore always holds
+either the previous complete export or the new one, never a mixture.
+
+- **An error during the run** removes the staging directory and leaves
+  `--out` as it was. A failed publication names the step, the paths, and
+  whether the prior output is back in place.
+- **A killed process** -- `Stop-Process -Force`, power loss, or Ctrl+C in a
+  Windows console, whose default handler exits without unwinding -- cannot
+  clean up, so the staging directory stays: Parquet files without their
+  footers, and no `manifest.json`. A kill exactly between
+  the two renames instead leaves `--out` missing and the complete prior
+  export in the `previous` sibling.
+- **The next export to the same `--out`** prints one `warning:` line per
+  such sibling before it starts, and deletes nothing: a staging directory
+  may belong to an export that is still running, and a `previous` sibling
+  beside a missing `--out` may be the only copy of that output (the warning
+  says so). Delete a leftover yourself once no export to that destination is
+  running, or move a `previous` sibling elsewhere to keep it.
+- **The corpus tools never read a leftover as an export.**
+  `audit_match_observations.py`, `validate_type_evidence.py`,
+  `summarize_value_coverage.py` and `summarize_unresolved_fields.py` skip
+  these names while discovering exports and list what they skipped under
+  `skipped_generated_dirs` in their reports; `export_scan.py` is the one
+  definition. At 259ed10 all four read a `previous` sibling as a second
+  export of the same replay and exited 0 with doubled counts.
+  `audit_match_observations.py` and `validate_type_evidence.py` also refuse a
+  discovered directory without `manifest.json`, since only a finished export
+  has one.
+
 #### Lines to actually watch in the summary
 
 ```
@@ -708,6 +743,7 @@ m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(len(m
 | `check_baseline_schemas.py` | All committed baseline schemas, measured SHA-256 hashes, and cross-file replay/counter/table identities. |
 | `check_decode_errors_corpus.py` | Overlay type errors, struct blob failures, array/leaf/truncated-RPC/movement failures, unwalked CNC brute-force payloads and movement-section tails -- the same zero-required counters as `verify_build_corpus.py` (top level; `--recursive` for subdirectories, `--checkpoints` to also decode Checkpoint chunks) |
 | `corpus_scan.py` | Not a check -- the `.vrf` discovery `validate_corpus.py` and `check_decode_errors_corpus.py` share, so the two can no longer glob a directory two different ways and disagree about what "the corpus" is without saying so. Non-recursive by default; read its docstring for why. |
+| `export_scan.py` | Not a check -- the export discovery the tools that read a directory of exports share: it names the staging and backup directories an interrupted `vrfkit export` leaves behind ([section 2](#if-an-export-is-interrupted)), so none of those tools can count one as an export. A Python test reads the names back out of the Rust code that creates them. |
 | `check_component_remaps.py` | Whether each component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. Fails, too, when an entry of the Rust table does not parse, since that pair would otherwise go unchecked. Re-derive a broken or renamed pair with `extract_component_classes` ([below](#reading-the-installed-game)). |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
 | `compare_combat_report.py` | Metrics-input multiset |
@@ -802,7 +838,10 @@ weapon-scoped continuous-effect RPC through the component's outer NetGUID.
 It reports unmatched and ambiguous evidence; it does not classify the RPC as
 a shot. Conflicting same-packet ammo values break the transition chain, and
 conflicting object mappings cannot support a match. Sampling, when requested,
-is evenly spaced by export name, not stratified by game build.
+is evenly spaced by export name, not stratified by game build. With
+`--exports`, a child without `manifest.json` is a failed export, and the
+leftovers of an interrupted export are skipped and listed
+([If an export is interrupted](#if-an-export-is-interrupted)).
 
 `generate_scoped_types.py` regenerates `scoped_types.rs` from the reviewed
 `tools/fixtures/scoped_type_evidence.json`. These types require the exact
@@ -946,7 +985,8 @@ reads raw payloads against explicit type proposals: the primitives and the
 scoped geometry/enum shapes above, decoded from Unreal's wire layout rather
 than by the Rust readers. Each specification
 names an exact exported group and field, and the decoder requires full payload
-consumption. This checks structure and observed numeric ranges, not gameplay
+consumption. Its recursive search skips the leftovers of an interrupted export
+and refuses a table without `manifest.json` beside it. This checks structure and observed numeric ranges, not gameplay
 meaning. Use it before adding overlay types and when comparing their emitted
 values after export (`--compare-typed`). Besides the byte-aligned primitives (`UInt32`
 read unsigned) it reads seven bit-level types -- `EnumByte` (a 1..8-bit
