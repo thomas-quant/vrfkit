@@ -3,6 +3,7 @@ from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import extract_kill_observations as tool
 from tools.tests.wire_fixtures import FIELD_SCHEMA as SCHEMA, array
 

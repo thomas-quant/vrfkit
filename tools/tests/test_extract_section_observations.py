@@ -10,6 +10,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import extract_section_observations as tool
 from tools.tests.wire_fixtures import BitWriter, packed
 
