@@ -702,6 +702,22 @@ class EffectBlobBitLengthTests(unittest.TestCase):
         self.assertEqual(self.decode(self.BLOB, 400), self.FOUR_PAIRS)
         self.assertEqual(self.decode(self.BLOB, 350), self.THREE_PAIRS)
 
+    def test_a_declared_length_past_the_bytes_stops_the_conversion(self):
+        # 400 bits declared over 45 bytes: the fourth value runs off the end.
+        # The per-bit reader raised IndexError there, as the bulk one must; a
+        # bare slice would read the missing bytes as zeros, a plausible value.
+        with self.assertRaises(IndexError):
+            self.decode(self.BLOB[:45], 400)
+
+    def test_a_short_read_leaves_the_position_at_the_declared_end(self):
+        # As the per-bit reader left it; the decoder's consumed/skip_bits
+        # resync after a failed value read counts on it.
+        reader = bundle._BitReader(b"\xff\xff", 12)
+        reader.read_bits(4)
+        with self.assertRaises(EOFError):
+            reader.read_bits(16)
+        self.assertEqual(reader.tell(), 12)
+
     def test_absent_blob_decodes_to_an_empty_mapping(self):
         self.assertEqual(bundle._decode_effect_blob(None, self.SPEC, {}), {})
 
