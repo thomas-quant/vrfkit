@@ -2,11 +2,9 @@
 //!
 //! Open-count on the reference replay: docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
 //!
-//! This is the block Unreal writes immediately after the actor GUID when a
-//! channel opens for a *dynamic* (even, non-zero GUID) actor. It is small and
-//! rare but its bit width is load-bearing for everything after it in the same
-//! bunch, so the reasoning below is kept next to the reads rather than in a
-//! design doc.
+//! The block Unreal writes right after the actor GUID when a channel opens for
+//! a *dynamic* (even, non-zero GUID) actor: small and rare, but its bit width
+//! decides everything after it in the same bunch.
 
 use vrf_bitio::BitReader;
 
@@ -42,27 +40,22 @@ pub(super) fn read_dynamic_spawn_data(
     // Archetype. Its path is what identifies the replay controller later, so
     // this read must happen before the net-player-index check in `channel.rs`.
     state.archetype_net_guid = net_guid::internal_load_object(payload, false, 0, sink)?;
-    // Level
     state.level_guid = net_guid::internal_load_object(payload, false, 0, sink)?;
-    // Location -- defaults to the origin, not to absent.
     state.spawn_location = Some(read_optional_quantized_vector(
         payload,
         SPAWN_SCALE_FACTOR,
         ORIGIN,
     )?);
-    // Rotation
     if payload.read_bit()? {
         state.spawn_rotation = Some(read_rotation_short(payload)?);
     }
-    // Scale -- defaults to unit scale, not to the origin.
     state.spawn_scale = Some(read_optional_quantized_vector(
         payload,
         SPAWN_SCALE_FACTOR,
         UNIT_SCALE,
     )?);
-    // Velocity -- unconditional, exactly as NewActorSerializer.cs:69-72 reads
-    // it. This used to be gated on a fabricated PlayerController premise; see
-    // docs/archive/PROJECT_STATUS.md 17-A for why that cost one invisible bit.
+    // Velocity is read unconditionally, as NewActorSerializer.cs:69-72 does;
+    // gating it cost one invisible bit (docs/archive/PROJECT_STATUS.md 17-A).
     state.spawn_velocity = Some(read_optional_quantized_vector(
         payload,
         SPAWN_SCALE_FACTOR,
@@ -88,17 +81,12 @@ pub(super) fn read_dynamic_spawn_data(
 ///   [else] -> 3 x f64
 /// ```
 ///
-/// A clear leading bit does not mean "absent" -- it means "take the default".
-/// `ArchiveVectorReaders.ReadOptionalQuantizedVector` returns `defaultVector`
-/// there, and `NewActorSerializer.cs:56-72` passes (0,0,0) for location and
-/// velocity and (1,1,1) for scale.
-///
-/// Returning `None` instead used to collapse that case into the
-/// genuinely-absent one: a static actor never enters the spawn block at all,
-/// so its location is unknown, while a dynamic actor with the bit clear has a
-/// known location of exactly (0,0,0). See docs/archive/PROJECT_STATUS.md 13-A
-/// for the corpus counts. This always yields a vector; only a static actor,
-/// which never reads the block, leaves the state's fields `None`.
+/// A clear leading bit means "take the default", not "absent":
+/// `ArchiveVectorReaders.ReadOptionalQuantizedVector` returns `defaultVector`,
+/// and `NewActorSerializer.cs:56-72` passes (0,0,0) for location and velocity
+/// and (1,1,1) for scale. So this always yields a vector; only a static actor,
+/// which never enters the block, leaves the fields `None` -- unknown, not
+/// (0,0,0) (docs/archive/PROJECT_STATUS.md 13-A has the corpus counts).
 fn read_optional_quantized_vector(
     reader: &mut BitReader<'_>,
     scale_factor: i32,
@@ -109,7 +97,6 @@ fn read_optional_quantized_vector(
     }
 
     if !reader.read_bit()? {
-        // Unquantized: 3x f64.
         return read_f64_vector(reader);
     }
 
@@ -138,11 +125,9 @@ fn read_optional_quantized_vector(
     let fy = (y ^ sign_bit) as i64 - sign_bias;
     let fz = (z ^ sign_bit) as i64 - sign_bias;
 
-    // `extra_info == 0` means the components are already whole units; anything
-    // else means they were multiplied by the scale factor before quantizing.
-    // The two arms stay separate rather than dividing by a 1.0 divisor: these
-    // values reach Parquet unrounded, and "the compiler surely folds it" is not
-    // the standard this crate's output is held to.
+    // `extra_info == 0`: the components are whole units; otherwise they were
+    // multiplied by the scale factor before quantizing. Two arms rather than a
+    // divide by 1.0, so whole-unit values reach Parquet with no arithmetic.
     Ok(if extra_info > 0 {
         let divisor = f64::from(scale_factor);
         FVector {
@@ -167,15 +152,8 @@ fn read_f64_vector(reader: &mut BitReader<'_>) -> Result<FVector> {
     Ok(FVector { x, y, z })
 }
 
-/// Read a compressed short rotator (3 components, each optionally present).
-///
-/// ```text
-/// For each of pitch, yaw, roll:
-///   hasComponent : 1 bit
-///   [if hasComponent]
-///     value      : u16 (16 bits)
-///     degrees = value * (360.0 / 65536.0)
-/// ```
+/// Read a compressed short rotator: for each of pitch, yaw and roll, a presence
+/// bit, then if set a u16 `value` giving `value * 360 / 65536` degrees.
 fn read_rotation_short(reader: &mut BitReader<'_>) -> Result<FRotator> {
     let pitch = read_compressed_short_component(reader)?;
     let yaw = read_compressed_short_component(reader)?;
@@ -198,8 +176,8 @@ mod tests {
     use super::*;
     use crate::test_bits::{pack, write_byte, write_serialized_int};
 
-    /// A clear leading bit yields the caller's default. The two defaults
-    /// differ (origin vs unit scale), which is the whole point.
+    /// A clear leading bit yields the caller's default, which differs by
+    /// vector (origin vs unit scale).
     #[test]
     fn absent_vector_takes_the_callers_default() {
         let data = pack(&[false]);
