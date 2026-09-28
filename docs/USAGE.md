@@ -799,9 +799,16 @@ conflicting object mappings cannot support a match. Sampling, when requested,
 is evenly spaced by export name, not stratified by game build.
 
 `generate_scoped_types.py` regenerates `scoped_types.rs` from the reviewed
-`tools/fixtures/scoped_type_evidence.json`. These primitive types require the
-exact group, field name and compatible checksum. They never propagate to an
-unobserved class alias or globally by checksum. The ordinary
+`tools/fixtures/scoped_type_evidence.json`. These types require the exact
+group, field name and compatible checksum. They never propagate to an
+unobserved class alias or globally by checksum, and they are not checksum
+donors. Besides the primitives, the fixture accepts `EnumRemainingBits`,
+`RotationShort`, `VectorNetQuantize100`, `RepMovementByte` and
+`RepMovementShort`, each with an independent decoder in
+`validate_type_evidence.py`. A `RepMovement` entry must also match the actor's
+spawn location at scale 100: projectiles and game objects replicate whole
+centimetres, so exact consumption alone would admit a location 100 times too
+small (see [UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md)). The ordinary
 `validate_type_evidence.py` specification also accepts an optional `checksum`
 to independently verify this narrower scope.
 
@@ -929,7 +936,9 @@ explicitly. The schema-v3 report lists version-selected custom decoders that
 remain `Raw` separately.
 
 `validate_type_evidence.py <export-or-parent> <specifications.json>` independently
-reads raw payloads against explicit primitive type proposals. Each specification
+reads raw payloads against explicit type proposals: the primitives and the
+scoped geometry/enum shapes above, decoded from Unreal's wire layout rather
+than by the Rust readers. Each specification
 names an exact exported group and field, and the decoder requires full payload
 consumption. This checks structure and observed numeric ranges, not gameplay
 meaning. Use it before adding overlay types and when comparing their emitted

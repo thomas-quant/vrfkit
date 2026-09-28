@@ -1418,8 +1418,13 @@ def main(argv: list[str]) -> int:
                     path.group("suffix"), names[0]
                 )
 
+    # Every access level, not only the two the supported shape uses. Upstream
+    # 8b7afcb builds Raze's caches through `private static
+    # ClassNetCacheDescriptor Rpc(...)` helpers; a marker that looked only for
+    # public/internal factories let that file through with its caches silently
+    # absent from the table instead of failing here.
     cache_factory_marker = re.compile(
-        rf'\b(?:public|internal)\s+static\s+ClassNetCacheDescriptor\s+'
+        rf'\b(?:public|internal|protected|private)\s+static\s+ClassNetCacheDescriptor\s+'
         rf'@?(?P<name>{CSHARP_IDENTIFIER})\s*\('
     )
     for cs_file, _, code_view in sources:
@@ -1525,6 +1530,27 @@ def main(argv: list[str]) -> int:
     factory_call_re = re.compile(
         rf'\s*@?(?P<factory>{CSHARP_IDENTIFIER})\s*\(\s*\)\s*'
     )
+    # A live `new ClassNetCacheDescriptor(...)` that the shape above cannot
+    # read is an unsupported construction, not an absent cache. Upstream
+    # 8b7afcb passes `CreateFunctions(agent)` where this expects a `[...]`
+    # list; the loop below then matched nothing, and all 29 agent
+    # `_ClassNetCache` entries left the table while the run reported success
+    # (compare_descriptor_sources.py against the vendored tree plus that one
+    # file, 2026-09-28).
+    runtime_cache_marker_re = re.compile(
+        rf'\bnew\s+'
+        rf'(?:(?:global\s*::\s*)?(?:{CSHARP_IDENTIFIER_TOKEN}\s*\.\s*)*)'
+        rf'@?ClassNetCacheDescriptor\s*\('
+    )
+    for cs_file, source, code_view in sources:
+        readable = {match.start() for match in runtime_cache_re.finditer(source)}
+        for marker in runtime_cache_marker_re.finditer(code_view):
+            if marker.start() not in readable:
+                raise SystemExit(
+                    f"{cs_file}: unsupported runtime ClassNetCache construction; "
+                    'expected new ClassNetCacheDescriptor(<descriptor>.Path + '
+                    '"<suffix>", [<factory>()])'
+                )
     for _, source, code_view in sources:
         for runtime_match in runtime_cache_re.finditer(source):
             if code_view[runtime_match.start()] == " ":

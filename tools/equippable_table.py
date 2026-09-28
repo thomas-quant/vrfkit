@@ -27,6 +27,7 @@ EQUIPPABLE_DEFINITIONS = [
     ('/Game/Equippables/Guns/Shotguns/PumpShotgun/PumpShotgun.PumpShotgun_C', 'Bucky', 'shotgun'),
     ('/Game/Equippables/Guns/Shotguns/AutoShotgun/AutomaticShotgun.AutomaticShotgun_C', 'Judge', 'shotgun'),
     ('/Game/Equippables/Guns/Rifles/Burst/AssaultRifle_Burst.AssaultRifle_Burst_C', 'Bulldog', 'rifle'),
+    ('/Game/Equippables/Guns/Rifles/BattleRifle/BattleRifle.BattleRifle_C', 'Warden', 'rifle'),
     ('/Game/Equippables/Guns/SniperRifles/Dmr/DMR.DMR_C', 'Guardian', 'rifle'),
     ('/Game/Equippables/Guns/Rifles/Carbine/AssaultRifle_ACR.AssaultRifle_ACR_C', 'Phantom', 'rifle'),
     ('/Game/Equippables/Guns/Rifles/AK/AssaultRifle_AK.AssaultRifle_AK_C', 'Vandal', 'rifle'),

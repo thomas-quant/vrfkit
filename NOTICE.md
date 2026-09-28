@@ -38,7 +38,7 @@ SOFTWARE.
 |---|---|
 | `crates/vrf-transform` | The eight 12.10--13.06 per-build payload transforms and their constants are a port of `Replay.Encoding/PayloadEncryption`. The substitution tables and golden test vectors are extracted mechanically from that source (`tools/extract_sboxes.py`, `tools/extract_golden.py`). |
 | `crates/vrf-bitio` | The Unreal wire primitives (`IntPacked`, bounded `SerializedInt`, `FString`, bit copying) follow the semantics implemented in `Replay.Encoding/Archives`. |
-| `third_party/vrp` | ValorantReplayParser's `src/Replay.Valorant` C# descriptor sources (upstream `2d2e05e` plus five local descriptor commits), with a selective reveal descriptor update from `2b66c65` and upstream's `LICENSE`. Its README records the exact revisions and local adaptations. |
+| `third_party/vrp` | ValorantReplayParser's `src/Replay.Valorant` C# descriptor sources (upstream `2d2e05e` plus five local descriptor commits), with a selective reveal descriptor update from `2b66c65`, the equippable resolver from `2103d92` and upstream's `LICENSE`. Its README records the exact revisions and local adaptations. |
 | `crates/vrf-decode/src/table.rs` | Generated from that copy (`tools/extract_descriptors.py`), then corrected against wire evidence (`tools/apply_type_corrections.py`). |
 | `tools/equippable_table.py` | Weapon display names generated from that copy's `Combat/ValorantEquippableResolver.cs` (`tools/extract_equippables.py`). |
 | `crates/vrfkit/src/sink` | The ActiveBlinds and projectile path field layouts reference upstream flash descriptors at `d23c13e`, independently validated against preserved replay payloads. |

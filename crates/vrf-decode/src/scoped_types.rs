@@ -3,9 +3,40 @@
 //! Observed build scope and wire evidence live in the source fixture.
 
 use crate::decode::FieldType;
+use crate::types::RotatorQuantization;
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 28] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 62] = [
+    (
+        "AttachComponent",
+        "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
+        924082277,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "AttachComponent",
+        "/Game/Characters/Clay/S0/Ability_E/Ability_Clay_E_Boomba.Ability_Clay_E_Boomba_C",
+        924082277,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "AttachComponent",
+        "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C",
+        924082277,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "AttachComponent",
+        "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
+        924082277,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "AttachComponent",
+        "/Game/Characters/Clay/S0/Ability_X/Ability_Clay_X_RocketLauncher.Ability_Clay_X_RocketLauncher_C",
+        924082277,
+        FieldType::ObjectNetGuid,
+    ),
     (
         "B",
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -101,12 +132,66 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 28] = [
         "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
         3944193776,
         FieldType::Byte,
+    ),
+    (
+        "Character",
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        1346692128,
+        FieldType::ObjectNetGuid,
     ),
     (
         "ClickedLocation",
         "/Script/ShooterGame.MapTargetingStateComponent:MulticastRespondToValidSingleMapClick",
         975869058,
         FieldType::VectorDouble,
+    ),
+    (
+        "CosmeticRandomSeed",
+        "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
+        2863861815,
+        FieldType::Int32,
+    ),
+    (
+        "CosmeticRandomSeed",
+        "/Game/Characters/Clay/S0/Ability_E/Ability_Clay_E_Boomba.Ability_Clay_E_Boomba_C",
+        2863861815,
+        FieldType::Int32,
+    ),
+    (
+        "CosmeticRandomSeed",
+        "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C",
+        2863861815,
+        FieldType::Int32,
+    ),
+    (
+        "CosmeticRandomSeed",
+        "/Game/Characters/Clay/S0/Ability_X/Ability_Clay_X_RocketLauncher.Ability_Clay_X_RocketLauncher_C",
+        2863861815,
+        FieldType::Int32,
+    ),
+    (
+        "CreatedByCharacter",
+        "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
+        2035145197,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "CreatedByCharacter",
+        "/Game/Characters/Clay/S0/Ability_E/Ability_Clay_E_Boomba.Ability_Clay_E_Boomba_C",
+        2035145197,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "CreatedByCharacter",
+        "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C",
+        2035145197,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "CreatedByCharacter",
+        "/Game/Characters/Clay/S0/Ability_X/Ability_Clay_X_RocketLauncher.Ability_Clay_X_RocketLauncher_C",
+        2035145197,
+        FieldType::ObjectNetGuid,
     ),
     (
         "CreatedByCharacter",
@@ -145,10 +230,126 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 28] = [
         FieldType::VectorDouble,
     ),
     (
+        "Duration",
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        1815021954,
+        FieldType::Float,
+    ),
+    (
         "HealCauser",
         "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
         546618027,
         FieldType::ObjectNetGuid,
+    ),
+    (
+        "LocationOffset",
+        "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
+        111823753,
+        FieldType::VectorNetQuantize { scale: 100 },
+    ),
+    (
+        "Module",
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        739992589,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "ModuleType",
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        3263282135,
+        FieldType::EnumRemainingBits,
+    ),
+    (
+        "NetTimestamp",
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        259706372,
+        FieldType::Float,
+    ),
+    (
+        "RelativeScale3D",
+        "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
+        1992268157,
+        FieldType::VectorNetQuantize { scale: 100 },
+    ),
+    (
+        "RelativeScale3D",
+        "/Game/Characters/Clay/S0/Ability_E/Ability_Clay_E_Boomba.Ability_Clay_E_Boomba_C",
+        1992268157,
+        FieldType::VectorNetQuantize { scale: 100 },
+    ),
+    (
+        "RelativeScale3D",
+        "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C",
+        1992268157,
+        FieldType::VectorNetQuantize { scale: 100 },
+    ),
+    (
+        "RelativeScale3D",
+        "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
+        1992268157,
+        FieldType::VectorNetQuantize { scale: 100 },
+    ),
+    (
+        "RelativeScale3D",
+        "/Game/Characters/Clay/S0/Ability_X/Ability_Clay_X_RocketLauncher.Ability_Clay_X_RocketLauncher_C",
+        1992268157,
+        FieldType::VectorNetQuantize { scale: 100 },
+    ),
+    (
+        "ReplicatedMovement",
+        "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C",
+        2749104612,
+        FieldType::RepMovement {
+            rotation: RotatorQuantization::ShortComponents,
+        },
+    ),
+    (
+        "RespawnNumber",
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        3960441757,
+        FieldType::Int32,
+    ),
+    (
+        "RotationOffset",
+        "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
+        1473289183,
+        FieldType::RotationShort,
+    ),
+    (
+        "Source",
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        1966913909,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "bAIControlled",
+        "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C",
+        2583701026,
+        FieldType::Bool,
+    ),
+    (
+        "bInPersistentData",
+        "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
+        4104327948,
+        FieldType::Bool,
+    ),
+    (
+        "bInPersistentData",
+        "/Game/Characters/Clay/S0/Ability_E/Ability_Clay_E_Boomba.Ability_Clay_E_Boomba_C",
+        4104327948,
+        FieldType::Bool,
+    ),
+    (
+        "bInPersistentData",
+        "/Game/Characters/Clay/S0/Ability_Q/Ability_Clay_Q_Satchel.Ability_Clay_Q_Satchel_C",
+        4104327948,
+        FieldType::Bool,
+    ),
+    (
+        "bInPersistentData",
+        "/Game/Characters/Clay/S0/Ability_X/Ability_Clay_X_RocketLauncher.Ability_Clay_X_RocketLauncher_C",
+        4104327948,
+        FieldType::Bool,
     ),
     (
         "bInPersistentData",
@@ -172,6 +373,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 28] = [
         "bInPersistentData",
         "/Game/Characters/Wushu/S0/Ability_4/Ability_Wushu_4_Smoke.Ability_Wushu_4_Smoke_C",
         4104327948,
+        FieldType::Bool,
+    ),
+    (
+        "isPossess",
+        "/Script/ShooterGame.ShooterCharacter:ClientResetRemoteMovementPrediction",
+        3522099335,
         FieldType::Bool,
     ),
 ];

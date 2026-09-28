@@ -31,6 +31,7 @@ for the measured scope, common checks and remaining limits.
 - Latest build verification: [`docs/BUILD_VERIFICATION.md`](docs/BUILD_VERIFICATION.md)
 - Historical field inventory: [`docs/TARGETING_AND_HEAL_VALUES.md`](docs/TARGETING_AND_HEAL_VALUES.md)
 - Upstream parity and 13.06 validation: [`docs/UPSTREAM_PARITY.md`](docs/UPSTREAM_PARITY.md)
+- Upstream Warden and Raze review: [`docs/UPSTREAM_RAZE_WARDEN.md`](docs/UPSTREAM_RAZE_WARDEN.md)
 - Character-death and KillData state: [`docs/KILL_LEDGER.md`](docs/KILL_LEDGER.md)
 - Damage, healing, decay and reset observations: [`docs/SECTION_OBSERVATIONS.md`](docs/SECTION_OBSERVATIONS.md)
 - Observed section timelines and explicit continuity gaps: [`docs/SECTION_TIMELINE.md`](docs/SECTION_TIMELINE.md)
@@ -784,7 +785,7 @@ Physical value coverage is the fraction of `fields.parquet` rows with at
 least one non-null `value_*` column. It cannot be computed by adding overlay,
 effect-blob or struct counters: these count different units and may describe
 parent/child expansions of the same input. The current reference
-baseline has 914,117 typed rows out of 1,296,660 (70.50%), measured directly
+baseline has 917,326 typed rows out of 1,296,660 (70.75%), measured directly
 from its columns.
 Adding raw child windows changes this denominator even when every old typed
 value survives; compare raw preservation and newly typed values separately.
@@ -1027,7 +1028,7 @@ The following files are generated and must never be edited by hand:
 |---|---|---|
 | `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,319 entries, 219 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
-| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum primitive types for ambiguous field names; no cross-group propagation |
+| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including upstream-declared geometry and enum shapes; no cross-group propagation |
 | `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` | 768-byte S-box, shared across builds |
 | `crates/vrf-transform/tests/data/golden_vectors.rs` | `tools/extract_golden.py` | Per-build golden test vectors |
 | `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` | Expected bytes from pinned original executable readers |

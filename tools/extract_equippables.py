@@ -11,7 +11,7 @@ as a list of Define(classPath, name, category) entries. That file is vendored
 with the rest of the descriptor sources, at
 third_party/vrp/Replay.Valorant/Combat/, and is the default input. Reproducing
 shot.equippable.name therefore requires a table, and this generator extracts it
-from that authoritative source rather than having anyone retype 24 paths.
+from that authoritative source rather than having anyone retype the paths.
 
 This does NOT weaken the parser's "no hardcoded names" invariant: the Rust
 crates stay free of name tables and emit class_path only. The mapping lives on
