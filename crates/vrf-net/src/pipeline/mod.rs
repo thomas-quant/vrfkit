@@ -1260,6 +1260,18 @@ mod tests {
         assert_eq!(stats.rep_layout_blocks, 1);
         assert_eq!(stats.skipped_bits, 0, "nothing may be abandoned");
         assert_eq!(sink.opens, vec![2]);
+        // A clean pass records no diagnostic event and drops none: the log is
+        // written only on a failure path. Asserted after a real reassembly and
+        // framing pass, not on a `NetStats::default()` that never ran one.
+        #[cfg(feature = "diagnostics")]
+        {
+            assert!(
+                stats.diagnostics.is_empty(),
+                "a clean pass recorded diagnostic events: {:?}",
+                stats.diagnostics
+            );
+            assert_eq!(stats.diagnostics_dropped, 0);
+        }
     }
 
     /// A partial final with no preceding initial is one error, counted once.

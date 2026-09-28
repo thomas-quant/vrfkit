@@ -689,15 +689,6 @@ mod tests {
         );
     }
 
-    /// A healthy pass records nothing and drops nothing. The reference replay
-    /// is this case: zero events across 608 020 content blocks.
-    #[test]
-    fn a_clean_pass_records_no_diagnostics() {
-        let stats = NetStats::default();
-        assert!(stats.diagnostics.is_empty());
-        assert_eq!(stats.diagnostics_dropped, 0);
-    }
-
     #[test]
     fn unknown_partial_error_paths_remain_visible_as_a_residual() {
         let stats = NetStats {
