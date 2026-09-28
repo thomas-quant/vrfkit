@@ -32,9 +32,23 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 # Substrings that mark a class as a persistent ability effect. Matched
-# case-insensitively against the full class_path. The list is intentionally
-# broad: a missed effect simply does not appear, and a false positive is a
-# short-lived actor whose open/close still reads sensibly.
+# case-insensitively against the full class_path. The list is broad on
+# purpose -- a missed effect simply does not appear -- but a false positive is
+# not harmless, and this file used to say it was ("a short-lived actor whose
+# open/close still reads sensibly"). Measured over the 1,018-export audit
+# corpus (parser 259ed10, 2026-09-28; actors.parquet opens), three names
+# matched a keyword they do not mean, each handled explicitly below:
+#   Gun_Deadeye_X_Giantslayer_Prototype_FIreRatePrototype -- Chamber's ult gun,
+#     "fire" in "FIreRate": 17,304 of 32,714 damage_zone rows, median lifetime
+#     ~100 s. An equippable, not an effect: `gun_` leaves are excluded.
+#   Projectile_Breach_Q_ThroughWalls_Flash -- "wall" in "ThroughWalls": 1,416
+#     rows filed as walls. A flash projectile, not a persistent effect; no
+#     other flash projectile is in this table (Vyse's placed flash trap is, as
+#     a trap). See NOT_EFFECT_TOKENS.
+#   GameObject_Sarge_X_OrbitalStrike_Production -- "orb" in "OrbitalStrike":
+#     174 rows filed as orbs. Brimstone's ult is 4-9 s of area damage, so
+#     `classify` files it as a damage_zone.
+# Every other class kept its type across the corpus when these three changed.
 EFFECT_KEYWORDS = (
     "smoke",
     "smokezone",
@@ -57,10 +71,29 @@ EFFECT_KEYWORDS = (
     "alarmbot",
 )
 
-# Map a class to a coarse effect family. Order matters: check the more
-# specific tokens first so "SlowField" is a slow, not a field.
-def classify(class_path: str) -> str:
+# Name fragments that contain a keyword without naming an effect, removed
+# before any keyword is matched. "ThroughWall" describes a projectile that
+# passes through walls: it is the whole of Breach's flash's claim to "wall",
+# while Phoenix's `FlameWall_ThroughWall` stays a wall through "FlameWall".
+NOT_EFFECT_TOKENS = ("throughwall",)
+
+#: Every `effect_type` value, in the order the summary prints them.
+EFFECT_TYPES = ("smoke", "wall", "slow", "trap", "damage_zone", "orb", "recon", "other")
+
+
+def _keyword_text(class_path: str) -> str:
+    """The lower-cased class path with `NOT_EFFECT_TOKENS` removed."""
     c = class_path.lower()
+    for token in NOT_EFFECT_TOKENS:
+        c = c.replace(token, "")
+    return c
+
+
+# Map a class to a coarse effect family. Order matters: check the more
+# specific tokens first so "SlowField" is a slow, not a field, and so
+# "OrbitalStrike" is a damage zone before "orb" can claim it.
+def classify(class_path: str) -> str:
+    c = _keyword_text(class_path)
     if "smoke" in c or "smokezone" in c:
         return "smoke"
     if "wall" in c or "barrier" in c or "toxicscreen" in c:
@@ -69,7 +102,8 @@ def classify(class_path: str) -> str:
         return "slow"
     if "trap" in c or "cage" in c:
         return "trap"
-    if "molotov" in c or "fire" in c or "decay" in c or "nanoswarm" in c:
+    if ("molotov" in c or "fire" in c or "decay" in c or "nanoswarm" in c
+            or "orbitalstrike" in c):
         return "damage_zone"
     if "orb" in c:
         return "orb"
@@ -78,10 +112,29 @@ def classify(class_path: str) -> str:
     return "other"
 
 
+#: Leaf-name prefix -> `actor_kind`. The table keeps a projectile and the zone
+#: it places as two rows, deliberately (see `is_effect_class`): on 0002c486 an
+#: Omen smoke is a `Projectile_Wraith_4_Smoke` (median 2.3 s) overlapping a
+#: `Zone_Wraith_4_Smoke` (median 16 s). The kind lets a consumer count either
+#: without this tool choosing for it.
+ACTOR_KINDS = {"projectile": "projectile", "gameobject": "game_object",
+               "zone": "zone", "patch": "patch", "pawn": "pawn"}
+#: Every `actor_kind` value, in the order the summary prints them.
+ACTOR_KIND_ORDER = ("projectile", "game_object", "zone", "patch", "pawn", "other")
+
+
+def actor_kind(class_path: str) -> str:
+    """The leaf's first `_`-separated token as a kind; `other` if unlisted."""
+    leaf = class_path.rsplit("/", 1)[-1].split(".", 1)[0]
+    return ACTOR_KINDS.get(leaf.split("_", 1)[0].lower(), "other")
+
+
 # Internal agent codename, when the class lives under /Game/Characters/<name>/.
-# These are VALORANT's internal names (Smonk = Brimstone, Pandemic = Viper,
-# ...); they are left as-is rather than mapped to display names, which
-# `equippable_table.py` already owns.
+# These are VALORANT's internal names (Sarge = Brimstone, Smonk = Clove,
+# Pandemic = Viper, ...; the vendored descriptors say so in
+# third_party/vrp/.../Agents/Sarge/SargeAgentDescriptor.cs and
+# .../Agents/Smonk/SmonkAbilityDescriptors.cs); they are left as-is rather than
+# mapped to display names, which `equippable_table.py` already owns.
 AGENT_RE = re.compile(r"/Game/Characters/(\w+)/")
 
 
@@ -93,15 +146,17 @@ def agent_codename(class_path: str) -> str:
 def is_effect_class(class_path: str) -> bool:
     if not class_path:
         return False
-    c = class_path.lower()
+    c = _keyword_text(class_path)
     if not any(k in c for k in EFFECT_KEYWORDS):
         return False
     # Exclude ability *controllers*: classes whose leaf starts with "Ability_"
     # are the ability actor itself (or a post-death variant), which lives across
     # the whole match. The transient effect instance is the GameObject_ /
     # Projectile_ / Patch_ actor it spawns, and that is what we want here.
+    # Exclude equippables too: a "Gun_" leaf is a weapon, whatever its name
+    # happens to contain (Chamber's ult gun, see EFFECT_KEYWORDS).
     leaf = class_path.rsplit("/", 1)[-1].lower()
-    if leaf.startswith("ability_"):
+    if leaf.startswith(("ability_", "gun_")):
         return False
     return True
 
@@ -126,10 +181,14 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
     sy = cols["spawn_y"]
     sz = cols["spawn_z"]
 
-    # Actor NetGUIDs are recycled across rounds, so the same GUID can carry
-    # several open/close lifetimes. Collect events per GUID, then pair each
-    # open with the close that follows it -- not first-open to last-close,
-    # which would span unrelated rounds and report absurd durations.
+    # Collect events per GUID, then pair each open with the close that follows
+    # it -- not first-open to last-close, which would span unrelated lifetimes
+    # and report absurd durations if a GUID were ever reused. This comment used
+    # to say GUIDs are recycled across rounds; measured over the 1,018-export
+    # audit corpus (parser 259ed10, 2026-09-28; every actors.parquet `open`,
+    # all classes), none is: 2,326,969 opens, 0 GUIDs opened twice in one
+    # export. The pairing stays because nothing shows another build cannot
+    # reuse a GUID, and it costs nothing when none does.
     events: dict[int, list[tuple]] = {}
     for i in range(len(guid)):
         cp = class_path[i]
@@ -199,6 +258,7 @@ def _row(guid: int, open_rec: tuple, close_ms):
         "actor_net_guid": guid,
         "class_path": cp,
         "effect_type": classify(cp),
+        "actor_kind": actor_kind(cp),
         "agent": agent_codename(cp),
         "spawn_x": x,
         "spawn_y": y,
@@ -213,6 +273,7 @@ SCHEMA = pa.schema([
     pa.field("actor_net_guid", pa.int32()),
     pa.field("class_path", pa.string()),
     pa.field("effect_type", pa.string()),
+    pa.field("actor_kind", pa.string()),
     pa.field("agent", pa.string()),
     pa.field("spawn_x", pa.float32()),
     pa.field("spawn_y", pa.float32()),
@@ -239,9 +300,15 @@ def main() -> int:
 
     from collections import Counter
     by_type = Counter(r["effect_type"] for r in rows)
+    by_kind = Counter(r["actor_kind"] for r in rows)
     print(f"wrote {args.out} ({len(rows)} effect instances)")
-    for t, n in sorted(by_type.items()):
-        print(f"  {t:12s} {n}")
+    # Every type and kind is printed, zeros included: a family that stopped
+    # matching must read as 0, not as a line that is no longer there.
+    for t in EFFECT_TYPES:
+        print(f"  {t:12s} {by_type[t]}")
+    print("  by actor kind (class leaf prefix):")
+    for k in ACTOR_KIND_ORDER:
+        print(f"    {k:12s} {by_kind[k]}")
     # Printed with its zero. An open-ended row can mean "the actor went dormant"
     # or "the export window ended first", and the table cannot tell them apart.
     # `went_dormant` does NOT decompose `open_ended`: it counts every instance
