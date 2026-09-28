@@ -27,6 +27,8 @@ else:
     from extract_kill_observations import InputError, exact_ref
 
 MAX_REPLICATION_LAG_MS = 50
+#: This file and the modules it runs, hashed as provenance and refused as --out.
+SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')
 DEATH_NAME = 'EReplayEventGroup::CharacterDeath'
 IDENTITY_STATUSES = (
     'resolved', 'absent_reference', 'null_reference', 'lifecycle_time_regression',
@@ -236,8 +238,7 @@ def extract(export, observations_path=None):
     else:
         import kill_state
     export = Path(export)
-    source_names = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')
-    sources = {name:file_sha(Path(__file__).parent/name) for name in source_names}
+    sources = {name:file_sha(Path(__file__).parent/name) for name in SOURCE_NAMES}
     parquet_names = ('fields','checkpoint_fields','actors','net_guids','checkpoint_actors',
                      'checkpoint_net_guids','checkpoint_export_groups','checkpoint_export_fields','events')
     inputs = {name+'.parquet':file_sha(export/(name+'.parquet')) for name in parquet_names}
@@ -376,8 +377,7 @@ def main(argv=None):
     pa.set_io_thread_count(1)
     try:
         observation_extractor.reject_overwrite(args.export,args.out)
-        protected=[Path(__file__).with_name(name) for name in
-                   ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')]
+        protected=[Path(__file__).with_name(name) for name in SOURCE_NAMES]
         if args.observations is not None:
             protected.append(args.observations)
         if args.out.resolve() in {p.resolve() for p in protected}:

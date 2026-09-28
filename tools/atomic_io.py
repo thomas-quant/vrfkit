@@ -25,6 +25,20 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
+def aliases(path: Path, protected) -> bool:
+    """Whether `path` names one of `protected`: the same resolved path, or
+    the same file through a hard link (checked only when both exist)."""
+    for item in protected:
+        try:
+            if path.exists() and item.exists() and path.samefile(item):
+                return True
+        except OSError:
+            pass
+        if path.resolve() == item.resolve():
+            return True
+    return False
+
+
 def require_descendant(path: Path, root: Path, *, allow_root: bool = False) -> Path:
     """Resolve *path* and require it to stay below the resolved *root*."""
     resolved_root = root.resolve()

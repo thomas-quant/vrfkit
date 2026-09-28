@@ -15,10 +15,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text, sha256_file
+    from .atomic_io import aliases, atomic_write_text, sha256_file
     from .extract_kill_observations import InputError, exact_ref, parse_array
 else:
-    from atomic_io import atomic_write_text, sha256_file
+    from atomic_io import aliases, atomic_write_text, sha256_file
     from extract_kill_observations import InputError, exact_ref, parse_array
 
 SCHEMA_VERSION = 1
@@ -44,6 +44,8 @@ COORDINATE_COLUMNS = ("time_ms", "packet_id", "channel_index", "actor_net_guid",
 FIELDS = ["time_ms", "packet_id", "channel_index", "actor_net_guid", "object_net_guid", "group_path", "handle", "field_name", "compatible_checksum", "bit_count", "raw_bits", "value_i64", "value_f64", "value_bool", "value_str"]
 CP_FIELDS = ["checkpoint_index", "checkpoint_id", *FIELDS]
 HEALTH_SECTION_PATH = "HealthDamageSection"
+INPUT_NAMES = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "net_guids.parquet")
+HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py")
 
 
 class IntegrityError(InputError):
@@ -51,17 +53,6 @@ class IntegrityError(InputError):
 
 
 sha = sha256_file
-
-def aliases(path, protected):
-    for item in protected:
-        try:
-            if path.exists() and item.exists() and path.samefile(item):
-                return True
-        except OSError:
-            pass
-        if path.resolve() == item.resolve():
-            return True
-    return False
 
 
 def raw(r, ordinal, population):
@@ -284,9 +275,9 @@ def result(route, key, rows, errors, reasons, report):
 
 
 def extract(export):
-    inputs = [export / n for n in ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "net_guids.parquet")]
+    inputs = [export / n for n in INPUT_NAMES]
     before = {p.name: sha(p) for p in inputs}
-    source_files = [Path(__file__).resolve(), Path(__file__).with_name("extract_kill_observations.py"), Path(__file__).with_name("atomic_io.py")]
+    source_files = [Path(__file__).resolve(), *(Path(__file__).with_name(n) for n in HELPER_NAMES)]
     impl_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     decl = declarations(manifest)
@@ -319,7 +310,7 @@ def extract(export):
 
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__); p.add_argument("--export",required=True,type=Path); p.add_argument("--out",required=True,type=Path); a=p.parse_args(argv)
-    protected=[a.export/n for n in ("manifest.json","fields.parquet","checkpoint_fields.parquet","net_guids.parquet")]+[Path(__file__),Path(__file__).with_name("extract_kill_observations.py"),Path(__file__).with_name("atomic_io.py")]
+    protected=[a.export/n for n in INPUT_NAMES]+[Path(__file__),*(Path(__file__).with_name(n) for n in HELPER_NAMES)]
     try:
         if a.export.is_dir():
             protected.extend(p for p in a.export.iterdir() if p.is_file())

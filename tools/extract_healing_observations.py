@@ -8,11 +8,11 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text, sha256_file
+    from .atomic_io import aliases, atomic_write_text, sha256_file
     from .extract_kill_observations import InputError, parse_array, exact_ref
     from .player_identity import load_player_bodies
 else:
-    from atomic_io import atomic_write_text, sha256_file
+    from atomic_io import aliases, atomic_write_text, sha256_file
     from extract_kill_observations import InputError, parse_array, exact_ref
     from player_identity import load_player_bodies
 SCHEMA_VERSION = 1
@@ -64,6 +64,15 @@ FIELD_COLS = [
 CHECKPOINT_FIELD_COLS = ["checkpoint_index", "checkpoint_id", *FIELD_COLS]
 #: Every status `edge()` can return, so the per-edge tally prints zeros too.
 EDGE_STATUSES = ("present", "null", "absent", "duplicate", "invalid")
+#: The export files read, and the helper modules hashed beside this file.
+INPUT_NAMES = (
+    "manifest.json",
+    "fields.parquet",
+    "checkpoint_fields.parquet",
+    "actors.parquet",
+    "net_guids.parquet",
+)
+HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py", "player_identity.py")
 
 
 class IntegrityError(InputError):
@@ -71,18 +80,6 @@ class IntegrityError(InputError):
 
 
 sha = sha256_file
-
-def aliases(path, protected):
-    target = path.resolve()
-    for candidate in protected:
-        if target == candidate.resolve():
-            return True
-        try:
-            if path.exists() and candidate.exists() and path.samefile(candidate):
-                return True
-        except OSError:
-            continue
-    return False
 
 
 def iter_rows(path, columns):
@@ -540,22 +537,11 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
 
 
 def extract(export):
-    inputs = [
-        export / n
-        for n in (
-            "manifest.json",
-            "fields.parquet",
-            "checkpoint_fields.parquet",
-            "actors.parquet",
-            "net_guids.parquet",
-        )
-    ]
+    inputs = [export / n for n in INPUT_NAMES]
     before = {p.name: sha(p) for p in inputs}
     source_files = [
         Path(__file__).resolve(),
-        Path(__file__).with_name("extract_kill_observations.py"),
-        Path(__file__).with_name("atomic_io.py"),
-        Path(__file__).with_name("player_identity.py"),
+        *(Path(__file__).with_name(n) for n in HELPER_NAMES),
     ]
     source_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
@@ -717,20 +703,9 @@ def main(argv=None):
     p.add_argument("--out", required=True, type=Path)
     a = p.parse_args(argv)
     try:
-        protected = [
-            a.export / n
-            for n in (
-                "manifest.json",
-                "fields.parquet",
-                "checkpoint_fields.parquet",
-                "actors.parquet",
-                "net_guids.parquet",
-            )
-        ] + [
+        protected = [a.export / n for n in INPUT_NAMES] + [
             Path(__file__),
-            Path(__file__).with_name("extract_kill_observations.py"),
-            Path(__file__).with_name("atomic_io.py"),
-            Path(__file__).with_name("player_identity.py"),
+            *(Path(__file__).with_name(n) for n in HELPER_NAMES),
         ]
         if aliases(a.out, protected):
             raise InputError("output aliases an input or implementation file")
