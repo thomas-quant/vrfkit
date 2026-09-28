@@ -10,7 +10,6 @@ impl SeededTransform for V11_09 {
     const BRANCH: &'static str = "++Ares-Core+release-11.09";
     const SEED_ADDEND: u32 = 0x12cf14e5;
     const INIT_A_OFFSET: u32 = 0x1b;
-    const TAIL_XOR: u8 = 0xe5;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         v = substitute_bytes_u64(v, &SBOX_64);

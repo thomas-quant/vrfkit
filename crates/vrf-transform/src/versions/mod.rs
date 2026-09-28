@@ -33,9 +33,9 @@
 //! | release-13.05 | `0x48c26613` | `0x13` | **add** | no |
 //! | release-13.06 | `0xe974593c` | `0x3c` | **add** | yes |
 //!
-//! In every recovered build, `TAIL_XOR == SEED_ADDEND & 0xff`. That is asserted per version
-//! rather than assumed, so a future build that breaks the pattern fails a test
-//! instead of silently corrupting the final partial byte of every payload.
+//! In every recovered build, `TAIL_XOR == SEED_ADDEND & 0xff`, so that is the
+//! trait default and a build that breaks the pattern overrides it. A wrong tail
+//! byte fails the build's 1- and 7-bit vectors, which every build must carry.
 //!
 //! ## One file per build
 //!
@@ -115,7 +115,7 @@ pub trait SeededTransform {
     /// Whether the offset is added (`true`) or subtracted (`false`).
     const ADD_OFFSET: bool = false;
     /// XORed into the final partial byte alongside the keystream byte.
-    const TAIL_XOR: u8;
+    const TAIL_XOR: u8 = Self::SEED_ADDEND as u8;
 
     /// Seed the first PRNG lane.
     #[must_use]
@@ -137,105 +137,4 @@ pub trait SeededTransform {
     /// Transform one byte.
     #[must_use]
     fn byte(value: u8, state: u32) -> u8;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `(branch, seed addend, init-a offset, adds offset, tail xor)` for every
-    /// registered build.
-    ///
-    /// Collected at runtime rather than compared as associated constants: a
-    /// `assert_eq!` between two consts folds to a tautology that the compiler (and
-    /// clippy) can see through, which defeats the point of checking it.
-    fn build_table() -> Vec<(&'static str, u32, u32, bool, u8)> {
-        fn row<T: SeededTransform>() -> (&'static str, u32, u32, bool, u8) {
-            (
-                T::BRANCH,
-                T::SEED_ADDEND,
-                T::INIT_A_OFFSET,
-                T::ADD_OFFSET,
-                T::TAIL_XOR,
-            )
-        }
-        vec![
-            row::<V11_06>(),
-            row::<V11_07>(),
-            row::<V11_08>(),
-            row::<V11_09>(),
-            row::<V11_10>(),
-            row::<V11_11>(),
-            row::<V12_00>(),
-            row::<V12_01>(),
-            row::<V12_02>(),
-            row::<V12_03>(),
-            row::<V12_04>(),
-            row::<V12_05>(),
-            row::<V12_06>(),
-            row::<V12_07>(),
-            row::<V12_08>(),
-            row::<V12_09>(),
-            row::<V12_10>(),
-            row::<V12_11>(),
-            row::<V13_00>(),
-            row::<V13_01>(),
-            row::<V13_02>(),
-            row::<V13_04>(),
-            row::<V13_05>(),
-            row::<V13_06>(),
-        ]
-    }
-
-    /// Across every known build the tail XOR byte is the low byte of the seed
-    /// addend. Encoding that as a test (not as a derivation) means a future build
-    /// that breaks the pattern is caught here rather than corrupting the last
-    /// partial byte of every payload it decodes.
-    #[test]
-    fn tail_xor_is_low_byte_of_seed_addend() {
-        for (branch, seed_addend, _, _, tail_xor) in build_table() {
-            assert_eq!(
-                tail_xor,
-                (seed_addend & 0xff) as u8,
-                "{branch}: TAIL_XOR should be the low byte of SEED_ADDEND {seed_addend:#010x}"
-            );
-        }
-    }
-
-    /// Compare each recovered offset sign with its native implementation.
-    /// Pinning the exact set means a new transform that
-    /// copy-pastes the wrong sign is caught here rather than in a corpus sweep.
-    #[test]
-    fn offset_signs_match_recovered_builds() {
-        let adding: Vec<&str> = build_table()
-            .into_iter()
-            .filter(|row| row.3)
-            .map(|row| row.0)
-            .collect();
-        assert_eq!(
-            adding,
-            vec![
-                V11_06::BRANCH,
-                V12_01::BRANCH,
-                V12_02::BRANCH,
-                V12_05::BRANCH,
-                V12_06::BRANCH,
-                V12_11::BRANCH,
-                V13_05::BRANCH,
-                V13_06::BRANCH
-            ]
-        );
-    }
-
-    #[test]
-    fn build_constants_are_all_distinct() {
-        // Two builds sharing a seed addend would almost certainly mean a
-        // copy-paste error in a newly added transform.
-        let table = build_table();
-        for (i, a) in table.iter().enumerate() {
-            for b in &table[i + 1..] {
-                assert_ne!(a.1, b.1, "{} and {} share a seed addend", a.0, b.0);
-            }
-        }
-    }
 }

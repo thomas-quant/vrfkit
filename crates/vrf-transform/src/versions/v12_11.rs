@@ -9,10 +9,7 @@ impl SeededTransform for V12_11 {
     const BRANCH: &'static str = "++Ares-Core+release-12.11";
     const SEED_ADDEND: u32 = 0x409d_36a3;
     const INIT_A_OFFSET: u32 = 0x23;
-    /// Adds instead of subtracting. release-13.05 and release-13.06 also add;
-    /// `only_12_11_13_05_and_13_06_add_the_offset` pins this exception.
     const ADD_OFFSET: bool = true;
-    const TAIL_XOR: u8 = 0xa3;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         let ror2 = state.rotate_right(2);

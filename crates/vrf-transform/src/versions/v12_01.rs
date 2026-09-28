@@ -11,7 +11,6 @@ impl SeededTransform for V12_01 {
     const SEED_ADDEND: u32 = 0x13fdd831;
     const INIT_A_OFFSET: u32 = 0x31;
     const ADD_OFFSET: bool = true;
-    const TAIL_XOR: u8 = 0x31;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         v = substitute_bytes_u64(v, &SBOX_64);

@@ -10,7 +10,6 @@ impl SeededTransform for V13_02 {
     const BRANCH: &'static str = "++Ares-Core+release-13.02";
     const SEED_ADDEND: u32 = 0x9e81_a37c;
     const INIT_A_OFFSET: u32 = 0x04;
-    const TAIL_XOR: u8 = 0x7c;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         let ror2 = state.rotate_right(2);

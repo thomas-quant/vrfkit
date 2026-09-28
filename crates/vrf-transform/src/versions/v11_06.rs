@@ -11,7 +11,6 @@ impl SeededTransform for V11_06 {
     const SEED_ADDEND: u32 = 0x3325e3bd;
     const INIT_A_OFFSET: u32 = 0x3d;
     const ADD_OFFSET: bool = true;
-    const TAIL_XOR: u8 = 0xbd;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         v = v.wrapping_add(u64::from(state.rotate_right(8)));

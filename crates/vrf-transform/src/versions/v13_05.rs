@@ -11,7 +11,6 @@ impl SeededTransform for V13_05 {
     /// The second build that adds instead of subtracting, and the first to do so
     /// since 12.11.
     const ADD_OFFSET: bool = true;
-    const TAIL_XOR: u8 = 0x13;
 
     fn word64(mut v: u64, state: u32) -> u64 {
         let ror1 = state.rotate_right(1);
