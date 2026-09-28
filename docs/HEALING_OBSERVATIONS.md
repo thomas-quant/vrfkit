@@ -67,7 +67,11 @@ validated summaries.
 
 `source_corroboration` retains the direct RPC edges independently from the
 causer actor and its replicated reference history. `recipient_corroboration`
-records lifecycle status and static manifest membership separately. Equal-time
+records lifecycle status and static manifest membership separately. Membership
+covers every pawn a manifest player's `SpawnedCharacter` named, including the
+one a player had before reconnecting (`tools/player_identity.py`); the
+document's `player_identity` counts say how many such pawns the export holds.
+Equal-time
 lifecycle boundaries, repeated opens, missing opens and conflicting references
 must not establish a definite player-credit relation.
 

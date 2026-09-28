@@ -10,10 +10,14 @@ An earlier version also unpacked `SerializeIntPacked` out of `raw_bits`, because
 `Owner` arrived untyped on this group. The overlay now resolves it by name, so
 that decoder and its vectors are gone.
 """
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_spike_carrier as spike  # noqa: E402
@@ -122,6 +126,78 @@ class UnresolvedTests(unittest.TestCase):
         """Not every replay has a plant; only a plant that lost its carrier."""
         self.assertEqual(
             spike.unresolved([interval(0, 900)], {"group": [], "time1": []}), [])
+
+
+BOMB = "/Game/Equippables/Bomb/BombEquippable.BombEquippable_C"
+PLAYER_STATE = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
+WRAITH = "/Game/Characters/Wraith/Wraith_PC.Wraith_PC_C"
+
+
+class ReconnectedCarrierTests(unittest.TestCase):
+    """39c2bb2c (13.05): PlayerState 256's SpawnedCharacter goes 1510 -> 0 ->
+    45530 and the manifest keeps 45530. Pawn 1510 carried and planted the
+    spike in round 5; the join on the manifest alone called that custody
+    `unknown` and the plant `NO CARRIER`."""
+
+    def build(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        # PlayerState 300 has a subject and no character, as the eleventh
+        # PlayerState of 4b8191e8 and 8cda0666 does.
+        (root / "manifest.json").write_text(json.dumps({"players": [
+            {"actor_net_guid": 256, "subject": "reconnected", "character_net_guid": 45530},
+            {"actor_net_guid": 300, "subject": "no-character", "character_net_guid": None}]}),
+            encoding="utf-8")
+
+        def field(time_ms, actor, group, name, value):
+            return {"time_ms": time_ms, "packet_id": time_ms, "actor_net_guid": actor,
+                    "object_net_guid": None, "group_path": group, "field_name": name,
+                    "value_i64": value, "raw_bits": None}
+
+        fields = [field(66, 256, PLAYER_STATE, "SpawnedCharacter", 1510),
+                  field(100, 900, BOMB, "Owner", 1510),
+                  field(300, 900, BOMB, "Owner", 950),
+                  field(1851838, 256, PLAYER_STATE, "SpawnedCharacter", 0),
+                  field(1948245, 256, PLAYER_STATE, "SpawnedCharacter", 45530),
+                  field(1948300, 900, BOMB, "Owner", 45530)]
+        pq.write_table(pa.Table.from_pylist(fields, schema=pa.schema([
+            ("time_ms", pa.uint32()), ("packet_id", pa.uint32()),
+            ("actor_net_guid", pa.uint32()), ("object_net_guid", pa.uint32()),
+            ("group_path", pa.string()), ("field_name", pa.string()),
+            ("value_i64", pa.int64()), ("raw_bits", pa.binary())])), root / "fields.parquet")
+        actors = [{"time_ms": 66, "actor_net_guid": 1510, "event": "open", "class_path": WRAITH},
+                  {"time_ms": 90, "actor_net_guid": 900, "event": "open", "class_path": BOMB},
+                  {"time_ms": 290, "actor_net_guid": 950, "event": "open", "class_path": GROUND}]
+        pq.write_table(pa.Table.from_pylist(actors, schema=pa.schema([
+            ("time_ms", pa.uint32()), ("actor_net_guid", pa.uint32()),
+            ("event", pa.string()), ("class_path", pa.string())])), root / "actors.parquet")
+        events = {"group": ["roundStarted", "spikePlanted"], "time1": [50, 250],
+                  "metadata": ["5", None]}
+        pq.write_table(pa.table(events), root / "events.parquet")
+        return spike.build(root)
+
+    def test_an_earlier_pawn_of_a_reconnected_player_is_the_carrier(self):
+        rows = self.build()[0]
+        first = rows[0]
+        self.assertEqual((first["owner_net_guid"], first["holder_kind"]), (1510, "player"))
+        self.assertEqual(first["carrier_subject"], "reconnected")
+        self.assertIn("SpawnedCharacter history", first["carrier_identity_provenance"])
+        self.assertEqual(rows[-1]["carrier_identity_provenance"],
+                         "manifest.players.character_net_guid (SpawnedCharacter)")
+        self.assertIsNone(rows[1]["carrier_identity_provenance"])
+
+    def test_the_plant_by_the_earlier_pawn_resolves(self):
+        rows, events = self.build()[:2]
+        self.assertEqual(spike.unresolved(rows, events), [])
+
+    def test_a_loose_spike_has_no_carrier_subject(self):
+        """The manifest-only map held a None key for a player with no
+        character, so `pawn_subject.get(None)` gave every loose interval that
+        player's subject: 86 and 46 intervals on 4b8191e8 and 8cda0666."""
+        loose = self.build()[0][1]
+        self.assertEqual((loose["holder_kind"], loose["carrier_pawn_guid"]), ("loose", None))
+        self.assertIsNone(loose["carrier_subject"])
 
 
 class LeafTests(unittest.TestCase):

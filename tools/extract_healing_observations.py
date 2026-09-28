@@ -10,9 +10,11 @@ import pyarrow.parquet as pq
 if __package__:
     from .atomic_io import atomic_write_text, sha256_file
     from .extract_kill_observations import InputError, parse_array, exact_ref
+    from .player_identity import load_player_bodies
 else:
     from atomic_io import atomic_write_text, sha256_file
     from extract_kill_observations import InputError, parse_array, exact_ref
+    from player_identity import load_player_bodies
 SCHEMA_VERSION = 1
 OUTER_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
 PARAM_GROUP = "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal"
@@ -553,15 +555,15 @@ def extract(export):
         Path(__file__).resolve(),
         Path(__file__).with_name("extract_kill_observations.py"),
         Path(__file__).with_name("atomic_io.py"),
+        Path(__file__).with_name("player_identity.py"),
     ]
     source_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text())
     declared = declarations(manifest)
-    players = {
-        int(x["character_net_guid"]): x.get("subject")
-        for x in manifest.get("players", [])
-        if x.get("character_net_guid")
-    }
+    # Every pawn a SpawnedCharacter value names, not only the manifest's last
+    # one: a reconnected player's earlier pawn is still that player's body.
+    bodies = load_player_bodies(export, manifest)
+    players = bodies.subjects
     paths = {
         x["net_guid"]: x["path"]
         for _, x in iter_rows(export / "net_guids.parquet", ["net_guid", "path"])
@@ -675,6 +677,7 @@ def extract(export):
         "export_id": export.name,
         "source": str(export.resolve()),
         "source_hashes": before,
+        "player_identity": bodies.counts,
         "provenance": {
             "replay_build": manifest.get("replay_build"),
             "input_sha256_before": before,
@@ -727,6 +730,7 @@ def main(argv=None):
             Path(__file__),
             Path(__file__).with_name("extract_kill_observations.py"),
             Path(__file__).with_name("atomic_io.py"),
+            Path(__file__).with_name("player_identity.py"),
         ]
         if aliases(a.out, protected):
             raise InputError("output aliases an input or implementation file")

@@ -93,6 +93,55 @@ class PlayerEffectTests(unittest.TestCase):
             self.assertEqual(doc["totals"]["player_blind_update"], 0)
             self.assertIsNone(doc["records"][0]["target_subject"])
 
+    @staticmethod
+    def spawned(state, value, time_ms, name="SpawnedCharacter",
+                group="/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"):
+        return {"time_ms": time_ms, "packet_id": time_ms, "channel_index": 33,
+                "actor_net_guid": state, "object_net_guid": None,
+                "group_path": group, "field_name": name, "value_i64": value}
+
+    def reconnect(self, extra=()):
+        """39c2bb2c (13.05): PlayerState 256 is given 1510, loses it on a
+        disconnect, and reconnects as 45530 -- the manifest keeps 45530."""
+        players = [{"actor_net_guid": 256, "subject": "reconnected",
+                    "character_net_guid": 45530}]
+        fields = [self.spawned(256, 1510, 66), self.spawned(256, 0, 1851838),
+                  self.spawned(256, 45530, 1948245), *extra]
+        for actor in (1510, 45530, 777):
+            fields += [self.row(actor, "MulticastPlayContinuousEffect.EffectID", 1, rpc=True),
+                       self.row(actor, "MulticastPlayContinuousEffect.EffectContainer", 99,
+                                rpc=True)]
+        return self.export(fields, players)
+
+    def test_an_earlier_pawn_of_a_reconnected_player_is_still_a_player_body(self):
+        doc = self.reconnect()
+        by_actor = {r["actor_net_guid"]: r for r in doc["records"]}
+        self.assertEqual(by_actor[1510]["target_identity"], "player_body")
+        self.assertEqual(by_actor[1510]["target_subject"], "reconnected")
+        self.assertIn("SpawnedCharacter history", by_actor[1510]["identity_provenance"])
+        self.assertEqual(by_actor[45530]["identity_provenance"],
+                         "manifest.players.character_net_guid (SpawnedCharacter)")
+        self.assertEqual(doc["totals"]["player_continuous_start"], 2)
+        self.assertEqual(doc["totals"]["player_body_via_non_final_spawned_character"], 1)
+        self.assertEqual(
+            doc["totals"]["player_identity"]["non_final_spawned_character_pawns"], 1)
+
+    def test_a_pawn_carrying_the_players_state_but_never_spawned_is_not_a_body(self):
+        """Astra's Rift_TargetingForm_PC_C: its own PlayerState names the player
+        and PossessedCharacter points at it, but SpawnedCharacter never does."""
+        form = "/Game/Characters/Rift/Rift_TargetingForm_PC.Rift_TargetingForm_PC_C"
+        doc = self.reconnect([self.spawned(777, 256, 90, "PlayerState", form),
+                              self.spawned(256, 777, 90, "PossessedCharacter")])
+        by_actor = {r["actor_net_guid"]: r for r in doc["records"]}
+        self.assertEqual(by_actor[777]["target_identity"], "unconfirmed_actor")
+        self.assertIsNone(by_actor[777]["target_subject"])
+        self.assertEqual(doc["totals"]["unconfirmed_target_observations"], 1)
+
+    def test_every_identity_count_is_reported_with_its_zero(self):
+        totals = self.export(self.blind(20))["totals"]
+        self.assertEqual(totals["player_body_via_non_final_spawned_character"], 0)
+        self.assertEqual(totals["player_identity"]["pawns_claimed_by_multiple_player_states"], 0)
+
     def test_untyped_member_stays_missing_and_wrong_group_is_ignored(self):
         fields = [self.row(20, "ActiveBlinds[0].InitialDuration")]
         wrong = self.row(20, "ActiveBlinds[0].EffectID", 1)

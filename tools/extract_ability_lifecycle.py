@@ -4,8 +4,10 @@
 This view makes no cast-count claim.  A candidate is admitted only when its
 class lives below ``/Game/Characters/<name>/`` and has an explicit ability path
 segment. Owner and Instigator are reported as replicated references; a player
-identity is linked only when an unambiguous reference equals a manifest
-``character_net_guid``. This is not proof that the player cast an ability.
+identity is linked only when an unambiguous reference equals a pawn a
+``SpawnedCharacter`` value proves: the manifest ``character_net_guid``, or an
+earlier value the manifest dropped when the player reconnected (see
+``player_identity.py``). This is not proof that the player cast an ability.
 """
 
 from __future__ import annotations
@@ -20,8 +22,10 @@ import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import atomic_write_text
+    from .player_identity import FINAL_PROVENANCE, load_player_bodies
 else:
     from atomic_io import atomic_write_text
+    from player_identity import FINAL_PROVENANCE, load_player_bodies
 
 
 ACTOR_COLUMNS = ("time_ms", "packet_id", "channel_index", "actor_net_guid",
@@ -85,15 +89,9 @@ def _reference(rows: list[dict], field: str) -> dict:
 
 def build(export_dir: Path) -> dict:
     manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
-    player_subjects = defaultdict(set)
-    for player in manifest.get("players", []):
-        guid = player.get("character_net_guid")
-        if guid is not None and int(guid) != 0:
-            player_subjects[int(guid)].add(player.get("subject"))
-    players = {guid: next(iter(subjects)) for guid, subjects in player_subjects.items()
-               if len(subjects) == 1}
-    conflicting_player_guids = {guid for guid, subjects in player_subjects.items()
-                                if len(subjects) != 1}
+    bodies = load_player_bodies(export_dir, manifest)
+    players = bodies.subjects
+    conflicting_player_guids = bodies.conflicts
     actors = pq.read_table(export_dir / "actors.parquet",
                            columns=list(ACTOR_COLUMNS)).to_pylist()
     fields = pq.read_table(export_dir / "fields.parquet",
@@ -167,7 +165,10 @@ def build(export_dir: Path) -> dict:
             "linked_player_net_guid": player_link,
             "linked_player_subject": players.get(player_link),
             "player_reference_provenance": (
-                "manifest_character_net_guid_reference" if player_link else None),
+                None if not player_link else
+                "manifest_character_net_guid_reference"
+                if bodies.provenance[player_link] == FINAL_PROVENANCE else
+                "spawned_character_history_reference"),
             "unresolved_reasons": sorted(set(unresolved)),
         }
         records.append(record)
@@ -227,8 +228,12 @@ def build(export_dir: Path) -> dict:
         "records": records,
         "totals": {
             "candidate_instances": len(records), "linked_player_reference": linked,
+            "linked_via_non_final_spawned_character": sum(
+                row["player_reference_provenance"] == "spawned_character_history_reference"
+                for row in records),
             "unresolved_player_reference": len(records) - linked,
             "conflicting_manifest_character_guids": len(conflicting_player_guids),
+            "player_identity": bodies.counts,
             "unresolved_reasons": {reason: reason_counts[reason]
                                    for reason in UNRESOLVED_REASONS},
             "closed": closed, "right_censored": len(records) - closed,
@@ -254,6 +259,11 @@ def main(argv: list[str] | None = None) -> int:
     print("wrote {} ({} candidate(s), {} linked, {} unresolved, {} closed, {} right-censored)".format(
         args.out, totals["candidate_instances"], totals["linked_player_reference"],
         totals["unresolved_player_reference"], totals["closed"], totals["right_censored"]))
+    # Printed with its zero: a pawn the manifest dropped on a reconnect links
+    # only through the SpawnedCharacter history, and 0 must read as "none".
+    print("  linked via an earlier SpawnedCharacter pawn: {}; player identity: {}".format(
+        totals["linked_via_non_final_spawned_character"],
+        json.dumps(totals["player_identity"], sort_keys=True)))
     return 0
 
 
