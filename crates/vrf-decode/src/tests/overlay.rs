@@ -18,6 +18,9 @@ const SWIFT_GS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits
 const SWIFT_PS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
 /Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
 
+/// One name, two properties: the byte-shaped `B` and the 32-bit `B`
+/// (checksum 943211507, the second word of the player-state GUID -- see
+/// `player_state_guid_parts_are_scoped_uint32`) resolve by checksum alone.
 #[test]
 fn scoped_types_require_the_exact_group_name_and_checksum() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -26,7 +29,11 @@ fn scoped_types_require_the_exact_group_name_and_checksum() {
             resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(379198054)),
             Some(FieldType::Byte)
         );
-        for checksum in [None, Some(943211507), Some(1)] {
+        assert_eq!(
+            resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(943211507)),
+            Some(FieldType::UInt32)
+        );
+        for checksum in [None, Some(1)] {
             assert_eq!(
                 resolve_field_type_with_checksum(&table, group, Some("B"), None, checksum),
                 None
@@ -305,6 +312,86 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
     );
     assert_eq!(truncated.value_str, None);
     assert_eq!(stats.decoded_err, 1);
+}
+
+/// The four 32-bit words `A`/`B`/`C`/`D` on the player state are one FGuid, whose
+/// members Unreal declares `uint32`, so they are `UInt32` -- scoped per group
+/// and checksum from `tools/fixtures/scoped_type_evidence.json`.
+///
+/// The scope is load-bearing. The handles drift by build (A is 219, 204 or 207)
+/// and 207 is D's handle on 11.11-12.05, so no handle key could work; `B` also
+/// names nine byte-shaped properties and `A` an 8-bit one (1036865991); and
+/// scoped entries never follow the Swiftplay alias, so each group needs its own.
+#[test]
+fn player_state_guid_parts_are_scoped_uint32() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
+        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
+    };
+    let parts = [
+        ("A", 988_169_428),
+        ("B", 943_211_507),
+        ("C", 965_590_766),
+        ("D", 1_032_080_829),
+    ];
+    for group in [BOMB_PS, SWIFT_PS] {
+        for (field, checksum) in parts {
+            assert_eq!(
+                resolve(group, field, Some(checksum)),
+                Some(FieldType::UInt32),
+                "{group} {field}"
+            );
+            for other in [None, Some(checksum ^ 1)] {
+                assert_eq!(resolve(group, field, other), None, "{field} {other:?}");
+            }
+        }
+    }
+    for (field, checksum) in parts {
+        assert_eq!(resolve("/Unobserved", field, Some(checksum)), None);
+        assert_eq!(resolve(BOMB_GS, field, Some(checksum)), None);
+    }
+    assert_eq!(resolve(BOMB_PS, "A", Some(1_036_865_991)), None);
+}
+
+/// The first overlay use of `UInt32`, proved end to end: scoped lookup, then
+/// `decode_u32`, then `value_i64`, with a high-bit word staying positive.
+///
+/// 0xe28c69d7 is a real `D` value from the 2026-09-28 audit. Read as `Int32`
+/// the same four bytes are -494114345 -- a plausible wrong number that a
+/// width check alone would accept. A payload of any other width is a decode
+/// error, not a truncated or padded value.
+#[test]
+fn player_state_guid_parts_decode_unsigned_and_exactly() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, raw: &[u8], bits| {
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some("D"),
+            210,
+            Some(1_032_080_829),
+            Some(raw),
+            bits,
+            &mut stats,
+        )
+        .expect("a scoped GUID part is attempted")
+        .value_i64
+    };
+    for group in [BOMB_PS, SWIFT_PS] {
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2], 32),
+            Some(3_800_852_951)
+        );
+        assert_eq!(apply(group, &[0xd7, 0x69, 0x8c], 24), None, "{group}");
+        assert_eq!(
+            apply(group, &[0xd7, 0x69, 0x8c, 0xe2, 0x00], 40),
+            None,
+            "{group}"
+        );
+    }
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 4));
 }
 
 /// A Bomb class is already canonical and must not be rewritten.
@@ -2116,6 +2203,108 @@ fn targeting_vectors_and_heal_causer_require_exact_scoped_checksums() {
             None
         );
     }
+}
+
+const HEAL_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal";
+const DECAY_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay";
+
+/// The heal and overheal-decay references, each typed by its exact
+/// group/name/checksum from `tools/fixtures/scoped_type_evidence.json`.
+///
+/// Scoped because the same parameter names carry other checksums on the damage
+/// RPCs (`MulticastNotifyDamage_Base` / `_Point`), which the descriptor types by
+/// name in their own groups -- a name rule would merge signatures the schema
+/// keeps apart. The negatives pin that boundary: no checksum, a neighbouring
+/// checksum, the exported `_ClassNetCache` spelling, or the sibling RPC types
+/// nothing. Production resolves through `with_handles`, so this does too.
+#[test]
+fn heal_and_decay_references_require_exact_scoped_checksums() {
+    const CNC: &str = "/Script/ShooterGame.DamageableComponent_ClassNetCache";
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
+        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
+    };
+    let cases = [
+        (HEAL_PARAMS, "EventInstigator", 3_087_885_251),
+        (HEAL_PARAMS, "EventInstigatorPawn", 3_901_949_544),
+        (DECAY_PARAMS, "EventInstigator", 3_087_885_251),
+        (DECAY_PARAMS, "EventInstigatorPawn", 3_901_949_544),
+        (DECAY_PARAMS, "DecayCauser", 3_648_603_088),
+    ];
+    for (group, field, checksum) in cases {
+        assert_eq!(
+            resolve(group, field, Some(checksum)),
+            Some(FieldType::ObjectNetGuid),
+            "{group} {field}"
+        );
+        for other in [None, Some(checksum ^ 1)] {
+            assert_eq!(
+                resolve(group, field, other),
+                None,
+                "{group} {field} {other:?}"
+            );
+        }
+        let (_, function) = group.split_once(':').expect("a parameter group");
+        let exported = format!("{function}.{field}");
+        assert_eq!(resolve(CNC, &exported, Some(checksum)), None, "{exported}");
+    }
+    // Each causer is declared on one RPC only.
+    assert_eq!(
+        resolve(HEAL_PARAMS, "DecayCauser", Some(3_648_603_088)),
+        None
+    );
+    assert_eq!(resolve(DECAY_PARAMS, "HealCauser", Some(546_618_027)), None);
+}
+
+/// The scoped references decode through the ordinary packed-NetGUID reader,
+/// with the payload consumed exactly.
+///
+/// The 24-bit window is the widest the 2026-09-28 audit saw on these
+/// parameters (50,360 = 56 + 9*128 + 3*16384, low-bit continuation). The
+/// single zero byte is the null reference: 39 `DecayCauser` rows in that audit
+/// are exactly `0x00`, and they decode to 0 -- Unreal's null NetGUID, the same
+/// value the damage-side references already export -- not to an actor.
+#[test]
+fn heal_and_decay_references_decode_packed_guids_exactly() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    let mut stats = OverlayStats::default();
+    let mut apply = |group: &str, field: &str, handle: u32, checksum: u32, raw: &[u8], bits| {
+        crate::apply_overlay_with_checksum(
+            &table,
+            group,
+            group_hash_state(group),
+            Some(field),
+            handle,
+            Some(checksum),
+            Some(raw),
+            bits,
+            &mut stats,
+        )
+        .expect("a scoped reference is attempted")
+        .value_i64
+    };
+    let pawn = apply(
+        HEAL_PARAMS,
+        "EventInstigatorPawn",
+        8,
+        3_901_949_544,
+        &[0x71, 0x13, 0x06],
+        24,
+    );
+    assert_eq!(pawn, Some(50_360));
+    let null = apply(DECAY_PARAMS, "DecayCauser", 9, 3_648_603_088, &[0x00], 8);
+    assert_eq!(null, Some(0));
+    // A byte the packed value never claims is a residual, not a value.
+    let residual = apply(
+        HEAL_PARAMS,
+        "EventInstigator",
+        7,
+        3_087_885_251,
+        &[0x71, 0x13, 0x06, 0x00],
+        32,
+    );
+    assert_eq!(residual, None);
+    assert_eq!((stats.decoded_ok, stats.decoded_err), (2, 1));
 }
 
 /// The life-change array walks into its four members, on real wire bytes.

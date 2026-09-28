@@ -130,12 +130,14 @@ def fixture(value=-0.0, causer=True):
         ),
         row("MulticastNotifyHeal.LifeChangeBySection", 163390906, parent, pw),
     ]
+    # Typed like the parser types them: the scoped ObjectNetGuid entries in
+    # tools/fixtures/scoped_type_evidence.json put the packed value in value_i64.
     for n, h, c, v in [
         ("EventInstigator", 7, 3087885251, 12),
         ("EventInstigatorPawn", 8, 3901949544, 50),
     ]:
         z, w = ref(v)
-        rows.append(row("MulticastNotifyHeal." + n, c, z, w))
+        rows.append(row("MulticastNotifyHeal." + n, c, z, w, value_i64=v))
     if causer:
         z, w = ref(70)
         rows.append(
@@ -416,6 +418,73 @@ class Tests(unittest.TestCase):
         out.write_text("old")
         self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
         self.assertEqual(out.read_text(), "old")
+
+    def test_typed_instigator_edges_are_present_and_raw_checked(self):
+        td, p = self.make()
+        self.addCleanup(td.cleanup)
+        d = tool.extract(p)
+        s = d["observations"][0]["source_corroboration"]
+        for key, value in (("event_instigator", 12), ("event_instigator_pawn", 50)):
+            with self.subTest(edge=key):
+                self.assertEqual(s[key]["status"], "present")
+                self.assertEqual(s[key]["value"], value)
+                self.assertEqual(
+                    d["counts"]["source_edge_status"][key],
+                    {"present": 1, "null": 0, "absent": 0, "duplicate": 0, "invalid": 0},
+                )
+        # The established target is stated, including that it never joins to
+        # an opened actor -- an unresolved join is not a decode fault.
+        semantics = s["event_instigator"]["semantics"]
+        self.assertIn("PlayerController", semantics)
+        self.assertIn("not a decode fault", semantics)
+
+    def test_instigator_typed_corruption_fails_atomically(self):
+        for name in ("EventInstigator", "EventInstigatorPawn"):
+            with self.subTest(field=name):
+                rows = fixture()
+                target = next(
+                    r for r in rows if r["field_name"] == "MulticastNotifyHeal." + name
+                )
+                target["value_i64"] += 1
+                td, p = self.make(rows)
+                self.addCleanup(td.cleanup)
+                out = p / "out.json"
+                out.write_text("old")
+                self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
+                self.assertEqual(out.read_text(), "old")
+
+    def test_an_invalid_edge_is_counted_not_just_labelled(self):
+        # A malformed reference window keeps the amount and marks the edge
+        # invalid. That used to move no counter at all; it must reach counts.
+        rows = fixture()
+        target = next(
+            r for r in rows if r["field_name"] == "MulticastNotifyHeal.EventInstigator"
+        )
+        target["bit_count"] += 8
+        td, p = self.make(rows)
+        self.addCleanup(td.cleanup)
+        d = tool.extract(p)
+        o = d["observations"][0]
+        self.assertEqual(o["amount"]["status"], "validated")
+        self.assertEqual(o["source_corroboration"]["event_instigator"]["status"], "invalid")
+        self.assertEqual(d["counts"]["source_edge_status"]["event_instigator"]["invalid"], 1)
+        self.assertEqual(d["counts"]["source_edge_status"]["causer"]["present"], 1)
+
+    def test_untyped_instigator_from_an_older_export_fails_loudly(self):
+        # An export from a parser that predates the scoped typing carries the
+        # raw window only. That must stop the run, not turn the edge "invalid"
+        # behind a successful exit.
+        for name in ("EventInstigator", "EventInstigatorPawn"):
+            with self.subTest(field=name):
+                rows = fixture()
+                target = next(
+                    r for r in rows if r["field_name"] == "MulticastNotifyHeal." + name
+                )
+                target["value_i64"] = None
+                td, p = self.make(rows)
+                self.addCleanup(td.cleanup)
+                with self.assertRaisesRegex(tool.IntegrityError, "untyped"):
+                    tool.extract(p)
 
     def test_swapped_children_and_unrelated_gap_are_rejected(self):
         rows = fixture()

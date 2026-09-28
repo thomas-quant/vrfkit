@@ -270,8 +270,14 @@ Replicated properties and RPC parameters.
 | `raw_bits` | bytes? | Raw payload |
 | `value_i64` / `value_f64` / `value_bool` / `value_str` | | Only when the type is known |
 
-Qualified map cursor/click vectors use `(x,y,z)` in `value_str`, and HealCauser
-references use `value_i64`. Multi-click vectors appear as additive indexed
+Qualified map cursor/click vectors use `(x,y,z)` in `value_str`. The heal and
+overheal-decay references (`HealCauser`, `DecayCauser`, and both RPCs'
+`EventInstigator` and `EventInstigatorPawn`) use `value_i64`. A `DecayCauser`
+of 0 is the null NetGUID -- no causer -- not an actor. `EventInstigator` is a
+PlayerController reference that never joins to `actors.parquet`; that is
+expected, not a decode fault. The player-state GUID words `A`..`D` are
+`UInt32`, so their `value_i64` is never negative even when the high bit is
+set. Multi-click vectors appear as additive indexed
 children immediately before their raw parent. Their inner declaration handle
 differs from the exported enclosing function handle. See
 [TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) for exact routes,
@@ -942,8 +948,9 @@ than by the Rust readers. Each specification
 names an exact exported group and field, and the decoder requires full payload
 consumption. This checks structure and observed numeric ranges, not gameplay
 meaning. Use it before adding overlay types and when comparing their emitted
-values after export (`--compare-typed`). Besides the byte-aligned primitives it
-reads four bit-level types -- `EnumByte` (a 1..8-bit payload), `FName`,
+values after export (`--compare-typed`). Besides the byte-aligned primitives (`UInt32`
+read unsigned) it reads seven bit-level types -- `EnumByte` (a 1..8-bit
+payload), `EnumRemainingBits`, `FName`, `RotationShort`, `VectorNetQuantize100`,
 `RepMovementByte` and `RepMovementShort` -- with its own LSB-first reader rather
 than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
 `ReplicatedMovement` value is compared by parsing the exported JSON, so `1` and
@@ -966,7 +973,11 @@ without `--compare-typed` on every row of the 1,018-replay audit exports
 separately covers the existing Swiftplay class-alias propagation of the
 original additions, checked in the 714-replay corpus. Run on a sample, the
 `missing` list names every entry that sample lacks, and the exit status is 1
-for that reason alone. A specimen must not be promoted to gameplay semantics
+for that reason alone. `tools/fixtures/type_evidence_scoped.json` holds checksum-scoped
+specifications for the scoped types added on 2026-09-28, in their exported
+spelling (`_ClassNetCache` group and function-qualified name for RPC
+parameters). Every identity in it must be observed, so run it on a set of
+exports that contains each one. A specimen must not be promoted to gameplay semantics
 just because this primitive check passes.
 
 `validate_ability_array_evidence.py <export-directory> [...] --compare-typed

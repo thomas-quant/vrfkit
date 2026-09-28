@@ -138,3 +138,10 @@ Further semantic work still needs independent evidence for GAS words,
 InputEventData action names and StopEffectType. A checksum-scoped treatment of
 the colliding `B` fields and recovery of pre-framing partial payloads require
 separate verified changes.
+
+(Later: the checksum-scoped `B` treatment has since landed. The byte-shaped
+`B` fields were typed `Byte` in the [partial preservation
+batch](TRANSPORT_PRESERVATION.md), and on 2026-09-28 the 32-bit `B`
+(checksum 943211507) was typed `UInt32` together with `A`, `C` and `D` as
+the words of the player-state GUID. The name-keyed rejection above still
+stands: neither is typed by name.)

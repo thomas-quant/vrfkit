@@ -91,6 +91,43 @@ checksum 791426194. The four exports without the parameter declaration also
 contain no matching value rows. No checkpoint value rows were observed;
 checkpoint declaration snapshots were checked separately.
 
+## Later addition: instigator and decay references (2026-09-28)
+
+This section is a separate, later measurement on a different corpus: all
+1,018 exports of the 2026-09-28 audit at `259ed10`, builds 11.06 to 13.06. It
+does not change the 714-export figures above. Five more heal and decay
+parameters are now typed `ObjectNetGuid` through the same scoped table. As
+with `HealCauser`, the exported rows use the `_ClassNetCache` group and
+function-qualified names.
+
+| Exact route (`DamageableComponent:` ...) | Checksum | Main rows | Builds | Resolves to |
+|---|---:|---:|---:|---|
+| `MulticastNotifyHeal.EventInstigator` | 3087885251 | 2,115,008 | 21 | nothing in the export (a PlayerController) |
+| `MulticastNotifyHeal.EventInstigatorPawn` | 3901949544 | 2,115,008 | 21 | an open character actor |
+| `MulticastNotifyOverhealDecay.EventInstigator` | 3087885251 | 536,700 | 16 | nothing in the export (a PlayerController) |
+| `MulticastNotifyOverhealDecay.EventInstigatorPawn` | 3901949544 | 536,700 | 16 | the decaying character itself |
+| `MulticastNotifyOverhealDecay.DecayCauser` | 3648603088 | 536,700 | 16 | an open ability actor, or 0 |
+
+None of these has checkpoint rows. Two independent readers consumed every
+payload exactly. The scope is exact because the damage RPCs carry parameters
+with the same names under other checksums.
+
+`EventInstigator` never resolves to an actor or a `net_guids` path. On every
+row it equals the replicated `Controller` and `Owner` of the
+`EventInstigatorPawn` actor, so it is the instigating player's controller,
+whose channel the replay never opens. An unresolved join is expected and is
+not a decode fault. `DecayCauser` has 39 null references, serialized as one
+zero byte, and they export as `value_i64 = 0`: Unreal's null NetGUID, meaning
+"no causer", not an actor. As with `HealCauser`, none of this establishes heal
+or decay credit.
+
+Per-field evidence and observed builds are in
+[`scoped_type_evidence.json`](../tools/fixtures/scoped_type_evidence.json).
+A fresh export of 30 replays, at least one from every build that carries
+these rows, confirmed the typing: 46,125 + 46,125 heal rows and 3 x 12,813
+decay rows, each typed and equal to an independent decode, with zero decode
+errors.
+
 ## Initial random seed remains unresolved
 
 The same investigation measured `AuthInitialRandomSeed`: 1,752,939 main rows

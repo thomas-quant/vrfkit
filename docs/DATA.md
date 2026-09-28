@@ -26,8 +26,9 @@ Structured-array children are admitted per build and per route: 13.01--13.06
 expand every measured route, and 11.06--13.00 expand only the routes whose
 layout matched and decoded cleanly there. On those builds the other parents
 remain raw rows; see [the legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28).
-Qualified HealCauser actor references and map-targeting cursor/click vectors
-also expose values. Multi-click arrays retain raw parents and add vector children.
+Qualified heal and overheal-decay references (HealCauser, DecayCauser and both
+RPCs' EventInstigator and EventInstigatorPawn) and map-targeting cursor/click
+vectors also expose values. Multi-click arrays retain raw parents and add vector children.
 Qualified reward names now retain complete text histories, string-table keys and format arguments. [KillData observations](KILL_OBSERVATIONS.md) preserve partial updates and scoped references.
 
 The [kill ledger](KILL_LEDGER.md) combines component-local KillData base/revision
@@ -54,6 +55,7 @@ historical rather than a current coverage figure.
 | Account UUID (subject) | `manifest.players.subject` / `BombPlayerState.Subject` | ✅ |
 | Character NetGUID | `manifest.players.character_net_guid` / `SpawnedCharacter` | ✅ joins movement 10/10 on 71 of 71 replays |
 | Agent (characterId) | `manifest` game_specific_data.playerLoadouts | ✅ |
+| Agent GUID, replicated | `BombPlayerState` / Swiftplay player state `A`, `B`, `C`, `D` (checksums 988169428, 943211507, 965590766, 1032080829) | ✅ four `UInt32` words of one FGuid, non-negative in `value_i64`, main and checkpoint. Formatted `%08x-%04x-%04x-%04x-%04x%08x` from (A, B>>16, B&0xffff, C>>16, C&0xffff, D), they equalled the header `characterId` on all 4,112 comparable sets in a 30-replay check (0 mismatches; the sampled 11.06-11.09 replay headers carry no loadouts). Names stay `A`..`D` on the wire; the byte-shaped `B` fields are separate properties |
 | Two players on the same agent | disambiguated by `subject` (characterId alone can't) | ✅ |
 | Display name / Riot ID | — | ❌ not established by the available evidence |
 | `ProfileName` | PlayerState replicated FString | ✅ exact string decoded; its purpose is not established as a display name or Riot ID |
@@ -119,6 +121,7 @@ requires corroborating credit changes; state rows alone are not that ledger.
 | Death-montage context | `MulticastNotifyDamage_{Point,Base}.DeathMontageEffectOverrideContext` → `actors.parquet` (a dynamic actor: `net_guids` has no path for it) | ✅ ObjectNetGuid; 0 (the null reference) except on kills, where it is a player-character pawn open at the event. Not established as the killer or the victim |
 | ADR | derived from CombatReport | ◐ +0.1–0.2 vs trackers (wire damage is fractional; not a bug) |
 | Health / armour / overheal, absolute | `DamageableComponent` RPCs → `LifeChangeEvents[]` / `LifeChangeBySection[]` | ✅ typed section updates; actor/section timelines require joins, see below |
+| Heal / overheal-decay source references | `MulticastNotifyHeal` `HealCauser`, `EventInstigator`, `EventInstigatorPawn`; `MulticastNotifyOverhealDecay` `DecayCauser`, `EventInstigator`, `EventInstigatorPawn` | ✅ `ObjectNetGuid` by exact group/name/checksum. `EventInstigator` is the instigator's PlayerController: it never joins to `actors.parquet` (join through the pawn's `Controller`/`Owner`), and that is expected, not a decode fault. `DecayCauser` = 0 means no causer. No heal credit is implied; see [TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) |
 
 **The historical "vs C#" figures here were measured on build 13.01 or earlier.**
 They describe the preserved comparison fixtures, not current upstream parser

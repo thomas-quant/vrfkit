@@ -3,6 +3,194 @@
   "entries": [
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+      "field": "A",
+      "checksum": 988169428,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-12.10",
+        "++Ares-Core+release-12.11",
+        "++Ares-Core+release-13.00",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 9,683 main plus 188,599 checkpoint rows on 24 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the first word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (219 on 11.06-11.10, 204 on 11.11-12.05, 207 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 223 main plus 4,359 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, 2,226 at or above 2^31 exported positive; validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+      "field": "A",
+      "checksum": 988169428,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 470 main plus 3,290 checkpoint rows on 5 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the first word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (219 on 11.06-11.10, 204 on 11.11-12.05, 207 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 50 main plus 270 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, 164 at or above 2^31 exported positive; validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+      "field": "B",
+      "checksum": 943211507,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-12.10",
+        "++Ares-Core+release-12.11",
+        "++Ares-Core+release-13.00",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 9,683 main plus 188,599 checkpoint rows on 24 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the second word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (220 on 11.06-11.10, 205 on 11.11-12.05, 208 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. This supersedes the earlier exclusion of 943211507 from the byte-shaped B entries: that was a scope statement for Byte typing, and this exact 32-bit entry is the separate verified change SCHEMA_EXPANSION.md deferred. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 223 main plus 4,359 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, none at or above 2^31 (every observed B has top nibble 0x4); validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+      "field": "B",
+      "checksum": 943211507,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 470 main plus 3,290 checkpoint rows on 5 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the second word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (220 on 11.06-11.10, 205 on 11.11-12.05, 208 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. This supersedes the earlier exclusion of 943211507 from the byte-shaped B entries: that was a scope statement for Byte typing, and this exact 32-bit entry is the separate verified change SCHEMA_EXPANSION.md deferred. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 50 main plus 270 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, none at or above 2^31 (every observed B has top nibble 0x4); validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+      "field": "C",
+      "checksum": 965590766,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-12.10",
+        "++Ares-Core+release-12.11",
+        "++Ares-Core+release-13.00",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 9,683 main plus 188,599 checkpoint rows on 24 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the third word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (221 on 11.06-11.10, 206 on 11.11-12.05, 209 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 223 main plus 4,359 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, 1,962 at or above 2^31 exported positive; validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+      "field": "C",
+      "checksum": 965590766,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 470 main plus 3,290 checkpoint rows on 5 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the third word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (221 on 11.06-11.10, 206 on 11.11-12.05, 209 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 50 main plus 270 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, 139 at or above 2^31 exported positive; validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+      "field": "D",
+      "checksum": 1032080829,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-12.10",
+        "++Ares-Core+release-12.11",
+        "++Ares-Core+release-13.00",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 9,683 main plus 188,599 checkpoint rows on 24 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the fourth word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (222 on 11.06-11.10, 207 on 11.11-12.05, 210 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 223 main plus 4,359 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, 3,230 at or above 2^31 exported positive; validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+      "field": "D",
+      "checksum": 1032080829,
+      "type": "UInt32",
+      "observed_builds": [
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact group, name and checksum: 470 main plus 3,290 checkpoint rows on 5 builds, all exactly 32 bits in 4 raw bytes. An independent LSB-first bit read equals little-endian u32 on every row; the repository validator (Int32 as a width proxy) reported 0 failures. A, B, C and D arrive together in every packet that carries one, and form one FGuid whose uint32 members are A..D; this field is the fourth word. Assembled as a GUID they equal the manifest playerLoadouts characterId on 199,432 of 199,432 joinable packet sets (0 mismatches) and map one-to-one to the 29 /Game/Characters classes. Unsigned because FGuid members are uint32 and many words set the high bit. Handles drift by build (222 on 11.06-11.10, 207 on 11.11-12.05, 210 on 12.06-13.06), so the key is name and checksum, never handle. The field keeps its wire name; no rename is asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 50 main plus 270 checkpoint rows, all typed and equal to an independent little-endian u32 decode, none negative, 237 at or above 2^31 exported positive; validate_type_evidence.py --compare-typed (UInt32) reported 0 failures and 0 mismatches. Assembled from the exported values across both groups, the GUID equals the playerLoadouts characterId on 4,112 of 4,112 joinable sets (0 incomplete; 790 sets on 11.06-11.09 have no loadout entry)."
+    },
+    {
+      "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
       "field": "B",
       "checksum": 379198054,
       "type": "Byte",
@@ -12,7 +200,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 31133 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 31133 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -25,7 +213,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 87755 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 87755 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -38,7 +226,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 8867 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 8867 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -51,7 +239,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 47818 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 47818 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -64,7 +252,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 8038 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 8038 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -75,7 +263,7 @@
         "++Ares-Core+release-13.01",
         "++Ares-Core+release-13.02"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 163 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 163 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -88,7 +276,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 6779 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 6779 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
@@ -100,7 +288,7 @@
         "++Ares-Core+release-13.02",
         "++Ares-Core+release-13.04"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 219 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 219 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -113,7 +301,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 459 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 459 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -126,7 +314,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 1393 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 1393 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -138,7 +326,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 134 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 134 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -151,7 +339,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 636 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 636 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -164,7 +352,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 101 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 101 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -174,7 +362,7 @@
       "observed_builds": [
         "++Ares-Core+release-13.02"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 9 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 9 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -186,7 +374,7 @@
         "++Ares-Core+release-13.04",
         "++Ares-Core+release-13.05"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 51 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 51 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
@@ -196,7 +384,7 @@
       "observed_builds": [
         "++Ares-Core+release-13.02"
       ],
-      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 9 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded."
+      "evidence": "714-export main/checkpoint raw audit, 2026-09-08 at f22e2de. 9 rows, exactly 8 bits each; unsigned byte extraction consumes all bits. Scope is wire value only; no color-setting purpose asserted. Distinct checksum 943211507 is 32 bits and excluded from this Byte entry; since 2026-09-28 it has its own UInt32 entry."
     },
     {
       "group": "/Script/ShooterGame.MapTargetingStateComponent",
@@ -236,6 +424,141 @@
         "++Ares-Core+release-13.05"
       ],
       "evidence": "714-export exact-route audit at bb5e155: 1518207 main rows, each fully consumed as low-bit-continuation packed u32 and each resolved to an actor in the same export. No checkpoint value rows; no heal-attribution meaning asserted."
+    },
+    {
+      "group": "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+      "field": "EventInstigator",
+      "checksum": 3087885251,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact exported name and checksum: 2,115,008 main rows (8/16/24-bit: 879,096/1,228,866/7,046), 0 checkpoint rows. Two independent low-bit-continuation packed-u32 readers consumed every payload exactly; 0 failures, 0 zero values. No value resolves to an actor or net_guids path in its export; every value equals the Rust-typed Controller and Owner of the EventInstigatorPawn actor at its latest earlier update, so it names a PlayerController the replay never opens. An unresolved join is expected, not a decode fault. No heal-credit meaning asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 46,125 main rows, all typed and equal to an independent decode; validate_type_evidence.py --compare-typed reported 0 failures and 0 mismatches."
+    },
+    {
+      "group": "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+      "field": "EventInstigatorPawn",
+      "checksum": 3901949544,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-11.06",
+        "++Ares-Core+release-11.07",
+        "++Ares-Core+release-11.08",
+        "++Ares-Core+release-11.09",
+        "++Ares-Core+release-11.10",
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact exported name and checksum: 2,115,008 main rows (16/24-bit: 2,109,967/5,041), 0 checkpoint rows, each consumed exactly by two independent packed-u32 readers with 0 failures. Every value resolves to a character actor in the same export, and it equals the Rust-typed Instigator of the HealCauser actor on all 2,114,439 rows that carry a causer. It is not always the healed actor. No heal-credit meaning asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 46,125 main rows, all typed and equal to an independent decode; validate_type_evidence.py --compare-typed reported 0 failures and 0 mismatches."
+    },
+    {
+      "group": "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+      "field": "EventInstigator",
+      "checksum": 3087885251,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact exported name and checksum: 536,700 main rows (8/16/24-bit: 224,966/310,664/1,070), 0 checkpoint rows, each consumed exactly by two independent packed-u32 readers with 0 failures and 0 zero values. As on MulticastNotifyHeal, no value resolves to an actor or net_guids path; every value equals the Rust-typed Controller and Owner of the EventInstigatorPawn actor. An unresolved join is expected, not a decode fault. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 12,813 main rows, all typed and equal to an independent decode; validate_type_evidence.py --compare-typed reported 0 failures and 0 mismatches."
+    },
+    {
+      "group": "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+      "field": "EventInstigatorPawn",
+      "checksum": 3901949544,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact exported name and checksum: 536,700 main rows (16/24-bit: 535,785/915), 0 checkpoint rows, each consumed exactly by two independent packed-u32 readers with 0 failures. Every value resolves to the decaying character actor itself (equal to the row's actor_net_guid) and equals the Rust-typed Instigator of the DecayCauser actor on all 536,661 rows with a non-null causer. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 12,813 main rows, all typed and equal to an independent decode; validate_type_evidence.py --compare-typed reported 0 failures and 0 mismatches."
+    },
+    {
+      "group": "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+      "field": "DecayCauser",
+      "checksum": 3648603088,
+      "type": "ObjectNetGuid",
+      "observed_builds": [
+        "++Ares-Core+release-11.11",
+        "++Ares-Core+release-12.00",
+        "++Ares-Core+release-12.01",
+        "++Ares-Core+release-12.02",
+        "++Ares-Core+release-12.03",
+        "++Ares-Core+release-12.04",
+        "++Ares-Core+release-12.05",
+        "++Ares-Core+release-12.06",
+        "++Ares-Core+release-12.07",
+        "++Ares-Core+release-12.08",
+        "++Ares-Core+release-12.09",
+        "++Ares-Core+release-13.01",
+        "++Ares-Core+release-13.02",
+        "++Ares-Core+release-13.04",
+        "++Ares-Core+release-13.05",
+        "++Ares-Core+release-13.06"
+      ],
+      "evidence": "2026-09-28 audit of all 1,018 exports at main 259ed10, main and checkpoint field tables, rows selected by exact exported name and checksum: 536,700 main rows (8/16/24-bit: 39/325,454/211,207), 0 checkpoint rows, each consumed exactly by two independent packed-u32 readers with 0 failures. The 39 8-bit rows are 0x00, the null reference, and export as 0. All 536,661 non-null values resolve to an ability actor open in the same export, each equal to an earlier Rust-typed HealCauser on the same recipient. No decay-attribution meaning asserted. Candidate re-export of 30 replays (every build that carries the field; inputs matched to the audit by SHA-256): 12,813 (5 of them the null reference, exported as 0) main rows, all typed and equal to an independent decode; validate_type_evidence.py --compare-typed reported 0 failures and 0 mismatches."
     },
     {
       "group": "/Game/Characters/Iris/S0/Ability_E/Ability_Iris_E_MT_Smoke_Production.Ability_Iris_E_MT_Smoke_Production_C",

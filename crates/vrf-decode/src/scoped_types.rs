@@ -6,7 +6,19 @@ use crate::decode::FieldType;
 use crate::types::RotatorQuantization;
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 57] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
+    (
+        "A",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        988169428,
+        FieldType::UInt32,
+    ),
+    (
+        "A",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        988169428,
+        FieldType::UInt32,
+    ),
     (
         "AttachComponent",
         "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
@@ -46,6 +58,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 57] = [
     (
         "B",
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        943211507,
+        FieldType::UInt32,
+    ),
+    (
+        "B",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
         1496132153,
         FieldType::Byte,
     ),
@@ -94,6 +112,12 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 57] = [
     (
         "B",
         "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        943211507,
+        FieldType::UInt32,
+    ),
+    (
+        "B",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
         1496132153,
         FieldType::Byte,
     ),
@@ -132,6 +156,18 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 57] = [
         "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
         3944193776,
         FieldType::Byte,
+    ),
+    (
+        "C",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        965590766,
+        FieldType::UInt32,
+    ),
+    (
+        "C",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        965590766,
+        FieldType::UInt32,
     ),
     (
         "ClickedLocation",
@@ -224,10 +260,52 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 57] = [
         FieldType::VectorDouble,
     ),
     (
+        "D",
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        1032080829,
+        FieldType::UInt32,
+    ),
+    (
+        "D",
+        "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
+        1032080829,
+        FieldType::UInt32,
+    ),
+    (
+        "DecayCauser",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+        3648603088,
+        FieldType::ObjectNetGuid,
+    ),
+    (
         "Duration",
         "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
         1815021954,
         FieldType::Float,
+    ),
+    (
+        "EventInstigator",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+        3087885251,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "EventInstigator",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+        3087885251,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "EventInstigatorPawn",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+        3901949544,
+        FieldType::ObjectNetGuid,
+    ),
+    (
+        "EventInstigatorPawn",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+        3901949544,
+        FieldType::ObjectNetGuid,
     ),
     (
         "HealCauser",

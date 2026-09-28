@@ -12,12 +12,15 @@ Usage:
 ``EXPORT_DIR`` may be one export or a directory containing exports.  Both
 ``fields.parquet`` and ``checkpoint_fields.parquet`` are inspected when present.
 The JSON shape is ``[{"group": "...", "field": "...", "type": "Bool"}]``.
-Supported types are Bool, Byte, Int32, Float, Double, FString, ObjectNetGuid,
-EnumByte, EnumRemainingBits, FName, RotationShort, VectorNetQuantize100,
-RepMovementByte and RepMovementShort -- among them every non-primitive name
-``generate_scoped_types.py`` accepts.
+Supported types are Bool, Byte, Int32, UInt32, Float, Double, FString,
+ObjectNetGuid, EnumByte, EnumRemainingBits, FName, RotationShort,
+VectorNetQuantize100, RepMovementByte and RepMovementShort -- among them
+every non-primitive name ``generate_scoped_types.py`` accepts. UInt32 is
+read unsigned, so a value with the high bit set must be exported positive;
+an Int32 reading of the same bits would pass the width check and still be
+wrong.
 
-All but the first seven are read bit by bit, because their payloads are not
+All but the first eight are read bit by bit, because their payloads are not
 byte multiples and some of them do not even start on a byte boundary:
 
 * ``EnumByte`` -- 1..8 bits, the whole payload is the value. A byte-sized enum
@@ -315,6 +318,10 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
         if bit_count != 32:
             raise ValueError("Int32 is not 32 bits")
         return struct.unpack("<i", raw)[0]
+    if type_name == "UInt32":
+        if bit_count != 32:
+            raise ValueError("UInt32 is not 32 bits")
+        return struct.unpack("<I", raw)[0]
     if type_name in {"Float", "Double"}:
         width, fmt = (32, "<f") if type_name == "Float" else (64, "<d")
         if bit_count != width:
@@ -365,7 +372,7 @@ TYPED_COLUMNS = {
     "Bool": "value_bool", "FString": "value_str",
     "Float": "value_f64", "Double": "value_f64",
     "Byte": "value_i64", "Int32": "value_i64",
-    "ObjectNetGuid": "value_i64",
+    "UInt32": "value_i64", "ObjectNetGuid": "value_i64",
     **BIT_LEVEL_TYPES,
 }
 
