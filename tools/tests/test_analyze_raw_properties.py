@@ -373,8 +373,7 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn("/private/replay-name", error.getvalue())
 
     def test_build_help_states_the_default_builds(self):
-        """The help said "13.02 and 13.04" while DEFAULT_BUILDS also held 13.05,
-        so a default run sampled a build --help said it excluded."""
+        """--help names exactly the builds a default run samples."""
         printed = io.StringIO()
         with redirect_stdout(printed), self.assertRaises(SystemExit):
             raw_inventory.parse_args(["--help"])

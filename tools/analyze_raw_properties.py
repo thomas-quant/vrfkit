@@ -1,36 +1,22 @@
 """Measure preserved, uninterpreted replicated-property payloads.
 
-This is a corpus instrument, not a decoder.  It deliberately does not assign
-names or types to unnamed fields.  A handle, compatible checksum, bit width,
-and containing export-group path are enough to measure whether the same wire
-shape recurs; they are not enough to claim what the property means.
+A corpus instrument, not a decoder: it assigns no names or types. A handle,
+compatible checksum, bit width and group path measure whether a wire shape
+recurs, not what the property means.
 
-The corpus can be large, so the tool never retains a corpus worth of Parquet
-files.  It exports one replay into a private temporary directory, streams only
-the columns needed from ``fields.parquet``, merges the aggregate, and removes
-the directory before moving to the next replay.  Peak temporary storage is one
-export.  The default is a deterministic size-stratified sample; pass ``--all``
-when an exhaustive sweep is actually intended.
+One replay at a time is exported into a private temporary directory, its
+``fields.parquet`` columns streamed into the aggregate and the directory
+removed, so peak temporary storage is one export. The default is a
+deterministic size-stratified sample; ``--all`` is the exhaustive sweep.
 
-Output is identifier-redacted by construction.  It contains build labels,
-counts, bit widths, and anonymous ranks only.  Replay paths and filenames,
-friendly names, group paths, actor/object/channel IDs, handles, compatible
-checksums, and raw payload bytes or hashes are never printed.
+Output is identifier-redacted by construction: build labels, counts, bit
+widths and anonymous ranks only, never replay paths or filenames, friendly
+names, group paths, actor/object/channel IDs, handles, compatible checksums,
+or payload bytes or hashes.
 
-Usage::
-
-    python tools/analyze_raw_properties.py \
-        ./target/release/vrfkit /path/to/corpus
-    python tools/analyze_raw_properties.py \
-        ./target/release/vrfkit /path/to/corpus \
-        --build 13.02 --build 13.04 --limit-per-build 8
-    python tools/analyze_raw_properties.py \
-        ./target/release/vrfkit /path/to/corpus --all
-
-An unnamed property row without ``raw_bits``, or whose byte length cannot hold
-its declared ``bit_count`` exactly, is an integrity failure and makes the
-command exit 1.  Such a row cannot be interpreted today *or* recovered by a
-future decoder, violating vrfkit's no-silent-loss invariant.
+An unnamed property row with no ``raw_bits``, or whose byte length cannot hold
+its declared ``bit_count`` exactly, is an integrity failure (exit 1): it can
+be neither interpreted today nor recovered by a future decoder.
 """
 from __future__ import annotations
 
@@ -182,13 +168,9 @@ def inspect_build(vrfkit: Path, replay: Path) -> str | None:
 def stratified_sample(
     candidates: Iterable[ReplayCandidate], limit: int,
 ) -> list[ReplayCandidate]:
-    """Deterministically span the observed file-size range.
-
-    Size is only a sampling coordinate; neither sizes nor source identifiers
-    are printed.  Selecting the first N sorted filenames would overrepresent a
-    coincidental filename prefix and selecting the newest N would overrepresent
-    one capture session.
-    """
+    """Deterministically span the observed file-size range (size is only a
+    coordinate, never printed): the first N filenames would overrepresent a
+    filename prefix, the newest N one capture session."""
     ordered = sorted(candidates, key=lambda item: (item.size, item.path.name))
     if limit >= len(ordered):
         return ordered
@@ -199,12 +181,8 @@ def stratified_sample(
 
 
 def _payload_is_zero(payload: bytes, bit_count: int) -> bool:
-    """Whether every meaningful payload bit is zero.
-
-    The exporter already clears padding bits, but masking the final byte keeps
-    this measurement correct for third-party Parquet files that preserve
-    arbitrary padding.
-    """
+    """Whether every meaningful payload bit is zero. The final byte is masked
+    for third-party Parquet that keeps arbitrary padding (vrfkit clears it)."""
     full_bytes, remaining_bits = divmod(bit_count, 8)
     if any(payload[:full_bytes]):
         return False
@@ -231,9 +209,8 @@ def analyze_export(
             f"fields.parquet is missing {len(missing)} required column(s)"
         )
 
-    # The adapter uses this exact key for one property update.  Actor and object
-    # IDs are necessary only while grouping this replay; they are never copied
-    # into Inventory and therefore cannot appear in the report.
+    # The adapter's key for one property update. Actor and object IDs group
+    # this replay only; never copied into Inventory, they cannot be reported.
     unnamed_blocks: dict[
         tuple[int, int, int, int | None, str],
         list[tuple[int, int | None, int]],
@@ -355,12 +332,9 @@ def summary_document(
     excluded: int,
     recursive: bool,
 ) -> dict:
-    """Return the stable, identifier-free machine-readable report.
-
-    The schema is intentionally aggregate-only.  In particular, neither the
-    structural keys in ``inventory.signatures`` nor hashes derived from those
-    keys appear here.  A hash would still be a persistent pseudonymous
-    identifier and would break the report's privacy contract.
+    """The stable, identifier-free machine-readable report: aggregate-only.
+    Neither the structural keys in ``inventory.signatures`` nor hashes of
+    them appear; a hash would still be a persistent pseudonymous identifier.
     """
     build_documents = {}
     for build in sorted(eligible_by_build):
@@ -715,10 +689,9 @@ def main(argv: list[str] | None = None) -> int:
     for ordinal, replay in enumerate(selected, 1):
         try:
             export_and_analyze(args.vrfkit, replay, inventory, ordinal)
-        # This is the privacy boundary.  A library exception can include the
-        # source replay path or field metadata in its message, so no exception
-        # is allowed to escape into a traceback.  The type plus a run-local
-        # ordinal still makes the failure visible and the process exits 1.
+        # The privacy boundary: an exception message can carry the replay path
+        # or field metadata, so none escapes as a traceback. The type and a
+        # run-local ordinal keep the failure visible, and the exit is 1.
         except Exception as error:
             print(
                 f"ERROR: replay-{ordinal:04d}: {type(error).__name__}; "
