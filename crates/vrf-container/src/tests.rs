@@ -1238,8 +1238,8 @@ mod event_chunks {
     }
 } // mod event_chunks
 
-// Two layouts `event_chunks` does not cover, moved here from the vrfkit
-// driver, whose test-only wrapper only forwarded to `parse_event_payload`.
+// Layouts `event_chunks` does not cover, moved here from the vrfkit driver,
+// whose test-only wrapper only forwarded to `parse_event_payload`.
 #[cfg(feature = "event")]
 mod event_payload_layouts {
     use super::*;
@@ -1265,6 +1265,23 @@ mod event_payload_layouts {
         assert_eq!(parsed.tag, 4);
         assert!(parsed.words.is_empty());
         assert_eq!(parsed.name, "EReplayEventGroup::SpikePlanted");
+        assert_eq!(parsed.seconds, 1.5);
+    }
+
+    /// characterDeath is the only multi-word group. The one-word reference's
+    /// word is 0, so only distinct nonzero words show a word swapped, dropped
+    /// or zeroed on its way to `events.parquet`'s word0 and word1.
+    #[test]
+    fn event_payload_yields_multi_word_values_in_order() {
+        let payload = event_payload(
+            8,
+            &[0x1111_1111, 0x2222_2222],
+            "EReplayEventGroup::CharacterDeath",
+        );
+        let parsed = parse_event_payload(&payload, 2).expect("two-word layout");
+        assert_eq!(parsed.tag, 8);
+        assert_eq!(parsed.words, [0x1111_1111, 0x2222_2222]);
+        assert_eq!(parsed.name, "EReplayEventGroup::CharacterDeath");
         assert_eq!(parsed.seconds, 1.5);
     }
 
