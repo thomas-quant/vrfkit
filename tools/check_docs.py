@@ -839,56 +839,56 @@ def main() -> int:
     live_counts = measured_counts(measurement_problems)
     overlay_counters = baseline_overlay_counters()
 
-    problems = (
-        check_tools(usage)
-        + check_crates(usage)
-        + check_links(README, readme)
-        + check_links(USAGE, usage)
-        + check_table_sizes(docs)
-        + stale_table_size_claims(every, table_lengths())
-        + check_source_table_size()
-        + contradicting_test_counts(every)
-        + measurement_problems
-        + stale_measured_counts(every, live_counts)
-        + check_generated_inventory(generated_docs)
-        + check_baseline_figures(docs, baseline_table_figures())
-        + overlay_partition_problems(overlay_counters)
-        + stale_overlay_counters(every, overlay_counters)
-        + check_overlay_counters_present(readme, overlay_counters)
-        + [p for name in ALL_DOCS
-           for p in check_links(REPO / name, every[name])
-           if name not in ("README.md", "docs/USAGE.md")]
-        + [p for path in link_checked_docs()
-           if path.relative_to(REPO).as_posix() not in ALL_DOCS
-           for p in check_links(path, read(path))]
-        + check_feature_matrix(read(REPO / "CONTRIBUTING.md"),
-                               read(REPO / ".github" / "workflows" / "ci.yml"))
-        + check_build_verification(
+    # One entry per check: the summary prints len(checks), never a literal.
+    checks = [
+        check_tools(usage),
+        check_crates(usage),
+        check_links(README, readme),
+        check_links(USAGE, usage),
+        check_table_sizes(docs),
+        stale_table_size_claims(every, table_lengths()),
+        check_source_table_size(),
+        contradicting_test_counts(every),
+        measurement_problems,
+        stale_measured_counts(every, live_counts),
+        check_generated_inventory(generated_docs),
+        check_baseline_figures(docs, baseline_table_figures()),
+        overlay_partition_problems(overlay_counters),
+        stale_overlay_counters(every, overlay_counters),
+        check_overlay_counters_present(readme, overlay_counters),
+        [p for name in ALL_DOCS
+         for p in check_links(REPO / name, every[name])
+         if name not in ("README.md", "docs/USAGE.md")],
+        [p for path in link_checked_docs()
+         if path.relative_to(REPO).as_posix() not in ALL_DOCS
+         for p in check_links(path, read(path))],
+        check_feature_matrix(read(REPO / "CONTRIBUTING.md"),
+                             read(REPO / ".github" / "workflows" / "ci.yml")),
+        check_build_verification(
             readme, usage, read(REPO / "crates/vrf-transform/src/lib.rs"),
-            json.loads(read(BUILD_AUDIT)))
-    )
+            json.loads(read(BUILD_AUDIT))),
+    ]
 
-    checked = 18
     if not args.fast:
         rust, tools_n, run_problems = measure_tests()
-        problems += run_problems
         for count, label in ((rust, "rust"), (tools_n, "tools")):
             for name, text in docs.items():
                 if str(count) not in text:
-                    problems.append(
+                    run_problems.append(
                         f"{name}: {label} test count is {count}, not quoted")
         live = {s for c in (rust, tools_n) for s in (str(c), f"{c:,}")}
         for name, text in every.items():
-            problems += [
+            run_problems += [
                 f"{name}:{i}: says {quoted}; the suites are {rust} and {tools_n}"
                 for i, quoted in stale_test_counts(text, live)]
         print(f"tests: rust {rust}, tools {tools_n}")
-        checked += 1
+        checks.append(run_problems)
+    problems = [p for found in checks for p in found]
 
     n_tools = len(list((REPO / "tools").glob("*.py")))
     n_crates = len({p.parent.name for p in (REPO / "crates").glob("*/Cargo.toml")})
     print(f"docs: {len(ALL_DOCS)} files ({len(link_checked_docs())} link-checked)   "
-          f"{n_tools} tools, {n_crates} crates, {checked} checks")
+          f"{n_tools} tools, {n_crates} crates, {len(checks)} checks")
 
     if problems:
         print(f"\nFAILED: {len(problems)} stale or missing doc claim(s)",

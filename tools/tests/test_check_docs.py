@@ -4,8 +4,14 @@ check_docs.py catches stale documentation, which nothing else can: a wrong
 number in prose compiles and passes every test. Its own detection logic is
 therefore the thing that must not rot into something that passes everything.
 """
+import ast
+import contextlib
+import inspect
+import io
 import json
+import re
 import sys
+import textwrap
 import unittest
 from unittest.mock import patch
 from subprocess import CompletedProcess
@@ -534,6 +540,46 @@ class DocCoverageTests(unittest.TestCase):
         for name in guard.ALL_DOCS:
             path = guard.REPO / name
             self.assertEqual(guard.check_links(path, guard.read(path)), [], name)
+
+
+class CheckCountTests(unittest.TestCase):
+    """The summary's `N checks` was the literal 18 while main() combined 19
+    check results, so it could not move when a check was added or removed.
+
+    The count main() should print is read from its source, the way
+    check_metrics_baseline.invariant_count reads its own: the elements of the
+    `checks` list, plus each `checks.append` (the suite measurement)."""
+
+    def checks_in_main(self) -> tuple[int, int]:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(guard.main)))
+        listed = [node.value for node in ast.walk(tree)
+                  if isinstance(node, ast.Assign)
+                  and [getattr(t, "id", None) for t in node.targets] == ["checks"]
+                  and isinstance(node.value, ast.List)]
+        self.assertEqual(len(listed), 1, "main() must combine its checks in one "
+                         "`checks` list, or its printed count is not derived from them")
+        appended = sum(1 for node in ast.walk(tree)
+                       if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute)
+                       and node.func.attr == "append"
+                       and getattr(node.func.value, "id", None) == "checks")
+        return len(listed[0].elts), appended
+
+    def printed_count(self, *argv: str) -> int:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["check_docs.py", *argv]), \
+                patch.object(guard, "measure_tests", return_value=(1, 1, [])), \
+                contextlib.redirect_stdout(output), \
+                contextlib.redirect_stderr(io.StringIO()):
+            guard.main()
+        found = re.search(r"(\d+) checks$", output.getvalue(), re.M)
+        self.assertIsNotNone(found, output.getvalue())
+        return int(found.group(1))
+
+    def test_the_printed_count_is_the_number_of_checks_combined(self):
+        listed, appended = self.checks_in_main()
+        self.assertEqual(self.printed_count("--fast"), listed)
+        self.assertEqual(self.printed_count(), listed + appended)
 
 
 if __name__ == "__main__":
