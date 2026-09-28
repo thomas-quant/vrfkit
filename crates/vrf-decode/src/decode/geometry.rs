@@ -7,7 +7,9 @@
 use vrf_bitio::BitReader;
 
 use super::{DecodeError, DecodedValue, render};
-use crate::types::{FQuat, FRepMovement, FRotator, FTransform, FVector, RotatorQuantization};
+use crate::types::{
+    FQuat, FRepMovement, FRotator, FTransform, FVector, RotatorQuantization, VectorQuantization,
+};
 
 pub(super) fn decode_vector_float(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     Ok(render(read_float_vector(r)?))
@@ -46,8 +48,9 @@ pub(super) fn decode_transform(r: &mut BitReader<'_>) -> Result<DecodedValue, De
 pub(super) fn decode_rep_movement(
     r: &mut BitReader<'_>,
     rotation: RotatorQuantization,
+    location: VectorQuantization,
 ) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_rep_movement(r, rotation)?))
+    Ok(render(read_rep_movement(r, rotation, location)?))
 }
 
 // -- Shared vector/rotation reading functions ---------------------------------
@@ -215,17 +218,34 @@ fn read_transform(r: &mut BitReader<'_>) -> Result<FTransform, vrf_bitio::BitErr
 fn read_rep_movement(
     r: &mut BitReader<'_>,
     rotation_quant: RotatorQuantization,
+    location_quant: VectorQuantization,
 ) -> Result<FRepMovement, DecodeError> {
     let simulated_physics_sleep = r.read_bit()?;
     let rep_physics = r.read_bit()?;
     let rep_server_frame = r.read_bit()?;
     let rep_server_handle = r.read_bit()?;
 
-    let location = read_quantized_vector(r, 100)?;
+    // The divisor is the table entry's, never a constant here. The header's
+    // extra-info bit says only that the integer was scaled; Unreal packs
+    // round(world * scale) for the sending class's LocationQuantizationLevel,
+    // and classes differ. This read used a literal 100 (the C# reference's
+    // VectorNetQuantize100), which returned world/100 on every whole-unit
+    // class: measured against actors.parquet spawn positions, 25 of the 26
+    // classes the table declares pack whole units and one packs two decimals.
+    // Bit consumption does not depend on the divisor, so the wrong constant
+    // raised no error and moved no counter. See docs/DATA.md.
+    let location = read_quantized_vector(r, location_quant.scale())?;
     let rotation = match rotation_quant {
         RotatorQuantization::ByteComponents => read_rotation_byte(r)?,
         RotatorQuantization::ShortComponents => read_rotation_short(r)?,
     };
+    // Whole units: Unreal's default VelocityQuantizationLevel, and what the
+    // wire shows wherever the level is observable -- the displacement between
+    // consecutive updates, over dt, over the reported speed, has a median
+    // between 0.97 and 1.06 on each of the 18 typed classes that move. It is
+    // not observable on the one two-decimal class
+    // (Pawn_Aggrobot_SeekerNade_C): all 932 of its velocities are the zero
+    // vector, which reads the same at any divisor.
     let linear_velocity = read_quantized_vector(r, 1)?;
 
     let angular_velocity = if rep_physics {

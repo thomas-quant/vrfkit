@@ -294,15 +294,12 @@ the rest.
   damage or purchase counts.
 - Re-run the component-remap and mapping guards on each new supported build;
   the replay does not reveal Blueprint-to-native class aliases by itself.
-- Give `ReplicatedMovement` a per-class location scale. `FieldType::RepMovement`
-  (like upstream's C# decoder) divides every location by 100; measured against
-  spawn locations on 2026-09-28, projectiles and game objects replicate whole
-  centimetres, so 24 of the 25 typed groups export positions 100 times too small
-  while pawns are right ([UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md)).
-  Exact consumption cannot see this -- the scale changes no width. The fix
-  rewrites typed values on those groups and every export baseline, so it needs
-  its own before/after. Raze's satchel, Paint Shells and rocket stay raw until
-  then.
+- Type Raze's satchel, Paint Shells and rocket `ReplicatedMovement` if they
+  are wanted. They were declined only because the reader read every location
+  at /100 ([UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md)); the level is
+  per class now ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)),
+  so each needs an entry with its measured level and a spawn-join line in
+  `REP_MOVEMENT_LOCATION_EVIDENCE`.
 
 Considered on 2026-09-14 and deliberately not done, each with the reason:
 

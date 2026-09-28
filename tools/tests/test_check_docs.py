@@ -440,8 +440,10 @@ class MeasuredCountTests(unittest.TestCase):
         # count, and the test must make that intentional change visible.
         # 187 -> 204: the September 2026 table typing -- 12 ADDITIONS plus the
         # AllianceFilter and four DeathMontage corrections (OriginalBuyerTeam
-        # changed type but not count).
-        self.assertEqual(guard.measured_counts()["corrections"], 204)
+        # changed type but not count). 204 -> 205: the SeekerNade location-level
+        # correction (repmovement-location-scale); HawkFlash's level rides on its
+        # existing ADDITIONS entry, so it adds none.
+        self.assertEqual(guard.measured_counts()["corrections"], 205)
 
 
 class GeneratedInventoryTests(unittest.TestCase):

@@ -849,7 +849,7 @@ checkpoint decode failures. This separate check exists because `vrfkit
 validate` does not print overlay counters, so `validate_corpus.py` alone cannot
 see a wrong type. Reaching zero found three places where the wire disagreed
 with the C# declarations; they are recorded with evidence in
-`tools/apply_type_corrections.py` (204 corrections, verified with `--check`).
+`tools/apply_type_corrections.py` (205 corrections, verified with `--check`).
 
 | Symptom | Actual | Evidence |
 |---|---|---|

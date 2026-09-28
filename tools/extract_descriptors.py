@@ -353,6 +353,43 @@ REP_MOVEMENT_DEFAULT_RE = re.compile(
 REP_MOVEMENT_PROPERTY_RE = re.compile(
     rf'\.ReplicatedMovement\(\s*(?P<property>{CSHARP_IDENTIFIER_TOKEN})\s*\)'
 )
+#: The location quantization every `RepMovement` entry is emitted with.
+#:
+#: The descriptors declare only the rotator width. The level the location was
+#: rounded to is a per-class choice (Unreal's `LocationQuantizationLevel`) that
+#: the wire does not carry, and the C# reader decodes every class at two
+#: decimals (its `ReplicatedMovementDecoder` reads `VectorNetQuantize100`).
+#: The wire contradicts that on 25 of the 26 classes the table declares:
+#: joined to the actor's spawn position in actors.parquet, their packed
+#: integer IS the world coordinate (median |packed| / |spawn| 1.000 on every
+#: class and every build that carries it; 1,018 replays over 21 builds,
+#: measured 2026-09-28). So the default is whole units -- also the engine's
+#: own `FRepMovement` default -- and `apply_type_corrections.py` pins the one
+#: class measured at two decimals. docs/DATA.md has the per-class figures.
+#:
+#: A class nobody has measured gets this default, which is a prior, not a
+#: measurement. `tests::overlay` lists every group given a `RepMovement` type
+#: (by this table or by the scoped types) with the level measured for it, and
+#: fails on one it does not list, so a new class cannot take the default
+#: without somebody checking it against spawn positions first.
+REP_MOVEMENT_LOCATION = "VectorQuantization::RoundWholeNumber"
+
+
+def rep_movement_type(rotation: str) -> str:
+    """The complete `FieldType::RepMovement` literal for one rotator width.
+
+    The single place the literal is spelled: the explicit-quantization call,
+    the bare `.ReplicatedMovement()` default and the virtual-property form
+    all emit through here, so the three cannot drift apart.
+    """
+    if rotation not in {"ByteComponents", "ShortComponents"}:
+        raise ValueError(f"unsupported rotator quantization {rotation!r}")
+    return (
+        f"FieldType::RepMovement {{ rotation: RotatorQuantization::{rotation}, "
+        f"location: {REP_MOVEMENT_LOCATION} }}"
+    )
+
+
 MOVEMENT_TYPE_PREFIX = "<virtual movement rotation:"
 MOVEMENT_OVERRIDE_RE = re.compile(
     rf'\b(?:virtual|override)\s+ERotatorQuantization\s+'
@@ -581,14 +618,11 @@ def extract_fields_from_block(
                 if rejected is not None:
                     rejected.add(("ReplicatedMovement", " ".join(code_line.split())))
                 continue
-            rust_quant = ("RotatorQuantization::ByteComponents"
-                          if quant == "ByteComponents"
-                          else "RotatorQuantization::ShortComponents")
             name = _extract_field_name(raw_line, code_line)
             if name:
                 fields.append((
                     name,
-                    f"FieldType::RepMovement {{ rotation: {rust_quant} }}",
+                    rep_movement_type(quant),
                     _extract_literal_handle(code_line),
                 ))
             elif rejected is not None:
@@ -601,7 +635,7 @@ def extract_fields_from_block(
             if name:
                 fields.append((
                     name,
-                    "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents }",
+                    rep_movement_type("ShortComponents"),
                     _extract_literal_handle(code_line),
                 ))
             elif rejected is not None:
@@ -1974,10 +2008,7 @@ def main(argv: list[str]) -> int:
             visited.add(current)
             value = movement_overrides.get(current, {}).get(property_name)
             if value is not None:
-                return (
-                    "FieldType::RepMovement { rotation: "
-                    f"RotatorQuantization::{value} }}"
-                )
+                return rep_movement_type(value)
             base = class_bases.get(current)
             if base is None:
                 break
@@ -2175,7 +2206,7 @@ def main(argv: list[str]) -> int:
         "",
         "use crate::decode::FieldType;",
         "use crate::overlay::{OverlayEntry, OverlayHandleEntry};",
-        "use crate::types::RotatorQuantization;",
+        "use crate::types::{RotatorQuantization, VectorQuantization};",
         "",
         f"pub static OVERLAY_TABLE: [OverlayEntry; {len(entries)}] = [",
     ]

@@ -487,7 +487,15 @@ def whole_table(overrides=None, drop=(), one_line=False):
 #: applies in BOTH layouts: a file carrying ShortComponents is correctable.
 UNCORRECTED_SMOKESCREEN = {
     ("SmokeScreen", "ReplicatedMovement"):
-        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents }",
+        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+        "location: VectorQuantization::RoundWholeNumber }",
+}
+#: Gekko's Wingman as the generator emits it: whole units, the default every
+#: `RepMovement` entry starts from. Also rewritten by a block-based pass.
+UNCORRECTED_SEEKER_NADE = {
+    (atc.SEEKER_NADE_GROUP, "ReplicatedMovement"):
+        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+        "location: VectorQuantization::RoundWholeNumber }",
 }
 #: `TimedBomb.TimeRemainingToExplode` is rewritten by a pass that matches a
 #: one-line literal, so in the rustfmt'd layout it is DEAD -- the file is not
@@ -592,6 +600,29 @@ class MainOnDiskTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(atc.main(), 0)
+
+    def test_the_seeker_nade_location_level_is_corrected_in_both_layouts(self):
+        """The one two-decimal class. The pass that pins it must fire on the
+        generator's one-line output AND on the rustfmt'd file, and `--check`
+        must refuse a file that still carries the whole-unit default."""
+        want = (
+            "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+            "location: VectorQuantization::RoundTwoDecimals }"
+        )
+        for one_line in (True, False):
+            with self.subTest(one_line=one_line):
+                source = whole_table(UNCORRECTED_SEEKER_NADE, one_line=one_line)
+                code, _out, err = self.run_main(source, "--check")
+                self.assertEqual(code, 1, "--check must not pass the default")
+                self.assertIn("RoundWholeNumber", err)
+                code, _out, err = self.run_main(source)
+                self.assertEqual(code, 0, err)
+                types = {
+                    (g, f): t for g, f, t in
+                    atc.parse_entries(self.path.read_text(encoding="utf-8"))
+                }
+                self.assertEqual(
+                    types[(atc.SEEKER_NADE_GROUP, "ReplicatedMovement")], want)
 
     def test_an_uncorrected_weapon_group_is_reported(self):
         """The 18 weapon groups had NO expectation of any kind.

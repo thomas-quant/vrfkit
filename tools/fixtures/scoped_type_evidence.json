@@ -1303,6 +1303,7 @@
       "field": "ReplicatedMovement",
       "checksum": 2749104612,
       "type": "RepMovementShort",
+      "location_quantization": "RoundTwoDecimals",
       "observed_builds": [
         "++Ares-Core+release-11.06",
         "++Ares-Core+release-11.07",

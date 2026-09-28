@@ -696,7 +696,7 @@ state after applying** and fails if it disagrees.
 ```bash
 python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
     crates/vrf-decode/src/table.rs
-python tools/apply_type_corrections.py           # apply, then verify (204 corrections)
+python tools/apply_type_corrections.py           # apply, then verify (205 corrections)
 cargo +1.86.0 fmt -p vrf-decode
 
 python tools/apply_type_corrections.py --check   # verify only
@@ -705,7 +705,7 @@ python tools/apply_type_corrections.py --check   # verify only
 CI runs the extract, apply and fmt lines on every push and fails if
 `table.rs` then differs from the committed file.
 
-Those 204 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
+Those 205 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
 subset absent from the vendored C# descriptor input (`third_party/vrp`).
 
 The `ADDITIONS` pass inserts items the pinned C# input is **silent on**. There are
@@ -850,10 +850,13 @@ unobserved class alias or globally by checksum, and they are not checksum
 donors. Besides the primitives, the fixture accepts `EnumRemainingBits`,
 `RotationShort`, `VectorNetQuantize100`, `RepMovementByte` and
 `RepMovementShort`, each with an independent decoder in
-`validate_type_evidence.py`. A `RepMovement` entry must also match the actor's
-spawn location at scale 100: projectiles and game objects replicate whole
-centimetres, so exact consumption alone would admit a location 100 times too
-small (see [UPSTREAM_RAZE_WARDEN.md](UPSTREAM_RAZE_WARDEN.md)). The ordinary
+`validate_type_evidence.py`. A `RepMovement` entry must also state its
+location level, `location_quantization` (`RoundWholeNumber`, `RoundOneDecimal`
+or `RoundTwoDecimals`), measured by the spawn join in
+[DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level):
+exact consumption cannot see a wrong level, and the Rust test
+`every_rep_movement_entry_carries_its_measured_location_level` fails on a
+`RepMovement` type whose group it does not list. The ordinary
 `validate_type_evidence.py` specification also accepts an optional `checksum`
 to independently verify this narrower scope.
 
@@ -995,10 +998,11 @@ payload), `EnumRemainingBits`, `FName`, `RotationShort`, `VectorNetQuantize100`,
 than `vrf-bitio`'s; those also require zero padding above `bit_count`, and a
 `ReplicatedMovement` value is compared by parsing the exported JSON, so `1` and
 `1.0` are the same number there. Its `location` is compared at either scale the
-packed integers allow -- divided by 100, as the reader does today, or in whole
-units -- and the report says which (`location_scales`): the reader's /100 is
-world/100 on every observed class but `Pawn_Aggrobot_SeekerNade_C`, a known
-divergence that a fixture must not lock in.
+packed integers allow -- divided by 100 or in whole units -- and the report
+says which (`location_scales`). The reader divides by each class's measured
+level, so a whole-unit class reports `/1` and a two-decimal pawn `/100`; the
+per-class level itself is pinned by the Rust test
+`every_rep_movement_entry_carries_its_measured_location_level`, not here.
 
 The shipped `tools/fixtures/type_evidence.json` covers the 38 crosshair and
 Tidal Wave additions plus 104 checksum-scoped wire entries for the September
@@ -1171,7 +1175,7 @@ python -W error tools/check_ascii.py --check                         # 158 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
 python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 906 tests
 python -W error tools/check_docs.py --fast
-python -W error tools/apply_type_corrections.py --check              # 204 corrections
+python -W error tools/apply_type_corrections.py --check              # 205 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
 python -W error tools/extract_equippables.py --check
 python -W error tools/check_baseline_schemas.py

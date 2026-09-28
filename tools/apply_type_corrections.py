@@ -45,6 +45,13 @@ else:  # direct script execution
 
 TABLE_RS = Path(__file__).parent.parent / "crates" / "vrf-decode" / "src" / "table.rs"
 
+#: Gekko's Wingman: the one class whose `ReplicatedMovement` location is packed
+#: at two decimals. See the pass that rewrites it in `main`.
+SEEKER_NADE_GROUP = (
+    "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade."
+    "Pawn_Aggrobot_SeekerNade_C"
+)
+
 #: (group_path substring, field_name, required FieldType -- IN FULL).
 #: One entry per correction the passes below make. Checked against the file
 #: after writing; a miss is a hard failure.
@@ -74,7 +81,11 @@ EXPECTED += [
     ("/Game/Characters/", "ReplayLastTransformUpdateTimeStamp",
      "FieldType::Float"),
     ("SmokeScreen", "ReplicatedMovement",
-     "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents }"),
+     "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+     "location: VectorQuantization::RoundWholeNumber }"),
+    (SEEKER_NADE_GROUP, "ReplicatedMovement",
+     "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+     "location: VectorQuantization::RoundTwoDecimals }"),
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::FName"),
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Point", "EquippableUsed", "FieldType::ObjectNetGuid"),
@@ -889,20 +900,19 @@ ADDITIONS = [
     # independent reader that matched Rust on 8,249,671 already-typed Byte
     # rows reproduced all of it.
     #
-    # LOCATION SCALE: every row's location header says "scaled", and the reader
-    # divides by 100, so the exported location is world/100 on this class --
-    # the packed integer at each of the 8,265 actors' first update matches the
-    # actors.parquet spawn position within 0.87 cm, the /100 value is 2,919 to
-    # 15,023 units off. That is the reader-wide divergence recorded in 13-J and
-    # in the decoders-deep-1 audit (world/100 on every observed class but
-    # Pawn_Aggrobot_SeekerNade_C); it is not this entry's to fix, and nothing
-    # here pins a location value. Multiply by 100 for world coordinates, and
-    # expect roll 0.0 always -- it is never replicated, so that is the
-    # absent-flag default, not a measurement. Re-measured on this change's own
-    # exports (31 replays, 15 builds with the class, 327 actors, first update
-    # at the actor's open time): median 8,043 cm from spawn as decoded, 0.50 cm
-    # (max 0.87) after x100. So when the location scale becomes part of the
-    # table entry, this one is whole units, like the other projectiles.
+    # LOCATION LEVEL: whole units (VectorQuantization::RoundWholeNumber). Every
+    # row's location header says "scaled", and the packed integer at each of
+    # the 8,265 actors' first update matches the actors.parquet spawn position
+    # within 0.87 cm; at /100 -- what the reader used to apply to every class,
+    # the divergence recorded in 13-J and in the decoders-deep-1 audit -- it
+    # is 2,919 to 15,023 units off. Re-measured on this change's own exports
+    # (31 replays, 15 builds with the class, 327 actors, first update at the
+    # actor's open time): median 8,043 cm from spawn at /100, 0.50 cm (max
+    # 0.87) as the packed integer. The level is now part of the table entry
+    # (REP_MOVEMENT_LOCATION_EVIDENCE in crates/vrf-decode/src/tests/overlay.rs
+    # pins it), so the export is in world units. Expect roll 0.0 always -- it
+    # is never replicated, so that is the absent-flag default, not a
+    # measurement.
     #
     # `Banking` (checksum 677106858, handle 17 on 11.06-11.09 and 18 after --
     # where PostControlVelocity took 17, so a handle rule would have mistyped
@@ -919,7 +929,8 @@ ADDITIONS = [
     ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
      "Projectile_Guide_E_HawkFlash_C",
      "ReplicatedMovement",
-     "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents }"),
+     "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+     "location: VectorQuantization::RoundWholeNumber }"),
     ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
      "Projectile_Guide_E_HawkFlash_C",
      "Banking", "FieldType::Double"),
@@ -1465,6 +1476,43 @@ def main():
             blocks[i] = block.replace(
                 "RotatorQuantization::ShortComponents",
                 "RotatorQuantization::ByteComponents",
+            )
+            count += 1
+    content = "    OverlayEntry {".join(blocks)
+
+    # Fix: location quantization for Gekko's Wingman pawn.
+    #
+    # The generator gives every `RepMovement` entry whole units, the level the
+    # wire shows on the other 24 classes (extract_descriptors.py,
+    # REP_MOVEMENT_LOCATION). This class packs two decimals instead: joined to
+    # its spawn position in actors.parquet (the actor's first
+    # ReplicatedMovement row at its `open` time_ms, same channel), the packed
+    # integer is 100 times the coordinate on all 932 actors in 1,018 replays
+    # over 15 builds -- median |packed| / |spawn| 100.000, p1..p99 99.998 to
+    # 100.001, every component within 0.0502 of spawn after dividing by 100.
+    # Its components are 17-22 bits wide where a whole-unit class on the same
+    # maps needs 10-15. Measured 2026-09-28 at 259ed10.
+    #
+    # Here the C# reference's fixed VectorNetQuantize100 happens to be right,
+    # so this restores what that reader did for this one class. Every other
+    # measured Pawn class replicates at two decimals too (none of them is in
+    # the table yet); that is a pattern, not evidence for a class nobody has
+    # measured.
+    #
+    # Block-based for the same reason as the SmokeScreen pass above: the entry
+    # spans several lines once rustfmt has run.
+    blocks = content.split("    OverlayEntry {")
+    for i, block in enumerate(blocks):
+        if i == 0:
+            continue
+        if f'group_path: "{SEEKER_NADE_GROUP}"' not in block:
+            continue
+        if 'field_name: "ReplicatedMovement"' not in block:
+            continue
+        if "VectorQuantization::RoundWholeNumber" in block:
+            blocks[i] = block.replace(
+                "VectorQuantization::RoundWholeNumber",
+                "VectorQuantization::RoundTwoDecimals",
             )
             count += 1
     content = "    OverlayEntry {".join(blocks)

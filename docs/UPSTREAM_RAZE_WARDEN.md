@@ -185,6 +185,15 @@ values on those groups and every export baseline, so it is recorded in
 [DATA.md](DATA.md) documents the metre reading until then. A Rust test pins
 the decline: a Raze projectile's `ReplicatedMovement` resolves to no type.
 
+Integration note (2026-09-28, `auto/integration-20260928`): the per-class
+level has landed. `FieldType::RepMovement` now carries each class's measured
+location level, so the reason for this decline no longer holds; the five
+projectiles stay raw only because nothing types them yet, and typing one needs
+its spawn-join line in `REP_MOVEMENT_LOCATION_EVIDENCE`. The Boom Bot's scoped
+entry states two decimals, re-measured at integration (2,296 joins, 18 builds,
+ratio 99.9986-100.0014). DATA.md's metre reading is superseded by
+[its per-class section](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level).
+
 ## Deferred: `FocusProjectiles`
 
 Upstream declares `Clay_PC_C.FocusProjectiles` as a RepLayout dynamic array of

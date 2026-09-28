@@ -5,7 +5,7 @@
 //! test here specifies the layout in both directions.
 
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
-use crate::types::RotatorQuantization;
+use crate::types::{RotatorQuantization, VectorQuantization};
 
 /// Helper: build a quantized vector bitstream.
 /// Format: SerializedInt(128) header + 3 x componentBitCount signed components.
@@ -197,7 +197,7 @@ fn rep_movement_decodes_required_fields() {
     let mut bits: Vec<bool> = Vec::new();
     // 4 flag bits: all false
     bits.extend([false, false, false, false]);
-    // Location: VectorNetQuantize100 (scale=100, componentBitCount=11)
+    // Location at two decimals (packed = round(x * 100), componentBitCount=11)
     let info = 11u32 | (1 << 6);
     write_serialized_int(&mut bits, info, 1 << 7);
     let xi = (1.23_f64 * 100.0).round() as i64;
@@ -221,6 +221,7 @@ fn rep_movement_decodes_required_fields() {
     let result = decode_field(
         FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
         &data,
         bit_count,
@@ -284,6 +285,7 @@ fn rep_movement_decodes_optional_fields() {
     let result = decode_field(
         FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
         &data,
         bit_count,
@@ -336,6 +338,7 @@ fn rep_movement_byte_quantized_rotation() {
     let result = decode_field(
         FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
         &data,
         bit_count,
@@ -350,6 +353,97 @@ fn rep_movement_byte_quantized_rotation() {
         }
         _ => panic!("expected Str"),
     }
+}
+
+/// A `ReplicatedMovement` payload whose location is the packed integers
+/// `packed` (header "scaled" flag set, `location_bits` per component), with
+/// no rotator components and a linear velocity of `(10, -2, 3)`.
+fn rep_movement_with_packed_location(packed: [i64; 3], location_bits: u32) -> (Vec<u8>, u32) {
+    let mut bits: Vec<bool> = Vec::new();
+    bits.extend([false, false, false, false]);
+    write_serialized_int(&mut bits, location_bits | (1 << 6), 1 << 7);
+    for component in packed {
+        write_signed_bits(&mut bits, component, location_bits);
+    }
+    // Rotation: three cleared presence flags read the same at either width.
+    bits.extend([false, false, false]);
+    write_serialized_int(&mut bits, 6 | (1 << 6), 1 << 7);
+    for component in [10, -2, 3] {
+        write_signed_bits(&mut bits, component, 6);
+    }
+    bits_to_bytes(&bits)
+}
+
+/// The location's divisor is the table entry's quantization level, not a
+/// constant. The wire carries only "the integer was scaled"; Unreal's sender
+/// packs `round(world * scale)` for its class's level, so a reader that
+/// divides by a fixed 100 returns world/100 for every whole-unit class --
+/// which is what shipped, measured against actor spawn positions on 25 of
+/// the 26 classes the table declares.
+///
+/// Each case packs one known world location the way that level packs it and
+/// requires the entry declaring that level to return the world location. A
+/// fixed divisor can satisfy at most one of the three. The velocity is whole
+/// units on every level, so a reader that applied the location's level to
+/// the velocity fails too.
+#[test]
+fn rep_movement_location_is_divided_by_the_declared_quantization() {
+    // Every level is checked before failing, so a regression reports all of
+    // the levels it breaks rather than only the first.
+    let mut wrong = Vec::new();
+    for (level, packed, bits, world) in [
+        (
+            VectorQuantization::RoundWholeNumber,
+            [930, -545, 1175],
+            12,
+            r#"{"x":930,"y":-545,"z":1175}"#,
+        ),
+        (
+            VectorQuantization::RoundOneDecimal,
+            [9302, -5451, 11753],
+            15,
+            r#"{"x":930.2,"y":-545.1,"z":1175.3}"#,
+        ),
+        (
+            VectorQuantization::RoundTwoDecimals,
+            [621_541, -570_761, 50_041],
+            21,
+            r#"{"x":6215.41,"y":-5707.61,"z":500.41}"#,
+        ),
+    ] {
+        let (data, bit_count) = rep_movement_with_packed_location(packed, bits);
+        let decoded = decode_field(
+            FieldType::RepMovement {
+                rotation: RotatorQuantization::ByteComponents,
+                location: level,
+            },
+            &data,
+            bit_count,
+        )
+        .unwrap_or_else(|e| panic!("{level:?}: {e}"));
+        let expected = format!(
+            concat!(
+                r#"{{"linear_velocity":{{"x":10,"y":-2,"z":3}},"#,
+                r#""angular_velocity":null,"location":{},"#,
+                r#""rotation":{{"pitch":0,"yaw":0,"roll":0}},"#,
+                r#""simulated_physics_sleep":false,"rep_physics":false,"#,
+                r#""server_frame":null,"server_physics_handle":null}}"#
+            ),
+            world
+        );
+        if decoded != DecodedValue::Str(expected) {
+            wrong.push(format!("{level:?}: got {decoded:?}, want location {world}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("; "));
+}
+
+/// The three levels are Unreal's `EVectorQuantization` divisors, in order.
+#[test]
+fn vector_quantization_scales_are_unreals() {
+    assert_eq!(VectorQuantization::RoundWholeNumber.scale(), 1);
+    assert_eq!(VectorQuantization::RoundOneDecimal.scale(), 10);
+    assert_eq!(VectorQuantization::RoundTwoDecimals.scale(), 100);
 }
 
 /// A `ReplicatedMovement` whose quantized vector takes the raw-`f32` fallback
@@ -383,6 +477,7 @@ fn rep_movement_with_a_non_finite_component_is_rejected() {
     let result = decode_field(
         FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
         &data,
         bit_count,

@@ -51,8 +51,14 @@ pub enum FieldType {
     RotationShort,
     RotationByte,
     Transform,
+    /// `FRepMovement`. Both parameters are per-class choices the wire does not
+    /// carry: the rotator's component width, and the number of decimals the
+    /// location was rounded to before packing. See
+    /// [`crate::types::RotatorQuantization`] and
+    /// [`crate::types::VectorQuantization`].
     RepMovement {
         rotation: crate::types::RotatorQuantization,
+        location: crate::types::VectorQuantization,
     },
     /// Dynamic arrays and custom decoders -- not decoded, raw_bits suffices.
     Raw,
@@ -181,7 +187,9 @@ fn dispatch_decode(
         FieldType::RotationShort => geometry::decode_rotation_short(r),
         FieldType::RotationByte => geometry::decode_rotation_byte(r),
         FieldType::Transform => geometry::decode_transform(r),
-        FieldType::RepMovement { rotation } => geometry::decode_rep_movement(r, rotation),
+        FieldType::RepMovement { rotation, location } => {
+            geometry::decode_rep_movement(r, rotation, location)
+        }
         FieldType::Raw | FieldType::Skip => Err(DecodeError::RawOrSkip),
     }
 }

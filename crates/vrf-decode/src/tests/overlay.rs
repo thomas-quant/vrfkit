@@ -8,7 +8,7 @@ use crate::overlay::{
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
-use crate::types::RotatorQuantization;
+use crate::types::{RotatorQuantization, VectorQuantization};
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
 
 const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
@@ -188,12 +188,11 @@ fn raze_scoped_identities_require_their_exact_checksum() {
 }
 
 /// The Boom Bot replicates short rotation components and a location in
-/// hundredths of a centimetre, verified against its spawn location. Raze's
-/// byte-rotation projectiles are deliberately left untyped: their location is
-/// whole centimetres, and `RepMovement` reads every location at scale 100 --
-/// a value 100 times too small, as it already is on 24 of the 25 groups the
-/// table types this way (all but the one pawn among them). See
-/// docs/UPSTREAM_RAZE_WARDEN.md.
+/// hundredths of a centimetre (two decimals), verified against its spawn
+/// location. Raze's byte-rotation projectiles stay untyped: they were declined
+/// while `RepMovement` read every location at scale 100 (docs/UPSTREAM_RAZE_WARDEN.md),
+/// and now that the level is per class, typing one needs its own spawn-join
+/// entry in `REP_MOVEMENT_LOCATION_EVIDENCE` first.
 #[test]
 fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -206,7 +205,8 @@ fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
             Some(REPLICATED_MOVEMENT_CHECKSUM)
         ),
         Some(FieldType::RepMovement {
-            rotation: crate::types::RotatorQuantization::ShortComponents
+            rotation: crate::types::RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         })
     );
     for group in [CLAY_SATCHEL, CLAY_ROCKET] {
@@ -744,9 +744,9 @@ fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
 /// audit every one of its 1,033,952 movement payloads (71-118 bits) is
 /// consumed exactly by the byte reading and 54.6% overrun or leave residue
 /// under the short one; `Banking` is 64 bits on all 801,700 rows, reading
-/// -180..180. Only the type is pinned here, deliberately not a decoded
-/// location: the reader's location scale is a separately tracked divergence
-/// (world/100 on this class), and a value pinned now would lock it in.
+/// -180..180. The location is whole units: the packed integer at each actor's
+/// first update matches its spawn position (see REP_MOVEMENT_LOCATION_EVIDENCE),
+/// so the entry states `RoundWholeNumber` and the export is world units.
 #[test]
 fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
@@ -754,7 +754,8 @@ fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     assert_eq!(
         table.lookup(HAWK, "ReplicatedMovement"),
         Some(FieldType::RepMovement {
-            rotation: RotatorQuantization::ByteComponents
+            rotation: RotatorQuantization::ByteComponents,
+            location: VectorQuantization::RoundWholeNumber,
         })
     );
     assert_eq!(table.lookup(HAWK, "Banking"), Some(FieldType::Double));
@@ -1732,8 +1733,9 @@ fn an_unlearned_checksum_resolves_nothing() {
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
 /// is the one that matters -- `ByteComponents` on 20 groups and `ShortComponents`
-/// on 6, which differ in width, so guessing would desync the block rather than
-/// read a wrong value.
+/// on 6, which differ in width, so guessing would desync the block; and one
+/// group packs its location at two decimals where the rest pack whole units,
+/// which a guess would read 100x off with no error at all.
 ///
 /// `AllianceFilter` used to be the second entry here and is not any more: its
 /// donors disagreed only in the table, never on the wire -- see
@@ -1817,6 +1819,227 @@ fn the_weapon_effect_rpcs_type_their_effect_manager_reference() {
         );
     }
     assert_eq!(lookup_checksum(1051633025), Some(FieldType::ObjectNetGuid));
+}
+
+/// Every group the overlay assigns a `RepMovement` type to -- a table entry or
+/// an exact scoped type -- with the location level the wire was measured at
+/// for that class.
+///
+/// Measured 2026-09-28 over the 1,018 replays audited at 259ed10 (21 of the
+/// 24 builds carry these rows): each actor `open` in actors.parquet joined to
+/// the actor's first `ReplicatedMovement` row at the same `time_ms` on the
+/// same channel, spawn position at least 50 units from the origin, comparing
+/// |packed location integer| with |spawn xyz|. The count is those joins, then
+/// the builds they span; the ratio is the level's divisor on every build.
+/// Checkpoint tables carry no `ReplicatedMovement` rows at all, so this is
+/// main-stream evidence only. docs/DATA.md has the method in full.
+const REP_MOVEMENT_LOCATION_EVIDENCE: [(&str, VectorQuantization); 27] = {
+    use VectorQuantization::{RoundTwoDecimals, RoundWholeNumber};
+    [
+        // 647 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_4/Projectile_Aggrobot_C_ExplodeyPatch.Projectile_Aggrobot_C_ExplodeyPatch_C",
+            RoundWholeNumber,
+        ),
+        // 1,007 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_Aggrobot_Zamboni_Rocket.Projectile_Aggrobot_Zamboni_Rocket_C",
+            RoundWholeNumber,
+        ),
+        // 1,819 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_DiscTurret_PowerWave.Projectile_E_Aggrobot_DiscTurret_PowerWave_C",
+            RoundWholeNumber,
+        ),
+        // 1,812 joins, 15 builds, ratio 1.000
+        (
+            "/Game/Characters/AggroBot/S0/Ability_E/Projectile_E_Aggrobot_OrbSpawner.Projectile_E_Aggrobot_OrbSpawner_C",
+            RoundWholeNumber,
+        ),
+        // 932 joins, 15 builds, ratio 100.000 -- the one two-decimal class
+        (
+            "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C",
+            RoundTwoDecimals,
+        ),
+        // 5,715 joins, 14 builds, ratio 1.000
+        (
+            "/Game/Characters/BountyHunter/S0/Ability_E/Projectile_E_BountyHunter_Divebomb.Projectile_E_BountyHunter_Divebomb_C",
+            RoundWholeNumber,
+        ),
+        // Scoped entry (tools/fixtures/scoped_type_evidence.json), a pawn.
+        // 2,296 joins, 18 builds, ratio 100.000 (p1-p99 99.9986-100.0014),
+        // every component within 0.0504 of spawn; re-measured at integration.
+        (
+            "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C",
+            RoundTwoDecimals,
+        ),
+        // Table entry (apply_type_corrections.py ADDITIONS). 8,265 joins, 15
+        // builds, ratio 1.000 (p1-p99 0.9998-1.0001), every component within
+        // 0.50 of spawn; re-measured at integration with an independent join.
+        (
+            "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C",
+            RoundWholeNumber,
+        ),
+        // 5,280 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
+            RoundWholeNumber,
+        ),
+        // 12,032 joins, 14 builds, ratio 1.000
+        (
+            "/Game/Characters/Hunter/S0/Ability_Q/Projectile_Hunter_Q_RevealBolt.Projectile_Hunter_Q_RevealBolt_C",
+            RoundWholeNumber,
+        ),
+        // 1,046 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+            RoundWholeNumber,
+        ),
+        // 596 joins, 5 builds, ratio 1.000
+        (
+            "/Game/Characters/Mage/S0/Ability_Q/Projectile_Mage_Q_Wall.Projectile_Mage_Q_Wall_C",
+            RoundWholeNumber,
+        ),
+        // 703 joins, 8 builds, ratio 1.000
+        (
+            "/Game/Characters/Pandemic/S0/Ability_E/Projectile_Pandemic_E_SmokeScreen_NoCollision.Projectile_Pandemic_E_SmokeScreen_NoCollision_C",
+            RoundWholeNumber,
+        ),
+        // 2,765 joins, 18 builds, ratio 1.000
+        (
+            "/Game/Characters/Phoenix/S0/Ability_Q/Production/Projectile_Phoenix_Q_FlameWall_ThroughWall.Projectile_Phoenix_Q_FlameWall_ThroughWall_C",
+            RoundWholeNumber,
+        ),
+        // 27,667 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
+            RoundWholeNumber,
+        ),
+        // 3,320 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
+            RoundWholeNumber,
+        ),
+        // 3,490 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+            RoundWholeNumber,
+        ),
+        // 3,505 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/Projectile_Smonk_DecayNade.Projectile_Smonk_DecayNade_C",
+            RoundWholeNumber,
+        ),
+        // 3,269 joins, 12 builds, ratio 1.000
+        (
+            "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel.Projectile_Neon_C_Tunnel_C",
+            RoundWholeNumber,
+        ),
+        // 1,029 joins, 11 builds, ratio 1.000
+        (
+            "/Game/Characters/Terra/S0/Ability_4/GameObject_Terra_C_TimeSlowGrenade_Explosion.GameObject_Terra_C_TimeSlowGrenade_Explosion_C",
+            RoundWholeNumber,
+        ),
+        // 1,033 joins, 11 builds, ratio 1.000
+        (
+            "/Game/Characters/Terra/S0/Ability_4/Projectile_Terra_C_TimeSlowGrenade.Projectile_Terra_C_TimeSlowGrenade_C",
+            RoundWholeNumber,
+        ),
+        // 13,892 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Characters/Vampire/S0/Ability_4/Projectile_Vampire_4_NearsightAoE.Projectile_Vampire_4_NearsightAoE_C",
+            RoundWholeNumber,
+        ),
+        // 14,935 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_4/Projectile_Wraith_4_Smoke.Projectile_Wraith_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 14,902 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 4,062 joins, 17 builds, ratio 1.000
+        (
+            "/Game/Characters/Wraith/S0/Ability_Q/Projectile_Wraith_Q_NearsightMissile.Projectile_Wraith_Q_NearsightMissile_C",
+            RoundWholeNumber,
+        ),
+        // 11,976 joins, 20 builds, ratio 1.000
+        (
+            "/Game/Characters/Wushu/S0/Ability_4/Projectile_Wushu_4_Smoke.Projectile_Wushu_4_Smoke_C",
+            RoundWholeNumber,
+        ),
+        // 288,644 joins, 21 builds, ratio 1.000
+        (
+            "/Game/Weapons/WeaponPickups/EquippablePickupProjectile.EquippablePickupProjectile_C",
+            RoundWholeNumber,
+        ),
+    ]
+};
+
+/// The location level of every `RepMovement` type the overlay can assign is
+/// the measured one, and no group gets a `RepMovement` type this list does not
+/// name.
+///
+/// The level is not on the wire, so the generator has to default it (whole
+/// units, extract_descriptors.py REP_MOVEMENT_LOCATION), and a default is a
+/// prior, not a measurement. Pinning each class keeps a changed default or a
+/// dropped correction from moving a class silently; failing on an unlisted
+/// group keeps a NEW class from taking the default without anyone checking
+/// it -- add it here only with its spawn-position evidence.
+///
+/// Three routes can assign the type, and all three are held to the list: the
+/// table and the exact scoped types by group, checksum propagation by
+/// admitting no `RepMovement` at all. The scoped route matters because it is
+/// generated from its own fixture, where a new `RepMovement` literal would
+/// never pass through the table's default or its corrections.
+#[test]
+fn every_rep_movement_entry_carries_its_measured_location_level() {
+    use std::collections::BTreeMap;
+
+    let table = OVERLAY_TABLE.iter().map(|e| (e.group_path, e.field_type));
+    let scoped = crate::scoped_types::SCOPED_TYPES
+        .iter()
+        .map(|&(_, group, _, field_type)| (group, field_type));
+    let mut declared: BTreeMap<&str, VectorQuantization> = BTreeMap::new();
+    for (group, field_type) in table.chain(scoped) {
+        if let FieldType::RepMovement { location, .. } = field_type {
+            let previous = declared.insert(group, location);
+            assert!(
+                previous.is_none() || previous == Some(location),
+                "{group}: RepMovement declared at two location levels"
+            );
+        }
+    }
+    let measured: BTreeMap<&str, VectorQuantization> =
+        REP_MOVEMENT_LOCATION_EVIDENCE.into_iter().collect();
+    assert_eq!(
+        measured.len(),
+        REP_MOVEMENT_LOCATION_EVIDENCE.len(),
+        "the evidence list names a group twice"
+    );
+    for (group, level) in &declared {
+        assert_eq!(
+            measured.get(group),
+            Some(level),
+            "{group}: declared {level:?}; the measured level differs or was never recorded"
+        );
+    }
+    for group in measured.keys() {
+        assert!(
+            declared.contains_key(group),
+            "{group}: measured but no route assigns it a RepMovement type"
+        );
+    }
+    // The name rule the checksum map would apply is closed for this field
+    // (donors disagree), so the table is the only route to a RepMovement type.
+    assert!(
+        CHECKSUM_TYPES
+            .iter()
+            .all(|(_, t)| !matches!(t, FieldType::RepMovement { .. })),
+        "a checksum-propagated RepMovement type would bypass the per-class evidence"
+    );
 }
 
 /// The map is only useful if it holds something; a silently empty generated

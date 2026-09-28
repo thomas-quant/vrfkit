@@ -50,17 +50,17 @@ byte multiples and some of them do not even start on a byte boundary:
   wrong value.
 
   The location is compared WITHOUT assuming its scale. The packed header only
-  says "scaled"; the scale itself is not on the wire. The Rust reader divides
-  by 100, which measures as world/100 on every observed class but one
-  (Pawn_Aggrobot_SeekerNade_C, where it is world units) -- a known,
-  separately tracked divergence. So the check accepts the packed integers at
-  /100 or at /1, requires everything else to match exactly, and reports
-  which scale each row was exported at (``location_scales``). A fixture that
-  pinned /100 would fail the day that divergence is fixed, for no wrong bit.
-  Measured against actors.parquet spawn locations
-  (docs/UPSTREAM_RAZE_WARDEN.md), pawns replicate hundredths of a centimetre
-  but projectiles and game objects replicate whole centimetres: a row the
-  check accepts at "/100" is only in world units for the former.
+  says "scaled"; the scale itself is not on the wire. The Rust reader
+  divides by the level each class's table or scoped entry states
+  (``FieldType::RepMovement { location }``): whole units on every class but
+  the two-decimal pawns (docs/DATA.md, "`ReplicatedMovement.location` is
+  world units, at a per-class level"). So the check accepts the packed
+  integers at /100 or at /1, requires everything else to match exactly, and
+  reports which scale each row was exported at (``location_scales``): "/1"
+  for a whole-unit class, "/100" for a two-decimal one. Which level a class
+  must have is not this check's to decide; the Rust test
+  ``every_rep_movement_entry_carries_its_measured_location_level`` pins it
+  per class against spawn-position evidence.
 
 The geometry decoders are written from Unreal's wire layout, not from the Rust
 readers, so the two can disagree.

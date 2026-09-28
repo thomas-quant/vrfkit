@@ -3,7 +3,7 @@
 //! Observed build scope and wire evidence live in the source fixture.
 
 use crate::decode::FieldType;
-use crate::types::RotatorQuantization;
+use crate::types::{RotatorQuantization, VectorQuantization};
 
 /// Sorted by (field name, group path, compatible checksum).
 pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
@@ -355,6 +355,7 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 70] = [
         2749104612,
         FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
+            location: VectorQuantization::RoundTwoDecimals,
         },
     ),
     (

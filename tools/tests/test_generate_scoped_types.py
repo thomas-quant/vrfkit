@@ -59,29 +59,61 @@ class ScopedTypeGenerationTests(unittest.TestCase):
 
     def test_rotator_quantization_import_only_when_an_entry_needs_it(self):
         base = {"group": "/G.G_C", "field": "ReplicatedMovement", "checksum": 2749104612,
-                "observed_builds": ["b"], "evidence": "e"}
+                "observed_builds": ["b"], "evidence": "e",
+                "location_quantization": "RoundWholeNumber"}
         byte = gen.render([{**base, "type": "RepMovementByte"}])
-        self.assertIn("use crate::types::RotatorQuantization;", byte)
+        self.assertIn("use crate::types::{RotatorQuantization, VectorQuantization};", byte)
         self.assertIn("        FieldType::RepMovement {\n"
                       "            rotation: RotatorQuantization::ByteComponents,\n"
+                      "            location: VectorQuantization::RoundWholeNumber,\n"
                       "        },\n", byte)
-        short = gen.render([{**base, "type": "RepMovementShort"}])
+        short = gen.render([{**base, "type": "RepMovementShort",
+                             "location_quantization": "RoundTwoDecimals"}])
         self.assertIn("RotatorQuantization::ShortComponents", short)
-        plain = gen.render([{**base, "field": "Scale", "type": "VectorNetQuantize100"}])
+        self.assertIn("location: VectorQuantization::RoundTwoDecimals,", short)
+        plain = gen.render([{"group": "/G.G_C", "field": "Scale", "checksum": 2749104612,
+                             "observed_builds": ["b"], "evidence": "e",
+                             "type": "VectorNetQuantize100"}])
         self.assertNotIn("RotatorQuantization", plain)
+        self.assertNotIn("VectorQuantization", plain)
         self.assertIn("        FieldType::VectorNetQuantize { scale: 100 },\n", plain)
 
     def test_quantization_is_part_of_the_scoped_identity_type(self):
         # One group may not carry both quantizations for one checksum: the
         # identity is exact, so the second entry is a duplicate, not a choice.
         base = {"group": "/G.G_C", "field": "ReplicatedMovement", "checksum": 2749104612,
-                "observed_builds": ["b"], "evidence": "e"}
+                "observed_builds": ["b"], "evidence": "e",
+                "location_quantization": "RoundWholeNumber"}
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "evidence.json"
             path.write_text(json.dumps({"schema_version": 1, "entries": [
                 {**base, "type": "RepMovementByte"}, {**base, "type": "RepMovementShort"}]}))
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 gen.load(path)
+
+    def test_a_rep_movement_entry_must_state_a_measured_location_level(self):
+        # The level is not on the wire and changes no width, so nothing
+        # downstream could catch a defaulted one: the fixture states it, and
+        # only a RepMovement entry may.
+        base = {"group": "/G.G_C", "field": "ReplicatedMovement", "checksum": 2749104612,
+                "observed_builds": ["b"], "evidence": "e", "type": "RepMovementShort"}
+        scalar = {"group": "/G.G_C", "field": "Seed", "checksum": 1,
+                  "observed_builds": ["b"], "evidence": "e", "type": "Int32"}
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "evidence.json"
+            for entry, message in (
+                (base, "needs a measured location_quantization"),
+                ({**base, "location_quantization": "RoundHalves"}, "needs a measured"),
+                ({**scalar, "location_quantization": "RoundWholeNumber"}, "only to RepMovement"),
+            ):
+                with self.subTest(entry=entry):
+                    path.write_text(json.dumps({"schema_version": 1, "entries": [entry]}))
+                    with self.assertRaisesRegex(ValueError, message):
+                        gen.load(path)
+            path.write_text(json.dumps({"schema_version": 1, "entries": [
+                {**base, "location_quantization": "RoundOneDecimal"}]}))
+            self.assertIn("location: VectorQuantization::RoundOneDecimal,",
+                          gen.render(gen.load(path)))
 
 
 if __name__ == "__main__":
