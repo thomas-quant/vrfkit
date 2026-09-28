@@ -38,5 +38,41 @@
   "group": "/Script/ShooterGame.EquippableStateMachineComponent",
   "field": "TransitionContext",
   "type": "ObjectNetGuid"
+ },
+ {
+  "group": "/Script/ShooterGame.AresInventory",
+  "field": "CorrectionIndex",
+  "type": "Int32",
+  "checksum": 3198546915
+ },
+ {
+  "group": "/Script/ShooterGame.AresInventory",
+  "field": "LastSeenClientCorrectionIndex",
+  "type": "Int32",
+  "checksum": 1076231069
+ },
+ {
+  "group": "/Script/ShooterGame.AresEquippableDataTracker",
+  "field": "OriginalBuyerTeam",
+  "type": "FName",
+  "checksum": 255019476
+ },
+ {
+  "group": "/Game/Equippables/Guns/Sidearms/BasePistol/BasePistol.BasePistol_C_ClassNetCache",
+  "field": "MulticastPlayContinuousEffectFromClient.EffectManagerComponent",
+  "type": "ObjectNetGuid",
+  "checksum": 1051633025
+ },
+ {
+  "group": "/Game/Equippables/Guns/Sidearms/BasePistol/BasePistol.BasePistol_C_ClassNetCache",
+  "field": "MulticastPlayContinuousEffectFromClient.AllianceFilter",
+  "type": "EnumByte",
+  "checksum": 2270825073
+ },
+ {
+  "group": "/Script/ShooterGame.ForceModuleManagerComponent_ClassNetCache",
+  "field": "NetMulticastRemoveForceModule.ModuleType",
+  "type": "EnumByte",
+  "checksum": 3263282135
  }
 ]

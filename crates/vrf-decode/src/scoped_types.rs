@@ -6,7 +6,7 @@ use crate::decode::FieldType;
 use crate::types::RotatorQuantization;
 
 /// Sorted by (field name, group path, compatible checksum).
-pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 62] = [
+pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 57] = [
     (
         "AttachComponent",
         "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
@@ -132,12 +132,6 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 62] = [
         "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
         3944193776,
         FieldType::Byte,
-    ),
-    (
-        "Character",
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-        1346692128,
-        FieldType::ObjectNetGuid,
     ),
     (
         "ClickedLocation",
@@ -248,24 +242,6 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 62] = [
         FieldType::VectorNetQuantize { scale: 100 },
     ),
     (
-        "Module",
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-        739992589,
-        FieldType::ObjectNetGuid,
-    ),
-    (
-        "ModuleType",
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-        3263282135,
-        FieldType::EnumRemainingBits,
-    ),
-    (
-        "NetTimestamp",
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-        259706372,
-        FieldType::Float,
-    ),
-    (
         "RelativeScale3D",
         "/Game/Characters/Clay/S0/Ability_4/Ability_Clay_4_ClusterGrenade.Ability_Clay_4_ClusterGrenade_C",
         1992268157,
@@ -302,12 +278,6 @@ pub(crate) static SCOPED_TYPES: [(&str, &str, u32, FieldType); 62] = [
         FieldType::RepMovement {
             rotation: RotatorQuantization::ShortComponents,
         },
-    ),
-    (
-        "RespawnNumber",
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-        3960441757,
-        FieldType::Int32,
     ),
     (
         "RotationOffset",

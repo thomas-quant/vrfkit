@@ -167,6 +167,34 @@ class AdditionsTests(unittest.TestCase):
         `AuthCurrentRandomSeed`, 120,853 rows of near-total distinctness across
         the full i32 range.
 
+        125 -> 127 is one finding on two twins: `EffectManagerComponent` on
+        the weapons' `MulticastPlay{Continuous,OneShot}EffectFromClient`.
+        Checksum 1051633025 belongs to these two parameters only; all
+        3,112,054 rows over the 1,018-replay audit are IntPacked GUIDs that
+        resolve to `EffectManager`, whose outer is the holder's pawn -- and
+        equals the weapon's typed Instigator at that time on 3,111,803.
+
+        127 -> 132 is the rest of `NetMulticastApplyForceModule` beside the
+        already-typed HandleNumber/SourceLocation: RespawnNumber, NetTimestamp,
+        ModuleType, Module, Character -- 665,519 calls each. Each checks out
+        against something outside itself: RespawnNumber against the typed
+        AresInventory counter, NetTimestamp against two typed clocks, Module
+        by resolving to ForceModule classes, Character by equalling the row's
+        own actor GUID, and ModuleType by agreeing with the Remove RPC on
+        every paired row. Remove's ModuleType is not an addition: it follows
+        through the checksum table, like HandleNumber does.
+
+        132 -> 135 types `ReadyingStateComponent.AuthEquipSpeed` (3 bits on
+        all 1,015,515 rows; equals its EnumByte sibling AutoEquipSpeed in the
+        same packet) and the two AresInventory correction counters (32 bits,
+        strictly increasing, LastSeen < Correction on every paired row, and
+        every checkpoint value equal to the preceding main-stream one).
+
+        135 -> 137 types HawkFlash's `ReplicatedMovement` (ByteComponents:
+        the only reading that consumes all 1,033,952 payloads; Short fails on
+        54.6%) and its `Banking` (64-bit doubles, -180..180, on 801,700 rows),
+        on that exact group only.
+
         63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
         for being a wrong `FString`; it is back because a decoder now exists
         and the reason given for waiting was itself wrong -- `Statistic` was
@@ -203,7 +231,7 @@ class AdditionsTests(unittest.TestCase):
         2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
         reaches a real declaration and the guessed name is gone.
         """
-        self.assertEqual(len(atc.ADDITIONS), 125, atc.ADDITIONS)
+        self.assertEqual(len(atc.ADDITIONS), 137, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
         """Same guardrail for the handle -> name additions.
@@ -338,6 +366,61 @@ class AdditionsTests(unittest.TestCase):
         self.assertEqual(len(keys), 1 + len(atc.ADDITIONS))
         # OVERLAY_TABLE's closing bracket is still present exactly once.
         self.assertEqual(out.count("];\n"), 1)
+
+
+class RetypeExactTests(unittest.TestCase):
+    """`retype_exact` keys on each block's OWN entry, never on text elsewhere.
+
+    The split on `    OverlayEntry {` leaves OVERLAY_HANDLE_TABLE in the last
+    block, and that table repeats group paths and field names. A substring pass
+    would read them as the last entry's; these pin that it does not.
+    """
+
+    GROUP = "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation"
+
+    def table(self, last_type):
+        body = formatted_typed([
+            (self.GROUP, "AllianceFilter", "FieldType::EnumRemainingBits"),
+            (self.GROUP, "AllianceFilterX", "FieldType::EnumRemainingBits"),
+            ("/Script/ShooterGame.ZzzTailComponent", "Stripes", last_type),
+        ])
+        return body + (
+            "\npub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; 1] = [\n"
+            "    OverlayHandleEntry {\n"
+            f'        group_path: "{self.GROUP}",\n'
+            "        handle: 28,\n"
+            '        field_name: "AllianceFilter",\n'
+            "    },\n"
+            "];\n"
+        )
+
+    def test_only_the_exact_entry_changes(self):
+        # The tail entry carries the old type too, and the handle table after
+        # it names the same group and field -- the shape a substring pass
+        # would misread as "the last entry is AllianceFilter".
+        source = self.table("FieldType::EnumRemainingBits")
+        out, n = atc.retype_exact(
+            source, self.GROUP, "AllianceFilter",
+            "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=1)
+        self.assertEqual(n, 1)
+        self.assertEqual(
+            [(f, t) for _g, f, t in atc.parse_entries(out)],
+            [("AllianceFilter", "FieldType::EnumByte"),
+             ("AllianceFilterX", "FieldType::EnumRemainingBits"),
+             ("Stripes", "FieldType::EnumRemainingBits")])
+
+    def test_an_already_corrected_table_changes_nothing(self):
+        out, n = atc.retype_exact(
+            self.table("FieldType::Float"), self.GROUP, "AllianceFilter",
+            "FieldType::EnumByte", "FieldType::Raw", expected=1)
+        self.assertEqual(n, 0)
+        self.assertEqual(out, self.table("FieldType::Float"))
+
+    def test_an_unexpected_count_is_a_hard_failure(self):
+        with self.assertRaises(SystemExit):
+            atc.retype_exact(
+                self.table("FieldType::Float"), self.GROUP, "AllianceFilter",
+                "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=2)
 
 
 #: A weapon group of the shape the "215"/"216" pass discovers for itself.

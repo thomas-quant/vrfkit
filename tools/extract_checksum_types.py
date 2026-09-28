@@ -19,12 +19,17 @@ of *groups* would have been a snapshot of whichever match was exported.
 
 **Conflicts are dropped, and that is the safety property.** A checksum whose
 donors disagree on the type is not written, and an older committed answer is
-removed as soon as a wider donor set makes it ambiguous. On the reference
-corpus that drops two:
-`AllianceFilter` (`EnumByte` vs `EnumRemainingBits`, equivalent at these widths
--- an inconsistency in the table, not on the wire) and `ReplicatedMovement`
-(`ByteComponents` vs `ShortComponents`, genuinely different and different in
-width). The second is the case a name-based rule would have got wrong.
+removed as soon as a wider donor set makes it ambiguous. On the 1,018-replay
+audit corpus that drops one: `ReplicatedMovement` (`ByteComponents` vs
+`ShortComponents`, genuinely different and different in width) -- the case a
+name-based rule would have got wrong.
+
+It used to drop two. `AllianceFilter` (2270825073) had `EnumByte` donors and
+one `EnumRemainingBits` donor, equivalent at the 3 bits every one of its
+16,030,813 rows carries -- an inconsistency in the table, not on the wire, and
+it left 4,560,248 receiver rows raw. `apply_type_corrections.py` now makes the
+donors agree, so the checksum is learned; that is a fix to the donors, not an
+exception to this rule.
 
 Dropping decides what gets WRITTEN. It used to also end the story: the dropped
 set never reached `reconcile`, so a checksum the file already commits and the

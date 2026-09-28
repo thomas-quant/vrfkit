@@ -13,25 +13,56 @@ Usage:
 ``fields.parquet`` and ``checkpoint_fields.parquet`` are inspected when present.
 The JSON shape is ``[{"group": "...", "field": "...", "type": "Bool"}]``.
 Supported types are Bool, Byte, Int32, Float, Double, FString, ObjectNetGuid,
-EnumRemainingBits, RotationShort, VectorNetQuantize100, RepMovementByte and
-RepMovementShort -- the names ``generate_scoped_types.py`` accepts.
+EnumByte, EnumRemainingBits, FName, RotationShort, VectorNetQuantize100,
+RepMovementByte and RepMovementShort -- among them every non-primitive name
+``generate_scoped_types.py`` accepts.
+
+All but the first seven are read bit by bit, because their payloads are not
+byte multiples and some of them do not even start on a byte boundary:
+
+* ``EnumByte`` -- 1..8 bits, the whole payload is the value. A byte-sized enum
+  is sent with only its significant bits, so a 3-bit payload is the normal
+  case, which is why ``Byte`` (exactly 8 bits) cannot check it.
+* ``EnumRemainingBits`` -- every bit of the payload is the value, up to 32; a
+  0-bit field is the enum's zero.
+* ``FName`` -- one ``isHardcoded`` bit, then either an IntPacked name index
+  (rendered as its decimal string) or an inline FString plus an i32 instance
+  number (0 renders the bare name, ``N`` renders ``name_{N-1}``). Everything
+  after the flag bit is one bit off byte alignment.
+* ``RotationShort`` -- one presence bit per rotator component, each followed
+  by 16 bits when set.
+* ``VectorNetQuantize100`` -- a bounded ``SerializeInt(128)`` header whose low
+  six bits give the component width and whose seventh selects scaled integers
+  (or doubles, when the width is zero); two's-complement components, divided
+  by 100 when scaled. With ``--compare-typed`` the exported ``value_str`` is
+  parsed back into numbers rather than compared as a spelling: vectors as
+  doubles, rotator components as the single precision floats Rust prints them
+  from.
+* ``RepMovementByte`` / ``RepMovementShort`` -- ``FRepMovement``: four flag
+  bits, a quantized location, a rotator with 8- or 16-bit components, a
+  quantized linear velocity, then the optional angular velocity and IntPacked
+  server frame/handle. With ``--compare-typed`` the exported ``value_str`` JSON
+  is parsed and compared numerically, rotator components after rounding to
+  f32 -- a string compare would fail on ``1`` against ``1.0`` rather than on a
+  wrong value.
+
+  The location is compared WITHOUT assuming its scale. The packed header only
+  says "scaled"; the scale itself is not on the wire. The Rust reader divides
+  by 100, which measures as world/100 on every observed class but one
+  (Pawn_Aggrobot_SeekerNade_C, where it is world units) -- a known,
+  separately tracked divergence. So the check accepts the packed integers at
+  /100 or at /1, requires everything else to match exactly, and reports
+  which scale each row was exported at (``location_scales``). A fixture that
+  pinned /100 would fail the day that divergence is fixed, for no wrong bit.
+  Measured against actors.parquet spawn locations
+  (docs/UPSTREAM_RAZE_WARDEN.md), pawns replicate hundredths of a centimetre
+  but projectiles and game objects replicate whole centimetres: a row the
+  check accepts at "/100" is only in world units for the former.
 
 The geometry decoders are written from Unreal's wire layout, not from the Rust
-readers: a bounded ``SerializeInt(128)`` header whose low six bits give the
-component width and whose seventh selects scaled integers (or doubles, when the
-width is zero); two's-complement components; one presence bit per rotator
-component followed by 8 or 16 bits; and ``ReplicatedMovement``'s four flag bits
-gating angular velocity, server frame and server physics handle.
-``--compare-typed`` parses the exported ``value_str`` back into numbers rather
-than comparing spellings: vectors as doubles, rotator components as the single
-precision floats Rust prints them from.
+readers, so the two can disagree.
 
-``ReplicatedMovement`` locations are read at scale 100 because that is what
-``FieldType::RepMovement`` does. Exact consumption cannot check that scale --
-it changes no width. Measured against actors.parquet spawn locations
-(docs/UPSTREAM_RAZE_WARDEN.md), pawns replicate hundredths of a centimetre but
-projectiles and game objects replicate whole centimetres, so for those classes
-a value this accepts is still 100 times too small.
+Bit-level payloads must also carry zero padding above ``bit_count``.
 """
 
 from __future__ import annotations
@@ -49,56 +80,46 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 
-TYPES = frozenset({
-    "Bool", "Byte", "Int32", "Float", "Double", "FString", "ObjectNetGuid",
-    "EnumRemainingBits", "RotationShort", "VectorNetQuantize100",
-    "RepMovementByte", "RepMovementShort",
-})
-
-#: The export column each type's value lands in.
-TYPED_COLUMN = {
-    "Bool": "value_bool", "FString": "value_str",
-    "Float": "value_f64", "Double": "value_f64",
-    "Byte": "value_i64", "Int32": "value_i64",
-    "ObjectNetGuid": "value_i64", "EnumRemainingBits": "value_i64",
-    "RotationShort": "value_str", "VectorNetQuantize100": "value_str",
-    "RepMovementByte": "value_str", "RepMovementShort": "value_str",
-}
-SHAPED_TYPES = frozenset({"RotationShort", "VectorNetQuantize100",
-                          "RepMovementByte", "RepMovementShort"})
+def _signed(value: int, width: int) -> int:
+    """Two's-complement sign extension of a `width`-bit field."""
+    sign = 1 << (width - 1)
+    return (value ^ sign) - sign
 
 
 class _Bits:
-    """Exactly ``bit_count`` bits, read least significant bit first -- the
-    order Unreal's bit writer fills bytes in and assembles multi-bit values."""
+    """LSB-first reader over exactly ``bit_count`` bits of one payload.
+
+    Written from the Unreal layouts rather than from ``vrf-bitio``, so the two
+    readers can disagree. Reading past ``bit_count`` raises, and so does
+    nonzero padding above it: the exporter zero-fills that padding, so a set
+    bit there means the payload window is not the one the type describes.
+    """
 
     def __init__(self, raw: bytes, bit_count: int):
-        self.raw, self.end, self.pos = raw, bit_count, 0
+        self._value = int.from_bytes(raw, "little")
+        if self._value >> bit_count:
+            raise ValueError("nonzero padding above bit_count")
+        self._end = bit_count
+        self.pos = 0
 
-    def read(self, count: int) -> int:
-        if self.pos + count > self.end:
-            raise ValueError("truncated payload")
-        value = 0
-        for index in range(count):
-            position = self.pos + index
-            value |= ((self.raw[position >> 3] >> (position & 7)) & 1) << index
+    def bits(self, count: int) -> int:
+        if self.pos + count > self._end:
+            raise ValueError("truncated payload: read past the end of the payload")
+        value = (self._value >> self.pos) & ((1 << count) - 1)
         self.pos += count
         return value
 
-    def serialize_int(self, maximum: int) -> int:
-        """Unreal's ``FBitReader::SerializeInt``: one bit per power of two
-        below ``maximum``, stopping as soon as the next one would reach it."""
-        value, mask = 0, 1
-        while value + mask < maximum:
-            if self.read(1):
-                value |= mask
-            mask <<= 1
-        return value
+    def bit(self) -> bool:
+        return bool(self.bits(1))
+
+    def remaining(self) -> int:
+        return self._end - self.pos
 
     def int_packed(self) -> int:
+        """``SerializeIntPacked``: 7 payload bits per byte, low bit continues."""
         value = 0
         for index in range(5):
-            byte = self.read(8)
+            byte = self.bits(8)
             chunk = byte >> 1
             if index == 4:
                 if byte & 1:
@@ -110,149 +131,178 @@ class _Bits:
                 return value
         raise AssertionError("unreachable IntPacked loop end")
 
+    def serialized_int(self, max_value: int) -> int:
+        """``FBitReader::SerializeInt``: floor(log2(max)) bits, then one more
+        only while the value could still be raised without reaching max."""
+        width = max_value.bit_length() - 1
+        value = self.bits(width)
+        mask = 1 << width
+        if value + mask < max_value and self.bit():
+            value |= mask
+        return value
 
-def _quantized_vector(bits: _Bits, scale: int) -> tuple:
-    header = bits.serialize_int(1 << 7)
-    width, scaled = header & 63, header >> 6
+    def fstring(self) -> str:
+        length = _signed(self.bits(32), 32)
+        if length == 0:
+            return ""
+        unit = 1 if length > 0 else 2
+        data = bytes(self.bits(8) for _ in range(abs(length) * unit))
+        if data[-unit:] != b"\0" * unit:
+            raise ValueError("FString lacks its terminator")
+        return data[:-unit].decode("utf-8" if unit == 1 else "utf-16-le")
+
+
+def _fname(reader: _Bits) -> str:
+    if reader.bit():
+        return str(reader.int_packed())
+    name = reader.fstring()
+    number = _signed(reader.bits(32), 32)
+    if number < 0:
+        raise ValueError("negative FName instance number")
+    return name if number == 0 else f"{name}_{number - 1}"
+
+
+def _packed_vector(reader: _Bits) -> dict:
+    """``ReadPackedVector``: a SerializeInt(128) header whose low six bits are
+    the component width and whose seventh says "scaled"; width 0 falls back to
+    three raw floats, or doubles when the seventh bit is set.
+
+    Returned unscaled -- ``{"packed": ints, "scaled": flag}`` or
+    ``{"floats": values}`` -- because the scale is the reader's choice, not
+    the wire's.
+    """
+    header = reader.serialized_int(1 << 7)
+    width, scaled = header & 63, bool(header >> 6)
     if width:
-        sign = 1 << (width - 1)
-        components = []
-        for _ in range(3):
-            value = bits.read(width)
-            value = value - (1 << width) if value & sign else value
-            components.append(value / scale if scaled else float(value))
-        return tuple(components)
+        return {"packed": tuple(_signed(reader.bits(width), width) for _ in range(3)),
+                "scaled": scaled}
     size, fmt = (64, "<d") if scaled else (32, "<f")
-    components = tuple(
-        struct.unpack(fmt, bits.read(size).to_bytes(size // 8, "little"))[0]
-        for _ in range(3)
-    )
-    if not all(math.isfinite(value) for value in components):
-        raise ValueError("non-finite vector component")
-    return components
+    parts = [struct.unpack(fmt, reader.bits(size).to_bytes(size // 8, "little"))[0]
+             for _ in range(3)]
+    if not all(math.isfinite(p) for p in parts):
+        raise ValueError("non-finite packed vector component")
+    return {"floats": tuple(parts)}
 
 
-def _rotator(bits: _Bits, width: int) -> tuple:
+def _unit_scale(vector: dict) -> tuple[float, float, float]:
+    """A velocity: whole units, where dividing by its scale of 1 is a no-op."""
+    if "floats" in vector:
+        return vector["floats"]
+    return tuple(float(p) for p in vector["packed"])
+
+
+def _vector_net_quantize100(reader: _Bits) -> tuple[float, float, float]:
+    """``FVector_NetQuantize100``: a packed vector whose scaled integers are
+    hundredths. Unlike a ``ReplicatedMovement`` location, the type names its
+    scale, so it is applied here."""
+    vector = _packed_vector(reader)
+    if "floats" in vector:
+        return vector["floats"]
+    if vector["scaled"]:
+        return tuple(p / 100 for p in vector["packed"])
+    return tuple(float(p) for p in vector["packed"])
+
+
+def _rotator(reader: _Bits, width: int) -> tuple[float, float, float]:
+    """A rotator: one presence bit per component, then `width` bits if set."""
     return tuple(
-        bits.read(width) * 360.0 / (1 << width) if bits.read(1) else 0.0
+        reader.bits(width) * 360.0 / (1 << width) if reader.bit() else 0.0
         for _ in range(3)
     )
 
 
-def _rep_movement(bits: _Bits, rotation_width: int) -> dict:
-    sleep, physics, frame, handle = (bool(bits.read(1)) for _ in range(4))
-    location = _quantized_vector(bits, 100)
-    rotation = _rotator(bits, rotation_width)
-    velocity = _quantized_vector(bits, 1)
-    angular = _quantized_vector(bits, 1) if physics else None
-    server_frame = bits.int_packed() if frame else None
-    server_handle = bits.int_packed() if handle else None
+def _rep_movement(reader: _Bits, rotation_bits: int) -> dict:
+    """``FRepMovement::NetSerialize``, in wire order."""
+    sleep = reader.bit()
+    physics = reader.bit()
+    frame = reader.bit()
+    handle = reader.bit()
+    location = _packed_vector(reader)
+    scale = 360.0 / (1 << rotation_bits)
+    rotation = []
+    for _axis in ("pitch", "yaw", "roll"):
+        present = reader.bit()
+        rotation.append(_f32(reader.bits(rotation_bits) * scale) if present else 0.0)
+    velocity = _unit_scale(_packed_vector(reader))
+    angular = _unit_scale(_packed_vector(reader)) if physics else None
+    server_frame = reader.int_packed() if frame else None
+    server_handle = reader.int_packed() if handle else None
     return {
-        "location": location, "rotation": rotation, "linear_velocity": velocity,
-        "angular_velocity": angular, "simulated_physics_sleep": sleep,
-        "rep_physics": physics, "server_frame": server_frame,
+        "linear_velocity": velocity,
+        "angular_velocity": angular,
+        "location": location,
+        "rotation": tuple(rotation),
+        "simulated_physics_sleep": sleep,
+        "rep_physics": physics,
+        "server_frame": server_frame,
         "server_physics_handle": server_handle,
     }
 
 
-def _decode_shaped(raw: bytes, bit_count: int, type_name: str):
-    bits = _Bits(raw, bit_count)
-    if type_name == "RotationShort":
-        value = _rotator(bits, 16)
-    elif type_name == "VectorNetQuantize100":
-        value = _quantized_vector(bits, 100)
-    else:
-        value = _rep_movement(bits, 8 if type_name == "RepMovementByte" else 16)
-    if bits.pos != bit_count:
-        raise ValueError(f"{type_name} leaves {bit_count - bits.pos} residual bits")
-    return value
-
-
-def _as_f32(value) -> float:
+def _f32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", value))[0]
 
 
-def _parse_triple(text, prefix: str):
-    if not isinstance(text, str) or not text.startswith(prefix) or not text.endswith(")"):
-        return None
-    parts = text[len(prefix):-1].split(",")
-    if len(parts) != 3:
-        return None
-    try:
-        return tuple(float(part) for part in parts)
-    except ValueError:
-        return None
+def _exported_rep_movement(text: str) -> dict:
+    """The exporter's ``value_str`` JSON in the shape ``_rep_movement`` returns."""
+    obj = json.loads(text)
+
+    def vector(v):
+        return None if v is None else (v["x"], v["y"], v["z"])
+
+    rotation = obj["rotation"]
+    return {
+        "linear_velocity": vector(obj["linear_velocity"]),
+        "angular_velocity": vector(obj["angular_velocity"]),
+        "location": vector(obj["location"]),
+        "rotation": tuple(_f32(rotation[k]) for k in ("pitch", "yaw", "roll")),
+        "simulated_physics_sleep": obj["simulated_physics_sleep"],
+        "rep_physics": obj["rep_physics"],
+        "server_frame": obj["server_frame"],
+        "server_physics_handle": obj["server_physics_handle"],
+    }
 
 
-def _json_vector(document: dict, key: str):
-    item = document.get(key)
-    if item is None:
-        return None
-    return (item.get("x"), item.get("y"), item.get("z"))
+#: Types read with `_Bits`, and the column their typed value is exported in.
+BIT_LEVEL_TYPES = {"EnumByte": "value_i64", "EnumRemainingBits": "value_i64",
+                   "FName": "value_str", "RotationShort": "value_str",
+                   "VectorNetQuantize100": "value_str",
+                   "RepMovementByte": "value_str", "RepMovementShort": "value_str"}
 
 
-def exported_matches(type_name: str, exported, decoded) -> bool:
-    """Whether the exported column holds the independently decoded value.
-
-    Scalars compare directly. Geometry is parsed out of ``value_str``:
-    vectors are doubles and must be equal; rotator components are single
-    precision in the model and are compared after rounding both sides to f32,
-    because the shortest f32 spelling does not parse back to the exact value
-    as a double.
-    """
-    if type_name == "VectorNetQuantize100":
-        return _parse_triple(exported, "(") == decoded
-    if type_name == "RotationShort":
-        parsed = _parse_triple(exported, "rot(")
-        return parsed is not None and all(
-            _as_f32(a) == _as_f32(b) for a, b in zip(parsed, decoded))
-    if type_name in {"RepMovementByte", "RepMovementShort"}:
-        try:
-            document = json.loads(exported)
-        except (TypeError, ValueError):
-            return False
-        if not isinstance(document, dict) or set(document) != set(decoded):
-            return False
-        rotation = document.get("rotation") or {}
-        return (
-            _json_vector(document, "location") == decoded["location"]
-            and _json_vector(document, "linear_velocity") == decoded["linear_velocity"]
-            and _json_vector(document, "angular_velocity") == decoded["angular_velocity"]
-            and set(rotation) == {"pitch", "yaw", "roll"}
-            and all(_as_f32(rotation[axis]) == _as_f32(expected)
-                    for axis, expected in zip(("pitch", "yaw", "roll"), decoded["rotation"]))
-            and document["simulated_physics_sleep"] is decoded["simulated_physics_sleep"]
-            and document["rep_physics"] is decoded["rep_physics"]
-            and document["server_frame"] == decoded["server_frame"]
-            and document["server_physics_handle"] == decoded["server_physics_handle"]
-        )
-    return exported == decoded
-
-
-def _summary(type_name: str, value):
-    """The numbers a range check can use: a scalar, or a vector's components."""
-    if type_name in {"RepMovementByte", "RepMovementShort"}:
-        return value["location"]
-    if isinstance(value, tuple):
-        return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value
-    return None
-
-
-def decode_exact(raw: bytes, bit_count: int, type_name: str):
-    """Decode one value while requiring the declared payload width."""
-    if len(raw or b"") != (bit_count + 7) // 8:
-        raise ValueError("raw byte length does not cover bit_count exactly")
-    if type_name == "EnumRemainingBits":
+def _decode_bits(raw: bytes, bit_count: int, type_name: str):
+    reader = _Bits(raw, bit_count)
+    if type_name == "EnumByte":
+        if not 1 <= bit_count <= 8:
+            raise ValueError("EnumByte is not 1..8 bits")
+        value = reader.bits(bit_count)
+    elif type_name == "EnumRemainingBits":
         # Every remaining bit is the value, and a 0-bit field is the enum's
         # zero. Wider than 32 bits is more than the reader holds, so it is
         # refused rather than truncated.
         if bit_count > 32:
             raise ValueError("EnumRemainingBits wider than 32 bits")
-        return _Bits(raw or b"", bit_count).read(bit_count)
-    if type_name in SHAPED_TYPES:
-        return _decode_shaped(raw, bit_count, type_name)
+        value = reader.bits(bit_count)
+    elif type_name == "FName":
+        value = _fname(reader)
+    elif type_name == "RotationShort":
+        value = _rotator(reader, 16)
+    elif type_name == "VectorNetQuantize100":
+        value = _vector_net_quantize100(reader)
+    else:
+        value = _rep_movement(reader, 8 if type_name == "RepMovementByte" else 16)
+    if reader.remaining():
+        raise ValueError(f"{type_name} leaves {reader.remaining()} residual bits")
+    return value
+
+
+def decode_exact(raw: bytes, bit_count: int, type_name: str):
+    """Decode one value while requiring the declared payload width."""
+    raw = raw or b""  # a zero-bit payload is exported as null
+    if len(raw) != (bit_count + 7) // 8:
+        raise ValueError("raw byte length does not cover bit_count exactly")
+    if type_name in BIT_LEVEL_TYPES:
+        return _decode_bits(raw, bit_count, type_name)
     if type_name == "Bool":
         if bit_count != 1:
             raise ValueError("Bool is not one bit")
@@ -310,6 +360,118 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
     raise ValueError(f"unsupported evidence type {type_name!r}")
 
 
+#: Every supported evidence type, and the column its exported value lives in.
+TYPED_COLUMNS = {
+    "Bool": "value_bool", "FString": "value_str",
+    "Float": "value_f64", "Double": "value_f64",
+    "Byte": "value_i64", "Int32": "value_i64",
+    "ObjectNetGuid": "value_i64",
+    **BIT_LEVEL_TYPES,
+}
+
+
+#: Location scales a RepMovement comparison accepts, in the order tried.
+LOCATION_SCALES = (100, 1)
+
+
+def rep_movement_location_scale(decoded: dict, exported) -> str | None:
+    """How `exported` renders `decoded`'s location, or None if it does not.
+
+    Every other member must be equal exactly. The location may be the packed
+    integers divided by any scale in LOCATION_SCALES -- the same one on all
+    three components, since the tuple is compared whole. A float fallback or
+    an unscaled packing has only one rendering.
+    """
+    if not isinstance(exported, dict) or exported.keys() != decoded.keys():
+        return None
+    if any(decoded[k] != exported[k] for k in decoded if k != "location"):
+        return None
+    location, got = decoded["location"], exported["location"]
+    if "floats" in location:
+        return "raw floats" if location["floats"] == got else None
+    if not location["scaled"]:
+        return "unscaled" if tuple(float(p) for p in location["packed"]) == got else None
+    for scale in LOCATION_SCALES:
+        if tuple(p / scale for p in location["packed"]) == got:
+            return f"/{scale}"
+    return None
+
+
+def _parse_triple(text, prefix: str):
+    if not isinstance(text, str) or not text.startswith(prefix) or not text.endswith(")"):
+        return None
+    parts = text[len(prefix):-1].split(",")
+    if len(parts) != 3:
+        return None
+    try:
+        return tuple(float(part) for part in parts)
+    except ValueError:
+        return None
+
+
+def exported_matches(type_name: str, exported, decoded) -> bool:
+    """Whether the exported column holds the independently decoded value.
+
+    Scalars compare directly. Geometry is parsed out of ``value_str``:
+    vectors are doubles and must be equal; rotator components are single
+    precision in the model and are compared after rounding both sides to f32,
+    because the shortest f32 spelling does not parse back to the exact value
+    as a double. A ``ReplicatedMovement`` export may be passed as its
+    ``value_str`` or as `exported_value` parsed it, and matches at any location
+    scale in `LOCATION_SCALES`; `values_match` also says which one.
+    """
+    if type_name.startswith("RepMovement"):
+        if exported is None or isinstance(exported, str):
+            exported = exported_value({TYPED_COLUMNS[type_name]: exported}, type_name)
+        return rep_movement_location_scale(decoded, exported) is not None
+    if type_name == "VectorNetQuantize100":
+        return _parse_triple(exported, "(") == decoded
+    if type_name == "RotationShort":
+        parsed = _parse_triple(exported, "rot(")
+        return parsed is not None and all(
+            _f32(a) == _f32(b) for a, b in zip(parsed, decoded))
+    return exported == decoded
+
+
+def _summary(type_name: str, value):
+    """The numbers a range check can use: a scalar, or a vector's components.
+
+    None for ``ReplicatedMovement``: its location is accepted at more than one
+    scale (see `rep_movement_location_scale`), so no one range describes it.
+    """
+    if type_name.startswith("RepMovement"):
+        return None
+    if isinstance(value, tuple):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def values_match(type_name: str, decoded, exported) -> tuple[bool, str | None]:
+    """`(matches, detail)`; detail is a RepMovement row's location scale."""
+    if type_name.startswith("RepMovement"):
+        scale = rep_movement_location_scale(decoded, exported)
+        return scale is not None, scale
+    return exported_matches(type_name, exported, decoded), None
+
+
+def exported_value(row: dict, type_name: str):
+    """The exported typed value, in the shape `decode_exact` returns.
+
+    A RepMovement `value_str` that does not parse is returned as a marker that
+    equals no decoded value, so it counts as a mismatch instead of stopping the
+    run.
+    """
+    value = row[TYPED_COLUMNS[type_name]]
+    if type_name.startswith("RepMovement") and value is not None:
+        try:
+            return _exported_rep_movement(value)
+        except (ValueError, KeyError, TypeError):
+            return {"unparseable value_str": value}
+    return value
+
+
 def parquet_files(root: Path, export_ids=None):
     if root.is_file():
         yield root
@@ -350,7 +512,7 @@ def spec_rows(table: pa.Table, groups: pa.Array, fields: pa.Array) -> pa.Table:
 def validate(export_root: Path, specifications: list[dict], export_ids=None, compare_typed=False) -> dict:
     if not export_root.exists():
         raise ValueError(f"export root does not exist: {export_root}")
-    allowed = TYPES
+    allowed = set(TYPED_COLUMNS)
     if not specifications:
         raise ValueError("evidence specification is empty")
     for spec in specifications:
@@ -379,6 +541,7 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
     failure_counts = Counter()
     typed_mismatch_count = 0
     typed_mismatch_examples = []
+    location_scales = defaultdict(Counter)
     paths = list(parquet_files(export_root, export_ids))
     if not paths:
         raise ValueError(f"no field parquet files below {export_root}")
@@ -412,13 +575,17 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
                 try:
                     value = decode_exact(row["raw_bits"], row["bit_count"], type_name)
                     if compare_typed:
-                        column = TYPED_COLUMN[type_name]
-                        if not exported_matches(type_name, row[column], value):
+                        exported = exported_value(row, type_name)
+                        matched, detail = values_match(type_name, value, exported)
+                        if detail is not None:
+                            location_scales[label][detail] += 1
+                        if not matched:
                             typed_mismatch_count += 1
                             if len(typed_mismatch_examples) < 32:
                                 typed_mismatch_examples.append({
                                     "file": str(path), "field": label,
-                                    "decoded": value, "exported": row[column],
+                                    "decoded": value,
+                                    "exported": row[TYPED_COLUMNS[type_name]],
                                 })
                     summary = _summary(type_name, value)
                     if isinstance(summary, tuple):
@@ -442,6 +609,8 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
                 "widths": dict(sorted(widths[label].items())),
                 "wire_keys": dict(sorted(wire_keys[label].items())),
                 **({"min": minima[label], "max": maxima[label]} if label in minima else {}),
+                **({"location_scales": dict(sorted(location_scales[label].items()))}
+                   if label in location_scales else {}),
             }
             for label, count in sorted(counts.items())
         },

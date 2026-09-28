@@ -151,9 +151,25 @@ VECTOR_PROPERTIES = frozenset({
 # Listed by name rather than sniffed with `value.startswith("{")`: a string
 # that merely looks like JSON is not evidence that it is a movement struct.
 # ReplicatedMovement is the only field with FieldType::RepMovement in the
-# generated table (7 entries, all this name).
+# generated table (26 entries, all this name). Its `location` is the packed
+# value divided by 100, which is world/100 on every observed class except
+# Pawn_Aggrobot_SeekerNade_C -- see docs/DATA.md; the adapter passes it through.
 JSON_OBJECT_PROPERTIES = frozenset({
     "ReplicatedMovement",
+})
+
+
+# The two damage RPCs, by the function name `_split_rpc_field` returns.
+DAMAGE_RPC_NAMES = frozenset({
+    "MulticastNotifyDamage_Point",
+    "MulticastNotifyDamage_Base",
+})
+
+# Damage RPC parameters the reference bundle emits as labelled blobs, and
+# rpc_received keeps as blobs, although the parser types them (ObjectNetGuid).
+DEATH_MONTAGE_BLOB_PARAMS = frozenset({
+    "DeathMontageEffectOverride",
+    "DeathMontageEffectOverrideContext",
 })
 
 
@@ -1624,13 +1640,16 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict
             result[out_name] = value
             return result
 
-        # DeathMontageEffectOverride and ...Context are genuine blobs and the
-        # reference labels them with exactly these TypeNames. A startswith
-        # match also swallowed DeathMontageEffectOverrideIsQueued, which is a
-        # 1-bit bool: 632 events shipped it as a blob with an invented
-        # TypeName where the reference emits plain false.
-        if param in ("DeathMontageEffectOverride",
-                     "DeathMontageEffectOverrideContext") and is_raw:
+        # DeathMontageEffectOverride and ...Context: the reference labels them
+        # blobs with exactly these TypeNames. The parser now types both as
+        # ObjectNetGuid -- an FXC_* effect class and a pawn actor reference --
+        # and the RPC loop hands their wire bits back here as the blob, so the
+        # event keeps the reference's shape while fields.parquet carries the
+        # GUID. A startswith match also swallowed
+        # DeathMontageEffectOverrideIsQueued, which is a 1-bit bool: 632 events
+        # shipped it as a blob with an invented TypeName where the reference
+        # emits plain false.
+        if param in DEATH_MONTAGE_BLOB_PARAMS and is_raw:
             if isinstance(value, dict):
                 value["TypeName"] = param
             result[out_name] = value
@@ -2578,6 +2597,19 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 # still ran above, so its malformed multi-typed counter stays
                 # visible; this narrowly chooses raw only for these shot-array
                 # consumers that require the exact payload window.
+                value = {
+                    "BitCount": col_bits[ri],
+                    "Data": base64.b64encode(col_raw[ri]).decode("ascii"),
+                }
+                is_raw = True
+            # The death-montage pair: typed ObjectNetGuid in fields.parquet
+            # (apply_type_corrections.py), but the reference bundle carries each
+            # as a {BitCount, Data, TypeName} blob, and rpc_received keeps that
+            # shape. Same narrow choice as the shot arrays above -- `_get_value`
+            # has already run, and the typed GUID stays in the parquet.
+            if (name in DAMAGE_RPC_NAMES
+                    and param in DEATH_MONTAGE_BLOB_PARAMS
+                    and col_raw[ri] is not None):
                 value = {
                     "BitCount": col_bits[ri],
                     "Data": base64.b64encode(col_raw[ri]).decode("ascii"),

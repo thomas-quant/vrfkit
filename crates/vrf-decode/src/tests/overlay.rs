@@ -8,6 +8,7 @@ use crate::overlay::{
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
+use crate::types::RotatorQuantization;
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
 
 const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
@@ -86,6 +87,35 @@ const FORCE_APPLY: &str =
     "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
 const REPLICATED_MOVEMENT_CHECKSUM: u32 = 2_749_104_612;
 
+/// Every scoped identity must be reachable. The table (and its class
+/// aliases) resolve a name before `SCOPED_TYPES` is consulted, so a scoped
+/// entry whose group already has a table entry of the same name is never
+/// read: it can disagree with the type that is, and no row or counter would
+/// show it. Five force-module entries were exactly that once the table typed
+/// the same `NetMulticastApplyForceModule` parameters by name.
+///
+/// Resolved without a checksum, so only the table, the aliases and the
+/// engine-reference fallback can answer. The fallback answers for any group,
+/// so a name it covers is recognised by also answering for a group no table
+/// declares, and is not counted as shadowing.
+#[test]
+fn no_scoped_identity_is_shadowed_by_the_table() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    let by_name =
+        |group, name| resolve_field_type_with_checksum(&table, group, Some(name), None, None);
+    let shadowed: Vec<(&str, &str, u32)> = crate::scoped_types::SCOPED_TYPES
+        .iter()
+        .filter(|(name, group, _, _)| {
+            by_name(group, name).is_some() && by_name("/Unobserved", name).is_none()
+        })
+        .map(|(name, group, checksum, _)| (*group, *name, *checksum))
+        .collect();
+    assert!(
+        shadowed.is_empty(),
+        "scoped entries the table resolves first, so never read: {shadowed:?}"
+    );
+}
+
 /// Upstream 8b7afcb's Raze fields are typed by exact identity only: the
 /// checksum is part of the key, and another group or checksum resolves to
 /// nothing rather than borrowing the type.
@@ -115,17 +145,28 @@ fn raze_scoped_identities_require_their_exact_checksum() {
         resolve("/Unobserved", "CosmeticRandomSeed", Some(2_863_861_815)),
         None
     );
+    // Of the seven force-module identities 8b7afcb declares, `Source` and
+    // `Duration` are still scoped here. `Module`, `ModuleType`, `Character`,
+    // `NetTimestamp` and `RespawnNumber` are typed by name in the table
+    // (apply_type_corrections.py), which resolves before any scoped entry, so
+    // scoped copies of them would be unreachable and were removed.
     assert_eq!(
-        resolve(FORCE_APPLY, "ModuleType", Some(3_263_282_135)),
-        Some(FieldType::EnumRemainingBits)
+        resolve(FORCE_APPLY, "Duration", Some(1_815_021_954)),
+        Some(FieldType::Float)
     );
-    // The same enum on the Remove RPC shares the checksum, but no entry names
-    // that group: exact identity means no propagation.
+    assert_eq!(
+        resolve(FORCE_APPLY, "Source", Some(1_966_913_909)),
+        Some(FieldType::ObjectNetGuid)
+    );
+    assert_eq!(resolve(FORCE_APPLY, "Duration", Some(1)), None);
+    // The Remove RPC is another group: exact identity means the scoped
+    // `Duration` checksum does not reach it. (Its `ModuleType` IS typed, but
+    // through the table entry's checksum, which is not this mechanism.)
     assert_eq!(
         resolve(
             "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule",
-            "ModuleType",
-            Some(3_263_282_135)
+            "Duration",
+            Some(1_815_021_954)
         ),
         None
     );
@@ -237,6 +278,9 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
         rotation.value_str.as_deref(),
         Some("rot(90,284.03503,359.989)")
     );
+    // `ModuleType` resolves through its table entry (EnumByte), not a scoped
+    // identity, since the table typed the Apply parameters by name; upstream's
+    // recorded 3-bit payload must still read 2.
     let module_type = decode(
         &mut stats,
         FORCE_APPLY,
@@ -525,6 +569,60 @@ fn equippable_used_is_an_object_net_guid() {
     }
 }
 
+/// The two death-montage parameters of both damage RPCs are IntPacked GUIDs,
+/// not the opaque payload the descriptor's `AddRaw` declares. Over the
+/// 1,018-replay audit (959,445 rows each): 8-bit rows are all the null GUID,
+/// and the rest resolve 100% -- `DeathMontageEffectOverride` through
+/// `net_guids` to an `FXC_*_C` finisher effect class, and
+/// `DeathMontageEffectOverrideContext` through `actors.parquet` to a `*_PC_C`
+/// pawn open at the event. `Raw` table entries win before the checksum and
+/// the scoped types, so this has to be a table correction, and the
+/// exact-quote match must not reach `...IsQueued` (a Bool).
+#[test]
+fn the_death_montage_parameters_are_object_net_guids() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in [
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
+    ] {
+        for field in [
+            "DeathMontageEffectOverride",
+            "DeathMontageEffectOverrideContext",
+        ] {
+            assert_eq!(
+                table.lookup(group, field),
+                Some(FieldType::ObjectNetGuid),
+                "{field} in {group}"
+            );
+        }
+        assert_eq!(
+            table.lookup(group, "bDeathMontageEffectOverrideIsQueued"),
+            Some(FieldType::Bool),
+            "the Bool sibling is untouched in {group}"
+        );
+    }
+    assert_eq!(lookup_checksum(1712763745), Some(FieldType::ObjectNetGuid));
+    assert_eq!(lookup_checksum(2397897524), Some(FieldType::ObjectNetGuid));
+}
+
+/// `AresEquippableDataTracker.OriginalBuyerTeam` is an inline FName: 97 bits
+/// is 1 (isHardcoded = 0) + 32 (length 4) + `Red\0` + 32 (number 0), and 105
+/// bits the same around `Blue\0`. Those two payloads are the only ones in the
+/// 1,018-replay audit (748,381 rows, main and checkpoint), and the descriptor's
+/// EnumByte could read neither -- no row is 8 bits.
+#[test]
+fn original_buyer_team_is_an_fname() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        table.lookup(
+            "/Script/ShooterGame.AresEquippableDataTracker",
+            "OriginalBuyerTeam"
+        ),
+        Some(FieldType::FName)
+    );
+    assert_eq!(lookup_checksum(255019476), Some(FieldType::FName));
+}
+
 #[test]
 fn transition_context_is_an_object_net_guid() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -552,6 +650,32 @@ fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
         ),
         Some(FieldType::VectorDouble)
     );
+}
+
+/// HawkFlash's `ReplicatedMovement` is read with byte rotator components and
+/// its `Banking` as a double, on that exact group only. Over the 1,018-replay
+/// audit every one of its 1,033,952 movement payloads (71-118 bits) is
+/// consumed exactly by the byte reading and 54.6% overrun or leave residue
+/// under the short one; `Banking` is 64 bits on all 801,700 rows, reading
+/// -180..180. Only the type is pinned here, deliberately not a decoded
+/// location: the reader's location scale is a separately tracked divergence
+/// (world/100 on this class), and a value pinned now would lock it in.
+#[test]
+fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
+    const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    assert_eq!(
+        table.lookup(HAWK, "ReplicatedMovement"),
+        Some(FieldType::RepMovement {
+            rotation: RotatorQuantization::ByteComponents
+        })
+    );
+    assert_eq!(table.lookup(HAWK, "Banking"), Some(FieldType::Double));
+    assert_eq!(lookup_checksum(677106858), Some(FieldType::Double));
+    // Still no name rule and no checksum for ReplicatedMovement as a whole:
+    // the new entry is a twentieth ByteComponents donor, and the six
+    // ShortComponents ones keep 2749104612 out of the checksum table.
+    assert_eq!(lookup_checksum(2749104612), None);
 }
 
 #[test]
@@ -1520,20 +1644,92 @@ fn an_unlearned_checksum_resolves_nothing() {
 
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 18 groups and `ShortComponents`
+/// is the one that matters -- `ByteComponents` on 20 groups and `ShortComponents`
 /// on 6, which differ in width, so guessing would desync the block rather than
 /// read a wrong value.
+///
+/// `AllianceFilter` used to be the second entry here and is not any more: its
+/// donors disagreed only in the table, never on the wire -- see
+/// `alliance_filter_donors_agree_so_the_checksum_types_the_receivers`.
 #[test]
 fn checksums_whose_donors_disagree_are_omitted() {
-    for (checksum, why) in [
-        (
-            2749104612u32,
-            "ReplicatedMovement: Byte vs Short components",
-        ),
-        (2270825073, "AllianceFilter: EnumByte vs EnumRemainingBits"),
+    assert_eq!(
+        lookup_checksum(2749104612),
+        None,
+        "ReplicatedMovement: Byte vs Short components"
+    );
+}
+
+/// `AllianceFilter` is one property, checksum 2270825073, declared by three
+/// effect RPCs and received by five more: the weapon `...FromClient` pair,
+/// `ReplayPlayOneShotEffectAtLocation` and both `ReplayRecord*Effect`.
+///
+/// The descriptors typed the three donors two ways -- `EnumByte` on the two
+/// `EffectManagerComponent` multicasts, `EnumRemainingBits` on
+/// `ReplayPlayContinuousEffectAtLocation` -- so the checksum learner dropped
+/// the checksum and the receivers shipped raw: 4,560,248 rows over the 1,018
+/// replays audited at 259ed10, every one of the 16,030,813 rows under this
+/// checksum 3 bits wide, where both readers return the same number. A
+/// correction makes the donors agree. This pins both halves: the donors, and
+/// the propagation that only a regenerated `checksum_table.rs` delivers -- a
+/// corrected table with a stale checksum table would still leave the
+/// receivers raw.
+#[test]
+fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    for group in [
+        "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+        "/Script/ShooterGame.EffectManagerComponent:MulticastPlayOneShotEffect",
+        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
     ] {
-        assert_eq!(lookup_checksum(checksum), None, "{why}");
+        assert_eq!(
+            table.lookup(group, "AllianceFilter"),
+            Some(FieldType::EnumByte),
+            "donor {group}"
+        );
     }
+    assert_eq!(lookup_checksum(2270825073), Some(FieldType::EnumByte));
+
+    const RECEIVER: &str =
+        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient";
+    assert_eq!(
+        table.lookup(RECEIVER, "AllianceFilter"),
+        None,
+        "typed by checksum, not by name"
+    );
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            RECEIVER,
+            Some("AllianceFilter"),
+            None,
+            Some(2270825073)
+        ),
+        Some(FieldType::EnumByte),
+    );
+}
+
+/// The weapon effect RPCs name the `EffectManager` of the pawn holding the
+/// weapon. Checksum 1051633025, declared only by these two functions: all
+/// 3,112,054 rows in the 1,018-replay audit are IntPacked 16/24-bit GUIDs that
+/// resolve in the same export's `net_guids` to `EffectManager`, whose outer is
+/// the holder's `*_PC_C` (or Yoru's decoy). Both twins are pinned: typing only
+/// one would be the "Viper typed, Phoenix not" shape this table has shipped
+/// before.
+#[test]
+fn the_weapon_effect_rpcs_type_their_effect_manager_reference() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in [
+        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient",
+        "/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
+    ] {
+        assert_eq!(
+            table.lookup(group, "EffectManagerComponent"),
+            Some(FieldType::ObjectNetGuid),
+            "{group}"
+        );
+    }
+    assert_eq!(lookup_checksum(1051633025), Some(FieldType::ObjectNetGuid));
 }
 
 /// The map is only useful if it holds something; a silently empty generated
@@ -1573,6 +1769,103 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
         ),
         Some(FieldType::Int32),
     );
+}
+
+/// The rest of `NetMulticastApplyForceModule`'s parameters, and the one
+/// `NetMulticastRemoveForceModule` parameter that only the checksum reaches.
+///
+/// Measured over the 1,018-replay audit (665,519 Apply rows, all main
+/// stream): `RespawnNumber` is 32 bits reading 0..38 and equals the same
+/// character's typed `AresInventory.RespawnNumber` on 665,363 of 665,370
+/// comparable rows; `NetTimestamp` is 32 bits of finite f32 on the 1/128 s
+/// tick grid; `ModuleType` is 3 bits reading {0, 2}; `Module` and `Character`
+/// are IntPacked GUIDs -- every `Module` resolves to a `ForceModule_*` class
+/// and every `Character` equals the row's own actor GUID.
+///
+/// `ModuleType` is declared once, on Apply. Remove carries the same property
+/// (checksum 3263282135) with no entry of its own, so its 2,743,504 rows are
+/// typed only if the regenerated checksum table learned the Apply donor --
+/// the same route `HandleNumber` takes above. Paired by (object, handle),
+/// Remove and Apply agree on 647,381 of 647,381 rows.
+#[test]
+fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() {
+    const APPLY: &str =
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
+    const REMOVE: &str =
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule";
+    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+    for (field, expected) in [
+        ("RespawnNumber", FieldType::Int32),
+        ("NetTimestamp", FieldType::Float),
+        ("ModuleType", FieldType::EnumByte),
+        ("Module", FieldType::ObjectNetGuid),
+        ("Character", FieldType::ObjectNetGuid),
+    ] {
+        assert_eq!(table.lookup(APPLY, field), Some(expected), "Apply {field}");
+    }
+    assert_eq!(lookup_checksum(3263282135), Some(FieldType::EnumByte));
+    assert_eq!(
+        table.lookup(REMOVE, "ModuleType"),
+        None,
+        "typed by checksum, not by name"
+    );
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            REMOVE,
+            Some("ModuleType"),
+            None,
+            Some(3263282135)
+        ),
+        Some(FieldType::EnumByte),
+    );
+    // The component's own `RespawnNumber` property (checksum 3044239005) is a
+    // different property on a different group; the RPC entry does not reach it.
+    assert_eq!(
+        table.lookup(
+            "/Script/ShooterGame.ForceModuleManagerComponent",
+            "RespawnNumber"
+        ),
+        None
+    );
+}
+
+/// `ReadyingStateComponent.AuthEquipSpeed` and the two inventory correction
+/// counters. Measured over the 1,018-replay audit: `AuthEquipSpeed` is 3 bits
+/// on all 1,015,515 rows (main {0,1,2}, checkpoints always 0), matching its
+/// descriptor-typed sibling `AutoEquipTransitionContext.AutoEquipSpeed` in the
+/// same packet; `CorrectionIndex` and `LastSeenClientCorrectionIndex` are 32
+/// bits on all 1,222,930 / 1,129,599 rows, strictly increasing per actor, with
+/// `LastSeen <= Correction - 1` on every paired row.
+#[test]
+fn readying_speed_and_inventory_correction_counters_are_typed() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for (group, field, expected) in [
+        (
+            "/Script/ShooterGame.ReadyingStateComponent",
+            "AuthEquipSpeed",
+            FieldType::EnumByte,
+        ),
+        (
+            "/Script/ShooterGame.AresInventory",
+            "CorrectionIndex",
+            FieldType::Int32,
+        ),
+        (
+            "/Script/ShooterGame.AresInventory",
+            "LastSeenClientCorrectionIndex",
+            FieldType::Int32,
+        ),
+    ] {
+        assert_eq!(table.lookup(group, field), Some(expected), "{field}");
+    }
+    for (checksum, expected) in [
+        (3151779304u32, FieldType::EnumByte),
+        (3198546915, FieldType::Int32),
+        (1076231069, FieldType::Int32),
+    ] {
+        assert_eq!(lookup_checksum(checksum), Some(expected), "{checksum}");
+    }
 }
 
 /// Which named area of the map a player is standing in -- "A Site", "Mid",

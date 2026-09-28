@@ -90,6 +90,7 @@ replays joined all ten and the worst managed 7; after it, 71 of 71 do.
 | Source (buy/ability/etc.) | `PurchasableTransactionSource` | ◐ partial (some rows) |
 | Inventory slot → item | `ItemSlot.Contents`, `AresInventory.ItemSlots` | ✅ / ◐ (MultiItemSlot raw) |
 | Charges purchasable this round | `EquipmentChargeComponent.TotalChargesAllowedToPurchaseThisRound` | ✅ |
+| Inventory correction counters | `AresInventory.CorrectionIndex` / `LastSeenClientCorrectionIndex` | ✅ Int32; strictly increasing per inventory, `LastSeen` always below `Correction`. What they count is inferred from the names only |
 
 Join `Purchaseable` to `net_guids`, `PurchasingPlayerState` to player identity,
 and update time to the latest preceding round boundary. Fields arrive as
@@ -114,6 +115,8 @@ requires corroborating credit changes; state rows alone are not that ledger.
 | Regional damage (head/body/leg) | `Interactions[].Regions[].Hits/Damage` | ✅ multiset-identical (on 13.01) |
 | Wallbang | `bIsWallPen` | ✅ |
 | Damage source (weapon, location, bone) | `MulticastNotifyDamage` (EquippableUsed, ImpactLocation, ImpactBone) | ✅ |
+| Finisher effect on a kill | `MulticastNotifyDamage_{Point,Base}.DeathMontageEffectOverride` → `net_guids.path` | ✅ ObjectNetGuid; 0 (the null reference) except on some kills, where it names an `FXC_*_C` finisher effect class |
+| Death-montage context | `MulticastNotifyDamage_{Point,Base}.DeathMontageEffectOverrideContext` → `actors.parquet` (a dynamic actor: `net_guids` has no path for it) | ✅ ObjectNetGuid; 0 (the null reference) except on kills, where it is a player-character pawn open at the event. Not established as the killer or the victim |
 | ADR | derived from CombatReport | ◐ +0.1–0.2 vs trackers (wire damage is fractional; not a bug) |
 | Health / armour / overheal, absolute | `DamageableComponent` RPCs → `LifeChangeEvents[]` / `LifeChangeBySection[]` | ✅ typed section updates; actor/section timelines require joins, see below |
 
@@ -227,6 +230,7 @@ with 100.
 | Raze satchel attachment | `Projectile_Clay_Q_Satchel_Arming`: `AttachComponent`, `LocationOffset`, `RotationOffset`, `RelativeScale3D` | ✅ exact identity; offsets are relative to the attach component, which resolves to world geometry or a character capsule |
 | Raze Boom Bot position | `Pawn_Clay_E_Boomba.ReplicatedMovement` (short rotation) / `bAIControlled` | ✅ location in centimetres, checked against spawn; `bAIControlled` is true on every observed row |
 | Raze satchel, Paint Shells and rocket position | `ReplicatedMovement` on those projectiles | ◐ raw on purpose; `actors.parquet` spawn xyz for placement -- see below |
+| Guide (Gekko) E projectile flight | `Projectile_Guide_E_HawkFlash_C`: `ReplicatedMovement` (ByteComponents), `Banking` (Double), `PostControlVelocity` | ✅ typed, main stream only (11.06-13.06). `location` lands on **world/100** for this class, like every observed RepMovement class except `Pawn_Aggrobot_SeekerNade_C`: multiply by 100 (the packed value matches the spawn position to 0.87 cm). Velocity is in world units; roll is never replicated and reads 0. `Banking` is an angle in degrees, -180..180; what it banks is not established |
 | Interaction progress (plant/defuse/orb pickup) | `UsableComponent.HighestProgress` (Float 0..1) / `bIsActive` | ✅ |
 
 ### `ReplicatedMovement` location is in metres on projectiles and game objects
@@ -438,7 +442,7 @@ crouch speed is ~190 cm/s.
 | Time (128 Hz tick, resets per round) / global | movement `timestamp` / `time_ms` | ✅ — `timestamp` is a **tick counter**, not milliseconds |
 | Posture (crouch) | `fields.bCrouchHeld` (not movement_state) | ✅ |
 | Trajectory | movement time series per character | ✅ |
-| Force modules applied to a character (knockback, tag slow, death push, door push) | `ForceModuleManagerComponent:NetMulticastApplyForceModule`: `Module`, `ModuleType`, `Character`, `Source`, `Duration`, `NetTimestamp`, `RespawnNumber` (plus the earlier `HandleNumber`, `SourceLocation`) | ✅ exact identity; `Module` resolves to a `ForceModule_*` class and `Character` to a character or pawn actor on every main row |
+| Force modules on a character (tagging, knockback, movement modifiers) | `ForceModuleManagerComponent` RPCs: `NetMulticastApplyForceModule` -- `Module` (→ `net_guids`, a `ForceModule_*` class), `ModuleType`, `Character` (equals the row's actor), `RespawnNumber`, `NetTimestamp`, `HandleNumber`, `SourceLocation`, `Source`, `Duration`; `NetMulticastRemoveForceModule` -- `HandleNumber`, `ModuleType` | ✅ typed: `Source` and `Duration` by exact group/name/checksum, Remove's `ModuleType` through Apply's checksum, the rest by name. `ModuleType` names are unknown: 0 is most modules and 2 the six displacement ones on Apply; Remove's 1 has no established meaning. `NetTimestamp` is a per-actor/per-life clock, not replay time |
 
 ### The tick is 128 Hz by a 3:13 pattern, not by alternating
 
@@ -506,6 +510,9 @@ rows, on build 13.02.
 | Reserve ammo over time | `AmmoComponent.AuthResourceAmount` (Int32) | ✅ via the `ReserveAmmo` remap -- same native component, second instance; reads 0..200, plus a 999 sentinel (below) |
 | Equipped weapon (per player, over time) | `AresInventory.CurrentEquippable` / `NewCurrentEquippable` -> actor class | ✅ via InventoryComponent->AresInventory remap (resolve the NetGUID to its equippable actor) |
 | Equipped weapon (on damage) | `MulticastNotifyDamage.EquippableUsed` | ✅ |
+| Holder of a weapon effect | `AresEquippable:MulticastPlay{Continuous,OneShot}EffectFromClient.EffectManagerComponent` → `net_guids` (`EffectManager`, whose outer is the holding pawn) | ✅ ObjectNetGuid; a just-dropped weapon can still name its previous holder |
+| Weapon readying speed | `ReadyingStateComponent.AuthEquipSpeed` | ✅ EnumByte, {0, 1, 2} in the main stream (same values as `AutoEquipSpeed`); member names unknown. Always 0 in checkpoints, so not readying state there |
+| Buyer team recorded on an equippable | `AresEquippableDataTracker.OriginalBuyerTeam` | ✅ FName as sent, `Red` or `Blue`; nothing maps it to attacker/defender or to a player |
 | Skin / spray / charm | `manifest` playerLoadouts (per subject) | ✅ |
 
 **999 means infinite reserve, not infinite ammo.** It appears on 53 rows over
@@ -1034,7 +1041,7 @@ is worth keeping.
 
 `Owner` was safe because its *encoding* is fixed, not because its name is
 standard. `ReplicatedMovement` is just as standard a name and is declared three
-different ways in the table -- `RepMovement{ByteComponents}` on 18 groups,
+different ways in the table -- `RepMovement{ByteComponents}` on 20 groups,
 `RepMovement{ShortComponents}` on 6, `Skip` on 1. Those differ in width, so a
 name rule there would not read a wrong value quietly; it would desync the block.
 `RelativeScale3D` and `CosmeticRandomSeed` split the same way, and only on
@@ -1049,11 +1056,22 @@ the schema itself distinguishes.
 
 (An earlier revision of this section offered `AllianceFilter` as the
 counterexample -- `EnumByte` on one group, `EnumRemainingBits` on another. It is
-not one. Both groups declare it under checksum 2270825073 and every row is 3
-bits wide, and `decode_byte` reads `bits_remaining()` for any width in 1..=8, so
-the two declarations return the same value. It is an inconsistency in the table,
-not a difference on the wire. The conclusion stands on the checksum evidence
-above.)
+not one. Every group that declares it does so under checksum 2270825073, and
+every row is 3 bits wide, and `decode_byte` reads `bits_remaining()` for any
+width in 1..=8, so the two declarations return the same value. It was an
+inconsistency in the table, not a difference on the wire. The conclusion stands
+on the checksum evidence above.
+
+That inconsistency had a cost this section did not count at the time. Two
+donor types for one checksum is what the checksum learner drops, so the five
+RPCs that carry `AllianceFilter` with no declaration of their own -- the
+weapons' `MulticastPlay{Continuous,OneShot}EffectFromClient`,
+`ReplayPlayOneShotEffectAtLocation` and both `ReplayRecord*Effect` -- stayed
+raw: 4,560,248 of the 16,030,813 rows under the checksum in the 1,018-replay
+audit, all reading 3 (`AllianceAny`). `apply_type_corrections.py` now declares
+the third donor `EnumByte` like the other two, so the checksum is learned and
+those rows are typed through it. `ReplicatedMovement` is still dropped, and
+should be.)
 
 Three names did clear the mechanical bar -- `AttachComponent` (declared `Raw`,
 so it would produce no values at all), `PreventPickupCharacter` and

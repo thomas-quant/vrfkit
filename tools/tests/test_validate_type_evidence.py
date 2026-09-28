@@ -11,7 +11,8 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from validate_type_evidence import (  # noqa: E402
-    decode_exact, exported_matches, spec_rows, validate)
+    decode_exact, exported_matches, exported_value, spec_rows, validate,
+    values_match)
 
 
 def pack_bits(*fields: tuple[int, int]) -> tuple[bytes, int]:
@@ -86,6 +87,175 @@ class SpecificationScopeTests(unittest.TestCase):
         })
         kept = spec_rows(table, pa.array(["g"]), pa.array(["f"]))
         self.assertEqual(kept["handle"].to_pylist(), [1, 4])
+
+
+def fstring_fields(text: str):
+    data = text.encode("utf-8") + b"\0"
+    return [(len(data), 32)] + [(byte, 8) for byte in data]
+
+
+#: Two real `ReplicatedMovement` rows and the JSON the Rust exporter wrote for
+#: them (audit exports at 259ed10). The Short one is the case a string compare
+#: cannot survive: f32 yaw 283.88671875 is printed as `283.88672`.
+DIVEBOMB_BYTE = (
+    "e0ec4e985d5421c37b4d07e4de1b04", 118,
+    '{"linear_velocity":{"x":2062,"y":-530,"z":525},"angular_velocity":null,'
+    '"location":{"x":25.25,"y":-44.04,"z":6.8},"rotation":{"pitch":16.875,'
+    '"yaw":347.34375,"roll":0},"simulated_physics_sleep":false,"rep_physics":false,'
+    '"server_frame":null,"server_physics_handle":null}',
+)
+SEEKER_NADE_SHORT = (
+    "4095feb5fa74b0e00ac1930501", 100,
+    '{"linear_velocity":{"x":0,"y":0,"z":0},"angular_velocity":null,'
+    '"location":{"x":4423.22,"y":598.93,"z":891.1},"rotation":{"pitch":0,'
+    '"yaw":283.88672,"roll":0},"simulated_physics_sleep":false,"rep_physics":false,'
+    '"server_frame":null,"server_physics_handle":null}',
+)
+
+
+class BitLevelTypeTests(unittest.TestCase):
+    def test_enum_byte_takes_its_width_from_the_payload(self):
+        self.assertEqual(decode_exact(b"\x05", 3, "EnumByte"), 5)
+        self.assertEqual(decode_exact(b"\xff", 8, "EnumByte"), 255)
+        with self.assertRaisesRegex(ValueError, "1..8"):
+            decode_exact(b"\x00\x01", 9, "EnumByte")
+        with self.assertRaisesRegex(ValueError, "1..8"):
+            decode_exact(b"", 0, "EnumByte")
+
+    def test_bit_level_padding_must_be_zero(self):
+        with self.assertRaisesRegex(ValueError, "padding"):
+            decode_exact(b"\x0d", 3, "EnumByte")
+
+    def test_fname_reads_the_two_corpus_payloads(self):
+        """The only two OriginalBuyerTeam payloads in 1,018 replays."""
+        self.assertEqual(
+            decode_exact(bytes.fromhex("08000000a4cac8000000000000"), 97, "FName"), "Red")
+        self.assertEqual(
+            decode_exact(bytes.fromhex("0a00000084d8eaca000000000000"), 105, "FName"), "Blue")
+
+    def test_fname_instance_number_and_hardcoded_index(self):
+        raw, bits = pack_bits((0, 1), *fstring_fields("Red"), (2, 32))
+        self.assertEqual(decode_exact(raw, bits, "FName"), "Red_1")
+        raw, bits = pack_bits((1, 1), (0x59, 8), (0x04, 8))
+        self.assertEqual(decode_exact(raw, bits, "FName"), "300")
+
+    def test_fname_rejects_residue_bad_numbers_and_missing_terminators(self):
+        raw, bits = pack_bits((0, 1), *fstring_fields("Red"), (0, 32), (0, 1))
+        with self.assertRaisesRegex(ValueError, "residual"):
+            decode_exact(raw, bits, "FName")
+        raw, bits = pack_bits((0, 1), *fstring_fields("Red"), (-1, 32))
+        with self.assertRaisesRegex(ValueError, "negative"):
+            decode_exact(raw, bits, "FName")
+        raw, bits = pack_bits((0, 1), (3, 32), *[(b, 8) for b in b"Red"], (0, 32))
+        with self.assertRaisesRegex(ValueError, "terminator"):
+            decode_exact(raw, bits, "FName")
+
+    def test_rep_movement_matches_the_exported_json(self):
+        for (hex_bits, bits, text), type_name in (
+            (DIVEBOMB_BYTE, "RepMovementByte"),
+            (SEEKER_NADE_SHORT, "RepMovementShort"),
+        ):
+            decoded = decode_exact(bytes.fromhex(hex_bits), bits, type_name)
+            self.assertEqual(
+                values_match(type_name, decoded,
+                             exported_value({"value_str": text}, type_name)),
+                (True, "/100"), type_name)
+
+    def test_the_location_scale_is_reported_not_assumed(self):
+        """The same bits exported in world units still match, at "/1"; a
+        scale nobody uses, or two scales in one vector, does not."""
+        hex_bits, bits, text = DIVEBOMB_BYTE
+        decoded = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
+        self.assertEqual(decoded["location"], {"packed": (2525, -4404, 680), "scaled": True})
+        for location, expected in (
+            ('{"x":2525,"y":-4404,"z":680}', (True, "/1")),
+            ('{"x":252.5,"y":-440.4,"z":68}', (False, None)),
+            ('{"x":2525,"y":-44.04,"z":6.8}', (False, None)),
+        ):
+            world = text.replace('{"x":25.25,"y":-44.04,"z":6.8}', location)
+            self.assertEqual(
+                values_match("RepMovementByte", decoded,
+                             exported_value({"value_str": world}, "RepMovementByte")),
+                expected, location)
+
+    def test_the_wrong_rotator_width_is_caught(self):
+        """A Byte row read as Short runs off the end. The reverse can consume
+        exactly and still be wrong -- which only the value compare sees."""
+        hex_bits, bits, _text = DIVEBOMB_BYTE
+        with self.assertRaisesRegex(ValueError, "past the end"):
+            decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementShort")
+        hex_bits, bits, text = SEEKER_NADE_SHORT
+        as_byte = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
+        self.assertEqual(
+            values_match("RepMovementByte", as_byte,
+                         exported_value({"value_str": text}, "RepMovementByte")),
+            (False, None))
+
+    def test_rep_movement_optional_members_are_read_in_wire_order(self):
+        # flags: physics, server frame and server handle set; every vector and
+        # rotator component present and non-zero.
+        raw, bits = pack_bits(
+            (0, 1), (1, 1), (1, 1), (1, 1),
+            (70, 7), (5, 6), (-3, 6), (1, 6),         # location, "scaled" set
+            (1, 1), (64, 8), (0, 1), (1, 1), (128, 8),  # pitch, no yaw, roll
+            (6, 7), (-7, 6), (0, 6), (31, 6),          # velocity, unscaled
+            (6, 7), (1, 6), (2, 6), (3, 6),            # angular velocity
+            (0x06, 8), (0x0a, 8),                      # frame 3, handle 5
+        )
+        self.assertEqual(decode_exact(raw, bits, "RepMovementByte"), {
+            "linear_velocity": (-7.0, 0.0, 31.0),
+            "angular_velocity": (1.0, 2.0, 3.0),
+            "location": {"packed": (5, -3, 1), "scaled": True},
+            "rotation": (90.0, 0.0, 180.0),
+            "simulated_physics_sleep": False,
+            "rep_physics": True,
+            "server_frame": 3,
+            "server_physics_handle": 5,
+        })
+
+    def test_an_unparseable_export_is_a_mismatch_not_a_crash(self):
+        hex_bits, bits, _text = DIVEBOMB_BYTE
+        decoded = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
+        self.assertEqual(
+            values_match("RepMovementByte", decoded,
+                         exported_value({"value_str": "{not json"}, "RepMovementByte")),
+            (False, None))
+
+    def test_compare_typed_checks_every_bit_level_type(self):
+        rows = [
+            ("g", "e", 3, bytes.fromhex("05"), 5, None),
+            ("g", "n", 97, bytes.fromhex("08000000a4cac8000000000000"), None, "Red"),
+            ("g", "m", DIVEBOMB_BYTE[1], bytes.fromhex(DIVEBOMB_BYTE[0]), None,
+             DIVEBOMB_BYTE[2]),
+        ]
+        specs = [{"group": "g", "field": "e", "type": "EnumByte"},
+                 {"group": "g", "field": "n", "type": "FName"},
+                 {"group": "g", "field": "m", "type": "RepMovementByte"}]
+
+        def run(rows):
+            with tempfile.TemporaryDirectory() as directory:
+                pq.write_table(pa.table({
+                    "group_path": [r[0] for r in rows], "field_name": [r[1] for r in rows],
+                    "handle": [1] * len(rows), "compatible_checksum": [2] * len(rows),
+                    "bit_count": [r[2] for r in rows], "raw_bits": [r[3] for r in rows],
+                    "value_i64": pa.array([r[4] for r in rows], pa.int64()),
+                    "value_str": pa.array([r[5] for r in rows], pa.string()),
+                    "value_f64": pa.array([None] * len(rows), pa.float64()),
+                    "value_bool": pa.array([None] * len(rows), pa.bool_()),
+                }), Path(directory) / "fields.parquet")
+                return validate(Path(directory), specs, compare_typed=True)
+
+        clean = run(rows)
+        self.assertEqual((clean["failure_count"], clean["typed_mismatch_count"]), (0, 0))
+        self.assertEqual(clean["missing"], [])
+        self.assertEqual(clean["fields"]["g::m"]["location_scales"], {"/100": 1})
+        wrong = [
+            ("g", "e", 3, bytes.fromhex("05"), 4, None),
+            ("g", "n", 97, bytes.fromhex("08000000a4cac8000000000000"), None, "Blue"),
+            ("g", "m", DIVEBOMB_BYTE[1], bytes.fromhex(DIVEBOMB_BYTE[0]), None,
+             DIVEBOMB_BYTE[2].replace("347.34375", "348.75")),
+        ]
+        self.assertEqual(run(wrong)["typed_mismatch_count"], 3)
 
 
 class DecodeExactTests(unittest.TestCase):
@@ -229,7 +399,9 @@ class ShapedTypeTests(unittest.TestCase):
                   (0, 7), (0, 32), (0, 32), (0, 32)]
         raw, bits = pack_bits(*fields)
         value = decode_exact(raw, bits, "RepMovementByte")
-        self.assertEqual(value["location"], (0.01, 0.02, 0.03))
+        # The location stays packed: its scale is not on the wire (see
+        # BitLevelTypeTests.test_the_location_scale_is_reported_not_assumed).
+        self.assertEqual(value["location"], {"packed": (1, 2, 3), "scaled": True})
         self.assertEqual(value["rotation"], (0.0, 90.0, 0.0))
         self.assertIsNone(value["angular_velocity"])
         self.assertIsNone(value["server_frame"])
@@ -266,7 +438,8 @@ class ShapedTypeTests(unittest.TestCase):
         # the double 359.989013671875, but it is that single-precision value.
         self.assertTrue(exported_matches("RotationShort", "rot(90,284.03503,359.989)", rotation))
         self.assertFalse(exported_matches("RotationShort", "rot(90,284.03503,359.98)", rotation))
-        decoded = {"location": (0.01, 0.02, 0.03), "rotation": (0.0, 90.0, 0.0),
+        decoded = {"location": {"packed": (1, 2, 3), "scaled": True},
+                   "rotation": (0.0, 90.0, 0.0),
                    "linear_velocity": (0.0, 0.0, 0.0), "angular_velocity": None,
                    "simulated_physics_sleep": False, "rep_physics": False,
                    "server_frame": None, "server_physics_handle": None}

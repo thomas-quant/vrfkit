@@ -735,7 +735,7 @@ cannot be expanded into fields, so it emits one preservation row (`handle` =
 diagnostic rather than pretending the properties were decoded.
 
 The overlay table is extracted mechanically from the C# descriptors
-(`tools/extract_descriptors.py`) -- 219 groups, 1,319 entries, 96 handles.
+(`tools/extract_descriptors.py`) -- 220 groups, 1,331 entries, 96 handles.
 Those descriptors are vendored verbatim in
 [`third_party/vrp/`](third_party/vrp/README.md),
 and CI regenerates the table from them on every push.
@@ -843,7 +843,7 @@ checkpoint decode failures. This separate check exists because `vrfkit
 validate` does not print overlay counters, so `validate_corpus.py` alone cannot
 see a wrong type. Reaching zero found three places where the wire disagreed
 with the C# declarations; they are recorded with evidence in
-`tools/apply_type_corrections.py` (187 corrections, verified with `--check`).
+`tools/apply_type_corrections.py` (204 corrections, verified with `--check`).
 
 | Symptom | Actual | Evidence |
 |---|---|---|
@@ -1026,7 +1026,7 @@ The following files are generated and must never be edited by hand:
 
 | Generated file | Generator | Notes |
 |---|---|---|
-| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,319 entries, 219 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
+| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,331 entries, 220 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
 | `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including upstream-declared geometry and enum shapes; no cross-group propagation |
 | `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` | 768-byte S-box, shared across builds |

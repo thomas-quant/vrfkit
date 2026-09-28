@@ -26,7 +26,7 @@ Evidence comes from all 1,018 unique replays of the local corpus (builds
 | `8b7afcb` satchel projectile attachment: `AttachComponent`, `RelativeScale3D`, `LocationOffset`, `RotationOffset` | Adopted with evidence | 4 exact identities. |
 | `8b7afcb` Boom Bot pawn: `bAIControlled`, `ReplicatedMovement` (short rotation) | Adopted with evidence | 2 exact identities; the location scale was checked against spawn positions. |
 | `8b7afcb` `ReplicatedMovement` (byte rotation) on the satchel, the three Paint Shells projectiles and the rocket | Declined | The rotation width is right, but `RepMovement` would export these locations 100 times too small. See [below](#declined-projectile-replicatedmovement). |
-| `8b7afcb` `RazeForceParameters` (`ForceModuleManagerComponent:NetMulticastApplyForceModule`) | Adopted with evidence | 7 exact identities. `HandleNumber` and `SourceLocation` were already typed with the same types. |
+| `8b7afcb` `RazeForceParameters` (`ForceModuleManagerComponent:NetMulticastApplyForceModule`) | Adopted with evidence | 7 identities, measured below. `Source` and `Duration` remain exact identities. The integrated tree types the other five (`Module`, `ModuleType`, `Character`, `NetTimestamp`, `RespawnNumber`) by name in the overlay table instead, which resolves before any scoped identity, so their scoped entries were removed as unreachable; see the note under the evidence table. `HandleNumber` and `SourceLocation` were already typed with the same types. |
 | `8b7afcb` `ClientResetRemoteMovementPrediction(isPossess)` on Raze and the Boom Bot | Adopted with evidence, wider than upstream | The wire declares one native `ShooterCharacter` parameter group, so the identity covers every character and pawn that sends the RPC: Raze's character and Boom Bot account for 8,511 of the 291,346 rows, and the other 282,835 follow from the wire identity rather than from a choice. Constant `true` in this corpus. |
 | `8b7afcb` roles `215`/`216`, `Owner`, `Instigator`, `AttachParent`, `Controller`, `PlayerState`, the Boom Bot's timestamp, gravity, movement mode and `bReplicateMovement`, the satchel explosion's fields, and every other `ClayAgentDescriptor` handle except the array | Not applicable | Already typed, with the same types, through the table, engine object references or checksum donors: 1,716,934 main and 179,976 checkpoint rows in the Raze property groups. |
 | `8b7afcb` `ClayAgentDescriptor.FocusProjectiles` (`RepLayoutDynamicArray`) | Deferred | Mapped to `Raw` even by faithful vendoring. Needs a measured array route; see [below](#deferred-focusprojectiles). |
@@ -55,7 +55,7 @@ checkpoint over the 1,018 replays.
 | Boom Bot pawn and cache | `bShouldUseMeshMaterialManager`, `MultiCastSetMinimapPulse.Pulsate` | 144; 874 | Not declared |
 | Satchel projectile and cache | `AttachSocket`, `HideSatchelStuckToLocalPawn.108` | 6; 5 | Not declared |
 | Force-module apply RPC | `ContextActor` (handle 9) | 7,990 | Upstream declares handles 0-8 only |
-| Force-module remove RPC | `ModuleType` | 2,743,504 | Declared `EnumRemainingBits` by upstream `99d9646`, not by these commits; shares the adopted checksum and agrees with it on every paired handle, but is not typed here |
+| Force-module remove RPC | `ModuleType` | 2,743,504 | Declared `EnumRemainingBits` by upstream `99d9646`, not by these commits; shares the adopted checksum and agrees with it on every paired handle. Not typed by this review; the integrated tree types it `EnumByte` through the table entry for Apply's `ModuleType`, whose checksum it shares |
 | `ForceModuleManagerComponent` | `AuthActivePredictedForceModules`, `NetMulticastEnforceEndOfLifeCleanup.ModulesCleanedUpByServer` | 61,969 / 52,575; 40,765 | Arrays; not declared |
 | `Comp_Projectile_CosmeticPlayEffectUntilTriggerMarker` / `...SoundLoop` | unresolved cache payloads | 2,016; 838 | Bare instance names with no class; upstream's cosmetic descriptor covers the base component only |
 
@@ -129,6 +129,17 @@ builds.
 | Force-module apply RPC | `NetTimestamp` | Float | 665,519 | 0 | 0 to 252.7 |
 | Force-module apply RPC | `RespawnNumber` | Int32 | 665,519 | 0 | 0 to 38 |
 | `ShooterCharacter` possession reset | `isPossess` | Bool | 291,346 | 0 | true on every row, 48 cache groups |
+
+Integration note (2026-09-28, `auto/integration-20260928`): the rows above
+were measured under this review's scoped identities. The integrated tree
+types `Module`, `ModuleType`, `Character`, `NetTimestamp` and `RespawnNumber`
+by name in the overlay table (`tools/apply_type_corrections.py`), with the
+same types except `ModuleType`, which the table reads as `EnumByte` rather
+than `EnumRemainingBits` -- the same value on every payload measured here,
+all of them 3 bits. The table resolves first, so the five scoped entries
+could never be read and were removed from
+`tools/fixtures/scoped_type_evidence.json`; a test now fails if any scoped
+identity is shadowed that way. `Source` and `Duration` stay scoped.
 
 Object references were resolved against the same export's `actors.parquet`
 (dynamic actors) and `net_guids.parquet` (static paths), main rows only. The
