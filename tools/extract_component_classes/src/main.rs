@@ -485,18 +485,11 @@ fn scan_all(
                     let Some(job) = jobs.get(i) else { break };
                     let container = &containers[job.container];
                     let outcome = match &mut handles[job.container] {
-                        Some(file) => {
-                            scan_package(container, file, job, script).map_err(|e| e.to_string())
-                        }
-                        slot => match container.open_ucas() {
-                            Ok(file) => {
-                                let file = slot.insert(file);
-                                scan_package(container, file, job, script)
-                                    .map_err(|e| e.to_string())
-                            }
-                            Err(e) => Err(e.to_string()),
-                        },
-                    };
+                        Some(file) => Ok(file),
+                        slot => container.open_ucas().map(|file| slot.insert(file)),
+                    }
+                    .and_then(|file| scan_package(container, file, job, script))
+                    .map_err(|e| e.to_string());
                     local.push((i, outcome));
                 }
                 results
