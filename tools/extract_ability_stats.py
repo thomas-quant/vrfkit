@@ -28,7 +28,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -44,26 +44,8 @@ GROUP = (
     "Comp_AbilityStatisticsReplicator_C"
 )
 TABLES = ("fields", "checkpoint_fields")
-PAIR_COLUMNS = (
-    "time_ms",
-    "packet_id",
-    "channel_index",
-    "actor_net_guid",
-    "object_net_guid",
-    "field_name",
-    "value_i64",
-    "value_str",
-)
-PAIR_KEY_NAMES = (
-    "table",
-    "packet_id",
-    "time_ms",
-    "channel_index",
-    "actor_net_guid",
-    "object_net_guid",
-    "cast_element_index",
-    "effect_element_index",
-)
+PAIR_COLUMNS = ("time_ms", "packet_id", "channel_index", "actor_net_guid",
+                "object_net_guid", "field_name", "value_i64", "value_str")
 MEMBER_RE = re.compile(
     r"^AbilityCastsThisRound\[(\d+)\]\.Effects\[(\d+)\]\."
     r"(Statistic|LocalizedStat)(?:_\d+_[0-9A-F]{32})?$",
@@ -147,8 +129,8 @@ class PairKey:
     cast_element_index: int
     effect_element_index: int
 
-    def as_dict(self) -> dict:
-        return dict(zip(PAIR_KEY_NAMES, self.__dict__.values(), strict=True))
+
+PAIR_KEY_NAMES = tuple(item.name for item in fields(PairKey))
 
 
 @dataclass
@@ -163,7 +145,7 @@ class PairingResult:
     def issue(self, kind: str, key: PairKey, detail: dict) -> None:
         self.issues[kind] += 1
         if len(self.samples[kind]) < 10:
-            self.samples[kind].append({**key.as_dict(), **detail})
+            self.samples[kind].append({**asdict(key), **detail})
 
 
 def replay_build(export_dir: Path) -> str:
@@ -272,15 +254,7 @@ def known_dictionary() -> dict[str, list[dict]]:
 
 def deduplicate_exports(exports: list[Path]) -> list[Path]:
     """Return each canonical export directory once, preserving argument order."""
-    unique = []
-    seen = set()
-    for export_dir in exports:
-        canonical = export_dir.resolve()
-        if canonical in seen:
-            continue
-        seen.add(canonical)
-        unique.append(canonical)
-    return unique
+    return list(dict.fromkeys(export_dir.resolve() for export_dir in exports))
 
 
 def validate_output_path(out: Path, exports: list[Path]) -> None:
@@ -472,7 +446,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         args.out,
         json.dumps(document, indent=2, ensure_ascii=True) + "\n",

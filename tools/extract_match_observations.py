@@ -702,7 +702,6 @@ def main() -> int:
     args = parser.parse_args()
     _reject_input_overwrite(args.export, args.out)
     result = build(args.export)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(args.out, json.dumps(result, indent=2) + "\n")
     print(f"wrote {args.out}")
     for name in ("ammo_changes", "equip_intervals", "reload_intervals",

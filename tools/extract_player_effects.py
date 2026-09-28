@@ -145,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         document = build(args.export)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(args.out, json.dumps(document, indent=2, ensure_ascii=True,
                                                allow_nan=False) + "\n")
     except (OSError, ValueError) as exc:

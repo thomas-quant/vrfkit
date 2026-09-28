@@ -250,7 +250,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         document = build(args.export)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(args.out, json.dumps(document, indent=2, ensure_ascii=True) + "\n")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
