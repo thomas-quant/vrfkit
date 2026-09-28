@@ -1517,18 +1517,22 @@ def main(argv: list[str]) -> int:
                 f"duplicate class declarations at {locations}"
             )
 
+    def ancestors(cls: str):
+        """`cls`, then each base in turn; stops at the root or on a cycle."""
+        seen: set[str] = set()
+        while cls is not None and cls not in seen:
+            seen.add(cls)
+            yield cls
+            cls = class_bases.get(cls)
+
+    def nearest(overrides: dict, cls: str, default):
+        """The override of the nearest class in `cls`'s chain that has one."""
+        return next((overrides[c] for c in ancestors(cls) if c in overrides), default)
+
     def effective_raw_wrapper_names(class_name: str) -> set[str]:
-        names: set[str] = set()
-        visited: set[str] = set()
-        current = class_name
-        while current not in visited:
-            visited.add(current)
-            names.update(raw_wrapper_names_by_class.get(current, set()))
-            base = class_bases.get(current)
-            if base is None:
-                break
-            current = base
-        return names
+        return set().union(
+            *(raw_wrapper_names_by_class.get(c, ()) for c in ancestors(class_name))
+        )
 
     # Runtime-created ClassNetCaches do not have descriptor classes or literal
     # paths. Discover the constructor shape, resolve its RpcDescriptor.Name,
@@ -1874,18 +1878,7 @@ def main(argv: list[str]) -> int:
         Actor from GenericAgentDescriptor this way. A chain that reaches the
         top with no override at all ends at the base class's own default.
         """
-        visited: set[str] = set()
-        current = cls
-        while current not in visited:
-            visited.add(current)
-            kind = class_kind_overrides.get(current)
-            if kind is not None:
-                return kind
-            base = class_bases.get(current)
-            if base is None:
-                break
-            current = base
-        return DEFAULT_EXPORT_GROUP_KIND
+        return nearest(class_kind_overrides, cls, DEFAULT_EXPORT_GROUP_KIND)
 
     # Phase 2: resolve inheritance -- propagate fields from base classes
     # For classes with a Path but no fields, inherit from their base.
@@ -1903,8 +1896,7 @@ def main(argv: list[str]) -> int:
         own_fields = class_fields.get(cls, [])
         base = class_bases.get(cls)
         if base:
-            base_plain = base.split("<")[0] if "<" in base else base
-            parent_fields = get_fields(base_plain, visited)
+            parent_fields = get_fields(base, visited)
             if parent_fields and own_fields:
                 # Merge: parent fields first, then child (child may override).
                 own_names = {name for name, _, _ in own_fields}
@@ -1923,21 +1915,14 @@ def main(argv: list[str]) -> int:
         if not field_type.startswith(MOVEMENT_TYPE_PREFIX):
             return field_type
         property_name = field_type[len(MOVEMENT_TYPE_PREFIX):-1]
-        visited: set[str] = set()
-        current = cls
-        while current not in visited:
-            visited.add(current)
-            value = movement_overrides.get(current, {}).get(property_name)
-            if value is not None:
-                return rep_movement_type(value)
-            base = class_bases.get(current)
-            if base is None:
-                break
-            current = base
-        raise SystemExit(
-            f"{cls}: cannot resolve virtual movement quantization "
-            f"{property_name}"
-        )
+        value = next((movement_overrides[c][property_name] for c in ancestors(cls)
+                      if property_name in movement_overrides.get(c, {})), None)
+        if value is None:
+            raise SystemExit(
+                f"{cls}: cannot resolve virtual movement quantization "
+                f"{property_name}"
+            )
+        return rep_movement_type(value)
 
     # Phase 3: build final entries
     entries: list[tuple[str, str, str]] = []  # (group_path, field_name, rust_type)
@@ -2018,18 +2003,9 @@ def main(argv: list[str]) -> int:
             skip_count += 1
 
     def has_effective_agent_category(cls: str) -> bool:
-        visited: set[str] = set()
-        current = cls
-        while current not in visited:
-            visited.add(current)
-            categories = class_category_overrides.get(current)
-            if categories is not None:
-                return "Agent" in categories or "All" in categories
-            base = class_bases.get(current)
-            if base is None:
-                return False
-            current = base
-        return False
+        return bool(
+            nearest(class_category_overrides, cls, frozenset()) & {"Agent", "All"}
+        )
 
     # 3c: runtime-created ClassNetCache entries. The live factory builds one
     # cache for every Agent-category descriptor using `descriptor.Path +
