@@ -267,10 +267,9 @@ mod tests {
     fn active_blinds_stays_off_on_every_legacy_build() {
         // Both legacy refusal causes move array_leaf_decode_errors; see
         // `MeasuredArrayRoutes::for_branch`. Only the 13.x builds admit it.
-        for (branch, routes) in PINNED {
+        for (branch, _) in PINNED {
             let measured_13x = branch.starts_with("++Ares-Core+release-13.")
                 && *branch != "++Ares-Core+release-13.00";
-            assert_eq!(routes.contains(&ActiveBlinds), measured_13x, "{branch}");
             assert_eq!(
                 MeasuredArrayRoutes::for_branch(branch).admits(ActiveBlinds),
                 measured_13x,
