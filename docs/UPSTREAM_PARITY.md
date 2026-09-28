@@ -195,12 +195,7 @@ These differences remain recorded rather than being called parity; the
 before/after Rust comparison checks that this update did not change the
 existing movement output.
 
-The MSRV 1.86 development sweep passed: formatting, workspace clippy with
-warnings denied, all-target/all-feature checks, rustdoc with warnings denied,
-the offset probe, Rust/Python Parquet interoperability, 27 advertised feature
-configurations, ASCII and generated-file checks, baseline schema checks and
-the full documentation guard. The final suites contain 701 passing Rust tests
-and 836 passing Python tests. Eleven 13.06 golden vectors are included in the
-88-vector transform test. After the last failure-accounting fix, the final
-binary again passed the twelve-replay checkpoint decode guard and the private
-13.06 export hash baseline.
+Eleven 13.06 golden vectors are included in the 88-vector transform test.
+After the last failure-accounting fix, the final binary again passed the
+twelve-replay checkpoint decode guard and the private 13.06 export hash
+baseline.

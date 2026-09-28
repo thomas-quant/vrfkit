@@ -88,22 +88,13 @@ vrfkit에 반영한 변경과 실제 리플레이 검증 범위는
 
 ## 열려 있는 PR #5
 
-[`#5` Add OwnerExclusivePlayerInfo descriptor and AresPlayerRoundInfo decoder](https://github.com/michel-giehl/ValorantReplayParser/pull/5)는
-**OPEN, 미병합**이다. head는 [`ce4f62a`](https://github.com/michel-giehl/ValorantReplayParser/tree/ce4f62a1a47207646cbc02cd4d9c85cb7386cc9d)이고
-3개 파일(+197)만 바꾸며 test 파일은 없다. 사람이 남긴 review/inline comment는 없고,
-유일한 bot comment는 quality gate 통과와 동시에 새 issue 2개, new-code coverage 0%를
-보고한다. 그러므로 실행·wire 검증의 증거가 아니다.
-
-PR의 실제 내용은 `Owner`, `RoundInfos`를 등록하고 RoundInfos의 40–44 handle을
-직접 Int32로 읽는 decoder다
-([diff source](https://github.com/michel-giehl/ValorantReplayParser/blob/ce4f62a1a47207646cbc02cd4d9c85cb7386cc9d/src/Replay.Valorant/GameState/AresPlayerRoundInfo.cs#L8-L177)).
-vrfkit은 이미 같은 dynamic-array framing과 다섯 멤버를 지원한다. 더구나 replay가
-선언한 `handle → name`으로 선택하고 member window의 완전 소모를 요구한다
-([`round_infos.rs`](../crates/vrf-decode/src/structs/round_infos.rs)); PR처럼 고정 handle에
-묶이지 않는다. 부모 raw bits를 보존하고 실패를 계수하는 점도 이미 갖췄다.
-
-따라서 #5는 기존 RoundInfos/OwnerExclusivePlayerInfo의 독립적인 출처 보강이며,
-현재 vrfkit에 가져올 새 decoder나 handle 수정은 없다.
+[`#5`](https://github.com/michel-giehl/ValorantReplayParser/pull/5)(OPEN, head
+[`ce4f62a`](https://github.com/michel-giehl/ValorantReplayParser/tree/ce4f62a1a47207646cbc02cd4d9c85cb7386cc9d),
+test 없음)는 `OwnerExclusivePlayerInfo` descriptor와 RoundInfos의 40–44 handle을 고정
+Int32로 읽는 decoder를 더한다. vrfkit은 같은 dynamic-array framing과 다섯 멤버를 replay가
+선언한 `handle → name`으로 이미 읽고 member window의 완전 소모를 요구하므로
+([`round_infos.rs`](../crates/vrf-decode/src/structs/round_infos.rs)) 가져올 decoder나 handle
+수정은 없다.
 
 ## 실제 코퍼스에서 확인한 추가 후보
 
@@ -173,29 +164,10 @@ actor별 TypedArray 위치 저장과 이진 탐색·보간, 작은 위치/이벤
 기존 파서 전체를 교체하기보다, 추후 valplay의 표시용 데이터와 UI를 설계할 때 참고하는
 가치가 크다. 실제 코드를 재사용한다면 해당 MIT 고지를 함께 유지한다.
 
-## 사용자가 닫았던 vrfkit PR #7
+## 결론
 
-[#7: feat: support release-13.05 payload transform](https://github.com/yakisoba0728/vrfkit/pull/7)은
-`436c1a02c13d60972d116cbd60f14a480d1ac768` 단일 커밋이며, 사용자가 2026-09-07에
-병합된 #8로 대체됐다고 닫았다.
-([닫은 이유](https://github.com/yakisoba0728/vrfkit/pull/7#issuecomment-5574235291))
-본문·diff·커밋·토론·review를 대조했으며 Rust 문법이나 replay 문법을 수정하는 변경은 없었다.
-13.05 transform, 등록, 11개 golden vector와 생성기 분기는 현재 main에 기능상 반영돼 있다.
-
-PR #7이 남긴 두 건의 주석 표현 수정(`helpers.rs:6` -> through release-13.05,
-`golden.rs:1` -> all seven)은 이후 main에 반영되었고, 2026-09-21 기준 두 파일
-모두 정확한 표현을 담고 있다. 더 남은 항목은 없다.
-
-상세 대조는 외부 조사 폴더의 `closed-pr7.md`에 남겼다.
-
-## 다음 구현 묶음 제안
-
-1. Harbor Tidal Wave descriptor를 선택적으로 가져와 코퍼스 payload와 검증한다.
-2. ProfileName 문자열 타이핑 및 조준선 이름별 타입 검증을 수행한다. 의미 미확정 이름은
-   원본 이름을 유지하고 Riot ID 등의 별칭을 붙이지 않는다.
-3. 위 변경 묶음에 #7에서 빠진 주석 두 곳을 포함한다.
-4. 뷰어 카탈로그·위치 저장 아이디어는 valplay 작업에서 활용한다. 추정 소유자/팀/지속시간은
-   vrfkit의 확정 지표로 이식하지 않는다.
+닫힌 vrfkit PR #7(13.05 transform)의 내용과 두 주석 수정은 모두 main에 반영됐고, 위의
+Tidal Wave·ProfileName 후보도 구현됐다([SCHEMA_EXPANSION.md](SCHEMA_EXPANSION.md)).
 
 이번 소스에서는 GAS 워드 의미, InputEventData 태그의 행동 이름, StopEffectType enum,
 pre-framing partial 손실을 해결할 새 근거를 찾지 못했다. 추가 후보의 존재를 전체 의미
