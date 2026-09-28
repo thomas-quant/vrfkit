@@ -1,13 +1,7 @@
-//! Content block header parsing and framing loop.
+//! Content block header parsing.
 //!
-//! A bunch's payload is a sequence of content blocks. Each block has a header
-//! that identifies what it describes (the actor itself, a subobject, or a
-//! deletion), followed by a payload whose structure depends on the header:
-//!
-//! - **RepLayout** (has_rep_layout = true): property field stream
-//! - **ClassNetCache** (has_rep_layout = false): RPC function stream
-//!
-//! # Content block header bit layout
+//! A bunch's payload is a sequence of content blocks, each a header saying
+//! what it describes (the actor, a subobject, or a deletion) and a payload.
 //!
 //! ```text
 //! +------------------------------------------------------------------+
@@ -49,7 +43,8 @@ pub struct ContentBlockHeader {
     pub object_net_guid: NetworkGuid,
     /// Net GUID of the class (subobject case, when present).
     pub class_net_guid: NetworkGuid,
-    /// True when the class GUID field was read, including an invalid zero.
+    /// The class GUID field was read, even as an invalid zero: this separates
+    /// a read-invalid class (deleted, flags 0) from an explicit delete.
     pub has_class_net_guid: bool,
     /// Net GUID of the outer object.
     pub outer_net_guid: NetworkGuid,
@@ -59,96 +54,75 @@ pub struct ContentBlockHeader {
     pub delete_flags: u8,
 }
 
-/// Read a content block header from the stream.
-///
-/// `actor_net_guid` is the channel's actor GUID (used as default outer).
-/// `is_exporting` should be false for normal content block headers.
+/// Read a content block header from the stream. `actor_net_guid` is the
+/// channel's actor GUID, the default outer.
 pub fn read_content_block_header(
     reader: &mut BitReader<'_>,
     actor_net_guid: NetworkGuid,
     sink: &mut dyn GuidPathSink,
 ) -> Result<ContentBlockHeader> {
-    let has_rep_layout = reader.read_bit()?;
+    // Every shape below starts from this.
+    let base = ContentBlockHeader {
+        has_rep_layout: reader.read_bit()?,
+        outer_net_guid: actor_net_guid,
+        ..Default::default()
+    };
 
-    // Is this block about the actor itself?
     if reader.read_bit()? {
         return Ok(ContentBlockHeader {
-            has_rep_layout,
             is_actor: true,
-            outer_net_guid: actor_net_guid,
-            ..Default::default()
+            ..base
         });
     }
 
-    // Subobject: read object net GUID
-    let object_net_guid = net_guid::internal_load_object(reader, false, 0, sink)?;
-    let is_stably_named = reader.read_bit()?;
+    let base = ContentBlockHeader {
+        object_net_guid: net_guid::internal_load_object(reader, false, 0, sink)?,
+        ..base
+    };
 
-    if is_stably_named {
-        return Ok(ContentBlockHeader {
-            has_rep_layout,
-            is_actor: false,
-            object_net_guid,
-            outer_net_guid: actor_net_guid,
-            is_stably_named: true,
-            ..Default::default()
-        });
-    }
-
-    // Check if deleted
     if reader.read_bit()? {
-        let delete_flags = reader.read_u8()?;
         return Ok(ContentBlockHeader {
-            has_rep_layout,
-            is_actor: false,
-            is_deleted: true,
-            object_net_guid,
-            outer_net_guid: actor_net_guid,
-            delete_flags,
-            ..Default::default()
+            is_stably_named: true,
+            ..base
         });
     }
 
-    // Read class net GUID
+    if reader.read_bit()? {
+        return Ok(ContentBlockHeader {
+            is_deleted: true,
+            delete_flags: reader.read_u8()?,
+            ..base
+        });
+    }
+
     let class_net_guid = net_guid::internal_load_object(reader, false, 0, sink)?;
     if !class_net_guid.is_valid() {
-        // Invalid class GUID means "deleted" with flags = 0
         return Ok(ContentBlockHeader {
-            has_rep_layout,
-            is_actor: false,
             is_deleted: true,
-            object_net_guid,
             has_class_net_guid: true,
-            outer_net_guid: actor_net_guid,
-            delete_flags: 0,
-            ..Default::default()
+            ..base
         });
     }
 
-    // Outer
+    // bUseActorOuter
     let outer_net_guid = if reader.read_bit()? {
-        // bUseActorOuter = true
         actor_net_guid
     } else {
         net_guid::internal_load_object(reader, false, 0, sink)?
     };
 
     Ok(ContentBlockHeader {
-        has_rep_layout,
-        is_actor: false,
-        object_net_guid,
         class_net_guid,
         has_class_net_guid: true,
         outer_net_guid,
-        is_stably_named: false,
-        is_deleted: false,
-        delete_flags: 0,
+        ..base
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{pack, write_byte, write_int_packed};
 
     #[derive(Default)]
     struct NullSink;
@@ -156,37 +130,10 @@ mod tests {
         fn register_path(&mut self, _: u32, _: &str, _: NetworkGuid) {}
     }
 
-    fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            for i in 0..8 {
-                bits.push((next_byte & (1 << i)) != 0);
-            }
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let byte_count = bits.len().div_ceil(8);
-        let mut bytes = vec![0u8; byte_count];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
-
     #[test]
     fn actor_block_returns_immediately() {
         let bits = vec![true, true]; // hasRepLayout=true, isActor=true
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = NullSink;
         let hdr = read_content_block_header(&mut reader, NetworkGuid(18), &mut sink).unwrap();
@@ -202,7 +149,7 @@ mod tests {
         bits.push(false); // isActor = false
         write_int_packed(&mut bits, 50); // objectNetGuid
         bits.push(true); // isStablyNamed
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = NullSink;
         let hdr = read_content_block_header(&mut reader, NetworkGuid(18), &mut sink).unwrap();
@@ -219,11 +166,8 @@ mod tests {
         write_int_packed(&mut bits, 60); // objectNetGuid
         bits.push(false); // isStablyNamed
         bits.push(true); // isDeleted
-        // deleteFlags byte: 0x03
-        for i in 0..8 {
-            bits.push((0x03u8 & (1 << i)) != 0);
-        }
-        let data = bits_to_bytes(&bits);
+        write_byte(&mut bits, 0x03); // deleteFlags
+        let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = NullSink;
         let hdr = read_content_block_header(&mut reader, NetworkGuid(18), &mut sink).unwrap();
@@ -244,7 +188,7 @@ mod tests {
             } else {
                 bits.extend([false; 8]);
             }
-            let data = bits_to_bytes(&bits);
+            let data = pack(&bits);
             read_content_block_header(&mut BitReader::new(&data), NetworkGuid(18), &mut NullSink)
                 .unwrap()
         };

@@ -2,11 +2,9 @@
 //!
 //! Open-count on the reference replay: docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
 //!
-//! This is the block Unreal writes immediately after the actor GUID when a
-//! channel opens for a *dynamic* (even, non-zero GUID) actor. It is small and
-//! rare but its bit width is load-bearing for everything after it in the same
-//! bunch, so the reasoning below is kept next to the reads rather than in a
-//! design doc.
+//! The block Unreal writes right after the actor GUID when a channel opens for
+//! a *dynamic* (even, non-zero GUID) actor: small and rare, but its bit width
+//! decides everything after it in the same bunch.
 
 use vrf_bitio::BitReader;
 
@@ -42,20 +40,27 @@ pub(super) fn read_dynamic_spawn_data(
     // Archetype. Its path is what identifies the replay controller later, so
     // this read must happen before the net-player-index check in `channel.rs`.
     state.archetype_net_guid = net_guid::internal_load_object(payload, false, 0, sink)?;
-    // Level
     state.level_guid = net_guid::internal_load_object(payload, false, 0, sink)?;
-    // Location -- defaults to the origin, not to absent.
-    state.spawn_location = read_optional_quantized_vector(payload, SPAWN_SCALE_FACTOR, ORIGIN)?;
-    // Rotation
+    state.spawn_location = Some(read_optional_quantized_vector(
+        payload,
+        SPAWN_SCALE_FACTOR,
+        ORIGIN,
+    )?);
     if payload.read_bit()? {
         state.spawn_rotation = Some(read_rotation_short(payload)?);
     }
-    // Scale -- defaults to unit scale, not to the origin.
-    state.spawn_scale = read_optional_quantized_vector(payload, SPAWN_SCALE_FACTOR, UNIT_SCALE)?;
-    // Velocity -- unconditional, exactly as NewActorSerializer.cs:69-72 reads
-    // it. This used to be gated on a fabricated PlayerController premise; see
-    // docs/archive/PROJECT_STATUS.md 17-A for why that cost one invisible bit.
-    state.spawn_velocity = read_optional_quantized_vector(payload, SPAWN_SCALE_FACTOR, ORIGIN)?;
+    state.spawn_scale = Some(read_optional_quantized_vector(
+        payload,
+        SPAWN_SCALE_FACTOR,
+        UNIT_SCALE,
+    )?);
+    // Velocity is read unconditionally, as NewActorSerializer.cs:69-72 does;
+    // gating it cost one invisible bit (docs/archive/PROJECT_STATUS.md 17-A).
+    state.spawn_velocity = Some(read_optional_quantized_vector(
+        payload,
+        SPAWN_SCALE_FACTOR,
+        ORIGIN,
+    )?);
     Ok(())
 }
 
@@ -76,28 +81,23 @@ pub(super) fn read_dynamic_spawn_data(
 ///   [else] -> 3 x f64
 /// ```
 ///
-/// A clear leading bit does not mean "absent" -- it means "take the default".
-/// `ArchiveVectorReaders.ReadOptionalQuantizedVector` returns `defaultVector`
-/// there, and `NewActorSerializer.cs:56-72` passes (0,0,0) for location and
-/// velocity and (1,1,1) for scale.
-///
-/// Returning `None` instead used to collapse that case into the
-/// genuinely-absent one: a static actor never enters the spawn block at all,
-/// so its location is unknown, while a dynamic actor with the bit clear has a
-/// known location of exactly (0,0,0). See docs/archive/PROJECT_STATUS.md 13-A
-/// for the corpus counts.
+/// A clear leading bit means "take the default", not "absent":
+/// `ArchiveVectorReaders.ReadOptionalQuantizedVector` returns `defaultVector`,
+/// and `NewActorSerializer.cs:56-72` passes (0,0,0) for location and velocity
+/// and (1,1,1) for scale. So this always yields a vector; only a static actor,
+/// which never enters the block, leaves the fields `None` -- unknown, not
+/// (0,0,0) (docs/archive/PROJECT_STATUS.md 13-A has the corpus counts).
 fn read_optional_quantized_vector(
     reader: &mut BitReader<'_>,
     scale_factor: i32,
     default: FVector,
-) -> Result<Option<FVector>> {
+) -> Result<FVector> {
     if !reader.read_bit()? {
-        return Ok(Some(default));
+        return Ok(default);
     }
 
     if !reader.read_bit()? {
-        // Unquantized: 3x f64.
-        return Ok(Some(read_f64_vector(reader)?));
+        return read_f64_vector(reader);
     }
 
     let info = reader.read_serialized_int(128)?;
@@ -105,14 +105,14 @@ fn read_optional_quantized_vector(
     let extra_info = info >> 6;
 
     if component_bit_count == 0 {
-        return Ok(Some(if extra_info == 0 {
+        return Ok(if extra_info == 0 {
             let x = f64::from(reader.read_f32()?);
             let y = f64::from(reader.read_f32()?);
             let z = f64::from(reader.read_f32()?);
             FVector { x, y, z }
         } else {
             read_f64_vector(reader)?
-        }));
+        });
     }
 
     let x = reader.read_bits(component_bit_count)?;
@@ -125,12 +125,10 @@ fn read_optional_quantized_vector(
     let fy = (y ^ sign_bit) as i64 - sign_bias;
     let fz = (z ^ sign_bit) as i64 - sign_bias;
 
-    // `extra_info == 0` means the components are already whole units; anything
-    // else means they were multiplied by the scale factor before quantizing.
-    // The two arms stay separate rather than dividing by a 1.0 divisor: these
-    // values reach Parquet unrounded, and "the compiler surely folds it" is not
-    // the standard this crate's output is held to.
-    Ok(Some(if extra_info > 0 {
+    // `extra_info == 0`: the components are whole units; otherwise they were
+    // multiplied by the scale factor before quantizing. Two arms rather than a
+    // divide by 1.0, so whole-unit values reach Parquet with no arithmetic.
+    Ok(if extra_info > 0 {
         let divisor = f64::from(scale_factor);
         FVector {
             x: fx as f64 / divisor,
@@ -143,7 +141,7 @@ fn read_optional_quantized_vector(
             y: fy as f64,
             z: fz as f64,
         }
-    }))
+    })
 }
 
 #[inline]
@@ -154,15 +152,8 @@ fn read_f64_vector(reader: &mut BitReader<'_>) -> Result<FVector> {
     Ok(FVector { x, y, z })
 }
 
-/// Read a compressed short rotator (3 components, each optionally present).
-///
-/// ```text
-/// For each of pitch, yaw, roll:
-///   hasComponent : 1 bit
-///   [if hasComponent]
-///     value      : u16 (16 bits)
-///     degrees = value * (360.0 / 65536.0)
-/// ```
+/// Read a compressed short rotator: for each of pitch, yaw and roll, a presence
+/// bit, then if set a u16 `value` giving `value * 360 / 65536` degrees.
 fn read_rotation_short(reader: &mut BitReader<'_>) -> Result<FRotator> {
     let pitch = read_compressed_short_component(reader)?;
     let yaw = read_compressed_short_component(reader)?;
@@ -183,26 +174,17 @@ fn read_compressed_short_component(reader: &mut BitReader<'_>) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_bits::{pack, write_byte, write_serialized_int};
 
-    fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
-
-    /// A clear leading bit yields the caller's default, never `None`. The two
-    /// defaults differ (origin vs unit scale), which is the whole point.
+    /// A clear leading bit yields the caller's default, which differs by
+    /// vector (origin vs unit scale).
     #[test]
     fn absent_vector_takes_the_callers_default() {
-        let data = bits_to_bytes(&[false]);
+        let data = pack(&[false]);
         let mut reader = BitReader::with_bit_len(&data, 1).unwrap();
         assert_eq!(
             read_optional_quantized_vector(&mut reader, SPAWN_SCALE_FACTOR, UNIT_SCALE).unwrap(),
-            Some(UNIT_SCALE)
+            UNIT_SCALE
         );
         assert_eq!(reader.position(), 1, "exactly one bit is consumed");
     }
@@ -214,20 +196,13 @@ mod tests {
         // hasValue=1, isQuantized=1, info = 8 | (1 << 6) = 72 -> 8-bit
         // components with extra_info = 1, so each is divided by 10.
         let mut bits = vec![true, true];
-        // SerializedInt(72, max=128): 7 value bits, LSB first.
-        for i in 0..7 {
-            bits.push((72u32 >> i) & 1 != 0);
-        }
+        write_serialized_int(&mut bits, 72, 128); // 7 value bits
         for byte in [0xFFu8, 0x01, 0x80] {
-            for i in 0..8 {
-                bits.push((byte >> i) & 1 != 0);
-            }
+            write_byte(&mut bits, byte);
         }
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-        let v = read_optional_quantized_vector(&mut reader, SPAWN_SCALE_FACTOR, ORIGIN)
-            .unwrap()
-            .unwrap();
+        let v = read_optional_quantized_vector(&mut reader, SPAWN_SCALE_FACTOR, ORIGIN).unwrap();
         assert_eq!(v.x, -0.1, "0xFF as i8 is -1");
         assert_eq!(v.y, 0.1);
         assert_eq!(v.z, -12.8, "0x80 as i8 is -128");
@@ -237,12 +212,12 @@ mod tests {
     #[test]
     fn rotation_short_skips_absent_components() {
         let mut bits = vec![true];
-        for i in 0..16 {
-            bits.push((16384u32 >> i) & 1 != 0);
+        for byte in 16384u16.to_le_bytes() {
+            write_byte(&mut bits, byte);
         }
         bits.push(false);
         bits.push(false);
-        let data = bits_to_bytes(&bits);
+        let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let r = read_rotation_short(&mut reader).unwrap();
         assert_eq!(r.pitch, 90.0);
