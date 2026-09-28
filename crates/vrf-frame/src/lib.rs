@@ -149,7 +149,8 @@ pub struct FrameWalk {
 }
 
 /// [`walk_demo_frames`] returning only `(packets, frames)`, kept for callers
-/// of the published function; it drops [`FrameSkips`].
+/// of the published function; it drops [`FrameSkips`] and the non-finite
+/// time count.
 pub fn iter_demo_frames(
     data: &[u8],
     flags: u32,

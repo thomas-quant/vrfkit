@@ -39,9 +39,11 @@ counter. A counter that stops being printed must not read as zero
 (docs/archive/PROJECT_STATUS.md 5-O), and one that cannot move must not read
 as success (`dead_counters`). `FAILURES` are verify_build_corpus.py's
 SINK_ZERO read off the summary, pinned by test_check_decode_errors_corpus.py.
-As there, only counts are gated: CNC `attempted` and the movement tails' bit
-totals are printed, not failed on, and `RPC suffix bits` stays ungated because
-verify_build_corpus.py records `rpc_suffix_bits_dropped` as a limitation.
+As there, only counts are gated: CNC `attempted`, the movement tails' bit
+totals and the envelope and ActiveBlinds trailer counts are printed, not failed
+on (verify_build_corpus.py checks the trailers' 24 bits per stream), and `RPC
+suffix bits` stays ungated because verify_build_corpus.py records
+`rpc_suffix_bits_dropped` as a limitation.
 
 Every failure gate is either backed in `MUST_MOVE` / `CHECKPOINT_MUST_MOVE` by
 the work counter whose movement makes its zero evidence, or listed in
