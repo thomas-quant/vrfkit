@@ -4,20 +4,12 @@
 //! hold three components -- so each one is a bit read followed by a `Display`
 //! of the model type in [`crate::types`].
 
-use vrf_bitio::BitReader;
+use vrf_bitio::{BitError, BitReader};
 
 use super::{DecodeError, DecodedValue, render};
 use crate::types::{
     FQuat, FRepMovement, FRotator, FTransform, FVector, RotatorQuantization, VectorQuantization,
 };
-
-pub(super) fn decode_vector_float(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_float_vector(r)?))
-}
-
-pub(super) fn decode_vector_double(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_double_vector(r)?))
-}
 
 pub(super) fn decode_vector_net_quantize(
     r: &mut BitReader<'_>,
@@ -29,33 +21,9 @@ pub(super) fn decode_vector_net_quantize(
     Ok(render(read_quantized_vector(r, scale)?))
 }
 
-pub(super) fn decode_vector_normal(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_fixed_vector_normal(r)?))
-}
-
-pub(super) fn decode_rotation_short(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_rotation_short(r)?))
-}
-
-pub(super) fn decode_rotation_byte(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_rotation_byte(r)?))
-}
-
-pub(super) fn decode_transform(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_transform(r)?))
-}
-
-pub(super) fn decode_rep_movement(
-    r: &mut BitReader<'_>,
-    rotation: RotatorQuantization,
-    location: VectorQuantization,
-) -> Result<DecodedValue, DecodeError> {
-    Ok(render(read_rep_movement(r, rotation, location)?))
-}
-
 // -- Shared vector/rotation reading functions ---------------------------------
 
-fn read_float_vector(r: &mut BitReader<'_>) -> Result<FVector, vrf_bitio::BitError> {
+pub(super) fn read_float_vector(r: &mut BitReader<'_>) -> Result<FVector, BitError> {
     Ok(FVector {
         x: f64::from(r.read_f32()?),
         y: f64::from(r.read_f32()?),
@@ -63,7 +31,7 @@ fn read_float_vector(r: &mut BitReader<'_>) -> Result<FVector, vrf_bitio::BitErr
     })
 }
 
-fn read_double_vector(r: &mut BitReader<'_>) -> Result<FVector, vrf_bitio::BitError> {
+pub(super) fn read_double_vector(r: &mut BitReader<'_>) -> Result<FVector, BitError> {
     Ok(FVector {
         x: r.read_f64()?,
         y: r.read_f64()?,
@@ -127,7 +95,7 @@ fn read_packed_quantized_vector(
     component_bit_count: u32,
     extra_info: u32,
     scale_factor: u32,
-) -> Result<FVector, vrf_bitio::BitError> {
+) -> Result<FVector, BitError> {
     let x_raw = r.read_bits(component_bit_count)?;
     let y_raw = r.read_bits(component_bit_count)?;
     let z_raw = r.read_bits(component_bit_count)?;
@@ -148,7 +116,7 @@ fn read_packed_quantized_vector(
 }
 
 /// Fixed-point normal vector: 3 x SerializedInt(65536), bias = 32768, scale = 32767.
-fn read_fixed_vector_normal(r: &mut BitReader<'_>) -> Result<FVector, vrf_bitio::BitError> {
+pub(super) fn read_fixed_vector_normal(r: &mut BitReader<'_>) -> Result<FVector, BitError> {
     const BIAS: i32 = 1 << 15;
     const SCALE: f64 = (BIAS - 1) as f64;
     const MAX: u32 = 1 << 16;
@@ -164,29 +132,24 @@ fn read_fixed_vector_normal(r: &mut BitReader<'_>) -> Result<FVector, vrf_bitio:
     })
 }
 
-fn read_rotation_short(r: &mut BitReader<'_>) -> Result<FRotator, vrf_bitio::BitError> {
-    let pitch = read_compressed_rotation_component(r, 16, 360.0 / 65536.0)?;
-    let yaw = read_compressed_rotation_component(r, 16, 360.0 / 65536.0)?;
-    let roll = read_compressed_rotation_component(r, 16, 360.0 / 65536.0)?;
+/// A compressed rotator: three components of `width` bits, 16 for the short
+/// form and 8 for the byte form. The degree scale `360 / 2^width` divides by
+/// a power of two, so it is exact in `f32` at both widths.
+pub(super) fn read_rotation(r: &mut BitReader<'_>, width: u32) -> Result<FRotator, BitError> {
+    let scale = 360.0 / (1u32 << width) as f32;
+    let pitch = read_compressed_rotation_component(r, width, scale)?;
+    let yaw = read_compressed_rotation_component(r, width, scale)?;
+    let roll = read_compressed_rotation_component(r, width, scale)?;
     Ok(FRotator { pitch, yaw, roll })
 }
 
-fn read_rotation_byte(r: &mut BitReader<'_>) -> Result<FRotator, vrf_bitio::BitError> {
-    let pitch = read_compressed_rotation_component(r, 8, 360.0 / 256.0)?;
-    let yaw = read_compressed_rotation_component(r, 8, 360.0 / 256.0)?;
-    let roll = read_compressed_rotation_component(r, 8, 360.0 / 256.0)?;
-    Ok(FRotator { pitch, yaw, roll })
-}
-
-/// A presence bit followed by an unsigned component of `width` bits (16 for
-/// the short form, 8 for the byte form), scaled to degrees. Shared by
-/// [`read_rotation_short`] and [`read_rotation_byte`], which differ only in
-/// that width and scale.
+/// A presence bit followed by an unsigned component of `width` bits, scaled
+/// to degrees.
 fn read_compressed_rotation_component(
     r: &mut BitReader<'_>,
     width: u32,
     scale: f32,
-) -> Result<f32, vrf_bitio::BitError> {
+) -> Result<f32, BitError> {
     if r.read_bit()? {
         let v = r.read_bits(width)?;
         Ok(v as f32 * scale)
@@ -195,7 +158,7 @@ fn read_compressed_rotation_component(
     }
 }
 
-fn read_quaternion(r: &mut BitReader<'_>) -> Result<FQuat, vrf_bitio::BitError> {
+fn read_quaternion(r: &mut BitReader<'_>) -> Result<FQuat, BitError> {
     Ok(FQuat {
         x: r.read_f32()?,
         y: r.read_f32()?,
@@ -204,7 +167,7 @@ fn read_quaternion(r: &mut BitReader<'_>) -> Result<FQuat, vrf_bitio::BitError> 
     })
 }
 
-fn read_transform(r: &mut BitReader<'_>) -> Result<FTransform, vrf_bitio::BitError> {
+pub(super) fn read_transform(r: &mut BitReader<'_>) -> Result<FTransform, BitError> {
     let rotation = read_quaternion(r)?;
     let translation = read_float_vector(r)?;
     let scale = read_float_vector(r)?;
@@ -215,7 +178,7 @@ fn read_transform(r: &mut BitReader<'_>) -> Result<FTransform, vrf_bitio::BitErr
     })
 }
 
-fn read_rep_movement(
+pub(super) fn read_rep_movement(
     r: &mut BitReader<'_>,
     rotation_quant: RotatorQuantization,
     location_quant: VectorQuantization,
@@ -236,8 +199,8 @@ fn read_rep_movement(
     // raised no error and moved no counter. See docs/DATA.md.
     let location = read_quantized_vector(r, location_quant.scale())?;
     let rotation = match rotation_quant {
-        RotatorQuantization::ByteComponents => read_rotation_byte(r)?,
-        RotatorQuantization::ShortComponents => read_rotation_short(r)?,
+        RotatorQuantization::ByteComponents => read_rotation(r, 8)?,
+        RotatorQuantization::ShortComponents => read_rotation(r, 16)?,
     };
     // Whole units: Unreal's default VelocityQuantizationLevel, and what the
     // wire shows wherever the level is observable -- the displacement between

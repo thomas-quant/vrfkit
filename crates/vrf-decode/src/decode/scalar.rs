@@ -145,13 +145,9 @@ pub(crate) fn render_fname(name: String, number: i32) -> Result<String, DecodeEr
 }
 
 /// Both an object NetGUID and a gameplay tag are wire IntPacked values;
-/// only the name at the call site says which wire concept they are.
-fn decode_int_packed(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+/// only the declared type says which wire concept they are.
+pub(super) fn decode_int_packed(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     Ok(DecodedValue::I64(i64::from(r.read_int_packed()?)))
-}
-
-pub(super) fn decode_object_net_guid(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    decode_int_packed(r)
 }
 
 /// 128-bit GUID: 4 x u32 LE -> formatted as standard hex GUID.
@@ -221,10 +217,6 @@ pub(super) fn decode_enum_remaining_bits(
     Ok(DecodedValue::I64(i64::from(
         r.read_bits(to_read as u32)? as u32
     )))
-}
-
-pub(super) fn decode_gameplay_tag(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    decode_int_packed(r)
 }
 
 /// Lowercase hex digits, indexed by nibble.

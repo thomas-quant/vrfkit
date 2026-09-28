@@ -192,21 +192,20 @@ fn dispatch_decode(
             .map(|tree| DecodedValue::Str(tree.to_json()))
             .map_err(DecodeError::FTextTree),
         FieldType::FName => scalar::decode_fname(r),
-        FieldType::ObjectNetGuid => scalar::decode_object_net_guid(r),
+        FieldType::ObjectNetGuid | FieldType::GameplayTag => scalar::decode_int_packed(r),
         FieldType::Guid => scalar::decode_guid(r),
         FieldType::SerializedInt { max } => scalar::decode_serialized_int(r, max),
         FieldType::EnumRemainingBits => scalar::decode_enum_remaining_bits(r, bit_count),
-        FieldType::GameplayTag => scalar::decode_gameplay_tag(r),
         FieldType::ByteArray { max_bytes } => scalar::decode_byte_array(r, max_bytes),
-        FieldType::VectorFloat => geometry::decode_vector_float(r),
-        FieldType::VectorDouble => geometry::decode_vector_double(r),
+        FieldType::VectorFloat => Ok(render(geometry::read_float_vector(r)?)),
+        FieldType::VectorDouble => Ok(render(geometry::read_double_vector(r)?)),
         FieldType::VectorNetQuantize { scale } => geometry::decode_vector_net_quantize(r, scale),
-        FieldType::VectorNetQuantizeNormal => geometry::decode_vector_normal(r),
-        FieldType::RotationShort => geometry::decode_rotation_short(r),
-        FieldType::RotationByte => geometry::decode_rotation_byte(r),
-        FieldType::Transform => geometry::decode_transform(r),
+        FieldType::VectorNetQuantizeNormal => Ok(render(geometry::read_fixed_vector_normal(r)?)),
+        FieldType::RotationShort => Ok(render(geometry::read_rotation(r, 16)?)),
+        FieldType::RotationByte => Ok(render(geometry::read_rotation(r, 8)?)),
+        FieldType::Transform => Ok(render(geometry::read_transform(r)?)),
         FieldType::RepMovement { rotation, location } => {
-            geometry::decode_rep_movement(r, rotation, location)
+            Ok(render(geometry::read_rep_movement(r, rotation, location)?))
         }
         FieldType::Raw | FieldType::Skip => Err(DecodeError::RawOrSkip),
     }
