@@ -411,8 +411,8 @@ Private evidence is retained under `gas-reference-census-root`,
 `gas-inner-investigation`, `fastarray-root-corpus`, `fastarray-observations-corpus`,
 `gas-fastarray-main-comparison`, `patchvolume-investigation`,
 `patchvolume-fastarray-entries`, `patchvolume-fastarray-root-accepted`, and,
-for the 2026-09-28 build-scope and chained-route entries,
-`auto-20260928/scratch-fastarray`: the walkers, per-export results, end-to-end
-receipts, and the mutation checks of the extractor's tests. The reports keep
+for the 2026-09-28 build-scope and chained-route entries, that run's private
+evidence set: the walkers, per-export results, end-to-end receipts, and the
+mutation checks of the extractor's tests. The reports keep
 sample scope and source/output hashes; private player observations are not
 included in this repository document.

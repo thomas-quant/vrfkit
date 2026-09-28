@@ -289,9 +289,10 @@ and 925 Python tests.
 
 ## Reproduction
 
-Inputs remain private. The scripts, their JSON outputs and both corpus exports
-are under `$env:LOCALAPPDATA/vrfkit/auto-20260928` (`audit-main`, and
-`scratch-upstream-raze` for this change).
+Inputs remain private. The scripts and their JSON outputs are kept outside the
+repository. The two corpus exports they were computed from (the 1,018-replay
+export at `259ed10` and the candidate re-export) were not kept; exporting the
+same replays with `--checkpoints` regenerates them.
 
 ```powershell
 python -W error tools/compare_descriptor_sources.py --baseline third_party/vrp `
