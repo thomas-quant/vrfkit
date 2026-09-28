@@ -438,21 +438,45 @@ mod tests {
 
     #[test]
     fn cnc_resolve_exact_class_name() {
-        // AresAbilitySystem -> AresAbilitySystemComponent_ClassNetCache (Component suffix)
+        // AresWorldSettings -> AresWorldSettings_ClassNetCache (the plain
+        // suffix; the Component suffix is cnc_resolve_component_suffix)
         let mut cache = NetGuidCache::new();
         cache.add_export_group(NetFieldExportGroup::new(
-            "/Script/ShooterGame.AresAbilitySystemComponent_ClassNetCache".into(),
+            "/Script/ShooterGame.AresWorldSettings_ClassNetCache".into(),
             80,
             1,
         ));
         let g = cache
-            .resolve_cnc_for_instance_name("AresAbilitySystem")
+            .resolve_cnc_for_instance_name("AresWorldSettings")
             .unwrap();
         assert_eq!(
             g.path,
-            "/Script/ShooterGame.AresAbilitySystemComponent_ClassNetCache"
+            "/Script/ShooterGame.AresWorldSettings_ClassNetCache"
         );
         assert_eq!(g.len(), 1);
+    }
+
+    /// A stem declared under more than one convention resolves by suffix
+    /// order: `_ClassNetCache`, then `Component_ClassNetCache`, then
+    /// `_C_ClassNetCache`. The groups are registered in the reverse order, so
+    /// registration order cannot produce the same answers.
+    #[test]
+    fn cnc_resolve_tries_the_suffixes_in_order() {
+        let c = "/Game/X/X.X_C_ClassNetCache";
+        let component = "/Script/ShooterGame.XComponent_ClassNetCache";
+        let plain = "/Script/ShooterGame.X_ClassNetCache";
+        for (paths, expected) in [
+            (&[c, component, plain][..], plain),
+            (&[c, component][..], component),
+        ] {
+            assert_eq!(
+                cache_of(paths)
+                    .resolve_cnc_for_instance_name("X")
+                    .map(|g| g.path.as_str()),
+                Some(expected),
+                "{paths:?}"
+            );
+        }
     }
 
     #[test]

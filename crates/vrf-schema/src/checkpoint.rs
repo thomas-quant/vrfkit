@@ -617,6 +617,24 @@ mod tests {
         }
     }
 
+    /// An archive with no GUID entries and one slotless group per
+    /// `(path, path_name_index)`; `build` writes index 7 for every group.
+    fn groups_at(groups: &[(&str, u32)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(groups.len() as u32).to_le_bytes());
+        for (path, index) in groups {
+            push_fstring(&mut body, path);
+            push_packed(&mut body, *index);
+            push_packed(&mut body, 0); // no field slots
+        }
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&((20 + body.len() - 8) as u32).to_le_bytes());
+        archive.extend_from_slice(&[0u8; 12]);
+        archive.extend_from_slice(&0u32.to_le_bytes()); // no guid entries
+        archive.extend_from_slice(&body);
+        archive
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         guids: Vec<GuidEvent>,
@@ -1091,6 +1109,9 @@ mod tests {
     /// incremental re-export that [`NetGuidCache::add_export_group`] merges --
     /// it is two different paths claiming one slot.
     ///
+    /// The probe's path half is the same case from the other side: one path,
+    /// or a spelling of it the cache registers as an alias, declared again at
+    /// another index. `add_export_group` would merge that without an error.
     #[test]
     fn two_groups_at_one_index_fail_before_returning_an_untrusted_cache() {
         // `build` writes path_name_index 7 for every group, so two groups is
@@ -1110,6 +1131,27 @@ mod tests {
                 ..
             }
         ));
+
+        for (first, second) in [
+            ("/Script/G.A", "/Script/G.A"),
+            (
+                "/Game/Characters/Jett/Jett_C",
+                "/Game/Characters/_Core/Jett/Jett_C",
+            ),
+        ] {
+            let archive = groups_at(&[(first, 7), (second, 8)]);
+            match read_checkpoint_tables(&archive, &mut NetGuidCache::new()) {
+                Err(SchemaError::CheckpointGroupCollision {
+                    path,
+                    path_name_index,
+                }) => assert_eq!(
+                    (path.as_str(), path_name_index),
+                    (second, 8),
+                    "{first} then {second}"
+                ),
+                other => panic!("{first} then {second}: expected a collision, got {other:?}"),
+            }
+        }
     }
 
     /// Two groups at different indices are the ordinary case and must not be
