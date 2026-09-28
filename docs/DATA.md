@@ -1024,10 +1024,19 @@ were added, it read 22 of them `ok` in 773 (pair, replay) cases where every one
 of their RepLayout rows was still bare, at up to 4.9% of the target
 (`ShieldDamageSection` beside `ChildDamageSectionComponent`). Simulating a
 rename used to put a leaf at 15.6% of its target, which the old rule did catch;
-a leaf whose remap simply did not fire was the case it missed. The C# reference's four ClassNetCache pairs still use
-the ratio, and on two old-build exports (12.03, 12.06) `DamageHandlerComponent`
-reads `broken` under it on one or two bare RepLayout rows -- before this change
-too; that pair does not remap RepLayout blocks at all.
+a leaf whose remap simply did not fire was the case it missed. The C# reference's four ClassNetCache pairs are judged the
+same way on the rows they route: the leaf's ClassNetCache rows -- the whole
+payloads a block keeps when it reaches no function table -- against
+`<class>_ClassNetCache`, and any bare row is `broken`. They used to keep the
+ratio over RepLayout rows, which is not what they remap, and it was wrong both
+ways. Over the 1,018 exports of the 2026-09-28 build audit it read
+`DamageHandlerComponent` `broken` on 10 healthy ones (12.03, 12.06, three 13.01,
+13.02, four 13.05) over one or two stray RepLayout rows, and `absent` on the
+rest, although `DamageableComponent_ClassNetCache` held rows on all 1,018
+(72.2M in all); and a scratch build that broke the pair's remap -- 89,843
+rows gone from that group and 4,563 payloads bare under the leaf on a 13.05
+export -- left its output unchanged byte for byte. RepLayout rows under a
+ClassNetCache-only leaf are now a printed count, not a failure.
 
 What the checker cannot see is a rename itself: the old leaf simply vanishes.
 The renamed component arrives under its new name, which is why the checker

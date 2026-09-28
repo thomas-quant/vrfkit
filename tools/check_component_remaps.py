@@ -14,15 +14,17 @@ the one replay that has a baseline. This works on any export, which is the point
 run it against a replay from a new build before trusting the output.
 
 For each pair it compares the rows still bare under the leaf with the rows
-that reached the class group. Only RepLayout rows count as bare: ClassNetCache
-rows are dropped (see `CNC_MARKERS`), because every RepLayout remap leaves its
-component's RPC stream bare by design.
+that reached the class group, counting only the kind of block the pair remaps.
+For a RepLayout pair that is RepLayout rows: ClassNetCache rows are dropped
+(see `CNC_MARKERS`), because every RepLayout remap leaves its component's RPC
+stream bare by design. For a ClassNetCache pair it is the other way round: the
+leaf's ClassNetCache rows against the class's `_ClassNetCache` group.
 
-    RepLayout pair, no RepLayout row left bare       -> ok      (the remap is doing work)
-    RepLayout pair, any RepLayout row left bare      -> broken  (it did not fire for them)
-    ClassNetCache pair, bare well under the target   -> ok
-    ClassNetCache pair, bare a large share of it     -> broken
-    neither present                                  -> absent  (not in this replay; says nothing)
+    RepLayout pair, no RepLayout row left bare           -> ok      (the remap is doing work)
+    RepLayout pair, any RepLayout row left bare          -> broken  (it did not fire for them)
+    ClassNetCache pair, no ClassNetCache row left bare   -> ok
+    ClassNetCache pair, any ClassNetCache row left bare  -> broken
+    neither present                                      -> absent  (not in this replay; says nothing)
 
 A RepLayout pair tolerates nothing because healthy is exactly zero. It used to
 be judged by a ratio -- bare rows up to 5% of the target's -- on the grounds
@@ -41,9 +43,34 @@ where every one of their RepLayout rows was still bare, at up to 4.9% of the
 target (`ShieldDamageSection` beside `ChildDamageSectionComponent`). The strict
 rule reads those `broken`, and `ok` once the remap is in.
 
-The four ClassNetCache pairs (the C# reference's effect components) keep the
-ratio. Their verdict compares bare RepLayout rows with the RepLayout group,
-which is not what those pairs remap, so it is a coarse signal and no more.
+The four ClassNetCache pairs (the C# reference's effect components) are held to
+the same zero, on the rows they route. They used to keep the ratio over
+RepLayout rows -- the leaf's against the class's RepLayout group -- and neither
+of those is what the pairs remap, so the verdict was wrong both ways. Over the
+1,018 exports of the 2026-09-28 build audit, `LocationalEffectManager` read
+`absent` on all 1,018 and `DamageHandlerComponent` on 1,008, although their
+`_ClassNetCache` groups held rows on every one of the 1,018 (119.9M and
+72.2M in all); and `DamageHandlerComponent` read `broken` on the other 10
+(12.03, 12.06, three 13.01, 13.02, four 13.05) over one or two stray
+RepLayout rows, for a pair that does not remap RepLayout blocks at all. A
+scratch build with that pair's target renamed moved 89,843 rows off
+`DamageableComponent_ClassNetCache` on a 13.05 export and left 4,563 payloads
+bare under the leaf, and this check's output did not change by a byte.
+
+What a ClassNetCache remap that did not fire leaves is exactly those payloads:
+with no function table the block is kept whole under the leaf, as a
+`CNC_MARKERS` row. On a healthy export there are none -- 0 in all 4,072
+(pair, export) cases of that audit -- so one is `broken`. RepLayout rows under
+a ClassNetCache-only leaf are not the pair's to route; they are counted and
+printed on every run, never failed on.
+
+Only `DamageHandlerComponent` -> `DamageableComponent` depends on the table
+today. The other three are also found by instance name
+(`<leaf>Component_ClassNetCache`, `resolve_cnc_for_instance_name`): with all
+four targets renamed in a scratch build, a 13.06 export still routed every one
+of their rows (16,421 / 34,366 / 34,139) and lost only the damage handler's
+17,982. For those three this verdict fires only when a build renames the class
+out from under both routes.
 
 What the verdicts DO NOT cover
 -----------------------------
@@ -102,8 +129,14 @@ BARE_SHARE_LIMIT = 0.05
 
 #: Field names that mark a ClassNetCache block rather than a RepLayout property.
 #: Two of the remaps are RepLayout-only by design, so their RPC stream stays bare
-#: and must not be read as the remap failing.
+#: and must not be read as the remap failing. For a ClassNetCache pair these are
+#: the rows that count: see `cnc_bare_counts`.
 CNC_MARKERS = ("_cnc_h", "__vrfkit_unresolved_class_net_cache_payload__")
+
+#: Suffix of the group a ClassNetCache pair routes its leaf's blocks to: the
+#: remap's target class path plus this is what `GroupKind::ClassNetCache`
+#: accepts in `sink/paths.rs`.
+CNC_GROUP_SUFFIX = "_ClassNetCache"
 
 
 class Verdict(NamedTuple):
@@ -146,15 +179,52 @@ def unparsed_entries(table: str, pairs) -> int:
     return table.count("GroupKind::") - len(pairs)
 
 
-def verdicts(pairs, rows_by_group, kinds=None) -> list[Verdict]:
+def class_net_cache_verdict(leaf, native, rows_by_group, cnc_bare) -> Verdict:
+    """A ClassNetCache pair: the leaf's ClassNetCache rows against the rows on
+    `<native>_ClassNetCache`, strictly.
+
+    Bare is tested first, and alone decides `broken`: the class group also
+    takes blocks that reach it without the table -- 78 rows from 2 objects on
+    a 13.01 export whose remap was broken in a scratch build, beside 5,247
+    payloads from 108 objects left bare -- so rows on the target do not show
+    that the remap fired. `rows_by_group[leaf]` holds the leaf's RepLayout
+    rows, which the pair does not route; they go in the detail, never the
+    state.
+    """
+    routed = rows_by_group.get(native + CNC_GROUP_SUFFIX, 0)
+    bare = cnc_bare.get(leaf, 0)
+    rep_layout = rows_by_group.get(leaf, 0)
+    note = (f"; {rep_layout} RepLayout rows under the leaf, which a ClassNetCache "
+            f"pair does not remap" if rep_layout else "")
+    if bare:
+        return Verdict(
+            leaf, native, "broken",
+            f"{bare} ClassNetCache rows still bare ({routed} on the class's "
+            f"{CNC_GROUP_SUFFIX} group); a working ClassNetCache remap leaves none"
+            + note)
+    if routed:
+        return Verdict(leaf, native, "ok",
+                       f"{routed} rows on the {CNC_GROUP_SUFFIX} group, 0 still bare"
+                       + note)
+    return Verdict(leaf, native, "absent",
+                   "no ClassNetCache rows in this replay" + note)
+
+
+def verdicts(pairs, rows_by_group, kinds=None, cnc_bare=None) -> list[Verdict]:
     """Classify each pair against a `{group_path: row count}` map.
 
     `kinds` maps a leaf to its `GroupKind`. A `RepLayout` pair is judged
-    strictly; any other (or one with no kind given) by the ratio.
+    strictly on RepLayout rows; a `ClassNetCache` pair strictly on the
+    ClassNetCache rows `cnc_bare` holds for its leaf (see
+    `class_net_cache_verdict`); a pair with no kind given by the ratio.
     """
     kinds = kinds or {}
+    cnc_bare = cnc_bare or {}
     out = []
     for leaf, native in pairs:
+        if kinds.get(leaf) == "ClassNetCache":
+            out.append(class_net_cache_verdict(leaf, native, rows_by_group, cnc_bare))
+            continue
         native_rows = rows_by_group.get(native, 0)
         bare_rows = rows_by_group.get(leaf, 0)
         if not native_rows and not bare_rows:
@@ -196,6 +266,20 @@ def bare_counts(fields_by_group) -> dict:
     }
 
 
+def cnc_bare_counts(fields_by_group) -> dict:
+    """The rows `bare_counts` drops: ClassNetCache rows per bare group.
+
+    What a ClassNetCache pair is judged on -- its component's blocks that did
+    not reach the class's `_ClassNetCache` group. Together with `bare_counts`
+    this accounts for every row of a bare group exactly once.
+    """
+    return {
+        group: sum(n for name, n in names.items()
+                   if any(m in (name or "") for m in CNC_MARKERS))
+        for group, names in fields_by_group.items()
+    }
+
+
 def unmapped_bare_groups(rows_by_group, pairs, min_rows: int = 1) -> list:
     """`(group, rows)` for bare groups no pair claims, worst first.
 
@@ -230,8 +314,12 @@ def nothing_checked(verdicts_) -> bool:
     return all(v.state == "absent" for v in verdicts_)
 
 
-def row_counts(export_dir: Path) -> dict:
-    """`{group_path: rows}`, with bare groups counting RepLayout blocks only."""
+def row_counts(export_dir: Path) -> tuple[dict, dict]:
+    """`({group_path: rows}, {bare group: ClassNetCache rows})`.
+
+    In the first map bare groups count RepLayout blocks only; the second holds
+    the ClassNetCache rows that leaves out, for the ClassNetCache pairs.
+    """
     import pyarrow.parquet as pq
 
     table = pq.read_table(export_dir / "fields.parquet",
@@ -245,7 +333,18 @@ def row_counts(export_dir: Path) -> dict:
             by_group[group][name] += 1
     out = dict(totals)
     out.update(bare_counts(by_group))
-    return out
+    return out, cnc_bare_counts(by_group)
+
+
+def class_net_cache_leaf_rep_layout_rows(rows_by_group, kinds) -> int:
+    """RepLayout rows under the leaves of ClassNetCache pairs.
+
+    Not a failure -- those pairs do not remap RepLayout blocks -- but a count,
+    printed on every run with its zero, so the rows the old ratio called
+    `broken` stay visible without failing a healthy export.
+    """
+    return sum(rows_by_group.get(leaf, 0)
+               for leaf, kind in kinds.items() if kind == "ClassNetCache")
 
 
 def main() -> int:
@@ -273,8 +372,9 @@ def main() -> int:
               f"would check them", file=sys.stderr)
         return 1
 
-    rows = row_counts(args.export)
-    results = verdicts(pairs, rows, remap_kinds(table))
+    rows, cnc_bare = row_counts(args.export)
+    kinds = remap_kinds(table)
+    results = verdicts(pairs, rows, kinds, cnc_bare)
     tally = collections.Counter(v.state for v in results)
 
     for v in results:
@@ -283,6 +383,10 @@ def main() -> int:
 
     print(f"{len(pairs)} remaps: {tally['ok']} ok, {tally['absent']} absent, "
           f"{tally['broken']} broken")
+    # Unconditional, zero included: see class_net_cache_leaf_rep_layout_rows.
+    print(f"{class_net_cache_leaf_rep_layout_rows(rows, kinds)} RepLayout row(s) "
+          f"under the leaves of the ClassNetCache pairs, which do not remap "
+          f"RepLayout blocks (reported, not a failure)")
 
     # Where a RENAME shows up. No verdict above can see one -- see the module
     # docstring -- so the list is printed on every run, pass or fail.
