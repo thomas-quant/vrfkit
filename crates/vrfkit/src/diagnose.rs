@@ -18,8 +18,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use vrf_container::{
-    ChunkIterator, ChunkType, decompress_checkpoint, decompress_replay_data_with_trailing,
-    parse_checkpoint_chunk, parse_preamble,
+    ChunkIterator, ChunkType, decompress_checkpoint_with_trailing,
+    decompress_replay_data_with_trailing, parse_checkpoint_chunk, parse_preamble,
 };
 use vrf_decode::OverlayErrorReport;
 use vrf_frame::{FrameSkips, walk_demo_frames};
@@ -40,6 +40,8 @@ struct DiagCheckpointStats {
     /// Snapshot frames with a NaN or infinite time, read as 0 ms.
     non_finite_frame_times: u64,
     packets: u64,
+    /// As `driver::checkpoints::CheckpointStats::trailing_bytes`: framing
+    /// residual after each archive plus archive bytes the codec never read.
     trailing_bytes: u64,
     guid_entries: u64,
     group_records: u64,
@@ -348,8 +350,9 @@ fn process_checkpoint_chunk(
     cp: &mut DiagCheckpointStats,
 ) -> Result<(), CliError> {
     let cp_chunk = parse_checkpoint_chunk(payload)?;
-    cp.trailing_bytes += cp_chunk.trailing_bytes as u64;
-    let plain = decompress_checkpoint(cp_chunk.archive, compressed, encrypted)?;
+    let (plain, unread) =
+        decompress_checkpoint_with_trailing(cp_chunk.archive, compressed, encrypted)?;
+    cp.trailing_bytes += (cp_chunk.trailing_bytes + unread) as u64;
 
     let mut cache = NetGuidCache::new();
     let tables = read_checkpoint_tables(&plain, &mut cache)
