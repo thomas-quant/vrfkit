@@ -146,11 +146,10 @@ use vrf_container::{
     ChunkIterator, ChunkType, decompress_replay_data_with_trailing, parse_preamble,
 };
 use vrf_frame::{FrameSkips, walk_demo_frames};
-use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::{DiagnosticEvent, NetStats, SkipReason};
 use vrf_schema::NetGuidCache;
 
-use crate::error::CliError;
+use crate::error::{CliError, replication_reader};
 use crate::report;
 use crate::sink::{ChannelState, ExportSink, RecordBuffers};
 
@@ -273,8 +272,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     eprintln!("validating RepLayout grammar on framed ReplayData content blocks...");
 
     let mut cache = NetGuidCache::new();
-    let mut repl_reader = ReplicationReader::new(branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut repl_reader = replication_reader(branch)?;
 
     let mut total_packets: u32 = 0;
     // Frames walked, not just packets. Packets are counted inside the frame

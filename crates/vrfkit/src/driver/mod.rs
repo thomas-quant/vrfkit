@@ -37,10 +37,9 @@ use vrf_export::{
     MovementWriter, NetGuidRecord, NetGuidWriter,
 };
 use vrf_frame::walk_demo_frames;
-use vrf_net::pipeline::ReplicationReader;
 use vrf_schema::NetGuidCache;
 
-use crate::error::CliError;
+use crate::error::{CliError, replication_reader};
 use crate::manifest::{self, ManifestQuality};
 use crate::sink::{ChannelState, ExportSink, RecordBuffers};
 use checkpoints::{CheckpointStats, ReplayContext};
@@ -146,8 +145,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
 
     // -- Setup replication reader and schema cache --------------------------
     let mut cache = NetGuidCache::new();
-    let mut repl_reader = ReplicationReader::new(ctx.branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut repl_reader = replication_reader(ctx.branch)?;
 
     // -- Iterate chunks ----------------------------------------------------
     let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);

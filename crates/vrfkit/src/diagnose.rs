@@ -43,11 +43,10 @@ use vrf_container::{
 };
 use vrf_decode::OverlayErrorReport;
 use vrf_frame::{FrameSkips, walk_demo_frames};
-use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::NetStats;
 use vrf_schema::{NetGuidCache, read_checkpoint_tables};
 
-use crate::error::CliError;
+use crate::error::{CliError, replication_reader};
 use crate::sink::{ChannelState, ExportSink, FailureAggregate, RecordBuffers, SinkTotals};
 
 /// Per-checkpoint-chunk metadata the JSON reports alongside the checkpoint
@@ -104,8 +103,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     eprintln!("diag: walking ReplayData and Checkpoint chunks, writing no table...");
 
     let mut cache = NetGuidCache::new();
-    let mut repl_reader = ReplicationReader::new(&branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut repl_reader = replication_reader(&branch)?;
 
     let mut total_packets: u32 = 0;
     let mut replay_data_chunks: u64 = 0;
@@ -383,8 +381,7 @@ fn process_checkpoint_chunk(
         .map_err(|e| CliError::Usage(format!("checkpoint {}: {e}", cp_chunk.id)))?;
 
     let frame = &plain[tables.frame_offset..];
-    let mut reader = ReplicationReader::new(branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut reader = replication_reader(branch)?;
     let mut channels = ChannelState::new();
     channels.enable_failure_aggregate(include_payloads);
     let mut buffers = RecordBuffers::default();

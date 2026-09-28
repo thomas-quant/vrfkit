@@ -23,13 +23,12 @@ use vrf_export::{
     CheckpointNetGuidRecord, CheckpointNetGuidWriter, NetGuidRecord, PartialWriter,
 };
 use vrf_frame::{FrameSkips, walk_demo_frames};
-use vrf_net::pipeline::ReplicationReader;
 use vrf_net::stats::NetStats;
 use vrf_schema::{
     CheckpointReadError, CheckpointTableSink, NetGuidCache, read_checkpoint_tables_with_sink,
 };
 
-use crate::error::CliError;
+use crate::error::{CliError, replication_reader};
 use crate::sink::{ChannelState, ExportSink, RecordBuffers, SinkTotals};
 
 /// Counters for the optional checkpoint pass. Kept together so the summary
@@ -284,8 +283,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.export_field_rows_written += declarations.field_rows;
 
     let frame = &plain[tables.frame_offset..];
-    let mut reader = ReplicationReader::new(ctx.branch)
-        .map_err(|e| CliError::Usage(format!("unsupported branch: {e}")))?;
+    let mut reader = replication_reader(ctx.branch)?;
     let mut channels = ChannelState::new();
     let mut buffers = RecordBuffers::default();
     let mut packet_count = 0u64;
