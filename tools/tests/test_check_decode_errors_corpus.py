@@ -584,30 +584,35 @@ class DeadCheckpointCounterTests(unittest.TestCase):
          "Checkpoint leaf errors"),
     )
 
+    @staticmethod
+    def dead(totals):
+        return guard.dead_counters(totals, guard.CHECKPOINT_MUST_MOVE,
+                                   " (with --checkpoints)")
+
     def test_a_working_checkpoint_corpus_has_no_dead_counters(self):
-        self.assertEqual(guard.dead_checkpoint_counters(self.WORKING), [])
+        self.assertEqual(self.dead(self.WORKING), [])
 
     def test_a_corpus_where_no_checkpoint_field_decoded_is_not_a_pass(self):
         totals = dict(self.WORKING, checkpoint_decoded=0)
-        dead = guard.dead_checkpoint_counters(totals)
+        dead = self.dead(totals)
         self.assertTrue(dead)
 
     def test_a_corpus_where_no_checkpoint_blob_decoded_is_not_a_pass(self):
         totals = dict(self.WORKING, checkpoint_blobs_decoded=0)
-        dead = guard.dead_checkpoint_counters(totals)
+        dead = self.dead(totals)
         self.assertTrue(dead)
 
     def test_each_checkpoint_work_counter_that_stays_at_zero_is_named_alone(self):
         for key, label, gate in self.CASES:
             with self.subTest(counter=key):
-                dead = guard.dead_checkpoint_counters(dict(self.WORKING, **{key: 0}))
+                dead = self.dead(dict(self.WORKING, **{key: 0}))
                 self.assertEqual(len(dead), 1, dead)
                 self.assertTrue(dead[0].startswith(f"{label} totalled 0"), dead)
                 self.assertIn(gate, dead[0])
 
     def test_a_checkpoint_pass_that_decoded_nothing_fails_on_every_one(self):
         totals = {key: 0 for key in self.WORKING}
-        self.assertEqual(len(guard.dead_checkpoint_counters(totals)),
+        self.assertEqual(len(self.dead(totals)),
                          len(self.CASES))
 
 

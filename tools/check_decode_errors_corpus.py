@@ -561,7 +561,7 @@ def _vacuous(gates: tuple[str, ...]) -> str:
     return ", ".join(FAILURE_LABELS[key] for key in gates)
 
 
-def dead_counters(totals: dict[str, int]) -> list[str]:
+def dead_counters(totals: dict[str, int], must_move=MUST_MOVE, suffix: str = "") -> list[str]:
     """Corpus totals that never moved, as human-readable failures.
 
     `Decode errors: 0` is only a statement about the overlay if something was
@@ -571,19 +571,13 @@ def dead_counters(totals: dict[str, int]) -> list[str]:
     clean sweep. The array and movement gates had the same hole after they
     were added: their work counters were summed and printed and never read, so
     an array walker that was never reached passed as "0 array failures".
-    """
-    return [f"{label} totalled 0 across the corpus: nothing decoded, so the "
-            f"zero in {_vacuous(gates)} says nothing"
-            for key, label, gates in MUST_MOVE if not totals.get(key)]
 
-
-def dead_checkpoint_counters(totals: dict[str, int]) -> list[str]:
-    """`dead_counters`, for the checkpoint pass. Only meaningful -- and only
-    ever called -- when `--checkpoints` was requested; see `CHECKPOINT_MUST_MOVE`.
+    The checkpoint pass passes `CHECKPOINT_MUST_MOVE` and the suffix
+    ` (with --checkpoints)`, and only when `--checkpoints` was requested.
     """
-    return [f"{label} totalled 0 across the corpus (with --checkpoints): "
-            f"nothing decoded, so the zero in {_vacuous(gates)} says nothing"
-            for key, label, gates in CHECKPOINT_MUST_MOVE if not totals.get(key)]
+    return [f"{label} totalled 0 across the corpus{suffix}: nothing decoded, so "
+            f"the zero in {_vacuous(gates)} says nothing"
+            for key, label, gates in must_move if not totals.get(key)]
 
 
 def unbacked_line(unbacked: tuple[tuple[str, str], ...]) -> str:
@@ -656,7 +650,7 @@ def export_command(exe: Path, replay: Path, out: Path, with_checkpoints: bool) -
 
 def _export_one(
     exe: Path, replay: Path, with_checkpoints: bool = False,
-) -> tuple[str, dict[str, int] | None, str]:
+) -> tuple[dict[str, int] | None, str]:
     """Export one replay to a scratch dir and return its overlay counters."""
     out = Path(tempfile.mkdtemp(prefix="vrfkit-decode-"))
     try:
@@ -668,11 +662,10 @@ def _export_one(
             errors="replace",
             timeout=600,
         )
-        counters, err = read_counters((r.stdout or "") + (r.stderr or ""),
-                                      r.returncode, require_checkpoints=with_checkpoints)
-        return replay.name, counters, err
+        return read_counters((r.stdout or "") + (r.stderr or ""),
+                             r.returncode, require_checkpoints=with_checkpoints)
     except subprocess.TimeoutExpired:
-        return replay.name, None, "timeout"
+        return None, "timeout"
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
@@ -731,7 +724,7 @@ def main() -> int:
     done = 0
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        for name, counters, err in pool.map(
+        for counters, err in pool.map(
             lambda f: _export_one(args.exe, f, with_checkpoints=args.checkpoints),
             files,
         ):
@@ -846,7 +839,7 @@ def main() -> int:
             print(f"    {line}", file=sys.stderr)
         return 1
     if args.checkpoints:
-        dead_cp = dead_checkpoint_counters(totals)
+        dead_cp = dead_counters(totals, CHECKPOINT_MUST_MOVE, " (with --checkpoints)")
         if dead_cp:
             print(f"\nFAILED: {len(dead_cp)} checkpoint counter(s) never "
                   f"moved, so the clean checkpoint failure counters beside "
