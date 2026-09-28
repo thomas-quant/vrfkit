@@ -37,6 +37,7 @@ for the measured scope, common checks and remaining limits.
 - Observed section timelines and explicit continuity gaps: [`docs/SECTION_TIMELINE.md`](docs/SECTION_TIMELINE.md)
 - Packet-ordered section comparisons: [`docs/SECTION_PACKET_TIMELINE.md`](docs/SECTION_PACKET_TIMELINE.md)
 - Numeric FastArray observations and remaining item semantics: [`docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md`](docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md)
+- Ground-area volume cells (molotov, slow, net and wire patches): [`docs/GROUND_VOLUMES.md`](docs/GROUND_VOLUMES.md)
 - Build it, test it, open a PR: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - Working conventions (for an AI agent): [`CLAUDE.md`](CLAUDE.md)
 

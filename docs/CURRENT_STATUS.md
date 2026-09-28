@@ -79,10 +79,12 @@ the AbilitiesAndBuffs bodies the parser files under
 [the chained-route entry](GAS_AND_PATCHVOLUME_INVESTIGATION.md#chained-route-admitted-2026-09-28).
 
 The investigation also records private structural evidence that the same
-generic walk fully consumes 26,303 selected PatchVolume windows. PatchVolume
-does not yet have a public extraction route or an established item/property
-schema. In both populations, numeric boundaries do not establish gameplay
-meanings.
+generic walk fully consumes 26,303 selected PatchVolume windows. In both
+populations, numeric boundaries alone do not establish gameplay meanings.
+PatchVolume has since gained both a schema and a public route: its windows are
+GroundVolumeComponent `FragmentInfo` cells, decoded by
+`tools/extract_ground_volumes.py` with the names each replay declares -- see
+[ground-area volumes](GROUND_VOLUMES.md). Parquet is unchanged.
 
 ## Completed evidence phases
 

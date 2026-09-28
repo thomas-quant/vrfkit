@@ -379,6 +379,16 @@ other. No actor-class remap, named PatchVolume property decoder or typed
 Parquet change is introduced. The private extraction demonstrates numerical
 structure; its property values remain raw pending an independent item schema.
 
+**Follow-up (2026-09-28): schema established.** The replays declare it.
+`PatchVolume` is a `/Script/DynamicVolume.GroundVolumeComponent`, the windows
+carry its ClassNetCache property `FragmentInfo`, and the twelve item handles
+are that class's declared cell members (`X`, `Y`, `ConvexHullPoints`,
+`Floor`, `Ceiling`, ...), at handles that move between builds. With the
+declared names, checksums and element grammar, all 36,661 windows of the
+1,018-export corpus decode exactly with `tools/extract_ground_volumes.py`, and
+the values pass a second reader and the owner-spawn geometry checks. See
+[ground-area volumes](GROUND_VOLUMES.md).
+
 ## Next work
 
 - Keep the four healing reference roles separate in any association schema;
@@ -390,8 +400,9 @@ structure; its property values remain raw pending an independent item schema.
   route, in main and checkpoint rows on all 24 builds. See
   [the chained route](#chained-route-admitted-2026-09-28). The `_cnc_h1`
   checkpoint stream is still unobserved.
-- Seek an independent PatchVolume subobject/item schema before assigning
-  names or decoding property values in its now-consumed windows.
+- Done: the PatchVolume item schema, from the replays' own declarations --
+  see [ground-area volumes](GROUND_VOLUMES.md). `Status` and `bIsActive`
+  meanings remain open.
 - The section arithmetic discrepancies and InputEventData action meanings
   remain open, as recorded in [the current backlog](CURRENT_RAW_BACKLOG.md).
 
