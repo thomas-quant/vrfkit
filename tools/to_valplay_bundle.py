@@ -1498,15 +1498,12 @@ def _write_manifest(manifest: dict, output_dir: Path, adapter: dict):
 
 
 def _dict_column_to_pylist(column):
-    """A dictionary-encoded column as a list that SHARES its string objects.
+    """A dictionary-encoded column as a list SHARING its string objects
+    (`to_pylist` for any other column).
 
-    `column.cast('string').to_pylist()` builds one Python str per ROW. On
-    02d4d478's fields.parquet that is 1,246,812 objects for `group_path`'s 443
-    distinct values and 1,207,778 for `field_name`'s 3,954 -- a hundred-odd MB
-    of duplicates, and 2.3x slower than reading the dictionary and indexing it.
-
-    Falls back to `to_pylist` for a column that is not dictionary-encoded, so
-    the caller does not have to care which it got.
+    `cast('string').to_pylist()` makes one str per row: on 02d4d478's
+    fields.parquet 1,246,812 for `group_path`'s 443 values and 1,207,778 for
+    `field_name`'s 3,954, a hundred-odd MB of duplicates, 2.3x slower.
     """
     arr = column.combine_chunks()
     if not pa.types.is_dictionary(arr.type):
@@ -1517,16 +1514,10 @@ def _dict_column_to_pylist(column):
 
 
 def _numeric_column_to_pylist(column):
-    """A non-nullable numeric column as a Python list, via numpy.
-
-    `to_pylist()` boxes one Python int per row through pyarrow's per-element
-    type dispatch; `to_numpy()` hands over the raw buffer and `.tolist()`
-    re-boxes it in C. On 02d4d478's 1,246,812-row fields.parquet that is ~14x
-    faster for the uint32 columns (250 ms -> 16 ms each).
-
-    Only safe on a column with NO nulls: numpy has no integer NaN, so a nullable
-    integer column would be widened to float64 with NaN where the holes were.
-    Use `_nullable_numeric_to_pylist` for those.
+    """A numeric column with NO nulls as a Python list, via numpy: ~14x
+    faster than `to_pylist` on 02d4d478's 1,246,812-row uint32 columns
+    (250 ms -> 16 ms each). numpy has no integer NaN and would widen a
+    nullable column to float64; use `_nullable_numeric_to_pylist` for those.
     """
     return column.to_numpy(zero_copy_only=False).tolist()
 
@@ -1534,11 +1525,9 @@ def _numeric_column_to_pylist(column):
 def _nullable_numeric_to_pylist(column):
     """A nullable numeric column as a list of (value | None), via numpy.
 
-    Reads the validity bitmap and the primitive buffer separately. The nulls are
-    filled with a type-matched sentinel only so the buffer survives `to_numpy`
-    without being widened to float64; the mask then punches None back in, so the
-    result matches `to_pylist` element-for-element (same value AND same Python
-    type) while being ~3x faster.
+    Nulls are filled with a type-matched sentinel so `to_numpy` does not widen
+    to float64, then the validity mask puts None back: equal to `to_pylist`
+    in value and Python type, ~3x faster.
     """
     arr = column.combine_chunks()
     n = len(arr)
@@ -1557,11 +1546,7 @@ def _nullable_numeric_to_pylist(column):
 
 
 class _FieldColumns(NamedTuple):
-    """fields.parquet held column-wise.
-
-    pyarrow iteration row-by-row is slow; batch-extracting each column to a
-    Python list once and indexing it is much faster.
-    """
+    """fields.parquet as one Python list per column (row iteration is slow)."""
 
     n_rows: int
     time_ms: list
@@ -1624,30 +1609,19 @@ def _load_field_columns(fields_path: Path, verbose: bool) -> _FieldColumns:
 
 
 def _group_rows(cols: _FieldColumns):
-    """Classify every field row: RPC vs replicated property, plus actor lifetimes.
+    """Group field rows into property and RPC groups (row indices by key),
+    plus each actor's first/last appearance.
 
-    RPCs are the rows whose group_path contains '_ClassNetCache'; properties are
-    everything else.
-
-    One pass, not two: `prop_groups` and `rpc_groups` are dicts, so they iterate
-    in insertion order, and that order decides how events tying on
-    (packet_id, time_ms) are ordered in the written bundle. Splitting this loop
-    would reshuffle them.
+    RPC rows are those whose group_path contains '_ClassNetCache'. One pass:
+    the dicts' insertion order decides how events tying on (packet_id,
+    time_ms) are written, and splitting the loop would reshuffle them.
     """
-    # Track actor first/last appearance for actor_spawned/actor_closed
-    # (fallback when actors.parquet is absent).
+    # First/last appearance: the lifetime fallback without actors.parquet.
     actor_first = {}  # actor_net_guid -> (time_ms, packet_id, group_path)
     actor_last = {}   # actor_net_guid -> (time_ms, packet_id)
-
-    # Group key -> list of row indices
-    # For properties: (packet_id, actor_net_guid, object_net_guid, group_path)
-    # For RPCs: (packet_id, actor_net_guid, group_path, handle)
     prop_groups = defaultdict(list)
     rpc_groups = defaultdict(list)
-    # Counted, not merely skipped. vrfkit reports the same quantity as
-    # `quality.net.unresolved_rpc_payloads_preserved`; recording this
-    # adapter's own count of the rows it actually saw makes the two
-    # comparable instead of leaving the skip invisible.
+    # Counted, to compare with quality.net.unresolved_rpc_payloads_preserved.
     unresolved_cnc_rows = 0
 
     col_time = cols.time_ms
@@ -1668,7 +1642,6 @@ def _group_rows(cols: _FieldColumns):
         pid = col_pid[i]
         ms = col_time[i]
 
-        # Track actor lifecycle
         if actor not in actor_first:
             actor_first[actor] = (ms, pid, gp)
         actor_last[actor] = (ms, pid)
@@ -1678,33 +1651,29 @@ def _group_rows(cols: _FieldColumns):
             handle = col_handle[i]
             rpc_groups[(pid, actor, gp, handle)].append(i)
         else:
-            # Keyed by subobject too: a character replicates several
-            # ItemSlot subobjects, and merging them into one event makes
-            # the inventory look like a single slot.
+            # Keyed by subobject too: a character's several ItemSlot
+            # subobjects would otherwise merge into one slot.
             prop_groups[(pid, actor, col_obj[i], gp)].append(i)
 
     return actor_first, actor_last, prop_groups, rpc_groups, unresolved_cnc_rows
 
 
-#: `actors.event` -> the bundle event type it publishes as. THREE values, not
-#: two: `dormant` is the server suspending replication of an actor that is
-#: still alive, so it is NOT a despawn and must not share a type with one. See
-#: CLAUDE.md ("Dormancy is not destruction; only `close` is a despawn") and
-#: `tools/extract_active_effects.py`, which pairs the same column.
-#:
-#: A value absent from this map is published as `actor_lifecycle_unknown` and
-#: counted, never folded into the nearest known type.
+#: `actors.event` -> the bundle event type (`open` is actor_spawned). THREE
+#: values: `dormant` is the server suspending replication of a live actor, NOT
+#: a despawn (CLAUDE.md; extract_active_effects.py pairs the same column), and
+#: valplay's ability_detail.py pairs spawn/close into a lifetime, so a dormant
+#: settled smoke or wall published as a close read as destroyed. A type of its
+#: own, not a flag on actor_closed, so consumers that do not know it ignore
+#: it. An unmapped value becomes `actor_lifecycle_unknown`, counted.
 _ACTOR_EVENT_TYPES = {
     "close": "actor_closed",
     "dormant": "actor_dormant",
 }
 
 
-# Event-chunk payload words are NOT self-describing.  This is the same closed
-# vocabulary used by ``crates/vrfkit/src/driver/mod.rs`` after its residual-zero
-# layout check: only these groups have a structurally established word count.
-# An unknown future group still crosses as a labelled timestamp, but none of
-# its payload words are assigned a meaning here.
+# Event-chunk payload words are not self-describing: the closed vocabulary of
+# crates/vrfkit/src/driver/mod.rs's residual-zero layout check. An unknown
+# group still crosses as a labelled timestamp, with no words.
 _SERVER_TIMELINE_WORD_COUNTS = {
     "characterDeath": 2,
     "characterUltimateUsed": 1,
@@ -1715,12 +1684,10 @@ _SERVER_TIMELINE_WORD_COUNTS = {
     "spikeExploded": 0,
 }
 
-# Structural Event-payload values measured over all 109,126 Event chunks in
-# the 527-replay, three-build corpus. These are public Unreal enum constants,
-# not replay-provided identities. The adapter rechecks them rather than trusting
-# an arbitrary Parquet string before allowing `payload_name` across the privacy
-# seam. Tag and seconds travel only when the whole tuple agrees; partial or
-# third-party rows fall back to the already-public group/times/words.
+# Structural payload values measured over all 109,126 Event chunks of the
+# 527-replay, three-build corpus: public Unreal enum constants, rechecked here
+# before `payload_name` may cross. Tag, name and seconds cross only as a whole
+# agreeing tuple; other rows keep the public group/times/words.
 _SERVER_TIMELINE_PAYLOAD_TAGS = {
     "characterDeath": 8,
     "characterUltimateUsed": 11,
@@ -1743,19 +1710,10 @@ EVENT_PAYLOAD_TIME_TOLERANCE_MS = 1.001
 
 
 class _PacketTimeIndex:
-    """Place packet-less Event chunks among packet-addressed replication rows.
-
-    Event chunks carry authoritative replay-relative times but no packet id;
-    the rest of ``events.ndjson`` is sorted in packet order because that is the
-    wire order.  For each event time we therefore use the largest packet id
-    observed at or before that time.  The prefix maximum keeps the derived key
-    monotone even if one malformed frame made a later packet report an earlier
-    timestamp -- the existing regression counter remains responsible for
-    surfacing that damaged time axis.
-
-    This key is ordering metadata only.  It is never published as if the Event
-    chunk itself declared a packet association.
-    """
+    """Order packet-less Event chunks among packet-ordered rows: an event time
+    maps to the largest packet id seen at or before it. The prefix maximum
+    stays monotone even when a bad frame gives a later packet an earlier time
+    (the regression counter reports that). Ordering only, never published."""
 
     def __init__(self, cols: "_FieldColumns"):
         max_packet_at_time = {}
@@ -1779,16 +1737,12 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
                                   verbose: bool) -> tuple[list, int | None]:
     """Publish the Event-chunk timeline through a privacy-safe allowlist.
 
-    ``events.parquet`` also holds a replay-scoped id, free-form metadata and
-    the original payload bytes. Any of those may contain account or match
-    identifiers, so none crosses this adapter seam. The structural payload
-    FString crosses only when it equals the fixed public enum constant for the
-    group and its tag/time tuple also matches the measured layout. Older
-    Parquet schemas simply omit those additive columns.
-
-    Returns ``(events, rows_read)``.  ``None`` means the table was absent;
-    zero means it was present and empty.  That distinction is needed for the
-    producer-declared row-count reconciliation in the bundle manifest.
+    events.parquet also holds a replay-scoped id, free-form metadata and raw
+    payload bytes, any of which may identify an account or match, so none
+    crosses. The payload FString crosses only when it equals the group's
+    public enum constant and the tag/time tuple matches the measured layout;
+    older exports lack those columns. Returns ``(events, rows_read)``,
+    rows_read None when the table is absent (not 0: it is reconciled).
     """
     path = export_dir / "events.parquet"
     if not path.exists():
@@ -1856,19 +1810,15 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                         verbose: bool, tally: "_Tally"):
     """Build actor_spawned / actor_closed / actor_dormant events.
 
-    Returns ``(events, guid_class)``. `guid_class` maps an actor GUID to its
-    spawn class path and is filled from the same pass, because the shot events
-    built later need it for weapon identity.
-
-    `tally` is required, not optional: the unknown-lifecycle-value counter is
-    the only thing that distinguishes "this export used the three values this
-    adapter knows" from "a fourth appeared and was published as an unknown".
+    Returns ``(events, guid_class)``; `guid_class` (actor GUID -> spawn class
+    path) is filled in the same pass for the shots' weapon identity. `tally`
+    is required: only its unknown-value counter says a fourth value appeared.
     """
     events = []
     guid_class = {}  # actor net guid -> spawn class path
     actor_event_counts = Counter()
 
-    # actors.parquet is authoritative: it carries class/archetype/location from
+    # actors.parquet is authoritative: class, archetype and location come from
     # the spawn data itself.
     actors_path = export_dir / "actors.parquet"
     if actors_path.exists():
@@ -1889,28 +1839,20 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
 
         for i in range(len(actors_table)):
             if a_event[i] == 'open':
-                # Spawn coordinates are Float32 on the wire and in the Parquet
-                # column; widening them to Python floats would print the binary
-                # artefact instead of the value the reference shows.
-                #
-                # A missing coordinate stays missing. Only static actors reach
-                # here with no spawn data at all -- 27 opens on 02d4d478 --
-                # because the parser now writes the wire's (0,0,0) default for
-                # a dynamic actor whose location bit is clear rather than
-                # dropping it (pipeline.rs, read_optional_quantized_vector).
-                # Substituting {0,0,0} here would put those 27 back among the
-                # 66 that really do spawn at the origin.
+                # Float32 spawn coordinates, written shortest. A missing one
+                # stays null: only static actors lack spawn data (27 opens on
+                # 02d4d478; for a dynamic actor with its location bit clear the
+                # parser writes the wire's (0,0,0) default, pipeline.rs
+                # read_optional_quantized_vector), and {0,0,0} would mix them
+                # with the 66 that really spawn at the origin.
                 has_loc = a_sx[i] is not None or a_sy[i] is not None or a_sz[i] is not None
                 location = _vec3(
                     _f32_shortest(a_sx[i]) if a_sx[i] is not None else 0,
                     _f32_shortest(a_sy[i]) if a_sy[i] is not None else 0,
                     _f32_shortest(a_sz[i]) if a_sz[i] is not None else 0,
                 ) if has_loc else None
-                # Spawn rotation is independent of spawn location: a static
-                # actor can omit both, while a dynamic projectile may carry a
-                # direction even when its position is the origin.  Preserve
-                # that distinction and never fabricate a zero rotation for a
-                # row whose three nullable wire columns are all absent.
+                # Rotation is independent of location (a projectile at the
+                # origin may carry a direction); null when all three are null.
                 has_rotation = (
                     a_spitch[i] is not None
                     or a_syaw[i] is not None
@@ -1926,18 +1868,14 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                 } if has_rotation else None
                 class_path = a_class[i]
                 if class_path:
-                    # First open wins: a GUID can be reused after a close, but
-                    # the shot events that reference it belong to its first life.
+                    # First open wins: a GUID reused after a close still
+                    # belongs, for the shots, to its first life.
                     guid_class.setdefault(a_guid[i], class_path)
-                # A static actor has no archetype and no class, and the
-                # reference emits null for both. Deriving "Default__" + the leaf
-                # of an empty class path produced the literal string
-                # "Default__" for all 27 of them -- a value that looks like an
-                # archetype and identifies nothing.
+                # Null for a static actor, as in the reference; never a bare
+                # "Default__".
                 archetype = a_arch[i]
-                # guid_class above keeps the full object path (weapon lookup
-                # matches on it); the event carries the package path the
-                # reference emits.
+                # guid_class keeps the full object path the weapon lookup
+                # matches; the event carries the reference's package path.
                 event = {
                     "type": "actor_spawned",
                     "time_ms": a_time[i],
@@ -1950,37 +1888,13 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                 }
                 events.append((a_pid[i], a_time[i], event))
             else:
-                # `actors.event` has THREE values -- open / close / dormant --
-                # and this was an `else`, so every dormant row published as
-                # `actor_closed`. Dormancy is the server stopping replication
-                # of an actor that is STILL ALIVE, which for a settled smoke,
-                # wall or trap is its normal steady state; valplay reads
-                # `actor_closed` as a despawn (pipeline/metrics/
-                # ability_detail.py pairs spawn/close into a lifetime), so a
-                # settled ability read as destroyed with its lifetime
-                # truncated to the moment it stopped moving.
-                #
-                # `tools/extract_active_effects.py` in this same directory
-                # already gets this right and says why. This is that reasoning
-                # applied one hop later, at the last seam before the data is
-                # consumed.
-                #
-                # WHY a distinct type rather than a flag on `actor_closed`:
-                # valplay filters events by exact `type` equality and has no
-                # event-type allowlist, so a new type is ignored by consumers
-                # that do not know it while `actor_closed` immediately stops
-                # over-reporting despawns. A flag would leave every existing
-                # consumer reading dormancy as destruction until valplay
-                # changed in lockstep. See BUNDLE_SCHEMA_VERSION for why this
-                # is not a version bump.
+                # close, dormant, or a value this adapter does not know: see
+                # _ACTOR_EVENT_TYPES, and BUNDLE_SCHEMA_VERSION for the bump.
                 raw_event = a_event[i]
                 event_type = _ACTOR_EVENT_TYPES.get(raw_event)
                 if event_type is None:
-                    # A fourth value the parser learned and this adapter has
-                    # not. Defaulting it to a despawn is the bug above; it is
-                    # published under its own type carrying the raw value, and
-                    # counted, so it is a visible unknown rather than a
-                    # plausible close.
+                    # Its own type with the raw value, and counted: a visible
+                    # unknown, never a plausible close.
                     tally.bump("unknown_actor_lifecycle_events")
                     event_type = "actor_lifecycle_unknown"
                 actor_event_counts[event_type] += 1
@@ -1989,9 +1903,7 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                     "time_ms": a_time[i],
                     "actor_net_guid": a_guid[i],
                     "channel": a_chan[i],
-                    # The wire's own value, forwarded so a consumer can audit
-                    # the mapping above instead of trusting this adapter's
-                    # choice of type name.
+                    # The wire's value, so a consumer can audit the mapping.
                     "actor_event": raw_event,
                 }
                 events.append((a_pid[i], a_time[i], event))
@@ -2001,7 +1913,7 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
             for name, count in sorted(actor_event_counts.items()):
                 print(f"    {name}: {count:,}")
     else:
-        # Fallback: infer from first/last field appearance (legacy behavior)
+        # Legacy fallback: lifetimes from the first/last field row.
         for actor, (ms, pid, gp) in actor_first.items():
             class_path = _group_path_to_class(gp)
             archetype = _group_path_to_archetype(gp)
@@ -2015,13 +1927,8 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
             }
             events.append((pid, ms, event))
 
-        # This branch infers lifetimes from the first and last field row for
-        # each actor because actors.parquet is absent, so there is no `event`
-        # column and no dormancy information AT ALL -- the last field row is
-        # the last time the actor was seen, whatever the reason. `actor_event`
-        # is therefore null rather than "close": this path cannot tell a
-        # despawn from a dormancy, and claiming either would be inventing the
-        # distinction the actors.parquet branch above exists to preserve.
+        # No `event` column here: the last field row cannot tell a despawn
+        # from dormancy, so `actor_event` is null, not "close".
         for actor, (ms, pid) in actor_last.items():
             event = {
                 "type": "actor_closed",
