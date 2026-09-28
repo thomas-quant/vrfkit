@@ -67,6 +67,26 @@ const SWIFT_GS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits
 /Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C";
 const SWIFT_PS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
 /Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
+const PLAY_CONTINUOUS: &str =
+    "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect";
+const STOP_CONTINUOUS: &str =
+    "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect";
+const FROM_CLIENT: &str =
+    "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient";
+const REPLAY_AT_LOCATION: &str =
+    "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation";
+const ONE_SHOT_AT_LOCATION: &str =
+    "/Script/ShooterGame.LocationalEffectManagerComponent:ClientPlayOneShotEffectAtLocation";
+const DAMAGE_BASE: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base";
+const DAMAGE_POINT: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point";
+const FORCE_REMOVE: &str =
+    "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule";
+const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/\
+Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
+const CAGE_TRAP_Q: &str =
+    "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C";
+const CAGE_TRAP_4: &str =
+    "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C";
 
 /// One name, two properties: the byte-shaped `B` and the 32-bit `B`
 /// (checksum 943211507, the second word of the player-state GUID -- see
@@ -202,14 +222,7 @@ fn raze_scoped_identities_require_their_exact_checksum() {
     // The Remove RPC is another group: exact identity means the scoped
     // `Duration` checksum does not reach it. (Its `ModuleType` IS typed, but
     // through the table entry's checksum, which is not this mechanism.)
-    assert_eq!(
-        resolve(
-            "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule",
-            "Duration",
-            Some(1_815_021_954)
-        ),
-        None
-    );
+    assert_eq!(resolve(FORCE_REMOVE, "Duration", Some(1_815_021_954)), None);
     assert_eq!(
         resolve(
             "/Script/ShooterGame.ShooterCharacter:ClientResetRemoteMovementPrediction",
@@ -395,24 +408,23 @@ fn canonical_group_leaves_a_bomb_class_alone() {
 
 #[test]
 fn bomb_player_crosshair_fields_are_typed_without_the_colliding_b() {
-    const GROUP: &str = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C";
     for field in [
         "bHasOutline",
         "bDisplayCenterDot",
         "bShowLines",
         "bUseAdvancedOptions",
     ] {
-        assert_typed(GROUP, field, Some(FieldType::Bool));
+        assert_typed(BOMB_PS, field, Some(FieldType::Bool));
     }
     for field in ["OutlineThickness", "CenterDotSize", "LineLength", "Opacity"] {
-        assert_typed(GROUP, field, Some(FieldType::Float));
+        assert_typed(BOMB_PS, field, Some(FieldType::Float));
     }
     for field in ["G", "R"] {
-        assert_typed(GROUP, field, Some(FieldType::Byte));
+        assert_typed(BOMB_PS, field, Some(FieldType::Byte));
     }
-    assert_typed(GROUP, "ProfileName", Some(FieldType::FString));
+    assert_typed(BOMB_PS, "ProfileName", Some(FieldType::FString));
     assert_eq!(
-        TABLE.lookup(GROUP, "B"),
+        TABLE.lookup(BOMB_PS, "B"),
         None,
         "B has both 8- and 32-bit wire fields"
     );
@@ -506,10 +518,7 @@ fn table_is_sorted() {
 
 #[test]
 fn lookup_finds_known_field() {
-    let ft = TABLE.lookup(
-        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
-        "CompetitiveTier",
-    );
+    let ft = TABLE.lookup(BOMB_PS, "CompetitiveTier");
     assert_eq!(ft, Some(FieldType::Int32));
 }
 
@@ -582,7 +591,7 @@ fn ability_fuel_fields_are_typed() {
 #[test]
 fn ping_latency_is_typed() {
     assert_typed(
-        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        BOMB_PS,
         "Ping",
         Some(FieldType::SerializedInt { max: 65536 }),
     );
@@ -598,10 +607,7 @@ fn equippable_used_is_an_object_net_guid() {
     // the adapter guessed a fixed 16-bit LE integer and produced values that
     // were never valid NetGUIDs. tools/apply_type_corrections.py restores
     // the real type.
-    for group in [
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
-    ] {
+    for group in [DAMAGE_BASE, DAMAGE_POINT] {
         assert_eq!(
             TABLE.lookup(group, "EquippableUsed"),
             Some(FieldType::ObjectNetGuid),
@@ -621,10 +627,7 @@ fn equippable_used_is_an_object_net_guid() {
 /// exact-quote match must not reach `...IsQueued` (a Bool).
 #[test]
 fn the_death_montage_parameters_are_object_net_guids() {
-    for group in [
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
-    ] {
+    for group in [DAMAGE_BASE, DAMAGE_POINT] {
         for field in [
             "DeathMontageEffectOverride",
             "DeathMontageEffectOverrideContext",
@@ -667,7 +670,7 @@ fn transition_context_is_an_object_net_guid() {
 
 #[test]
 fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
-    let group = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
+    let group = HAWK;
     assert_typed(group, "PostControlVelocity", Some(FieldType::VectorDouble));
     assert_ne!(
         TABLE.lookup(
@@ -688,7 +691,6 @@ fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
 /// so the entry states `RoundWholeNumber` and the export is world units.
 #[test]
 fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
-    const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
     assert_typed(
         HAWK,
         "ReplicatedMovement",
@@ -732,19 +734,13 @@ fn cypher_trap_fields_follow_the_13_01_rename() {
             "/Game/Characters/Gumshoe/S0/Ability_E/Ability_Gumshoe_E_TripWire.Ability_Gumshoe_E_TripWire_C",
             "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_TripWire.Ability_Gumshoe_4_TripWire_C",
         ),
-        (
-            "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
-            "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
-        ),
+        (CAGE_TRAP_4, CAGE_TRAP_Q),
     ] {
         for group in [old, new] {
             assert_typed(group, "CreatedByCharacter", Some(FieldType::ObjectNetGuid));
         }
     }
-    for group in [
-        "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
-        "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
-    ] {
+    for group in [CAGE_TRAP_4, CAGE_TRAP_Q] {
         assert_typed(
             group,
             "RelativeScale3D",
@@ -825,8 +821,8 @@ fn damage_geometry_fields_are_quantized_vectors() {
     // even though vrf-decode already implements the exact quantization.
     // Scales are the C# call sites: VectorNetQuantize = 1,
     // VectorNetQuantize100 = 100, VectorNetQuantizeNormal = unit vector.
-    const BASE: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base";
-    const POINT: &str = "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point";
+    const BASE: &str = DAMAGE_BASE;
+    const POINT: &str = DAMAGE_POINT;
 
     // DamageOrigin is on the shared base; the impact geometry only exists
     // for point damage, which is why the two groups differ here.
@@ -896,8 +892,7 @@ fn overlay_falls_back_to_the_b_prefixed_boolean_name() {
 
 #[test]
 fn overlay_falls_back_to_an_explicit_property_handle_when_the_wire_name_differs() {
-    const GROUP: &str =
-        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation";
+    const GROUP: &str = REPLAY_AT_LOCATION;
     let entries: &[OverlayEntry] = &[OverlayEntry {
         group_path: GROUP,
         field_name: "Location",
@@ -1668,16 +1663,8 @@ fn blind_duration_is_typed() {
 /// ADDITIONS in the same wire-evidence class as `Money` and `Ping`.
 #[test]
 fn heal_and_overheal_decay_scalars_are_typed() {
-    assert_typed(
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
-        "HealTaken",
-        Some(FieldType::Float),
-    );
-    assert_typed(
-        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
-        "DecayApplied",
-        Some(FieldType::Float),
-    );
+    assert_typed(HEAL_PARAMS, "HealTaken", Some(FieldType::Float));
+    assert_typed(DECAY_PARAMS, "DecayApplied", Some(FieldType::Float));
 }
 
 /// `PlayerScoreComponent.Score` is the per-player combat score. No C#
@@ -1858,22 +1845,10 @@ fn the_engine_fallback_does_not_invent_other_names() {
 #[test]
 fn the_rpc_transform_vectors_are_typed() {
     for (group, field) in [
-        (
-            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
-            "Scale3D",
-        ),
-        (
-            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
-            "Translation",
-        ),
-        (
-            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
-            "249",
-        ),
-        (
-            "/Script/ShooterGame.LocationalEffectManagerComponent:ClientPlayOneShotEffectAtLocation",
-            "248",
-        ),
+        (PLAY_CONTINUOUS, "Scale3D"),
+        (PLAY_CONTINUOUS, "Translation"),
+        (PLAY_CONTINUOUS, "249"),
+        (ONE_SHOT_AT_LOCATION, "248"),
         (
             "/Game/GameModes/Components/Comp_BombEvents.Comp_BombEvents_C:BombPlantedRPC",
             "PlantLocation",
@@ -1892,7 +1867,7 @@ fn the_rpc_transform_vectors_are_typed() {
 /// (1,1,1). Six f32s would give (0, 1.875, 0, 1.875, 0, 1.875).
 #[test]
 fn a_192_bit_rpc_vector_decodes_as_three_doubles() {
-    const GROUP: &str = "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect";
+    const GROUP: &str = PLAY_CONTINUOUS;
     let mut stats = OverlayStats::default();
     let mut bits = Vec::new();
     for _ in 0..3 {
@@ -2037,9 +2012,9 @@ fn checksums_whose_donors_disagree_are_omitted() {
 #[test]
 fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
     for group in [
-        "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+        PLAY_CONTINUOUS,
         "/Script/ShooterGame.EffectManagerComponent:MulticastPlayOneShotEffect",
-        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+        REPLAY_AT_LOCATION,
     ] {
         assert_eq!(
             TABLE.lookup(group, "AllianceFilter"),
@@ -2049,8 +2024,7 @@ fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
     }
     assert_checksum(2270825073, Some(FieldType::EnumByte));
 
-    const RECEIVER: &str =
-        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient";
+    const RECEIVER: &str = FROM_CLIENT;
     assert_eq!(
         TABLE.lookup(RECEIVER, "AllianceFilter"),
         None,
@@ -2072,7 +2046,7 @@ fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
 #[test]
 fn the_weapon_effect_rpcs_type_their_effect_manager_reference() {
     for group in [
-        "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient",
+        FROM_CLIENT,
         "/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
     ] {
         assert_typed(
@@ -2132,17 +2106,11 @@ const REP_MOVEMENT_LOCATION_EVIDENCE: [(&str, VectorQuantization); 27] = {
         // Scoped entry (tools/fixtures/scoped_type_evidence.json), a pawn.
         // 2,296 joins, 18 builds, ratio 100.000 (p1-p99 99.9986-100.0014),
         // every component within 0.0504 of spawn; re-measured at integration.
-        (
-            "/Game/Characters/Clay/S0/Ability_E/Pawn_Clay_E_Boomba.Pawn_Clay_E_Boomba_C",
-            RoundTwoDecimals,
-        ),
+        (CLAY_BOOMBOT, RoundTwoDecimals),
         // Table entry (apply_type_corrections.py ADDITIONS). 8,265 joins, 15
         // builds, ratio 1.000 (p1-p99 0.9998-1.0001), every component within
         // 0.50 of spawn; re-measured at integration with an independent join.
-        (
-            "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C",
-            RoundWholeNumber,
-        ),
+        (HAWK, RoundWholeNumber),
         // 5,280 joins, 5 builds, ratio 1.000
         (
             "/Game/Characters/Hunter/S0/Ability_4/Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C",
@@ -2332,16 +2300,8 @@ fn the_checksum_table_is_populated_and_sorted() {
 /// the checksum that carries it to Remove say `UInt32`.
 #[test]
 fn the_movement_time_pair_and_force_module_handle_are_typed() {
-    assert_typed(
-        "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
-        "StopMovementTime",
-        Some(FieldType::Float),
-    );
-    assert_typed(
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-        "HandleNumber",
-        Some(FieldType::UInt32),
-    );
+    assert_typed(STOP_CONTINUOUS, "StopMovementTime", Some(FieldType::Float));
+    assert_typed(FORCE_APPLY, "HandleNumber", Some(FieldType::UInt32));
     assert_checksum(3336285386, Some(FieldType::UInt32));
 }
 
@@ -2360,28 +2320,18 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
 fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
     for (group, checksum) in [
         ("/Script/ShooterGame.EffectManagerComponent", 1129645208),
-        (
-            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
-            2340855891,
-        ),
+        (PLAY_CONTINUOUS, 2340855891),
         (
             "/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
             2340855891,
         ),
-        (
-            "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
-            2251343646,
-        ),
+        (REPLAY_AT_LOCATION, 2251343646),
     ] {
         assert_typed(group, "EffectID", Some(FieldType::Int64));
         assert_checksum(checksum, Some(FieldType::Int64));
     }
     assert_eq!(
-        resolve(
-            "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
-            "EffectID",
-            Some(2340855891)
-        ),
+        resolve(STOP_CONTINUOUS, "EffectID", Some(2340855891)),
         Some(FieldType::Int64),
     );
     assert!(
@@ -2410,10 +2360,8 @@ fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
 /// Remove and Apply agree on 647,381 of 647,381 rows.
 #[test]
 fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() {
-    const APPLY: &str =
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
-    const REMOVE: &str =
-        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule";
+    const APPLY: &str = FORCE_APPLY;
+    const REMOVE: &str = FORCE_REMOVE;
     for (field, expected) in [
         ("RespawnNumber", FieldType::Int32),
         ("NetTimestamp", FieldType::Float),
@@ -2619,8 +2567,8 @@ fn the_weapon_classes_type_215_and_216_like_everything_else() {
 #[test]
 fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
     const GROUPS: [&str; 5] = [
-        "/Script/ShooterGame.LocationalEffectManagerComponent:ClientPlayOneShotEffectAtLocation",
-        "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+        ONE_SHOT_AT_LOCATION,
+        REPLAY_AT_LOCATION,
         "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayOneShotEffectAtLocation",
         "/Script/ShooterGame.EffectManagerComponent:ReplayRecordOneShotEffect",
         "/Script/ShooterGame.EffectManagerComponent:ReplayRecordContinuousEffect",
@@ -2681,7 +2629,7 @@ fn targeting_vectors_and_heal_causer_require_exact_scoped_checksums() {
             FieldType::VectorDouble,
         ),
         (
-            "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+            HEAL_PARAMS,
             "HealCauser",
             546618027,
             FieldType::ObjectNetGuid,
