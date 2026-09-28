@@ -1,20 +1,17 @@
 //! ClassNetCache payload brute-forcer for unresolved groups.
 //!
-//! When a ClassNetCache block's group is never declared in the replay,
-//! `function_count` -- the handle width for the RPC stream -- is unknown, and
-//! `vrf_net`'s ClassNetCache parser refuses to walk it. The payload is
-//! preserved as raw bits (one `__vrfkit_unresolved_class_net_cache_payload__`
-//! row), but every RPC inside is lost.
-//!
-//! This module recovers that structure. For a payload whose group is a known
-//! bare instance name (e.g. `AbilitiesAndBuffsComponent`), it brute-forces
-//! `function_count` from 2 to 256 by walking the ClassNetCache stream with each
-//! candidate and checking whether the walk consumes the buffer exactly.
+//! When a ClassNetCache block's group is never declared in the replay, its
+//! `function_count` -- the RPC stream's handle width -- is unknown and
+//! `vrf_net`'s parser refuses to walk it: the payload survives as one
+//! `__vrfkit_unresolved_class_net_cache_payload__` raw row and every RPC in it
+//! is lost. For a known bare instance name (e.g. `AbilitiesAndBuffsComponent`)
+//! this module tries `function_count` 2..=256 and keeps the walks that consume
+//! the buffer exactly.
 //!
 //! # Wire format
 //!
-//! The ClassNetCache RPC stream (confirmed against `parse_class_net_cache` in
-//! `vrf-net` and the C# `ParseClassNetCachePayload`) is:
+//! As `parse_class_net_cache` in `vrf-net` and the C#
+//! `ParseClassNetCachePayload` read it:
 //!
 //! ```text
 //! loop:
@@ -23,31 +20,25 @@
 //!   payload      = sub-reader of payload_bits bits
 //! ```
 //!
-//! There is no checksum bit and no explicit handle-0 terminator: the loop runs
-//! until the bit reader is at end. A "clean walk" is one where every iteration
-//! reads a handle, a well-formed payload-length, and a payload that fits, and
-//! the final payload ends exactly at the stream boundary.
+//! No checksum bit and no handle-0 terminator: the loop runs to the end of the
+//! stream, and a clean walk consumes it exactly.
 //!
 //! # The function_count ambiguity
 //!
-//! `SerializedInt(max)` spends `floor(log2(max))` bits unconditionally plus one
-//! extra bit conditionally. For handle values that are small relative to `max`,
-//! several adjacent `function_count` values produce the same handle width and
-//! therefore the same walk. On `AbilitiesAndBuffsComponent` every payload
-//! contains a single RPC at handle 1, and `function_count` 34-65 all walk
-//! cleanly -- the handle takes 6 bits in every case. The brute-force returns
-//! the **minimum** valid `function_count`, which is sufficient to decode the
-//! stream: every fc in the valid range produces identical RPC structure.
+//! `SerializedInt(max)` spends `floor(log2(max))` bits plus one conditional
+//! bit, so adjacent counts share a handle width and walk identically: on
+//! `AbilitiesAndBuffsComponent` every payload is one RPC at handle 1, read in
+//! 6 bits by every count in 34..=65, and vrfkit's `ABILITIES_AND_BUFFS_FC` is
+//! that band's minimum. The search returns the minimum clean count. Counts in
+//! DIFFERENT bands can also walk the same buffer, into a different structure;
+//! see [`BruteForceResult::ambiguous_with`].
 //!
-//! # Payload kind and inner structure
+//! # Payload kind
 //!
-//! ClassNetCache framing also carries custom-delta properties. The legacy
-//! `CncRpc` and `function_count` names do not establish that an entry is a
-//! function call. The C# reference reader dispatches custom-delta properties
-//! separately from `ReceivedRPC` after reading this shared outer framing.
-//!
-//! See [`AbilitiesActivation`] for the measured `AbilitiesAndBuffsComponent`
-//! inner structure and what it does and does not establish.
+//! ClassNetCache framing also carries custom-delta properties, which the C#
+//! reader dispatches apart from `ReceivedRPC` after this shared framing, so
+//! the `CncRpc` and `function_count` names do not prove a function call. See
+//! [`AbilitiesActivation`] for the measured `AbilitiesAndBuffsComponent` payload.
 
 use vrf_bitio::BitReader;
 
@@ -73,46 +64,25 @@ pub struct BruteForceResult {
     pub function_count: u32,
     /// The RPCs decoded with that function_count.
     pub rpcs: Vec<CncRpc>,
-    /// Another `function_count` that walks the SAME bits just as cleanly but
-    /// into a DIFFERENT set of RPCs, if one exists.
-    ///
-    /// The search returns the first clean walk, and the module reasoned that
-    /// this was safe because adjacent counts inside one handle-width band
-    /// produce identical structure. True, and not the whole condition: two
-    /// counts in DIFFERENT bands can both divide the same buffer exactly. This
-    /// module's own fixtures depend on knowing it -- `build_one_rpc_stream`
-    /// fills payloads with 1-bits specifically because a zero-filled one lets
-    /// wrong counts walk cleanly.
-    ///
-    /// `None` means the search checked every candidate and found no competing
-    /// parse, which is what makes the returned count a measurement rather than
-    /// the first thing that happened to fit.
+    /// Another `function_count` that walks the SAME bits just as cleanly into
+    /// a DIFFERENT set of RPCs, if one exists. Counts within one handle-width
+    /// band walk identically, but counts in different bands can both divide a
+    /// buffer exactly (why the test fixtures are 1-filled). `None` means every
+    /// candidate was checked and none competes: the returned count is a
+    /// measurement, not the first fit.
     pub ambiguous_with: Option<u32>,
 }
 
 /// Brute-force `function_count` for a ClassNetCache payload whose group is
-/// unresolved.
-///
-/// Tries each `function_count` from 2 to `MAX_FC`. The minimum value whose walk
-/// consumes the entire buffer cleanly (zero residual bits, at least one RPC) is
-/// returned. If no value works, returns `None`.
-///
-/// The payload is the transform-decoded byte buffer of the content block, and
-/// `bit_count` is its declared bit length (the same pair the preservation row
-/// stores).
-///
-/// The caller is expected to gate this on a specific group path (e.g.
-/// `AbilitiesAndBuffsComponent`) so that the brute-force is not attempted on
-/// every unresolved block. A group whose structure is genuinely unknown will
-/// return `None` and the preservation row stays as the only record.
+/// unresolved: the minimum count in 2..=`MAX_FC` whose walk consumes the whole
+/// buffer with at least one RPC, or `None`. `payload` and `bit_count` are the
+/// content block's transform-decoded bytes and declared bit length, as the
+/// preservation row stores them. Gate this on a known group path (e.g.
+/// `AbilitiesAndBuffsComponent`); for an unknown structure it returns `None`
+/// and the preservation row stays the only record.
 #[must_use]
 pub fn brute_force_function_count(payload: &[u8], bit_count: u32) -> Option<BruteForceResult> {
-    // The whole range is scanned even after a hit. Returning the first clean
-    // walk was justified by adjacent counts in one handle-width band producing
-    // identical structure -- which is true, and is a narrower statement than
-    // the one being relied on. Counts in different bands can also divide the
-    // same buffer exactly, and then the first hit is a choice between parses
-    // rather than the only reading. See `ambiguous_with`.
+    // The whole range is scanned even after a hit, for `ambiguous_with`.
     let mut chosen: Option<BruteForceResult> = None;
     for fc in 2..=MAX_FC {
         let Some(rpcs) = decode_cnc_payload(payload, bit_count, fc) else {
@@ -136,12 +106,9 @@ pub fn brute_force_function_count(payload: &[u8], bit_count: u32) -> Option<Brut
     chosen
 }
 
-/// Whether two candidate walks recovered the same RPC framing.
-///
-/// Structure is the handle, size and position of every RPC. Two counts that
-/// agree on all three describe the same stream and the choice between them does
-/// not matter; a disagreement on any of them means the payload has more than
-/// one clean reading.
+/// Whether two candidate walks recovered the same RPC framing: the handle,
+/// size and position of every RPC. Any disagreement means the payload has more
+/// than one clean reading.
 fn same_structure(a: &[CncRpc], b: &[CncRpc]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| {
@@ -151,16 +118,11 @@ fn same_structure(a: &[CncRpc], b: &[CncRpc]) -> bool {
         })
 }
 
-/// Walk a ClassNetCache stream with a known `function_count` and return the
-/// RPCs it contains.
-///
-/// This is the per-payload decode used after the function_count has been
-/// determined (e.g. by [`brute_force_function_count`] on a representative
-/// sample, or by a hardcoded constant for a known group). Mirrors
-/// `parse_class_net_cache` in `vrf-net` but returns the RPC list instead of
-/// driving a sink. Returns `None` when the walk is not clean -- a malformed
-/// read or no RPC at all -- rather than partial results; the caller should
-/// keep the preservation row in that case.
+/// Walk a ClassNetCache stream with a known `function_count` (from
+/// [`brute_force_function_count`] on a sample, or a constant for a known group)
+/// and return its RPCs, as `parse_class_net_cache` in `vrf-net` walks it. `None`
+/// when the walk is not clean -- a malformed read or no RPC -- never partial
+/// results; the caller keeps the preservation row.
 #[must_use]
 pub fn decode_cnc_payload(
     payload: &[u8],
@@ -172,8 +134,7 @@ pub fn decode_cnc_payload(
     let mut rpcs = Vec::new();
     // Every read fails rather than run past the window, so the loop leaves
     // only with the window consumed exactly (a sub-byte tail fails the next
-    // read). That exactness is what separates a decode from a payload of
-    // another format that merely parses into something plausible.
+    // read): what separates a decode from another format that merely parses.
     while !reader.at_end() {
         let handle = reader.read_serialized_int(handle_max).ok()?;
         let payload_bits = reader.read_int_packed().ok()?;
@@ -188,32 +149,16 @@ pub fn decode_cnc_payload(
     (!rpcs.is_empty()).then_some(rpcs)
 }
 
-/// Decoded inner structure of an `AbilitiesAndBuffsComponent` ClassNetCache
-/// RPC payload.
-///
-/// The outer RPC framing -- function handle plus payload size -- is recovered
-/// by [`decode_cnc_payload`]. This decomposes the payload itself, which was
-/// long believed to be an opaque class-specific blob. It is not: across
-/// thousands of payloads the layout is fully deterministic. A single flag bit
-/// (always `1`) is followed by a stream of little-endian `u32` words and an
-/// optional sub-32-bit trailing residual, and `bit_count == 1 + 32 * words +
-/// trailing` holds exactly on every payload. This Rust helper stops there --
-/// it is a legacy bit-slicing routine, not a semantic decoder.
-///
-/// A separate Python reader (`tools/extract_fastarray_observations.py`) reads
-/// the same payload under a different grammar and measures it as custom-delta
-/// FastArray framing: a support bit, four i32 header words, deleted item IDs,
-/// and changed items with packed handle/width property streams.
-///
-/// Word positions are not semantic field declarations either way. A September
-/// 2026 twelve-export audit observed increasing first words within
-/// actor/object/channel sequences, but the second word did not always equal
-/// the previously observed first word. Leading pairs also occurred on
-/// different identities. These observations do not establish an engine
-/// prediction-key type, gameplay state-sync event, cast identity, or buff
-/// meaning. The complete word list and residual remain available without
-/// assigning those roles; see `docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md` for
-/// the evidence scope, including the FastArray measurement above.
+/// The inner structure of an `AbilitiesAndBuffsComponent` ClassNetCache RPC
+/// payload (the framing is [`decode_cnc_payload`]'s): a flag bit (always 1),
+/// little-endian `u32` words and a sub-32-bit trailing residual, with
+/// `bit_count == 1 + 32 * words + trailing` exactly on every payload. A legacy
+/// bit-slicing routine, not a semantic decoder: the Python reader in
+/// `tools/extract_fastarray_observations.py` reads the same payload as
+/// custom-delta FastArray framing, and a September 2026 twelve-export audit
+/// found the word positions carry no established prediction-key, state-sync
+/// event, cast identity or buff meaning
+/// (`docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md`).
 #[derive(Debug, Clone)]
 pub struct AbilitiesActivation {
     /// The leading flag bit. Observed to be `1` on every payload; kept as a
@@ -228,24 +173,17 @@ pub struct AbilitiesActivation {
 }
 
 impl AbilitiesActivation {
-    /// Return the first two raw words when present.
-    ///
-    /// The legacy accessor name does not establish a prediction-key type or
-    /// an identity suitable for joining ability casts.
+    /// The first two raw words, when present. The legacy name does not make
+    /// them a prediction key or a cast identity.
     #[must_use]
     pub fn key_pair(&self) -> Option<(u32, u32)> {
         Some((*self.words.first()?, *self.words.get(1)?))
     }
 }
 
-/// Decompose the inner payload of an `AbilitiesAndBuffsComponent` ClassNetCache
-/// RPC into its deterministic structure.
-///
-/// Skips the flag bit, reads whole little-endian `u32` words while at least 32
-/// bits remain, and captures any trailing residual. Returns `None` only for an
-/// empty payload: the decomposition is a pure bit-stream walk, so on a
-/// non-empty payload it always succeeds and the words are exactly the bits the
-/// wire carried.
+/// Decompose an `AbilitiesAndBuffsComponent` ClassNetCache RPC payload into
+/// [`AbilitiesActivation`]. `None` only for an empty payload: a pure
+/// bit-stream walk otherwise always succeeds.
 #[must_use]
 pub fn decode_abilities_and_buffs_inner(
     payload: &[u8],
@@ -282,16 +220,10 @@ mod tests {
     use super::*;
     use crate::test_bits::BitWriter;
 
-    /// Build a ClassNetCache stream with one RPC at handle 1, using a given
-    /// function_count to determine the handle width.
-    ///
-    /// The payload is filled with 1-bits (`true`) rather than zeros. This is
-    /// load-bearing for the brute-force tests: a zero-filled payload lets
-    /// wrong `function_count` values walk cleanly because every misaligned
-    /// IntPacked read returns 0 (zero-cost payload), producing many tiny
-    /// garbage RPCs that consume the buffer. A one-filled payload makes those
-    /// misaligned reads return large values that overrun the stream, so only
-    /// the correct handle width walks cleanly.
+    /// A ClassNetCache stream with one RPC at handle 1, written with
+    /// `function_count`'s handle width. The payload is 1-filled on purpose: in
+    /// a zero-filled one every misaligned IntPacked reads 0, so wrong counts
+    /// walk cleanly as many tiny RPCs; ones make them overrun instead.
     fn build_one_rpc_stream(function_count: u32, payload_bits: u32) -> (Vec<u8>, u32) {
         BitWriter::new()
             .serialized_int(1, function_count.max(2))
@@ -300,21 +232,13 @@ mod tests {
             .finish()
     }
 
-    /// A single-RPC payload at handle 1 should resolve to the minimum
-    /// function_count whose handle width matches the one it was written with:
-    /// every count in one handle-width band walks the same, and the search
-    /// picks the smallest.
-    ///
-    /// The one-filled fixtures are unambiguous, so `ambiguous_with` must stay
-    /// clear on them -- otherwise it would fire on every payload and mean
-    /// nothing.
+    /// A single RPC at handle 1 resolves to the minimum count of the handle
+    /// width it was written with, and the unambiguous one-filled fixtures keep
+    /// `ambiguous_with` clear.
     #[test]
     fn single_rpc_finds_minimum_fc() {
-        // fc=34: for handle=1, ilog2(34)=5 bits, then 1+32=33 < 34, so the
-        // extra bit is read: 6 bits total. The minimum fc that produces a
-        // 6-bit handle for value=1 is 34 (fc=33 gives 5 bits, fc=34 forces
-        // the extra read). fc=50 is inside the same band, so it resolves to 34
-        // too.
+        // fc=34: ilog2 is 5 bits, and 1+32=33 < 34 forces the extra bit, so
+        // 6 bits (fc=33 gives 5). fc=50 is in the same band.
         for (written_with, payload_bits) in [(34, 100), (50, 64)] {
             let (data, bit_count) = build_one_rpc_stream(written_with, payload_bits);
             let result = brute_force_function_count(&data, bit_count).expect("a valid fc");
@@ -326,20 +250,12 @@ mod tests {
         }
     }
 
-    /// A stream written with a larger fc that changes the handle width should
-    /// still resolve correctly.
+    /// A stream written with a larger fc, in a wider handle band, resolves to
+    /// that band's minimum.
     #[test]
     fn single_rpc_with_larger_fc() {
-        // fc=128: for handle=1, ilog2(128)=7, 1+128=129 >= 128, so 7 bits.
-        // fc=65..127 also gives 7 bits for value=1 (1+64=65 < 65..127), but
-        // fc=64 gives 6 bits (1+64=65 >= 64). The minimum fc requiring the
-        // 7-bit encoding is 66. But wait -- for value=1 with fc=66: ilog2=6,
-        // read 6 bits -> 1, 1+64=65 < 66, read extra bit -> 7 bits.
-        //
-        // For fc=65: ilog2=6, read 6 bits -> 1, 1+64=65 >= 65 -> 6 bits.
-        // For fc=66: ilog2=6, read 6 bits -> 1, 1+64=65 < 66 -> 7 bits.
-        //
-        // So the minimum fc for 7-bit handle is 66, not 128.
+        // fc=128 reads handle 1 in 7 bits. The 7-bit band starts at 66: ilog2
+        // is 6, and 1+64=65 < 66 forces the extra bit (fc=65 stops at 6 bits).
         let (data, bit_count) = build_one_rpc_stream(128, 50);
         let result = brute_force_function_count(&data, bit_count);
         assert!(result.is_some());
@@ -379,9 +295,8 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// Build a bit buffer from an explicit flag + a sequence of LE u32 words +
-    /// an optional trailing residual. Mirrors the wire layout of an
-    /// `AbilitiesAndBuffsComponent` RPC payload.
+    /// An `AbilitiesAndBuffsComponent` RPC payload: flag, LE u32 words, then a
+    /// trailing residual.
     fn build_activation_stream(
         flag: bool,
         words: &[u32],
@@ -396,9 +311,8 @@ mod tests {
         bits.bits(u64::from(trailing), trailing_bits).finish()
     }
 
-    /// A real-shape payload: flag(1) + 5 LE u32 words, no trailing. This is
-    /// the 161-bit family observed across thousands of payloads, the simplest
-    /// and most common `AbilitiesAndBuffsComponent` RPC.
+    /// The 161-bit shape (flag + 5 words, no trailing), the simplest and most
+    /// common `AbilitiesAndBuffsComponent` RPC across thousands of payloads.
     #[test]
     fn abilities_inner_flag_then_u32_stream() {
         let words = [5u32, 3, 1, 0, 2];
@@ -410,8 +324,7 @@ mod tests {
         assert_eq!(decoded.key_pair(), Some((5, 3)));
     }
 
-    /// A large payload carries a sub-32-bit trailing residual after the last
-    /// whole word. The decoder must capture it without losing bits.
+    /// A sub-32-bit trailing residual after the last whole word is captured.
     #[test]
     fn abilities_inner_captures_trailing_residual() {
         // flag(1) + 1 word + 16 trailing bits = 49 bits.
@@ -449,22 +362,9 @@ mod tests {
         assert_eq!(decoded.key_pair(), None);
     }
 
-    /// A zero-filled payload can walk cleanly under SEVERAL function counts
-    /// that disagree about how many RPCs it holds, and the search must say so
-    /// rather than return the first one as though it were the only one.
-    ///
-    /// This is not hypothetical, and this module already knew it: the doc on
-    /// `build_one_rpc_stream` above explains that the fixtures are filled with
-    /// 1-bits precisely because "a zero-filled payload lets wrong
-    /// `function_count` values walk cleanly ... producing many tiny garbage
-    /// RPCs that consume the buffer". The module's own claim -- that every fc
-    /// in the valid range produces identical RPC structure -- holds only
-    /// within one handle-WIDTH band; it says nothing about two bands whose
-    /// per-RPC size happens to divide the same buffer.
-    ///
-    /// 90 zero bits is exactly that: fc=2 gives a 1-bit handle and a zero
-    /// payload, so 10 RPCs of 9 bits; fc=3 gives a 2-bit handle, so 9 RPCs of
-    /// 10 bits. Both consume the buffer exactly and they are different parses.
+    /// A payload that walks cleanly under counts in different bands must be
+    /// reported as ambiguous: 90 zero bits are 10 RPCs of 9 bits under fc=2
+    /// (1-bit handle, zero payload) and 9 RPCs of 10 bits under fc=3.
     #[test]
     fn an_ambiguous_payload_reports_the_competing_function_count() {
         let data = vec![0u8; 12]; // 96 bits of storage, 90 declared

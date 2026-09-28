@@ -41,7 +41,10 @@ pub enum FTextTree {
         source: Box<FTextTree>,
         arguments: Vec<FTextArgument>,
     },
-    /// Observed history-255, zero-flags, zero-length empty form.
+    /// The observed empty form: history 255 with zero flags and a zero i32
+    /// after the history byte. That i32 is most likely Unreal's
+    /// `bHasCultureInvariantString` archive bool rather than a length; a 1
+    /// would be followed by a string, and is refused as `InvalidEmptyForm`.
     Empty { flags: u32 },
 }
 /// `FNumberFormattingOptions` in wire order: two archive bools (whole u32s,
@@ -186,9 +189,7 @@ impl FTextTree {
                 format,
                 culture,
             } => {
-                // `{}` prints an f64 in the shortest spelling that parses back
-                // to the same bits, and never in exponent form; finiteness was
-                // checked while decoding.
+                // `{}`: shortest round-trip spelling, never exponent form.
                 write!(
                     s,
                     r#"{{"flags":{flags},"history":4,"kind":"as_number","source":{{"tag":3,"double":{}}},"format":"#,
@@ -216,15 +217,9 @@ impl FTextTree {
         }
     }
 }
-/// Charge one node against the total-node budget, shared by the tree root
-/// (each recursive [`decode_tree`] call) and each format argument's own node
-/// in the history-3 loop below.
-///
-/// `checked_add` guards `nodes` itself from wrapping past `u16::MAX`; in
-/// practice the `> MAX_NODES` check below already returns before `nodes` can
-/// approach that, since `MAX_NODES` is far below `u16::MAX`. The overflow arm
-/// stays because it is what makes this budget check correct on its own terms,
-/// not dependent on `MAX_NODES` never changing.
+/// Charge one node against the total-node budget: each tree (each
+/// [`decode_tree`] call) and each format argument. `checked_add` keeps the
+/// check sound on its own, not only while `MAX_NODES` stays below `u16::MAX`.
 fn charge_node_budget(nodes: &mut u16) -> Result<(), FTextTreeError> {
     *nodes = nodes
         .checked_add(1)

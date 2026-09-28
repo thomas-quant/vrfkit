@@ -1,16 +1,14 @@
-//! Numeric FastArray custom-delta framing, without a gameplay item schema.
+//! Numeric FastArray custom-delta framing, without a gameplay item schema: a
+//! port of `ReplayReader.ReceiveCustomDeltaProperty` / `NetDeltaSerialize` in
+//! ValorantReplayParserPlayground at 6931a70. The measured body is a support
+//! bit (must be true; false is unvalidated), four little-endian i32 header
+//! words, deleted IDs, then changed IDs with handle/width field streams ending
+//! at encoded handle 0.
 //!
-//! Ported from `ReplayReader.ReceiveCustomDeltaProperty` / `NetDeltaSerialize`
-//! in ValorantReplayParserPlayground at commit 6931a70. The measured body is
-//! a support bit, four little-endian i32 header words, deleted IDs, then changed
-//! IDs with packed handle/width field streams terminated by encoded handle 0.
-//! The support bit must be true; the false variant has not been validated.
-//!
-//! AbilitiesAndBuffs uses [`crate::fastarray::ChecksumMode::Absent`]. Both modes can accidentally
-//! consume the same body, so callers must establish the mode from independent
-//! population/schema evidence, never choose whichever variant happens to fit.
-//! The caller retains the original bytes: returned field offsets address that
-//! exact body, and neither field handles nor item IDs establish game meanings.
+//! AbilitiesAndBuffs uses [`crate::fastarray::ChecksumMode::Absent`]. Both
+//! modes can consume the same body, so the mode must come from independent
+//! evidence, never from whichever fits. Field offsets address the caller's
+//! bytes; neither handles nor item IDs carry established game meaning.
 
 use vrf_bitio::BitReader;
 
