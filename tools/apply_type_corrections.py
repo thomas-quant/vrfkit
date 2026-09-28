@@ -1203,70 +1203,67 @@ def _own_entry(block: str) -> tuple[str, str, str | None]:
     return group.group(1), field.group(1), _field_type_of(block)
 
 
-def apply_additions(content: str) -> tuple[str, int]:
-    """Insert every entry in `ADDITIONS` that is not already present.
+def _insert_sorted(content: str, marker: str, rows, key_of, render, label,
+                   slice_name: str, find_close) -> tuple[str, int]:
+    """Insert every row whose key (`row[:2]`) is not already in the slice.
 
     Insertion, not replacement, so it cannot reuse the `.replace()` shape the
     corrections above use -- there is nothing to replace.
 
-    The slice is sorted by `(group_path, field_name)` and
-    `tests::overlay::table_is_sorted` enforces it, so a new entry goes at its
-    sorted position rather than at the end. We find the first existing entry
-    that sorts AFTER ours and splice in before it; if no such entry exists we
-    fail loudly rather than append, because appending past the final block
-    would write into the `];` that closes the slice.
+    Both slices are sorted by that key and `tests::overlay::table_is_sorted`
+    enforces it, so a new entry goes at its sorted position rather than at the
+    end: in front of the marker of the first existing entry that sorts AFTER
+    it. With no such entry it is the slice's new tail and goes before the `];`
+    that closes the slice, which `find_close` locates in the final block.
+    That block holds the last OverlayEntry followed by `];` and the whole
+    OVERLAY_HANDLE_TABLE, so OVERLAY_TABLE's close is the FIRST `\\n];` there;
+    OVERLAY_HANDLE_TABLE is the last slice in the file, so its close is the
+    last. Refusing the append used to be the safe choice, but a sorted table
+    whose last group is new (e.g. ZoomMultiplierComponent) cannot gain entries
+    without it, so it is handled rather than rejected.
     """
     added = 0
-    for group, field, ftype in ADDITIONS:
-        blocks = content.split("    OverlayEntry {")
-        keys = []
-        for block in blocks[1:]:
-            g, f = GROUP_RE.search(block), FIELD_RE.search(block)
-            keys.append((g.group(1), f.group(1)) if g and f else ("", ""))
-        if (group, field) in keys:
+    for row in rows:
+        blocks = content.split(marker)
+        keys = [key_of(block) for block in blocks[1:]]
+        if row[:2] in keys:
             continue
+        target = next((i for i, k in enumerate(keys) if k > row[:2]), None)
+        if target is None:
+            last = blocks[-1]
+            close = find_close(last, "\n];")
+            if close == -1:
+                raise SystemExit(
+                    f"{TABLE_RS}: {label(*row)} would append but the "
+                    f"{slice_name} closing '];' could not be located."
+                )
+            content = (marker.join(blocks[:-1]) + marker + last[:close]
+                       + render(*row) + last[close:])
+        else:
+            # blocks[target + 1] is the block for `keys[target]`.
+            content = (marker.join(blocks[: target + 1]) + render(*row)
+                       + marker + marker.join(blocks[target + 1:]))
+        added += 1
+    return content, added
 
-        target = next((i for i, k in enumerate(keys) if k > (group, field)), None)
-        entry = (
+
+def _entry_key(block: str) -> tuple[str, str]:
+    g, f = GROUP_RE.search(block), FIELD_RE.search(block)
+    return (g.group(1), f.group(1)) if g and f else ("", "")
+
+
+def apply_additions(content: str) -> tuple[str, int]:
+    """Insert every entry in `ADDITIONS` that is not already present."""
+    return _insert_sorted(
+        content, "    OverlayEntry {", ADDITIONS, _entry_key,
+        lambda group, field, ftype: (
             "    OverlayEntry {\n"
             f'        group_path: "{group}",\n'
             f'        field_name: "{field}",\n'
             f"        field_type: {ftype},\n"
             "    },\n"
-        )
-        if target is None:
-            # The new entry is the new tail of OVERLAY_TABLE. Splice it in
-            # before the `];` that closes that slice. The split puts the final
-            # block (blocks[-1]) as the last OverlayEntry's text followed by
-            # `];` and the OVERLAY_HANDLE_TABLE that comes after, so the first
-            # `\n];` in that block is the OVERLAY_TABLE close. Refusing here
-            # used to be the safe choice, but a sorted table whose last group
-            # is new (e.g. ZoomMultiplierComponent) cannot gain entries without
-            # it, so the append is handled rather than rejected.
-            last = blocks[-1]
-            close = last.find("\n];")
-            if close == -1:
-                raise SystemExit(
-                    f"{TABLE_RS}: {group}/{field} would append but the "
-                    f"OVERLAY_TABLE closing '];' could not be located."
-                )
-            head = (
-                "    OverlayEntry {".join(blocks[:-1])
-                + "    OverlayEntry {"
-                + last[:close]
-            )
-            content = head + entry + last[close:]
-        else:
-            # blocks[target + 1] is the block for `keys[target]`; put the new
-            # entry in front of the marker that introduces it.
-            head = "    OverlayEntry {".join(blocks[: target + 1])
-            tail = (
-                "    OverlayEntry {"
-                + "    OverlayEntry {".join(blocks[target + 1:])
-            )
-            content = head + entry + tail
-        added += 1
-    return content, added
+        ),
+        lambda group, field, _ftype: f"{group}/{field}", "OVERLAY_TABLE", str.find)
 
 
 def _type_token_swap(old: str, new: str) -> tuple[str, str]:
@@ -1484,86 +1481,63 @@ HEADER_RES = (
 TABLE_LEN_RE = re.compile(r"(pub static OVERLAY_TABLE: \[OverlayEntry; )(\d+)(\])")
 
 
-def resync_table_len(content: str) -> str:
-    """Rewrite the declared `OVERLAY_TABLE` length to the entries present."""
-    n = sum(1 for _ in parse_entries(content))
-    new_content, hits = TABLE_LEN_RE.subn(
+def _resync_len(content: str, len_re: re.Pattern, n: int, slice_name: str) -> str:
+    """Rewrite one slice's declared length to `n`, the entries present."""
+    new_content, hits = len_re.subn(
         lambda m: f"{m.group(1)}{n}{m.group(3)}", content, count=1
     )
     if hits != 1:
         raise SystemExit(
-            f"{TABLE_RS}: expected exactly one OVERLAY_TABLE length declaration, "
+            f"{TABLE_RS}: expected exactly one {slice_name} length declaration, "
             f"found {hits}."
         )
     return new_content
 
 
-HANDLE_GROUP_RE = re.compile(r'group_path: "([^"]+)"')
+def resync_table_len(content: str) -> str:
+    """Rewrite the declared `OVERLAY_TABLE` length to the entries present."""
+    return _resync_len(content, TABLE_LEN_RE, sum(1 for _ in parse_entries(content)),
+                       "OVERLAY_TABLE")
+
+
 HANDLE_NUM_RE = re.compile(r"handle: (\d+)")
 
 
 def parse_handle_entries(content: str):
     """Yield (group_path, handle, field_name) for every OverlayHandleEntry."""
     for block in content.split("    OverlayHandleEntry {")[1:]:
-        g = HANDLE_GROUP_RE.search(block)
+        g = GROUP_RE.search(block)
         h = HANDLE_NUM_RE.search(block)
         f = FIELD_RE.search(block)
         if g and h and f:
             yield g.group(1), int(h.group(1)), f.group(1)
 
 
+def _handle_key(block: str) -> tuple[str, int]:
+    g, h = GROUP_RE.search(block), HANDLE_NUM_RE.search(block)
+    return (g.group(1), int(h.group(1))) if g and h else ("", -1)
+
+
 def apply_handle_additions(content: str) -> tuple[str, int]:
     """Insert every OverlayHandleEntry in HANDLE_ADDITIONS not already present.
 
-    Mirrors `apply_additions` but keys on `(group_path, handle)` and writes into
-    the OVERLAY_HANDLE_TABLE slice. Some groups (e.g. `MagazineAmmo`) are never
+    `apply_additions` for the OVERLAY_HANDLE_TABLE slice, keyed on
+    `(group_path, handle)`. Some groups (e.g. `MagazineAmmo`) are never
     given field names by the replay or the C# descriptors, so the handle table
     is the only place that can name them -- and without a name the overlay
     cannot type the handle.
     """
-    added = 0
-    for group, handle, field in HANDLE_ADDITIONS:
-        blocks = content.split("    OverlayHandleEntry {")
-        keys = []
-        for block in blocks[1:]:
-            g, h = HANDLE_GROUP_RE.search(block), HANDLE_NUM_RE.search(block)
-            keys.append((g.group(1), int(h.group(1))) if g and h else ("", -1))
-        if (group, handle) in keys:
-            continue
-
-        target = next((i for i, k in enumerate(keys) if k > (group, handle)), None)
-        entry = (
+    return _insert_sorted(
+        content, "    OverlayHandleEntry {", HANDLE_ADDITIONS, _handle_key,
+        lambda group, handle, field: (
             "    OverlayHandleEntry {\n"
             f'        group_path: "{group}",\n'
             f"        handle: {handle},\n"
             f'        field_name: "{field}",\n'
             "    },\n"
-        )
-        if target is None:
-            # OVERLAY_HANDLE_TABLE is the last slice in the file; splice the new
-            # entry in before its closing `];`.
-            last = blocks[-1]
-            close = last.rfind("\n];")
-            if close == -1:
-                raise SystemExit(
-                    f"{TABLE_RS}: {group}/handle {handle} would append but the "
-                    f"OVERLAY_HANDLE_TABLE closing '];' could not be located."
-                )
-            head = (
-                "    OverlayHandleEntry {".join(blocks[:-1])
-                + "    OverlayHandleEntry {"
-                + last[:close]
-            )
-            content = head + entry + last[close:]
-        else:
-            head = "    OverlayHandleEntry {".join(blocks[: target + 1])
-            tail = (
-                "    OverlayHandleEntry {"
-                + "    OverlayHandleEntry {".join(blocks[target + 1:])
-            )
-            content = head + entry + tail
-        added += 1
-    return content, added
+        ),
+        lambda group, handle, _field: f"{group}/handle {handle}",
+        "OVERLAY_HANDLE_TABLE", str.rfind)
 
 
 HANDLE_TABLE_LEN_RE = re.compile(
@@ -1573,16 +1547,9 @@ HANDLE_TABLE_LEN_RE = re.compile(
 
 def resync_handle_table_len(content: str) -> str:
     """Rewrite the declared `OVERLAY_HANDLE_TABLE` length to the entries present."""
-    n = sum(1 for _ in parse_handle_entries(content))
-    new_content, hits = HANDLE_TABLE_LEN_RE.subn(
-        lambda m: f"{m.group(1)}{n}{m.group(3)}", content, count=1
-    )
-    if hits != 1:
-        raise SystemExit(
-            f"{TABLE_RS}: expected exactly one OVERLAY_HANDLE_TABLE length "
-            f"declaration, found {hits}."
-        )
-    return new_content
+    return _resync_len(content, HANDLE_TABLE_LEN_RE,
+                       sum(1 for _ in parse_handle_entries(content)),
+                       "OVERLAY_HANDLE_TABLE")
 
 
 def rewrite_header(content: str) -> tuple[str, tuple[str, ...]]:
