@@ -1,11 +1,8 @@
-"""Guards for the spike-custody derived view.
-
-The join itself is checked by running the script against a real export. What is
-pinned here is the owner classification, which is the one place the script makes
-a judgement rather than reading a column: an `Owner` NetGUID has to come out as
-the player carrying the spike, nobody at all, or a proxy carrier walked back
-through its `Instigator`.
-"""
+"""Guards for the spike-custody view: the owner classification, the one place
+the script judges rather than reads a column (an `Owner` NetGUID is the player
+carrying the spike, nobody, or a proxy walked back through its `Instigator`);
+the plant-time carrier lookup; the failure conditions; and the whole join on a
+synthetic export whose carrier is a reconnected player's earlier pawn."""
 import json
 import sys
 import tempfile
