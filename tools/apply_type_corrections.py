@@ -52,6 +52,59 @@ SEEKER_NADE_GROUP = (
     "Pawn_Aggrobot_SeekerNade_C"
 )
 
+#: The five AGameObject-derived classes whose `ReplicatedMovement` the C#
+#: descriptors declare with a bare `.ReplicatedMovement()` -- the builder's
+#: ShortComponents default -- and which the pass in `main` reads with byte
+#: rotator components instead. Exact group paths, compared with `==`.
+GAME_OBJECT_BYTE_ROTATOR_GROUPS = (
+    "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke."
+    "GameObject_Mage_E_WorldSmoke_C",
+    "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke."
+    "GameObject_Smonk_NewSmoke_C",
+    "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS."
+    "GameObject_Smonk_NewSmoke_PDS_C",
+    "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/"
+    "GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+    "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+)
+
+#: The four `EffectID` entries the C# descriptors declare `UInt64`, retyped
+#: `Int64`: (group, the replay's compatible_checksum, the chain it reproduces).
+#:
+#: Every one of them is the member `EffectID` of the struct `FEffectID`, and
+#: each replay checksum reproduces with that member typed `int64` and not
+#: `uint64` (tools/tests/test_compatible_checksum_facts.py recomputes all four
+#: from the chains below). The 13.06 executable's reflection agrees:
+#: `FEffectID.EffectID` is Int64. The C# `ulong` was a guess the width could
+#: not refute -- 64 bits read the same either way below 2^63.
+#:
+#: Unsigned would also refuse a real value: `decode_u64` fails any pattern with
+#: bit 63 set, which is a legitimate negative `int64`. No measured row sets it,
+#: so nothing exported changes; the change is to what the reader claims.
+#: Measured 2026-09-28 over all 1,018 replays (exports by the r3 build, main
+#: and checkpoint tables): 27,672,549 rows under 2340855891, 3,269,732 under
+#: 2251343646 and 26,813 `ActiveBlinds[].EffectID` leaves, every one 64 bits
+#: wide, values 2..40,853, bit 63 never set; the typed value equals an
+#: independent little-endian i64 read on every row.
+#:
+#: The same property reaches `MulticastStopContinuousEffect`, the weapons'
+#: `MulticastPlayContinuousEffectFromClient` and
+#: `ReplayStopContinuousEffectAtLocation` under 2340855891 through
+#: checksum_table.rs, which therefore has to learn the new type too, and
+#: `ActiveBlinds[].BlindEffectID.EffectID` (3321413110) is typed in
+#: crates/vrfkit/src/sink/blobs.rs.
+EFFECT_ID_INT64 = (
+    ("/Script/ShooterGame.EffectManagerComponent", 1129645208,
+     "ServerActiveEffects: TArray<FActiveEffectInfo> -> EffectID: FEffectID "
+     "-> EffectID: int64"),
+    ("/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+     2340855891, "parameter EffectID: FEffectID -> EffectID: int64"),
+    ("/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
+     2340855891, "parameter EffectID: FEffectID -> EffectID: int64"),
+    ("/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+     2251343646, "parameter CurrentEffectID: FEffectID -> EffectID: int64"),
+)
+
 #: (group_path substring, field_name, required FieldType -- IN FULL).
 #: One entry per correction the passes below make. Checked against the file
 #: after writing; a miss is a hard failure.
@@ -86,6 +139,11 @@ EXPECTED += [
     (SEEKER_NADE_GROUP, "ReplicatedMovement",
      "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
      "location: VectorQuantization::RoundTwoDecimals }"),
+    *[(_group, "ReplicatedMovement",
+       "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+       "location: VectorQuantization::RoundWholeNumber }")
+      for _group in GAME_OBJECT_BYTE_ROTATOR_GROUPS],
+    *[(_group, "EffectID", "FieldType::Int64") for _group, _c, _chain in EFFECT_ID_INT64],
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::FName"),
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Point", "EquippableUsed", "FieldType::ObjectNetGuid"),
@@ -391,9 +449,15 @@ ADDITIONS = [
     # Admitted on wire evidence, same bar as the rest: every row is 192 bits
     # (3 x f64); `Translation` reads as map coordinates (7211.7, 1670.3, 96.0)
     # on an Ascent replay; `Scale3D` is (1,1,1) on every row, which no other
-    # reading of those bits produces. The third parameter of the same RPC
-    # arrives as handle `249` with no name from the replay and is left raw --
-    # naming a handle is what HANDLE_ADDITIONS is for, and its bar is higher.
+    # reading of those bits produces. The third member of the same
+    # `ValveSetTransform: FTransform` parameter arrives named `249` -- the
+    # hardcoded FName index of `Rotation`, not a handle -- and is left raw.
+    # It is the transform's FQuat, X/Y/Z only, like the typed `249`s below:
+    # its checksum 177696787 reproduces as `ValveSetTransform: FTransform ->
+    # Rotation: FQuat` (tools/tests/test_compatible_checksum_facts.py), and
+    # over the 1,018-replay corpus all 58,598 rows under it (Phoenix's and
+    # Viper's walls, Astra's MulticastAddAnchor) are 192 bits with
+    # |xyz| <= 1. Typing it is a separate change.
     ("/Game/Characters/Phoenix/S0/Ability_Q/Production/"
      "GameObject_Phoenix_Q_FlameWallManager_Production."
      "GameObject_Phoenix_Q_FlameWallManager_Production_C:MulticastAddSmokeScreenPoint",
@@ -417,10 +481,13 @@ ADDITIONS = [
     # Decoded, yaw is set on 92.5% of rows, pitch on 14.5% and roll on 0.1%,
     # all on a 0.0055-degree lattice: a ground-placed effect facing somewhere.
     #
-    # Not to be confused with the other `249` above, which is a `VectorDouble`.
-    # That one is 192 bits under a different checksum; this family shares
-    # 2526428638 and is 19 bits on most rows. Same number, different property --
-    # which is the whole reason the checksum is the thing to check.
+    # Not to be confused with the other `249`, which is a `VectorDouble`: the
+    # FQuat of an FTransform (X/Y/Z, 192 bits, checksum 747197698 and two
+    # siblings -- see the RPC transform vectors below). This family shares
+    # 2526428638, which reproduces as a top-level `Rotation: FRotator`
+    # (tools/tests/test_compatible_checksum_facts.py), and is 19 bits on most
+    # rows. Same number, different property -- which is the whole reason the
+    # checksum is the thing to check.
     ("/Script/ShooterGame.LocationalEffectManagerComponent:ClientPlayOneShotEffectAtLocation",
      "249", "FieldType::RotationShort"),
     ("/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
@@ -600,8 +667,24 @@ ADDITIONS = [
     # Read as 3 x f64 they are unambiguous. `Scale3D` is exactly
     # (1.0, 1.0, 1.0) on every row, which no other reading produces -- 6 x f32
     # gives (0, 1.875, 0, 1.875, 0, 1.875). The `248` locations are map
-    # coordinates in Unreal units with plausible floor heights, and `249` is a
-    # rotator carrying negative zero, which a wrong split would not produce.
+    # coordinates in Unreal units with plausible floor heights.
+    #
+    # `249` is NOT a rotator. It is the transform's `Rotation`, an FQuat, sent
+    # as its X, Y and Z (doubles under UE5's large world coordinates) and named
+    # by the hardcoded FName index 249. The checksum settles it: 747197698
+    # reproduces as `Transform: FTransform -> Rotation: FQuat` and not as
+    # FRotator (3753301026) or FVector (1853556327), and Translation/Scale3D
+    # reproduce under the same parent (tools/tests/test_compatible_checksum_
+    # facts.py); the 13.06 executable's reflection has `Transform.Rotation` as
+    # a quaternion. W is not on the wire: Unreal's `FQuat::NetSerialize`
+    # normalizes, flips all four signs when W < 0 and writes X, Y, Z, so a
+    # reader rebuilds W = sqrt(max(0, 1 - |xyz|^2)). That convention is the
+    # public engine source's and was NOT verified in this binary. The data fit
+    # it: over all 1,018 replays (r3 exports, 2026-09-28) 12,698,371 rows carry
+    # 747197698, every one 192 bits with |xyz| <= 1 (max 1.0, none above
+    # 1 + 1e-6), and 12,594,391 of them hold a negative zero -- what the sign
+    # flip leaves on a zero component. The exported value_str is "(x,y,z)" of
+    # the quaternion: neither Euler angles nor a direction. No W is exported.
     #
     # Independently cross-checked: `BombPlantedRPC.PlantLocation` and
     # `MulticastActivateBombSiteEffects.BombLocation` are two unrelated RPCs
@@ -681,6 +764,10 @@ ADDITIONS = [
      "EffectManagerComponent", "FieldType::ObjectNetGuid"),
     ("/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
      "EffectManagerComponent", "FieldType::ObjectNetGuid"),
+    # The same FQuat X/Y/Z under another parent: `SpawnTransform: FTransform
+    # -> Rotation: FQuat` reproduces its checksum 1874998526 (Translation
+    # 131504838, Scale3D 3357891630 follow the same parent). 183,577 rows over
+    # the 1,018 replays, all 192 bits, |xyz| <= 1.
     ("/Script/ShooterGame.AresGameStateBase:MulticastResetForRespawn",
      "249", "FieldType::VectorDouble"),
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
@@ -706,8 +793,21 @@ ADDITIONS = [
     # range present -- a dense sequential id, which no other reading of these
     # bits produces. Checksum 3336285386 shares it with `NetMulticastRemove`
     # `ForceModule`.
+    #
+    # UInt32, not the Int32 this entry first carried: the width and the values
+    # could not tell the two apart, the checksum can. 3336285386 reproduces as
+    # the parameter `Handle` of type `FForceModuleHandle` with member
+    # `HandleNumber` of type `uint32`, and as nothing with `int32` (4073821633)
+    # or at the top level; `NetMulticastEnforceEndOfLifeCleanup`'s 1457545067
+    # is the same member inside `ModulesCleanedUpByServer: TArray<
+    # FForceModuleHandle>`. The 13.06 executable's reflection agrees
+    # (`FForceModuleHandle.HandleNumber` is UInt32). The formula and the chain
+    # are pinned in tools/tests/test_compatible_checksum_facts.py. Every
+    # measured value is below 2^31, so the exported numbers do not change:
+    # over all 1,018 replays (2026-09-28) 665,519 Apply and 2,743,504 Remove
+    # rows, 32 bits each, 1..4,518, bit 31 never set.
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-     "HandleNumber", "FieldType::Int32"),
+     "HandleNumber", "FieldType::UInt32"),
     # The other five `NetMulticastApplyForceModule` parameters. Descriptor-silent;
     # measured 2026-09-28 over the 1,018 replays audited at 259ed10. The RPC
     # occurs in 1,015 of them (not in the single 12.10, 12.11 and 13.00 files),
@@ -778,13 +878,21 @@ ADDITIONS = [
      "Module", "FieldType::ObjectNetGuid"),
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
      "Character", "FieldType::ObjectNetGuid"),
-    # Which named area of the map a player is standing in -- "A Site", "Mid",
-    # "Heaven" and so on, the same callouts the game announces. The group only
+    # Which callout region of the map a player is standing in. The group only
     # became reachable when the `CalloutRegionTracker` leaf was remapped, and
     # the field is an ObjectNetGuid: unpacking the raw bits of all 1,957
     # non-zero rows and looking them up in net_guids resolves 1,957 of 1,957 to
     # a `CalloutRegion_*` path, 22 distinct regions. Nothing else in the export
     # names where a player is in map terms.
+    #
+    # What resolves is the region ACTOR's object name (its outer chain is the
+    # map's `<Map>_Callout_Volumes` level), not the callout the game shows or
+    # announces. That name is the actor's `RegionName`, string-table text the
+    # replay does not carry, and it differs from the letters of the object
+    # name for at least 9 of 160 letter-style regions (Ascent's
+    # `CalloutRegion_A_Link` is shown as "Tree"; checked 2026-09-28 against the
+    # installed 13.06 game's string tables, read-only). Treat the path as an
+    # identifier, not as a label.
     ("/Script/ShooterGame.CalloutRegionTrackingComponent",
      "CurrentRegion", "FieldType::ObjectNetGuid"),
     # The per-cast ability log: who cast what, when, and where. vrfkit already
@@ -880,8 +988,8 @@ ADDITIONS = [
     # HawkFlash's `ReplicatedMovement` and `Banking`. third_party/vrp has no
     # HawkFlash class at all, so these are ADDITIONS keyed on the exact group;
     # DATA.md's "no name rule for ReplicatedMovement" stands, and checksum
-    # 2749104612 stays dropped (this is a twentieth ByteComponents donor
-    # against six ShortComponents ones). Measured 2026-09-28 over the 1,018
+    # 2749104612 stays dropped (byte donors still sit beside Gekko's short,
+    # two-decimal Wingman). Measured 2026-09-28 over the 1,018
     # replays audited at 259ed10: the group occurs on 15 builds (11.06-13.06),
     # every row in the main stream -- no class's ReplicatedMovement reaches a
     # checkpoint table, so that side is untested by construction.
@@ -934,6 +1042,63 @@ ADDITIONS = [
     ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
      "Projectile_Guide_E_HawkFlash_C",
      "Banking", "FieldType::Double"),
+    # Cypher's trapwire and cage, renamed in 13.01. Through 12.08 (and in the
+    # one 13.00 fixture) the classes live at the paths the C# descriptors
+    # name -- Ability_E/{Ability,GameObject}_Gumshoe_E_TripWire(_SecondWire)_C
+    # and Ability_4/{Ability,Projectile}_Gumshoe_4_CageTrap_C -- and the table
+    # types them there. From 13.01 on they are
+    # Ability_4/{Ability,GameObject}_Gumshoe_4_TripWire(_SecondWire)_C and
+    # Ability_Q/{Ability,Projectile}_Gumshoe_Q_CageTrap_C, and nothing typed
+    # the fields below: null on every row while decode errors stayed 0.
+    #
+    # These are relocated properties with descriptor-sourced types -- the
+    # BaseTeamState kind of addition above, not new types. Across the
+    # manifests of all 1,018 replays the old paths are declared only on
+    # 11.06-13.00 and the new ones only on 13.01-13.06, never both in one
+    # replay, with identical field sets, handles and checksums. The rename is
+    # visible in the type system itself: the trapwire's
+    # `SetEnemyInTrap.PairedWire` parameter points at its own class, and its
+    # checksum moves from 3671888355 to 3454621121 -- exactly
+    # `AGameObject_Gumshoe_E_TripWire_C*` -> `AGameObject_Gumshoe_4_TripWire_C*`
+    # (tools/tests/test_compatible_checksum_facts.py, with the chains below).
+    #
+    # Measured 2026-09-28 on exports of all 1,018 replays (fields +
+    # checkpoint_fields; independent readers from validate_type_evidence.py):
+    #
+    #   `Deployed` (3902815170 = `Deployed: bool`): 8,908 + 8,889 main rows on
+    #   the two wires in 268 replays of 13.01-13.06, 1 bit each, every one
+    #   true, none in checkpoints. False is the class default and is never
+    #   sent: the one row per wire (17,797 wire actors, one row each)
+    #   arrives after the actor's channel opens, 0-266 ms later (median 106)
+    #   on the first wire and 466-1,071 ms
+    #   (median 743) on the second -- the same timing as on the old paths
+    #   (0-260 / 512-1,049 ms over their 345 + 345 rows).
+    #   `CreatedByCharacter` (2035145197 = `CreatedByCharacter:
+    #   AShooterCharacter*`): 687 main + 5,135 checkpoint rows on each of the
+    #   two ability classes in 270 replays, IntPacked 16 bits or the 8-bit
+    #   null; every non-null value is the `Gumshoe_PC_C` actor of the same
+    #   export (actors.parquet), as on the old paths.
+    #   `RelativeScale3D` (1992268157): 684 main + 5,135 checkpoint rows on
+    #   the cage ability, 31 bits, (1, 1, 1) on every row -- the old cage's
+    #   VectorNetQuantize100. The old trapwire ability had no entry for it, so
+    #   the new one gets none either.
+    #
+    # The old entries stay: 11.06-12.08 still carry the old paths. Only
+    # `Deployed`'s checksum is donated to checksum_table.rs -- the four
+    # TripWire groups are its only carriers, so it types nothing new and
+    # catches the next rename. 2035145197 and 1992268157 are NOT donated: every
+    # agent's ability classes carry them, and nobody has measured those.
+    ("/Game/Characters/Gumshoe/S0/Ability_4/GameObject_Gumshoe_4_TripWire."
+     "GameObject_Gumshoe_4_TripWire_C", "Deployed", "FieldType::Bool"),
+    ("/Game/Characters/Gumshoe/S0/Ability_4/GameObject_Gumshoe_4_TripWire_SecondWire."
+     "GameObject_Gumshoe_4_TripWire_SecondWire_C", "Deployed", "FieldType::Bool"),
+    ("/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_TripWire."
+     "Ability_Gumshoe_4_TripWire_C", "CreatedByCharacter", "FieldType::ObjectNetGuid"),
+    ("/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap."
+     "Ability_Gumshoe_Q_CageTrap_C", "CreatedByCharacter", "FieldType::ObjectNetGuid"),
+    ("/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap."
+     "Ability_Gumshoe_Q_CageTrap_C", "RelativeScale3D",
+     "FieldType::VectorNetQuantize { scale: 100 }"),
 ]
 EXPECTED += [(g, f, t) for g, f, t in ADDITIONS]
 
@@ -1117,6 +1282,76 @@ def retype_exact(content: str, group: str, field: str, old: str, new: str,
         raise SystemExit(
             f"{TABLE_RS}: {group}/{field} {old} -> {new} changed {changed} "
             f"entries, expected {expected} (or 0 on a corrected table)."
+        )
+    return "    OverlayEntry {".join(blocks), changed
+
+
+def retype_game_object_rotators(content: str) -> tuple[str, int]:
+    """ShortComponents -> ByteComponents on `GAME_OBJECT_BYTE_ROTATOR_GROUPS`.
+
+    The C# descriptors for these five (CoveAbilityDescriptor, DarkCover-
+    AbilityDescriptor and the three Smonk descriptors) call a bare
+    `.ReplicatedMovement()`, which is the builder's ShortComponents default;
+    none of them states a width. 13-J (docs/archive/PROJECT_STATUS.md) took
+    that default for the three Smonk classes because the wire could not
+    choose, and 16-D found Omen's zone in the same state.
+
+    The wire still cannot choose: none of the five ever replicates a rotation,
+    so both widths read the same 3 flag bits and the same values. What decides
+    it is the game's own class data (13.06 cooked classes plus the
+    executable's reflection, read-only; game-analysis cdo-defaults track):
+
+    * all five derive natively from AGameObject > AActor, the chain of
+      GameObject_Terra_C_TimeSlowGrenade_Explosion_C, which this table already
+      reads with byte components on wire evidence;
+    * no Blueprint class default in any of the five chains writes
+      ReplicatedMovement -- across the whole 13.06 build exactly one actor
+      class does (PlaceholderPlayerController_C) -- so the quantization is
+      the native class's;
+    * grouped by native class, every class whose rotation IS observable
+      decodes exactly at one width only: AShooterCharacter 7 of 7 Short,
+      AProjectile 38 of 38 Byte, AGameObject_NoMesh 2 of 2 Byte, AGameObject
+      4 of 4 Byte.
+
+    That is a prior, not a measurement of these five, and it is recorded as
+    one. The measurement is the bound, the 13-J one: all 903 replays whose
+    main stream declares ReplicatedMovement on one of these groups (the
+    2026-09-28 declaration survey of the 1,018-replay corpus; 21 builds,
+    11.06-13.06) were exported with checkpoints by the build before and after
+    this pass, and every Parquet file and every manifest.json -- overlay
+    counters included -- is byte-identical. If one of them is ever seen
+    replicating a rotation, exact consumption decides, the 13-J way, and this
+    prior is what it overrules.
+
+    Only the rotator token of the exact `(group, "ReplicatedMovement")` entry
+    whose full type is still the short, whole-unit literal is rewritten, so
+    the pass works on the one-line and the rustfmt'd layouts alike and does
+    nothing on a corrected table. Any other count is a hard failure.
+    """
+    short_whole = normalize_type(
+        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+        "location: VectorQuantization::RoundWholeNumber }"
+    )
+    blocks = content.split("    OverlayEntry {")
+    changed = 0
+    for i, block in enumerate(blocks[1:], 1):
+        g, f = GROUP_RE.search(block), FIELD_RE.search(block)
+        if not (g and f and g.group(1) in GAME_OBJECT_BYTE_ROTATOR_GROUPS
+                and f.group(1) == "ReplicatedMovement"):
+            continue
+        if _field_type_of(block) != short_whole:
+            continue
+        blocks[i] = block.replace(
+            "RotatorQuantization::ShortComponents",
+            "RotatorQuantization::ByteComponents",
+            1,
+        )
+        changed += 1
+    if changed not in (0, len(GAME_OBJECT_BYTE_ROTATOR_GROUPS)):
+        raise SystemExit(
+            f"{TABLE_RS}: the AGameObject rotator pass changed {changed} entries, "
+            f"expected {len(GAME_OBJECT_BYTE_ROTATOR_GROUPS)} (or 0 on a "
+            f"corrected table)."
         )
     return "    OverlayEntry {".join(blocks), changed
 
@@ -1517,6 +1752,11 @@ def main():
             count += 1
     content = "    OverlayEntry {".join(blocks)
 
+    # Fix: byte rotator components for five AGameObject classes. The evidence
+    # is on `retype_game_object_rotators`.
+    content, n = retype_game_object_rotators(content)
+    count += n
+
     # REMOVED: FName -> Raw for DamagedBone in MulticastNotifyDamage_Point.
     #
     # This pass existed because 177 of 581 payloads arrive at 9 bits, which
@@ -1747,6 +1987,14 @@ def main():
                 content, f"/Script/ShooterGame.DamageableComponent:{rpc}", field,
                 "FieldType::Raw", "FieldType::ObjectNetGuid", expected=1)
             count += n
+
+    # Fix: UInt64 -> Int64 for the four EffectID entries. The evidence is on
+    # EFFECT_ID_INT64.
+    for group, _checksum, _chain in EFFECT_ID_INT64:
+        content, n = retype_exact(
+            content, group, "EffectID", "FieldType::UInt64", "FieldType::Int64",
+            expected=1)
+        count += n
 
     # Additions last, so the bucket recount below sees them.
     content, n_added = apply_additions(content)

@@ -36,9 +36,19 @@ set never reached `reconcile`, so a checksum the file already commits and the
 manifests now make unsafe passed `--check` and survived `merge`'s union. Every
 committed conflict now fails checking and is omitted by write mode.
 
+A committed type can only change on purpose. When a correction retypes the
+donors of a checksum the file already carries -- `EffectID` from `UInt64` to
+`Int64`, say -- the manifests teach the new type and `merge` refuses it as a
+disagreement, which is right when nobody meant it. `--retype CHECKSUM` names
+the checksums whose committed type the learned one may replace; it is refused
+for a checksum that does not disagree (a stale or mistyped flag), for one
+whose donors conflict among themselves, and in `--check`, which writes
+nothing.
+
 Usage:
     python tools/extract_checksum_types.py --export out/probe [--export out/other]
     python tools/extract_checksum_types.py --export out/probe --check
+    python tools/extract_checksum_types.py --export out/probe --retype 1129645208
 """
 
 from __future__ import annotations
@@ -192,8 +202,28 @@ def reconcile(committed: dict[int, str], learned: dict[int, str],
     )
 
 
+def retype_problems(verdict: Verdict, retype: set[int]) -> list[str]:
+    """Why a `--retype` request must be refused; empty when it may proceed.
+
+    Only a real disagreement -- the committed type and one unanimous learned
+    type -- can be retyped. Anything else is a flag that names the wrong
+    checksum or a basis that cannot settle it.
+    """
+    problems = []
+    for checksum in sorted(retype):
+        if checksum in verdict.disagreed:
+            continue
+        if checksum in verdict.contradicted or checksum in verdict.ambiguous:
+            problems.append(f"{checksum}: its donors disagree among themselves, "
+                            f"so there is no single type to retype it to")
+        else:
+            problems.append(f"{checksum}: the committed and learned types do not "
+                            f"disagree under these manifests")
+    return problems
+
+
 def merge(committed: dict[int, str], learned: dict[int, str],
-          conflicts: dict | None = None) -> dict[int, str]:
+          conflicts: dict | None = None, retype=()) -> dict[int, str]:
     """Union, refusing a disagreement rather than picking a winner.
 
     Widening the basis must not narrow the table: an entry a smaller run cannot
@@ -202,7 +232,16 @@ def merge(committed: dict[int, str], learned: dict[int, str],
     Every key in `conflicts` is dropped from the old mapping. The write path
     heals an unsafe narrower-basis entry while preserving unrelated checksums
     this particular manifest set did not see.
+
+    `retype` names checksums whose committed type the learned one replaces --
+    the one deliberate exception to refusing a disagreement. Each must be
+    learned, or it would silently vanish from the table instead.
     """
+    retype = set(retype)
+    unlearned = sorted(retype - learned.keys())
+    if unlearned:
+        raise ValueError(f"cannot retype {unlearned}: these manifests teach no type for it")
+    committed = {c: t for c, t in committed.items() if c not in retype}
     clash = [c for c in committed.keys() & learned.keys()
              if committed[c] != learned[c]]
     if clash:
@@ -229,7 +268,16 @@ def main() -> int:
                     help="directory written by `vrfkit export` (repeatable)")
     ap.add_argument("--check", action="store_true",
                     help="verify the committed file matches; write nothing")
+    ap.add_argument("--retype", type=int, action="append", default=[],
+                    metavar="CHECKSUM",
+                    help="write mode: let the learned type replace the committed "
+                         "one for this checksum (repeatable); refused unless the "
+                         "two disagree")
     args = ap.parse_args()
+    if args.retype and args.check:
+        print("FAILED: --retype rewrites the table and has no meaning with --check",
+              file=sys.stderr)
+        return 2
 
     manifests = [d / "manifest.json" for d in args.export]
     missing = [m for m in manifests if not m.is_file()]
@@ -282,9 +330,19 @@ def main() -> int:
     # equality with a regeneration was never achievable for a content-addressed
     # table, and demanding it is what made `--check` fail for every basis and
     # stop meaning anything.
-    widened = merge(committed, resolved, conflicts)
+    problems = retype_problems(verdict, set(args.retype))
+    if problems:
+        for line in problems:
+            print(f"  REFUSED --retype {line}", file=sys.stderr)
+        print(f"FAILED: {len(problems)} --retype request(s) refused; nothing written",
+              file=sys.stderr)
+        return 1
+    widened = merge(committed, resolved, conflicts, retype=args.retype)
+    for checksum in sorted(set(args.retype)):
+        print(f"  RETYPED {checksum}: {committed[checksum]} -> {widened[checksum]}")
     atomic_write_text(OUT_RS, render(widened))
-    print(f"wrote {OUT_RS} ({len(widened)} checksums, +{len(verdict.new)})")
+    print(f"wrote {OUT_RS} ({len(widened)} checksums, +{len(verdict.new)}, "
+          f"{len(set(args.retype))} retyped)")
     return 0
 
 

@@ -195,6 +195,12 @@ class AdditionsTests(unittest.TestCase):
         54.6%) and its `Banking` (64-bit doubles, -180..180, on 801,700 rows),
         on that exact group only.
 
+        137 -> 142 is one finding: Cypher's trapwire and cage classes were
+        renamed in 13.01, and five descriptor-typed fields -- `Deployed` on
+        both wires, `CreatedByCharacter` on both ability items, the cage's
+        `RelativeScale3D` -- follow them to the new paths with the same name,
+        checksum and width. Relocations, like BaseTeamState, not new types.
+
         63 -> 64 types `LocalizedStat` as `FText`. It was removed at 62 -> 61
         for being a wrong `FString`; it is back because a decoder now exists
         and the reason given for waiting was itself wrong -- `Statistic` was
@@ -231,7 +237,7 @@ class AdditionsTests(unittest.TestCase):
         2 as `AuthResourceAmount`, so the leaf remap in `sink/paths.rs` now
         reaches a real declaration and the guessed name is gone.
         """
-        self.assertEqual(len(atc.ADDITIONS), 137, atc.ADDITIONS)
+        self.assertEqual(len(atc.ADDITIONS), 142, atc.ADDITIONS)
 
     def test_handle_additions_stay_the_narrow_exception(self):
         """Same guardrail for the handle -> name additions.
@@ -431,7 +437,18 @@ WEAPON_ROWS = [
 ]
 
 
-def whole_table(overrides=None, drop=(), one_line=False):
+def rustfmt_type(field_type):
+    """A braced type the way rustfmt lays it out inside an entry: one field
+    per line, each with a trailing comma. A bare variant comes back as is."""
+    if "{" not in field_type:
+        return field_type
+    head, _brace, rest = field_type.partition("{")
+    fields = [part.strip() for part in rest.rstrip("} ").split(",") if part.strip()]
+    inner = "".join(f"            {part},\n" for part in fields)
+    return f"{head.rstrip()} {{\n{inner}        }}"
+
+
+def whole_table(overrides=None, drop=(), one_line=False, braced_multiline=False):
     """A complete table.rs that satisfies every correction, minus `overrides`.
 
     Derived from EXPECTED rather than hand-written, so it cannot go stale as
@@ -440,6 +457,11 @@ def whole_table(overrides=None, drop=(), one_line=False):
     is expressed. The two generated header lines and both slice lengths are
     written truthfully, so `main()` fails for the reason under test and not
     because the fixture is malformed.
+
+    `braced_multiline` lays braced types (`RepMovement { .. }`) out over
+    several lines, the way the committed, rustfmt'd table.rs has them. Without
+    it the formatted layout keeps them on one line, where a pass that replaces
+    the one-line type literal still matches although the real file would not.
     """
     overrides = overrides or {}
     rows = [
@@ -461,7 +483,7 @@ def whole_table(overrides=None, drop=(), one_line=False):
             "    OverlayEntry {\n"
             f'        group_path: "{g}",\n'
             f'        field_name: "{f}",\n'
-            f"        field_type: {t},\n"
+            f"        field_type: {rustfmt_type(t) if braced_multiline else t},\n"
             "    },\n"
             for g, f, t in rows
         )
@@ -496,6 +518,14 @@ UNCORRECTED_SEEKER_NADE = {
     (atc.SEEKER_NADE_GROUP, "ReplicatedMovement"):
         "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
         "location: VectorQuantization::RoundWholeNumber }",
+}
+#: The five AGameObject smoke/zone classes as the generator emits them: the
+#: bare `.ReplicatedMovement()` builder default, short rotator components.
+UNCORRECTED_GAME_OBJECT_ROTATORS = {
+    (group, "ReplicatedMovement"):
+        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+        "location: VectorQuantization::RoundWholeNumber }"
+    for group in atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS
 }
 #: `TimedBomb.TimeRemainingToExplode` is rewritten by a pass that matches a
 #: one-line literal, so in the rustfmt'd layout it is DEAD -- the file is not
@@ -623,6 +653,55 @@ class MainOnDiskTests(unittest.TestCase):
                 }
                 self.assertEqual(
                     types[(atc.SEEKER_NADE_GROUP, "ReplicatedMovement")], want)
+
+    def test_the_game_object_rotators_are_corrected_in_both_layouts(self):
+        """The five AGameObject classes read byte rotator components.
+
+        The pass has to fire on the generator's one-line output and on the
+        rustfmt'd file -- a `str.replace` of the one-line type literal would
+        match the first and silently not the second -- and `--check` must
+        refuse a file that still carries the short default on any of them.
+        """
+        want = (
+            "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+            "location: VectorQuantization::RoundWholeNumber }"
+        )
+        self.assertEqual(len(atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS), 5)
+        for one_line in (True, False):
+            with self.subTest(one_line=one_line):
+                source = whole_table(UNCORRECTED_GAME_OBJECT_ROTATORS,
+                                     one_line=one_line, braced_multiline=not one_line)
+                if not one_line:
+                    self.assertIn(
+                        "            rotation: RotatorQuantization::ShortComponents,\n",
+                        source, "the fixture must carry rustfmt's multi-line form")
+                code, _out, err = self.run_main(source, "--check")
+                self.assertEqual(code, 1, "--check must not pass the short default")
+                for group in atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS:
+                    self.assertIn(group, err)
+                code, _out, err = self.run_main(source)
+                self.assertEqual(code, 0, err)
+                types = {
+                    (g, f): t for g, f, t in
+                    atc.parse_entries(self.path.read_text(encoding="utf-8"))
+                }
+                for group in atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS:
+                    self.assertEqual(types[(group, "ReplicatedMovement")], want, group)
+                # The one short-rotator class the table keeps is untouched.
+                self.assertIn(
+                    "ShortComponents",
+                    types[(atc.SEEKER_NADE_GROUP, "ReplicatedMovement")])
+
+    def test_a_partially_corrected_rotator_set_is_a_hard_failure(self):
+        """Two of five still short is neither "fresh" nor "done": refuse it."""
+        groups = atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS
+        partial = {k: v for k, v in UNCORRECTED_GAME_OBJECT_ROTATORS.items()
+                   if k[0] in groups[:2]}
+        with self.assertRaises(SystemExit):
+            atc.retype_game_object_rotators(whole_table(partial))
+        out, n = atc.retype_game_object_rotators(whole_table())
+        self.assertEqual(n, 0, "an already corrected table must change nothing")
+        self.assertEqual(out, whole_table())
 
     def test_an_uncorrected_weapon_group_is_reported(self):
         """The 18 weapon groups had NO expectation of any kind.

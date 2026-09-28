@@ -763,9 +763,137 @@ fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     assert_eq!(table.lookup(HAWK, "Banking"), Some(FieldType::Double));
     assert_eq!(lookup_checksum(677106858), Some(FieldType::Double));
     // Still no name rule and no checksum for ReplicatedMovement as a whole:
-    // the new entry is a twentieth ByteComponents donor, and the six
-    // ShortComponents ones keep 2749104612 out of the checksum table.
+    // byte and short donors both remain in the table (see
+    // `only_the_seeker_nade_keeps_short_rotator_components`), so 2749104612
+    // stays out of the checksum table.
     assert_eq!(lookup_checksum(2749104612), None);
+}
+
+/// Cypher's trapwire and cage classes were renamed in 13.01, and the five
+/// descriptor-typed fields follow them: the same name, checksum and width on
+/// both sides of the rename (see apply_type_corrections.py). The old paths
+/// keep their entries -- 11.06-12.08 still carry them -- and `Deployed`'s
+/// checksum is learned so that the next rename is caught without an entry.
+/// `CreatedByCharacter` (2035145197) and `RelativeScale3D` (1992268157) are
+/// deliberately not learned: every agent's ability classes carry them, and a
+/// learned checksum would type all of those unmeasured.
+#[test]
+fn cypher_trap_fields_follow_the_13_01_rename() {
+    const OLD_E: &str = "/Game/Characters/Gumshoe/S0/Ability_E/";
+    const NEW_4: &str = "/Game/Characters/Gumshoe/S0/Ability_4/";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for wire in [
+        "GameObject_Gumshoe_{}_TripWire.GameObject_Gumshoe_{}_TripWire_C",
+        "GameObject_Gumshoe_{}_TripWire_SecondWire.GameObject_Gumshoe_{}_TripWire_SecondWire_C",
+    ] {
+        let old = format!("{OLD_E}{}", wire.replace("{}", "E"));
+        let new = format!("{NEW_4}{}", wire.replace("{}", "4"));
+        assert_eq!(
+            table.lookup(&old, "Deployed"),
+            Some(FieldType::Bool),
+            "{old}"
+        );
+        assert_eq!(
+            table.lookup(&new, "Deployed"),
+            Some(FieldType::Bool),
+            "{new}"
+        );
+    }
+    for (old, new) in [
+        (
+            "/Game/Characters/Gumshoe/S0/Ability_E/Ability_Gumshoe_E_TripWire.Ability_Gumshoe_E_TripWire_C",
+            "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_TripWire.Ability_Gumshoe_4_TripWire_C",
+        ),
+        (
+            "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
+            "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
+        ),
+    ] {
+        for group in [old, new] {
+            assert_eq!(
+                table.lookup(group, "CreatedByCharacter"),
+                Some(FieldType::ObjectNetGuid),
+                "{group}"
+            );
+        }
+    }
+    for group in [
+        "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
+        "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
+    ] {
+        assert_eq!(
+            table.lookup(group, "RelativeScale3D"),
+            Some(FieldType::VectorNetQuantize { scale: 100 }),
+            "{group}"
+        );
+    }
+    assert_eq!(lookup_checksum(3902815170), Some(FieldType::Bool));
+    assert_eq!(lookup_checksum(2035145197), None);
+    assert_eq!(lookup_checksum(1992268157), None);
+    // A future path for the same wire resolves through the checksum alone.
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            "/Game/Characters/Gumshoe/S0/Ability_C/GameObject_Gumshoe_C_TripWire.GameObject_Gumshoe_C_TripWire_C",
+            Some("Deployed"),
+            None,
+            Some(3902815170)
+        ),
+        Some(FieldType::Bool)
+    );
+}
+
+/// The five AGameObject smoke and zone classes read byte rotator components,
+/// and the only table entry left with short ones is Gekko's Wingman, an
+/// AShooterCharacter pawn.
+///
+/// The C# descriptors give the five the builder's ShortComponents default by
+/// calling a bare `.ReplicatedMovement()`. None of them ever replicates a
+/// rotation, so the wire cannot choose between the widths (13-J, 16-D); the
+/// choice follows the game's own class data (13.06): all five derive
+/// natively from AGameObject > AActor, no Blueprint default in their chains
+/// writes `ReplicatedMovement`, and every AGameObject class whose rotation is
+/// observable decodes at byte width only (AProjectile 38 of 38 byte,
+/// AShooterCharacter 7 of 7 short). `apply_type_corrections.py`,
+/// `retype_game_object_rotators`, has the evidence and the bound.
+#[test]
+fn only_the_seeker_nade_keeps_short_rotator_components() {
+    const GAME_OBJECTS: [&str; 5] = [
+        "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+        "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
+        "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
+        "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+        "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+    ];
+    const SEEKER_NADE: &str = "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in GAME_OBJECTS {
+        assert_eq!(
+            table.lookup(group, "ReplicatedMovement"),
+            Some(FieldType::RepMovement {
+                rotation: RotatorQuantization::ByteComponents,
+                location: VectorQuantization::RoundWholeNumber,
+            }),
+            "{group}"
+        );
+    }
+    let short: Vec<&str> = OVERLAY_TABLE
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.field_type,
+                FieldType::RepMovement {
+                    rotation: RotatorQuantization::ShortComponents,
+                    ..
+                }
+            )
+        })
+        .map(|e| e.group_path)
+        .collect();
+    assert_eq!(short, [SEEKER_NADE]);
+    // SeekerNade's short, two-decimal donor still disagrees with the byte,
+    // whole-unit ones, so the checksum stays dropped.
+    assert_eq!(lookup_checksum(REPLICATED_MOVEMENT_CHECKSUM), None);
 }
 
 #[test]
@@ -1779,6 +1907,11 @@ fn a_table_entry_outranks_the_engine_fallback() {
 /// The replay's own `compatible_checksum` agrees with the grouping and was not
 /// used to derive it: `248` is 598402184 wherever it appears, `249` is
 /// 747197698, `Translation` 2235276067, `Scale3D` 2983776962.
+///
+/// `249` here is the FTransform's `Rotation`, an FQuat sent as X/Y/Z (W is
+/// implied), not a rotator: 747197698 reproduces as `Transform: FTransform ->
+/// Rotation: FQuat` (tools/tests/test_compatible_checksum_facts.py). The bits
+/// read the same as any 3 x f64; only the meaning was wrong.
 #[test]
 fn the_rpc_transform_vectors_are_typed() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -1902,10 +2035,10 @@ fn an_unlearned_checksum_resolves_nothing() {
 
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 20 groups and `ShortComponents`
-/// on 6, which differ in width, so guessing would desync the block; and one
-/// group packs its location at two decimals where the rest pack whole units,
-/// which a guess would read 100x off with no error at all.
+/// is the one that matters -- `ByteComponents` on 25 groups and `ShortComponents`
+/// on 1, which differ in width, so guessing would desync the block; and that
+/// one group packs its location at two decimals where the rest pack whole
+/// units, which a guess would read 100x off with no error at all.
 ///
 /// `AllianceFilter` used to be the second entry here and is not any more: its
 /// donors disagreed only in the table, never on the wire -- see
@@ -2232,6 +2365,11 @@ fn the_checksum_table_is_populated_and_sorted() {
 /// One entry each: checksum propagation carries `StopMovementTime` to
 /// `ReplayStopContinuousEffectAtLocation` (244888268) and `HandleNumber` to
 /// `NetMulticastRemoveForceModule` (3336285386).
+///
+/// `HandleNumber` is unsigned: 3336285386 reproduces only as
+/// `Handle: FForceModuleHandle -> HandleNumber: uint32`
+/// (tools/tests/test_compatible_checksum_facts.py), so both the Apply entry and
+/// the checksum that carries it to Remove say `UInt32`.
 #[test]
 fn the_movement_time_pair_and_force_module_handle_are_typed() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
@@ -2247,7 +2385,66 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
             "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
             "HandleNumber"
         ),
-        Some(FieldType::Int32),
+        Some(FieldType::UInt32),
+    );
+    assert_eq!(lookup_checksum(3336285386), Some(FieldType::UInt32));
+}
+
+/// `EffectID` is the `int64` member of `FEffectID`, not the `ulong` the C#
+/// descriptors declare: each replay checksum below reproduces with `int64`
+/// and not with `uint64` (tools/tests/test_compatible_checksum_facts.py has
+/// the chains), and the 13.06 executable's reflection agrees.
+///
+/// The table entries are the donors; the checksum table carries the type on to
+/// the RPCs that declare no entry of their own (`MulticastStopContinuousEffect`,
+/// the weapons' `MulticastPlayContinuousEffectFromClient`,
+/// `ReplayStopContinuousEffectAtLocation`). Both halves are pinned because the
+/// CI checksum guard compares a one-group fixture and cannot see a checksum
+/// table left behind by a retyped donor.
+#[test]
+fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for (group, checksum) in [
+        ("/Script/ShooterGame.EffectManagerComponent", 1129645208),
+        (
+            "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
+            2340855891,
+        ),
+        (
+            "/Script/ShooterGame.EffectManagerComponent:MulticastUpdateContinuousEffect",
+            2340855891,
+        ),
+        (
+            "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
+            2251343646,
+        ),
+    ] {
+        assert_eq!(
+            table.lookup(group, "EffectID"),
+            Some(FieldType::Int64),
+            "{group}"
+        );
+        assert_eq!(
+            lookup_checksum(checksum),
+            Some(FieldType::Int64),
+            "{checksum}"
+        );
+    }
+    assert_eq!(
+        resolve_field_type_with_checksum(
+            &table,
+            "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
+            Some("EffectID"),
+            None,
+            Some(2340855891)
+        ),
+        Some(FieldType::Int64),
+    );
+    assert!(
+        !OVERLAY_TABLE
+            .iter()
+            .any(|e| e.field_type == FieldType::UInt64),
+        "no entry should still read an int64 property as UInt64"
     );
 }
 
@@ -2496,8 +2693,9 @@ fn the_weapon_classes_type_215_and_216_like_everything_else() {
 /// table already carries `ReplayPlayContinuousEffectAtLocation.Rotation` as
 /// `RotationShort`.
 ///
-/// It is not the other `249`. That one is a `VectorDouble` under a different
-/// checksum; this family shares 2526428638 and is 19 bits, not 192.
+/// It is not the other `249`. That one is the FQuat X/Y/Z of an FTransform, a
+/// `VectorDouble` under 747197698; this family shares 2526428638 -- a
+/// top-level `Rotation: FRotator` -- and is 19 bits, not 192.
 #[test]
 fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
     const GROUPS: [&str; 5] = [

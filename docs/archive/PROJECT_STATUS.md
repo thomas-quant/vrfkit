@@ -3126,6 +3126,21 @@ and `ProjectileSmokeScreen` is Short and **wrong**. The builder default is the
 only clean tiebreaker, and if these three classes are ever seen replicating a
 rotation, that correction is the precedent to check first.
 
+**Superseded 2026-09-28** (branch `auto/game-evidence-typing-fixes`). All three,
+16-D's `Zone_Wraith_4_Smoke` and Astra's `GameObject_Mage_E_WorldSmoke` now read
+`ByteComponents`. The wire still cannot choose -- none of the five sets a
+rotator flag -- but a better tiebreaker than the builder default now exists:
+the 13.06 game's own class data, read-only. All five derive natively from
+`AGameObject > AActor`; no Blueprint class default in their chains writes
+`ReplicatedMovement` (across the build, one actor class does); and grouped by
+native class, every class whose rotation is observable decodes at one width
+only -- `AShooterCharacter` 7 of 7 short, `AProjectile` 38 of 38 byte,
+`AGameObject` 4 of 4 byte. The change was bounded the way this section bounded
+the default, at corpus scale: all 903 replays that declare `ReplicatedMovement`
+on one of the five (21 builds) were exported with the build before and after,
+and every Parquet file and manifest is byte-identical. The correction is
+`retype_game_object_rotators` in `tools/apply_type_corrections.py`.
+
 Two independent checks that the values are real, not merely bit-exact:
 
   * **gravity.** All 30 newly-covered rows decode to exactly `(0,0,-1)`,
@@ -3892,6 +3907,8 @@ rotation value, all zero -- and it is declared `ShortComponents`. The safety
 argument for the other three is otherwise confirmed: every `ByteComponents`
 class has 7 to 22,844 distinct rotations, so the discriminator really does fire
 where it can.
+(2026-09-28: it and the other four unobservable classes now read
+`ByteComponents`; see the note closing 13-J.)
 
 **13-J's coverage is per-replay, not corpus-wide.** "0 untyped" holds on
 02d4d478. Across the other 10 replays 290 of 659 gravity rows and 34,765 of

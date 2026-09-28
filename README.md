@@ -18,8 +18,8 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
-**Verified state (2026-09-28):** Rust has **814 passing** tests; Python has
-**1121 passing** tests. All 24 supported builds received the same verification
+**Verified state (2026-09-28):** Rust has **819 passing** tests; Python has
+**1133 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. The two
 ActiveBlinds decoding errors found by the first 2026-09-25 audit were fixed
 that day. See [build verification](docs/BUILD_VERIFICATION.md)
@@ -388,7 +388,7 @@ it as one gives the year 3626.
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**814 passing**; the full Python suite also has **1121 passing** tests. The
+**819 passing**; the full Python suite also has **1133 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
@@ -741,7 +741,7 @@ cannot be expanded into fields, so it emits one preservation row (`handle` =
 diagnostic rather than pretending the properties were decoded.
 
 The overlay table is extracted mechanically from the C# descriptors
-(`tools/extract_descriptors.py`) -- 220 groups, 1,331 entries, 96 handles.
+(`tools/extract_descriptors.py`) -- 224 groups, 1,336 entries, 96 handles.
 Those descriptors are vendored verbatim in
 [`third_party/vrp/`](third_party/vrp/README.md),
 and CI regenerates the table from them on every push.
@@ -849,7 +849,7 @@ checkpoint decode failures. This separate check exists because `vrfkit
 validate` does not print overlay counters, so `validate_corpus.py` alone cannot
 see a wrong type. Reaching zero found three places where the wire disagreed
 with the C# declarations; they are recorded with evidence in
-`tools/apply_type_corrections.py` (205 corrections, verified with `--check`).
+`tools/apply_type_corrections.py` (219 corrections, verified with `--check`).
 
 | Symptom | Actual | Evidence |
 |---|---|---|
@@ -1032,7 +1032,7 @@ The following files are generated and must never be edited by hand:
 
 | Generated file | Generator | Notes |
 |---|---|---|
-| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,331 entries, 220 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
+| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,336 entries, 224 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
 | `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including upstream-declared geometry and enum shapes; no cross-group propagation |
 | `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` | 768-byte S-box, shared across builds |

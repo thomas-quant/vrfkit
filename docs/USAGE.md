@@ -362,8 +362,9 @@ Note what separates the second and third buckets among RPCs, since both hold
 parameter and lands in the second, while an RPC whose payload could not be
 split into parameters is emitted whole with no declared handle and lands in the
 third. `ClientPlayOneShotEffectAtLocation.249` sits in the second because it is
-a parameter -- one whose name the replay gives as a bare handle number, and
-whose sibling `248` this repo already types as a `VectorDouble`.
+a parameter -- one whose name the replay gives as a bare number (the hardcoded
+FName index of `Rotation`), and whose sibling `248` this repo already types as
+a `VectorDouble`.
 
 Without this column those three are one undifferentiated pile. Phoenix's smoke
 wall sat in the middle bucket for the life of the project -- 2,791 rows of null
@@ -683,9 +684,9 @@ needs it.
 
 | Script | Produces |
 |---|---|
-| `extract_descriptors.py` | `crates/vrf-decode/src/table.rs` (overlay table 1,331 + 96 handles) from the vendored C# descriptors in `third_party/vrp/Replay.Valorant` |
+| `extract_descriptors.py` | `crates/vrf-decode/src/table.rs` (overlay table 1,336 + 96 handles) from the vendored C# descriptors in `third_party/vrp/Replay.Valorant` |
 | `apply_type_corrections.py` | Applies verified corrections/additions to that file and recomputes the two-line generation header |
-| `extract_checksum_types.py` | `crates/vrf-decode/src/checksum_table.rs` -- `compatible_checksum` -> `FieldType`, learned from the fields the overlay table already declares. Needs an export directory rather than the C# tree, since checksums come from the replay. Checksums whose donors disagree are dropped, which is the safety property. Repeat `--export` to widen the basis; the run **merges** into the committed table rather than replacing it, because a checksum this basis did not happen to see is still correct. `--check` asks whether the two agree *where they overlap* -- not whether they are byte-identical, which a content-addressed table cannot be across different sets of replays. |
+| `extract_checksum_types.py` | `crates/vrf-decode/src/checksum_table.rs` -- `compatible_checksum` -> `FieldType`, learned from the fields the overlay table already declares. Needs an export directory rather than the C# tree, since checksums come from the replay. Checksums whose donors disagree are dropped, which is the safety property. Repeat `--export` to widen the basis; the run **merges** into the committed table rather than replacing it, because a checksum this basis did not happen to see is still correct. `--check` asks whether the two agree *where they overlap* -- not whether they are byte-identical, which a content-addressed table cannot be across different sets of replays. A committed type changes only on purpose: when a correction retypes a checksum's donors, the merge refuses the disagreement until `--retype CHECKSUM` names it (write mode only, and only for a real disagreement). |
 | `extract_sboxes.py` | `crates/vrf-transform/src/sbox.rs` |
 | `extract_golden.py` | `crates/vrf-transform/tests/data/golden_vectors.rs` |
 | `extract_equippables.py` | `tools/equippable_table.py` from the vendored `third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs`; `--check` runs in CI |
@@ -699,7 +700,7 @@ state after applying** and fails if it disagrees.
 ```bash
 python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
     crates/vrf-decode/src/table.rs
-python tools/apply_type_corrections.py           # apply, then verify (205 corrections)
+python tools/apply_type_corrections.py           # apply, then verify (219 corrections)
 cargo +1.86.0 fmt -p vrf-decode
 
 python tools/apply_type_corrections.py --check   # verify only
@@ -708,11 +709,11 @@ python tools/apply_type_corrections.py --check   # verify only
 CI runs the extract, apply and fmt lines on every push and fails if
 `table.rs` then differs from the committed file.
 
-Those 205 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
+Those 219 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
 subset absent from the vendored C# descriptor input (`third_party/vrp`).
 
 The `ADDITIONS` pass inserts items the pinned C# input is **silent on**. There are
-currently 137 of them, and every one is admitted on wire evidence written into the
+currently 142 of them, and every one is admitted on wire evidence written into the
 comment above the list -- bit width, value range, distribution -- and nothing else.
 The original three still show the bar: `BaseTeamState.LoadoutValue` /
 `AverageLoadoutValue` (26-I, where the reference declares the type of the same
@@ -1038,10 +1039,14 @@ Tidal Wave additions plus 104 checksum-scoped wire entries for the September
 ForceModule parameters, the two death-montage references, `AuthEquipSpeed`,
 the inventory correction counters, `OriginalBuyerTeam` and HawkFlash's
 movement and banking -- one entry per exported group that carries each, which
-is why every weapon `_ClassNetCache` group is listed. All 142 were checked
+is why every weapon `_ClassNetCache` group is listed. Those 142 were checked
 without `--compare-typed` on every row of the 1,018-replay audit exports
 (44,934,425 rows, 0 failures, nothing missing), and with `--compare-typed` on
-31 fresh exports covering all 24 builds. `tools/fixtures/type_evidence_aliases.json`
+31 fresh exports covering all 24 builds. The last five entries are Cypher's
+trapwire and cage fields at their 13.01 paths (`Deployed`, `CreatedByCharacter`,
+`RelativeScale3D`), checked with `--compare-typed` on the exports of every
+13.01-13.06 replay that carries them; older replays do not carry those paths,
+so a sample without Cypher on 13.01 or later lists them as `missing`. `tools/fixtures/type_evidence_aliases.json`
 separately covers the existing Swiftplay class-alias propagation of the
 original additions, checked in the 714-replay corpus. Run on a sample, the
 `missing` list names every entry that sample lacks, and the exit status is 1
@@ -1197,14 +1202,14 @@ field meaning; the analyzer deliberately performs no type inference.
 ### Quick sweep -- after any change
 
 ```bash
-cargo +1.86.0 test --workspace --locked                              # 814 passing
+cargo +1.86.0 test --workspace --locked                              # 819 passing
 cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo +1.86.0 fmt --check
 python -W error tools/check_ascii.py --check                         # 159 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
-python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1121 tests
+python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1133 tests
 python -W error tools/check_docs.py --fast
-python -W error tools/apply_type_corrections.py --check              # 205 corrections
+python -W error tools/apply_type_corrections.py --check              # 219 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
 python -W error tools/extract_equippables.py --check
 python -W error tools/check_baseline_schemas.py

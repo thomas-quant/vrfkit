@@ -25,6 +25,9 @@ pub enum FieldType {
     EnumByte,
     Int32,
     UInt32,
+    /// A signed 64-bit integer. `FEffectID::EffectID` is one: its
+    /// `compatible_checksum` reproduces only with the C++ type `int64`.
+    Int64,
     UInt64,
     Float,
     Double,
@@ -168,6 +171,7 @@ fn dispatch_decode(
         FieldType::Byte | FieldType::EnumByte => scalar::decode_byte(r),
         FieldType::Int32 => scalar::decode_i32(r),
         FieldType::UInt32 => scalar::decode_u32(r),
+        FieldType::Int64 => scalar::decode_i64(r),
         FieldType::UInt64 => scalar::decode_u64(r),
         FieldType::Float => scalar::decode_float(r),
         FieldType::Double => scalar::decode_double(r),

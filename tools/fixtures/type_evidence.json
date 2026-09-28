@@ -140,5 +140,10 @@
   {"group":"/Script/ShooterGame.AresInventory","field":"LastSeenClientCorrectionIndex","type":"Int32","checksum":1076231069},
   {"group":"/Script/ShooterGame.AresEquippableDataTracker","field":"OriginalBuyerTeam","type":"FName","checksum":255019476},
   {"group":"/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C","field":"ReplicatedMovement","type":"RepMovementByte","checksum":2749104612},
-  {"group":"/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C","field":"Banking","type":"Double","checksum":677106858}
+  {"group":"/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C","field":"Banking","type":"Double","checksum":677106858},
+  {"group":"/Game/Characters/Gumshoe/S0/Ability_4/GameObject_Gumshoe_4_TripWire.GameObject_Gumshoe_4_TripWire_C","field":"Deployed","type":"Bool","checksum":3902815170},
+  {"group":"/Game/Characters/Gumshoe/S0/Ability_4/GameObject_Gumshoe_4_TripWire_SecondWire.GameObject_Gumshoe_4_TripWire_SecondWire_C","field":"Deployed","type":"Bool","checksum":3902815170},
+  {"group":"/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_TripWire.Ability_Gumshoe_4_TripWire_C","field":"CreatedByCharacter","type":"ObjectNetGuid","checksum":2035145197},
+  {"group":"/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C","field":"CreatedByCharacter","type":"ObjectNetGuid","checksum":2035145197},
+  {"group":"/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C","field":"RelativeScale3D","type":"VectorNetQuantize100","checksum":1992268157}
 ]

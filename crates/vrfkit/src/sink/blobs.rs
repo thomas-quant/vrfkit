@@ -271,6 +271,14 @@ fn verified_array_leaf_type(
 /// enclosing checksum and each member declaration were observed unchanged in
 /// 13.02 and 13.05. A changed name/checksum or conflicting future overlay
 /// refuses typing, while the parent's raw_bits stay available.
+///
+/// `EffectID` is signed. Its checksum 3321413110 reproduces only as
+/// `AuthBlindManagerState: FBlindManagerState -> ActiveBlinds: TArray ->
+/// FActiveBlind -> BlindEffectID: FEffectID -> EffectID: int64` (not `uint64`,
+/// which gives 2854897423); the 13.06 executable's reflection has
+/// `FEffectID.EffectID` as Int64 too. The chain is recomputed in
+/// tools/tests/test_compatible_checksum_facts.py. Below 2^63 both readings
+/// give the same number; UInt64 refused the rest.
 fn verified_blind_leaf_type(
     handle: u32,
     name: Option<&str>,
@@ -279,7 +287,7 @@ fn verified_blind_leaf_type(
 ) -> Option<FieldType> {
     let (wanted_name, wanted_checksum, wanted_type) = match handle {
         3 => ("BlindId", 2_836_858_544, FieldType::UInt32),
-        4 => ("EffectID", 3_321_413_110, FieldType::UInt64),
+        4 => ("EffectID", 3_321_413_110, FieldType::Int64),
         5 => ("SourceID", 4_130_766_059, FieldType::FName),
         6 => ("bLocalEffect", 2_802_682_995, FieldType::Bool),
         7 => ("bTransient", 815_378_154, FieldType::Bool),
@@ -2596,6 +2604,57 @@ mod tests {
             Some(bytes(&bits).as_slice())
         );
         assert_eq!(stats.array_leaf_decode_errors, 1);
+    }
+
+    /// `FEffectID::EffectID` is an `int64` (checksum 3321413110 reproduces
+    /// only with that type), so a pattern with bit 63 set is a negative ID,
+    /// not an overflow: read as `UInt64` it would be refused and the element
+    /// would lose its typed value.
+    #[test]
+    fn active_blinds_effect_id_is_signed() {
+        const GROUP: &str = "/Script/ShooterGame.BlindManagerComponent";
+        const PARENT: &str = "ActiveBlinds";
+        let declarations = [
+            (3, "BlindId", 2_836_858_544),
+            (4, "EffectID", 3_321_413_110),
+            (5, "SourceID", 4_130_766_059),
+            (6, "bLocalEffect", 2_802_682_995),
+            (7, "bTransient", 815_378_154),
+            (8, "InitialDuration", 1_370_668_337),
+            (9, "StartNetMovementTime", 2_358_118_895),
+            (10, "BlindConfig", 4_121_438_116),
+            (11, "CausingActor", 2_370_661_694),
+        ];
+        let mut source_id = vec![false];
+        source_id.extend(bits_from_bytes(&(29i32).to_le_bytes()));
+        source_id.extend(bits_from_bytes(b"DedicatedServerWorldSourceID\0"));
+        source_id.extend(bits_from_bytes(&0i32.to_le_bytes()));
+        let mut blind_config = Vec::new();
+        packed(&mut blind_config, 256);
+        let mut causing_actor = Vec::new();
+        packed(&mut causing_actor, 257);
+        let bits = one_element(&[
+            (3, bits_from_bytes(&7u32.to_le_bytes())),
+            (4, bits_from_bytes(&(-2i64).to_le_bytes())),
+            (5, source_id),
+            (6, vec![true]),
+            (7, vec![false]),
+            (8, bits_from_bytes(&1.5f32.to_le_bytes())),
+            (9, bits_from_bytes(&10.0f32.to_le_bytes())),
+            (10, blind_config),
+            (11, causing_actor),
+        ]);
+        let identity = (GROUP, PARENT, 3_853_965_310);
+        let (valid, stats) =
+            export_array_with_declarations(identity, &declarations, &bits, Some(MEASURED_BUILD));
+        assert_eq!(stats.array_leaf_decode_errors, 0);
+        let effect_id = valid
+            .fields
+            .iter()
+            .find(|f| f.field_name.as_deref() == Some("ActiveBlinds[0].EffectID"))
+            .expect("the EffectID leaf is emitted");
+        assert_eq!(effect_id.value_i64, Some(-2));
+        assert_eq!(effect_id.bit_count, 64);
     }
 
     #[test]

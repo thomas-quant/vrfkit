@@ -13,7 +13,7 @@
 use crate::decode::FieldType;
 
 /// Sorted by checksum; binary-searched by `lookup_checksum`.
-pub static CHECKSUM_TYPES: [(u32, FieldType); 458] = [
+pub static CHECKSUM_TYPES: [(u32, FieldType); 459] = [
     (5646457, FieldType::Float),
     (6302035, FieldType::EnumByte),
     (24357661, FieldType::ObjectNetGuid),
@@ -121,7 +121,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 458] = [
     (1111509696, FieldType::Bool),
     (1117738893, FieldType::Bool),
     (1118571008, FieldType::EnumByte),
-    (1129645208, FieldType::UInt64),
+    (1129645208, FieldType::Int64),
     (1134544246, FieldType::ObjectNetGuid),
     (1136738133, FieldType::Float),
     (1138205977, FieldType::Float),
@@ -254,7 +254,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 458] = [
     (2211868506, FieldType::ObjectNetGuid),
     (2235276067, FieldType::VectorDouble),
     (2237993796, FieldType::EnumByte),
-    (2251343646, FieldType::UInt64),
+    (2251343646, FieldType::Int64),
     (2267879547, FieldType::Byte),
     (2270825073, FieldType::EnumByte),
     (2272326398, FieldType::Float),
@@ -262,7 +262,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 458] = [
     (2316259323, FieldType::Float),
     (2324864779, FieldType::Float),
     (2327969556, FieldType::Float),
-    (2340855891, FieldType::UInt64),
+    (2340855891, FieldType::Int64),
     (2349523235, FieldType::EnumByte),
     (2355109972, FieldType::Float),
     (2363329911, FieldType::Float),
@@ -377,7 +377,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 458] = [
     (3326148726, FieldType::Float),
     (3330235692, FieldType::Float),
     (3332934847, FieldType::Float),
-    (3336285386, FieldType::Int32),
+    (3336285386, FieldType::UInt32),
     (3357891630, FieldType::VectorDouble),
     (3358662469, FieldType::Int32),
     (3387035138, FieldType::ObjectNetGuid),
@@ -432,6 +432,7 @@ pub static CHECKSUM_TYPES: [(u32, FieldType); 458] = [
     (3883502598, FieldType::Bool),
     (3883624036, FieldType::Float),
     (3899377067, FieldType::FString),
+    (3902815170, FieldType::Bool),
     (3909815348, FieldType::Float),
     (3954716686, FieldType::EnumByte),
     (3960441757, FieldType::Int32),

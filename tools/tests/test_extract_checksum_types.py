@@ -70,6 +70,61 @@ class MergeTests(unittest.TestCase):
             gen.merge({1: "FieldType::Int32"}, {1: "FieldType::Float"})
 
 
+class RetypeTests(unittest.TestCase):
+    """`--retype`: the one deliberate way to change a committed type.
+
+    A correction that retypes a donor (the `EffectID`s, UInt64 -> Int64) makes
+    the manifests teach a type the file already contradicts, and `merge`
+    refuses that. Without a named exception the table could only be fixed by
+    hand, which is what it must never be.
+    """
+
+    def test_a_named_disagreement_takes_the_learned_type(self):
+        merged = gen.merge(
+            {1: "FieldType::UInt64", 2: "FieldType::Float"},
+            {1: "FieldType::Int64"},
+            retype={1},
+        )
+        self.assertEqual(merged, {1: "FieldType::Int64", 2: "FieldType::Float"})
+
+    def test_an_unnamed_disagreement_is_still_refused(self):
+        with self.assertRaises(ValueError):
+            gen.merge(
+                {1: "FieldType::UInt64", 2: "FieldType::Int32"},
+                {1: "FieldType::Int64", 2: "FieldType::UInt32"},
+                retype={1},
+            )
+
+    def test_a_retype_the_basis_does_not_teach_cannot_delete_the_entry(self):
+        with self.assertRaises(ValueError):
+            gen.merge({1: "FieldType::UInt64"}, {}, retype={1})
+
+    def test_only_a_real_disagreement_may_be_retyped(self):
+        verdict = gen.reconcile(
+            committed={1: "FieldType::UInt64", 2: "FieldType::Int32", 3: "FieldType::Float"},
+            learned={1: "FieldType::Int64", 2: "FieldType::Int32"},
+            conflicts={3: (["FieldType::Double", "FieldType::Float"], ["X"])},
+        )
+        self.assertEqual(gen.retype_problems(verdict, {1}), [])
+        # agrees already / not learned at all / donors conflict: all refused
+        for checksum in (2, 4, 3):
+            self.assertEqual(len(gen.retype_problems(verdict, {checksum})), 1, checksum)
+
+    def test_retype_is_refused_in_check_mode(self):
+        export = Path(__file__).resolve().parents[1] / "fixtures" / "checksum_export"
+        result = subprocess.run(
+            [sys.executable, str(Path(gen.__file__)), "--export", str(export),
+             "--check", "--retype", "24357661"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--retype", result.stderr)
+
+
 class ConflictTests(unittest.TestCase):
     """A dropped conflict never reached the verdict.
 
