@@ -350,10 +350,6 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
         sink.enable_checkpoint_block_context(checkpoint.clone(), stats.field_rows, block_count);
         reader.finish_with_sink(&mut sink);
     }
-    stats.block_rows_written += buffers.checkpoint_blocks.len() as u64;
-    writers
-        .blocks
-        .push_batch(buffers.checkpoint_blocks.drain(..))?;
     for mut record in buffers.partials.drain(..) {
         stats.partial_rows += 1;
         stats.partial_bits += record.bit_count;
