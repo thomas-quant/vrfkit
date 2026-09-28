@@ -130,6 +130,19 @@ RAW_BLOB_PREFERRED = {
     "RoundInfos": "TArray<FAresPlayerRoundInfo>",
 }
 
+# The two damage RPCs, by the function name `_split_rpc_field` returns.
+DAMAGE_RPC_NAMES = frozenset({
+    "MulticastNotifyDamage_Point",
+    "MulticastNotifyDamage_Base",
+})
+
+# Damage RPC parameters the reference bundle emits as labelled blobs, and
+# rpc_received keeps as blobs, although the parser types them (ObjectNetGuid).
+DEATH_MONTAGE_BLOB_PARAMS = frozenset({
+    "DeathMontageEffectOverride",
+    "DeathMontageEffectOverrideContext",
+})
+
 # RPC parameters whose consumer decodes the raw wire blob itself, by function.
 # Built from raw_bits whenever the row has them, typed or not -- the same rule
 # as RAW_BLOB_PREFERRED -- so typing a parameter upstream can neither drop the
@@ -139,7 +152,7 @@ RAW_BLOB_PREFERRED = {
 #   (`_decode_effect_elements`), which needs the exact payload window.
 # * A damage RPC's LifeChangeEvents feeds valplay's `_decode_remaining_hp`
 #   (weapon_stats.py), which reads the bits of the blob and nothing else.
-# * A damage RPC's death-montage pair (DEATH_MONTAGE_BLOB_PARAMS below) is
+# * A damage RPC's death-montage pair (DEATH_MONTAGE_BLOB_PARAMS above) is
 #   typed ObjectNetGuid in fields.parquet, but the reference bundle carries
 #   each as a labelled blob and rpc_received keeps that shape.
 #
@@ -150,14 +163,8 @@ RAW_BLOB_PREFERRED = {
 _RAW_SOURCED_RPC_PARAMS = {
     "ReplayPlayContinuousEffectAtLocation":
         frozenset({"FloatValues", "ObjectValues", "VectorValues"}),
-    "MulticastNotifyDamage_Point": frozenset({
-        "LifeChangeEvents",
-        "DeathMontageEffectOverride", "DeathMontageEffectOverrideContext",
-    }),
-    "MulticastNotifyDamage_Base": frozenset({
-        "LifeChangeEvents",
-        "DeathMontageEffectOverride", "DeathMontageEffectOverrideContext",
-    }),
+    **dict.fromkeys(DAMAGE_RPC_NAMES,
+                    DEATH_MONTAGE_BLOB_PARAMS | {"LifeChangeEvents"}),
 }
 
 
@@ -197,20 +204,6 @@ VECTOR_PROPERTIES = frozenset({
 # rescaled here.
 JSON_OBJECT_PROPERTIES = frozenset({
     "ReplicatedMovement",
-})
-
-
-# The two damage RPCs, by the function name `_split_rpc_field` returns.
-DAMAGE_RPC_NAMES = frozenset({
-    "MulticastNotifyDamage_Point",
-    "MulticastNotifyDamage_Base",
-})
-
-# Damage RPC parameters the reference bundle emits as labelled blobs, and
-# rpc_received keeps as blobs, although the parser types them (ObjectNetGuid).
-DEATH_MONTAGE_BLOB_PARAMS = frozenset({
-    "DeathMontageEffectOverride",
-    "DeathMontageEffectOverrideContext",
 })
 
 
@@ -660,9 +653,7 @@ def _parse_vector_or_zero(val, tally=None) -> dict:
     that index into it; what changes is that the run no longer claims it
     invented nothing.
     """
-    if isinstance(val, dict):
-        return val
-    parsed = _parse_vector_or_none(val) if val is not None else None
+    parsed = _parse_vector_or_none(val)
     if parsed is None:
         _bump(tally, "fabricated_shot_locations")
         return {"x": 0, "y": 0, "z": 0}
@@ -876,17 +867,7 @@ class _BitReader:
         return _struct.unpack('<d', _struct.pack('<Q', raw))[0]
 
     def skip_bits(self, n: int):
-        self._pos += n
-        if self._pos > self._bit_len:
-            self._pos = self._bit_len
-
-
-def _read_effect_float(r: _BitReader):
-    return r.read_f32()
-
-
-def _read_effect_object(r: _BitReader):
-    return r.read_int_packed()
+        self._pos = min(self._pos + n, self._bit_len)
 
 
 def _read_effect_vector(r: _BitReader):
@@ -909,9 +890,9 @@ class _EffectArraySpec(NamedTuple):
     read_value: object
 
 
-_EFFECT_FLOATS = _EffectArraySpec(7, 8, _read_effect_float)
+_EFFECT_FLOATS = _EffectArraySpec(7, 8, _BitReader.read_f32)
 _EFFECT_VECTORS = _EffectArraySpec(11, 12, _read_effect_vector)
-_EFFECT_OBJECTS = _EffectArraySpec(15, 16, _read_effect_object)
+_EFFECT_OBJECTS = _EffectArraySpec(15, 16, _BitReader.read_int_packed)
 
 
 def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
@@ -1186,12 +1167,9 @@ def _build_shot_event(
     rot_obj = _parse_rotation(rotation, tally)
 
     # Build attack vectors
-    attack_vectors = []
-    for i in range(1, 16):
-        key = f"FiringState.AttackVector.{i}"
-        if key in vectors:
-            x, y, z = vectors[key]
-            attack_vectors.append({"x": x, "y": y, "z": z})
+    attack_keys = (f"FiringState.AttackVector.{i}" for i in range(1, 16))
+    attack_vectors = [{"x": x, "y": y, "z": z} for x, y, z in
+                      (vectors[key] for key in attack_keys if key in vectors)]
 
     burst = floats.get("FiringState.BurstShotNumber")
     yaw_switch = floats.get("FiringState.YawSwitch")
@@ -1249,7 +1227,7 @@ def _build_shot_event(
         "start_movement_time": _f32_shortest(start_time)
         if isinstance(start_time, float) else start_time,
         "source_id": source_id,
-        "is_local_effect": bool(is_local) if is_local is not None else False,
+        "is_local_effect": bool(is_local),
         "is_transient": bool(is_transient) if is_transient is not None else True,
         "wait_on_replication_actor": wait_on or 0,
         # Absent means absent. The reference emits null on 101 of 02d4d478's
@@ -1270,7 +1248,7 @@ def _build_shot_event(
         "yaw_switch": yaw_switch,
         "firing_player_state": firing_player,
         "firing_state": firing_state,
-        "attack_vectors": attack_vectors if attack_vectors else [],
+        "attack_vectors": attack_vectors,
         # The C# parser's tier-1 source; never populated in any observed replay.
         "effect_equippable": None,
         "equippable": equippable,
@@ -1499,22 +1477,16 @@ def _set_nested(root: dict, parts: list, value, tally=None):
     """
     obj = root
     element = None  # the subscript `obj` sits at, when it is an array element
+    last = len(parts) - 1
     for i, (name, idx) in enumerate(parts):
-        is_last = (i == len(parts) - 1)
-        # Ensure current level has the key as a dict or list
+        is_last = i == last
         if idx is not None:
-            # This level is an array
-            if name not in obj:
-                obj[name] = []
-            arr = obj[name]
+            arr = obj.setdefault(name, [])
             if not isinstance(arr, list):
-                # Conflict: was set as a non-list value, override
                 _bump(tally, "payload_shape_conflicts")
-                obj[name] = []
-                arr = obj[name]
-            # Extend array to have at least idx+1 elements
+                arr = obj[name] = []
             while len(arr) <= idx:
-                arr.append({} if not is_last else None)
+                arr.append(None if is_last else {})
             if is_last:
                 if isinstance(arr[idx], (dict, list)) and arr[idx]:
                     # A populated element replaced by a scalar.
@@ -1524,39 +1496,33 @@ def _set_nested(root: dict, parts: list, value, tally=None):
                     _bump(tally, "property_key_collisions")
                 arr[idx] = value
             else:
-                if arr[idx] is None or not isinstance(arr[idx], dict):
+                if not isinstance(arr[idx], dict):
                     if arr[idx] is not None:
                         # A scalar element descended into as a container.
                         _bump(tally, "payload_shape_conflicts")
                     arr[idx] = {}
-                # Set the Index field on array elements to match C# output
-                if "Index" not in arr[idx]:
-                    arr[idx]["Index"] = idx
+                # The C# parser's Index field, set to the subscript.
+                arr[idx].setdefault("Index", idx)
                 obj = arr[idx]
                 element = idx
+        elif is_last:
+            previous = obj.get(name)
+            if isinstance(previous, (dict, list)) and previous:
+                # A populated subtree replaced by a scalar.
+                _bump(tally, "payload_shape_conflicts")
+            elif (name in obj and not isinstance(previous, (dict, list))
+                  and not (name == "Index" and previous == element)):
+                # A value replaced by a same-named row. An Index equal to
+                # the element's subscript is the one injected above.
+                _bump(tally, "property_key_collisions")
+            obj[name] = value
         else:
-            if is_last:
-                previous = obj.get(name)
-                if isinstance(previous, (dict, list)) and previous:
-                    # A populated subtree replaced by a scalar.
-                    _bump(tally, "payload_shape_conflicts")
-                elif (name in obj and not isinstance(previous, (dict, list))
-                      and not (name == "Index" and previous == element)):
-                    # A value replaced by a same-named row. An Index equal to
-                    # the element's subscript is the one injected above.
-                    _bump(tally, "property_key_collisions")
-                obj[name] = value
-            else:
-                if name not in obj:
-                    obj[name] = {}
-                next_obj = obj[name]
-                if not isinstance(next_obj, dict):
-                    # Conflict: overwrite non-dict with dict
-                    _bump(tally, "payload_shape_conflicts")
-                    obj[name] = {}
-                    next_obj = obj[name]
-                obj = next_obj
-                element = None
+            nxt = obj.setdefault(name, {})
+            if not isinstance(nxt, dict):
+                _bump(tally, "payload_shape_conflicts")
+                nxt = obj[name] = {}
+            obj = nxt
+            element = None
 
 
 def _drop_padding_elements(node):
@@ -1654,12 +1620,8 @@ def _split_rpc_field(field_name: str):
     "DamageTaken"). For zero-param RPCs, the field_name IS the RPC name with no
     dot.
     """
-    if field_name is None:
-        return None, None
-    dot = field_name.find('.')
-    if dot == -1:
-        return field_name, None
-    return field_name[:dot], field_name[dot+1:]
+    name, dot, param = field_name.partition('.')
+    return name, (param if dot else None)
 
 
 # ---------------------------------------------------------------------------
@@ -1674,11 +1636,9 @@ def _group_path_to_class(gp: str) -> str:
     '/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C').
     For ClassNetCache RPCs, strip the _ClassNetCache suffix to get the class.
     """
-    if CLASS_NET_CACHE_SUFFIX in gp:
-        # e.g. '/Script/ShooterGame.DamageableComponent_ClassNetCache'
-        # -> '/Script/ShooterGame.DamageableComponent'
-        return gp.replace(CLASS_NET_CACHE_SUFFIX, '')
-    return gp
+    # e.g. '/Script/ShooterGame.DamageableComponent_ClassNetCache'
+    # -> '/Script/ShooterGame.DamageableComponent'
+    return gp.replace(CLASS_NET_CACHE_SUFFIX, '')
 
 
 def _to_package_path(class_path: str) -> str:
@@ -1716,29 +1676,26 @@ def _group_path_to_archetype(gp: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# RPC name normalization
-# ---------------------------------------------------------------------------
-def _normalize_rpc_name(name: str) -> str:
-    """Map vrfkit's RPC field_name prefix to the C# parser's function_name.
-
-    WHY: vrfkit uses the exact ClassNetCache field name as the RPC name prefix
-    in field_name (e.g. 'MulticastNotifyDamage_Point'). The C# parser emits
-    the same names, but some zero-param RPCs may differ in casing or prefix.
-    """
-    # Most are identical. Known mappings:
-    return name
-
-
-# ---------------------------------------------------------------------------
 # RPC parameter normalization
 # ---------------------------------------------------------------------------
+#: Damage RPC booleans the C# reference spells without vrfkit's 'b' prefix.
+_DAMAGE_PARAM_RENAMES = {
+    "bDamageKilledTarget": "DamageKilledTarget",
+    "bAliveAfterDamage": "AliveAfterDamage",
+    "bIsWallPenetration": "IsWallPenetration",
+    "bEquippableUsedZoomed": "EquippableUsedZoomed",
+    "bEquippableUsedInFocusMode": "EquippableUsedInFocusMode",
+}
+
+
 def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
                          tally=None) -> dict | None:
     """Normalize an RPC parameter name and value to match C# parser output.
 
     WHY: vrfkit uses prefixed 'b' for booleans (e.g. 'bDamageKilledTarget')
     while C# emits 'DamageKilledTarget'. Also, RegionalDamage is stored as
-    int enum in vrfkit but as string in C# output.
+    int enum in vrfkit but as string in C# output. Only the damage RPCs are
+    renamed or reshaped; every other RPC's parameters pass through unchanged.
 
     Members of a life-change array are dropped. vrfkit now emits one row per
     member of `LifeChangeEvents[]`/`LifeChangeBySection[]` alongside the parent
@@ -1760,35 +1717,24 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
         "LifeChangeBySection",
     ):
         return None
+    if rpc_name not in DAMAGE_RPC_NAMES:
+        return {param: value}
 
-    result = {}
-
-    if rpc_name in ("MulticastNotifyDamage_Point", "MulticastNotifyDamage_Base"):
-        # Parameter name mapping for damage RPCs
-        param_map = {
-            "bDamageKilledTarget": "DamageKilledTarget",
-            "bAliveAfterDamage": "AliveAfterDamage",
-            "bIsWallPenetration": "IsWallPenetration",
-            "bEquippableUsedZoomed": "EquippableUsedZoomed",
-            "bEquippableUsedInFocusMode": "EquippableUsedInFocusMode",
-        }
-        out_name = param_map.get(param, param)
-
-        # RegionalDamage: int -> string
-        if param == "RegionalDamage" and not is_raw:
-            value = REGIONAL_DAMAGE_MAP.get(value, f"regional_damage__unknown_{value}")
-
+    out_name = _DAMAGE_PARAM_RENAMES.get(param, param)
+    if param == "RegionalDamage" and not is_raw:
+        value = REGIONAL_DAMAGE_MAP.get(value, f"regional_damage__unknown_{value}")
+    elif param in DAMAGE_VECTOR_PARAMS:
         # Damage geometry: the parser now decodes these as quantized vectors
         # (previously raw blobs, because the C# custom decoder hid the type).
         # They arrive as the compact "(x,y,z)" string and the reference emits
         # {x, y, z}. Left as the raw payload if a value ever fails to parse --
         # visibly absent beats a fabricated zero vector.
-        if param in DAMAGE_VECTOR_PARAMS:
-            parsed = _parse_vector_or_none(value)
-            result[out_name] = parsed if parsed is not None else value
-            return result
-
-        # EquippableUsed: net GUID -> the C# ValorantEquippable shape.
+        parsed = _parse_vector_or_none(value)
+        if parsed is not None:
+            value = parsed
+    elif param == "EquippableUsed":
+        # EquippableUsed: net GUID -> the C# ValorantEquippable shape. An
+        # undecodable one passes its bits through rather than a guess.
         #
         # Name/ClassPath stay null and Category stays "unknown" because that is
         # what the C# parser emits: its resolver looks the GUID up in the
@@ -1803,29 +1749,31 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
         # IntPacked's continuation flag, so every multi-byte value came out odd
         # and could never be a valid dynamic NetGUID. The overlay now types the
         # field as ObjectNetGuid, so the parser hands us the decoded integer.
-        if param == "EquippableUsed":
-            if isinstance(value, int) and not is_raw:
-                result[out_name] = {
-                    "NetGuid": value,
-                    "Name": None,
-                    "ClassPath": None,
-                    "Category": "unknown",
-                }
-            else:
-                # Undecodable: pass the bits through rather than guessing.
-                result[out_name] = value
-            return result
-
-        # LifeChangeEvents: keep as blob. `_build_rpc_events` builds it from
-        # raw_bits whenever the row has them, typed or not (see
-        # `_RAW_SOURCED_RPC_PARAMS`), so `is_raw` here means "the blob exists".
-        if param == "LifeChangeEvents" and is_raw:
-            # Pass through as {BitCount, Data, TypeName} matching C# format
-            if isinstance(value, dict):
-                value["TypeName"] = "LifeChangeEvents"
-            result[out_name] = value
-            return result
-
+        if isinstance(value, int) and not is_raw:
+            value = {
+                "NetGuid": value,
+                "Name": None,
+                "ClassPath": None,
+                "Category": "unknown",
+            }
+    elif param == "LifeChangeEvents" or param in DEATH_MONTAGE_BLOB_PARAMS:
+        # Kept as the reference's labelled blob, {BitCount, Data, TypeName}.
+        # `_build_rpc_events` builds these from raw_bits whenever the row has
+        # them, typed or not (see `_RAW_SOURCED_RPC_PARAMS`), so `is_raw` here
+        # means "the blob exists".
+        #
+        # DeathMontageEffectOverride and ...Context: the reference labels them
+        # blobs with exactly these TypeNames. The parser now types both as
+        # ObjectNetGuid -- an FXC_* effect class and a pawn actor reference --
+        # and the RPC loop hands their wire bits back here as the blob, so the
+        # event keeps the reference's shape while fields.parquet carries the
+        # GUID. A startswith match also swallowed
+        # DeathMontageEffectOverrideIsQueued, which is a 1-bit bool: 632 events
+        # shipped it as a blob with an invented TypeName where the reference
+        # emits plain false.
+        if is_raw and isinstance(value, dict):
+            value["TypeName"] = param
+    elif param == "DamagedBone" and is_raw:
         # DamagedBone is an FName the overlay decodes into value_str: all
         # 632,906 MulticastNotifyDamage_Point rows on the 1,018-export corpus
         # are typed (2026-09-28; _Base carries none). A raw one is a decode
@@ -1840,54 +1788,9 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
         # Null rather than the raw blob because valplay's `_bone_region`
         # files None under "other", and would raise TypeError on a dict
         # (`bone in HEAD_BONES`, a frozenset).
-        if param == "DamagedBone" and is_raw:
-            _bump(tally, "damaged_bone_undecoded")
-            result[out_name] = None
-            return result
-
-        # DeathMontageEffectOverride and ...Context: the reference labels them
-        # blobs with exactly these TypeNames. The parser now types both as
-        # ObjectNetGuid -- an FXC_* effect class and a pawn actor reference --
-        # and the RPC loop hands their wire bits back here as the blob, so the
-        # event keeps the reference's shape while fields.parquet carries the
-        # GUID. A startswith match also swallowed
-        # DeathMontageEffectOverrideIsQueued, which is a 1-bit bool: 632 events
-        # shipped it as a blob with an invented TypeName where the reference
-        # emits plain false.
-        if param in DEATH_MONTAGE_BLOB_PARAMS and is_raw:
-            if isinstance(value, dict):
-                value["TypeName"] = param
-            result[out_name] = value
-            return result
-
-        result[out_name] = value
-        return result
-
-    elif rpc_name == "MulticastNotifyKilledEnemy":
-        # Parameters: KillerCharacter, KilledCharacter, MultikillLevel
-        result[param] = value
-        return result
-
-    elif rpc_name in ("MulticastEndRound", "ClientRoundStart"):
-        # NewRoundNumber
-        result[param] = value
-        return result
-
-    elif rpc_name == "MulticastSetPhase":
-        result[param] = value
-        return result
-
-    elif rpc_name == "MulticastReceivePlayerResurrectEvent":
-        result[param] = value
-        return result
-
-    else:
-        # Generic: pass through all params
-        if is_raw and isinstance(value, dict):
-            # Keep blob format
-            pass
-        result[param] = value
-        return result
+        _bump(tally, "damaged_bone_undecoded")
+        value = None
+    return {out_name: value}
 
 
 # ---------------------------------------------------------------------------
@@ -2355,19 +2258,15 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
     time2 = _numeric_column_to_pylist(table.column("time2"))
     word0 = _nullable_numeric_to_pylist(table.column("word0"))
     word1 = _nullable_numeric_to_pylist(table.column("word1"))
-    row_count = len(table)
-    payload_tag = (
-        _nullable_numeric_to_pylist(table.column("payload_tag"))
-        if "payload_tag" in table.column_names else [None] * row_count
-    )
-    payload_name = (
-        table.column("payload_name").to_pylist()
-        if "payload_name" in table.column_names else [None] * row_count
-    )
-    payload_seconds = (
-        _nullable_numeric_to_pylist(table.column("payload_seconds"))
-        if "payload_seconds" in table.column_names else [None] * row_count
-    )
+
+    def optional(name, read):  # an additive column an older export lacks
+        if name in table.column_names:
+            return read(table.column(name))
+        return [None] * len(table)
+
+    payload_tag = optional("payload_tag", _nullable_numeric_to_pylist)
+    payload_name = optional("payload_name", pa.ChunkedArray.to_pylist)
+    payload_seconds = optional("payload_seconds", _nullable_numeric_to_pylist)
     packet_index = _PacketTimeIndex(cols)
     events = []
 
@@ -2589,7 +2488,6 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
                 "actor_event": None,
             }
             events.append((pid + 1, ms, event))
-            actor_event_counts["actor_closed"] += 1
 
     return events, guid_class
 
@@ -2786,10 +2684,7 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
         # Determine RPC name from first field_name
         rpc_name = None
         payload = {}
-        # Collect raw blobs for effect decoding
-        float_blob = None
-        object_blob = None
-        vector_blob = None
+        effect_blobs = {}  # shot array parameter -> _EffectBlob
         # {raw-sourced parameter: blob built?} for this invocation; created
         # only when it carries one. See `_RAW_SOURCED_RPC_PARAMS`.
         blob_state = None
@@ -2847,13 +2742,7 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                             # bit_count travels with the bytes. Recomputing it
                             # downstream as len(data) * 8 would feed the last
                             # byte's padding bits to the decoder as data.
-                            captured = _EffectBlob(bytes(raw), bits)
-                            if param == "FloatValues":
-                                float_blob = captured
-                            elif param == "ObjectValues":
-                                object_blob = captured
-                            else:
-                                vector_blob = captured
+                            effect_blobs[param] = _EffectBlob(bytes(raw), bits)
                         value = _raw_blob(raw, bits)
                         is_raw = True
                         blob_state[param] = True
@@ -2897,7 +2786,8 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 shot_ctx, ms, pid, actor,
                 cols.obj[first] if cols.obj[first] is not None else actor,
                 cols.channel[first], payload,
-                _EffectBlobs(float_blob, object_blob, vector_blob),
+                _EffectBlobs(*map(effect_blobs.get, (
+                    "FloatValues", "ObjectValues", "VectorValues"))),
                 tally=tally,
             )
             events.append((pid, ms, shot_event))
@@ -2906,13 +2796,10 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 resolved_weapon_count += 1
             # Still emit as rpc_received too (some downstream might need it)
 
-        # Normalize the RPC function name to match C# parser output
-        function_name = _normalize_rpc_name(rpc_name)
-
         event = {
             "type": "rpc_received",
             "time_ms": ms,
-            "function_name": function_name,
+            "function_name": rpc_name,
             "actor_net_guid": actor,
             "payload": payload if payload else None,
         }
@@ -3224,10 +3111,6 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     movement_path = export_dir / "movement.parquet"
     manifest_path = export_dir / "manifest.json"
 
-    if not fields_path.exists():
-        sys.exit(f"fields.parquet not found in {export_dir}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
     tally = _Tally()
 
     # ---- Load manifest ----
