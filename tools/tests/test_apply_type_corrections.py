@@ -428,6 +428,30 @@ class RetypeExactTests(unittest.TestCase):
                 self.table("FieldType::Float"), self.GROUP, "AllianceFilter",
                 "FieldType::EnumRemainingBits", "FieldType::EnumByte", expected=2)
 
+    def test_a_braced_retype_changes_the_entry_it_counts(self):
+        """The count claims an entry changed. rustfmt breaks a braced type
+        over lines, so its one-line literal is not in the file: replacing that
+        literal changed nothing while the count still said one entry had. A
+        change the rewrite cannot make in place is refused, not guessed."""
+        group = atc.GAME_OBJECT_BYTE_ROTATOR_GROUPS[0]
+        rep = ("FieldType::RepMovement {{ rotation: RotatorQuantization::{}, "
+               "location: VectorQuantization::{} }}")
+        short_whole = rep.format("ShortComponents", "RoundWholeNumber")
+        byte_whole = rep.format("ByteComponents", "RoundWholeNumber")
+        for one_line in (True, False):
+            with self.subTest(one_line=one_line):
+                source = whole_table(UNCORRECTED_GAME_OBJECT_ROTATORS,
+                                     one_line=one_line, braced_multiline=not one_line)
+                out, n = atc.retype_exact(source, group, "ReplicatedMovement",
+                                          short_whole, byte_whole, expected=1)
+                types = {(g, f): t for g, f, t in atc.parse_entries(out)}
+                self.assertEqual((n, types[(group, "ReplicatedMovement")]),
+                                 (1, byte_whole))
+                with self.assertRaises(SystemExit):
+                    atc.retype_exact(source, group, "ReplicatedMovement", short_whole,
+                                     rep.format("ByteComponents", "RoundTwoDecimals"),
+                                     expected=1)
+
 
 #: A weapon group of the shape the "215"/"216" pass discovers for itself.
 WEAPON_GROUP = "/Game/Equippables/Guns/Rifles/Vandal.Vandal_C"

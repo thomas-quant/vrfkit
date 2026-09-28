@@ -1269,29 +1269,61 @@ def apply_additions(content: str) -> tuple[str, int]:
     return content, added
 
 
+def _type_token_swap(old: str, new: str) -> tuple[str, str]:
+    """The one token to swap in an entry's type so that `old` becomes `new`.
+
+    A bare `old` is one token. Two braced types must differ in exactly one
+    word, and only that word is swapped: rustfmt breaks a braced type over
+    lines, so the one-line literal is not in the committed file to replace.
+    Anything else is refused rather than guessed.
+    """
+    old_n, new_n = normalize_type(old), normalize_type(new)
+    if "{" not in old_n:
+        return old_n, new_n
+    old_words, new_words = old_n.split(), new_n.split()
+    differ = [(a.rstrip(","), b.rstrip(","))
+              for a, b in zip(old_words, new_words) if a != b]
+    if len(old_words) != len(new_words) or len(differ) != 1:
+        raise SystemExit(
+            f"{TABLE_RS}: {old} -> {new} is not a one-word change, so it "
+            f"cannot be rewritten in place in both layouts."
+        )
+    return differ[0]
+
+
 def retype_exact(content: str, group: str, field: str, old: str, new: str,
                  expected: int) -> tuple[str, int]:
     """Rewrite `old` -> `new` on the entries keyed EXACTLY `(group, field)`.
 
     The key is each block's OWN entry (see `_own_entry`): its group and field
-    compared with `==`, and its own `field_type` compared in full. The type is
-    then replaced once, and its first occurrence in the block is the entry's
-    own `field_type`.
+    compared with `==`, and its own `field_type` compared in full. Only the
+    differing token is swapped (`_type_token_swap`), inside the entry's own
+    `field_type`, so both layouts are rewritten. An entry is counted only once
+    its type reads `new`; a swap that does not get there is a hard failure,
+    because a count that moves without the change is worse than no count.
 
     `expected` is how many entries a freshly generated table must change. On an
     already corrected table the answer is 0; any other count means the key
     matched something it was not written for, and that is a hard failure
     rather than a quiet extra rewrite.
     """
+    token, replacement = _type_token_swap(old, new)
     blocks = content.split("    OverlayEntry {")
     changed = 0
     for i, block in enumerate(blocks[1:], 1):
-        g, f = GROUP_RE.search(block), FIELD_RE.search(block)
-        if not (g and f and g.group(1) == group and f.group(1) == field):
+        own_group, own_field, own_type = _own_entry(block)
+        if (own_group, own_field) != (group, field):
             continue
-        if _field_type_of(block) != normalize_type(old):
+        if own_type != normalize_type(old):
             continue
-        blocks[i] = block.replace(old, new, 1)
+        at = block.find(TYPE_MARKER)
+        rewritten = block[:at] + block[at:].replace(token, replacement, 1)
+        if _field_type_of(rewritten) != normalize_type(new):
+            raise SystemExit(
+                f"{TABLE_RS}: {group}/{field} {old} -> {new} did not rewrite "
+                f"the entry's own type."
+            )
+        blocks[i] = rewritten
         changed += 1
     if changed not in (0, expected):
         raise SystemExit(
