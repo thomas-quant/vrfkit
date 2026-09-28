@@ -192,9 +192,7 @@ def _same_value(actual: object | None, expected: object | None,
                 spec: bundle._EffectArraySpec) -> bool:
     if actual is None or expected is None:
         return actual is expected
-    if spec is bundle._EFFECT_FLOATS:
-        return actual == expected
-    if spec is bundle._EFFECT_OBJECTS:
+    if spec is bundle._EFFECT_FLOATS or spec is bundle._EFFECT_OBJECTS:
         return actual == expected
     if isinstance(actual, tuple) and isinstance(expected, tuple):
         return len(actual) == len(expected) and all(

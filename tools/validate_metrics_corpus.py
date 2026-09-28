@@ -100,8 +100,7 @@ def fresh_dir(path: Path, root: Path | None = None) -> Path:
     `check_export_baseline.py` already states the rule for its own output.
     """
     root = root or path.parent
-    require_descendant(path, root)
-    remove_tree(path, root)
+    remove_tree(path, root)  # refuses a path outside `root` before deleting
     path.mkdir(parents=True, exist_ok=True)
     return path
 
