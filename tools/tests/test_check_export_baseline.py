@@ -1,13 +1,6 @@
-"""Guards for the export baseline pinner.
-
-`measure` deliberately records a counter the summary did not print as None
-rather than 0 -- its own comment says "a counter that silently reads as absent
-is how this class of bug survives". `--update` then pinned the None anyway, so
-a summary that STOPPED printing a counter matched the baseline from then on.
-
-The cross-check already catches this for the four counters that are Parquet row
-identities. The other twenty had nothing.
-"""
+"""Guards for the export baseline pinner: the Parquet cross-checks, the
+refusal to pin an unmeasured counter or a machine path, and summary patterns
+that must each read exactly one line."""
 import contextlib
 import io
 import json
@@ -70,8 +63,6 @@ class UnpinnableTests(unittest.TestCase):
 
 
 class CrossCheckTests(unittest.TestCase):
-    """Unchanged behaviour, pinned alongside the new refusal."""
-
     def test_partial_identity_includes_checkpoint_rows_only_when_present(self):
         current = measurement(partial_rows=2, cp_partial_rows=3)
         current["parquet"]["partials"]["rows"] = 5
@@ -611,8 +602,8 @@ class CncCounterTests(unittest.TestCase):
 
 
 class RpcCounterTests(unittest.TestCase):
-    """`RPCs:` is a suffix of `Truncated RPCs:`, so an unanchored pattern read
-    whichever of the two lines came first."""
+    """`RPCs:` is a suffix of `Truncated RPCs:`, so an unanchored pattern
+    would read whichever of the two lines came first."""
 
     def test_the_rpc_count_is_not_read_off_the_truncated_rpcs_line(self):
         pattern = guard.PATTERNS["rpcs"]
@@ -624,13 +615,10 @@ class RpcCounterTests(unittest.TestCase):
 
 
 class SummaryLabelTests(unittest.TestCase):
-    """Every counter pattern reads exactly one line summary.rs can print.
-
-    Each quoted `"  ..."` literal in the summary is rendered with its
-    placeholders filled in. A pattern matching two of them reads whichever
-    comes first -- `rpcs` read `Truncated RPCs:` that way -- and one matching
-    none reports a printed counter as missing on every run.
-    """
+    """Every counter pattern reads exactly one line summary.rs can print, each
+    quoted `"  ..."` literal rendered with its placeholders filled in: a
+    pattern matching two reads whichever comes first, and one matching none
+    reports a printed counter as missing on every run."""
 
     SUMMARY_RS = (Path(__file__).resolve().parents[2]
                   / "crates" / "vrfkit" / "src" / "driver" / "summary.rs")
@@ -750,9 +738,9 @@ class RequiredInputTests(unittest.TestCase):
 
 
 class UpdateReplayNameTests(unittest.TestCase):
-    """--update wrote the replay path it had resolved into a new baseline: an
-    absolute --replay, or VRFKIT_CORPUS_DIR joined to a bare one, put one
-    machine's directory into a committed file."""
+    """--update must not pin a resolved replay path (an absolute --replay, or
+    VRFKIT_CORPUS_DIR joined to a bare one) into a new baseline: it would put
+    one machine's directory into a committed file."""
 
     def run_update(self, root: Path, replay: str, corpus_dir: str | None):
         current = measurement(actor_closes=0)
