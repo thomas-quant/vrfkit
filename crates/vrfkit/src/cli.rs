@@ -1,10 +1,4 @@
 //! Argument parsing -- hand-rolled, no external dependencies.
-//!
-//! Four subcommands:
-//!   inspect `<file>`
-//!   validate `<file>`
-//!   diag `<file>` [--json `<path>`] [--include-payloads]
-//!   export `<file>` --out `<dir>`      (feature `export`)
 
 use crate::error::CliError;
 use crate::inspect;
@@ -46,13 +40,10 @@ SUBCOMMANDS:
                              partials.
 ";
 
-/// Dispatch one command line and report the process exit code it earns.
-///
-/// `Ok(0)` for every subcommand that has nothing to conclude. `validate` is the
-/// exception: it is an oracle, so it returns its own code and `Ok` no longer
-/// means "clean". See [`oracle::Verdict`].
+/// Dispatch one command line and return its exit code: 0, except that
+/// `validate` is an oracle and returns its own, so `Ok` does not mean "clean".
+/// See [`oracle::Verdict`].
 pub fn run(args: &[String]) -> Result<u8, CliError> {
-    // args[0] = binary name
     if args.len() < 2 {
         return Err(CliError::Usage(USAGE.to_string()));
     }
@@ -149,9 +140,8 @@ fn export(args: &[String]) -> Result<(), CliError> {
     crate::driver::run(file, out_dir, with_checkpoints)
 }
 
-/// Refusal, not silence. A build without the `export` feature has no Parquet
-/// writers at all, and a subcommand that printed nothing and exited 0 would be
-/// indistinguishable from one that wrote the files.
+/// Refusal, not silence: without the `export` feature there are no writers,
+/// and printing nothing with exit 0 would look like the files were written.
 #[cfg(not(feature = "export"))]
 fn export(_args: &[String]) -> Result<(), CliError> {
     Err(CliError::Usage(
