@@ -28,8 +28,7 @@ pub enum ExportError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A logical error in the caller's data (e.g. finishing a writer that was
-    /// never opened, or pushing a record after close).
+    /// Caller misuse. The writers return it for a row-group size of zero.
     #[error("{0}")]
     Usage(String),
 }

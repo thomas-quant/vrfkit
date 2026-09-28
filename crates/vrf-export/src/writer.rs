@@ -219,10 +219,6 @@ pub struct TableWriter<T: Table, W: Write + Send> {
     /// Rows per Arrow batch. See [`MAX_BUFFERED_ROWS`]; never larger than the
     /// row-group size, so a caller asking for tiny row groups still gets them.
     batch_rows: usize,
-    /// Reachable only through `finish_ref`. `finish` takes `self` by value, so
-    /// after it nothing holds the writer to push into; the guard exists for the
-    /// by-reference variant and for a caller that keeps the writer alive.
-    finished: bool,
     /// [`Table::retained_bytes`] summed over every row not yet in a closed row
     /// group -- in `buffer` or in `writer`'s open row group. Zeroed whenever
     /// that row group closes, never by a batch flush alone, and consulted only
@@ -265,7 +261,6 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
             writer,
             buffer: Vec::with_capacity(T::initial_capacity(batch_rows)),
             batch_rows,
-            finished: false,
             pending_bytes: 0,
             _table: PhantomData,
         })
@@ -276,22 +271,14 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
     /// here -- unless the table's byte budget is crossed (see
     /// [`Table::MAX_BUFFERED_BYTES`]).
     pub fn push(&mut self, record: T::Row) -> Result<(), ExportError> {
-        self.guard_open()?;
-        self.flush_for_byte_budget(&record)?;
-        self.pending_bytes = self
-            .pending_bytes
-            .saturating_add(T::retained_bytes(&record));
-        self.buffer.push(record);
-        self.flush_if_full_or_oversized()
+        self.push_batch(std::iter::once(record))
     }
 
-    /// Push a batch of records. Cheaper than repeated single pushes because the
-    /// finished-writer check happens once for the whole batch.
+    /// Push every record in `records`, each exactly as [`Self::push`] would.
     pub fn push_batch(
         &mut self,
         records: impl IntoIterator<Item = T::Row>,
     ) -> Result<(), ExportError> {
-        self.guard_open()?;
         for record in records {
             self.flush_for_byte_budget(&record)?;
             self.pending_bytes = self
@@ -312,7 +299,6 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
             self.flush_buffer()?;
         }
         self.writer.close()?;
-        self.finished = true;
         Ok(())
     }
 
@@ -322,15 +308,6 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
     }
 
     // -- internal ----------------------------------------------------------
-
-    fn guard_open(&self) -> Result<(), ExportError> {
-        if self.finished {
-            return Err(ExportError::Usage(
-                "cannot push to a finished writer".into(),
-            ));
-        }
-        Ok(())
-    }
 
     /// Close the open row group before `record` if adding it would take the
     /// pending bytes past the budget, so the row that tips it starts a new
