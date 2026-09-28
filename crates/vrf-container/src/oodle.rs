@@ -1,36 +1,15 @@
 //! ReplayData chunk framing and Oodle archive decompression.
 //!
-//! Two framings meet here. A ReplayData chunk states its decompressed length
-//! twice -- once in its own 16-byte prologue as `MemorySizeInBytes`, once
-//! inside the Oodle archive header -- and the parser requires them to agree. A
-//! Checkpoint chunk (see `crate::checkpoint`) reuses the archive half only,
-//! and has no outer statement to check against, which is why
+//! A ReplayData chunk states its output length twice, as `MemorySizeInBytes` in
+//! its 16-byte prologue and in the archive header, and the two must agree. A
+//! Checkpoint archive has only the header's, which is why
 //! `decompress_oodle_archive` takes the expected length as an `Option`.
-//!
-//! # Compression is optional at the crate level
-//!
-//! Every replay observed to date is Oodle-compressed, but the format allows
-//! plaintext chunks, and a consumer that only ever sees those does not need the
-//! decoder linked in. The `oodle` feature (on by default) gates the
-//! `oozextract` dependency; with it off the plaintext paths still work and a
-//! compressed archive reports [`ContainerError::OodleUnsupported`] rather than
-//! silently returning nothing.
 
 use crate::error::ContainerError;
 use crate::io::le_u32;
 use crate::limits::MAX_CHUNK_SIZE;
 
 /// Parsed metadata from a ReplayData chunk's inner framing.
-///
-/// ```text
-/// +------------------------------------------------+
-/// | u32 Time1                                      |
-/// | u32 Time2                                      |
-/// | i32 SizeInBytes      (compressed payload size) |
-/// | i32 MemorySizeInBytes (decompressed size)      |
-/// | [SizeInBytes] data                             |
-/// +------------------------------------------------+
-/// ```
 #[derive(Debug, Clone)]
 pub struct ReplayDataMeta {
     /// Chunk start time in milliseconds. On 02d4d478 the 19 chunks run (0, 47),
@@ -43,17 +22,11 @@ pub struct ReplayDataMeta {
     pub size_in_bytes: i32,
     /// Decompressed size -- allocate this many bytes for Oodle output.
     pub memory_size_in_bytes: i32,
-    /// Bytes of the chunk payload past the declared archive that this framing
-    /// does not account for: `payload.len() - 16 - SizeInBytes`, floored at
-    /// zero (a `SizeInBytes` larger than the payload is truncation, reported by
-    /// the decompressor, not a negative residual).
-    ///
-    /// Reported for the same reason `CheckpointChunk::trailing_bytes` is: the
-    /// data-bearing slices are cut to the declared length
-    /// (`data_bytes[..size]`, `compressed_data[..compressed_size]`), so anything
-    /// past it is replay data that would otherwise be discarded with no error
-    /// and no tally. Expected to be zero; a non-zero value means the chunk
-    /// framing has changed.
+    /// Payload bytes past the declared archive (`payload.len() - 16 - SizeInBytes`),
+    /// floored at 0: a larger `SizeInBytes` is truncation, which the decompressor
+    /// reports. The archive's `compressed_size` is pinned to `SizeInBytes - 8`, so
+    /// the archive slice drops these same bytes and this one count covers both.
+    /// Expected 0; non-zero means the framing changed.
     pub trailing_bytes: usize,
 }
 
@@ -63,12 +36,9 @@ const REPLAY_DATA_PROLOGUE_BYTES: usize = 16;
 /// Bytes of Oodle archive header: decompressed size then compressed size.
 const OODLE_HEADER_BYTES: usize = 8;
 
-/// Parse the inner framing of a ReplayData chunk payload and return metadata.
-///
-/// The payload bytes are the region `data[chunk.data_offset .. + chunk.size_in_bytes]`
-/// from a [`RawChunk`](crate::RawChunk) of type [`ChunkType::ReplayData`](crate::ChunkType::ReplayData).
-///
-/// # Layout
+/// Parse the inner framing of a ReplayData chunk payload: the region
+/// `data[chunk.data_offset .. + chunk.size_in_bytes]` of a [`RawChunk`](crate::RawChunk)
+/// of type [`ChunkType::ReplayData`](crate::ChunkType::ReplayData).
 ///
 /// | Offset | Type | Field |
 /// |--------|------|-------|
@@ -96,9 +66,8 @@ pub fn parse_replay_data_meta(payload: &[u8]) -> Result<ReplayDataMeta, Containe
         });
     }
 
-    // What the chunk carries past the archive the prologue declares. A negative
-    // `size_in_bytes` yields zero here; it is rejected by the decompressor,
-    // and calling the whole payload "trailing" would be a second wrong answer.
+    // A negative `size_in_bytes` yields zero: the decompressor rejects it, and
+    // calling the whole payload "trailing" would be a second wrong answer.
     let available = payload.len() - REPLAY_DATA_PROLOGUE_BYTES;
     let trailing_bytes =
         usize::try_from(size_in_bytes).map_or(0, |declared| available.saturating_sub(declared));
@@ -112,15 +81,10 @@ pub fn parse_replay_data_meta(payload: &[u8]) -> Result<ReplayDataMeta, Containe
     })
 }
 
-/// Decompress a ReplayData chunk payload using Oodle.
-///
-/// `payload` is the full chunk payload (starting at Time1). `compressed` is the
-/// `ReplayInfo.compressed` flag from the preamble.
-///
-/// When `compressed` is false, the data portion is returned as-is (after
-/// validating that `SizeInBytes == MemorySizeInBytes`).
-///
-/// When `compressed` is true, the data portion contains an Oodle archive:
+/// Decompress a ReplayData chunk payload (from Time1 on). `compressed` is the
+/// preamble's `ReplayInfo::compressed`: without it the data is returned as-is,
+/// after checking `SizeInBytes == MemorySizeInBytes`; with it the data is an
+/// Oodle archive:
 ///
 /// | Offset (relative to data start) | Type | Field |
 /// |---|---|---|
@@ -128,18 +92,9 @@ pub fn parse_replay_data_meta(payload: &[u8]) -> Result<ReplayDataMeta, Containe
 /// | 4 | i32 | compressed_size (must == SizeInBytes - 8) |
 /// | 8 | [u8] | Oodle-compressed bytes |
 ///
-/// # Errors
-///
-/// Returns [`ContainerError`] for size mismatches, truncation, or Oodle failures.
-///
-/// # Trailing bytes
-///
 /// This form **drops** the count [`decompress_replay_data_with_trailing`]
-/// returns: the payload bytes no reader consumed. A chunk carrying more than
-/// its `SizeInBytes` accounts for, or an archive whose codec stream ends
-/// early, loses the excess here with no error and no tally. The count is
-/// expected to be zero, and a caller that ignores it is choosing not to notice
-/// a framing change rather than being unable to.
+/// returns, the payload bytes no reader consumed; expected 0, but a caller
+/// that ignores it cannot notice a framing change.
 pub fn decompress_replay_data(
     payload: &[u8],
     compressed: bool,
@@ -148,17 +103,11 @@ pub fn decompress_replay_data(
     decompress_replay_data_with_trailing(payload, compressed, encrypted).map(|(plain, _)| plain)
 }
 
-/// As [`decompress_replay_data`], also reporting the payload bytes no reader
-/// consumed.
-///
-/// Two residuals, added. The first is [`ReplayDataMeta::trailing_bytes`], the
-/// bytes past the declared archive, computed once from the prologue; the inner
-/// `compressed_data[..compressed_size]` slice in `decompress_oodle_archive`
-/// discards exactly those bytes, because for a ReplayData chunk
-/// `compressed_size` is pinned to `SizeInBytes - 8` and the archive slice runs
-/// to the end of the payload. The second is inside the archive: the codec
-/// stops once its output is full and never checks that its input is used up,
-/// so bytes after the last block it reads are counted rather than dropped.
+/// As [`decompress_replay_data`], also returning the payload bytes no reader
+/// consumed: [`ReplayDataMeta::trailing_bytes`] plus the archive bytes the
+/// codec never read (it stops once its output is full and never checks that
+/// its input is used up). Both were 0 in all 20,180 ReplayData archives of
+/// 1,014 replays, 11.06-13.06 (census, 2026-09-28).
 pub fn decompress_replay_data_with_trailing(
     payload: &[u8],
     compressed: bool,
@@ -172,7 +121,6 @@ pub fn decompress_replay_data_with_trailing(
     let data_bytes = &payload[REPLAY_DATA_PROLOGUE_BYTES..];
 
     if !compressed {
-        // Uncompressed: sizes must match.
         if meta.size_in_bytes != meta.memory_size_in_bytes {
             return Err(ContainerError::SizeMismatch {
                 size: meta.size_in_bytes,
@@ -199,27 +147,12 @@ pub fn decompress_replay_data_with_trailing(
     Ok((plain, meta.trailing_bytes + unread))
 }
 
-/// Decompress one Oodle archive: an 8-byte header followed by the codec stream.
-///
-/// ```text
-/// | i32 decompressed_size |
-/// | i32 compressed_size   |
-/// | [compressed_size] bytes |
-/// ```
-///
-/// Shared by ReplayData and Checkpoint chunks, which frame their archives
-/// identically and differ only in what states the expected output length.
-/// `declared_size` is the archive's declared byte count including the 8-byte
-/// header. `expected_decompressed` is the length an outer field claims -- a
-/// ReplayData chunk has `MemorySizeInBytes` and passes it, a checkpoint has no
-/// such field and passes `None`, which makes the header's own
-/// `decompressed_size` the sole authority.
-///
-/// Returns the plaintext and the count of archive bytes the codec never read.
-///
-/// Every check a ReplayData chunk performed before this was factored out is
-/// still performed here, in the same order, so its error behaviour is
-/// unchanged; the corpus run over 215 files is what pins that.
+/// Decompress one Oodle archive (layout on [`decompress_replay_data`]), for
+/// ReplayData and Checkpoint chunks alike. `declared_size` includes the 8-byte
+/// header. `expected_decompressed` is an outer field's claim: a ReplayData
+/// chunk passes `MemorySizeInBytes`; a checkpoint has none and passes `None`,
+/// leaving the header's `decompressed_size` the sole authority. Returns the
+/// plaintext and the count of archive bytes the codec never read.
 pub(crate) fn decompress_oodle_archive(
     archive: &[u8],
     declared_size: i32,
@@ -265,12 +198,8 @@ pub(crate) fn decompress_oodle_archive(
         });
     }
 
-    // Anything past `compressed_size` in this slice is not counted here. It is
-    // the same excess `ReplayDataMeta::trailing_bytes` already measured -- the
-    // caller hands the whole post-prologue region as `archive`, and
-    // `compressed_size` is pinned to `declared_size - 8` just above -- and a
-    // checkpoint passes `declared_size = archive.len()`, so there is nothing
-    // left over on that path at all. Counting it again here would double it.
+    // Bytes past `compressed_size` are `ReplayDataMeta::trailing_bytes`, which
+    // the caller counts; a checkpoint passes `declared_size = archive.len()`.
     let compressed_data = &archive[OODLE_HEADER_BYTES..];
     if compressed_data.len() < compressed_size as usize {
         return Err(ContainerError::Truncated {
@@ -290,27 +219,20 @@ pub(crate) fn decompress_oodle_archive(
 fn inflate(input: &[u8], decompressed_size: usize) -> Result<(Vec<u8>, usize), ContainerError> {
     let mut output = vec![0u8; decompressed_size];
 
-    // A fresh extractor per archive, deliberately.
-    //
-    // `Extractor::new` allocates and zeroes ~768 KiB (two 256 KiB scratch
-    // arrays plus a 256 KiB BytesMut), and the reference replay decompresses 19
-    // ReplayData archives plus 18 checkpoints, so hoisting it into a
-    // thread-local was measured: it is worth 2.3% on `export` and 1.8% on
-    // `validate`. It is not taken, because `Extractor` carries `bitknit_state`
-    // and `lzna_state` across calls and only clears them when a block header
-    // sets `restart_decoder`. A reused extractor would therefore decode a
-    // stream whose first quantum does NOT request a restart against the
-    // *previous* archive's decoder state, where a fresh one fails with
-    // "Bitknit uninitialized". No archive that decodes correctly today would
-    // change -- the divergence is confined to inputs that currently error --
-    // but turning a loud failure into a silent decode is exactly what this
-    // crate does not do. Reinstate this if `oozextract` grows a `reset()`.
+    // A fresh extractor per archive, deliberately. `Extractor::new` zeroes
+    // ~768 KiB, and a reused one measured 2.3% faster on `export` and 1.8% on
+    // `validate` (02d4d478: 19 ReplayData and 18 checkpoint archives). But
+    // `Extractor` keeps `bitknit_state` and `lzna_state` across calls unless a
+    // block header sets `restart_decoder`, so a reused one would decode a
+    // no-restart stream against the previous archive's state where a fresh one
+    // fails loudly ("Bitknit uninitialized"). Only inputs that error today
+    // would change, but a loud failure must not become a silent decode.
+    // Revisit if `oozextract` grows a `reset()`.
     let mut extractor = oozextract::Extractor::new();
     // `read` over a slice, not `read_from_slice`: the codec stops once
     // `output` is full and never checks that its input is used up, and only
-    // this form leaves the slice at what it did not read (`read_from_slice`
-    // keeps its cursor private). The remainder means something only on
-    // success; a failed read consumes the rest of the slice.
+    // this form leaves the slice at what it did not read. The remainder means
+    // something only on success; a failed read consumes the rest of the slice.
     let mut unread = input;
     let n = extractor
         .read(&mut unread, &mut output)
@@ -326,12 +248,7 @@ fn inflate(input: &[u8], decompressed_size: usize) -> Result<(Vec<u8>, usize), C
     Ok((output, unread.len()))
 }
 
-/// Stand-in used when the `oodle` feature is off.
-///
-/// Reports rather than returning an empty buffer: a caller that asked for a
-/// compressed archive from a build without a decoder has a configuration
-/// problem, and a zero-length "success" would be indistinguishable from an
-/// empty chunk downstream.
+/// Stand-in when the `oodle` feature is off; see [`ContainerError::OodleUnsupported`].
 #[cfg(not(feature = "oodle"))]
 fn inflate(input: &[u8], decompressed_size: usize) -> Result<(Vec<u8>, usize), ContainerError> {
     let _ = input;
