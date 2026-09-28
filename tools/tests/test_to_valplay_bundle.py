@@ -706,6 +706,14 @@ class ShotEventTests(unittest.TestCase):
             },
         )
 
+    def test_an_undecoded_alliance_filter_passes_through_unchanged(self):
+        """Only an int is an enum ordinal. An untyped AllianceFilter arrives as
+        its raw blob, and str() published the Python repr "{'BitCount': 3,
+        ...}" -- neither the reference's enum string nor null."""
+        blob = {"BitCount": 3, "Data": "Aw=="}
+        self.assertEqual(self.build_shot({"AllianceFilter": blob})["alliance_filter"], blob)
+        self.assertIsNone(self.build_shot({})["alliance_filter"])
+
 
 class EffectBlobBitLengthTests(unittest.TestCase):
     """The bit length must come from the parser, not from the byte length.

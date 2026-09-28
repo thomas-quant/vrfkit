@@ -1234,13 +1234,12 @@ def _build_shot_event(
     else:
         fire_mode, fire_mode_evidence = "unknown", None
 
-    # Alliance filter string
-    alliance_str = None
-    if alliance is not None:
-        if isinstance(alliance, int):
-            alliance_str = ALLIANCE_MAP.get(alliance, f"alliance_unknown_{alliance}")
-        else:
-            alliance_str = str(alliance)
+    # Only an int is an enum ordinal. Anything else -- the {BitCount, Data}
+    # blob of a field the overlay could not type -- passes through unchanged,
+    # like every other shot param; str() published its Python repr.
+    alliance_str = alliance
+    if isinstance(alliance, int):
+        alliance_str = ALLIANCE_MAP.get(alliance, f"alliance_unknown_{alliance}")
 
     shot = {
         "effect_id": effect_id,
