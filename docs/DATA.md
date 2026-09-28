@@ -9,42 +9,21 @@ with "lost"; check stream-loss counters separately.
 Legend: ✅ typed (value decoded) · ◐ raw or derivable · ❌ unavailable in the
 stated observation scope. Absence in a sample is not proof of format-wide absence.
 
-The historical 2026-09-09 714-replay field measurement is recorded in
-[TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md): physical
-typed-value presence is 71.2336% main, 77.3065% checkpoint, and 72.5608%
-combined, counted directly from all four value columns. These physical row
-ratios are not semantic completeness. Both corpus guards and the independent
-before/after comparison passed on those 714 inputs. The latest build-by-build
-validation is recorded in [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md); it
-checks a larger replay collection with one acceptance rule for all builds.
-The historical physical-coverage ratios above were not remeasured by that audit.
-The 2026-09-25 ActiveBlinds fix restores 522 typed children in the 986-replay
-corpus audited that day, including explicit zero CausingActor references; it
-retains every prior field row and raw payload. See the [resolved findings](BUILD_VERIFICATION.md#resolved-findings).
-RequestedIgnoreActors, TransitionContext and the measured HawkFlash velocity now expose typed reference/vector values.
-Structured-array children are admitted per build and per route: 13.01--13.06
-expand every measured route, and 11.06--13.00 expand only the routes whose
-layout matched and decoded cleanly there. On those builds the other parents
-remain raw rows; see [the legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28).
-Qualified heal and overheal-decay references (HealCauser, DecayCauser and both
-RPCs' EventInstigator and EventInstigatorPawn) and map-targeting cursor/click
-vectors also expose values. Multi-click arrays retain raw parents and add vector children.
-Qualified reward names now retain complete text histories, string-table keys and format arguments. [KillData observations](KILL_OBSERVATIONS.md) preserve partial updates and scoped references.
-
-The [kill ledger](KILL_LEDGER.md) combines component-local KillData base/revision
-state with character-death events through validated PlayerState identities and
-rounds. Checkpoint repeats and unmatched events remain separate populations.
-The earlier partial-header correction is recorded in
-[PARTIAL_HEADER_CORRECTION.md](PARTIAL_HEADER_CORRECTION.md), and crosshair/Tidal
-Wave additions in [SCHEMA_EXPANSION.md](SCHEMA_EXPANSION.md).
-
-Checkpoint-scoped actor/GUID output, reviewed CombatReport participant identity,
-and reload observation boundaries are described in
-[SEMANTIC_CONTEXT_EXPANSION.md](SEMANTIC_CONTEXT_EXPANSION.md).
-Checkpoint-local GUID path reconstruction and its evidence boundary are
-described in [CHECKPOINT_PATH_RESOLUTION.md](CHECKPOINT_PATH_RESOLUTION.md).
-Its 72.4914% combined ratio predates the structured-array expansion and is
-historical rather than a current coverage figure.
+Current validation is [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md): one
+acceptance rule on 1,018 replays of 24 builds, with the
+[resolved findings](BUILD_VERIFICATION.md#resolved-findings) (among them the
+2026-09-25 ActiveBlinds fix). Structured-array children are admitted per build
+and per route: every measured route on 13.01--13.06, only the routes that
+matched and decoded cleanly on 11.06--13.00, where the other parents stay raw
+([legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+The dated batches that added types and context are the phase reports --
+[targeting and heal values](TARGETING_AND_HEAL_VALUES.md) (with the 2026-09-09
+714-replay physical coverage), [schema expansion](SCHEMA_EXPANSION.md),
+[partial-header correction](PARTIAL_HEADER_CORRECTION.md),
+[semantic context](SEMANTIC_CONTEXT_EXPANSION.md) and
+[checkpoint path resolution](CHECKPOINT_PATH_RESOLUTION.md) -- and the KillData
+[observations](KILL_OBSERVATIONS.md) and [ledger](KILL_LEDGER.md). Physical
+row ratios are not semantic completeness.
 
 ---
 
@@ -60,13 +39,10 @@ historical rather than a current coverage figure.
 | Display name / Riot ID | — | ❌ not established by the available evidence |
 | `ProfileName` | PlayerState replicated FString | ✅ exact string decoded; its purpose is not established as a display name or Riot ID |
 
-That 10/10 was not free, and it is worth knowing why it can break.
-`SpawnedCharacter` is replicated a second time as 0 when a player disconnects,
-so a plain last-write-wins capture throws the real GUID away. It did: 9 players
-across 5 replays came out with `character_net_guid == 0` while still appearing
-in the manifest, so nothing looked wrong until the join was counted. The rule is
-**last non-zero write wins** -- 0 is not a NetGUID. Before the fix 64 of 69
-replays joined all ten and the worst managed 7; after it, 71 of 71 do.
+`SpawnedCharacter` is replicated again as 0 when a player disconnects, so the
+rule is **last non-zero write wins** -- 0 is not a NetGUID. Last-write-wins lost
+9 players across 5 replays with nothing looking wrong (64 of 69 replays joined
+all ten, the worst 7); with the rule, 71 of 71 do.
 
 **The manifest keeps one pawn per player, and a reconnect gives a player two.**
 On 39c2bb2c (13.05) PlayerState 256 writes `SpawnedCharacter` 1510 at t=66, 0
@@ -178,27 +154,17 @@ carries them -- and `MulticastNotifyHeal` and `MulticastNotifyOverhealDecay`
 name their array `LifeChangeBySection`, not `LifeChangeEvents`. A filter on the
 array's name alone silently drops more than half the calls.
 
-For a retained healing view, use `tools/extract_healing_observations.py`.
-It keeps serialized amounts, section state and identity corroboration separate;
-see [HEALING_OBSERVATIONS.md](HEALING_OBSERVATIONS.md) for its measured coverage
-and the distinction between serialized amounts and effective HP restored.
-
-For all five routes, use `tools/extract_section_observations.py`; see
-[SECTION_OBSERVATIONS.md](SECTION_OBSERVATIONS.md). It preserves raw evidence,
-parentless amounts, unresolved section references and separate checkpoint rows.
-The historical measurements below do not replace its current raw validation
-or establish player attribution and continuous health timelines.
-
-`tools/extract_section_timeline.py` adds exact observed predecessors and
-explicit ordering/lifetime gaps; see [SECTION_TIMELINE.md](SECTION_TIMELINE.md).
-Its comparison eligibility does not establish a game life, component life,
-effective HP or player credit.
-
-`tools/extract_section_packet_timeline.py` retains that strict view and adds
-packet-ordered comparisons. Distinct main packets can resolve some observations
-that share a millisecond timestamp; same-packet ties and unresolved actor/channel
-instances still prevent links. See [SECTION_PACKET_TIMELINE.md](SECTION_PACKET_TIMELINE.md)
-for evidence, arithmetic disagreements and the separate interpretation limits.
+Four tools build on these rows, each keeping raw evidence and unresolved
+references visible: `tools/extract_healing_observations.py` (serialized heal
+amounts, not effective HP; [HEALING_OBSERVATIONS.md](HEALING_OBSERVATIONS.md)),
+`tools/extract_section_observations.py` (all five routes, parentless amounts
+and checkpoint rows; [SECTION_OBSERVATIONS.md](SECTION_OBSERVATIONS.md)),
+`tools/extract_section_timeline.py` (exact predecessors and ordering/lifetime
+gaps; [SECTION_TIMELINE.md](SECTION_TIMELINE.md)) and
+`tools/extract_section_packet_timeline.py` (packet-ordered comparisons; ties in
+one packet still prevent links; [SECTION_PACKET_TIMELINE.md](SECTION_PACKET_TIMELINE.md)).
+None establishes a game life, player credit or a continuous health timeline,
+and the historical measurements below do not replace their raw validation.
 
 Verified over 69 replays on build 13.02: 377,487 elements, zero parse errors,
 zero residual bits, and every observed element carrying exactly four members
@@ -568,10 +534,9 @@ reader divided every location by 100, the C# reference's `VectorNetQuantize100`.
 The wire packs `round(world * scale)` and sets one bit saying "scaled", never the
 scale, and on all but one class the scale is 1 -- so `location` came out as
 world/100, a plausible point near the map origin, while every decode counter
-read clean (bit consumption does not depend on the divisor). This table used to
-list the field as "`ReplicatedMovement` (x100) ✅". To repair an old export,
-multiply `location` by 100 on every class except `Pawn_Aggrobot_SeekerNade_C`,
-whose values were already right.
+read clean (bit consumption does not depend on the divisor). To repair an old
+export, multiply `location` by 100 on every class except
+`Pawn_Aggrobot_SeekerNade_C`, whose values were already right.
 
 The scale is Unreal's `LocationQuantizationLevel`, a per-class choice the wire
 does not carry, so every `RepMovement` entry in the overlay table now states it
@@ -624,19 +589,13 @@ packed integers. Two checks per class:
 | `Projectile_Aggrobot_C_ExplodeyPatch_C` | Byte | whole units | 647 | 15 | 0.9999-1.0001 | 1.00 (9,052) |
 | `Projectile_Mage_Q_Wall_C` | Byte | whole units | 596 | 5 | 0.9998-1.0002 | 0.98 (131,617) |
 
-\* The five `Byte*` classes never replicate a rotation, so byte and short
-components read the same three clear flag bits and give the same values: the
-wire cannot tell the widths apart, and the choice is a prior, not a
-measurement. Until 2026-09-28 they read short -- the builder default the C#
-descriptors' bare `.ReplicatedMovement()` takes. They read byte now because the
-13.06 game's own class data points that way: all five derive natively from
-`AGameObject`, no Blueprint default in their chains sets `ReplicatedMovement`,
-and by native class every class whose rotation is observable decodes at one
-width only -- `AShooterCharacter` 7 of 7 short, `AProjectile` 38 of 38 byte,
-`AGameObject` 4 of 4 byte. The change moved nothing: all 903 replays that
-declare their movement were exported before and after it, and every Parquet
-file and manifest is byte-identical. If one of them ever sets a rotator flag,
-exact consumption decides, as it did for every other class here.
+\* The five `Byte*` classes never replicate a rotation, so the wire cannot
+tell byte from short components and the width is a prior, not a measurement:
+the 13.06 game's class data, by which every observable native `AGameObject`
+decodes as byte. The evidence, and the byte-identical re-export of all 903
+replays that declare their movement, are at `GAME_OBJECT_BYTE_ROTATOR_GROUPS`
+in `tools/apply_type_corrections.py`. A rotator flag, if one ever appears,
+decides by exact consumption.
 
 Every class the table types was observed, so no entry rests on the default
 alone. The Boom Bot (`Pawn_Clay_E_Boomba_C`), typed through an exact scoped
@@ -674,15 +633,12 @@ level, and fails on a group it does not list: a new class cannot ship on the
 default without somebody running the spawn join first. A `RepMovement` literal
 written without a `location:` does not compile.
 
-**This member now differs from the C# reference on purpose.** The reference
-still emits location/100 for every class. The 2026-08-02 decision to keep that
-reading (archived as 13-J in
-[PROJECT_STATUS.md](archive/PROJECT_STATUS.md#13-j-the-ability-pawns-and-projectiles-got-descriptors-done-2026-08-02))
-rested on member-for-member parity with the reference (13-B) and on "no metric
-section consumes the field"; the second reason stopped being true when this
-document began listing the field as a position source, and a position that is
-100x wrong is not a parity worth keeping. That parity join was a one-off, so no
-committed check had to be changed or excluded.
+**This member differs from the C# reference on purpose:** the reference still
+emits location/100 for every class. Keeping that reading
+([archive 13-J](archive/PROJECT_STATUS.md#13-j-the-ability-pawns-and-projectiles-got-descriptors-done-2026-08-02))
+rested on member-for-member parity (13-B) and on no metric reading the field;
+this page lists it as a position source, and a position 100x wrong is not
+parity worth keeping.
 
 ### RPC transforms: `249` is a rotation quaternion, not a rotator
 
@@ -835,19 +791,12 @@ intervals carried that player's subject; now none does.
 ## Limitations (replay-format, not parser bugs)
 
 - **Display names** — the replay carries no player names, only account UUIDs.
-- **InventoryComponent** — RESOLVED: it replicates under its Blueprint class
-  name, but the replay declares the property layout under the native parent
-  `AresInventory`. The `KNOWN_SUBOBJECT_CLASS_PATHS` remap (InventoryComponent
-  -> AresInventory, AbilitiesAndBuffsComponent -> AresAbilitySystemComponent)
-  connects them, so the handles pick up names and types -- `CurrentEquippable`
-  (equipped weapon / spike carrier) included. ZoomStateMachine, ReserveAmmo and
-  CalloutRegionTracker were listed here as still needing that map; they have it.
-  All three are in `KNOWN_SUBOBJECT_CLASS_PATHS` and are pinned by the test at
-  `crates/vrfkit/src/sink/paths.rs`, with 30 more added from the 13.06 game.
-  The procedure that produced them, and the tool that repeats it, are under
-  "Reading component classes out of the game" below. A bare component group that
-  turns up on a new build still needs the same treatment, and the map is not
-  name-derivable -- it comes from the game's class hierarchy.
+- **Bare component groups** — a component such as `InventoryComponent`
+  replicates under its instance name while the replay declares its layout under
+  the native class (`AresInventory`). `KNOWN_SUBOBJECT_CLASS_PATHS` connects
+  them (pinned in `crates/vrfkit/src/sink/paths.rs`). The map comes from the
+  game's class hierarchy, not from names; a bare group on a new build needs
+  "Reading component classes out of the game" below.
 - **AbilitiesAndBuffsComponent** — the replay never declares its `_ClassNetCache`
   group, so `function_count` is brute-forced (fc=34). The outer RPC framing is
   fully recovered, and the inner payload is decomposed (a flag bit followed by a
@@ -870,17 +819,12 @@ intervals carried that player's subject; now none does.
   and the field resolves through the weakest fallback — `compatible_checksum`
   (`checksum_table.rs`, to `ObjectNetGuid`). No row lost its type, but the name
   path for that one entry is dead until the generator learns the number.
-- **A reused channel used to inherit the previous actor's archetype.** Channel
-  archetypes were keyed by channel alone and never cleared, so when a channel
-  closed and reopened for a different actor, `resolve_actor_group_path` read the
-  stale archetype and assigned the old class. Measured, not hypothesised: on
-  `08aec1e1` packet 28115, a `BP_Destructible_Snowman_B1` was decoded as
-  `Projectile_Pandemic_4_SmokeGrenade_C`, emitting field names `215`/`216` with
-  typed values for a class it was not. 13 of the 215 replays carried this, 98
-  rows in total. Archetypes are now stamped with the actor GUID they were read
-  for, so those rows report the bare group with no field name instead — which is
-  why corpus `Decoded OK` fell 169,335,818 -> 169,335,720 while `raw/skip`,
-  `not in table` and `rows offered` all held exactly steady.
+- **A reused channel once inherited the previous actor's archetype**: on
+  `08aec1e1` packet 28115 a `BP_Destructible_Snowman_B1` decoded as
+  `Projectile_Pandemic_4_SmokeGrenade_C`, with typed `215`/`216` fields (13 of
+  215 replays, 98 rows). Archetypes are now stamped with the actor GUID they
+  were read for, so those rows report the bare group: corpus `Decoded OK` fell
+  169,335,818 -> 169,335,720 with every other bucket steady.
 - **spikeExploded** — not a limitation: `events.spikeExploded` is the canonical
   detonation signal and is always emitted. `RoundResults` records the round
   *win reason* (elimination/detonate/defuse), not whether the spike detonated,
@@ -890,20 +834,11 @@ intervals carried that player's subject; now none does.
 
 ## What's next (where to start)
 
-The current implementation and remaining evidence requirements are tracked in
-[`FOLLOWUP.md`](FOLLOWUP.md). Three analysis helpers now turn the existing
-tables into inspectable outputs: `summarize_value_coverage.py` measures physical
-typed rows; `extract_ability_stats.py` validates the observed 32-ID stat
-dictionary; `extract_match_observations.py` joins conservative match observations.
-Their outputs distinguish replicated snapshots from events and leave unresolved
-ownership or semantics explicit.
-
-**Start by bucketing the untyped rows on `compatible_checksum`.** That column
-exists so this list can be found rather than stumbled on: a checksum the
-overlay already knows means a resolution bug, a checksum it has never seen
-means a coverage gap, and no checksum means the value is addressed inside a
-payload and there is nothing to look up. The recipe and the shape of the split
-are in `docs/USAGE.md` under the fields schema.
+Remaining work and its evidence requirements are tracked in
+[`FOLLOWUP.md`](FOLLOWUP.md). **Start by bucketing the untyped rows on
+`compatible_checksum`**: a known checksum means a resolution bug, an unseen one
+a coverage gap, none a value addressed inside a payload
+([recipe](USAGE.md#fieldsparquet)).
 
 1. **The next unnamed single handle** — `HANDLE_ADDITIONS` in
    `tools/apply_type_corrections.py` is currently empty: its one entry named
@@ -947,30 +882,23 @@ IDs 57, 62 and 65 were not observed on 13.06 and stay unknown for that build.
 
 ### Done, and where the reasoning lives
 
-| was | outcome |
-|---|---|
-| Remaining Blueprint components | done from the shipped game — "Reading component classes out of the game" below |
-| `ReserveAmmo` | same pass; both ammo counters are `AmmoComponent.AuthResourceAmount` |
-| Checksum propagation | built — `crates/vrf-decode/src/checksum_table.rs`, generated by `tools/extract_checksum_types.py`, consulted last in `resolve_entry` |
-| Checksum as type evidence | built — `tools/check_checksum_types.py` recomputes each typed field's `compatible_checksum` from the type vrfkit decodes; method, formula provenance and limits in [CHECKSUM_TYPES.md](CHECKSUM_TYPES.md) |
-| Walk into `AbilityCastsThisRound[].Effects[]` | built — `ABILITY_CASTS_SCHEMA` in `crates/vrf-decode/src/array/schema.rs` |
-| Exact ability cast count | the claim was wrong; see below |
-| RPC signature aliasing | rejected with measurements — "Closed: RPC signature aliasing" |
-| More name-resolved properties | rejected with measurements — "Closed: more name-resolved properties" |
+Remaining Blueprint components and `ReserveAmmo` came from the shipped game
+("Reading component classes out of the game" below). Checksum propagation is
+`checksum_table.rs` (`extract_checksum_types.py`), consulted last in
+`resolve_entry`, and `check_checksum_types.py` checks it as type evidence
+([CHECKSUM_TYPES.md](CHECKSUM_TYPES.md)). `AbilityCastsThisRound[].Effects[]` is
+walked by `ABILITY_CASTS_SCHEMA` in `crates/vrf-decode/src/array/schema.rs`. RPC
+signature aliasing and more name-resolved properties were rejected with
+measurements (the "Closed" sections below).
 
-**The cast-count entry is worth keeping as a lesson.** It said "confirmed
-wire-limit: the GAS stream is state-sync, not one RPC per cast". The premise was
-right and the conclusion did not follow --
+The list once said "confirmed wire-limit: the GAS stream is state-sync, not one
+RPC per cast". The premise was right and the conclusion did not follow:
 `Comp_AbilityStatisticsReplicator` replicates one record per cast, with the
-caster's subject UUID, slot, round, time and world location.
-
-It went unseen through several sweeps for a reason that will recur: the rows
-were always there and the array was already being flattened with every member
-*named*, but no member had a type, so every value sat in `raw_bits` with the
-`value_*` columns null. Each survey of "what is still untyped" ranked by row
-count and read the top of the list; these fields sit at 300-800 rows each and
-never made the cut. **A named field with no type is invisible to a scan that
-starts from typed columns.**
+caster's subject UUID, slot, round, time and world location. The rows were
+flattened and every member named, but none typed, so every "what is still
+untyped" survey -- ranked by row count, these sit at 300-800 rows -- missed
+them. **A named field with no type is invisible to a scan that starts from
+typed columns.**
 
 ### Reading component classes out of the game
 
@@ -1039,19 +967,13 @@ subobject. The chain as this section used to state it -- `_GEN_VARIABLE` exports
 only -- finds five of those pairs nowhere in 13.06 (step 3), so the class
 default object shape was always part of the method, written down or not.
 
-The earlier pass also corrected one guess. `MagazineAmmo` and `ReserveAmmo` are
-both `AmmoComponent`, a group the replay declares with handle 2 as
-`AuthResourceAmount` -- so the hand-written `AmmoCount` name, the one entry
-`HANDLE_ADDITIONS` ever had, was in the right place with the wrong word. Both
-ammo counters now read the real declaration and that mechanism is empty.
-
-Effect on 02d4d478, measured when that change landed: unnamed handles
-17,013 -> 2,460, decoded OK 702,149 -> 714,070, `Typed` 71.0% -> 72.2%, decode
-errors still 0. Corpus-wide at the time, 215/215 replays with decode errors 0.
-
-Those are the deltas that change produced, not current totals. Later work moved
-both ends: `tools/baselines/export_02d4d478.json` pins today's figures. Read this
-paragraph as a dated before/after, which is what it was written as.
+The earlier pass also corrected one guess: `MagazineAmmo` and `ReserveAmmo` are
+both `AmmoComponent`, whose handle 2 the replay declares as `AuthResourceAmount`,
+so the hand-written `AmmoCount` -- the one entry `HANDLE_ADDITIONS` ever had --
+was in the right place with the wrong word. On 02d4d478 that change took
+unnamed handles 17,013 -> 2,460 and decoded OK 702,149 -> 714,070, with 215/215
+corpus replays at 0 decode errors (a dated before/after; the baseline pins
+today's totals).
 
 #### Pairs added from 13.06 (2026-09-28)
 
@@ -1157,27 +1079,18 @@ across the 92 re-exported replays not one of the 48 RepLayout pairs left a
 single row bare, so healthy is exactly zero. ClassNetCache rows are excluded,
 because the RepLayout-only remaps leave their RPC stream bare by design.
 
-It used to allow up to 5% of the target's rows, and that could not fail where it
-mattered. Asking only whether the target has rows is not enough -- 26 leaves now
-share `EquippableStateMachineComponent` -- and a share of the target is not
-enough either: run against the 92 replays exported before the 29 pairs above
-were added, it read 22 of them `ok` in 773 (pair, replay) cases where every one
-of their RepLayout rows was still bare, at up to 4.9% of the target
-(`ShieldDamageSection` beside `ChildDamageSectionComponent`). Simulating a
-rename used to put a leaf at 15.6% of its target, which the old rule did catch;
-a leaf whose remap simply did not fire was the case it missed. The C# reference's four ClassNetCache pairs are judged the
-same way on the rows they route: the leaf's ClassNetCache rows -- the whole
-payloads a block keeps when it reaches no function table -- against
-`<class>_ClassNetCache`, and any bare row is `broken`. They used to keep the
-ratio over RepLayout rows, which is not what they remap, and it was wrong both
-ways. Over the 1,018 exports of the 2026-09-28 build audit it read
-`DamageHandlerComponent` `broken` on 10 healthy ones (12.03, 12.06, three 13.01,
-13.02, four 13.05) over one or two stray RepLayout rows, and `absent` on the
-rest, although `DamageableComponent_ClassNetCache` held rows on all 1,018
-(72.2M in all); and a scratch build that broke the pair's remap -- 89,843
-rows gone from that group and 4,563 payloads bare under the leaf on a 13.05
-export -- left its output unchanged byte for byte. RepLayout rows under a
-ClassNetCache-only leaf are now a printed count, not a failure.
+The rule used to allow up to 5% of the target's rows, which could not fail where
+it mattered: on the 92 replays exported before the 29 pairs above, it read 22
+pairs `ok` in 773 (pair, replay) cases whose RepLayout rows were all still bare,
+at up to 4.9% of the target (`ShieldDamageSection` beside
+`ChildDamageSectionComponent`); only a simulated rename, at 15.6%, tripped it.
+The C# reference's four ClassNetCache pairs are judged on the rows they route
+-- the leaf's ClassNetCache rows against `<class>_ClassNetCache`, any bare row
+`broken`. Their old RepLayout ratio read `DamageHandlerComponent` `broken` on 10
+healthy exports of the 1,018 and `absent` on the rest, and left its verdict
+unchanged on a scratch build that broke the remap (89,843 rows gone from the
+group, 4,563 payloads bare under the leaf on a 13.05 export). RepLayout rows
+under a ClassNetCache-only leaf are now a printed count, not a failure.
 
 What the checker cannot see is a rename itself: the old leaf simply vanishes.
 The renamed component arrives under its new name, which is why the checker
@@ -1185,14 +1098,10 @@ prints the bare groups no pair claims on every run. When that list or a
 `broken` verdict points at a component, re-read its class from the new build's
 game with `tools/extract_component_classes` rather than guessing a name.
 
-Three names were left here with one reason -- "the replay declares neither
-group" -- and the tool shows the reason was measured on the wrong class for two
-of them. `AttachedDamageSection` is not an `AttachedDamageSectionComponent` but
-a Blueprint subclass of it, `/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C`,
-whose group the replay does declare; it is a pair now, after the review below.
-`MapTargetingState` names two classes (above), so that half of the old reason
-stands on different ground. `AresAttributeSet_2` now has `AresAttributeSet_1`
-beside it. Nothing changes for the AbilitiesAndBuffs item.
+Of the three names once left here because "the replay declares neither group",
+`AttachedDamageSection` is a Blueprint subclass whose group the replay does
+declare (a pair now, below), `MapTargetingState` names two classes (above), and
+`AresAttributeSet_2` now has `AresAttributeSet_1` beside it.
 
 #### The armour section, `AttachedDamageSection` (2026-09-28)
 
@@ -1416,24 +1325,14 @@ replay carry more than one `compatible_checksum`, which is exactly the same
 statement the checksum makes. Typing them by name would merge signatures that
 the schema itself distinguishes.
 
-(An earlier revision of this section offered `AllianceFilter` as the
-counterexample -- `EnumByte` on one group, `EnumRemainingBits` on another. It is
-not one. Every group that declares it does so under checksum 2270825073, and
-every row is 3 bits wide, and `decode_byte` reads `bits_remaining()` for any
-width in 1..=8, so the two declarations return the same value. It was an
-inconsistency in the table, not a difference on the wire. The conclusion stands
-on the checksum evidence above.
-
-That inconsistency had a cost this section did not count at the time. Two
-donor types for one checksum is what the checksum learner drops, so the five
-RPCs that carry `AllianceFilter` with no declaration of their own -- the
-weapons' `MulticastPlay{Continuous,OneShot}EffectFromClient`,
-`ReplayPlayOneShotEffectAtLocation` and both `ReplayRecord*Effect` -- stayed
-raw: 4,560,248 of the 16,030,813 rows under the checksum in the 1,018-replay
-audit, all reading 3 (`AllianceAny`). `apply_type_corrections.py` now declares
-the third donor `EnumByte` like the other two, so the checksum is learned and
-those rows are typed through it. `ReplicatedMovement` is still dropped, and
-should be.)
+`AllianceFilter` is not a counterexample, though it was once offered as one:
+every group declares it under checksum 2270825073 and every row is 3 bits,
+which `EnumByte` and `EnumRemainingBits` read alike. Its two donor types did
+make the checksum learner drop it, leaving raw the five RPCs that carry it
+with no declaration of their own -- 4,560,248 of the 16,030,813 rows under the
+checksum in the 1,018-replay audit, all `AllianceAny` (3) -- until
+`apply_type_corrections.py` declared the third donor `EnumByte` too.
+`ReplicatedMovement` is still dropped, and should be.
 
 Three names did clear the mechanical bar -- `AttachComponent` (declared `Raw`,
 so it would produce no values at all), `PreventPickupCharacter` and
@@ -1446,9 +1345,5 @@ Two loose ends found on the way, neither a live bug: `RemoteRole` is declared
 on one and `Float` on another. `RemoteRole` never appears on the wire in this
 corpus, so nothing decodes through the odd entry.
 
-The overlay table and all generated files are off-limits to hand-editing:
-`tools/extract_descriptors.py` (on the vendored descriptors in
-`third_party/vrp/Replay.Valorant`) then
-`tools/apply_type_corrections.py` then `cargo fmt` is the only path, and
-`python tools/check_docs.py` + the export baseline must stay green. CI reruns
-that path and fails if `table.rs` changes.
+Generated files are never hand-edited; the only path is in
+[CONTRIBUTING.md](../CONTRIBUTING.md#generated-files--never-hand-edit).
