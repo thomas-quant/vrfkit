@@ -1,25 +1,19 @@
 //! Parquet writers running off the packet loop.
 //!
-//! `fields` and `movement` are the two large tables and their Parquet encoding
-//! (Arrow batch build + ZSTD) was measured at 570 ms and 450 ms of a 2.60 s
-//! export -- 37% of the run, executed inline in the packet loop. Each table is
-//! an independent file whose writer never reads replay state, so each is moved
-//! to its own thread and fed record batches over a bounded channel. The writers
-//! still see every record exactly once, in stream order, and the row-group flush
-//! boundary still falls on the same cumulative row counts, so the bytes are
-//! unchanged; only the thread they are produced on differs.
+//! Inline in the packet loop, encoding `fields` and `movement` (Arrow batch
+//! build + ZSTD) measured 570 ms and 450 ms of a 2.60 s export, 37% of the
+//! run. Each table is an independent file whose writer reads no replay state,
+//! so each runs on its own thread, fed over a bounded channel so a slow writer
+//! applies backpressure. One consumer sees every record once, in stream
+//! order, and row groups close on the same cumulative counts, so the bytes
+//! are unchanged. `actors`, `net_guids` and `events` stay inline: together
+//! under 1% of the write cost.
 //!
-//! The channels are bounded so a slow writer applies backpressure instead of
-//! growing the in-flight batch queue without limit. `actors`, `net_guids` and
-//! `events` stay inline: together they are under 1% of the write cost.
-//!
-//! No error is dropped on this path. A writer that fails returns its error and
-//! drops its receiver, which turns the next `send` into an error. `ship` then
-//! joins the thread on the spot and returns the writer's own error -- the one
-//! the packet loop propagates, since the driver returns from there without
-//! reaching `finish`, and `Drop` has to discard whatever it joins. A writer
-//! thread that panics is reported as an error rather than being mistaken for
-//! success, and a writer that has failed can never `finish` successfully.
+//! No error is dropped. A failed writer returns its error and drops its
+//! receiver, so the next send fails; `ship` then joins the thread and returns
+//! the writer's own error, because the packet loop returns from there without
+//! reaching `finish` and `Drop` discards what it joins. A panic is an error,
+//! and a writer that failed never finishes `Ok`.
 
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
@@ -28,17 +22,16 @@ use vrf_export::ExportError;
 
 use crate::error::CliError;
 
-/// Rows accumulated in the packet loop before a batch is handed to a writer
-/// thread. A replay yields ~530 k packets but only ~0.8 field rows and ~3.5
-/// movement rows per packet, so sending one message per packet would cost more
-/// in channel traffic than the encoding it hides. At this size `fields` sends
-/// ~26 messages and `movement` ~112 over a whole replay.
+/// Rows gathered in the packet loop per message to a writer thread; one
+/// message per packet would cost more in channel traffic than the encoding it
+/// hides. Measured at 061155a on 02d4d478 (pyarrow row counts over its 530,401
+/// packets): `fields` 1,296,660 rows, 2.44 per packet, about 80 batches;
+/// `movement` 1,844,147 rows, 3.48 per packet, about 113.
 const WRITER_BATCH_ROWS: usize = 16_384;
 
-/// Batches allowed in flight per writer. Bounds peak memory: four field batches
-/// is roughly 10 MB of records plus the raw-bit payloads they own. The two
-/// name columns no longer contribute -- they are interned `Arc<str>` shared
-/// with the sink, so a queued batch holds refcounts, not strings.
+/// Batches in flight per writer, bounding memory: four field batches are about
+/// 10 MB of records plus their raw-bit payloads. Names are interned `Arc<str>`,
+/// so a queued batch holds refcounts, not strings.
 const WRITER_QUEUE_DEPTH: usize = 4;
 
 /// A writer running on its own thread, plus the handle needed to collect its
@@ -49,9 +42,8 @@ pub(super) struct WriterThread<T> {
     batch: Vec<T>,
     /// Table name, used only to name the failing table in an error message.
     table: &'static str,
-    /// Why the writer stopped, once `ship` has found out and joined it. The
-    /// error itself went to that caller (it is not `Clone`); the text is kept
-    /// so a later `finish` names the same cause instead of claiming success.
+    /// Why the writer stopped, once `ship` joined it. The error went to that
+    /// caller (it is not `Clone`); a later `finish` names the same cause.
     failure: Option<String>,
 }
 
@@ -91,12 +83,9 @@ impl<T: Send + 'static> WriterThread<T> {
         if tx.send(full).is_ok() {
             return Ok(());
         }
-        // A send fails only once the receiver is gone, so the writer thread
-        // has already returned or panicked and this join cannot block. It is
-        // the last place its own error exists: the packet loop returns what
-        // this returns without ever calling `finish`, and `Drop` discards the
-        // result it joins. "Stopped early" used to be the whole message even
-        // for a disk-full or Parquet encode failure.
+        // A send fails only once the receiver is gone, so this join cannot
+        // block, and it is the last place the writer's own error exists (see
+        // the module doc).
         self.tx = None;
         let error = match self.handle.take().map(thread::JoinHandle::join) {
             Some(Ok(Err(e))) => CliError::Export(e),
@@ -111,22 +100,18 @@ impl<T: Send + 'static> WriterThread<T> {
         Err(error)
     }
 
-    /// Ship the trailing partial batch, close the channel and surface the
-    /// writer's own result. Any panic in the writer becomes an error here --
-    /// it must never be mistaken for a completed file.
+    /// Ship the trailing partial batch, close the channel and return the
+    /// writer's own result; a panic is an error, never a completed file.
     pub(super) fn finish(mut self) -> Result<(), CliError> {
         let table = self.table;
-        // An earlier `ship` already joined the stopped writer and returned its
-        // error to that caller. The file is incomplete, so finishing can only
-        // fail. Without this the batch that `ship` emptied before its failed
-        // send made `finish` report success.
+        // An earlier `ship` joined the stopped writer and returned its error;
+        // the file is incomplete, so finishing can only fail.
         if let Some(cause) = self.failure.take() {
             return Err(CliError::Usage(format!(
                 "{table} writer had already failed: {cause}"
             )));
         }
-        // A `ship` that finds the writer gone has joined it and returns the
-        // writer's own error.
+        // A failing `ship` has joined the writer and returns its own error.
         if !self.batch.is_empty() {
             self.ship()?;
         }
@@ -146,10 +131,8 @@ impl<T: Send + 'static> WriterThread<T> {
 
 impl<T> Drop for WriterThread<T> {
     fn drop(&mut self) {
-        // Every early return closes the producer side and waits for the writer
-        // to observe cancellation. Dropping JoinHandle without joining would
-        // detach a thread still writing into a staging directory that the
-        // caller is about to remove or publish.
+        // Close the producer side and join: a detached thread could still be
+        // writing into a staging directory the caller removes or publishes.
         self.tx = None;
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -187,15 +170,10 @@ mod tests {
         dropper.join().unwrap();
     }
 
-    /// A writer that fails must never be reported as a finished file.
-    ///
-    /// Moving the Parquet writers onto threads moved their errors off the `?`
-    /// path, which is exactly the shape of a silent success. The case only
-    /// `finish` can catch is a writer that drained its channel and then
-    /// failed -- a disk full while writing the Parquet footer: no send fails,
-    /// so the error exists only in the join. The test this replaced failed
-    /// its writer mid-stream, which a send always noticed first, and it
-    /// stayed green with that join arm made to swallow the error.
+    /// The case only `finish` can catch: a writer that drained its channel and
+    /// then failed (a disk full on the footer), so no send fails and the error
+    /// exists only in the join. A mid-stream failure cannot test this arm: a
+    /// send always sees it first.
     #[test]
     fn a_writer_that_fails_after_draining_its_channel_fails_finish() {
         let mut writer = WriterThread::<u8>::spawn("test", |rx| {
@@ -223,15 +201,7 @@ mod tests {
         panic!("the writer stopped reading, so a send must have failed by now");
     }
 
-    /// The error `append` returns is the one the export reports, so it must be
-    /// the writer's own.
-    ///
-    /// The driver returns `append`'s error from the packet loop and never
-    /// reaches `finish`, and `Drop` discards what it joins. `append` used to
-    /// say only "writer stopped early", so a disk-full or Parquet encode
-    /// failure mid-export printed that and nothing else: the one message an
-    /// operator needs was thrown away. The test above never looked at
-    /// `append`'s error at all.
+    /// `append`'s error is the one the export reports (see the module doc).
     #[test]
     fn append_reports_the_writer_threads_own_error() {
         let mut writer = WriterThread::<u8>::spawn("test", |rx| {
@@ -247,8 +217,8 @@ mod tests {
             error.to_string().contains("writer failed"),
             "append must surface the writer's own error, got: {error}"
         );
-        // The failure was already reported, and the handle joined: `finish`
-        // must neither panic on the missing handle nor report a finished file.
+        // Already reported and joined: `finish` must neither panic on the
+        // missing handle nor report a finished file.
         let error = writer
             .finish()
             .expect_err("a writer that failed must not finish successfully");
@@ -258,8 +228,7 @@ mod tests {
         );
     }
 
-    /// A panic found through `append` is named as a panic, not as an early
-    /// stop. The panic message printed during `cargo test` is expected.
+    /// The panic message `cargo test` prints here is expected.
     #[test]
     fn append_reports_a_panicking_writer_as_a_panic() {
         let mut writer = WriterThread::<u8>::spawn("test", |rx| {
@@ -271,8 +240,6 @@ mod tests {
         assert!(writer.finish().is_err());
     }
 
-    /// Only a writer that returned `Ok` without draining its channel has
-    /// nothing more specific to say than that it stopped early.
     #[test]
     fn append_reports_a_writer_that_returned_ok_early_as_stopped() {
         let mut writer = WriterThread::<u8>::spawn("test", |rx| {
@@ -284,10 +251,7 @@ mod tests {
         assert!(writer.finish().is_err());
     }
 
-    /// A panicking writer thread must also be an error. `JoinHandle::join`
-    /// returns `Err` on panic and it would be easy to discard.
-    ///
-    /// The panic message this prints on stderr during `cargo test` is expected.
+    /// The panic message `cargo test` prints here is expected.
     #[test]
     fn a_panicking_writer_thread_is_reported_not_swallowed() {
         let writer = WriterThread::<u8>::spawn("test", |_rx| panic!("writer died"));
