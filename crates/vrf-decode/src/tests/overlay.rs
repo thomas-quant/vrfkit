@@ -6,12 +6,60 @@ use std::collections::BTreeSet;
 use crate::checksum_table::CHECKSUM_TYPES;
 use crate::decode::{DecodeError, FieldType, decode_field};
 use crate::overlay::{
-    OverlayEntry, OverlayHandleEntry, OverlayStats, OverlayTable, apply_overlay,
+    OverlayEntry, OverlayHandleEntry, OverlayResult, OverlayStats, OverlayTable, apply_overlay,
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
 use crate::types::{RotatorQuantization, VectorQuantization};
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
+
+/// The table production resolves through: every entry and the explicit-handle
+/// fallback. One static, so its hash index is built once for the suite.
+pub(super) static TABLE: OverlayTable =
+    OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
+
+/// The table entry for `(group, field)`, reported at the caller's line.
+#[track_caller]
+fn assert_typed(group: &str, field: &str, want: Option<FieldType>) {
+    assert_eq!(TABLE.lookup(group, field), want, "{group} {field}");
+}
+
+/// The checksum table's answer for `checksum`, reported at the caller's line.
+#[track_caller]
+fn assert_checksum(checksum: u32, want: Option<FieldType>) {
+    assert_eq!(lookup_checksum(checksum), want, "{checksum}");
+}
+
+/// What [`TABLE`] resolves `field` of `group` to, with no handle.
+pub(super) fn resolve(group: &str, field: &str, checksum: Option<u32>) -> Option<FieldType> {
+    resolve_field_type_with_checksum(&TABLE, group, Some(field), None, checksum)
+}
+
+/// One field through [`TABLE`] as the export path applies it: name, handle,
+/// checksum and payload. The overlay declining the field fails the test.
+#[track_caller]
+pub(super) fn apply_scoped(
+    stats: &mut OverlayStats,
+    group: &str,
+    field: &str,
+    handle: u32,
+    checksum: u32,
+    raw: &[u8],
+    bits: u32,
+) -> OverlayResult {
+    let applied = crate::apply_overlay_with_checksum(
+        &TABLE,
+        group,
+        group_hash_state(group),
+        Some(field),
+        handle,
+        Some(checksum),
+        Some(raw),
+        bits,
+        stats,
+    );
+    applied.unwrap_or_else(|| panic!("{group} {field}: the overlay declined it"))
+}
 
 const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
 const BOMB_PS: &str = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C";
@@ -25,60 +73,27 @@ const SWIFT_PS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits
 /// `player_state_guid_parts_are_scoped_uint32`) resolve by checksum alone.
 #[test]
 fn scoped_types_require_the_exact_group_name_and_checksum() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in [BOMB_PS, SWIFT_PS] {
+        assert_eq!(resolve(group, "B", Some(379198054)), Some(FieldType::Byte));
         assert_eq!(
-            resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(379198054)),
-            Some(FieldType::Byte)
-        );
-        assert_eq!(
-            resolve_field_type_with_checksum(&table, group, Some("B"), None, Some(943211507)),
+            resolve(group, "B", Some(943211507)),
             Some(FieldType::UInt32)
         );
         for checksum in [None, Some(1)] {
-            assert_eq!(
-                resolve_field_type_with_checksum(&table, group, Some("B"), None, checksum),
-                None
-            );
+            assert_eq!(resolve(group, "B", checksum), None);
         }
     }
     for (group, name) in [("/Unobserved", "B"), (BOMB_PS, "Unobserved")] {
-        assert_eq!(
-            resolve_field_type_with_checksum(&table, group, Some(name), None, Some(379198054)),
-            None
-        );
+        assert_eq!(resolve(group, name, Some(379198054)), None);
     }
 }
 
 #[test]
 fn scoped_bytes_decode_exactly_and_reject_a_wider_payload() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let mut stats = OverlayStats::default();
-    let value = crate::apply_overlay_with_checksum(
-        &table,
-        BOMB_PS,
-        group_hash_state(BOMB_PS),
-        Some("B"),
-        39,
-        Some(379198054),
-        Some(&[255]),
-        8,
-        &mut stats,
-    )
-    .expect("scoped byte is attempted");
+    let value = apply_scoped(&mut stats, BOMB_PS, "B", 39, 379198054, &[255], 8);
     assert_eq!(value.value_i64, Some(255));
-    let rejected = crate::apply_overlay_with_checksum(
-        &table,
-        BOMB_PS,
-        group_hash_state(BOMB_PS),
-        Some("B"),
-        39,
-        Some(379198054),
-        Some(&[255, 0, 0, 0]),
-        32,
-        &mut stats,
-    )
-    .expect("known type reports a rejected width");
+    let rejected = apply_scoped(&mut stats, BOMB_PS, "B", 39, 379198054, &[255, 0, 0, 0], 32);
     assert_eq!(rejected.value_i64, None);
     assert_eq!(stats.decoded_ok, 1);
     assert_eq!(stats.decoded_err, 1);
@@ -115,9 +130,7 @@ const REPLICATED_MOVEMENT_CHECKSUM: u32 = 2_749_104_612;
 /// entry must resolve to its own type at its own identity.
 #[test]
 fn no_scoped_identity_is_shadowed_by_the_table() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let by_name =
-        |group, name| resolve_field_type_with_checksum(&table, group, Some(name), None, None);
+    let by_name = |group, name| resolve(group, name, None);
     let scoped = &crate::scoped_types::SCOPED_TYPES;
     let shadowed: Vec<(&str, &str, u32)> = scoped
         .iter()
@@ -140,7 +153,7 @@ fn no_scoped_identity_is_shadowed_by_the_table() {
     }
     for &(name, group, checksum, field_type) in scoped {
         assert_eq!(
-            resolve_field_type_with_checksum(&table, group, Some(name), None, Some(checksum)),
+            resolve(group, name, Some(checksum)),
             Some(field_type),
             "unreachable scoped identity {name} / {group} / {checksum}"
         );
@@ -152,10 +165,6 @@ fn no_scoped_identity_is_shadowed_by_the_table() {
 /// nothing rather than borrowing the type.
 #[test]
 fn raze_scoped_identities_require_their_exact_checksum() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let resolve = |group, name, checksum| {
-        resolve_field_type_with_checksum(&table, group, Some(name), None, checksum)
-    };
     assert_eq!(
         resolve(
             CLAY_SATCHEL_ABILITY,
@@ -219,13 +228,10 @@ fn raze_scoped_identities_require_their_exact_checksum() {
 /// entry in `REP_MOVEMENT_LOCATION_EVIDENCE` first.
 #[test]
 fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
+        resolve(
             CLAY_BOOMBOT,
-            Some("ReplicatedMovement"),
-            None,
+            "ReplicatedMovement",
             Some(REPLICATED_MOVEMENT_CHECKSUM)
         ),
         Some(FieldType::RepMovement {
@@ -235,11 +241,9 @@ fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
     );
     for group in [CLAY_SATCHEL, CLAY_ROCKET] {
         assert_eq!(
-            resolve_field_type_with_checksum(
-                &table,
+            resolve(
                 group,
-                Some("ReplicatedMovement"),
-                None,
+                "ReplicatedMovement",
                 Some(REPLICATED_MOVEMENT_CHECKSUM)
             ),
             None,
@@ -252,31 +256,8 @@ fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
 /// corpus), decoded through the scoped identities: exact widths, exact values.
 #[test]
 fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
-    fn decode(
-        stats: &mut OverlayStats,
-        group: &str,
-        name: &str,
-        handle: u32,
-        checksum: u32,
-        raw: &[u8],
-        bits: u32,
-    ) -> crate::overlay::OverlayResult {
-        let table = OverlayTable::new(&OVERLAY_TABLE);
-        crate::apply_overlay_with_checksum(
-            &table,
-            group,
-            group_hash_state(group),
-            Some(name),
-            handle,
-            Some(checksum),
-            Some(raw),
-            bits,
-            stats,
-        )
-        .expect("a scoped identity is attempted")
-    }
     let mut stats = OverlayStats::default();
-    let seed = decode(
+    let seed = apply_scoped(
         &mut stats,
         CLAY_SATCHEL_ABILITY,
         "CosmeticRandomSeed",
@@ -286,7 +267,7 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
         32,
     );
     assert_eq!(seed.value_i64, Some(1_078_716_897));
-    let offset = decode(
+    let offset = apply_scoped(
         &mut stats,
         CLAY_SATCHEL,
         "LocationOffset",
@@ -296,7 +277,7 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
         64,
     );
     assert_eq!(offset.value_str.as_deref(), Some("(-782.71,-1366.59,5.8)"));
-    let rotation = decode(
+    let rotation = apply_scoped(
         &mut stats,
         CLAY_SATCHEL,
         "RotationOffset",
@@ -312,7 +293,7 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
     // `ModuleType` resolves through its table entry (EnumByte), not a scoped
     // identity, since the table typed the Apply parameters by name; upstream's
     // recorded 3-bit payload must still read 2.
-    let module_type = decode(
+    let module_type = apply_scoped(
         &mut stats,
         FORCE_APPLY,
         "ModuleType",
@@ -325,7 +306,7 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
     assert_eq!(stats.decoded_ok, 4);
     // Upstream's truncation case: one byte cannot carry the rotator its
     // presence bits announce. Rejected and counted, not truncated.
-    let truncated = decode(
+    let truncated = apply_scoped(
         &mut stats,
         CLAY_SATCHEL,
         "RotationOffset",
@@ -348,10 +329,6 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
 /// scoped entries never follow the Swiftplay alias, so each group needs its own.
 #[test]
 fn player_state_guid_parts_are_scoped_uint32() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
-        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
-    };
     let parts = [
         ("A", 988_169_428),
         ("B", 943_211_507),
@@ -386,22 +363,9 @@ fn player_state_guid_parts_are_scoped_uint32() {
 /// error, not a truncated or padded value.
 #[test]
 fn player_state_guid_parts_decode_unsigned_and_exactly() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     let mut stats = OverlayStats::default();
     let mut apply = |group: &str, raw: &[u8], bits| {
-        crate::apply_overlay_with_checksum(
-            &table,
-            group,
-            group_hash_state(group),
-            Some("D"),
-            210,
-            Some(1_032_080_829),
-            Some(raw),
-            bits,
-            &mut stats,
-        )
-        .expect("a scoped GUID part is attempted")
-        .value_i64
+        apply_scoped(&mut stats, group, "D", 210, 1_032_080_829, raw, bits).value_i64
     };
     for group in [BOMB_PS, SWIFT_PS] {
         assert_eq!(
@@ -432,28 +396,23 @@ fn canonical_group_leaves_a_bomb_class_alone() {
 #[test]
 fn bomb_player_crosshair_fields_are_typed_without_the_colliding_b() {
     const GROUP: &str = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for field in [
         "bHasOutline",
         "bDisplayCenterDot",
         "bShowLines",
         "bUseAdvancedOptions",
     ] {
-        assert_eq!(table.lookup(GROUP, field), Some(FieldType::Bool), "{field}");
+        assert_typed(GROUP, field, Some(FieldType::Bool));
     }
     for field in ["OutlineThickness", "CenterDotSize", "LineLength", "Opacity"] {
-        assert_eq!(
-            table.lookup(GROUP, field),
-            Some(FieldType::Float),
-            "{field}"
-        );
+        assert_typed(GROUP, field, Some(FieldType::Float));
     }
     for field in ["G", "R"] {
-        assert_eq!(table.lookup(GROUP, field), Some(FieldType::Byte), "{field}");
+        assert_typed(GROUP, field, Some(FieldType::Byte));
     }
-    assert_eq!(table.lookup(GROUP, "ProfileName"), Some(FieldType::FString));
+    assert_typed(GROUP, "ProfileName", Some(FieldType::FString));
     assert_eq!(
-        table.lookup(GROUP, "B"),
+        TABLE.lookup(GROUP, "B"),
         None,
         "B has both 8- and 32-bit wire fields"
     );
@@ -462,7 +421,6 @@ fn bomb_player_crosshair_fields_are_typed_without_the_colliding_b() {
 #[test]
 fn tidal_wave_rpc_parameters_are_typed() {
     const CHUNK: &str = "/Game/Characters/Mage/S0/Ability_X/GameObject_Mage_X_TidalWave_Chunk.GameObject_Mage_X_TidalWave_Chunk_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let initialize = format!("{CHUNK}:MulticastInitialize");
     for (field, field_type) in [
         ("ChunkIndex", FieldType::Int32),
@@ -470,18 +428,12 @@ fn tidal_wave_rpc_parameters_are_typed() {
         ("Velocity In", FieldType::Double),
         ("PreviousChunk", FieldType::ObjectNetGuid),
     ] {
-        assert_eq!(
-            table.lookup(&initialize, field),
-            Some(field_type),
-            "{field}"
-        );
+        assert_typed(&initialize, field, Some(field_type));
     }
-    assert_eq!(
-        table.lookup(
-            &format!("{CHUNK}:MulticastWallStartLinger"),
-            "FinalEndpointReached"
-        ),
-        Some(FieldType::Bool)
+    assert_typed(
+        &format!("{CHUNK}:MulticastWallStartLinger"),
+        "FinalEndpointReached",
+        Some(FieldType::Bool),
     );
 }
 
@@ -508,10 +460,9 @@ fn canonical_group_does_not_alias_the_suffixed_forms() {
 /// exactly once, under the Bomb game state.
 #[test]
 fn a_swiftplay_field_resolves_through_its_bomb_twin() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     for field in ["ChosenCeremonyForRound", "RoundResults", "BombState"] {
-        let bomb = resolve_field_type(&table, BOMB_GS, Some(field), None);
-        let swift = resolve_field_type(&table, SWIFT_GS, Some(field), None);
+        let bomb = resolve_field_type(&TABLE, BOMB_GS, Some(field), None);
+        let swift = resolve_field_type(&TABLE, SWIFT_GS, Some(field), None);
         assert_eq!(swift, bomb, "{field} must resolve the same on both classes");
         assert!(bomb.is_some(), "{field} should be in the table at all");
     }
@@ -520,15 +471,14 @@ fn a_swiftplay_field_resolves_through_its_bomb_twin() {
 /// The alias must not invent types. A name in neither class stays unresolved.
 #[test]
 fn the_alias_does_not_invent_a_type() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     assert_eq!(
-        resolve_field_type(&table, SWIFT_GS, Some("NoSuchFieldAnywhere"), None),
+        resolve_field_type(&TABLE, SWIFT_GS, Some("NoSuchFieldAnywhere"), None),
         None,
     );
     // and an unaliased group gains nothing
     assert_eq!(
         resolve_field_type(
-            &table,
+            &TABLE,
             "/Game/Nope.Nope_C",
             Some("ChosenCeremonyForRound"),
             None
@@ -556,8 +506,7 @@ fn table_is_sorted() {
 
 #[test]
 fn lookup_finds_known_field() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let ft = table.lookup(
+    let ft = TABLE.lookup(
         "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
         "CompetitiveTier",
     );
@@ -575,17 +524,10 @@ fn lookup_finds_known_field() {
 /// See tools/apply_type_corrections.py ADDITIONS.
 #[test]
 fn money_management_economy_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let group = "/Script/ShooterGame.MoneyManagementComponent";
-    assert_eq!(table.lookup(group, "Money"), Some(FieldType::Int32));
-    assert_eq!(
-        table.lookup(group, "StartOfRoundMoney"),
-        Some(FieldType::Int32)
-    );
-    assert_eq!(
-        table.lookup(group, "TotalMoneyGranted"),
-        Some(FieldType::Int32)
-    );
+    assert_typed(group, "Money", Some(FieldType::Int32));
+    assert_typed(group, "StartOfRoundMoney", Some(FieldType::Int32));
+    assert_typed(group, "TotalMoneyGranted", Some(FieldType::Int32));
 }
 
 /// Concussion state is replicated under a SHARED component path
@@ -605,18 +547,11 @@ fn money_management_economy_is_typed() {
 /// ADDITIONS in the same wire-evidence class as `Money` and `Ping`.
 #[test]
 fn concussion_fields_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let group = "/Game/Characters/Components/Comp_Actor_Concussable\
 .Comp_Actor_Concussable_C";
-    assert_eq!(
-        table.lookup(group, "ConcussStartTime"),
-        Some(FieldType::Float)
-    );
-    assert_eq!(
-        table.lookup(group, "ConcussEndTime"),
-        Some(FieldType::Float)
-    );
-    assert_eq!(table.lookup(group, "ConcussLevel"), Some(FieldType::Double));
+    assert_typed(group, "ConcussStartTime", Some(FieldType::Float));
+    assert_typed(group, "ConcussEndTime", Some(FieldType::Float));
+    assert_typed(group, "ConcussLevel", Some(FieldType::Double));
 }
 
 /// `Comp_AbilityFuelSystem` is a generic component attached to a handful of
@@ -632,11 +567,10 @@ fn concussion_fields_are_typed() {
 /// decodes. No descriptor declares this group, so these are ADDITIONS.
 #[test]
 fn ability_fuel_fields_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let group = "/Game/Characters/Components/Comp_AbilityFuelSystem\
 .Comp_AbilityFuelSystem_C";
-    assert_eq!(table.lookup(group, "CurrentFuel"), Some(FieldType::Double));
-    assert_eq!(table.lookup(group, "IsFuelDraining"), Some(FieldType::Bool));
+    assert_typed(group, "CurrentFuel", Some(FieldType::Double));
+    assert_typed(group, "IsFuelDraining", Some(FieldType::Bool));
 }
 
 /// `Ping` on BombPlayerState is a 16-bit LE unsigned integer that behaves
@@ -647,13 +581,10 @@ fn ability_fuel_fields_are_typed() {
 /// (16 bits LSB-first) -- the same wire-evidence ADDITION class as `Money`.
 #[test]
 fn ping_latency_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
-            "Ping"
-        ),
-        Some(FieldType::SerializedInt { max: 65536 })
+    assert_typed(
+        "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
+        "Ping",
+        Some(FieldType::SerializedInt { max: 65536 }),
     );
 }
 
@@ -667,13 +598,12 @@ fn equippable_used_is_an_object_net_guid() {
     // the adapter guessed a fixed 16-bit LE integer and produced values that
     // were never valid NetGUIDs. tools/apply_type_corrections.py restores
     // the real type.
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in [
         "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
         "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
     ] {
         assert_eq!(
-            table.lookup(group, "EquippableUsed"),
+            TABLE.lookup(group, "EquippableUsed"),
             Some(FieldType::ObjectNetGuid),
             "EquippableUsed must decode as a net GUID in {group}",
         );
@@ -691,7 +621,6 @@ fn equippable_used_is_an_object_net_guid() {
 /// exact-quote match must not reach `...IsQueued` (a Bool).
 #[test]
 fn the_death_montage_parameters_are_object_net_guids() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in [
         "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Base",
         "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
@@ -700,20 +629,16 @@ fn the_death_montage_parameters_are_object_net_guids() {
             "DeathMontageEffectOverride",
             "DeathMontageEffectOverrideContext",
         ] {
-            assert_eq!(
-                table.lookup(group, field),
-                Some(FieldType::ObjectNetGuid),
-                "{field} in {group}"
-            );
+            assert_typed(group, field, Some(FieldType::ObjectNetGuid));
         }
         assert_eq!(
-            table.lookup(group, "bDeathMontageEffectOverrideIsQueued"),
+            TABLE.lookup(group, "bDeathMontageEffectOverrideIsQueued"),
             Some(FieldType::Bool),
             "the Bool sibling is untouched in {group}"
         );
     }
-    assert_eq!(lookup_checksum(1712763745), Some(FieldType::ObjectNetGuid));
-    assert_eq!(lookup_checksum(2397897524), Some(FieldType::ObjectNetGuid));
+    assert_checksum(1712763745, Some(FieldType::ObjectNetGuid));
+    assert_checksum(2397897524, Some(FieldType::ObjectNetGuid));
 }
 
 /// `AresEquippableDataTracker.OriginalBuyerTeam` is an inline FName: 97 bits
@@ -723,39 +648,29 @@ fn the_death_montage_parameters_are_object_net_guids() {
 /// EnumByte could read neither -- no row is 8 bits.
 #[test]
 fn original_buyer_team_is_an_fname() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.AresEquippableDataTracker",
-            "OriginalBuyerTeam"
-        ),
-        Some(FieldType::FName)
+    assert_typed(
+        "/Script/ShooterGame.AresEquippableDataTracker",
+        "OriginalBuyerTeam",
+        Some(FieldType::FName),
     );
-    assert_eq!(lookup_checksum(255019476), Some(FieldType::FName));
+    assert_checksum(255019476, Some(FieldType::FName));
 }
 
 #[test]
 fn transition_context_is_an_object_net_guid() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.EquippableStateMachineComponent",
-            "TransitionContext"
-        ),
-        Some(FieldType::ObjectNetGuid)
+    assert_typed(
+        "/Script/ShooterGame.EquippableStateMachineComponent",
+        "TransitionContext",
+        Some(FieldType::ObjectNetGuid),
     );
 }
 
 #[test]
 fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let group = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
-    assert_eq!(
-        table.lookup(group, "PostControlVelocity"),
-        Some(FieldType::VectorDouble)
-    );
+    assert_typed(group, "PostControlVelocity", Some(FieldType::VectorDouble));
     assert_ne!(
-        table.lookup(
+        TABLE.lookup(
             "/Script/ShooterGame.EquippableStateMachineComponent",
             "PostControlVelocity"
         ),
@@ -774,21 +689,21 @@ fn hawk_flash_post_control_velocity_is_vector_double_only_on_its_exact_group() {
 #[test]
 fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     const HAWK: &str = "/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash.Projectile_Guide_E_HawkFlash_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(HAWK, "ReplicatedMovement"),
+    assert_typed(
+        HAWK,
+        "ReplicatedMovement",
         Some(FieldType::RepMovement {
             rotation: RotatorQuantization::ByteComponents,
             location: VectorQuantization::RoundWholeNumber,
-        })
+        }),
     );
-    assert_eq!(table.lookup(HAWK, "Banking"), Some(FieldType::Double));
-    assert_eq!(lookup_checksum(677106858), Some(FieldType::Double));
+    assert_typed(HAWK, "Banking", Some(FieldType::Double));
+    assert_checksum(677106858, Some(FieldType::Double));
     // Still no name rule and no checksum for ReplicatedMovement as a whole:
     // byte and short donors both remain in the table (see
     // `only_the_seeker_nade_keeps_short_rotator_components`), so 2749104612
     // stays out of the checksum table.
-    assert_eq!(lookup_checksum(2749104612), None);
+    assert_checksum(2749104612, None);
 }
 
 /// Cypher's trapwire and cage classes were renamed in 13.01, and the five
@@ -803,23 +718,14 @@ fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
 fn cypher_trap_fields_follow_the_13_01_rename() {
     const OLD_E: &str = "/Game/Characters/Gumshoe/S0/Ability_E/";
     const NEW_4: &str = "/Game/Characters/Gumshoe/S0/Ability_4/";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for wire in [
         "GameObject_Gumshoe_{}_TripWire.GameObject_Gumshoe_{}_TripWire_C",
         "GameObject_Gumshoe_{}_TripWire_SecondWire.GameObject_Gumshoe_{}_TripWire_SecondWire_C",
     ] {
         let old = format!("{OLD_E}{}", wire.replace("{}", "E"));
         let new = format!("{NEW_4}{}", wire.replace("{}", "4"));
-        assert_eq!(
-            table.lookup(&old, "Deployed"),
-            Some(FieldType::Bool),
-            "{old}"
-        );
-        assert_eq!(
-            table.lookup(&new, "Deployed"),
-            Some(FieldType::Bool),
-            "{new}"
-        );
+        assert_typed(&old, "Deployed", Some(FieldType::Bool));
+        assert_typed(&new, "Deployed", Some(FieldType::Bool));
     }
     for (old, new) in [
         (
@@ -832,33 +738,27 @@ fn cypher_trap_fields_follow_the_13_01_rename() {
         ),
     ] {
         for group in [old, new] {
-            assert_eq!(
-                table.lookup(group, "CreatedByCharacter"),
-                Some(FieldType::ObjectNetGuid),
-                "{group}"
-            );
+            assert_typed(group, "CreatedByCharacter", Some(FieldType::ObjectNetGuid));
         }
     }
     for group in [
         "/Game/Characters/Gumshoe/S0/Ability_4/Ability_Gumshoe_4_CageTrap.Ability_Gumshoe_4_CageTrap_C",
         "/Game/Characters/Gumshoe/S0/Ability_Q/Ability_Gumshoe_Q_CageTrap.Ability_Gumshoe_Q_CageTrap_C",
     ] {
-        assert_eq!(
-            table.lookup(group, "RelativeScale3D"),
+        assert_typed(
+            group,
+            "RelativeScale3D",
             Some(FieldType::VectorNetQuantize { scale: 100 }),
-            "{group}"
         );
     }
-    assert_eq!(lookup_checksum(3902815170), Some(FieldType::Bool));
-    assert_eq!(lookup_checksum(2035145197), None);
-    assert_eq!(lookup_checksum(1992268157), None);
+    assert_checksum(3902815170, Some(FieldType::Bool));
+    assert_checksum(2035145197, None);
+    assert_checksum(1992268157, None);
     // A future path for the same wire resolves through the checksum alone.
     assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
+        resolve(
             "/Game/Characters/Gumshoe/S0/Ability_C/GameObject_Gumshoe_C_TripWire.GameObject_Gumshoe_C_TripWire_C",
-            Some("Deployed"),
-            None,
+            "Deployed",
             Some(3902815170)
         ),
         Some(FieldType::Bool)
@@ -888,15 +788,14 @@ fn only_the_seeker_nade_keeps_short_rotator_components() {
         "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
     ];
     const SEEKER_NADE: &str = "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in GAME_OBJECTS {
-        assert_eq!(
-            table.lookup(group, "ReplicatedMovement"),
+        assert_typed(
+            group,
+            "ReplicatedMovement",
             Some(FieldType::RepMovement {
                 rotation: RotatorQuantization::ByteComponents,
                 location: VectorQuantization::RoundWholeNumber,
             }),
-            "{group}"
         );
     }
     let short: Vec<&str> = OVERLAY_TABLE
@@ -915,7 +814,7 @@ fn only_the_seeker_nade_keeps_short_rotator_components() {
     assert_eq!(short, [SEEKER_NADE]);
     // SeekerNade's short, two-decimal donor still disagrees with the byte,
     // whole-unit ones, so the checksum stays dropped.
-    assert_eq!(lookup_checksum(REPLICATED_MOVEMENT_CHECKSUM), None);
+    assert_checksum(REPLICATED_MOVEMENT_CHECKSUM, None);
 }
 
 #[test]
@@ -960,9 +859,8 @@ fn damage_geometry_fields_are_quantized_vectors() {
         ),
     ];
 
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for (group, field, want) in expected {
-        assert_eq!(table.lookup(group, field), Some(want), "{field} in {group}");
+        assert_typed(group, field, Some(want));
     }
 }
 
@@ -1226,8 +1124,7 @@ fn a_b_prefixed_spelling_difference_is_not_treated_as_a_conflict() {
 
 #[test]
 fn lookup_returns_none_for_unknown() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    let ft = table.lookup("nonexistent", "field");
+    let ft = TABLE.lookup("nonexistent", "field");
     assert_eq!(ft, None);
 }
 
@@ -1672,13 +1569,11 @@ fn byte_rejects_payloads_wider_than_eight_bits() {
 /// one would catch an index that quietly disagrees on a handful of entries.
 #[test]
 fn the_hash_index_answers_exactly_what_the_binary_search_answered() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-
     for entry in &OVERLAY_TABLE {
         // Every real key.
         assert_eq!(
-            table.lookup(entry.group_path, entry.field_name),
-            table.lookup_by_binary_search(entry.group_path, entry.field_name),
+            TABLE.lookup(entry.group_path, entry.field_name),
+            TABLE.lookup_by_binary_search(entry.group_path, entry.field_name),
             "direct lookup disagrees for {}::{}",
             entry.group_path,
             entry.field_name,
@@ -1693,8 +1588,8 @@ fn the_hash_index_answers_exactly_what_the_binary_search_answered() {
                 .unwrap_or(entry.field_name),
         ] {
             assert_eq!(
-                table.lookup_b_prefixed(entry.group_path, probe),
-                table.lookup_b_prefixed_by_binary_search(entry.group_path, probe),
+                TABLE.lookup_b_prefixed(entry.group_path, probe),
+                TABLE.lookup_b_prefixed_by_binary_search(entry.group_path, probe),
                 "b-prefixed lookup disagrees for {}::b{}",
                 entry.group_path,
                 probe,
@@ -1709,13 +1604,13 @@ fn the_hash_index_answers_exactly_what_the_binary_search_answered() {
             (entry.group_path, ""),
         ] {
             assert_eq!(
-                table.lookup(group, name),
-                table.lookup_by_binary_search(group, name),
+                TABLE.lookup(group, name),
+                TABLE.lookup_by_binary_search(group, name),
                 "miss disagrees for {group}::{name}",
             );
             assert_eq!(
-                table.lookup_b_prefixed(group, name),
-                table.lookup_b_prefixed_by_binary_search(group, name),
+                TABLE.lookup_b_prefixed(group, name),
+                TABLE.lookup_b_prefixed_by_binary_search(group, name),
                 "b-prefixed miss disagrees for {group}::b{name}",
             );
         }
@@ -1726,19 +1621,17 @@ fn the_hash_index_answers_exactly_what_the_binary_search_answered() {
 /// handles that are not declared for a group that is.
 #[test]
 fn the_handle_index_answers_exactly_what_the_binary_search_answered() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-
     for entry in &OVERLAY_HANDLE_TABLE {
         for handle in [entry.handle, entry.handle.wrapping_add(1000), u32::MAX, 0] {
             assert_eq!(
-                table.lookup_handle(entry.group_path, handle),
-                table.lookup_handle_by_binary_search(entry.group_path, handle),
+                TABLE.lookup_handle(entry.group_path, handle),
+                TABLE.lookup_handle_by_binary_search(entry.group_path, handle),
                 "handle lookup disagrees for {}::{handle}",
                 entry.group_path,
             );
         }
         assert_eq!(
-            table.lookup_handle("/Game/NoSuchGroupPathAnywhere", entry.handle),
+            TABLE.lookup_handle("/Game/NoSuchGroupPathAnywhere", entry.handle),
             None,
         );
     }
@@ -1749,13 +1642,10 @@ fn the_handle_index_answers_exactly_what_the_binary_search_answered() {
 /// data). Common to all player characters. Typed as Float.
 #[test]
 fn blind_duration_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.BlindManagerComponent",
-            "LongestActiveBlindDuration"
-        ),
-        Some(FieldType::Float)
+    assert_typed(
+        "/Script/ShooterGame.BlindManagerComponent",
+        "LongestActiveBlindDuration",
+        Some(FieldType::Float),
     );
 }
 
@@ -1778,20 +1668,15 @@ fn blind_duration_is_typed() {
 /// ADDITIONS in the same wire-evidence class as `Money` and `Ping`.
 #[test]
 fn heal_and_overheal_decay_scalars_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
-            "HealTaken"
-        ),
-        Some(FieldType::Float)
+    assert_typed(
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal",
+        "HealTaken",
+        Some(FieldType::Float),
     );
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
-            "DecayApplied"
-        ),
-        Some(FieldType::Float)
+    assert_typed(
+        "/Script/ShooterGame.DamageableComponent:MulticastNotifyOverhealDecay",
+        "DecayApplied",
+        Some(FieldType::Float),
     );
 }
 
@@ -1803,10 +1688,10 @@ fn heal_and_overheal_decay_scalars_are_typed() {
 /// full match. Typed as Int32. ADDITION, same wire-evidence class as `Money`.
 #[test]
 fn player_score_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup("/Script/ShooterGame.PlayerScoreComponent", "Score"),
-        Some(FieldType::Int32)
+    assert_typed(
+        "/Script/ShooterGame.PlayerScoreComponent",
+        "Score",
+        Some(FieldType::Int32),
     );
 }
 
@@ -1816,14 +1701,9 @@ fn player_score_is_typed() {
 /// scoreboard from lossy kill RPCs instead of using the server totals.
 #[test]
 fn basic_combat_stats_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let group = "/Script/ShooterGame.BasicCombatStatsComponent";
     for field in ["AggregateKills", "AggregateDeaths", "AggregateAssists"] {
-        assert_eq!(
-            table.lookup(group, field),
-            Some(FieldType::Int32),
-            "{field}"
-        );
+        assert_typed(group, field, Some(FieldType::Int32));
     }
 }
 
@@ -1843,16 +1723,12 @@ fn basic_combat_stats_are_typed() {
 /// five are ADDITIONS, same wire-evidence class as `Money`.
 #[test]
 fn zoom_multiplier_fov_fields_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let group = "/Script/ShooterGame.ZoomMultiplierComponent";
-    assert_eq!(table.lookup(group, "SourceFov"), Some(FieldType::Float));
-    assert_eq!(table.lookup(group, "TargetFov"), Some(FieldType::Float));
-    assert_eq!(table.lookup(group, "SourceFov1P"), Some(FieldType::Float));
-    assert_eq!(table.lookup(group, "TargetFov1P"), Some(FieldType::Float));
-    assert_eq!(
-        table.lookup(group, "TotalTransitionTimeDuration"),
-        Some(FieldType::Float)
-    );
+    assert_typed(group, "SourceFov", Some(FieldType::Float));
+    assert_typed(group, "TargetFov", Some(FieldType::Float));
+    assert_typed(group, "SourceFov1P", Some(FieldType::Float));
+    assert_typed(group, "TargetFov1P", Some(FieldType::Float));
+    assert_typed(group, "TotalTransitionTimeDuration", Some(FieldType::Float));
 }
 
 /// `UsableComponent` drives every hold-to-interact object: spike plant/defuse,
@@ -1864,13 +1740,9 @@ fn zoom_multiplier_fov_fields_are_typed() {
 /// `Money`.
 #[test]
 fn usable_component_interaction_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let group = "/Script/ShooterGame.UsableComponent";
-    assert_eq!(
-        table.lookup(group, "HighestProgress"),
-        Some(FieldType::Float)
-    );
-    assert_eq!(table.lookup(group, "bIsActive"), Some(FieldType::Bool));
+    assert_typed(group, "HighestProgress", Some(FieldType::Float));
+    assert_typed(group, "bIsActive", Some(FieldType::Bool));
 }
 
 /// Ammo used to need a hand-written handle name and no longer does.
@@ -1887,17 +1759,13 @@ fn usable_component_interaction_is_typed() {
 /// rather than as silently unnamed handles.
 #[test]
 fn the_ammo_component_declares_the_handle_the_bare_groups_land_on() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     const GROUP: &str = "/Script/ShooterGame.AmmoComponent";
-    assert_eq!(
-        table.lookup(GROUP, "AuthResourceAmount"),
-        Some(FieldType::Int32),
-    );
+    assert_typed(GROUP, "AuthResourceAmount", Some(FieldType::Int32));
 
     let mut stats = OverlayStats::default();
     let data = 12i32.to_le_bytes();
     let result = apply_overlay_with_handle(
-        &table,
+        &TABLE,
         GROUP,
         group_hash_state(GROUP),
         Some("AuthResourceAmount"),
@@ -1922,13 +1790,10 @@ fn the_ammo_component_declares_the_handle_the_bare_groups_land_on() {
 /// wire-evidence class as `Money`.
 #[test]
 fn finite_speed_movement_max_range_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.FiniteSpeedMovementComponent",
-            "MaximumRange"
-        ),
-        Some(FieldType::Float)
+    assert_typed(
+        "/Script/ShooterGame.FiniteSpeedMovementComponent",
+        "MaximumRange",
+        Some(FieldType::Float),
     );
 }
 
@@ -1941,25 +1806,23 @@ fn finite_speed_movement_max_range_is_typed() {
 /// name once the table has missed on both the group and its alias.
 #[test]
 fn an_engine_object_ref_resolves_on_a_group_the_table_never_saw() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     const BOMB_EQUIPPABLE: &str = "/Game/Equippables/Bomb/BombEquippable.BombEquippable_C";
     assert_eq!(
-        table.lookup(BOMB_EQUIPPABLE, "Owner"),
+        TABLE.lookup(BOMB_EQUIPPABLE, "Owner"),
         None,
         "not in the table"
     );
     assert_eq!(
-        resolve_field_type(&table, BOMB_EQUIPPABLE, Some("Owner"), None),
+        resolve_field_type(&TABLE, BOMB_EQUIPPABLE, Some("Owner"), None),
         Some(FieldType::ObjectNetGuid),
     );
 }
 
 #[test]
 fn the_engine_fallback_covers_every_one_of_the_four_names() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     for name in ["Owner", "Instigator", "AttachParent", "Controller"] {
         assert_eq!(
-            resolve_field_type(&table, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
+            resolve_field_type(&TABLE, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
             Some(FieldType::ObjectNetGuid),
             "{name} should resolve by name",
         );
@@ -1969,10 +1832,9 @@ fn the_engine_fallback_covers_every_one_of_the_four_names() {
 /// The fallback is a fixed list, not "anything that looks like a reference".
 #[test]
 fn the_engine_fallback_does_not_invent_other_names() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     for name in ["OwnerId", "Owner2", "MyOwner", "Parent", "Target"] {
         assert_eq!(
-            resolve_field_type(&table, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
+            resolve_field_type(&TABLE, "/Game/NeverSeen.NeverSeen_C", Some(name), None),
             None,
             "{name} must stay unresolved",
         );
@@ -1995,7 +1857,6 @@ fn the_engine_fallback_does_not_invent_other_names() {
 /// read the same as any 3 x f64; only the meaning was wrong.
 #[test]
 fn the_rpc_transform_vectors_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for (group, field) in [
         (
             "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
@@ -2022,11 +1883,7 @@ fn the_rpc_transform_vectors_are_typed() {
             "BombLocation",
         ),
     ] {
-        assert_eq!(
-            table.lookup(group, field),
-            Some(FieldType::VectorDouble),
-            "{group}:{field}",
-        );
+        assert_typed(group, field, Some(FieldType::VectorDouble));
     }
 }
 
@@ -2036,14 +1893,13 @@ fn the_rpc_transform_vectors_are_typed() {
 #[test]
 fn a_192_bit_rpc_vector_decodes_as_three_doubles() {
     const GROUP: &str = "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let mut stats = OverlayStats::default();
     let mut bits = Vec::new();
     for _ in 0..3 {
         bits.extend_from_slice(&1.0f64.to_le_bytes());
     }
     let result = apply_overlay(
-        &table,
+        &TABLE,
         GROUP,
         group_hash_state(GROUP),
         Some("Scale3D"),
@@ -2068,16 +1924,9 @@ fn a_192_bit_rpc_vector_decodes_as_three_doubles() {
 fn a_checksum_types_a_field_the_table_never_declared() {
     const UNDECLARED: &str =
         "/Script/ShooterGame.ReplayPlayerController:ClientReplayReceiveInputEventProcessingCapture";
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    assert_eq!(table.lookup(UNDECLARED, "PlayerID"), None, "not declared");
+    assert_eq!(TABLE.lookup(UNDECLARED, "PlayerID"), None, "not declared");
     assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
-            UNDECLARED,
-            Some("PlayerID"),
-            None,
-            Some(2396673102)
-        ),
+        resolve(UNDECLARED, "PlayerID", Some(2396673102)),
         Some(FieldType::Int32),
     );
 }
@@ -2149,17 +1998,7 @@ fn a_declared_entry_outranks_the_engine_and_checksum_fallbacks() {
 /// learned.
 #[test]
 fn an_unlearned_checksum_resolves_nothing() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
-            "/Game/Nope.Nope_C",
-            Some("Whatever"),
-            None,
-            Some(1)
-        ),
-        None,
-    );
+    assert_eq!(resolve("/Game/Nope.Nope_C", "Whatever", Some(1)), None,);
 }
 
 /// The safety property: a checksum whose donors disagree is not in the table at
@@ -2197,35 +2036,28 @@ fn checksums_whose_donors_disagree_are_omitted() {
 /// receivers raw.
 #[test]
 fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     for group in [
         "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect",
         "/Script/ShooterGame.EffectManagerComponent:MulticastPlayOneShotEffect",
         "/Script/ShooterGame.ReplayEffectComponent:ReplayPlayContinuousEffectAtLocation",
     ] {
         assert_eq!(
-            table.lookup(group, "AllianceFilter"),
+            TABLE.lookup(group, "AllianceFilter"),
             Some(FieldType::EnumByte),
             "donor {group}"
         );
     }
-    assert_eq!(lookup_checksum(2270825073), Some(FieldType::EnumByte));
+    assert_checksum(2270825073, Some(FieldType::EnumByte));
 
     const RECEIVER: &str =
         "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient";
     assert_eq!(
-        table.lookup(RECEIVER, "AllianceFilter"),
+        TABLE.lookup(RECEIVER, "AllianceFilter"),
         None,
         "typed by checksum, not by name"
     );
     assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
-            RECEIVER,
-            Some("AllianceFilter"),
-            None,
-            Some(2270825073)
-        ),
+        resolve(RECEIVER, "AllianceFilter", Some(2270825073)),
         Some(FieldType::EnumByte),
     );
 }
@@ -2239,18 +2071,17 @@ fn alliance_filter_donors_agree_so_the_checksum_types_the_receivers() {
 /// before.
 #[test]
 fn the_weapon_effect_rpcs_type_their_effect_manager_reference() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in [
         "/Script/ShooterGame.AresEquippable:MulticastPlayContinuousEffectFromClient",
         "/Script/ShooterGame.AresEquippable:MulticastPlayOneShotEffectFromClient",
     ] {
-        assert_eq!(
-            table.lookup(group, "EffectManagerComponent"),
+        assert_typed(
+            group,
+            "EffectManagerComponent",
             Some(FieldType::ObjectNetGuid),
-            "{group}"
         );
     }
-    assert_eq!(lookup_checksum(1051633025), Some(FieldType::ObjectNetGuid));
+    assert_checksum(1051633025, Some(FieldType::ObjectNetGuid));
 }
 
 /// Every group the overlay assigns a `RepMovement` type to -- a table entry or
@@ -2501,22 +2332,17 @@ fn the_checksum_table_is_populated_and_sorted() {
 /// the checksum that carries it to Remove say `UInt32`.
 #[test]
 fn the_movement_time_pair_and_force_module_handle_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
-            "StopMovementTime"
-        ),
+    assert_typed(
+        "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
+        "StopMovementTime",
         Some(FieldType::Float),
     );
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
-            "HandleNumber"
-        ),
+    assert_typed(
+        "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
+        "HandleNumber",
         Some(FieldType::UInt32),
     );
-    assert_eq!(lookup_checksum(3336285386), Some(FieldType::UInt32));
+    assert_checksum(3336285386, Some(FieldType::UInt32));
 }
 
 /// `EffectID` is the `int64` member of `FEffectID`, not the `ulong` the C#
@@ -2532,7 +2358,6 @@ fn the_movement_time_pair_and_force_module_handle_are_typed() {
 /// table left behind by a retyped donor.
 #[test]
 fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for (group, checksum) in [
         ("/Script/ShooterGame.EffectManagerComponent", 1129645208),
         (
@@ -2548,23 +2373,13 @@ fn effect_ids_are_signed_on_every_donor_and_in_the_checksum_table() {
             2251343646,
         ),
     ] {
-        assert_eq!(
-            table.lookup(group, "EffectID"),
-            Some(FieldType::Int64),
-            "{group}"
-        );
-        assert_eq!(
-            lookup_checksum(checksum),
-            Some(FieldType::Int64),
-            "{checksum}"
-        );
+        assert_typed(group, "EffectID", Some(FieldType::Int64));
+        assert_checksum(checksum, Some(FieldType::Int64));
     }
     assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
+        resolve(
             "/Script/ShooterGame.EffectManagerComponent:MulticastStopContinuousEffect",
-            Some("EffectID"),
-            None,
+            "EffectID",
             Some(2340855891)
         ),
         Some(FieldType::Int64),
@@ -2599,7 +2414,6 @@ fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() 
         "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule";
     const REMOVE: &str =
         "/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastRemoveForceModule";
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     for (field, expected) in [
         ("RespawnNumber", FieldType::Int32),
         ("NetTimestamp", FieldType::Float),
@@ -2607,32 +2421,24 @@ fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() 
         ("Module", FieldType::ObjectNetGuid),
         ("Character", FieldType::ObjectNetGuid),
     ] {
-        assert_eq!(table.lookup(APPLY, field), Some(expected), "Apply {field}");
+        assert_typed(APPLY, field, Some(expected));
     }
-    assert_eq!(lookup_checksum(3263282135), Some(FieldType::EnumByte));
+    assert_checksum(3263282135, Some(FieldType::EnumByte));
     assert_eq!(
-        table.lookup(REMOVE, "ModuleType"),
+        TABLE.lookup(REMOVE, "ModuleType"),
         None,
         "typed by checksum, not by name"
     );
     assert_eq!(
-        resolve_field_type_with_checksum(
-            &table,
-            REMOVE,
-            Some("ModuleType"),
-            None,
-            Some(3263282135)
-        ),
+        resolve(REMOVE, "ModuleType", Some(3263282135)),
         Some(FieldType::EnumByte),
     );
     // The component's own `RespawnNumber` property (checksum 3044239005) is a
     // different property on a different group; the RPC entry does not reach it.
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.ForceModuleManagerComponent",
-            "RespawnNumber"
-        ),
-        None
+    assert_typed(
+        "/Script/ShooterGame.ForceModuleManagerComponent",
+        "RespawnNumber",
+        None,
     );
 }
 
@@ -2645,7 +2451,6 @@ fn the_force_module_apply_parameters_are_typed_and_remove_follows_by_checksum() 
 /// `LastSeen <= Correction - 1` on every paired row.
 #[test]
 fn readying_speed_and_inventory_correction_counters_are_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for (group, field, expected) in [
         (
             "/Script/ShooterGame.ReadyingStateComponent",
@@ -2663,14 +2468,14 @@ fn readying_speed_and_inventory_correction_counters_are_typed() {
             FieldType::Int32,
         ),
     ] {
-        assert_eq!(table.lookup(group, field), Some(expected), "{field}");
+        assert_typed(group, field, Some(expected));
     }
     for (checksum, expected) in [
         (3151779304u32, FieldType::EnumByte),
         (3198546915, FieldType::Int32),
         (1076231069, FieldType::Int32),
     ] {
-        assert_eq!(lookup_checksum(checksum), Some(expected), "{checksum}");
+        assert_checksum(checksum, Some(expected));
     }
 }
 
@@ -2685,12 +2490,9 @@ fn readying_speed_and_inventory_correction_counters_are_typed() {
 /// terms rather than in centimetres.
 #[test]
 fn the_callout_region_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.CalloutRegionTrackingComponent",
-            "CurrentRegion"
-        ),
+    assert_typed(
+        "/Script/ShooterGame.CalloutRegionTrackingComponent",
+        "CurrentRegion",
         Some(FieldType::ObjectNetGuid),
     );
 }
@@ -2715,7 +2517,6 @@ fn the_callout_region_is_typed() {
 fn the_ability_cast_log_is_typed() {
     const GROUP: &str = "/Game/Characters/_Core/Comp_AbilityStatisticsReplicator\
 .Comp_AbilityStatisticsReplicator_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for (field, expected) in [
         (
             "Player_11_0963330440D68BDF1A8E34B035420342",
@@ -2735,7 +2536,7 @@ fn the_ability_cast_log_is_typed() {
             FieldType::VectorDouble,
         ),
     ] {
-        assert_eq!(table.lookup(GROUP, field), Some(expected), "{field}");
+        assert_typed(GROUP, field, Some(expected));
     }
 }
 
@@ -2765,14 +2566,9 @@ GameObject_Pandemic_E_SmokeScreenManager.GameObject_Pandemic_E_SmokeScreenManage
     const PHOENIX: &str = "/Game/Characters/Phoenix/S0/Ability_Q/Production/\
 GameObject_Phoenix_Q_FlameWallManager_Production.\
 GameObject_Phoenix_Q_FlameWallManager_Production_C:MulticastAddSmokeScreenPoint";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in [VIPER, PHOENIX] {
         for field in ["Translation", "Scale3D"] {
-            assert_eq!(
-                table.lookup(group, field),
-                Some(FieldType::VectorDouble),
-                "{group} {field}"
-            );
+            assert_typed(group, field, Some(FieldType::VectorDouble));
         }
     }
 }
@@ -2798,14 +2594,9 @@ fn the_weapon_classes_type_215_and_216_like_everything_else() {
         "/Game/Equippables/Melee/Ability_Melee_Base.Ability_Melee_Base_C",
     ];
     const ALREADY_TYPED: &str = "/Game/GameModes/Bomb/TimedBomb.TimedBomb_C";
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in WEAPONS.iter().chain(std::iter::once(&ALREADY_TYPED)) {
         for field in ["215", "216"] {
-            assert_eq!(
-                table.lookup(group, field),
-                Some(FieldType::EnumRemainingBits),
-                "{group} {field}"
-            );
+            assert_typed(group, field, Some(FieldType::EnumRemainingBits));
         }
     }
 }
@@ -2834,13 +2625,8 @@ fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
         "/Script/ShooterGame.EffectManagerComponent:ReplayRecordOneShotEffect",
         "/Script/ShooterGame.EffectManagerComponent:ReplayRecordContinuousEffect",
     ];
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     for group in GROUPS {
-        assert_eq!(
-            table.lookup(group, "249"),
-            Some(FieldType::RotationShort),
-            "{group}"
-        );
+        assert_typed(group, "249", Some(FieldType::RotationShort));
     }
     // The location it pairs with, unchanged, on the four that send it numbered.
     // `ReplayPlayContinuousEffectAtLocation` is the exception and the reason
@@ -2850,17 +2636,13 @@ fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
     for group in GROUPS {
         if group.ends_with("ReplayPlayContinuousEffectAtLocation") {
             assert_eq!(
-                table.lookup(group, "Rotation"),
+                TABLE.lookup(group, "Rotation"),
                 Some(FieldType::RotationShort),
                 "{group} names its rotation and must still agree"
             );
             continue;
         }
-        assert_eq!(
-            table.lookup(group, "248"),
-            Some(FieldType::VectorDouble),
-            "{group} 248"
-        );
+        assert_typed(group, "248", Some(FieldType::VectorDouble));
     }
 }
 
@@ -2876,19 +2658,15 @@ fn the_effect_placement_rotation_is_typed_on_every_rpc_that_sends_it() {
 /// way -- and follows Unreal's `FRandomStream`, whose seed is an `int32`.
 #[test]
 fn the_random_number_generator_seed_is_typed() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
-    assert_eq!(
-        table.lookup(
-            "/Script/ShooterGame.NetworkedRandomNumberGeneratorComponent",
-            "AuthCurrentRandomSeed"
-        ),
-        Some(FieldType::Int32)
+    assert_typed(
+        "/Script/ShooterGame.NetworkedRandomNumberGeneratorComponent",
+        "AuthCurrentRandomSeed",
+        Some(FieldType::Int32),
     );
 }
 
 #[test]
 fn targeting_vectors_and_heal_causer_require_exact_scoped_checksums() {
-    let table = OverlayTable::new(&OVERLAY_TABLE);
     let cases = [
         (
             "/Script/ShooterGame.MapTargetingStateComponent",
@@ -2910,18 +2688,9 @@ fn targeting_vectors_and_heal_causer_require_exact_scoped_checksums() {
         ),
     ];
     for (group, field, checksum, expected) in cases {
-        assert_eq!(
-            resolve_field_type_with_checksum(&table, group, Some(field), None, Some(checksum)),
-            Some(expected)
-        );
-        assert_eq!(
-            resolve_field_type_with_checksum(&table, group, Some(field), None, Some(checksum ^ 1)),
-            None
-        );
-        assert_eq!(
-            resolve_field_type_with_checksum(&table, "/wrong", Some(field), None, Some(checksum)),
-            None
-        );
+        assert_eq!(resolve(group, field, Some(checksum)), Some(expected));
+        assert_eq!(resolve(group, field, Some(checksum ^ 1)), None);
+        assert_eq!(resolve("/wrong", field, Some(checksum)), None);
     }
 }
 
@@ -2940,10 +2709,6 @@ const DECAY_PARAMS: &str = "/Script/ShooterGame.DamageableComponent:MulticastNot
 #[test]
 fn heal_and_decay_references_require_exact_scoped_checksums() {
     const CNC: &str = "/Script/ShooterGame.DamageableComponent_ClassNetCache";
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
-    let resolve = |group: &str, field: &str, checksum: Option<u32>| {
-        resolve_field_type_with_checksum(&table, group, Some(field), None, checksum)
-    };
     let cases = [
         (HEAL_PARAMS, "EventInstigator", 3_087_885_251),
         (HEAL_PARAMS, "EventInstigatorPawn", 3_901_949_544),
@@ -2986,22 +2751,9 @@ fn heal_and_decay_references_require_exact_scoped_checksums() {
 /// value the damage-side references already export -- not to an actor.
 #[test]
 fn heal_and_decay_references_decode_packed_guids_exactly() {
-    let table = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
     let mut stats = OverlayStats::default();
     let mut apply = |group: &str, field: &str, handle: u32, checksum: u32, raw: &[u8], bits| {
-        crate::apply_overlay_with_checksum(
-            &table,
-            group,
-            group_hash_state(group),
-            Some(field),
-            handle,
-            Some(checksum),
-            Some(raw),
-            bits,
-            &mut stats,
-        )
-        .expect("a scoped reference is attempted")
-        .value_i64
+        apply_scoped(&mut stats, group, field, handle, checksum, raw, bits).value_i64
     };
     let pawn = apply(
         HEAL_PARAMS,
