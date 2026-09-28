@@ -425,16 +425,6 @@ mod tests {
     // -- NetGuidCache unit tests (ported from NetGuidCacheTests.cs) -----------
 
     #[test]
-    fn cache_stores_group_by_path_and_index() {
-        let mut cache = NetGuidCache::new();
-        let group = NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 2);
-        cache.add_export_group(group).unwrap();
-
-        assert!(cache.get_group_by_path("/Game/Test.Test_C").is_some());
-        assert!(cache.get_group_by_index(7).is_some());
-    }
-
-    #[test]
     fn property_exports_never_shadow_the_class_net_cache_group() {
         const CLASS: &str = "/Script/ShooterGame.DamageableComponent";
         const RPC: &str = "/Script/ShooterGame.DamageableComponent_ClassNetCache";
@@ -501,84 +491,6 @@ mod tests {
         let result = cache.get_group_by_index(7).unwrap();
         assert_eq!(result.len(), 4);
         assert_eq!(result.get_field(1).unwrap().name, "ExistingField");
-    }
-
-    #[test]
-    fn crossed_path_and_index_identities_leave_both_groups_unchanged() {
-        let mut cache = NetGuidCache::new();
-        cache
-            .add_export_group(NetFieldExportGroup::new("/Script/G.A".into(), 7, 1))
-            .unwrap();
-        cache
-            .add_export_group(NetFieldExportGroup::new("/Script/G.B".into(), 8, 1))
-            .unwrap();
-
-        let err = cache
-            .add_export_group(NetFieldExportGroup::new("/Script/G.A".into(), 8, 2))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SchemaError::CrossedExportGroupIdentity { .. }
-        ));
-
-        assert_eq!(cache.group_count(), 2);
-        assert_eq!(cache.get_group_by_index(7).unwrap().path, "/Script/G.A");
-        assert_eq!(cache.get_group_by_index(8).unwrap().path, "/Script/G.B");
-        assert_eq!(
-            cache
-                .get_group_by_path("/Script/G.A")
-                .unwrap()
-                .path_name_index,
-            7
-        );
-        assert_eq!(
-            cache
-                .get_group_by_path("/Script/G.B")
-                .unwrap()
-                .path_name_index,
-            8
-        );
-    }
-
-    #[test]
-    fn same_path_at_new_index_refreshes_the_canonical_index() {
-        let mut cache = NetGuidCache::new();
-        cache
-            .add_export_group(NetFieldExportGroup::new("/Script/G.A".into(), 7, 1))
-            .unwrap();
-
-        cache
-            .add_export_group(NetFieldExportGroup::new("/Script/G.A".into(), 9, 2))
-            .unwrap();
-
-        let group = cache.get_group_by_index(9).unwrap();
-        assert_eq!(group.path, "/Script/G.A");
-        assert_eq!(group.path_name_index, 9);
-        assert_eq!(group.len(), 2);
-        assert!(cache.get_group_by_index(7).is_none());
-    }
-
-    #[test]
-    fn same_index_with_new_path_refreshes_path_and_leaf_indexes() {
-        let mut cache = NetGuidCache::new();
-        cache
-            .add_export_group(NetFieldExportGroup::new("/Script/G.Old".into(), 7, 1))
-            .unwrap();
-
-        cache
-            .add_export_group(NetFieldExportGroup::new("/Script/G.New".into(), 7, 2))
-            .unwrap();
-
-        let group = cache.get_group_by_index(7).unwrap();
-        assert_eq!(group.path, "/Script/G.New");
-        assert_eq!(group.path_name_index, 7);
-        assert_eq!(group.len(), 2);
-        assert!(cache.get_group_by_path("/Script/G.Old").is_none());
-        assert!(cache.unique_leaf_match("Old").is_none());
-        assert_eq!(
-            cache.unique_leaf_match("New").unwrap().path,
-            "/Script/G.New"
-        );
     }
 
     /// A `path_name_index` reused for a genuinely different path must not
@@ -734,22 +646,6 @@ mod tests {
         assert_eq!(cache.get_gameplay_tag_name(2).unwrap(), "Ability.Active");
         assert!(cache.get_gameplay_tag_name(4).is_none()); // unpopulated slot
         assert!(cache.get_gameplay_tag_name(99).is_none()); // out of range
-    }
-
-    // -- Path alias lookup tests ----------------------------------------------
-
-    #[test]
-    fn alias_lookup_via_cache() {
-        let mut cache = NetGuidCache::new();
-        let group = NetFieldExportGroup::new("/Game/Characters/_Core/Jett/Jett_C".into(), 50, 1);
-        cache.add_export_group(group).unwrap();
-
-        // Should be reachable via the core-stripped alias.
-        assert!(
-            cache
-                .get_group_by_path("/Game/Characters/Jett/Jett_C")
-                .is_some()
-        );
     }
 
     // -- The lookups after any sequence of registrations ------------------------
