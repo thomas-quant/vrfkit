@@ -66,8 +66,10 @@ pub(crate) struct CheckpointStats {
     pub export_field_rows_written: u64,
     pub partial_rows: u64,
     pub partial_bits: u64,
-    /// Actor rows are written to their checkpoint-scoped table. This retained
-    /// counter remains explicit so a future discard path cannot be silent.
+    /// Actor rows that never reached `checkpoint_actors.parquet`: the sink
+    /// pushes one per open and one per close, so this is each chunk's opens
+    /// and closes less the rows it wrote. Measured rather than assumed, so a
+    /// discard path cannot be silent.
     pub actor_rows_dropped: u64,
     pub movement_rows_dropped: u64,
     /// Everything the checkpoint sinks counted.
@@ -88,6 +90,17 @@ pub(crate) struct CheckpointStats {
     pub sink: SinkTotals,
     /// Replication/framing counters from every finalized checkpoint reader.
     pub net: NetStats,
+}
+
+impl CheckpointStats {
+    /// Fold in one finished chunk's reader counters, and count as dropped
+    /// every actor row its opens and closes called for beyond the
+    /// `actor_rows` it wrote.
+    fn absorb_chunk_net(&mut self, chunk_net: &mut NetStats, actor_rows: u64) {
+        self.actor_rows_dropped +=
+            (chunk_net.actor_opens + chunk_net.actor_closes).saturating_sub(actor_rows);
+        self.net.absorb(chunk_net);
+    }
 }
 
 pub(super) struct CheckpointWriters<W: Write + Send> {
@@ -227,6 +240,7 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
     stats.trailing_bytes += cp.trailing_bytes as u64;
     let plain = decompress_checkpoint(cp.archive, ctx.compressed, ctx.encrypted)?;
 
+    let actor_rows_before = stats.actor_rows_written;
     let checkpoint_index = u32::try_from(stats.chunks)
         .map_err(|_| CliError::Usage("too many checkpoint chunks to index".to_owned()))?;
     let checkpoint = CheckpointIdentity {
@@ -350,7 +364,8 @@ pub(super) fn process_chunk<W: Write + Send, P: Write + Send>(
         partial_writer.push(record)?;
     }
     let mut chunk_net = reader.stats().clone();
-    stats.net.absorb(&mut chunk_net);
+    let chunk_actor_rows = stats.actor_rows_written - actor_rows_before;
+    stats.absorb_chunk_net(&mut chunk_net, chunk_actor_rows);
 
     let mut guid_entries = cache.net_guid_entries();
     guid_entries.sort_unstable_by_key(|entry| entry.net_guid);
@@ -411,6 +426,39 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// `actor_rows_dropped` was declared, printed and published but never
+    /// assigned, so `Dropped: 0 actor` and the baseline guard that requires
+    /// that 0 could not move. The sink pushes exactly one actor row per open
+    /// and per close, so a chunk's opens and closes less the rows it wrote
+    /// are the rows it dropped -- counted per chunk, so one chunk's surplus
+    /// cannot cancel another's loss.
+    #[test]
+    fn actor_rows_a_chunk_opened_or_closed_but_did_not_write_are_dropped() {
+        let mut stats = CheckpointStats::default();
+        let mut clean = NetStats {
+            actor_opens: 3,
+            actor_closes: 1,
+            ..NetStats::default()
+        };
+        stats.absorb_chunk_net(&mut clean, 4);
+        assert_eq!(stats.actor_rows_dropped, 0);
+
+        let mut lossy = NetStats {
+            actor_opens: 2,
+            ..NetStats::default()
+        };
+        stats.absorb_chunk_net(&mut lossy, 1);
+        assert_eq!(stats.actor_rows_dropped, 1, "one open wrote no row");
+
+        let mut surplus = NetStats {
+            actor_opens: 1,
+            ..NetStats::default()
+        };
+        stats.absorb_chunk_net(&mut surplus, 2);
+        assert_eq!(stats.actor_rows_dropped, 1, "a surplus is not a refund");
+        assert_eq!((stats.net.actor_opens, stats.net.actor_closes), (6, 1));
     }
 
     #[test]
