@@ -1,77 +1,46 @@
 //! Decoders for Valorant struct-array blobs that arrive as opaque raw bits.
 //!
-//! # Covered blobs
-//!
 //! | Field | Export group | Purpose | Module |
 //! |-------|-------------|---------|--------|
 //! | `RoundResults` | `BombGameState` | Per-round winning team and outcome | `round_results` |
 //! | `TeamEconomy` | `BombGameState` | Team loadout value per round | `team_economy` |
 //! | `RoundInfos` | `OwnerExclusivePlayerInfo` | Per-player per-round credit | `round_infos` |
 //!
-//! # Wire layout (established from C# reference parser + corpus validation)
-//!
-//! All three use the same UE RepLayout dynamic-array serialization, which
-//! the internal `framing` module reads:
-//!
-//! ```text
-//! [IntPacked: declared_count]
-//! repeat {
-//!     [IntPacked: encoded_index]  // 0 = end, otherwise index = encoded - 1
-//!     repeat {
-//!         [IntPacked: encoded_handle]  // 0 = end, otherwise handle = encoded - 1
-//!         [IntPacked: bit_count]       // payload length in bits
-//!         [bits: payload]              // field-specific content
-//!     }
-//! }
-//! ```
+//! All three use the RepLayout dynamic-array framing the effect arrays use
+//! (diagrammed in the `effect` module docs), read by the internal `framing`
+//! module; an FName member goes through `FieldType::FName`'s reader with a
+//! 1024-byte string cap. A replay carries a few dozen of each, so nothing here
+//! is on a hot path.
 //!
 //! # Members are selected by DECLARED NAME, not by handle number
 //!
-//! Handle numbers are a per-build layout detail: build 13.02 shifted
-//! `RoundResults`' handles by eight and a decoder pinned to the old numbers
-//! decoded nothing, silently, for a whole build. See
-//! docs/archive/PROJECT_STATUS.md 26-B/26-D for the measurement and
-//! `framing::member_name` for why resolution runs handle -> name and never
-//! the reverse.
+//! Handle numbers are a per-build layout detail: 13.02 moved `RoundResults`'
+//! members down by eight, and a decoder keyed on the old numbers decoded
+//! nothing, silently, for a whole build (docs/archive/PROJECT_STATUS.md
+//! 26-B/26-D; `framing::member_name` says why resolution runs handle -> name).
+//! So the decoders take, besides a `reader` over exactly the blob's declared
+//! bits, `declared`: the enclosing group's field export names indexed by
+//! handle (only the fixed-handle `decode_team_economy` does not). An empty
+//! declaration is an error, not a fallback to build-specific numbers that
+//! would be wrong without warning.
 //!
-//! Members and payload types per blob, with the handles each build happens to
-//! use written down as a reading aid ONLY. Nothing matches on them:
+//! Members and payload types, with each build's handles as a reading aid ONLY
+//! (nothing matches on them):
 //!
-//! ## RoundResults (`BombGameState`)      13.01: 93..=96   13.02: 81..=84
-//! - `WinningTeam` (FName)
-//! - `WinningTeamRole` (enum byte, variable bit width)
-//! - `RoundResult` (enum byte, variable bit width)
-//! - `EliminatedTeams` (skipped - opaque nested array). Declared at TWO
-//!   consecutive handles in both builds; matching on the name covers both
-//!   without either being written down.
-//!
-//! ## RoundInfos (`OwnerExclusivePlayerInfo`)   40..=44 in both builds
-//! - `RoundNumber`, `StartOfRoundMoney`, `StartOfRoundLoadoutValue`,
-//!   `EndOfRoundMoney`, `EndOfRoundLoadoutValue` (all Int32)
-//!
-//! ## TeamEconomy (`BombGameState`, through 13.01)
-//! - `241`: ReplicationId (IntPacked; hardcoded FName index)
-//! - `LoadoutValue`, `AverageLoadoutValue` (Int32)
-//!
-//! The declared handles are 53..=55 in the 12.01--12.05 samples and 56..=58
-//! from 12.06 through 13.01. The parser uses the declaration, including the
-//! numeric FName spelling, rather than treating the later handles as universal.
-//! The original `decode_team_economy` API retains its fixed-handle behavior;
-//! `decode_team_economy_declared` is the schema-aware entry point.
-//! In 13.02 the property moved into separately replicated BaseTeamState actors.
-//!
-//! # FName wire format (from `FArchive.ReadFNameCore`)
-//! ```text
-//! [1 bit: is_hardcoded]
-//! if hardcoded: [IntPacked: name_index]  -> returned as decimal string
-//! else:        [FString: name] [Int32: number_suffix]
-//! ```
-//!
-//! # Volume
-//!
-//! These are per-round rows, not per-field ones: a replay carries a few dozen
-//! of each. Nothing here is on a hot path, so it is written for the wire
-//! format's clarity rather than for throughput.
+//! - RoundResults (`BombGameState`; 13.01: 93..=96, 13.02: 81..=84):
+//!   `WinningTeam` (FName), `WinningTeamRole` and `RoundResult` (enum bytes of
+//!   variable width), `EliminatedTeams` (skipped; declared at TWO consecutive
+//!   handles in both builds, one name arm covering both).
+//! - RoundInfos (`OwnerExclusivePlayerInfo`; 40..=44 in both builds):
+//!   `RoundNumber`, `StartOfRoundMoney`, `StartOfRoundLoadoutValue`,
+//!   `EndOfRoundMoney`, `EndOfRoundLoadoutValue` (all Int32).
+//! - TeamEconomy (`BombGameState` through 13.01; 53..=55 in the 12.01-12.05
+//!   samples, 56..=58 from 12.06): `241`, the ReplicationId declared as a
+//!   hardcoded FName index (IntPacked), and `LoadoutValue`,
+//!   `AverageLoadoutValue` (Int32). From 13.02 the property lives in
+//!   separately replicated BaseTeamState actors. `decode_team_economy` keeps
+//!   the fixed 56..=58 layout; `decode_team_economy_declared` follows the
+//!   declaration.
 
 mod framing;
 mod round_infos;
@@ -131,14 +100,9 @@ pub enum StructBlobError {
     #[error("too many fields in element ({context})")]
     TooManyFields { context: &'static str },
 
-    /// A byte enum carried a value this decoder has no variant for.
-    ///
-    /// The `from_byte` conversions used to return `None` here, and `None` is
-    /// also how these members spell "the wire did not send this field" -- so an
-    /// unrecognised value became an ABSENT field with nothing counted. That is
-    /// exactly the shape a game patch adding an enum variant takes: the column
-    /// quietly starts going null on the new rows while every counter stays
-    /// clean. Reported instead, so the first one is loud.
+    /// A byte enum carried a value this decoder has no variant for. Reported:
+    /// `None` means "not sent", so a patch adding a variant would otherwise
+    /// turn the column null with every counter clean.
     #[error("{enum_name} has no variant for value {value} in {context}")]
     UnknownEnumValue {
         enum_name: &'static str,
@@ -159,16 +123,10 @@ pub enum StructBlobError {
     NotFullyConsumed { remaining: u64 },
 
     /// A member did not consume the field window the wire declared for it.
-    ///
-    /// Each field gets a `sub_reader` of its declared width, and that reader
-    /// advances the PARENT past the whole window whatever the member does with
-    /// it -- so the blob stays aligned, the remaining members decode, and
-    /// `ensure_consumed` at the end is satisfied. The leftover was invisible.
-    ///
-    /// Concretely: a 64-bit `EndOfRoundMoney` whose first 32 bits read 1900
-    /// exported 1900 and dropped the other 32, counted as decoded rather than
-    /// failed. Whether 1900 was the value or half of one, nothing could say --
-    /// which is the situation this crate treats as worse than a failure.
+    /// The field's `sub_reader` advances the PARENT past the whole window, so
+    /// the blob stays aligned and the closing check passes whatever the member
+    /// read: a 64-bit `EndOfRoundMoney` whose first 32 bits read 1900 exported
+    /// 1900, counted as decoded.
     #[error("{name} (handle {handle}) left {remaining} of its {declared} bits unread in {context}")]
     MemberNotFullyConsumed {
         name: String,
