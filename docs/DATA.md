@@ -555,9 +555,9 @@ packed integers. Two checks per class:
 |---|---|---|---:|---:|---|---|
 | `Pawn_Aggrobot_SeekerNade_C` | Short | **two decimals** | 932 | 15 | 99.9984-100.0014 | no moving rows |
 | `EquippablePickupProjectile_C` | Byte | whole units | 288,644 | 21 | 0.9997-1.0002 | 1.01 (1,950,150) |
-| `GameObject_Smonk_NewSmoke_C` | Short | whole units | 27,667 | 21 | 0.9999-1.0001 | no moving rows |
+| `GameObject_Smonk_NewSmoke_C` | Byte* | whole units | 27,667 | 21 | 0.9999-1.0001 | no moving rows |
 | `Projectile_Wraith_4_Smoke_C` | Byte | whole units | 14,935 | 17 | 0.9998-1.0002 | 1.00 (144,774) |
-| `Zone_Wraith_4_Smoke_C` | Short | whole units | 14,902 | 17 | 0.9999-1.0001 | no moving rows |
+| `Zone_Wraith_4_Smoke_C` | Byte* | whole units | 14,902 | 17 | 0.9999-1.0001 | no moving rows |
 | `Projectile_Vampire_4_NearsightAoE_C` | Byte | whole units | 13,892 | 21 | 0.9998-1.0002 | 0.97 (67,202) |
 | `Projectile_Hunter_Q_RevealBolt_C` | Byte | whole units | 12,032 | 14 | 0.9998-1.0002 | 1.00 (170,773) |
 | `Projectile_Wushu_4_Smoke_C` | Byte | whole units | 11,976 | 20 | 0.9999-1.0002 | 0.98 (530,104) |
@@ -566,19 +566,33 @@ packed integers. Two checks per class:
 | `Projectile_Hunter_4_ExplosiveBolt_C` | Byte | whole units | 5,280 | 5 | 0.9999-1.0001 | 1.00 (55,390) |
 | `Projectile_Wraith_Q_NearsightMissile_C` | Byte | whole units | 4,062 | 17 | 0.9998-1.0001 | 1.00 (53,124) |
 | `Projectile_Smonk_DecayNade_C` | Byte | whole units | 3,505 | 21 | 0.9999-1.0001 | 1.00 (46,775) |
-| `GameObject_Smonk_Q_DecayExplosion_C` | Short | whole units | 3,490 | 21 | 0.9999-1.0001 | no moving rows |
-| `GameObject_Smonk_NewSmoke_PDS_C` | Short | whole units | 3,320 | 21 | 0.9998-1.0002 | no moving rows |
+| `GameObject_Smonk_Q_DecayExplosion_C` | Byte* | whole units | 3,490 | 21 | 0.9999-1.0001 | no moving rows |
+| `GameObject_Smonk_NewSmoke_PDS_C` | Byte* | whole units | 3,320 | 21 | 0.9998-1.0002 | no moving rows |
 | `Projectile_Neon_C_Tunnel_C` | Byte | whole units | 3,269 | 12 | 0.9998-1.0001 | 0.98 (54,749) |
 | `Projectile_Phoenix_Q_FlameWall_ThroughWall_C` | Byte | whole units | 2,765 | 18 | 0.9999-1.0001 | 0.98 (179,899) |
 | `Projectile_E_Aggrobot_DiscTurret_PowerWave_C` | Byte | whole units | 1,819 | 15 | 0.9998-1.0002 | 1.00 (30,501) |
 | `Projectile_E_Aggrobot_OrbSpawner_C` | Byte | whole units | 1,812 | 15 | 0.9999-1.0002 | 1.06 (13,139) |
-| `GameObject_Mage_E_WorldSmoke_C` | Short | whole units | 1,046 | 5 | 0.9999-1.0001 | no moving rows |
+| `GameObject_Mage_E_WorldSmoke_C` | Byte* | whole units | 1,046 | 5 | 0.9999-1.0001 | no moving rows |
 | `Projectile_Terra_C_TimeSlowGrenade_C` | Byte | whole units | 1,033 | 11 | 0.9999-1.0002 | 1.00 (10,280) |
 | `GameObject_Terra_C_TimeSlowGrenade_Explosion_C` | Byte | whole units | 1,029 | 11 | 0.9998-1.0001 | no moving rows |
 | `Projectile_Aggrobot_Zamboni_Rocket_C` | Byte | whole units | 1,007 | 15 | 0.9998-1.0002 | 1.00 (1,112) |
 | `Projectile_Pandemic_E_SmokeScreen_NoCollision_C` | Byte | whole units | 703 | 8 | 0.9998-1.0001 | 1.00 (8,930) |
 | `Projectile_Aggrobot_C_ExplodeyPatch_C` | Byte | whole units | 647 | 15 | 0.9999-1.0001 | 1.00 (9,052) |
 | `Projectile_Mage_Q_Wall_C` | Byte | whole units | 596 | 5 | 0.9998-1.0002 | 0.98 (131,617) |
+
+\* The five `Byte*` classes never replicate a rotation, so byte and short
+components read the same three clear flag bits and give the same values: the
+wire cannot tell the widths apart, and the choice is a prior, not a
+measurement. Until 2026-09-28 they read short -- the builder default the C#
+descriptors' bare `.ReplicatedMovement()` takes. They read byte now because the
+13.06 game's own class data points that way: all five derive natively from
+`AGameObject`, no Blueprint default in their chains sets `ReplicatedMovement`,
+and by native class every class whose rotation is observable decodes at one
+width only -- `AShooterCharacter` 7 of 7 short, `AProjectile` 38 of 38 byte,
+`AGameObject` 4 of 4 byte. The change moved nothing: all 903 replays that
+declare their movement were exported before and after it, and every Parquet
+file and manifest is byte-identical. If one of them ever sets a rotator flag,
+exact consumption decides, as it did for every other class here.
 
 Every class the table types was observed, so no entry rests on the default
 alone. The Boom Bot (`Pawn_Clay_E_Boomba_C`), typed through an exact scoped
@@ -1292,13 +1306,13 @@ table rather than only the ones this replay spawned, is **none**, and the reason
 is worth keeping.
 
 `Owner` was safe because its *encoding* is fixed, not because its name is
-standard. `ReplicatedMovement` is just as standard a name and is declared four
-different ways in the table -- `RepMovement` with byte rotators on 20 groups,
-with short rotators on 6, `Skip` on 1, and one of the short ones packs its
-location at two decimals where the rest pack whole units. The two rotator
-widths consume different numbers of bits, so a name rule there would desync
-the block; the location level consumes the same bits either way, so a name
-rule would read a value 100x off without a single error -- the failure the
+standard. `ReplicatedMovement` is just as standard a name and is declared three
+different ways in the table -- `RepMovement` with byte rotators and whole units
+on 25 groups, with short rotators and two decimals on 1 (Gekko's Wingman), and
+`Skip` on 1. The two rotator widths consume different numbers of bits, so a
+name rule there would desync the block; the location level consumes the same
+bits either way, so a name rule would read a value 100x off without a single
+error -- the failure the
 [per-class level](#replicatedmovementlocation-is-world-units-at-a-per-class-level)
 exists to prevent.
 `RelativeScale3D` and `CosmeticRandomSeed` split the same way, and only on

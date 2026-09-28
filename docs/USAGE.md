@@ -699,7 +699,7 @@ state after applying** and fails if it disagrees.
 ```bash
 python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
     crates/vrf-decode/src/table.rs
-python tools/apply_type_corrections.py           # apply, then verify (205 corrections)
+python tools/apply_type_corrections.py           # apply, then verify (210 corrections)
 cargo +1.86.0 fmt -p vrf-decode
 
 python tools/apply_type_corrections.py --check   # verify only
@@ -708,7 +708,7 @@ python tools/apply_type_corrections.py --check   # verify only
 CI runs the extract, apply and fmt lines on every push and fails if
 `table.rs` then differs from the committed file.
 
-Those 205 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
+Those 210 corrections are the whole live expectation set the script re-verifies; `ADDITIONS` is the
 subset absent from the vendored C# descriptor input (`third_party/vrp`).
 
 The `ADDITIONS` pass inserts items the pinned C# input is **silent on**. There are
@@ -1204,7 +1204,7 @@ python -W error tools/check_ascii.py --check                         # 159 files
 python -W error tools/check_effect_decoder.py --check                # 12 cases
 python -W error -m unittest discover -s tools/tests -p "test_*.py"   # 1121 tests
 python -W error tools/check_docs.py --fast
-python -W error tools/apply_type_corrections.py --check              # 205 corrections
+python -W error tools/apply_type_corrections.py --check              # 210 corrections
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
 python -W error tools/extract_equippables.py --check
 python -W error tools/check_baseline_schemas.py

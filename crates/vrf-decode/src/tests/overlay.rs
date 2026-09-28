@@ -763,9 +763,63 @@ fn hawk_flash_movement_and_banking_are_typed_on_their_exact_group() {
     assert_eq!(table.lookup(HAWK, "Banking"), Some(FieldType::Double));
     assert_eq!(lookup_checksum(677106858), Some(FieldType::Double));
     // Still no name rule and no checksum for ReplicatedMovement as a whole:
-    // the new entry is a twentieth ByteComponents donor, and the six
-    // ShortComponents ones keep 2749104612 out of the checksum table.
+    // byte and short donors both remain in the table (see
+    // `only_the_seeker_nade_keeps_short_rotator_components`), so 2749104612
+    // stays out of the checksum table.
     assert_eq!(lookup_checksum(2749104612), None);
+}
+
+/// The five AGameObject smoke and zone classes read byte rotator components,
+/// and the only table entry left with short ones is Gekko's Wingman, an
+/// AShooterCharacter pawn.
+///
+/// The C# descriptors give the five the builder's ShortComponents default by
+/// calling a bare `.ReplicatedMovement()`. None of them ever replicates a
+/// rotation, so the wire cannot choose between the widths (13-J, 16-D); the
+/// choice follows the game's own class data (13.06): all five derive
+/// natively from AGameObject > AActor, no Blueprint default in their chains
+/// writes `ReplicatedMovement`, and every AGameObject class whose rotation is
+/// observable decodes at byte width only (AProjectile 38 of 38 byte,
+/// AShooterCharacter 7 of 7 short). `apply_type_corrections.py`,
+/// `retype_game_object_rotators`, has the evidence and the bound.
+#[test]
+fn only_the_seeker_nade_keeps_short_rotator_components() {
+    const GAME_OBJECTS: [&str; 5] = [
+        "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
+        "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
+        "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
+        "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+        "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+    ];
+    const SEEKER_NADE: &str = "/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade.Pawn_Aggrobot_SeekerNade_C";
+    let table = OverlayTable::new(&OVERLAY_TABLE);
+    for group in GAME_OBJECTS {
+        assert_eq!(
+            table.lookup(group, "ReplicatedMovement"),
+            Some(FieldType::RepMovement {
+                rotation: RotatorQuantization::ByteComponents,
+                location: VectorQuantization::RoundWholeNumber,
+            }),
+            "{group}"
+        );
+    }
+    let short: Vec<&str> = OVERLAY_TABLE
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.field_type,
+                FieldType::RepMovement {
+                    rotation: RotatorQuantization::ShortComponents,
+                    ..
+                }
+            )
+        })
+        .map(|e| e.group_path)
+        .collect();
+    assert_eq!(short, [SEEKER_NADE]);
+    // SeekerNade's short, two-decimal donor still disagrees with the byte,
+    // whole-unit ones, so the checksum stays dropped.
+    assert_eq!(lookup_checksum(REPLICATED_MOVEMENT_CHECKSUM), None);
 }
 
 #[test]
@@ -1902,10 +1956,10 @@ fn an_unlearned_checksum_resolves_nothing() {
 
 /// The safety property: a checksum whose donors disagree is not in the table at
 /// all, so the mechanism declines the cases it cannot settle. `ReplicatedMovement`
-/// is the one that matters -- `ByteComponents` on 20 groups and `ShortComponents`
-/// on 6, which differ in width, so guessing would desync the block; and one
-/// group packs its location at two decimals where the rest pack whole units,
-/// which a guess would read 100x off with no error at all.
+/// is the one that matters -- `ByteComponents` on 25 groups and `ShortComponents`
+/// on 1, which differ in width, so guessing would desync the block; and that
+/// one group packs its location at two decimals where the rest pack whole
+/// units, which a guess would read 100x off with no error at all.
 ///
 /// `AllianceFilter` used to be the second entry here and is not any more: its
 /// donors disagreed only in the table, never on the wire -- see

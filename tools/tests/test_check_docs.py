@@ -442,8 +442,10 @@ class MeasuredCountTests(unittest.TestCase):
         # AllianceFilter and four DeathMontage corrections (OriginalBuyerTeam
         # changed type but not count). 204 -> 205: the SeekerNade location-level
         # correction (repmovement-location-scale); HawkFlash's level rides on its
-        # existing ADDITIONS entry, so it adds none.
-        self.assertEqual(guard.measured_counts()["corrections"], 205)
+        # existing ADDITIONS entry, so it adds none. 205 -> 210: the five
+        # AGameObject smoke/zone classes read byte rotator components
+        # (game-evidence-typing-fixes).
+        self.assertEqual(guard.measured_counts()["corrections"], 210)
 
 
 class GeneratedInventoryTests(unittest.TestCase):

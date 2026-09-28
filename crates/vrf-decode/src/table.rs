@@ -1485,7 +1485,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
         group_path: "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke.GameObject_Mage_E_WorldSmoke_C",
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
-            rotation: RotatorQuantization::ShortComponents,
+            rotation: RotatorQuantization::ByteComponents,
             location: VectorQuantization::RoundWholeNumber,
         },
     },
@@ -2157,7 +2157,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
         group_path: "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke.GameObject_Smonk_NewSmoke_C",
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
-            rotation: RotatorQuantization::ShortComponents,
+            rotation: RotatorQuantization::ByteComponents,
             location: VectorQuantization::RoundWholeNumber,
         },
     },
@@ -2175,7 +2175,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
         group_path: "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS.GameObject_Smonk_NewSmoke_PDS_C",
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
-            rotation: RotatorQuantization::ShortComponents,
+            rotation: RotatorQuantization::ByteComponents,
             location: VectorQuantization::RoundWholeNumber,
         },
     },
@@ -2193,7 +2193,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
         group_path: "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
-            rotation: RotatorQuantization::ShortComponents,
+            rotation: RotatorQuantization::ByteComponents,
             location: VectorQuantization::RoundWholeNumber,
         },
     },
@@ -2774,7 +2774,7 @@ pub static OVERLAY_TABLE: [OverlayEntry; 1331] = [
         group_path: "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
         field_name: "ReplicatedMovement",
         field_type: FieldType::RepMovement {
-            rotation: RotatorQuantization::ShortComponents,
+            rotation: RotatorQuantization::ByteComponents,
             location: VectorQuantization::RoundWholeNumber,
         },
     },

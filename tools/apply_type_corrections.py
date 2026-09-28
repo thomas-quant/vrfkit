@@ -52,6 +52,22 @@ SEEKER_NADE_GROUP = (
     "Pawn_Aggrobot_SeekerNade_C"
 )
 
+#: The five AGameObject-derived classes whose `ReplicatedMovement` the C#
+#: descriptors declare with a bare `.ReplicatedMovement()` -- the builder's
+#: ShortComponents default -- and which the pass in `main` reads with byte
+#: rotator components instead. Exact group paths, compared with `==`.
+GAME_OBJECT_BYTE_ROTATOR_GROUPS = (
+    "/Game/Characters/Mage/S0/Ability_E/GameObject_Mage_E_WorldSmoke."
+    "GameObject_Mage_E_WorldSmoke_C",
+    "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke."
+    "GameObject_Smonk_NewSmoke_C",
+    "/Game/Characters/Smonk/S0/Ability_E/MapTargetSmoke/GameObject_Smonk_NewSmoke_PDS."
+    "GameObject_Smonk_NewSmoke_PDS_C",
+    "/Game/Characters/Smonk/S0/Ability_Q/DebuffKnife/DecayLauncher/"
+    "GameObject_Smonk_Q_DecayExplosion.GameObject_Smonk_Q_DecayExplosion_C",
+    "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
+)
+
 #: (group_path substring, field_name, required FieldType -- IN FULL).
 #: One entry per correction the passes below make. Checked against the file
 #: after writing; a miss is a hard failure.
@@ -86,6 +102,10 @@ EXPECTED += [
     (SEEKER_NADE_GROUP, "ReplicatedMovement",
      "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
      "location: VectorQuantization::RoundTwoDecimals }"),
+    *[(_group, "ReplicatedMovement",
+       "FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
+       "location: VectorQuantization::RoundWholeNumber }")
+      for _group in GAME_OBJECT_BYTE_ROTATOR_GROUPS],
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::FName"),
     ("MulticastNotifyDamage_Base", "EquippableUsed", "FieldType::ObjectNetGuid"),
     ("MulticastNotifyDamage_Point", "EquippableUsed", "FieldType::ObjectNetGuid"),
@@ -880,8 +900,8 @@ ADDITIONS = [
     # HawkFlash's `ReplicatedMovement` and `Banking`. third_party/vrp has no
     # HawkFlash class at all, so these are ADDITIONS keyed on the exact group;
     # DATA.md's "no name rule for ReplicatedMovement" stands, and checksum
-    # 2749104612 stays dropped (this is a twentieth ByteComponents donor
-    # against six ShortComponents ones). Measured 2026-09-28 over the 1,018
+    # 2749104612 stays dropped (byte donors still sit beside Gekko's short,
+    # two-decimal Wingman). Measured 2026-09-28 over the 1,018
     # replays audited at 259ed10: the group occurs on 15 builds (11.06-13.06),
     # every row in the main stream -- no class's ReplicatedMovement reaches a
     # checkpoint table, so that side is untested by construction.
@@ -1117,6 +1137,76 @@ def retype_exact(content: str, group: str, field: str, old: str, new: str,
         raise SystemExit(
             f"{TABLE_RS}: {group}/{field} {old} -> {new} changed {changed} "
             f"entries, expected {expected} (or 0 on a corrected table)."
+        )
+    return "    OverlayEntry {".join(blocks), changed
+
+
+def retype_game_object_rotators(content: str) -> tuple[str, int]:
+    """ShortComponents -> ByteComponents on `GAME_OBJECT_BYTE_ROTATOR_GROUPS`.
+
+    The C# descriptors for these five (CoveAbilityDescriptor, DarkCover-
+    AbilityDescriptor and the three Smonk descriptors) call a bare
+    `.ReplicatedMovement()`, which is the builder's ShortComponents default;
+    none of them states a width. 13-J (docs/archive/PROJECT_STATUS.md) took
+    that default for the three Smonk classes because the wire could not
+    choose, and 16-D found Omen's zone in the same state.
+
+    The wire still cannot choose: none of the five ever replicates a rotation,
+    so both widths read the same 3 flag bits and the same values. What decides
+    it is the game's own class data (13.06 cooked classes plus the
+    executable's reflection, read-only; game-analysis cdo-defaults track):
+
+    * all five derive natively from AGameObject > AActor, the chain of
+      GameObject_Terra_C_TimeSlowGrenade_Explosion_C, which this table already
+      reads with byte components on wire evidence;
+    * no Blueprint class default in any of the five chains writes
+      ReplicatedMovement -- across the whole 13.06 build exactly one actor
+      class does (PlaceholderPlayerController_C) -- so the quantization is
+      the native class's;
+    * grouped by native class, every class whose rotation IS observable
+      decodes exactly at one width only: AShooterCharacter 7 of 7 Short,
+      AProjectile 38 of 38 Byte, AGameObject_NoMesh 2 of 2 Byte, AGameObject
+      4 of 4 Byte.
+
+    That is a prior, not a measurement of these five, and it is recorded as
+    one. The measurement is the bound, the 13-J one: all 903 replays whose
+    main stream declares ReplicatedMovement on one of these groups (the
+    2026-09-28 declaration survey of the 1,018-replay corpus; 21 builds,
+    11.06-13.06) were exported with checkpoints by the build before and after
+    this pass, and every Parquet file and every manifest.json -- overlay
+    counters included -- is byte-identical. If one of them is ever seen
+    replicating a rotation, exact consumption decides, the 13-J way, and this
+    prior is what it overrules.
+
+    Only the rotator token of the exact `(group, "ReplicatedMovement")` entry
+    whose full type is still the short, whole-unit literal is rewritten, so
+    the pass works on the one-line and the rustfmt'd layouts alike and does
+    nothing on a corrected table. Any other count is a hard failure.
+    """
+    short_whole = normalize_type(
+        "FieldType::RepMovement { rotation: RotatorQuantization::ShortComponents, "
+        "location: VectorQuantization::RoundWholeNumber }"
+    )
+    blocks = content.split("    OverlayEntry {")
+    changed = 0
+    for i, block in enumerate(blocks[1:], 1):
+        g, f = GROUP_RE.search(block), FIELD_RE.search(block)
+        if not (g and f and g.group(1) in GAME_OBJECT_BYTE_ROTATOR_GROUPS
+                and f.group(1) == "ReplicatedMovement"):
+            continue
+        if _field_type_of(block) != short_whole:
+            continue
+        blocks[i] = block.replace(
+            "RotatorQuantization::ShortComponents",
+            "RotatorQuantization::ByteComponents",
+            1,
+        )
+        changed += 1
+    if changed not in (0, len(GAME_OBJECT_BYTE_ROTATOR_GROUPS)):
+        raise SystemExit(
+            f"{TABLE_RS}: the AGameObject rotator pass changed {changed} entries, "
+            f"expected {len(GAME_OBJECT_BYTE_ROTATOR_GROUPS)} (or 0 on a "
+            f"corrected table)."
         )
     return "    OverlayEntry {".join(blocks), changed
 
@@ -1516,6 +1606,11 @@ def main():
             )
             count += 1
     content = "    OverlayEntry {".join(blocks)
+
+    # Fix: byte rotator components for five AGameObject classes. The evidence
+    # is on `retype_game_object_rotators`.
+    content, n = retype_game_object_rotators(content)
+    count += n
 
     # REMOVED: FName -> Raw for DamagedBone in MulticastNotifyDamage_Point.
     #
