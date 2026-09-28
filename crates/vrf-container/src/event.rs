@@ -43,7 +43,7 @@
 use vrf_bitio::BitReader;
 
 use crate::error::ContainerError;
-use crate::io::{read_fstring, read_i32, read_u32};
+use crate::io::{declared_body, read_fstring, read_i32, read_u32};
 use crate::limits::MAX_FSTRING_BYTES;
 
 /// A parsed Event chunk: the six header fields plus its raw payload.
@@ -294,11 +294,9 @@ pub fn parse_event_payload(payload: &[u8], word_count: usize) -> Option<EventPay
 /// raw payload and report the mismatch.
 #[must_use]
 pub fn parse_known_event_payload(group: &str, payload: &[u8]) -> Option<EventPayload> {
-    let word_count = known_event_word_count(group)?;
-    let expected_name = known_event_payload_name(group)?;
-    let expected_tag = known_event_payload_tag(group)?;
-    let parsed = parse_event_payload(payload, word_count)?;
-    (parsed.name == expected_name && parsed.tag == expected_tag).then_some(parsed)
+    let known = known_event_group(group)?;
+    let parsed = parse_event_payload(payload, known.word_count)?;
+    (parsed.name == known.payload_name && parsed.tag == known.payload_tag).then_some(parsed)
 }
 
 /// Parse an Event chunk payload.
@@ -326,22 +324,8 @@ pub fn parse_event_chunk(payload: &[u8]) -> Result<EventChunk<'_>, ContainerErro
             size: size_in_bytes,
         });
     }
-    let size = size_in_bytes as usize;
-
-    // Every read above is byte-granular, so the reader sits on a byte boundary.
-    let header_end = (reader.position() / 8) as usize;
-    // Only the shortfall test: `header_end > payload.len()` cannot be true.
-    // Every read above returned Ok, and BitReader::need refuses to advance
-    // past the buffer before any successful read, so position()/8 is always
-    // within payload. The disjunct that used to be here read as a second
-    // guard and could not fire.
-    if payload.len() - header_end < size {
-        return Err(ContainerError::Truncated {
-            context: "event payload",
-            needed: size,
-            available: payload.len().saturating_sub(header_end),
-        });
-    }
+    let (body, trailing_bytes) =
+        declared_body(payload, &reader, size_in_bytes as usize, "event payload")?;
 
     Ok(EventChunk {
         id,
@@ -350,8 +334,8 @@ pub fn parse_event_chunk(payload: &[u8]) -> Result<EventChunk<'_>, ContainerErro
         time1,
         time2,
         size_in_bytes,
-        payload: &payload[header_end..header_end + size],
-        trailing_bytes: payload.len() - header_end - size,
+        payload: body,
+        trailing_bytes,
     })
 }
 

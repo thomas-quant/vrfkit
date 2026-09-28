@@ -69,6 +69,29 @@ pub(crate) fn read_guid(reader: &mut BitReader<'_>) -> Result<[u32; 4], Containe
     ])
 }
 
+/// The `size`-byte body after the header `reader` has read from `payload`,
+/// and the count of bytes after it that the layout does not account for.
+#[cfg(any(feature = "event", feature = "checkpoint"))]
+pub(crate) fn declared_body<'a>(
+    payload: &'a [u8],
+    reader: &BitReader<'_>,
+    size: usize,
+    context: &'static str,
+) -> Result<(&'a [u8], usize), ContainerError> {
+    // Byte-granular reads that all returned Ok leave the reader on a byte
+    // boundary inside `payload`: BitReader::need never advances past it.
+    let header_end = (reader.position() / 8) as usize;
+    let available = payload.len() - header_end;
+    if available < size {
+        return Err(ContainerError::Truncated {
+            context,
+            needed: size,
+            available,
+        });
+    }
+    Ok((&payload[header_end..header_end + size], available - size))
+}
+
 /// `max_bytes` is a parameter rather than [`crate::limits::MAX_FSTRING_BYTES`]
 /// because `info` reads one string under a much tighter bound
 /// (`MAX_FRIENDLY_NAME_BYTES`); the other three pass the general limit.

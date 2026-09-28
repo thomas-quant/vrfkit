@@ -46,7 +46,7 @@
 use vrf_bitio::BitReader;
 
 use crate::error::ContainerError;
-use crate::io::{read_fstring, read_i32, read_u32};
+use crate::io::{declared_body, read_fstring, read_i32, read_u32};
 use crate::limits::MAX_FSTRING_BYTES;
 
 /// A parsed Checkpoint chunk header plus its still-compressed archive.
@@ -102,22 +102,12 @@ pub fn parse_checkpoint_chunk(payload: &[u8]) -> Result<CheckpointChunk<'_>, Con
             size: size_in_bytes,
         });
     }
-    let size = size_in_bytes as usize;
-
-    // Every read above is byte-granular, so the reader sits on a byte boundary.
-    let header_end = (reader.position() / 8) as usize;
-    // Only the shortfall test: `header_end > payload.len()` cannot be true.
-    // Every read above returned Ok, and BitReader::need refuses to advance
-    // past the buffer before any successful read, so position()/8 is always
-    // within payload. The disjunct that used to be here read as a second
-    // guard and could not fire.
-    if payload.len() - header_end < size {
-        return Err(ContainerError::Truncated {
-            context: "checkpoint archive",
-            needed: size,
-            available: payload.len().saturating_sub(header_end),
-        });
-    }
+    let (archive, trailing_bytes) = declared_body(
+        payload,
+        &reader,
+        size_in_bytes as usize,
+        "checkpoint archive",
+    )?;
 
     Ok(CheckpointChunk {
         id,
@@ -126,8 +116,8 @@ pub fn parse_checkpoint_chunk(payload: &[u8]) -> Result<CheckpointChunk<'_>, Con
         time1,
         time2,
         size_in_bytes,
-        archive: &payload[header_end..header_end + size],
-        trailing_bytes: payload.len() - header_end - size,
+        archive,
+        trailing_bytes,
     })
 }
 
