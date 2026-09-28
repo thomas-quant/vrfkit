@@ -152,7 +152,7 @@ const ENVELOPE_TRAILER_BITS: u32 = 24;
 /// "Measured on real replays"): byte-wrapped, inner movementBitCount 0, a
 /// section ending in a `000` terminator plus non-zero bits, then a trailer.
 /// Counted independently with temporary counters over `vrfkit validate` on
-/// 02d4d478 (13.01), 02eef9e2 (13.06) and one 11.06 replay: all 6,167,472
+/// 02d4d478 (13.01), 02eef9e2 (13.06) and 11.06 `sample-1`: all 6,167,472
 /// streams, with 11 to 26 bits after the last move (`000`, then non-zero)
 /// and 24 after the envelope.
 fn build_component_data_stream(moves: &[BitWriter]) -> BitWriter {
