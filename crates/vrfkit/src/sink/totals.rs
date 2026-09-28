@@ -205,19 +205,21 @@ mod tests {
     /// reported a future tail under the wrong window kind.
     ///
     /// So every counter gets its own value from `next()` through a literal
-    /// with no `..`, two packets are absorbed, and the totals are read back
-    /// through a destructure with no `..` and each value checked by name. A
-    /// counter added to `ExportStats`, `SinkTotals`, `OverlayStats` or
-    /// `ArrayDecodeStats` does not compile until it is given a value and a
-    /// binding here, and a binding left unchecked is an unused variable. It
-    /// sits next to `absorb` rather than in the `export`-gated driver, so the
-    /// core-only build runs it too.
+    /// with no `..`, three packets are absorbed, and the totals are read back
+    /// through a destructure with no `..` and each value checked by name. The
+    /// values start at 2 and there are three packets so that a counter
+    /// assigned, doubled or bumped by one per packet instead of summed cannot
+    /// land on the right total. A counter added to `ExportStats`,
+    /// `SinkTotals`, `OverlayStats` or `ArrayDecodeStats` does not compile
+    /// until it is given a value and a binding here, and a binding left
+    /// unchecked is an unused variable. It sits next to `absorb` rather than
+    /// in the `export`-gated driver, so the core-only build runs it too.
     #[test]
     fn absorb_sums_every_counter_into_its_own_field() {
         let last = std::cell::Cell::new(0u64);
         let next = || {
             last.set(last.get() + 1);
-            last.get()
+            last.get() + 1
         };
         let mut packet_report = OverlayErrorReport::default();
         packet_report.record(
@@ -282,6 +284,7 @@ mod tests {
         let mut later = sent.clone();
         later.struct_blob_first_error = Some("later blob".to_owned());
         later.movement_first_error = Some("later movement".to_owned());
+        totals.absorb(&mut later.clone(), &mut report);
         totals.absorb(&mut later, &mut report);
 
         let SinkTotals {
@@ -335,188 +338,60 @@ mod tests {
             rep_layout_cnc_tails_preserved,
         } = totals;
         let (overlay, array) = (&sent.overlay, &sent.array);
-        let landed = [
-            ("fields_emitted", fields_emitted, sent.fields_emitted),
-            ("rpcs_emitted", rpcs_emitted, sent.rpcs_emitted),
-            ("actor_opens", actor_opens, sent.actor_opens),
-            ("actor_closes", actor_closes, sent.actor_closes),
-            ("content_blocks", content_blocks, sent.content_blocks),
-            ("overlay.decoded_ok", decoded_ok, overlay.decoded_ok),
-            ("overlay.decoded_err", decoded_err, overlay.decoded_err),
-            ("overlay.raw_or_skip", raw_or_skip, overlay.raw_or_skip),
-            ("overlay.not_in_table", not_in_table, overlay.not_in_table),
-            (
-                "overlay.no_field_name",
-                no_field_name,
-                overlay.no_field_name,
-            ),
-            (
-                "overlay.handle_conflicts_refused",
-                handle_conflicts_refused,
-                overlay.handle_conflicts_refused,
-            ),
-            (
-                "effect_blobs_decoded",
-                effect_blobs_decoded,
-                sent.effect_blobs_decoded,
-            ),
-            (
-                "struct_blobs_decoded",
-                struct_blobs_decoded,
-                sent.struct_blobs_decoded,
-            ),
-            (
-                "struct_blobs_failed",
-                struct_blobs_failed,
-                sent.struct_blobs_failed,
-            ),
-            (
-                "multi_contents_items_emitted",
-                multi_contents_items_emitted,
-                sent.multi_contents_items_emitted,
-            ),
-            (
-                "movement_rpc_errors",
-                movement_rpc_errors,
-                sent.movement_rpc_errors,
-            ),
-            (
-                "movement_sized_section_tails",
-                movement_sized_section_tails,
-                sent.movement_sized_section_tails,
-            ),
-            (
-                "movement_sized_section_tail_bits",
-                movement_sized_section_tail_bits,
-                sent.movement_sized_section_tail_bits,
-            ),
-            (
-                "movement_open_section_tails",
-                movement_open_section_tails,
-                sent.movement_open_section_tails,
-            ),
-            (
-                "movement_open_section_tail_bits",
-                movement_open_section_tail_bits,
-                sent.movement_open_section_tail_bits,
-            ),
-            (
-                "array.elements_decoded",
-                elements_decoded,
-                array.elements_decoded,
-            ),
-            (
-                "array.fields_emitted",
-                array_fields_emitted,
-                array.fields_emitted,
-            ),
-            ("array.truncations", truncations, array.truncations),
-            ("array.errors", errors, array.errors),
-            (
-                "array.unconsumed_nested_bits",
-                unconsumed_nested_bits,
-                array.unconsumed_nested_bits,
-            ),
-            (
-                "array.unconsumed_root_bits",
-                unconsumed_root_bits,
-                array.unconsumed_root_bits,
-            ),
-            (
-                "array.implicit_terminations",
-                implicit_terminations,
-                array.implicit_terminations,
-            ),
-            (
-                "tracked_rewards_opaque_empty_variants",
-                tracked_rewards_opaque_empty_variants,
-                sent.tracked_rewards_opaque_empty_variants,
-            ),
-            (
-                "array_leaf_decode_errors",
-                array_leaf_decode_errors,
-                sent.array_leaf_decode_errors,
-            ),
-            (
-                "targeting_world_locations_decoded",
-                targeting_world_locations_decoded,
-                sent.targeting_world_locations_decoded,
-            ),
-            ("truncated_rpcs", truncated_rpcs, sent.truncated_rpcs),
-            (
-                "rpc_suffix_bits_dropped",
-                rpc_suffix_bits_dropped,
-                sent.rpc_suffix_bits_dropped,
-            ),
-            ("cnc_rpcs_emitted", cnc_rpcs_emitted, sent.cnc_rpcs_emitted),
-            (
-                "cnc_bruteforce_payloads_attempted",
-                cnc_bruteforce_payloads_attempted,
-                sent.cnc_bruteforce_payloads_attempted,
-            ),
-            (
-                "cnc_bruteforce_payloads_unwalked",
-                cnc_bruteforce_payloads_unwalked,
-                sent.cnc_bruteforce_payloads_unwalked,
-            ),
-            (
-                "rep_layout_cnc_tails_decoded",
-                rep_layout_cnc_tails_decoded,
-                sent.rep_layout_cnc_tails_decoded,
-            ),
-            (
-                "rep_layout_cnc_tails_preserved",
-                rep_layout_cnc_tails_preserved,
-                sent.rep_layout_cnc_tails_preserved,
-            ),
+        // (name, total, per-packet value) for every counter.
+        macro_rules! landed {
+            ($($total:ident = $sent:expr),+ $(,)?) => {
+                [$((stringify!($sent), $total, $sent)),+]
+            };
+        }
+        let landed = landed![
+            fields_emitted = sent.fields_emitted,
+            rpcs_emitted = sent.rpcs_emitted,
+            actor_opens = sent.actor_opens,
+            actor_closes = sent.actor_closes,
+            content_blocks = sent.content_blocks,
+            decoded_ok = overlay.decoded_ok,
+            decoded_err = overlay.decoded_err,
+            raw_or_skip = overlay.raw_or_skip,
+            not_in_table = overlay.not_in_table,
+            no_field_name = overlay.no_field_name,
+            handle_conflicts_refused = overlay.handle_conflicts_refused,
+            effect_blobs_decoded = sent.effect_blobs_decoded,
+            struct_blobs_decoded = sent.struct_blobs_decoded,
+            struct_blobs_failed = sent.struct_blobs_failed,
+            multi_contents_items_emitted = sent.multi_contents_items_emitted,
+            movement_rpc_errors = sent.movement_rpc_errors,
+            movement_sized_section_tails = sent.movement_sized_section_tails,
+            movement_sized_section_tail_bits = sent.movement_sized_section_tail_bits,
+            movement_open_section_tails = sent.movement_open_section_tails,
+            movement_open_section_tail_bits = sent.movement_open_section_tail_bits,
+            elements_decoded = array.elements_decoded,
+            array_fields_emitted = array.fields_emitted,
+            truncations = array.truncations,
+            errors = array.errors,
+            unconsumed_nested_bits = array.unconsumed_nested_bits,
+            unconsumed_root_bits = array.unconsumed_root_bits,
+            implicit_terminations = array.implicit_terminations,
+            tracked_rewards_opaque_empty_variants = sent.tracked_rewards_opaque_empty_variants,
+            array_leaf_decode_errors = sent.array_leaf_decode_errors,
+            targeting_world_locations_decoded = sent.targeting_world_locations_decoded,
+            truncated_rpcs = sent.truncated_rpcs,
+            rpc_suffix_bits_dropped = sent.rpc_suffix_bits_dropped,
+            cnc_rpcs_emitted = sent.cnc_rpcs_emitted,
+            cnc_bruteforce_payloads_attempted = sent.cnc_bruteforce_payloads_attempted,
+            cnc_bruteforce_payloads_unwalked = sent.cnc_bruteforce_payloads_unwalked,
+            rep_layout_cnc_tails_decoded = sent.rep_layout_cnc_tails_decoded,
+            rep_layout_cnc_tails_preserved = sent.rep_layout_cnc_tails_preserved,
         ];
         // Every counter was given a different value, so a counter summed into
         // another's field shows up here as two wrong sums.
         for (name, total, per_packet) in landed {
-            assert_eq!(total, 2 * per_packet, "{name}");
+            assert_eq!(total, 3 * per_packet, "{name}");
         }
         assert_eq!(landed.len() as u64, last.get(), "one check per counter");
         assert_eq!(struct_blob_first_error.as_deref(), Some("first blob"));
         assert_eq!(movement_first_error.as_deref(), Some("first movement"));
         // One recorded failure per packet, folded into the shared report.
-        assert_eq!(report.total_errors(), 2);
-    }
-
-    /// `fields_emitted`/`rpcs_emitted`/`actor_opens`/`actor_closes`/
-    /// `content_blocks` must survive `absorb`, across more than one packet.
-    /// Before this test (and the fields it checks) existed, these five
-    /// counters were incremented on every packet's `ExportStats` and read by
-    /// nothing: `absorb` folded in every other field but these, so the sink's
-    /// own tally of what it saw never reached the summary.
-    #[test]
-    fn absorb_sums_the_per_packet_event_counters_across_packets() {
-        let mut totals = SinkTotals::default();
-        let mut report = OverlayErrorReport::default();
-
-        let mut packet_one = ExportStats {
-            fields_emitted: 3,
-            rpcs_emitted: 1,
-            actor_opens: 2,
-            actor_closes: 1,
-            content_blocks: 4,
-            ..ExportStats::default()
-        };
-        totals.absorb(&mut packet_one, &mut report);
-
-        let mut packet_two = ExportStats {
-            fields_emitted: 5,
-            rpcs_emitted: 2,
-            actor_opens: 0,
-            actor_closes: 3,
-            content_blocks: 6,
-            ..ExportStats::default()
-        };
-        totals.absorb(&mut packet_two, &mut report);
-
-        assert_eq!(totals.fields_emitted, 8);
-        assert_eq!(totals.rpcs_emitted, 3);
-        assert_eq!(totals.actor_opens, 2);
-        assert_eq!(totals.actor_closes, 4);
-        assert_eq!(totals.content_blocks, 10);
+        assert_eq!(report.total_errors(), 3);
     }
 }
