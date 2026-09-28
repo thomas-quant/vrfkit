@@ -2,11 +2,15 @@ import base64
 import contextlib
 import io
 import json
+import math
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import numpy
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -243,6 +247,240 @@ class MovementTruncationTests(unittest.TestCase):
             self.assertEqual(
                 (out / "movement.ndjson").read_text(encoding="utf-8"), ""
             )
+
+
+#: float32 values where a vectorised shortcut and the per-value encoder can
+#: disagree. Each is compared with the per-value rule the bulk path replaced
+#: -- `_JSON.encode(_f32_shortest(v))` for the shortened columns and
+#: `_JSON.encode(v)` for yaw/pitch -- never with a literal, so the test pins
+#: the contract and not today's spelling of it.
+TEXT_RULE_EDGES = (
+    float("inf"), float("-inf"), float("nan"),
+    # >= 2**24 every float32 is an integer, but not every one prints as its
+    # exact integer: 123456792 round-trips as 123456790.
+    123456792.0, 1e16, 1e20,
+    3.4028234663852886e38, -3.4028234663852886e38,        # +/- FLT_MAX
+    16777216.0, 16777215.0, -16777215.0, 33554436.0,
+    8388608.0, 12345670.0,
+    # numpy writes non-integral values from 1e6 up in scientific notation;
+    # the rule writes them positional. 999999.94 is the last one both agree on.
+    8388607.5, 1234567.5, -1234567.5, 1000000.0625, 999999.94,
+    # float32(1e-4) is 9.99999975e-05: numpy judges the binary value and
+    # writes '1e-04', repr judges the decimal and writes '0.0001'.
+    1e-4, -1e-4, 1.0000000474974513e-04, 9.9e-05,
+    1e-05, 1e-07, 1e-45, 1.1754943508222875e-38,          # exponent form,
+    #                                                       subnormal, min normal
+    2382.2, 349.99, -349.99, 253.289794921875, 0.1, 1.5,
+    0.0, -0.0,
+)
+
+
+def column_text(values, *, shorten):
+    """Per-row text `_json_scalar_column` produces for `values` as float32:
+    its distinct texts fanned back out through its inverse, as the writer
+    does."""
+    arr = numpy.array(values, dtype=numpy.float32)
+    texts, inverse = bundle._json_scalar_column(arr, shorten=shorten)
+    return texts.take(inverse).to_pylist()
+
+
+def per_value_text(values, *, shorten):
+    """The oracle: one encoder call per row, the rule before vectorisation."""
+    encode = bundle._JSON.encode
+    widened = [float(v) for v in numpy.array(values, dtype=numpy.float32)]
+    if shorten:
+        return [encode(bundle._f32_shortest(v)) for v in widened]
+    return [encode(v) for v in widened]
+
+
+class MovementTextRuleTests(unittest.TestCase):
+    """Movement text is built once per DISTINCT value and fanned out.
+
+    That is only sound if the text of a distinct value is exactly what the
+    per-value encoder wrote for it. The bulk shortcut (numpy's Dragon4 text
+    plus an int64 fix-up for integral values) was applied to every value and
+    is exact only on part of the float32 range: +/-inf went through the int64
+    cast and came out as -9223372036854775808, NaN printed as the invalid-JSON
+    `nan`, integral values above 2**24 printed their exact integer instead of
+    the shortest round-trip one, and non-integral values outside
+    [1e-4, 1e6) came out in numpy's scientific notation -- with, at most, a
+    numpy RuntimeWarning as the only signal.
+    """
+
+    def test_shortened_columns_match_the_per_value_encoder(self):
+        self.assertEqual(
+            column_text(TEXT_RULE_EDGES, shorten=True),
+            per_value_text(TEXT_RULE_EDGES, shorten=True),
+        )
+
+    def test_unshortened_columns_match_the_per_value_encoder(self):
+        self.assertEqual(
+            column_text(TEXT_RULE_EDGES, shorten=False),
+            per_value_text(TEXT_RULE_EDGES, shorten=False),
+        )
+
+    def test_non_finite_values_are_spelled_by_the_encoder(self):
+        """Spelled out too, so a failure names the three values that broke."""
+        for shorten in (True, False):
+            with self.subTest(shorten=shorten):
+                self.assertEqual(
+                    column_text([float("inf"), float("-inf"), float("nan")],
+                                shorten=shorten),
+                    ["Infinity", "-Infinity", "NaN"],
+                )
+
+    def test_each_zero_keeps_its_own_sign(self):
+        """-0.0 == 0.0, so a value-level unique merges them into one entry and
+        prints whichever sign sorted first for every zero in the column. Both
+        orders, because which sign wins depends on the sort's tie-break.
+        """
+        for values in ([0.0, -0.0, 5.0, -0.0], [-0.0, 0.0, 5.0, 0.0]):
+            with self.subTest(values=values):
+                self.assertEqual(column_text(values, shorten=False),
+                                 per_value_text(values, shorten=False))
+                self.assertEqual(column_text(values, shorten=True),
+                                 per_value_text(values, shorten=True))
+
+
+#: The movement line as the per-row writer spelled it before the lines were
+#: assembled in Arrow -- a COPY, deliberately not `_MOVEMENT_LINE`, so that a
+#: change to the constant or to how the writer derives its fragments turns
+#: the oracle test red instead of moving both sides at once.
+ORACLE_MOVEMENT_LINE = (
+    '{"time_ms":%s,"shooter_character_net_guid":%s,'
+    '"position":{"x":%s,"y":%s,"z":%s},'
+    '"velocity":{"x":%s,"y":%s,"z":%s},'
+    '"yaw":%s,"pitch":%s}\n'
+)
+
+
+def oracle_movement_bytes(rows: list[dict]) -> bytes:
+    """movement.ndjson as the per-row writer produced it, value by value.
+
+    Keeps the last row per (packet_id, character) in row order -- the
+    collapse rule -- encodes every value with its own encoder call, and ends
+    lines the way the old text-mode file did: os.linesep.
+    """
+    last = {}
+    for i, row in enumerate(rows):
+        last[(row.get("packet_id", 0), row.get("char", 0))] = i
+    encode = bundle._JSON.encode
+
+    def f32(row, name):
+        return float(numpy.float32(row.get(name, 0.0)))
+
+    lines = []
+    for i in sorted(last.values()):
+        row = rows[i]
+        lines.append(ORACLE_MOVEMENT_LINE % (
+            row.get("time_ms", 0), row.get("char", 0),
+            *(encode(bundle._f32_shortest(f32(row, n)))
+              for n in ("pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z")),
+            encode(f32(row, "yaw")), encode(f32(row, "pitch")),
+        ))
+    return "".join(lines).replace("\n", os.linesep).encode("ascii")
+
+
+def oracle_rows() -> list[dict]:
+    """Integral, -0.0, exponent-form, large, non-finite and ordinary values,
+    sub-moves to collapse, two characters, and large ids -- enough rows to
+    span several write blocks at the block sizes the test patches in."""
+    values = [0.0, -0.0, 1.0, -3.0, 1e-05, 1e-07, 2382.2, 349.99, -349.99,
+              0.1, 1234567.5, 123456792.0, 16777215.0, 1e-4, 51292.77,
+              float("inf"), float("-inf"), float("nan"), 253.289794921875]
+    rows = []
+    for i in range(61):
+        v = values[i % len(values)]
+        w = values[(i * 7 + 3) % len(values)]
+        rows.append({
+            "time_ms": 1000 + i // 3, "packet_id": 1 + i // 3,
+            "char": (40, 4294967295)[i % 2],
+            "pos_x": v, "pos_y": w, "pos_z": -v,
+            "vel_x": w, "vel_y": v * 0.5, "vel_z": 0.0 if i % 5 else -0.0,
+            "yaw": (0.0, -0.0, 359.9945068359375, 253.289794921875)[i % 4],
+            "pitch": (-0.0, 0.0, 1e-05, 90.5)[i % 4],
+        })
+    return rows
+
+
+class MovementLineAssemblyTests(unittest.TestCase):
+    """movement.ndjson is the per-row writer's bytes, block by block.
+
+    The lines are assembled in Arrow from per-distinct texts; the oracle
+    builds them one row and one encoder call at a time.
+    """
+
+    def write(self, rows: list[dict], block_rows: int) -> bytes:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_movement_parquet(root / "movement.parquet", rows)
+            out = root / "out"
+            out.mkdir()
+            with mock.patch.object(bundle, "_MOVEMENT_BLOCK_ROWS", block_rows):
+                bundle._write_movement(root / "movement.parquet", out, False)
+            return (out / "movement.ndjson").read_bytes()
+
+    def test_bytes_equal_the_per_row_writer(self):
+        rows = oracle_rows()
+        expected = oracle_movement_bytes(rows)
+        # Guards on the oracle itself: sub-moves were collapsed, and the kept
+        # lines span several of the 7-row blocks below with a partial last one.
+        lines = expected.count(os.linesep.encode())
+        self.assertLess(lines, len(rows))
+        self.assertGreater(lines, 14)
+        self.assertNotEqual(lines % 7, 0)
+        # One block, full blocks plus a partial last one, one row per block.
+        for block_rows in (1 << 18, 7, 1):
+            with self.subTest(block_rows=block_rows):
+                self.assertEqual(self.write(rows, block_rows), expected)
+
+    def test_lines_end_the_way_the_text_mode_file_ended_them(self):
+        data = self.write(oracle_rows(), 7)
+        self.assertEqual(data.count(os.linesep.encode()), data.count(b"\n"))
+        self.assertTrue(data.endswith(os.linesep.encode()))
+
+    def test_an_empty_table_writes_an_empty_file(self):
+        self.assertEqual(self.write([], 7), b"")
+
+    def test_a_null_in_a_movement_column_stops_the_conversion(self):
+        """Every movement column is declared non-null. `to_numpy` would turn a
+        null uint32 into a float64 NaN, and every line would then carry a
+        float-spelled time -- plausible text, wrong type."""
+        for column in ("time_ms", "pos_x"):
+            with self.subTest(column=column):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    path = root / "movement.parquet"
+                    write_movement_parquet(path, oracle_rows()[:3])
+                    table = pq.read_table(path)
+                    index = table.schema.get_field_index(column)
+                    values = table.column(column).to_pylist()
+                    values[1] = None
+                    table = table.set_column(index, column, pa.array(
+                        values, type=table.schema.field(column).type))
+                    pq.write_table(table, path)
+                    out = root / "out"
+                    out.mkdir()
+                    with self.assertRaisesRegex(ValueError, column):
+                        bundle._write_movement(path, out, False)
+
+    def test_a_null_line_is_refused_rather_than_dropped(self):
+        """`binary_join_element_wise` emits NULL for a row with a null input,
+        and a null adds no bytes to the data buffer: the line would vanish
+        while movement_rows_written still counted it."""
+        texts = pa.array(["1", None, "3"], type=pa.string())
+        with self.assertRaises(RuntimeError):
+            bundle._join_movement_block([pa.scalar("<"), texts, pa.scalar(">")])
+        self.assertEqual(
+            bytes(bundle._join_movement_block(
+                [pa.scalar("<"), texts.fill_null("2"), pa.scalar(">")])),
+            b"<1><2><3>")
+
+    def test_only_the_arrays_own_bytes_are_written(self):
+        """A slice shares its parent's data buffer, so the buffer holds bytes
+        before and after the slice's values; only the values are the text."""
+        sliced = pa.array(["a", "bb", "ccc", "dddd"], type=pa.string()).slice(1, 2)
+        self.assertEqual(bytes(bundle._string_bytes(sliced)), b"bbccc")
 
 
 class TransactionalConversionTests(unittest.TestCase):
@@ -1127,6 +1365,233 @@ class FabricatedLocationTests(TallyTestCase):
         self.assertEqual(tally["fabricated_shot_locations"], 0)
 
 
+class RawSourcedFieldTests(TallyTestCase):
+    """A field whose consumer decodes the raw wire blob gets the blob, typed or not.
+
+    RoundInfos (valplay's `_roundinfo` bit-decodes it) and a damage RPC's
+    LifeChangeEvents (valplay's `_decode_remaining_hp`) were gated on
+    `is_raw`, which `_get_value` sets only when EVERY typed column is null --
+    though raw_bits travels beside typed values by design. Once the overlay
+    typed either one, RoundInfos vanished from the payload with no counter
+    and LifeChangeEvents became a typed value its consumer skips. The shot
+    arrays already read raw_bits directly; all three now share that path.
+    """
+
+    OEPI = "/Script/ShooterGame.OwnerExclusivePlayerInfo"
+    RI_RAW = bytes.fromhex("0102030405")
+    RI_BLOB = {
+        "BitCount": 40,
+        "Data": base64.b64encode(RI_RAW).decode("ascii"),
+        "TypeName": "TArray<FAresPlayerRoundInfo>",
+    }
+
+    def roundinfos(self, **overrides) -> dict:
+        row = {
+            "time_ms": 10, "packet_id": 1, "actor": 5, "object": 5,
+            "group_path": self.OEPI, "handle": 39, "field_name": "RoundInfos",
+            "bit_count": 40, "raw_bits": self.RI_RAW,
+        }
+        row.update(overrides)
+        return row
+
+    def roundinfos_child(self) -> dict:
+        return {
+            "time_ms": 10, "packet_id": 1, "actor": 5, "object": 5,
+            "group_path": self.OEPI, "handle": 43,
+            "field_name": "RoundInfos[0].EndOfRoundMoney",
+            "bit_count": 32, "value_i64": 900,
+        }
+
+    def property_payload(self, tmp: str) -> dict:
+        (event,) = self.events_of(tmp, "export_group_received")
+        return event["payload"]
+
+    def test_an_untyped_roundinfos_row_publishes_its_blob(self):
+        """The shape that has always worked, pinned so the fix cannot move it.
+        stream.rs writes the decoded children first and the parent row below."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(
+                tmp, [self.roundinfos_child(), self.roundinfos()])
+            payload = self.property_payload(tmp)
+        self.assertEqual(payload, {"RoundInfos": self.RI_BLOB})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_typed_roundinfos_row_still_publishes_its_raw_blob(self):
+        """The defect: a value_str beside raw_bits made the payload `{}`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [
+                self.roundinfos_child(), self.roundinfos(value_str="[]"),
+            ])
+            payload = self.property_payload(tmp)
+        self.assertEqual(payload, {"RoundInfos": self.RI_BLOB})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_roundinfos_row_without_raw_bits_is_counted(self):
+        """No raw bits, no blob: counted, and the typed value is not thrown away."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [
+                self.roundinfos(raw_bits=None, bit_count=None, value_str="[]"),
+            ])
+            payload = self.property_payload(tmp)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+        self.assertEqual(payload, {"RoundInfos": "[]"})
+
+    def test_roundinfos_children_without_their_blob_are_counted(self):
+        """The children are dropped by design -- the blob carries them -- so
+        children with no blob beside them are a loss, counted once."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [self.roundinfos_child()])
+            payload = self.property_payload(tmp)
+        self.assertEqual(payload, {})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+
+    DAMAGE = "MulticastNotifyDamage_Point"
+    LCE_RAW = bytes.fromhex("02021620772418400000ce421a400000b0c11c02010000")
+    LCE_BLOB = {
+        "BitCount": 177,
+        "Data": base64.b64encode(LCE_RAW).decode("ascii"),
+        "TypeName": "LifeChangeEvents",
+    }
+
+    def damage_rows(self, **parent) -> list[dict]:
+        """One damage invocation shaped like the corpus: every row carries the
+        function's handle, and the decoded LifeChangeEvents members precede
+        the parent row that holds the whole blob."""
+        common = {"time_ms": 20, "packet_id": 2, "actor": 7,
+                  "group_path": self.RPC_GROUP, "handle": 1}
+        lce = {**common, "field_name": f"{self.DAMAGE}.LifeChangeEvents",
+               "bit_count": 177, "raw_bits": self.LCE_RAW}
+        lce.update(parent)
+        return [
+            {**common, "field_name": f"{self.DAMAGE}.DamageTaken",
+             "bit_count": 32, "value_f64": 30.0},
+            {**common,
+             "field_name": f"{self.DAMAGE}.LifeChangeEvents[0].LifeResult",
+             "bit_count": 32, "value_f64": 70.0, "raw_bits": b"\x00\x00\x8cB"},
+            lce,
+        ]
+
+    def damage_payload(self, tmp: str) -> dict:
+        (event,) = self.events_of(tmp, "rpc_received")
+        return event["payload"]
+
+    def test_an_untyped_life_change_blob_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows())
+            payload = self.damage_payload(tmp)
+        self.assertEqual(payload, {"DamageTaken": 30.0,
+                                   "LifeChangeEvents": self.LCE_BLOB})
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_typed_life_change_row_still_publishes_its_raw_blob(self):
+        """Typed, it fell through to the generic pass-through and shipped the
+        typed value where valplay's HP decoder reads the blob."""
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows(value_str="[{}]"))
+            payload = self.damage_payload(tmp)
+        self.assertEqual(payload["LifeChangeEvents"], self.LCE_BLOB)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 0)
+
+    def test_a_life_change_row_without_raw_bits_is_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows(
+                raw_bits=None, bit_count=None, value_str="[{}]"))
+            payload = self.damage_payload(tmp)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+        self.assertEqual(payload["LifeChangeEvents"], "[{}]")
+
+    def test_life_change_members_without_their_blob_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, self.damage_rows()[:2])
+            payload = self.damage_payload(tmp)
+        self.assertNotIn("LifeChangeEvents", payload)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 1)
+
+    def test_shot_arrays_without_raw_bits_are_counted(self):
+        """Their consumer is this file's own effect decoder; it gets nothing."""
+        rows = [{
+            "time_ms": 30, "packet_id": 3, "actor": 2, "object": 22,
+            "channel_index": 1, "group_path": ShotEffectRawSourceTests.SHOT_RPC,
+            "handle": 9,
+            "field_name": f"ReplayPlayContinuousEffectAtLocation.{name}",
+            "value_str": "[]",
+        } for name in ("FloatValues", "ObjectValues", "VectorValues")]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, rows)
+        self.assertEqual(summary["tally"]["raw_blobs_unavailable"], 3)
+
+
+class DamagedBoneTests(TallyTestCase):
+    """DamagedBone is an FName the overlay decodes; an undecoded one is null, not guessed.
+
+    The raw branch ASCII-decoded the wire bytes with errors='replace' inside a
+    bare `except`, so it could not fail -- and this rendering already shipped
+    mojibake once (apply_type_corrections.py records it for all 581 payloads
+    when the field was forced to Raw). `null` is also what valplay can take:
+    its `_bone_region` files None under 'other', where a raw blob dict would
+    raise TypeError on `bone in HEAD_BONES`, a frozenset.
+    """
+
+    FIELD = "MulticastNotifyDamage_Point.DamagedBone"
+    # An FName "Head" as it sits in the corpus (105 bits).
+    HEAD_RAW = bytes.fromhex("0a00000090cac2c8aa00000000")
+
+    def bone_payload(self, **row) -> tuple[dict, dict]:
+        base = {"time_ms": 20, "packet_id": 2, "actor": 7,
+                "group_path": self.RPC_GROUP, "handle": 1,
+                "field_name": self.FIELD, "bit_count": 105,
+                "raw_bits": self.HEAD_RAW}
+        base.update(row)
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, [base])
+            (event,) = self.events_of(tmp, "rpc_received")
+        return event["payload"], summary["tally"]
+
+    def test_a_decoded_bone_is_passed_through(self):
+        payload, tally = self.bone_payload(value_str="Head")
+        self.assertEqual(payload, {"DamagedBone": "Head"})
+        self.assertEqual(tally["damaged_bone_undecoded"], 0)
+
+    def test_an_undecoded_bone_is_null_and_counted(self):
+        payload, tally = self.bone_payload()
+        self.assertEqual(payload, {"DamagedBone": None})
+        self.assertEqual(tally["damaged_bone_undecoded"], 1)
+
+
+class RawGateHardeningTests(TallyTestCase):
+    """Two more `is_raw` gates that lost a value, uncounted, once it was typed."""
+
+    def test_a_typed_container_row_does_not_replace_its_decoded_elements(self):
+        """stream.rs emits a flattened array's element rows first and the
+        container row below. The container was skipped only when raw, so a
+        typed one landed through the direct top-level assignment -- which no
+        conflict counter sees -- and replaced the decoded list."""
+        common = {"time_ms": 10, "packet_id": 1, "actor": 5,
+                  "group_path": "/Game/Test/Holder.Holder_C"}
+        rows = [
+            {**common, "field_name": "Items[0].Count", "bit_count": 32,
+             "value_i64": 3},
+            {**common, "field_name": "Items", "bit_count": 40,
+             "raw_bits": b"\x01\x02\x03\x04\x05", "value_str": "[3]"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = self.convert_rows(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        self.assertEqual(event["payload"], {"Items": [{"Index": 0, "Count": 3}]})
+        self.assertEqual(summary["tally"]["payload_shape_conflicts"], 0)
+
+    def test_a_typed_function_row_is_carried(self):
+        """A row that IS the function carried its value only when raw."""
+        row = {"time_ms": 20, "packet_id": 2, "actor": 7,
+               "group_path": self.RPC_GROUP, "handle": 4,
+               "field_name": "MulticastSomething", "bit_count": 8,
+               "value_i64": 5}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.convert_rows(tmp, [row])
+            (event,) = self.events_of(tmp, "rpc_received")
+        self.assertEqual(event["payload"], {"MulticastSomething": 5})
+
+
 class SummaryReportingTests(TallyTestCase):
     """The summary must not say 'complete' about a conversion that lost rows."""
 
@@ -1740,6 +2205,111 @@ class AdapterAccountingTests(SeamTestCase):
         # Present and zero, not absent: a key that appears only when non-zero
         # cannot distinguish "clean" from "this counter stopped running".
         self.assertEqual(losses["unnamed_rpc_rows"], 0)
+
+    def test_the_loss_counter_set_is_pinned(self):
+        """Every counter reaches the manifest under a fixed name, zero or not.
+
+        Spelled out rather than read back from `_Tally.REASONS`: comparing the
+        manifest with the dict it was written from could not fail. A counter
+        that is renamed or dropped has to turn this red.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _, published, _ = self.build(tmp, manifest=self.full_manifest())
+        self.assertEqual(
+            sorted(published["adapter"]["losses"]),
+            sorted([
+                "unnamed_property_rows",
+                "unnamed_rpc_rows",
+                "unnamed_rpc_invocations",
+                "rpc_param_collisions",
+                "unparsable_path_segments",
+                "payload_shape_conflicts",
+                "multi_typed_rows",
+                "fabricated_shot_locations",
+                "fabricated_shot_rotations",
+                "effect_half_read_pairs",
+                "effect_array_residual_bits",
+                "missing_manifest",
+                "empty_gameplay_tag_table",
+                "events_time_ms_regressions",
+                "upstream_row_count_disagreement",
+                "unknown_actor_lifecycle_events",
+                "non_finite_movement_rows",
+                "raw_blobs_unavailable",
+                "damaged_bone_undecoded",
+            ]),
+        )
+
+
+class NonFiniteMovementTests(SeamTestCase):
+    """A non-finite movement value is written as the encoder spells it, and counted.
+
+    The decoder can produce one: vrf-movement reads raw f32/f64 components
+    with no finiteness check and stream.rs narrows f64 with a bare `as f32`.
+    `Infinity`/`NaN` is how every other float in this bundle is spelled, and
+    Python's json reads it; a strict parser (orjson) rejects the line. Before
+    this, the shortened columns wrote +/-inf as -9223372036854775808 -- valid
+    JSON, a plausible number, the wrong sign -- and NaN as `nan`, which no
+    parser accepts, with nothing but a numpy warning on stderr.
+    """
+
+    def convert(self, movement):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, published, summary = self.build(
+                tmp, movement_rows=movement,
+                manifest={"replay_version": "5.3.2"},
+            )
+            lines = (out / "movement.ndjson").read_text(
+                encoding="utf-8").splitlines()
+        return lines, published, summary
+
+    def test_non_finite_values_are_encoded_and_counted(self):
+        inf, nan = float("inf"), float("nan")
+        movement = [
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": inf},
+            {"time_ms": 2, "packet_id": 2, "char": 5, "vel_z": nan},
+            {"time_ms": 3, "packet_id": 3, "char": 5, "yaw": -inf},
+            {"time_ms": 4, "packet_id": 4, "char": 5, "pos_x": 1.5},
+        ]
+        lines, published, summary = self.convert(movement)
+        rows = [json.loads(line) for line in lines]  # stdlib: non-strict
+        self.assertEqual(len(rows), 4)
+        self.assertIn('"position":{"x":Infinity,', lines[0])
+        self.assertEqual(rows[0]["position"]["x"], inf)
+        self.assertTrue(math.isnan(rows[1]["velocity"]["z"]))
+        self.assertEqual(rows[2]["yaw"], -inf)
+        self.assertEqual(rows[3]["position"]["x"], 1.5)
+        # Rows, not values: three rows carry one non-finite value each.
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 3)
+        self.assertEqual(
+            published["adapter"]["losses"]["non_finite_movement_rows"], 3)
+        self.assertTrue(any("non_finite_movement_rows" in line
+                            for line in summary["tally"].lines()))
+
+    def test_a_row_is_counted_once_however_many_of_its_values_are_bad(self):
+        inf = float("inf")
+        movement = [{"time_ms": 1, "packet_id": 1, "char": 5,
+                     "pos_x": inf, "pos_y": -inf, "pitch": float("nan")}]
+        _, _, summary = self.convert(movement)
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 1)
+
+    def test_a_collapsed_sub_move_is_not_counted(self):
+        """Only rows the bundle writes are counted; movement.parquet keeps the rest."""
+        movement = [
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": float("inf")},
+            {"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 2.0},
+        ]
+        lines, published, summary = self.convert(movement)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 0)
+        self.assertEqual(
+            published["adapter"]["losses"]["non_finite_movement_rows"], 0)
+
+    def test_finite_movement_counts_nothing(self):
+        movement = [{"time_ms": 1, "packet_id": 1, "char": 5, "pos_x": 1e-05}]
+        _, published, summary = self.convert(movement)
+        self.assertEqual(summary["tally"]["non_finite_movement_rows"], 0)
+        self.assertIn("non_finite_movement_rows", published["adapter"]["losses"])
 
 
 class ServerTimelineEventTests(SeamTestCase):

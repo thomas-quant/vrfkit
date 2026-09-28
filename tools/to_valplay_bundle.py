@@ -50,7 +50,6 @@ import time
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from functools import lru_cache
-from itertools import islice
 from pathlib import Path
 from typing import NamedTuple
 
@@ -120,8 +119,45 @@ ALTERNATE_FIRE_MARKERS = (
 #
 # Our raw bits for RoundInfos are byte-identical to the reference's, so passing
 # them through is exact rather than approximate.
+#
+# The blob is built from raw_bits DIRECTLY, whether or not the overlay also
+# typed the row. It used to be taken only when `_get_value` reported the row
+# raw -- which it does only when every typed column is null, though raw_bits
+# travels beside a typed value by design -- so a typed RoundInfos row dropped
+# its blob and, with it, every decoded child, with no counter moving. Keyed by
+# the wire's own field name. See `_RAW_SOURCED_RPC_PARAMS` for the RPC side.
 RAW_BLOB_PREFERRED = {
     "RoundInfos": "TArray<FAresPlayerRoundInfo>",
+}
+
+# RPC parameters whose consumer decodes the raw wire blob itself, by function.
+# Built from raw_bits whenever the row has them, typed or not -- the same rule
+# as RAW_BLOB_PREFERRED -- so typing a parameter upstream can neither drop the
+# blob nor swap it for a value its consumer cannot read.
+#
+# * The shot effect arrays feed this file's own effect decoder
+#   (`_decode_effect_elements`), which needs the exact payload window.
+# * A damage RPC's LifeChangeEvents feeds valplay's `_decode_remaining_hp`
+#   (weapon_stats.py), which reads the bits of the blob and nothing else.
+# * A damage RPC's death-montage pair (DEATH_MONTAGE_BLOB_PARAMS below) is
+#   typed ObjectNetGuid in fields.parquet, but the reference bundle carries
+#   each as a labelled blob and rpc_received keeps that shape.
+#
+# valplay's resource_budget.RETAINED_RAW_BLOB_KEYS lists every blob its metrics
+# decode: these, RoundInfos, and AggregateKills/Deaths/Assists and Score. The
+# last four take the generic path here -- no branch of this file depends on
+# whether they are raw -- and valplay reads either shape of them.
+_RAW_SOURCED_RPC_PARAMS = {
+    "ReplayPlayContinuousEffectAtLocation":
+        frozenset({"FloatValues", "ObjectValues", "VectorValues"}),
+    "MulticastNotifyDamage_Point": frozenset({
+        "LifeChangeEvents",
+        "DeathMontageEffectOverride", "DeathMontageEffectOverrideContext",
+    }),
+    "MulticastNotifyDamage_Base": frozenset({
+        "LifeChangeEvents",
+        "DeathMontageEffectOverride", "DeathMontageEffectOverrideContext",
+    }),
 }
 
 
@@ -310,6 +346,16 @@ class _Tally(dict):
         "unknown_actor_lifecycle_events":
             "actors.event values this adapter has no event type for "
             "(published as actor_lifecycle_unknown)",
+        "non_finite_movement_rows":
+            "movement rows written with a non-finite value (spelled "
+            "Infinity/NaN; strict JSON parsers reject the line)",
+        "raw_blobs_unavailable":
+            "wire blobs a consumer decodes itself (RoundInfos, damage "
+            "LifeChangeEvents, shot effect arrays) that could not be built: "
+            "the row had no raw bits, or only its decoded members arrived",
+        "damaged_bone_undecoded":
+            "DamagedBone values the parser could not decode (published as "
+            "null, never guessed from the raw bytes)",
     }
 
     def __init__(self):
@@ -377,10 +423,12 @@ def _f32_shortest(value):
 #: instance is the same code path with the same output.
 _JSON = json.JSONEncoder(separators=(',', ':'), ensure_ascii=True)
 
-#: The movement record, as a format string. Key order is the order the record
-#: dict used, which is what `json.dumps` emitted; every slot is filled with
-#: text `_JSON.encode` produced for that value, so the line is byte-for-byte
-#: what encoding the dict would have written.
+#: The movement record, as a template with one `%s` per slot. Key order is the
+#: order the record dict used, which is what `json.dumps` emitted; every slot
+#: is filled with text `_JSON.encode` produced for that value, so the line is
+#: byte-for-byte what encoding the dict would have written. `_write_movement`
+#: splits it on `%s` into the literal fragments it interleaves with the slot
+#: texts, so this stays the one place the line is spelled.
 _MOVEMENT_LINE = (
     '{"time_ms":%s,"shooter_character_net_guid":%s,'
     '"position":{"x":%s,"y":%s,"z":%s},'
@@ -388,31 +436,98 @@ _MOVEMENT_LINE = (
     '"yaw":%s,"pitch":%s}\n'
 )
 
+#: Rows per block of movement.ndjson assembled in Arrow and written at once.
+#: Bounds the text held at any moment to one block's worth -- ~48 MB at the
+#: ~184 bytes a line measures on the reference exports -- instead of the
+#: whole file's. Measured on f73d4475's writer alone, 3 runs each: 2**16 and
+#: 2**18 are equal within noise (~3.4 s, ~665 MB peak, which the per-column
+#: dedup sets, not the block), 2**14 is ~4% slower, 2**20 adds 50-80 MB.
+_MOVEMENT_BLOCK_ROWS = 1 << 18
+
+
+#: Below this magnitude every integer is exactly representable in float32, so
+#: the shortest round-trip text of an integral float32 IS its integer text.
+#: From here up the two part ways: 123456792.0 round-trips as 123456790.
+_F32_EXACT_INT_LIMIT = 2 ** 24
+
+#: numpy's float32 text is positional only for 1e-4 <= |v| < 1e6, judged on
+#: the binary value; Python's float repr -- where the per-value rule ends --
+#: is positional from 1e-4 to 1e16, judged on the decimal. Outside the
+#: narrower band they disagree: 1234567.5 is '1.2345675e+06' to numpy, and
+#: float32(1e-4), which is 9.99999975e-05, is '1e-04' to numpy and '0.0001'
+#: to repr. Compared in float64, because 1e-4 is not a float32.
+_F32_POSITIONAL_BAND = (1e-4, 1e6)
+
 
 def _json_scalar_column(arr, *, shorten=False):
     """The JSON TEXT of each value, computed once per distinct value.
 
-    `arr` is a 1-D numpy array. `numpy.unique` collapses it to its distinct
-    values in C; the text is built once per distinct value and a fancy-index
-    gather fans it back out to every row, all vectorised. This is what lets
-    `_write_movement` skip building 1.8 million dicts and calling the encoder
-    1.8 million times -- there is no per-row Python loop here at all.
+    `arr` is a 1-D numpy float array. Returns ``(texts, inverse)``: `texts`
+    is a pa.string() array with the text of each distinct value, `inverse` a
+    pa.int32() array mapping every row of `arr` to its entry, so
+    `texts.take(inverse)` is the column's text row by row. `numpy.unique`
+    collapses the column in C and the caller fans the text back out with
+    Arrow's `take`, one write block at a time -- there is no per-row Python
+    loop anywhere, which is what lets `_write_movement` skip building 1.8
+    million dicts and calling the encoder 1.8 million times. The fan-out is
+    the caller's; the text rule is here, and only here.
 
-    Exact by construction rather than by resemblance. For `shorten=False` the
-    string stored is whatever `_JSON.encode` produces for that exact value --
-    including the non-obvious cases, `Infinity` and `NaN`, which an f-string
-    would spell `inf` and `nan` and quietly emit as invalid JSON.
+    The contract is per value, and it is checked, not assumed: every row's
+    text is what the per-element version this replaced wrote for that row's
+    own value -- `_JSON.encode(_f32_shortest(v))` for `shorten=True`,
+    `_JSON.encode(v)` for `shorten=False` (`MovementTextRuleTests`).
 
-    For `shorten=True` the stored string is the shortest decimal that
-    round-trips through float32 -- what `_JSON.encode(_f32_shortest(v))`
-    produced in the previous per-element version. numpy's float32->str
-    formatter is the same Dragon4 shortest-round-trip algorithm, so
-    `uniq.astype(str)` emits the identical text, and integer-valued float32s
-    are normalised to int form (no decimal point) the way `_f32_shortest`
-    returned an `int` for them. Verified byte-identical over 1,274,448 real
-    movement float32s. (`shorten=True` assumes finite float32 data -- the
-    movement invariant; inf/nan would need the encoder's `Infinity`/`NaN` and
-    are not produced by the decoder.)
+    Distinct BIT PATTERNS, not distinct values. -0.0 == 0.0, so a value-level
+    unique merged the two zeros into one entry and wrote whichever sign the
+    sort put first for every zero in the column -- a genuine `0.0` yaw could
+    come out `-0.0`. Unique over the raw bits keeps them apart, and gives
+    each NaN payload its own entry (all spelled `NaN`). No movement column on
+    the corpus holds a -0.0 (0 in 1,973,922,078 rows x 8 columns, 1,018
+    exports, 2026-09-28), so this moved no line: it closes the case instead
+    of depending on its absence.
+
+    `shorten=False` encodes each distinct value, `Infinity` and `NaN`
+    included -- an f-string would spell those `inf` and `nan`, invalid JSON.
+
+    `shorten=True` takes a vectorised shortcut only where it is proven equal
+    to the per-value rule, and the per-value encoder everywhere else:
+
+    * an integral value below `_F32_EXACT_INT_LIMIT` is written as its int,
+      the way `_f32_shortest` returns an `int` for it;
+    * a non-integral value inside `_F32_POSITIONAL_BAND` is numpy's
+      `astype(str)` -- the same Dragon4 shortest round-trip, in the same
+      positional notation.
+
+    Both are checked EXHAUSTIVELY against the per-value rule, not sampled:
+    all 556,160,338 non-integral float32 inside the band (278,080,169 of each
+    sign) and all 33,554,430 integral ones with 0 < |v| < 2**24, 0
+    mismatches (numpy 2.5.2, 2026-09-28). The same run shows the edges are
+    real: just outside the band, float32(+/-1e-4) and every non-integral
+    value in 1e6 <= |v| < 2**20 differ.
+
+    The shortcut used to be applied to every value, and outside that domain
+    it is wrong:
+
+    * +/-inf pass `v == trunc(v)` and went through the int64 cast, which
+      wrote -9223372036854775808 -- valid JSON, a plausible number, the wrong
+      sign -- with a numpy RuntimeWarning on stderr as the only signal;
+    * NaN fell through to `astype(str)` and was written `nan`, which no JSON
+      parser accepts;
+    * an integral value at or above 2**24 was written as its exact integer
+      rather than its shortest round-trip (123456792 for 123456790), and one
+      at or above 2**63 (1e20) overflowed the cast the same way inf did;
+    * a non-integral value outside the band got numpy's scientific notation
+      where the rule writes positional (see `_F32_POSITIONAL_BAND`).
+
+    Those distinct values now take the per-value encoder. The old docstring
+    excused the first two as "not produced by the decoder"; nothing enforces
+    that -- vrf-movement reads raw f32/f64 components with no finiteness
+    check and stream.rs narrows f64 with a bare `as f32`. None of the four
+    occurs on the corpus (0 non-finite and 0 with |v| >= 2**24 in the scan
+    above; 0 distinct non-integral values outside the band in any shortened
+    column of any export), so this moved no line either. How a non-finite
+    value reaches the consumer, and why it is counted, is `_write_movement`'s
+    to say.
 
     Worth doing per-distinct because these columns are quantized on the wire
     and repeat heavily. Measured on 02d4d478's 1,837,220 kept movement rows:
@@ -424,24 +539,45 @@ def _json_scalar_column(arr, *, shorten=False):
     11,023,320 -- 7.4x fewer. yaw and pitch dedup too (65,491 and 16,943
     distinct) but are NOT shortened; see `_write_movement`.
     """
-    uniq, inverse = numpy.unique(arr, return_inverse=True)
+    if arr.dtype.kind != "f" or arr.dtype.itemsize not in (4, 8):
+        # The bit-pattern view below needs a same-width unsigned type, and a
+        # silent mis-view would print plausible numbers. Refuse instead.
+        raise TypeError(f"_json_scalar_column wants float32/float64, got {arr.dtype}")
+    if arr.shape[0] > numpy.iinfo(numpy.int32).max:
+        # The int32 inverse below would wrap and point rows at wrong texts.
+        raise ValueError(f"{arr.shape[0]:,} rows is more than an int32 index can address")
+    ubits, inverse = numpy.unique(
+        arr.view(numpy.dtype(f"u{arr.dtype.itemsize}")), return_inverse=True
+    )
+    # int32 halves what the caller holds per column until the write, and the
+    # int64 original is dropped at once: peak memory is the acceptance bar
+    # for this function as much as speed is.
+    inverse = pa.array(inverse.astype(numpy.int32))
+    uniq = ubits.view(arr.dtype)
     if shorten:
-        # Bulk shortest float32 repr (Dragon4). Integer-valued entries are
-        # rewritten as int decimals to match `_f32_shortest`'s int return and
-        # the encoder's int output; an object array holds them so a wide int
-        # can never truncate against the float column's narrower `<U` width.
-        is_int = (uniq == numpy.trunc(uniq))
+        # The two shortcut domains, then the per-value encoder for the rest.
+        # An object array holds the texts so a wide int can never truncate
+        # against the float column's narrower `<U` width.
+        magnitude = numpy.abs(uniq.astype(numpy.float64))
+        finite = numpy.isfinite(uniq)
+        integral = finite & (uniq == numpy.trunc(uniq))
+        low, high = _F32_POSITIONAL_BAND
+        as_int = integral & (magnitude < _F32_EXACT_INT_LIMIT)
+        as_dragon4 = finite & ~integral & (magnitude >= low) & (magnitude < high)
         texts = numpy.empty(uniq.shape[0], dtype=object)
-        texts[:] = uniq.astype(str)
-        if is_int.any():
-            texts[is_int] = uniq[is_int].astype(numpy.int64).astype(str)
-        texts = texts.tolist()
+        if as_dragon4.any():
+            texts[as_dragon4] = uniq[as_dragon4].astype(str)
+        if as_int.any():
+            texts[as_int] = uniq[as_int].astype(numpy.int64).astype(str)
+        per_value = ~(as_int | as_dragon4)
+        if per_value.any():
+            encode = _JSON.encode
+            texts[per_value] = [encode(_f32_shortest(v))
+                                for v in uniq[per_value].tolist()]
     else:
         encode = _JSON.encode
         texts = [encode(float(v)) for v in uniq.tolist()]
-    gathered = numpy.empty(uniq.shape[0], dtype=object)
-    gathered[:] = texts
-    return gathered[inverse].tolist()
+    return pa.array(texts, type=pa.string()), inverse
 
 
 def _vec3(x, y, z) -> dict:
@@ -1449,11 +1585,33 @@ def _get_value(row_i64, row_f64, row_bool, row_str, row_raw, row_bits,
     if row_str is not None:
         return row_str, False
     if row_raw is not None:
-        # Return as {BitCount, Data, TypeName} blob format matching C# output
-        bit_count = row_bits
-        data_b64 = base64.b64encode(row_raw).decode('ascii')
-        return {"BitCount": bit_count, "Data": data_b64}, True
+        return _raw_blob(row_raw, row_bits), True
     return None, False
+
+
+def _raw_blob(row_raw, row_bits) -> dict:
+    """The {BitCount, Data} blob of one row's raw bits, as the C# output has it.
+
+    One builder for every site that publishes raw bits -- `_get_value` and the
+    raw-sourced fields -- so the key order, which is part of the bytes, has
+    one source. A caller that labels the blob adds `TypeName` after these two.
+    """
+    return {"BitCount": row_bits,
+            "Data": base64.b64encode(row_raw).decode('ascii')}
+
+
+def _count_unbuilt_blobs(blob_state, tally) -> None:
+    """Count the raw-sourced fields one event needed and did not get.
+
+    `blob_state` maps each raw-sourced field the event touched -- by its
+    container row or by a decoded member -- to whether its blob was built;
+    `None` when it touched none. Counted per event and field, not per row, so
+    a blob whose members all arrived without it counts once.
+    """
+    if blob_state:
+        unbuilt = sum(1 for built in blob_state.values() if not built)
+        if unbuilt:
+            tally.bump("raw_blobs_unavailable", unbuilt)
 
 
 def _split_rpc_field(field_name: str):
@@ -1541,7 +1699,8 @@ def _normalize_rpc_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 # RPC parameter normalization
 # ---------------------------------------------------------------------------
-def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict | None:
+def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
+                         tally=None) -> dict | None:
     """Normalize an RPC parameter name and value to match C# parser output.
 
     WHY: vrfkit uses prefixed 'b' for booleans (e.g. 'bDamageKilledTarget')
@@ -1556,7 +1715,12 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict
     Confirmed by injecting two such rows and reading them back out of
     `events.ndjson`, not inferred. The parent blob row still carries the same
     information in the shape this adapter expects, so skipping the children
-    loses nothing here.
+    loses nothing here -- as long as the parent is there. On the damage RPCs,
+    whose blob valplay decodes, a member that arrives without it is counted
+    (`raw_blobs_unavailable`, see `_build_rpc_events`).
+
+    `tally` is optional so the function stays callable on its own; the
+    conversion passes the real one for `damaged_bone_undecoded`.
     """
     if "[" in param and param.split("[", 1)[0] in (
         "LifeChangeEvents",
@@ -1619,7 +1783,9 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict
                 result[out_name] = value
             return result
 
-        # LifeChangeEvents: keep as blob
+        # LifeChangeEvents: keep as blob. `_build_rpc_events` builds it from
+        # raw_bits whenever the row has them, typed or not (see
+        # `_RAW_SOURCED_RPC_PARAMS`), so `is_raw` here means "the blob exists".
         if param == "LifeChangeEvents" and is_raw:
             # Pass through as {BitCount, Data, TypeName} matching C# format
             if isinstance(value, dict):
@@ -1627,22 +1793,23 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool) -> dict
             result[out_name] = value
             return result
 
-        # DamagedBone: raw -> string "0" or actual bone name
+        # DamagedBone is an FName the overlay decodes into value_str: all
+        # 632,906 MulticastNotifyDamage_Point rows on the 1,018-export corpus
+        # are typed (2026-09-28; _Base carries none). A raw one is a decode
+        # the parser could not do -- it counts that on its side -- and it is
+        # published as null and counted, not guessed at.
+        #
+        # This branch used to ASCII-decode the wire bytes with
+        # errors='replace' inside a bare `except`, so it could not fail: the
+        # FName "Head" came out as '\n\x00\x00\x00' plus replacement
+        # characters, the same mojibake apply_type_corrections.py records
+        # shipping for all 581 payloads when the field was forced to Raw.
+        # Null rather than the raw blob because valplay's `_bone_region`
+        # files None under "other", and would raise TypeError on a dict
+        # (`bone in HEAD_BONES`, a frozenset).
         if param == "DamagedBone" and is_raw:
-            if isinstance(value, dict) and "Data" in value:
-                raw_bytes = base64.b64decode(value["Data"])
-                # Try to interpret as a null-terminated string or simple int
-                try:
-                    # It's typically a short string or "0"
-                    decoded = raw_bytes.rstrip(b'\x00').decode('ascii', errors='replace')
-                    if decoded:
-                        result[out_name] = decoded
-                    else:
-                        result[out_name] = "0"
-                except Exception:
-                    result[out_name] = "0"
-                return result
-            result[out_name] = value
+            _bump(tally, "damaged_bone_undecoded")
+            result[out_name] = None
             return result
 
         # DeathMontageEffectOverride and ...Context: the reference labels them
@@ -2434,6 +2601,9 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 indexed_names.add(fn[:fn.index('[')])
 
         payload = {}
+        # {RAW_BLOB_PREFERRED name: blob built?} for this event; created only
+        # for an event that carries such a field.
+        blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
             if fn is None:
@@ -2443,6 +2613,29 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                 col_raw[ri], col_bits[ri], tally
             )
+            type_name = RAW_BLOB_PREFERRED.get(fn)
+            if type_name is not None:
+                # The container row of a field whose consumer decodes the
+                # blob: built from raw_bits whether or not the row is also
+                # typed (see RAW_BLOB_PREFERRED). `_get_value` still ran above,
+                # so its multi-typed counter keeps seeing this row.
+                if blob_state is None:
+                    blob_state = {}
+                raw = col_raw[ri]
+                if raw is not None:
+                    blob = _raw_blob(raw, col_bits[ri])
+                    blob["TypeName"] = type_name
+                    payload[fn] = blob
+                    blob_state[fn] = True
+                else:
+                    # No bits, no blob: counted once the event is complete.
+                    # A typed value is published in the blob's place rather
+                    # than dropped -- the consumer skips a non-blob, visibly --
+                    # unless this event already built the blob.
+                    blob_state.setdefault(fn, False)
+                    if value is not None and not blob_state[fn]:
+                        payload[fn] = value
+                continue
             if value is None and not is_raw:
                 continue
 
@@ -2468,21 +2661,31 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
             # Parse the field path and set in nested structure
             parts = _parse_field_path(fn, tally)
             if len(parts) == 1 and parts[0][1] is None:
-                # Simple top-level field. Skip if it's a raw blob that has
-                # indexed sub-fields (the sub-fields carry the decoded data)
-                # -- unless downstream wants the undecoded blob.
+                # Simple top-level field. Skip it when it is the container of
+                # indexed sub-fields: the sub-fields carry the decoded data.
+                #
+                # Skipped whether raw OR typed. This used to test `is_raw`, and
+                # stream.rs writes a flattened array's element rows first and
+                # the container row after them, so a typed container reached
+                # the assignment below -- which no conflict counter watches --
+                # and replaced the decoded list with its own value. No such
+                # typed container occurs on the 1,018-export corpus
+                # (2026-09-28); typing one upstream must not change the bundle.
                 bare_name = parts[0][0]
-                if bare_name in RAW_BLOB_PREFERRED:
-                    if is_raw and isinstance(value, dict):
-                        value["TypeName"] = RAW_BLOB_PREFERRED[bare_name]
-                        payload[bare_name] = value
-                    continue
-                if is_raw and bare_name in indexed_names:
+                if bare_name in indexed_names:
                     continue
                 payload[bare_name] = value
-            elif parts[0][0] not in RAW_BLOB_PREFERRED:
+            elif parts[0][0] in RAW_BLOB_PREFERRED:
+                # A decoded member of a raw-blob field. The blob carries it, so
+                # the member is not published -- which makes a member whose
+                # event built no blob a loss, counted below.
+                if blob_state is None:
+                    blob_state = {}
+                blob_state.setdefault(parts[0][0], False)
+            else:
                 _set_nested(payload, parts, value, tally)
 
+        _count_unbuilt_blobs(blob_state, tally)
         _drop_padding_elements(payload)
 
         # Emit even if payload is empty (some events are just existence signals)
@@ -2545,6 +2748,9 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
         float_blob = None
         object_blob = None
         vector_blob = None
+        # {raw-sourced parameter: blob built?} for this invocation; created
+        # only when it carries one. See `_RAW_SOURCED_RPC_PARAMS`.
+        blob_state = None
         for ri in row_indices:
             fn = col_fn[ri]
             if fn is None:
@@ -2565,11 +2771,15 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 # Keyed under the function's own name. The reference emits none
                 # of these functions (they sit in its 241 unbound groups), so
                 # there is no key to match -- this is a vrfkit-only convention.
+                #
+                # A typed row is carried as well. This tested `is_raw`, so a
+                # function row the overlay typed was dropped with no counter;
+                # none is typed on the 1,018-export corpus (2026-09-28).
                 value, is_raw = _get_value(
                     col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                     col_raw[ri], col_bits[ri], tally
                 )
-                if is_raw:
+                if value is not None:
                     if name in payload:
                         tally.bump("rpc_param_collisions")
                     payload[name] = value
@@ -2578,57 +2788,56 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
                 col_raw[ri], col_bits[ri], tally
             )
-            # Shot arrays deliberately keep the preserved wire blob as their
-            # source. Rust may add a value_str JSON overlay in the future, but
-            # that must neither replace the Python shot decoder's raw input nor
-            # change rpc_received's established blob payload contract.
-            shot_effect_blob = (
-                name == "ReplayPlayContinuousEffectAtLocation"
-                and param in ("FloatValues", "ObjectValues", "VectorValues")
-                and col_raw[ri] is not None
-            )
-            if shot_effect_blob:
-                # bit_count travels with the bytes. Recomputing it downstream
-                # as len(data) * 8 would feed the last byte's padding bits to
-                # the decoder as data.
-                captured = _EffectBlob(bytes(col_raw[ri]), col_bits[ri])
-                if param == "FloatValues":
-                    float_blob = captured
-                elif param == "ObjectValues":
-                    object_blob = captured
-                elif param == "VectorValues":
-                    vector_blob = captured
-                # Keep the rpc_received wire-blob shape too. `_get_value`
-                # still ran above, so its malformed multi-typed counter stays
-                # visible; this narrowly chooses raw only for these shot-array
-                # consumers that require the exact payload window.
-                value = {
-                    "BitCount": col_bits[ri],
-                    "Data": base64.b64encode(col_raw[ri]).decode("ascii"),
-                }
-                is_raw = True
-            # The death-montage pair: typed ObjectNetGuid in fields.parquet
-            # (apply_type_corrections.py), but the reference bundle carries each
-            # as a {BitCount, Data, TypeName} blob, and rpc_received keeps that
-            # shape. Same narrow choice as the shot arrays above -- `_get_value`
-            # has already run, and the typed GUID stays in the parquet.
-            if (name in DAMAGE_RPC_NAMES
-                    and param in DEATH_MONTAGE_BLOB_PARAMS
-                    and col_raw[ri] is not None):
-                value = {
-                    "BitCount": col_bits[ri],
-                    "Data": base64.b64encode(col_raw[ri]).decode("ascii"),
-                }
-                is_raw = True
+            # A raw-sourced parameter keeps the preserved wire blob as its
+            # source whether or not the overlay typed it: a value_str overlay
+            # must neither replace the shot decoder's raw input nor change a
+            # consumer's blob contract. `_get_value` still ran above, so its
+            # multi-typed counter keeps seeing these rows.
+            sourced = _RAW_SOURCED_RPC_PARAMS.get(name)
+            if sourced is not None:
+                if param in sourced:
+                    if blob_state is None:
+                        blob_state = {}
+                    raw = col_raw[ri]
+                    if raw is not None:
+                        bits = col_bits[ri]
+                        if name == "ReplayPlayContinuousEffectAtLocation":
+                            # bit_count travels with the bytes. Recomputing it
+                            # downstream as len(data) * 8 would feed the last
+                            # byte's padding bits to the decoder as data.
+                            captured = _EffectBlob(bytes(raw), bits)
+                            if param == "FloatValues":
+                                float_blob = captured
+                            elif param == "ObjectValues":
+                                object_blob = captured
+                            else:
+                                vector_blob = captured
+                        value = _raw_blob(raw, bits)
+                        is_raw = True
+                        blob_state[param] = True
+                    else:
+                        # Counted once the invocation is complete; whatever
+                        # typed value the row has still goes out below.
+                        blob_state.setdefault(param, False)
+                elif "[" in param:
+                    member_of = param.split("[", 1)[0]
+                    if member_of in sourced:
+                        # A decoded member (dropped by `_normalize_rpc_param`
+                        # because the blob carries it): the blob is expected.
+                        if blob_state is None:
+                            blob_state = {}
+                        blob_state.setdefault(member_of, False)
             if value is None and not is_raw:
                 continue
             # Map parameter names to match C# parser output
-            param_out = _normalize_rpc_param(rpc_name, param, value, is_raw)
+            param_out = _normalize_rpc_param(rpc_name, param, value, is_raw, tally)
             if param_out is not None:
                 for k, v in param_out.items():
                     if k in payload:
                         tally.bump("rpc_param_collisions")
                     payload[k] = v
+
+        _count_unbuilt_blobs(blob_state, tally)
 
         if rpc_name is None:
             tally.bump("unnamed_rpc_invocations")
@@ -2727,15 +2936,69 @@ def _write_events(events: list, output_dir: Path, verbose: bool) -> tuple[int, i
     return events_written, regressions
 
 
+#: Every movement.parquet column `_write_movement` reads. The export declares
+#: all of them non-null (vrf-export/src/tables/movement.rs).
+_MOVEMENT_COLUMNS = ("time_ms", "packet_id", "character_net_guid",
+                     "pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z",
+                     "yaw", "pitch")
+
+
+def _join_movement_block(pieces) -> memoryview:
+    """Concatenate one block's line pieces row by row; return the text's bytes.
+
+    `pieces` alternate literal fragments (scalars) and slot texts (arrays of
+    one block's length). The joined lines sit back to back in the result's
+    data buffer, so the block is written as that buffer's used span.
+
+    A NULL line is refused, not written. `binary_join_element_wise` emits
+    NULL for a row with any null input, and a null contributes no bytes to
+    the data buffer: the line would vanish from the file while
+    `movement_rows_written` still counted it. `_write_movement` refuses null
+    input columns before it gets here, so this is the second line of defence.
+    """
+    lines = pc.binary_join_element_wise(*pieces, "")
+    if lines.null_count:
+        raise RuntimeError(
+            f"{lines.null_count:,} movement lines came out NULL; writing the "
+            "block would drop them while still counting them as written")
+    return _string_bytes(lines)
+
+
+def _string_bytes(arr) -> memoryview:
+    """The values of a pa.string() array as one span of bytes, back to back.
+
+    That is the data buffer between the array's first and last offsets --
+    not the whole buffer, which for a slice starts before the array's first
+    value, and which Arrow may allocate larger than it fills.
+    """
+    if arr.type != pa.string():
+        raise RuntimeError(f"expected a string array, got {arr.type}")
+    offsets = numpy.frombuffer(arr.buffers()[1], dtype=numpy.int32,
+                               count=len(arr) + 1, offset=arr.offset * 4)
+    return memoryview(arr.buffers()[2])[offsets[0]:offsets[-1]]
+
+
 def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tuple:
     """Write movement.ndjson, keeping the last sub-move per (packet, character).
 
-    Returns ``(rows_read, rows_written)``. They differ by the intra-packet
-    sub-move collapse below, so only `rows_read` can be compared with what the
-    export manifest declared; publishing `rows_written` against
-    `quality.movement_rows` would report every healthy replay as lossy.
-    `rows_read` is `None` when the table is absent, which is a different fact
-    from an empty one.
+    Returns ``(rows_read, rows_written, non_finite_rows)``. The first two
+    differ by the intra-packet sub-move collapse below, so only `rows_read`
+    can be compared with what the export manifest declared; publishing
+    `rows_written` against `quality.movement_rows` would report every healthy
+    replay as lossy. `rows_read` is `None` when the table is absent, which is
+    a different fact from an empty one.
+
+    `non_finite_rows` counts WRITTEN rows with at least one non-finite float
+    (position, velocity, yaw or pitch); a collapsed sub-move is not in the
+    bundle and is not counted. Such a value is written the way the encoder
+    spells a non-finite float everywhere else in this bundle -- `Infinity`,
+    `-Infinity`, `NaN` (see `_json_scalar_column`) -- not as `null` and not as
+    a number. Python's json reads those tokens; a strict parser rejects the
+    line. valplay parses with orjson when it is installed, skips a line it
+    cannot parse, and then recounts fewer movement rows than
+    `adapter.movement_rows_written` declares, which stops the bundle from
+    publishing -- a refusal, not a quietly shorter track. The count is what
+    names the cause.
     """
     if not movement_path.exists():
         # Truncate rather than return. `convert` reuses an existing output
@@ -2748,20 +3011,30 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
         (output_dir / "movement.ndjson").write_text("", encoding='utf-8')
         if verbose:
             print("  movement.parquet not found, movement.ndjson written empty")
-        return None, 0
+        return None, 0, 0
 
     t0 = time.time()
     if verbose:
         print("Converting movement.parquet...")
-    mv_table = pq.read_table(movement_path)
+    mv_table = pq.read_table(movement_path, columns=list(_MOVEMENT_COLUMNS))
     n_mv = len(mv_table)
+
+    # Every movement column is declared non-null, and that is load-bearing:
+    # `to_numpy` turns a uint32 column with a null into float64 with NaN, and
+    # every line of it would then carry `1000.0`-style times, or `nan`. It
+    # used to be assumed. A null is now refused here, naming the column.
+    for name in _MOVEMENT_COLUMNS:
+        nulls = mv_table.column(name).null_count
+        if nulls:
+            raise ValueError(f"movement.parquet column {name!r} carries "
+                             f"{nulls:,} nulls; the export declares it non-null")
 
     # Batch-extract every column to a numpy array. `to_numpy` hands over the
     # raw buffer; `to_pylist` boxes one Python float/int per row through
     # pyarrow's per-element type dispatch (~14x slower on these 1.84M-row
     # columns, the same win the fields path gets via _numeric_column_to_pylist).
-    # All movement columns are non-nullable, so zero_copy_only=False never
-    # widens ints to float64 -- uint32 stays uint32, float32 stays float32.
+    # With no nulls, zero_copy_only=False never widens ints to float64 --
+    # uint32 stays uint32, float32 stays float32.
     mv_time = mv_table.column('time_ms').to_numpy(zero_copy_only=False)
     mv_pid = mv_table.column('packet_id').to_numpy(zero_copy_only=False)
     mv_char = mv_table.column('character_net_guid').to_numpy(zero_copy_only=False)
@@ -2816,8 +3089,9 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # original -- exactly what the per-row dict overwrite computed. `np.sort`
     # restores row order. Both keys are uint32 so the shift cannot collide.
     key64 = (mv_pid.astype(numpy.uint64) << numpy.uint64(32)) | mv_char.astype(numpy.uint64)
-    _, first_in_rev = numpy.unique(key64[::-1], return_index=True)
+    first_in_rev = numpy.unique(key64[::-1], return_index=True)[1]
     keep = numpy.sort((n_mv - 1) - first_in_rev)
+    del key64, first_in_rev
     movement_collapsed = n_mv - len(keep)
 
     # Every position and velocity component is Float32 on the wire and in
@@ -2836,42 +3110,59 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # pitch rows away from the reference. It changed no metric, which is
     # exactly why it survived.
     #
-    # Select the kept rows once per column via numpy fancy indexing (C-level),
-    # so neither the text builder nor the write loop indexes anything. Then
-    # turn each kept column into its JSON TEXT once per distinct value (see
-    # _json_scalar_column) and let the write loop concatenate strings that
-    # already exist instead of building dicts and encoding each one.
-    #
-    # time_ms and character_net_guid are uint32 and nearly all distinct:
-    # `int.__repr__` is the same text the JSON encoder uses for an int, so
-    # `astype(str)` on the uint32 array is the line's text directly -- no
-    # encoder, no memo.
-    cols = (
-        mv_time[keep].astype(str).tolist(),
-        mv_char[keep].astype(str).tolist(),
-        _json_scalar_column(mv_px[keep], shorten=True),
-        _json_scalar_column(mv_py[keep], shorten=True),
-        _json_scalar_column(mv_pz[keep], shorten=True),
-        _json_scalar_column(mv_vx[keep], shorten=True),
-        _json_scalar_column(mv_vy[keep], shorten=True),
-        _json_scalar_column(mv_vz[keep], shorten=True),
-        _json_scalar_column(mv_yaw[keep]),
-        _json_scalar_column(mv_pitch[keep]),
-    )
+    # Select the kept rows once per column via numpy fancy indexing (C-level)
+    # and turn each kept float column into its JSON TEXT once per distinct
+    # value (see _json_scalar_column). One float column at a time, in
+    # `_MOVEMENT_LINE`'s slot order, so only one kept copy is alive at once;
+    # holding all eight cost +35-83 MB of peak working set across 11 exports.
+    non_finite = numpy.zeros(len(keep), dtype=bool)
+    float_texts = []
+    for column, shorten in ((mv_px, True), (mv_py, True), (mv_pz, True),
+                            (mv_vx, True), (mv_vy, True), (mv_vz, True),
+                            (mv_yaw, False), (mv_pitch, False)):
+        kept = column[keep]
+        non_finite |= ~numpy.isfinite(kept)
+        float_texts.append(_json_scalar_column(kept, shorten=shorten))
+        del kept
+    non_finite_rows = int(numpy.count_nonzero(non_finite))
     movement_written = len(keep)
+    # time_ms and character_net_guid are uint32 and nearly all distinct, so
+    # they are not deduplicated: Arrow's integer-to-string cast writes the
+    # plain decimal digits, the same text `int.__repr__` -- and so the JSON
+    # encoder -- gives an int.
+    int_slots = (pa.array(mv_time[keep]), pa.array(mv_char[keep]))
+    # The table and its column views are no longer needed; what the write
+    # loop reads is above. Dropping them now keeps them out of its peak.
+    del (mv_table, mv_time, mv_pid, mv_char, mv_px, mv_py, mv_pz,
+         mv_vx, mv_vy, mv_vz, mv_yaw, mv_pitch, keep, non_finite)
 
-    # `%` against a tuple formats in C, where a Python-level chain of `+`
-    # does not; and lines go out in blocks because 1.8 million pairs of
-    # `write` calls on a TextIOWrapper cost more than the joins do. The block
-    # is bounded so peak memory stays flat instead of holding 340 MB of text.
-    with open(output_dir / "movement.ndjson", 'w', encoding='utf-8') as f:
-        write = f.write
-        rows = zip(*cols)
-        while True:
-            block = [_MOVEMENT_LINE % r for r in islice(rows, 16384)]
-            if not block:
-                break
-            write(''.join(block))
+    # The lines are assembled in Arrow's C++, one block at a time: each slot's
+    # texts are taken for the block's rows (`take` for the deduplicated
+    # floats, a cast for the ints) and `binary_join_element_wise` interleaves
+    # them with `_MOVEMENT_LINE`'s literal fragments, so no Python object is
+    # made per row -- only per distinct value. The text of every slot is
+    # what the per-row `_MOVEMENT_LINE % (...)` join put there, so the bytes
+    # are too (`MovementLineAssemblyTests`; sha256-identical on 11 exports).
+    #
+    # The file is written in binary mode, so the line ending is spelled
+    # here: it was opened in text mode, which turns '\n' into os.linesep --
+    # CRLF on Windows -- and the fragments carry that same os.linesep so each
+    # platform keeps the bytes it had.
+    fragments = [pa.scalar(text, type=pa.string()) for text in
+                 _MOVEMENT_LINE.replace("\n", os.linesep).split("%s")]
+    if len(fragments) != 2 + len(float_texts) + 1:
+        raise RuntimeError("_MOVEMENT_LINE's slots no longer match the columns")
+    with open(output_dir / "movement.ndjson", "wb") as f:
+        for start in range(0, movement_written, _MOVEMENT_BLOCK_ROWS):
+            length = min(_MOVEMENT_BLOCK_ROWS, movement_written - start)
+            slots = [pc.cast(values.slice(start, length), pa.string())
+                     for values in int_slots]
+            slots += [texts.take(inverse.slice(start, length))
+                      for texts, inverse in float_texts]
+            pieces = [fragments[0]]
+            for slot, fragment in zip(slots, fragments[1:]):
+                pieces += (slot, fragment)
+            f.write(_join_movement_block(pieces))
 
     if verbose and movement_collapsed:
         print(f"  {movement_collapsed:,} intra-packet sub-moves collapsed "
@@ -2879,7 +3170,7 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
 
     if verbose:
         print(f"  {movement_written:,} movement rows written in {time.time()-t0:.1f}s")
-    return n_mv, movement_written
+    return n_mv, movement_written, non_finite_rows
 
 
 # ---------------------------------------------------------------------------
@@ -3002,9 +3293,12 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         tally.bump("events_time_ms_regressions", time_ms_regressions)
 
     # ---- Convert movement.parquet ----
-    movement_rows_read, movement_written = _write_movement(
+    movement_rows_read, movement_written, non_finite_movement_rows = _write_movement(
         movement_path, output_dir, verbose
     )
+    # Every row is still written, so this is not a loss; it is surfaced with
+    # the losses because a strict parser rejects the line it is on.
+    tally.bump("non_finite_movement_rows", non_finite_movement_rows)
 
     # ---- Cross-check what vrfkit declared against what was actually read ----
     #

@@ -881,6 +881,24 @@ ones the export declared, and the conversion `losses` tally.
 path independently recountable. `bundle_schema_version`
 names the shape; valplay's resume marker records it and rebuilds when it moves.
 
+`losses` carries every counter, zero included, so a clean conversion reads as
+zeros rather than as missing keys; the console summary prints only the ones
+that fired. `non_finite_movement_rows` counts movement lines holding a
+non-finite position, velocity, yaw or pitch. Those are written `Infinity` /
+`-Infinity` / `NaN`, as every non-finite float in the bundle is spelled: Python's
+`json` reads them, a strict parser such as orjson rejects the line. None occurs
+on the 1,018-export corpus, and the decoder does not rule them out.
+
+The blobs a consumer decodes itself -- `RoundInfos`, a damage RPC's
+`LifeChangeEvents`, the shot effect arrays -- are built from `raw_bits` whether
+or not the overlay also typed the row, so typing one upstream cannot change or
+drop it. `raw_blobs_unavailable` counts those that could not be built: the row
+had no raw bits (its typed value, if any, is published in the blob's place), or
+only decoded members arrived. `damaged_bone_undecoded` counts `DamagedBone`
+values the parser could not decode; they are published as `null`, never
+rendered from the raw bytes. All three counters are 0 on the 11 exports of the
+2026-09-28 A/B (builds 11.06-13.06).
+
 `players` is deliberately **not** forwarded: valplay derives the same table
 from the same `BombPlayerState` rows and its version keeps a *set* of character
 GUIDs, which is what attributes a resurrected player's kills. Forwarding the
@@ -923,26 +941,29 @@ python "<valplay>/pipeline/metrics/compute_metrics.py" <bundle_dir> -o metrics.j
 
 **The slowest stage is valplay's `compute_metrics.py`; the slowest one
 vrfkit owns is `to_valplay_bundle.py`.** For a single 48 MB replay
-(`02d4d478`), measured 2026-09-28: `vrfkit export --out` without
-`--checkpoints` from a release build of 259ed10, `to_valplay_bundle.py` from
-the same commit on that export, then `compute_metrics.py` (valplay 0d91c9a)
-on the bundle -- three sequential runs of each, Python 3.12.10:
+(`02d4d478`), measured 2026-09-28 on the integration tree: `vrfkit export
+--out` without `--checkpoints` from its release build (0301c6c),
+`to_valplay_bundle.py` from the same tree on that export, then
+`compute_metrics.py` (valplay 0d91c9a) on the bundle -- three sequential runs
+of each, Python 3.12.10, the machine 17-28% busy:
 
 | Stage | Median | Range |
 |---|---|---|
-| `vrfkit export` | 1.53 s | 1.47-1.58 s |
-| `to_valplay_bundle.py` | **13.1 s** | 10.6-15.0 s |
-| `compute_metrics.py` | 20.9 s | 20.4-21.1 s |
+| `vrfkit export` | 0.84 s | 0.84-0.86 s |
+| `to_valplay_bundle.py` | **6.02 s** | 5.97-6.02 s |
+| `compute_metrics.py` | 13.15 s | 13.11-13.34 s |
 
-The machine was shared with other work (CPU 91% busy before the runs, 71%
-after, about 30 other Python processes), so read the times as upper bounds:
-the adapter's last performance commit (670474f) recorded 4.59 s on its 13.01
-reference export. Two things held in every run regardless:
-`compute_metrics.py` took longer than the bundle conversion, and the bundle
-conversion took 7-10x as long as the parse (8.6x on the medians). The multiple
-this section quoted before dates from section 35 and predates the adapter's
-numpy column reads (bb4b0f4), vectorised movement path (cecea64), per-row
-trimming (3c67a91) and disabled cyclic collector (670474f).
+Bundle conversion is about 7x the parse. Its biggest phase was writing
+movement.ndjson (~40% of it on 02d4d478 and f73d4475, writer timed alone
+against the whole run); its lines are now assembled in Arrow from the
+per-distinct value texts instead of formatted row by row in Python.
+Interleaved with the 259ed10 adapter on 11 exports over 9 builds, conversion
+was 1.07-1.58x faster (sum of medians 92.0 -> 76.3 s), peak working set fell
+300-570 MB on every full-size export, and events.ndjson and movement.ndjson
+were byte-identical. The multiple this section quoted before dates from
+section 35 and predates the adapter's numpy column reads (bb4b0f4),
+vectorised movement path (cecea64), per-row trimming (3c67a91), disabled
+cyclic collector (670474f) and Arrow movement lines.
 If you process multiple replays, **parallelizing is the biggest lever** --
 each replay is fully independent, and the measurements above are deliberately
 sequential for accuracy.
