@@ -56,7 +56,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -68,9 +67,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import atomic_write_text, sha256_file
 else:  # direct script execution
-    from atomic_io import atomic_write_text
+    from atomic_io import atomic_write_text, sha256_file
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
@@ -266,15 +265,6 @@ CHECKPOINT_PARQUET_FILES = (
     "checkpoint_fields", "checkpoint_actors", "checkpoint_net_guids", "checkpoint_blocks",
     "checkpoint_guid_entries", "checkpoint_export_groups", "checkpoint_export_fields",
 )
-
-
-def sha256_file(path: Path) -> str:
-    """Return a measured content digest without loading a Parquet file whole."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def cross_check_identities(counters: dict, parquet: dict) -> list:
@@ -582,6 +572,31 @@ def checkpoint_guid_crosscheck(out_dir: Path) -> tuple[dict, list[str]]:
     return counts, errors
 
 
+def _manifest_agreement(out_dir: Path, counters: dict, what: str, pick) -> list[str]:
+    """The counts `pick` reads from the manifest's `quality` object must be
+    nonnegative integers equal to the summary's; `what` names them in every
+    message."""
+    try:
+        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
+        values = pick(quality)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [f"manifest omits {what} quality data: {exc}"]
+    if any(type(value) is not int or value < 0 for value in values.values()):
+        return [f"{what} counts must be nonnegative integers"]
+    return [f"manifest {key}={value} disagrees with summary {counters.get(key)}"
+            for key, value in values.items() if counters.get(key) != value]
+
+
+def _sink_counts(key: str, checkpoints: bool):
+    """A `pick` for `quality.sink[key]` and, with checkpoints, its `cp_` twin."""
+    def pick(quality):
+        values = {key: quality["sink"][key]}
+        if checkpoints:
+            values["cp_" + key] = quality["checkpoints"]["sink"][key]
+        return values
+    return pick
+
+
 def reward_opaque_manifest_errors(
     out_dir: Path, counters: dict, checkpoints: bool,
 ) -> list[str]:
@@ -590,40 +605,14 @@ def reward_opaque_manifest_errors(
     It is deliberately not folded into a decode-error-zero gate: the count
     records a known opaque payload variant and can legitimately be nonzero.
     """
-    try:
-        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
-        main = quality["sink"]["tracked_rewards_opaque_empty_variants"]
-        checkpoint = (quality["checkpoints"]["sink"]
-                      ["tracked_rewards_opaque_empty_variants"]
-                      if checkpoints else None)
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        return [f"manifest omits tracked rewards opaque-empty quality data: {exc}"]
-    values = {"tracked_rewards_opaque_empty_variants": main}
-    if checkpoints:
-        values["cp_tracked_rewards_opaque_empty_variants"] = checkpoint
-    if any(type(value) is not int or value < 0 for value in values.values()):
-        return ["tracked rewards opaque-empty counts must be nonnegative integers"]
-    return [
-        f"manifest {key}={value} disagrees with summary {counters.get(key)}"
-        for key, value in values.items()
-        if counters.get(key) != value
-    ]
+    return _manifest_agreement(out_dir, counters, "tracked rewards opaque-empty", _sink_counts(
+        "tracked_rewards_opaque_empty_variants", checkpoints))
 
 
 def targeting_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
     """Require the additive targeting count even when it is zero."""
-    key = "targeting_world_locations_decoded"
-    try:
-        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
-        values = {key: quality["sink"][key]}
-        if checkpoints:
-            values["cp_" + key] = quality["checkpoints"]["sink"][key]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return [f"manifest omits targeting world-location quality data: {exc}"]
-    if any(type(value) is not int or value < 0 for value in values.values()):
-        return ["targeting world-location counts must be nonnegative integers"]
-    return [f"manifest {name}={value} disagrees with summary {counters.get(name)}"
-            for name, value in values.items() if counters.get(name) != value]
+    return _manifest_agreement(out_dir, counters, "targeting world-location", _sink_counts(
+        "targeting_world_locations_decoded", checkpoints))
 
 
 def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
@@ -640,18 +629,13 @@ def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool)
     crates/vrfkit/tests/frame_skips.rs, which runs the binary on a replay
     that carries both sections.
     """
-    try:
-        quality = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["quality"]
+    def pick(quality):
         values = {f"frame_{key}": quality[f"frame_{key}"] for key in FRAME_SKIP_KEYS}
         if checkpoints:
             values.update({f"cp_frame_{key}": quality["checkpoints"][f"checkpoint_frame_{key}"]
                            for key in FRAME_SKIP_KEYS})
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return [f"manifest omits frame-skip quality data: {exc}"]
-    if any(type(value) is not int or value < 0 for value in values.values()):
-        return ["frame-skip counts must be nonnegative integers"]
-    return [f"manifest {name}={value} disagrees with summary {counters.get(name)}"
-            for name, value in values.items() if counters.get(name) != value]
+        return values
+    return _manifest_agreement(out_dir, counters, "frame-skip", pick)
 
 
 def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -> dict:
