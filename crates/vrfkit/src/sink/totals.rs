@@ -1,41 +1,23 @@
 //! The one place a packet sink's counters are accumulated.
 //!
 //! `ExportSink` is rebuilt for every packet -- ~530,000 times on the reference
-//! replay -- so anything it counts and the caller does not read is discarded
-//! that many times and reads as a permanent zero. That is not a hypothetical:
-//! `cnc_rpcs_emitted` is the only signal that the `AbilitiesAndBuffsComponent`
-//! brute-force produced RPC structure rather than leaving an opaque blob, and
-//! it reached no summary at all. A build that stopped reaching that decoder
-//! would have left "Decode errors: 0" and every other line of the export
-//! summary exactly where a good run leaves them.
+//! replay -- so a counter the caller does not read reads as a permanent zero:
+//! `cnc_rpcs_emitted`, the only signal the `AbilitiesAndBuffsComponent`
+//! brute-force produced RPC structure, once reached no summary, and the
+//! checkpoint pass once dropped [`ArrayDecodeStats::errors`], `truncated_rpcs`
+//! and the movement errors, so an overrun checkpoint array lost its children
+//! with no failure recorded. Both passes and `diag` share
+//! [`SinkTotals::absorb`], which is why it lives here, not in the
+//! `export`-gated driver: `diag` is built without the feature.
 //!
-//! The checkpoint pass had its own copy of the same loop and its own subset of
-//! the same omission: [`ArrayDecodeStats::errors`], `truncated_rpcs` and the
-//! movement-decode errors were dropped there, so a checkpoint array that
-//! overran mid-element wrote its parent raw row, lost its flattened children,
-//! and recorded no failure anywhere.
-//!
-//! Both passes now go through [`SinkTotals::absorb`], and so does `diag`,
-//! which used to keep a line-for-line copy of it (`DiagSinkTotals`) and a
-//! second list of the same counters. That is why this lives in `sink` and not
-//! in the `export`-gated driver: `diag` is built without the feature.
-//!
-//! `absorb` opens with a destructure of `ExportStats` that has no `..`, and it
-//! sums the overlay and array counters through `OverlayStats::merge_counts_from`
-//! and `ArrayDecodeStats::merge_from`, which are written the same way. A
-//! counter added to any of the three structs therefore does not compile until
-//! it is summed here, and binding it without summing it is an unused-variable
-//! warning. Before, a new field compiled cleanly and simply never arrived:
-//! "one place to be wired in" was a convention with nothing enforcing it.
-//!
-//! What the destructure cannot see is a counter summed into the wrong field
-//! while both bindings are still used. `absorb_sums_every_counter_into_its_own_field`
-//! below gives every counter its own value and checks where each one lands.
-//!
-//! What this does NOT cover: the printers. The export summary, the manifest's
-//! `quality` block and the `diag` JSON each still name their lines by hand, so
-//! a counter can reach this struct and still be printed nowhere. The `diag`
-//! list is checked against this struct by a test in `diagnose.rs`.
+//! `absorb` destructures `ExportStats` with no `..` and sums the overlay and
+//! array counters through `OverlayStats::merge_counts_from` and
+//! `ArrayDecodeStats::merge_from`, written the same way, so a counter added to
+//! any of the three does not compile until it is summed here (bound but not
+//! summed, it is an unused variable). A counter summed into the wrong field is
+//! caught by `absorb_sums_every_counter_into_its_own_field`. Not covered: the
+//! printers -- the summary, the manifest's `quality` block and the `diag` JSON
+//! name their lines by hand; only the `diag` list is checked, in `diagnose.rs`.
 
 use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
 
@@ -44,28 +26,21 @@ use super::ExportStats;
 /// Everything a packet's sink counted, summed across packets.
 #[derive(Debug, Default)]
 pub(crate) struct SinkTotals {
-    /// Rows pushed at the sites that count them: replicated properties, RPC
-    /// parameters and the extra whole-payload row a partial parameter walk
-    /// adds, life-change and path-point members, flattened array leaves,
-    /// struct-blob members, `_cnc_h*` rows and RepLayout tail rows. Not every
-    /// row: movement batch rows, zero-bit RPC markers, the raw row of an RPC
-    /// whose parameters did not walk, unresolved-payload preservation rows
-    /// and targeting world-location children are pushed without it. So it is
-    /// comparable neither with NetStats' `fields` -- framed RepLayout
-    /// properties -- nor with the `fields.parquet` row count. On 02d4d478 it
-    /// reads 1,060,119 against `Fields: 429,648` and 1,296,660 table rows.
+    /// Rows pushed at the sites that count them (properties, RPC parameters and
+    /// a partial walk's whole-payload row, life-change and path-point members,
+    /// array leaves, struct-blob members, `_cnc_h*` and tail rows); movement
+    /// batch rows, zero-bit RPC markers, unwalked RPCs' raw rows, preservation
+    /// rows and targeting children are not. So it matches neither NetStats'
+    /// `fields` (framed RepLayout properties) nor the `fields.parquet` row
+    /// count: on 02d4d478, 1,060,119 against `Fields: 429,648` and 1,296,660 rows.
     pub fields_emitted: u64,
-    /// The sink's own count of four events vrf-net counts too: RPC callbacks,
-    /// actor opens, actor closes, and content blocks, live and deleted.
-    /// vrf-net invokes each of these callbacks right beside its own increment,
-    /// so each pair is one count taken twice and must be equal. A difference
-    /// means the sink's bookkeeping -- a missing or extra `+= 1` -- is broken;
-    /// it cannot detect framing going out of step, since both sides see the
-    /// same callbacks. Published in the manifest as `sink_rpcs_emitted`,
-    /// `sink_actor_opens`, `sink_actor_closes` and `sink_content_blocks`,
-    /// where `tools/verify_build_corpus.py` fails a replay whose value differs
-    /// from the `net` block's. Before these totals existed, `ExportStats`
-    /// counted all five per packet and no caller read them.
+    /// The sink's own count of four events vrf-net counts beside the same
+    /// callbacks (RPCs, actor opens and closes, content blocks live and
+    /// deleted), so each pair must be equal: a difference is a missing or extra
+    /// `+= 1` in the sink, never framing. Published as the manifest's
+    /// `sink_rpcs_emitted`, `sink_actor_opens`, `sink_actor_closes` and
+    /// `sink_content_blocks`; `tools/verify_build_corpus.py` fails a replay
+    /// whose value differs from the `net` block's.
     pub rpcs_emitted: u64,
     pub actor_opens: u64,
     pub actor_closes: u64,
@@ -74,14 +49,12 @@ pub(crate) struct SinkTotals {
     pub effect_blobs_decoded: u64,
     pub struct_blobs_decoded: u64,
     pub struct_blobs_failed: u64,
-    /// First failure verbatim; a later packet must not overwrite the one that
-    /// names the build change.
+    /// The first failure, never overwritten: it names the build change.
     pub struct_blob_first_error: Option<String>,
     pub multi_contents_items_emitted: u64,
     pub movement_rpc_errors: u64,
     pub movement_first_error: Option<String>,
-    /// See `ExportStats::movement_sized_section_tails` and its three
-    /// neighbours.
+    /// See `ExportStats::movement_sized_section_tails` and its neighbours.
     pub movement_sized_section_tails: u64,
     pub movement_sized_section_tail_bits: u64,
     pub movement_open_section_tails: u64,
@@ -93,9 +66,7 @@ pub(crate) struct SinkTotals {
     pub truncated_rpcs: u64,
     pub rpc_suffix_bits_dropped: u64,
     pub cnc_rpcs_emitted: u64,
-    /// See `ExportStats::cnc_bruteforce_payloads_attempted`.
     pub cnc_bruteforce_payloads_attempted: u64,
-    /// See `ExportStats::cnc_bruteforce_payloads_unwalked`.
     pub cnc_bruteforce_payloads_unwalked: u64,
     /// Post-RepLayout ClassNetCache tails decoded as verified RPC structure.
     pub rep_layout_cnc_tails_decoded: u64,
@@ -104,15 +75,9 @@ pub(crate) struct SinkTotals {
 }
 
 impl SinkTotals {
-    /// Fold one packet's counters in.
-    ///
-    /// `error_report` is passed in rather than owned because both passes merge
-    /// into the *same* report: a decode error is a decode error wherever it
-    /// happened, and the breakdown the summary prints is the only place a
-    /// checkpoint-only failure would ever be seen.
-    ///
-    /// `stats` is taken by `&mut` for the two `Option<String>` fields, which are
-    /// moved out rather than cloned -- they are only ever set once per run.
+    /// Fold one packet's counters in. Both passes merge into the *same*
+    /// `error_report`, the only place a checkpoint-only decode error is ever
+    /// seen. `stats` is `&mut` so the two first-error strings move, not clone.
     pub(crate) fn absorb(
         &mut self,
         stats: &mut ExportStats,
@@ -191,29 +156,12 @@ mod tests {
     use super::*;
     use vrf_decode::{DecodeErrorKind, FieldType, OverlayErrorReport};
 
-    /// Every counter a packet's sink produced lands in the `SinkTotals` field
-    /// of its own name, summed across packets.
-    ///
-    /// `ExportSink` is rebuilt for each of a replay's ~530,000 packets, so a
-    /// counter `absorb` does not carry is dropped that many times and reads as
-    /// a permanent zero -- `cnc_rpcs_emitted`, the only evidence the
-    /// AbilitiesAndBuffs brute-force produced RPC structure, once reached no
-    /// summary at all. `absorb`'s destructure catches a counter left out, and
-    /// the unused-variable lint one bound and not summed; neither sees a
-    /// counter summed into the wrong field. Swapping the sized and open
-    /// movement-tail targets compiled and passed every test, and would have
-    /// reported a future tail under the wrong window kind.
-    ///
-    /// So every counter gets its own value from `next()` through a literal
-    /// with no `..`, three packets are absorbed, and the totals are read back
-    /// through a destructure with no `..` and each value checked by name. The
-    /// values start at 2 and there are three packets so that a counter
-    /// assigned, doubled or bumped by one per packet instead of summed cannot
-    /// land on the right total. A counter added to `ExportStats`,
-    /// `SinkTotals`, `OverlayStats` or `ArrayDecodeStats` does not compile
-    /// until it is given a value and a binding here, and a binding left
-    /// unchecked is an unused variable. It sits next to `absorb` rather than
-    /// in the `export`-gated driver, so the core-only build runs it too.
+    /// Every counter lands in its own `SinkTotals` field, summed across packets,
+    /// which the destructures cannot see (a sized/open movement-tail swap once
+    /// compiled and passed every test). Each counter gets a distinct value from
+    /// `next()`, starting at 2, through no-`..` literals and destructures over
+    /// three packets, so one assigned, doubled, bumped per packet or summed into
+    /// another field misses its total. Beside `absorb`, so core-only builds run it.
     #[test]
     fn absorb_sums_every_counter_into_its_own_field() {
         let last = std::cell::Cell::new(0u64);
