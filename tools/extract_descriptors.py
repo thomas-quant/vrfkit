@@ -325,10 +325,10 @@ REP_MOVEMENT_PROPERTY_RE = re.compile(
 #: class measured at two decimals. docs/DATA.md has the per-class figures.
 #:
 #: A class nobody has measured gets this default, which is a prior, not a
-#: measurement. `tests::overlay` lists every `RepMovement` entry with the
-#: level measured for it and fails on an entry it does not list, so a new
-#: one cannot take the default without somebody checking it against spawn
-#: positions first.
+#: measurement. `tests::overlay` lists every group given a `RepMovement` type
+#: (by this table or by the scoped types) with the level measured for it, and
+#: fails on one it does not list, so a new class cannot take the default
+#: without somebody checking it against spawn positions first.
 REP_MOVEMENT_LOCATION = "VectorQuantization::RoundWholeNumber"
 
 

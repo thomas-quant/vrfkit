@@ -556,9 +556,11 @@ What the evidence does **not** cover:
 `REP_MOVEMENT_LOCATION`) gives every entry whole units -- Unreal's own
 `FRepMovement` default and the level of 24 of the 25 classes above -- and
 `apply_type_corrections.py` pins SeekerNade to two decimals. A default is a
-prior, not a measurement, so `tests::overlay` lists every `RepMovement` entry
-with its measured level and fails on an entry it does not list: a new class
-cannot ship on the default without somebody running the spawn join first.
+prior, not a measurement, so `tests::overlay` lists every group given a
+`RepMovement` type -- by the table or by `scoped_types.rs` -- with its measured
+level, and fails on a group it does not list: a new class cannot ship on the
+default without somebody running the spawn join first. A `RepMovement` literal
+written without a `location:` does not compile.
 
 **This member now differs from the C# reference on purpose.** The reference
 still emits location/100 for every class. The 2026-08-02 decision to keep that

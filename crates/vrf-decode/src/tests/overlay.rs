@@ -1268,8 +1268,9 @@ fn checksums_whose_donors_disagree_are_omitted() {
     }
 }
 
-/// Every `RepMovement` entry the table declares, with the location level the
-/// wire was measured at for that class.
+/// Every group the overlay assigns a `RepMovement` type to -- a table entry or
+/// an exact scoped type -- with the location level the wire was measured at
+/// for that class.
 ///
 /// Measured 2026-09-28 over the 1,018 replays audited at 259ed10 (21 of the
 /// 24 builds carry these rows): each actor `open` in actors.parquet joined to
@@ -1410,26 +1411,40 @@ const REP_MOVEMENT_LOCATION_EVIDENCE: [(&str, VectorQuantization); 25] = {
     ]
 };
 
-/// The location level of every `RepMovement` entry is the measured one, and
-/// the table has no `RepMovement` entry this list does not name.
+/// The location level of every `RepMovement` type the overlay can assign is
+/// the measured one, and no group gets a `RepMovement` type this list does not
+/// name.
 ///
 /// The level is not on the wire, so the generator has to default it (whole
 /// units, extract_descriptors.py REP_MOVEMENT_LOCATION), and a default is a
 /// prior, not a measurement. Pinning each class keeps a changed default or a
 /// dropped correction from moving a class silently; failing on an unlisted
-/// entry keeps a NEW class from taking the default without anyone checking
+/// group keeps a NEW class from taking the default without anyone checking
 /// it -- add it here only with its spawn-position evidence.
+///
+/// Three routes can assign the type, and all three are held to the list: the
+/// table and the exact scoped types by group, checksum propagation by
+/// admitting no `RepMovement` at all. The scoped route matters because it is
+/// generated from its own fixture, where a new `RepMovement` literal would
+/// never pass through the table's default or its corrections.
 #[test]
 fn every_rep_movement_entry_carries_its_measured_location_level() {
     use std::collections::BTreeMap;
 
-    let declared: BTreeMap<&str, VectorQuantization> = OVERLAY_TABLE
+    let table = OVERLAY_TABLE.iter().map(|e| (e.group_path, e.field_type));
+    let scoped = crate::scoped_types::SCOPED_TYPES
         .iter()
-        .filter_map(|e| match e.field_type {
-            FieldType::RepMovement { location, .. } => Some((e.group_path, location)),
-            _ => None,
-        })
-        .collect();
+        .map(|&(_, group, _, field_type)| (group, field_type));
+    let mut declared: BTreeMap<&str, VectorQuantization> = BTreeMap::new();
+    for (group, field_type) in table.chain(scoped) {
+        if let FieldType::RepMovement { location, .. } = field_type {
+            let previous = declared.insert(group, location);
+            assert!(
+                previous.is_none() || previous == Some(location),
+                "{group}: RepMovement declared at two location levels"
+            );
+        }
+    }
     let measured: BTreeMap<&str, VectorQuantization> =
         REP_MOVEMENT_LOCATION_EVIDENCE.into_iter().collect();
     assert_eq!(
@@ -1447,7 +1462,7 @@ fn every_rep_movement_entry_carries_its_measured_location_level() {
     for group in measured.keys() {
         assert!(
             declared.contains_key(group),
-            "{group}: measured but not a RepMovement entry in the table"
+            "{group}: measured but no route assigns it a RepMovement type"
         );
     }
     // The name rule the checksum map would apply is closed for this field
