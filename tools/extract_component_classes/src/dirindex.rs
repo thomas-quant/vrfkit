@@ -26,7 +26,7 @@ struct FileEntry {
 
 #[derive(Debug, Clone)]
 pub struct DirectoryIndex {
-    pub mount_point: String,
+    mount_point: String,
     dirs: Vec<DirEntry>,
     files: Vec<FileEntry>,
     strings: Vec<String>,

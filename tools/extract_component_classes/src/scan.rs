@@ -187,14 +187,12 @@ pub fn scan_header(
             });
             continue;
         }
-        let is_cdo_child = outer
-            .map(|o| {
-                o.object_name
-                    .base(&pkg.names)
-                    .unwrap_or("")
-                    .starts_with(CDO_PREFIX)
-            })
-            .unwrap_or(false);
+        let is_cdo_child = outer.is_some_and(|o| {
+            o.object_name
+                .base(&pkg.names)
+                .unwrap_or("")
+                .starts_with(CDO_PREFIX)
+        });
         if is_cdo_child {
             candidates.push(Candidate {
                 kind: "cdo_subobject",

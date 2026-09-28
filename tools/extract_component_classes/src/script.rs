@@ -35,7 +35,7 @@ struct ScriptObject {
     outer: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScriptObjects {
     objects: HashMap<u64, ScriptObject>,
 }
