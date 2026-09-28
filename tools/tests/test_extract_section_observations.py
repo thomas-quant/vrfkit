@@ -10,17 +10,9 @@ from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import extract_section_observations as tool
-
-
-def bits(values):
-    out = []
-    for value in values:
-        while True:
-            part = value & 127; value >>= 7
-            out.append((part << 1) | bool(value))
-            if not value: break
-    return bytes(out)
+from tools.tests.wire_fixtures import BitWriter, packed
 
 
 def row(name, raw, width, **typed):
@@ -58,30 +50,21 @@ def fixture(route="MulticastNotifyHeal", sections=None):
         manifest_fields.append((0, scalar, checksums[0]))
         rows.append(row(route + "." + scalar, struct.pack("<f", amount), 32,
                         value_f64=amount, compatible_checksum=checksums[0], handle=outer))
-    wire = []
-
-    def append(payload, width=None):
-        for i in range(len(payload) * 8 if width is None else width):
-            wire.append((payload[i // 8] >> (i % 8)) & 1)
-
-    append(bits([len(sections)]))
+    wire = BitWriter().packed(len(sections))
     for index, (ref, life, delta, alive) in enumerate(sections):
-        append(bits([index + 1]))
+        wire.packed(index + 1)
         for i, (name, value) in enumerate(zip(member_names, (ref, life, delta, alive))):
             if i == 0:
-                payload = bits([value]); width = len(payload) * 8; typed = {"value_i64": value}
+                payload = packed(value); width = len(payload) * 8; typed = {"value_i64": value}
             elif i == 3:
                 payload = bytes([int(value)]); width = 1; typed = {"value_bool": value}
             else:
                 payload = struct.pack("<f", value); width = 32; typed = {"value_f64": struct.unpack("<f", payload)[0]}
-            append(bits([parent_handle + i + 2, width])); append(payload, width)
+            wire.packed(parent_handle + i + 2).packed(width).raw(payload, width)
             rows.append(row(f"{route}.{parent}[{index}].{name}", payload, width, handle=outer, **typed))
-        append(bits([0]))
-    append(bits([0]))
-    payload = bytearray((len(wire) + 7) // 8)
-    for i, bit in enumerate(wire):
-        payload[i // 8] |= bit << (i % 8)
-    rows.append(row(route + "." + parent, bytes(payload), len(wire), handle=outer, compatible_checksum=checksums[1]))
+        wire.packed(0)
+    payload, width = wire.packed(0).to_bytes()
+    rows.append(row(route + "." + parent, payload, width, handle=outer, compatible_checksum=checksums[1]))
     manifest = {"net_field_export_groups": [
         {"path": tool.OUTER_GROUP, "fields": [{"handle": outer, "name": route, "compatible_checksum": outer_crc}]},
         {"path": "/Script/ShooterGame.DamageableComponent:" + route,
@@ -218,7 +201,7 @@ class SectionObservationTests(unittest.TestCase):
     def test_parent_child_payload_mismatch_is_retained_invalid(self):
         # A valid-looking parent with no emitted flattened leaf cannot silently
         # become a zero section array.
-        parent = row("MulticastNotifyHeal.LifeChangeBySection", bits([1, 1, 3, 8, 2, 0, 0]), 56,
+        parent = row("MulticastNotifyHeal.LifeChangeBySection", packed(1, 1, 3, 8, 2, 0, 0), 56,
                      compatible_checksum=163390906)
         declared = {route: {"_fields": {}, "outer": {"name": route, "compatible_checksum": tool.ROUTES[route][1]}} for route in tool.ROUTES}
         declared["MulticastNotifyHeal"]["_fields"] = {1: ("LifeChangeBySection", 163390906)}
@@ -227,7 +210,7 @@ class SectionObservationTests(unittest.TestCase):
         self.assertIn("array_validation_failed", got["ambiguity_reasons"])
 
     def test_packed_reference_requires_exact_typed_value(self):
-        payload = bits([60])
+        payload = packed(60)
         with self.assertRaises(tool.IntegrityError):
             tool.reference(row("x", payload, 8, value_i64=61))
 

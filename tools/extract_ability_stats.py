@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
 """Extract and validate the ability-stat data dictionary from vrfkit exports.
 
-``AbilityCastsThisRound[].Effects[]`` carries both ``Statistic`` (an integer)
-and ``LocalizedStat`` (an FText key). They describe the same array element, so
-the wire supplies its own integer-to-name dictionary. This tool pairs only rows
-that share the complete serialized instance context and validates the result
-against the mappings observed per build, 13.01 through 13.06. Any other build
-has no dictionary: its mappings are reported as ``unknown_build`` and the exit
-is nonzero until that build is measured.
-
-Counts are serialized snapshot observations. They are not ability casts: the
-same cast can be repeated in later array snapshots or at checkpoints.
-
-Usage:
-    python tools/extract_ability_stats.py \
-        --export path/to/export --out ability_stats.json
-
-Repeat ``--export`` to aggregate multiple exports. The JSON is written even
-when validation fails so unknown IDs and conflicts remain inspectable.
+``AbilityCastsThisRound[].Effects[]`` carries ``Statistic`` (an integer) and
+``LocalizedStat`` (an FText key) on the same array element, so the wire
+supplies its own integer-to-name dictionary. Rows are paired only on the
+complete serialized instance context and validated against the mappings
+measured per build (KNOWN_STAT_NAMES); any other build is ``unknown_build``
+and the exit is nonzero until it is measured. Counts are snapshot
+observations, not casts: one cast recurs in later snapshots and checkpoints.
+Repeat ``--export`` to aggregate; the JSON is written even when validation
+fails, so unknown IDs and conflicts stay inspectable.
 """
 
 from __future__ import annotations
@@ -28,7 +20,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -44,26 +36,8 @@ GROUP = (
     "Comp_AbilityStatisticsReplicator_C"
 )
 TABLES = ("fields", "checkpoint_fields")
-PAIR_COLUMNS = (
-    "time_ms",
-    "packet_id",
-    "channel_index",
-    "actor_net_guid",
-    "object_net_guid",
-    "field_name",
-    "value_i64",
-    "value_str",
-)
-PAIR_KEY_NAMES = (
-    "table",
-    "packet_id",
-    "time_ms",
-    "channel_index",
-    "actor_net_guid",
-    "object_net_guid",
-    "cast_element_index",
-    "effect_element_index",
-)
+PAIR_COLUMNS = ("time_ms", "packet_id", "channel_index", "actor_net_guid",
+                "object_net_guid", "field_name", "value_i64", "value_str")
 MEMBER_RE = re.compile(
     r"^AbilityCastsThisRound\[(\d+)\]\.Effects\[(\d+)\]\."
     r"(Statistic|LocalizedStat)(?:_\d+_[0-9A-F]{32})?$",
@@ -72,10 +46,10 @@ MEMBER_RE = re.compile(
 BUILD_RE = re.compile(r"release-(\d+\.\d+)", re.IGNORECASE)
 
 
-# Measured over all 714 release-13.01--13.05 exports on 2026-09-08. The scan
-# paired 155,150 main/checkpoint observations using PAIR_KEY_NAMES, with zero
-# missing partners, duplicate members, ID conflicts, or reverse-name conflicts.
-# Builds 13.01--13.04 exposed the same 31 IDs; 13.05 added TimeSprinting.
+# Measured 2026-09-08 over all 714 release-13.01--13.05 exports: 155,150
+# main/checkpoint pairs (PAIR_KEY_NAMES), zero missing partners, duplicate
+# members, ID or reverse-name conflicts. 13.01--13.04 share these 31 IDs;
+# 13.05 adds 27 TimeSprinting.
 _BASE_STAT_NAMES = {
     0: "EnemiesBlinded",
     1: "DamageDealt",
@@ -111,17 +85,13 @@ _BASE_STAT_NAMES = {
 }
 _STAT_NAMES_1305 = {**_BASE_STAT_NAMES, 27: "TimeSprinting"}
 # 13.06, measured 2026-09-28 over all 38 13.06 exports of the 1,018-replay
-# common audit (parser 259ed10, `export --checkpoints`). The same pairing found
-# 14,814 main/checkpoint observations of 29 IDs with zero missing partners,
-# duplicate or null members, and zero ID or reverse-name collisions. Every
-# observed ID carries exactly its 13.05 name and none is new. That agreement is
-# the evidence, not the `known` status the 38 exports then receive: this entry
-# was built from them, so they validate against it by construction.
-# Three 13.05 IDs were not observed in any 13.06 export and stay unknown for
-# 13.06: 57 EnemiesJammed, 62 UtilDestroyed and 65 DebuffResisted. They are
-# rare on 13.05 too (12, 15 and 7 of its 401 audit exports), so their absence
-# says nothing either way. A 13.06 export carrying one fails as
-# unknown_statistic_id, which means "not yet measured on this build".
+# audit (parser 259ed10, `export --checkpoints`): 14,814 pairs of 29 IDs, zero
+# missing partners, duplicate or null members, ID or reverse-name collisions,
+# every ID with exactly its 13.05 name. That agreement is the evidence, not the
+# `known` status: this entry was built from those 38 exports, so they validate
+# against it by construction. 57, 62 and 65 were not observed on 13.06 (rare
+# on 13.05 too: 12, 15 and 7 of its 401 audit exports) and stay unknown,
+# failing as unknown_statistic_id ("not yet measured on this build").
 _UNOBSERVED_IN_1306 = frozenset({57, 62, 65})
 KNOWN_STAT_NAMES = {
     "13.01": dict(_BASE_STAT_NAMES),
@@ -147,8 +117,8 @@ class PairKey:
     cast_element_index: int
     effect_element_index: int
 
-    def as_dict(self) -> dict:
-        return dict(zip(PAIR_KEY_NAMES, self.__dict__.values(), strict=True))
+
+PAIR_KEY_NAMES = tuple(item.name for item in fields(PairKey))
 
 
 @dataclass
@@ -163,7 +133,7 @@ class PairingResult:
     def issue(self, kind: str, key: PairKey, detail: dict) -> None:
         self.issues[kind] += 1
         if len(self.samples[kind]) < 10:
-            self.samples[kind].append({**key.as_dict(), **detail})
+            self.samples[kind].append({**asdict(key), **detail})
 
 
 def replay_build(export_dir: Path) -> str:
@@ -272,15 +242,7 @@ def known_dictionary() -> dict[str, list[dict]]:
 
 def deduplicate_exports(exports: list[Path]) -> list[Path]:
     """Return each canonical export directory once, preserving argument order."""
-    unique = []
-    seen = set()
-    for export_dir in exports:
-        canonical = export_dir.resolve()
-        if canonical in seen:
-            continue
-        seen.add(canonical)
-        unique.append(canonical)
-    return unique
+    return list(dict.fromkeys(export_dir.resolve() for export_dir in exports))
 
 
 def validate_output_path(out: Path, exports: list[Path]) -> None:
@@ -472,7 +434,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         args.out,
         json.dumps(document, indent=2, ensure_ascii=True) + "\n",

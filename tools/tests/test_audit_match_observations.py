@@ -66,7 +66,8 @@ class MatchObservationAuditTests(unittest.TestCase):
             result = audit.audit_export(root, window_ms=30)
         self.assertEqual(result["counts"]["ambiguous_multiple_rpc"], 1)
         self.assertEqual(result["counts"]["unmatched"], 1)
-        self.assertEqual(result["counts"]["left_censored_magazine_streams"], 1)
+        self.assertEqual(result["counts"]["magazine_streams"], 1)
+        self.assertEqual(result["counts"]["all_ambiguous_magazine_streams"], 0)
 
     def test_conflicting_ammo_packet_is_counted_not_ordered(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -80,6 +81,32 @@ class MatchObservationAuditTests(unittest.TestCase):
             result = audit.audit_export(root)
         self.assertEqual(result["counts"]["ambiguous_ammo_packets"], 1)
         self.assertEqual(result["counts"]["ammo_decreases_examined"], 0)
+
+    def test_a_stream_with_no_determinate_sample_is_counted(self):
+        """Every packet of stream 11 carries two values; streams 10 and 12 are
+        determinate, so a count of determinate streams would read 2, not 1."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root, [
+                (100, 10, 20, 10, self.ammo_group, audit.AMMO_FIELD, 30),
+                (120, 12, 20, 10, self.ammo_group, audit.AMMO_FIELD, 29),
+                (100, 10, 20, 11, self.ammo_group, audit.AMMO_FIELD, 30),
+                (100, 10, 20, 11, self.ammo_group, audit.AMMO_FIELD, 25),
+                (130, 13, 20, 11, self.ammo_group, audit.AMMO_FIELD, 24),
+                (130, 13, 20, 11, self.ammo_group, audit.AMMO_FIELD, 23),
+                (110, 11, 20, 12, self.ammo_group, audit.AMMO_FIELD, 20),
+                (140, 14, 20, 12, self.ammo_group, audit.AMMO_FIELD, 19),
+            ])
+            pq.write_table(pa.table({
+                "net_guid": [10, 11, 12, 20],
+                "path": ["MagazineAmmo", "MagazineAmmo", "MagazineAmmo",
+                         "/Game/Equippables/Guns/Rifles/Test.Test_C"],
+                "outer_net_guid": [20, 20, 20, None]}), root / "net_guids.parquet")
+            counts = audit.audit_export(root)["counts"]
+        self.assertEqual(counts["magazine_streams"], 3)
+        self.assertEqual(counts["all_ambiguous_magazine_streams"], 1)
+        self.assertEqual(counts["ambiguous_ammo_packets"], 2)
+        self.assertNotIn("left_censored_magazine_streams", counts)
 
     def test_corpus_failure_and_empty_population_do_not_report_success(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -99,16 +126,8 @@ class MatchObservationAuditTests(unittest.TestCase):
         ]
 
     def test_export_leftovers_are_listed_and_never_audited(self):
-        """Neither sibling `vrfkit export` leaves behind is an export.
-
-        Measured at 259ed10: `Stop-Process -Force` 1.5 s into
-        `vrfkit export ... --out pub2` left `.pub2.vrfkit-staging-55396-0`
-        with a footerless fields.parquet, and `--exports` over its parent
-        reported candidate_exports=2, exports_failed=1 and exited 1. The
-        `previous` sibling is worse: it is a complete export, manifest and
-        all, so it was audited again. Measured with that sibling alone beside
-        `pub2`: corroborated_unique_rpc 2 instead of 1, exit 0.
-        """
+        """Neither sibling `vrfkit export` leaves behind is an export (the
+        259ed10 measurements are export_scan.py's)."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_complete_export(root / "pub2", self.corroborated_rows())

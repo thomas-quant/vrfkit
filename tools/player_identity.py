@@ -1,41 +1,26 @@
 """Player bodies from the whole `SpawnedCharacter` history, not its last value.
 
-Only `SpawnedCharacter` proves that a pawn is a player's body: it is the
-PlayerState's reference to the character it spawned. `PossessedCharacter`,
-`Owner`, `Instigator` and a pawn's own `PlayerState` can all name a controlled
-device instead -- Astra's `Rift_TargetingForm_PC_C` carries the player's
-PlayerState on every possession and is never a `SpawnedCharacter` value.
+Only `SpawnedCharacter`, the PlayerState's reference to the character it
+spawned, proves a body. `PossessedCharacter`, `Owner`, `Instigator` and a
+pawn's own `PlayerState` can name a device: Astra's `Rift_TargetingForm_PC_C`
+carries the player's PlayerState on every possession and is never a
+`SpawnedCharacter` value.
 
-The manifest keeps one value per player. `players[].character_net_guid` is the
-last non-zero `SpawnedCharacter` write (docs/DATA.md, "Player identity"), which
-survives the 0 written on a disconnect -- and also throws away the pawn the
-player had before it. A player who reconnects is given a new pawn: on 39c2bb2c
-(13.05) PlayerState 256 writes 1510 at t=66, 0 at 1851838 and 45530 at
-1948245, and the manifest keeps 45530. Joined on the manifest alone, pawn
-1510's 1,854 effect records were labelled `unconfirmed_actor` by a run that
-exited 0, and its five spike custody intervals `unknown`.
+The manifest keeps the last non-zero value and drops a pre-reconnect pawn
+(docs/DATA.md, "Player identity": 39c2bb2c, 1510 -> 0 -> 45530; the
+manifest-only join mislabelled pawn 1510's 1,854 effect records and exited
+0). The rule is as static as the manifest's: a pawn named by exactly one
+PlayerState is that player's body for the whole export. `history` keeps each
+PlayerState's writes in order, zeros included.
 
-`player_bodies` admits every non-zero value of the field instead, read from
-main `fields.parquet` (top-level rows on the PlayerState class), and joins it
-to the PlayerState's manifest `subject`. The rule is static, like the
-manifest's: a pawn named by exactly one PlayerState is that player's body for
-the whole export. `history` keeps each PlayerState's writes in order, zeros
-included, for a reader that wants the intervals.
-
-Measured on the 1,018-export audit corpus (parser 259ed10, 2026-09-28): 10,426
-`SpawnedCharacter` rows, every one top-level and typed on the two classes in
-`PLAYER_STATE_GROUPS`; 10,250 named pawns, each named by exactly one
-PlayerState, and each pawn's own top-level `PlayerState` on its class group
-names that same PlayerState (10,250 of 10,250); 97 pawns in 86 exports are
-earlier values the manifest dropped; the manifest's value equals the last
-non-zero history value for every player. A time-scoped rule was rejected:
-347 effect rows on 24 pawns share the naming write's `time_ms` but precede it
-by packet id (the spawn tick), 327 of them on pawns the manifest already
-admitted, and no effect row on a named pawn follows its PlayerState's next
-write. A packet-ordered scope would demote those 327 with nothing to gain.
-
-Every count in `COUNT_KEYS` is reported, zeros included, by the tools that use
-this module.
+1,018 exports (parser 259ed10, 2026-09-28): 10,426 `SpawnedCharacter` rows,
+all top-level and typed on `PLAYER_STATE_GROUPS`; 10,250 pawns, each named by
+one PlayerState that the pawn's own `PlayerState` names back (10,250 of
+10,250); 97 earlier pawns in 86 exports. A time-scoped rule was rejected: 347
+effect rows on 24 pawns share the naming write's `time_ms` but precede it by
+packet id (the spawn tick), 327 of them on pawns the manifest already
+admitted, and none on a named pawn follows its PlayerState's next write, so a
+packet-ordered scope would demote those 327 for nothing.
 """
 
 from __future__ import annotations
@@ -47,19 +32,17 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-#: The PlayerState classes that replicate `SpawnedCharacter`. Swiftplay
-#: replicates the Bomb class's fields under its own class; the overlay and the
-#: sink treat that as the Bomb class through `GROUP_ALIASES` in
-#: `crates/vrf-decode/src/overlay.rs`, and `test_player_identity.py` fails if
-#: that table grows a PlayerState alias this tuple does not carry.
+#: The PlayerState classes that replicate `SpawnedCharacter`: Bomb, and the
+#: Swiftplay alias `GROUP_ALIASES` in crates/vrf-decode/src/overlay.rs maps to
+#: it (test_player_identity.py fails on an alias this tuple lacks).
 PLAYER_STATE_GROUPS = (
     "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
     "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/"
     "Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
 )
 
-#: Provenance of a body that is the manifest's own `character_net_guid`. The
-#: string predates this module, so records it labelled do not change.
+#: Provenance of the manifest's own `character_net_guid`. The string predates
+#: this module and must stay byte-identical: records it labelled keep it.
 FINAL_PROVENANCE = "manifest.players.character_net_guid (SpawnedCharacter)"
 #: Provenance of a body the manifest dropped: an earlier non-zero value.
 EARLIER_PROVENANCE = "fields.SpawnedCharacter history (earlier pawn of a manifest player)"

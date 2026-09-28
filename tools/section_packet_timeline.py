@@ -1,15 +1,12 @@
 """Packet-resolved companion view for an accepted strict section timeline."""
 from __future__ import annotations
 import collections, copy
+if __package__:
+ from .section_timeline import _lifetime, _traces
+else:
+ from section_timeline import _lifetime, _traces
 
 REMOVED_STRICT_REASONS={"same_time_tie","prior_tie_censor","lifecycle_unresolved","prior_lifecycle_unresolved","actor_channel_instance_changed"}
-
-def traces(rows):
- actors,channels=collections.defaultdict(list),collections.defaultdict(list)
- for ordinal,row in rows:
-  if row.get("event") in ("open","close"):
-   item=(ordinal,dict(row));actors[row["actor_net_guid"]].append(item);channels[row["channel_index"]].append(item)
- return actors,channels
 
 def active_at_packet(history,coordinate):
  """Resolve main-packet state; events in the observation packet are unordered."""
@@ -38,32 +35,24 @@ def active_at_packet(history,coordinate):
  if any(active[k]!=coordinate[k] for k in ("actor_net_guid","channel_index")):return None,"active_identity_mismatch"
  return active,"active"
 
-def packet_lifetime(actors,channels,coordinate):
- actor,a_status=active_at_packet(actors.get(coordinate["actor_net_guid"],[]),coordinate)
- channel,c_status=active_at_packet(channels.get(coordinate["channel_index"],[]),coordinate)
- matched=actor is not None and channel is not None and actor==channel
- return {"status":"active" if matched else "unresolved","actor_status":a_status,"channel_status":c_status,"actor_open":actor,"channel_open":channel}
-
 def _arithmetic_counts(nodes,key):
  out={f"{key}_arithmetic_true":0,f"{key}_arithmetic_false":0,f"{key}_arithmetic_unknown":0,f"{key}_eligible_arithmetic_true":0,f"{key}_eligible_arithmetic_false":0,f"{key}_eligible_arithmetic_unknown":0}
  for node in nodes:
   value=node["route_arithmetic"]["matches"];suffix="true" if value is True else "false" if value is False else "unknown";out[f"{key}_arithmetic_{suffix}"]+=1
-  if node[key]["eligible"] and value is True:out[f"{key}_eligible_arithmetic_true"]+=1
-  if node[key]["eligible"] and value is False:out[f"{key}_eligible_arithmetic_false"]+=1
-  if node[key]["eligible"] and value is None:out[f"{key}_eligible_arithmetic_unknown"]+=1
+  if node[key]["eligible"]:out[f"{key}_eligible_arithmetic_{suffix}"]+=1
  return out
 
 def build(strict,actor_rows,population="main"):
  """Retain strict data and add packet-only comparison evidence."""
  if population!="main":raise ValueError("packet timeline requires main population")
- result=copy.deepcopy(strict);actors,channels=traces(actor_rows);nodes=result["nodes"]
+ result=copy.deepcopy(strict);actors,channels=_traces(actor_rows);nodes=result["nodes"]
  packet_counts=collections.Counter();time_groups=collections.defaultdict(list)
  for n in nodes:
   c=n["origin"]["coordinate"];k=n["state_key"];packet_counts[(k["actor_net_guid"],k["object_net_guid"],k["changed_component_ref"],c["packet_id"])]+=1
   time_groups[(k["actor_net_guid"],k["object_net_guid"],k["changed_component_ref"],c["time_ms"])].append(c["packet_id"])
  by_id={tuple(n["node_id"]):n for n in nodes}
  for node in nodes:
-  c=node["origin"]["coordinate"];k=node["state_key"];life=packet_lifetime(actors,channels,c);prior=by_id.get(tuple(node["previous_node_id"])) if node["previous_node_id"] else None
+  c=node["origin"]["coordinate"];k=node["state_key"];life=_lifetime(actors,channels,c,active_at_packet);prior=by_id.get(tuple(node["previous_node_id"])) if node["previous_node_id"] else None
   removed=sorted(x for x in node["continuity"]["reasons"] if x in REMOVED_STRICT_REASONS);reasons=[x for x in node["continuity"]["reasons"] if x not in REMOVED_STRICT_REASONS]
   tied=packet_counts[(k["actor_net_guid"],k["object_net_guid"],k["changed_component_ref"],c["packet_id"])]>1
   if tied:reasons.append("same_packet_tie")

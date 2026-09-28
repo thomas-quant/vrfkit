@@ -19,14 +19,18 @@ import pyarrow.parquet as pq
 
 if __package__:
     from . import extract_kill_observations as observation_extractor
-    from .atomic_io import atomic_write_text, sha256_file
+    from .atomic_io import atomic_write_text, sha256_file as file_sha
     from .extract_kill_observations import InputError, exact_ref
 else:
     import extract_kill_observations as observation_extractor
-    from atomic_io import atomic_write_text, sha256_file
+    from atomic_io import atomic_write_text, sha256_file as file_sha
     from extract_kill_observations import InputError, exact_ref
 
+#: Matched lags measure 5-41 ms on the 714-export corpus, and a 100 ms cap
+#: changed no match (docs/KILL_LEDGER.md, "Validation scope").
 MAX_REPLICATION_LAG_MS = 50
+#: This file and the modules it runs, hashed as provenance and refused as --out.
+SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')
 DEATH_NAME = 'EReplayEventGroup::CharacterDeath'
 IDENTITY_STATUSES = (
     'resolved', 'absent_reference', 'null_reference', 'lifecycle_time_regression',
@@ -189,14 +193,19 @@ def resolve_round(rounds, timestamp):
             'round_event_row_ordinal':row['event_row_ordinal']}
 
 
+def joinable(death):
+    """A validated death payload whose killer, victim and round all resolved."""
+    return (death['payload_issue'] is None
+            and death['killer_identity']['status'] == death['victim_identity']['status'] == 'resolved'
+            and death['round_identity']['status'] == 'resolved')
+
+
 def match_deaths(deaths, complete_main):
     """Require exactly one candidate on each side, without consuming greedily."""
     by_pair = defaultdict(list)
     for index, death in enumerate(deaths):
-        killer, victim = death['killer_identity'], death['victim_identity']
-        if (death['payload_issue'] is None and killer['status'] == victim['status'] == 'resolved'
-            and death['round_identity']['status'] == 'resolved'):
-            by_pair[(killer['player_state_ref'], victim['player_state_ref'],
+        if joinable(death):
+            by_pair[(death['killer_identity']['player_state_ref'], death['victim_identity']['player_state_ref'],
                      death['round_identity']['round_number'])].append(index)
     candidates, reverse = [], defaultdict(list)
     for index, observation in enumerate(complete_main):
@@ -210,8 +219,6 @@ def match_deaths(deaths, complete_main):
     return [(index, options[0]) for index, options in enumerate(candidates)
             if len(options) == 1 and len(reverse[options[0]]) == 1], candidates, dict(reverse)
 
-
-file_sha = sha256_file
 
 def player_state_rows(path):
     """Preserve physical field ordinals while selecting top-level properties."""
@@ -236,8 +243,7 @@ def extract(export, observations_path=None):
     else:
         import kill_state
     export = Path(export)
-    source_names = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')
-    sources = {name:file_sha(Path(__file__).parent/name) for name in source_names}
+    sources = {name:file_sha(Path(__file__).parent/name) for name in SOURCE_NAMES}
     parquet_names = ('fields','checkpoint_fields','actors','net_guids','checkpoint_actors',
                      'checkpoint_net_guids','checkpoint_export_groups','checkpoint_export_fields','events')
     inputs = {name+'.parquet':file_sha(export/(name+'.parquet')) for name in parquet_names}
@@ -329,9 +335,7 @@ def extract(export, observations_path=None):
              'event_killer_player_state_ref':death['killer_identity']['player_state_ref'],
              'replication_lag_ms':observation['time_ms']-death['time1']}
             for death in deaths
-            if death['payload_issue'] is None
-            and death['killer_identity']['status'] == death['victim_identity']['status'] == 'resolved'
-            and death['round_identity']['status'] == 'resolved'
+            if joinable(death)
             and death['round_identity']['round_number'] == observation['members']['round_number']
             and death['victim_identity']['player_state_ref'] == observation['members']['victim_ref']
             and death['killer_identity']['player_state_ref'] != observation['actor_net_guid']
@@ -376,8 +380,7 @@ def main(argv=None):
     pa.set_io_thread_count(1)
     try:
         observation_extractor.reject_overwrite(args.export,args.out)
-        protected=[Path(__file__).with_name(name) for name in
-                   ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')]
+        protected=[Path(__file__).with_name(name) for name in SOURCE_NAMES]
         if args.observations is not None:
             protected.append(args.observations)
         if args.out.resolve() in {p.resolve() for p in protected}:

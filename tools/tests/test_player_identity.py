@@ -1,10 +1,6 @@
-"""`player_identity` admits every `SpawnedCharacter` pawn, and only those.
-
-The failure this guards is quiet: a join keyed on the manifest's single
-`character_net_guid` drops the pawn a player had before reconnecting, labels
-its records as some other actor's, and exits 0. The opposite failure is quiet
-too -- admitting a pawn because it carries the player's `PlayerState` would
-make Astra's targeting form a player body.
+"""`player_identity` admits every `SpawnedCharacter` pawn, and only those: not
+only the manifest's last one, and never a pawn merely carrying the player's
+`PlayerState` (Astra's targeting form).
 """
 import json
 import re

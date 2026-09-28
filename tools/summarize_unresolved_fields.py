@@ -1,36 +1,35 @@
 """Prioritize physical field rows whose typed overlay is wholly absent.
 
-This is an inventory of raw/untyped *wire rows*, not a decoder and not a
-semantic claim.  A row is untyped only when all four ``value_*`` columns are
-null; zero, ``False``, and empty strings are therefore typed.  ``raw_bit_sum``
-is the sum of ``bit_count`` for those rows, not a comparison of payload values.
-
-Inputs are export directories or parents with direct export children.  Sources
-are opened read-only.  The output directory receives a concise summary and a
-complete, deterministic JSON catalog.  Main and checkpoint tables retain
-separate catalog entries because checkpoint rows are a different decode path.
+An inventory of raw/untyped wire rows, not a decoder or a semantic claim. A
+row is untyped only when all four ``value_*`` columns are null (0, ``False``
+and "" are typed); every ``*_bit_sum`` sums their declared ``bit_count``, not
+payload values. Inputs are exports or parents of exports, read-only; the
+output directory gets a summary and a deterministic JSON catalog, with main
+and checkpoint entries apart because they are different decode paths.
 """
 from __future__ import annotations
 
 import argparse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
-from typing import Iterable
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .export_scan import child_exports, leftover_note, skipped_report
+    from .atomic_io import atomic_write_text
+    from .export_scan import discover_exports, skipped_report
 else:
-    from export_scan import child_exports, leftover_note, skipped_report
+    from atomic_io import atomic_write_text
+    from export_scan import discover_exports, skipped_report
 
 
 VALUE_COLUMNS = ("value_i64", "value_f64", "value_bool", "value_str")
@@ -42,33 +41,20 @@ AGGREGATE_COLUMNS = (
     "preserved_raw_bit_sum", "missing_raw_nonempty_rows", "missing_declared_bit_sum",
     "zero_bit_marker_rows", "wrong_raw_length_rows",
 )
+GROUP_KEY = ("table_name, replay_build, group_path, group_is_null, field_name, field_is_null, "
+             "checksum_key, checksum_is_null")
+#: Adds a shard's or batch's aggregates to an existing catalog key.
+MERGE_AGGREGATES = (f"ON CONFLICT({GROUP_KEY}) DO UPDATE SET "
+                    + ", ".join(f"{name} = {name} + excluded.{name}" for name in AGGREGATE_COLUMNS))
 
 
 class InputError(ValueError):
     """An input cannot support an honest raw/untyped inventory."""
 
 
-def discover(inputs: Iterable[Path], skipped: list[Path] | None = None) -> list[Path]:
-    """Find export directories without recursively treating unrelated files as input.
-
-    A parent's `vrfkit export` staging/backup leftovers are never exports
-    (see `export_scan.py`); they are appended to `skipped` when it is given.
-    """
-    exports: set[Path] = set()
-    for root in inputs:
-        if not root.is_dir():
-            raise InputError(f"not an export directory or parent: {root}")
-        if (root / "fields.parquet").is_file():
-            exports.add(root.resolve())
-            continue
-        children, leftovers = child_exports(root)
-        if skipped is not None:
-            skipped.extend(leftovers)
-        if not children:
-            raise InputError(
-                f"no direct child exports containing fields.parquet in {root}{leftover_note(leftovers)}")
-        exports.update(child.resolve() for child in children)
-    return sorted(exports)
+#: Export directories named directly, or the direct child exports of a parent.
+discover = partial(discover_exports, error=InputError,
+                   no_children="no direct child exports containing fields.parquet in")
 
 
 def _build_and_manifest_sha(directory: Path) -> tuple[str, str]:
@@ -123,21 +109,8 @@ def _upsert_groups(connection: sqlite3.Connection, table: str, build: str, expor
         rows.append((table, build, group_path, group_is_null, field_name, field_is_null, checksum, checksum_is_null,
                      *(int(item[name]) for name in AGGREGATE_COLUMNS), export_id))
     connection.executemany(
-        """INSERT INTO groups(table_name, replay_build, group_path, group_is_null, field_name, field_is_null,
-                              checksum_key, checksum_is_null, row_count, declared_bit_sum, raw_present_rows,
-                              preserved_raw_rows, preserved_raw_bit_sum, missing_raw_nonempty_rows,
-                              missing_declared_bit_sum, zero_bit_marker_rows, wrong_raw_length_rows)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(table_name, replay_build, group_path, group_is_null, field_name, field_is_null, checksum_key, checksum_is_null)
-           DO UPDATE SET row_count = row_count + excluded.row_count,
-                         declared_bit_sum = declared_bit_sum + excluded.declared_bit_sum,
-                         raw_present_rows = raw_present_rows + excluded.raw_present_rows,
-                         preserved_raw_rows = preserved_raw_rows + excluded.preserved_raw_rows,
-                         preserved_raw_bit_sum = preserved_raw_bit_sum + excluded.preserved_raw_bit_sum,
-                         missing_raw_nonempty_rows = missing_raw_nonempty_rows + excluded.missing_raw_nonempty_rows,
-                         missing_declared_bit_sum = missing_declared_bit_sum + excluded.missing_declared_bit_sum,
-                         zero_bit_marker_rows = zero_bit_marker_rows + excluded.zero_bit_marker_rows,
-                         wrong_raw_length_rows = wrong_raw_length_rows + excluded.wrong_raw_length_rows""",
+        f"""INSERT INTO groups({GROUP_KEY}, {', '.join(AGGREGATE_COLUMNS)})
+            VALUES ({', '.join('?' * (8 + len(AGGREGATE_COLUMNS)))}) {MERGE_AGGREGATES}""",
         [row[:-1] for row in rows],
     )
     connection.executemany(
@@ -211,9 +184,8 @@ def _scan_table(connection: sqlite3.Connection, directory: Path, export_id: str,
 
 
 def _database(connection: sqlite3.Connection) -> None:
-    # The catalog can have high cardinality.  Keep SQLite's page cache bounded
-    # and spill temporary sort/index pages to the per-run directory instead of
-    # allowing the process cache to grow with the corpus.
+    # A high-cardinality catalog: SQLite's page cache stays bounded, and temp
+    # sort/index pages spill to the per-run directory, not process memory.
     connection.execute("PRAGMA cache_size = -32768")
     connection.execute("PRAGMA temp_store = FILE")
     connection.executescript(
@@ -297,17 +269,8 @@ def _merge_shard(connection: sqlite3.Connection, path: Path, index: int) -> None
     connection.execute(f"ATTACH DATABASE ? AS {alias}", (str(path),))
     try:
         group_rows = connection.execute(f"SELECT * FROM {alias}.groups")
-        statement = """INSERT INTO groups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(table_name, replay_build, group_path, group_is_null, field_name, field_is_null, checksum_key, checksum_is_null)
-                       DO UPDATE SET row_count = row_count + excluded.row_count,
-                                     declared_bit_sum = declared_bit_sum + excluded.declared_bit_sum,
-                                     raw_present_rows = raw_present_rows + excluded.raw_present_rows,
-                                     preserved_raw_rows = preserved_raw_rows + excluded.preserved_raw_rows,
-                                     preserved_raw_bit_sum = preserved_raw_bit_sum + excluded.preserved_raw_bit_sum,
-                                     missing_raw_nonempty_rows = missing_raw_nonempty_rows + excluded.missing_raw_nonempty_rows,
-                                     missing_declared_bit_sum = missing_declared_bit_sum + excluded.missing_declared_bit_sum,
-                                     zero_bit_marker_rows = zero_bit_marker_rows + excluded.zero_bit_marker_rows,
-                                     wrong_raw_length_rows = wrong_raw_length_rows + excluded.wrong_raw_length_rows"""
+        statement = (f"INSERT INTO groups VALUES ({', '.join('?' * (8 + len(AGGREGATE_COLUMNS)))}) "
+                     + MERGE_AGGREGATES)
         while batch := group_rows.fetchmany(10_000):
             connection.executemany(statement, batch)
         group_rows.close()
@@ -321,7 +284,6 @@ def _merge_shard(connection: sqlite3.Connection, path: Path, index: int) -> None
 
 
 def summarize(exports: list[Path], jobs: int = 1, top: int = 25) -> tuple[dict, list[dict]]:
-    """Scan Arrow batches in parallel into bounded SQLite shards, then merge deterministically."""
     if jobs < 1 or jobs > 16:
         raise InputError("jobs must be between 1 and 16")
     if top < 1:
@@ -381,9 +343,7 @@ def summarize(exports: list[Path], jobs: int = 1, top: int = 25) -> tuple[dict, 
 
 
 def _write_json(path: Path, document: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:

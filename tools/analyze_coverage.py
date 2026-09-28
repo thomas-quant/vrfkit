@@ -1,36 +1,24 @@
 """Analyze overlay coverage gaps: classify 'Not in table' fields into
 'C# descriptor missing' vs 'extractor failure'.
 
-Reads:
-  - out/nested/manifest.json  (replay groups + fields)
-  - crates/vrf-decode/src/table.rs  (current overlay entries)
-  - C# descriptor directory (to list which groups have descriptors); the
-    vendored third_party/vrp/Replay.Valorant unless --csharp-dir says otherwise
-
-Outputs:
-  - Groups in replay with no overlay entry, split by whether a C# descriptor
-    exists for that group.
-  - Top uncovered groups by field count.
-
-Usage:
-    python tools/analyze_coverage.py [--csharp-dir <path>]
+Groups of out/nested/manifest.json with no entry in table.rs are split by
+whether a C# descriptor exists for them (the vendored Replay.Valorant, or
+--csharp-dir).
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
 from pathlib import Path
-from collections import Counter
 
 VRFKIT_ROOT = Path(__file__).parent.parent
 MANIFEST_PATH = VRFKIT_ROOT / "out" / "nested" / "manifest.json"
 TABLE_RS_PATH = VRFKIT_ROOT / "crates" / "vrf-decode" / "src" / "table.rs"
 
-# The descriptors table.rs is generated from, vendored in the tree
-# (third_party/vrp/README.md). This used to come from VRFKIT_CSHARP_DIR, which
-# no one set, so the extractor-missed count read NOT MEASURED by default.
-# --csharp-dir points at another Replay.Valorant directory, e.g. upstream's.
+# The vendored descriptors table.rs is generated from (third_party/vrp/
+# README.md); --csharp-dir points at another Replay.Valorant, e.g. upstream's.
 DEFAULT_CSHARP_DIR = VRFKIT_ROOT / "third_party" / "vrp" / "Replay.Valorant"
 
 PATH_RE = re.compile(r'override\s+string\s+Path\s*=>\s*"(?P<path>[^"]+)"')
@@ -57,10 +45,7 @@ def extract_overlay_groups(table_rs: Path) -> set[str]:
 
 
 def classify(groups_in_replay, overlay_groups: set, csharp_paths: set):
-    """`(counts, extractor-missed groups, no-descriptor groups)`.
-
-    Split out of `main` so the classification can be tested without an export.
-    """
+    """`(counts, extractor-missed groups, no-descriptor groups)`."""
     counts = {"covered": 0, "extractor_missed": 0, "no_descriptor": 0}
     missed: list[tuple[str, int]] = []
     no_desc: list[tuple[str, int]] = []
@@ -79,17 +64,10 @@ def classify(groups_in_replay, overlay_groups: set, csharp_paths: set):
 
 
 def missed_report(extractor_missed: int, measured: bool) -> str:
-    """The extractor-missed line, which must not print an unmeasured zero.
-
-    Without the C# descriptor directory `csharp_paths` is empty, so every
-    uncovered group falls into "no descriptor" and this line reads
-    "extractor missed: 0" on a machine that never looked -- the same vacuous
-    zero the malformed counter carried for the project's whole history.
-
-    The count is deliberately NOT fatal when it IS measured: overlay coverage
-    is known-incomplete by design, so failing on it would make this analysis
-    permanently red and it would simply stop being run.
-    """
+    """The extractor-missed line: NOT MEASURED without descriptors (every
+    uncovered group would read "no descriptor", printing a vacuous 0). A
+    measured count is deliberately not fatal: coverage is incomplete by
+    design, and an always-red analysis would stop being run."""
     if not measured:
         return ("  C# descriptor exists but extractor missed: NOT MEASURED "
                 "(no C# descriptor dir; pass --csharp-dir)")
@@ -97,10 +75,11 @@ def missed_report(extractor_missed: int, measured: bool) -> str:
 
 
 def main(argv: list[str]) -> int:
-    csharp_dir = DEFAULT_CSHARP_DIR
-    for i, arg in enumerate(argv[1:], 1):
-        if arg == "--csharp-dir" and i + 1 < len(argv):
-            csharp_dir = Path(argv[i + 1])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--csharp-dir", type=Path, default=DEFAULT_CSHARP_DIR,
+                        help="C# descriptor directory (default: the vendored "
+                             "third_party/vrp/Replay.Valorant)")
+    csharp_dir = parser.parse_args(argv[1:]).csharp_dir
 
     if not MANIFEST_PATH.exists():
         print(f"ERROR: {MANIFEST_PATH} not found. Run export first.", file=sys.stderr)
@@ -115,8 +94,8 @@ def main(argv: list[str]) -> int:
     else:
         csharp_paths = set()
         print(f"NOTE: C# descriptor dir not found ({csharp_dir}); "
-              f"pass --csharp-dir to classify extractor-missed groups. "
-              f"All uncovered groups will read as 'no descriptor'.",
+              "pass --csharp-dir to classify extractor-missed groups. "
+              "All uncovered groups will read as 'no descriptor'.",
               file=sys.stderr)
 
     print(f"Replay groups: {len(groups_in_replay)}")
@@ -128,15 +107,14 @@ def main(argv: list[str]) -> int:
     counts, uncovered_ext_miss, uncovered_no_desc = classify(
         groups_in_replay, overlay_groups, csharp_paths)
 
-    print(f"=== Replay group classification ===")
+    print("=== Replay group classification ===")
     print(f"  Covered by overlay:    {counts['covered']}")
     print(missed_report(counts["extractor_missed"], measured))
-    print(f"  No C# descriptor (raw-only):               "
+    print("  No C# descriptor (raw-only):               "
           f"{counts['no_descriptor']}"
           + ("" if measured else "  <- every uncovered group, unclassified"))
     print()
 
-    # Count total fields in each category
     total_fields_in_replay = sum(len(g["fields"]) for g in groups_in_replay)
     covered_fields = sum(
         len(g["fields"]) for g in groups_in_replay if g["path"] in overlay_groups
@@ -144,23 +122,23 @@ def main(argv: list[str]) -> int:
     ext_miss_fields = sum(fc for _, fc in uncovered_ext_miss)
     no_desc_fields = sum(fc for _, fc in uncovered_no_desc)
 
-    print(f"=== Field-level breakdown ===")
+    print("=== Field-level breakdown ===")
     print(f"  Total declared fields in replay: {total_fields_in_replay}")
     print(f"  In overlay-covered groups:       {covered_fields}")
-    print(f"  In extractor-missed groups:      "
+    print("  In extractor-missed groups:      "
           + (str(ext_miss_fields) if measured else "NOT MEASURED"))
     print(f"  In no-descriptor groups:         {no_desc_fields}")
     print()
 
     if uncovered_ext_miss:
-        print(f"=== Extractor-missed groups (C# descriptor exists, overlay missing) ===")
+        print("=== Extractor-missed groups (C# descriptor exists, overlay missing) ===")
         uncovered_ext_miss.sort(key=lambda x: -x[1])
         for path, fc in uncovered_ext_miss[:20]:
             print(f"  {fc:>4} fields  {path}")
         print()
 
     if uncovered_no_desc:
-        print(f"=== Top no-descriptor groups (by field count) ===")
+        print("=== Top no-descriptor groups (by field count) ===")
         uncovered_no_desc.sort(key=lambda x: -x[1])
         for path, fc in uncovered_no_desc[:20]:
             print(f"  {fc:>4} fields  {path}")

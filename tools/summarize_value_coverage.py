@@ -1,12 +1,11 @@
 """Count physical typed rows, with optional reviewed semantic-evidence rows.
 
-Inputs are export directories or parents whose direct children are exports.
-Read-only: the JSON report goes to stdout, and no export is modified. A typed
-row has at least one non-null value_i64/f64/bool/str, including 0, False and
-empty strings. Multiple populated columns still count as one typed row and
-are reported separately. This is not a percentage of game facts understood.
-``--semantic-evidence`` accepts an explicit reviewed-evidence catalog; it
-never promotes a field name or typed value to a semantic verdict on its own.
+Inputs are exports or parents of exports, read-only; the JSON report goes to
+stdout. A typed row has at least one non-null value_i64/f64/bool/str, 0,
+False and "" included; several populated columns count once and are
+reported separately. Not a percentage of game facts understood.
+``--semantic-evidence`` takes a reviewed catalog; a field name or typed value
+alone never becomes a semantic verdict.
 """
 from __future__ import annotations
 
@@ -24,9 +23,9 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .export_scan import child_exports, leftover_note, skipped_report
+    from .export_scan import discover_exports, skipped_report
 else:
-    from export_scan import child_exports, leftover_note, skipped_report
+    from export_scan import discover_exports, skipped_report
 
 VALUE_COLUMNS = ("value_i64", "value_f64", "value_bool", "value_str")
 TABLES = ("fields", "checkpoint_fields")
@@ -60,26 +59,8 @@ def _count_parquet(parquet: pq.ParquetFile, filename: str) -> dict[str, int]:
     return {"rows": rows, "typed_rows": typed, "untyped_rows": rows - typed, "multi_value_rows": multi}
 
 
-def discover(inputs: list[Path], skipped: list[Path] | None = None) -> list[Path]:
-    """Exports named directly, or the direct child exports of a parent.
-
-    A parent's `vrfkit export` staging/backup leftovers are never exports
-    (see `export_scan.py`); they are appended to `skipped` when it is given.
-    """
-    exports: set[Path] = set()
-    for root in inputs:
-        if not root.is_dir():
-            raise ValueError(f"not an export directory or parent: {root}")
-        if (root / "fields.parquet").is_file():
-            exports.add(root.resolve())
-            continue
-        children, leftovers = child_exports(root)
-        if skipped is not None:
-            skipped.extend(leftovers)
-        if not children:
-            raise ValueError(f"no direct child exports in {root}{leftover_note(leftovers)}")
-        exports.update(child.resolve() for child in children)
-    return sorted(exports)
+#: Export directories named directly, or the direct child exports of a parent.
+discover = discover_exports
 
 
 def count_export(directory: Path) -> dict[str, dict[str, int]]:
@@ -97,13 +78,8 @@ def _require_string(value: object, location: str) -> str:
 
 
 def load_semantic_evidence(path: Path) -> dict:
-    """Read an explicit catalog of reviewed semantic assertions.
-
-    Each source records provenance; each reviewed claim selects rows by exact
-    JSON-scalar equality or a schema-2 literal indexed path template. Unknown
-    and unsupported claims remain visible but are never counted as semantic
-    verification.
-    """
+    """Read an explicit catalog of reviewed semantic assertions; unknown and
+    unsupported claims stay visible but never count as verification."""
     try:
         raw_document = path.read_bytes()
         document = json.loads(raw_document)
