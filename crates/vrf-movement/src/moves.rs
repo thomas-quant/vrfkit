@@ -21,17 +21,22 @@ use crate::types::{MovementMove, RpcDecodeResult};
 /// Magic byte at the start of a movement section.
 pub(crate) const MOVEMENT_MAGIC: u8 = 0x52;
 
-/// Maximum padding bits at the end of a movement section before we stop
-/// looking for another marker.
+/// The C# reference's `MaxMovementPaddingBits`: with at most this many bits
+/// left after a move, the section ends without reading another marker.
+///
+/// The name says padding; the bits are not. In every stream measured they are
+/// a `000` terminator where the next marker would sit, then 8 to 23 bits that
+/// are not all zero, and nothing reads them. See the crate docs, "Measured on
+/// real replays".
 const MAX_MOVEMENT_PADDING_BITS: u64 = 31;
 
 /// Parse the movement section: magic byte, then a sequence of moves.
 ///
 /// Returns the bits of the section's window left unread at a stop the grammar
 /// does not explain: a zero marker with bits still behind it, or a window too
-/// short for the magic or the first marker. The up-to-31 bits of padding after
-/// a decoded move are the grammar's own end and return 0, as does a window
-/// that was read to its last bit. The caller tallies a nonzero return; see
+/// short for the magic or the first marker. The end after a decoded move with
+/// at most `MAX_MOVEMENT_PADDING_BITS` left returns 0, as does a window that
+/// was read to its last bit. The caller tallies a nonzero return; see
 /// [`RpcDecodeResult::sized_section_tails`] for why it is not an error.
 pub(crate) fn parse_movement_section(
     reader: &mut BitReader<'_>,
@@ -67,7 +72,8 @@ pub(crate) fn parse_movement_section(
         emit(mv);
         result.total_moves += 1;
 
-        // Check if we're in trailing padding territory.
+        // The section's own end: the terminator and the bits after it stay
+        // unread (see MAX_MOVEMENT_PADDING_BITS).
         if reader.bits_remaining() <= MAX_MOVEMENT_PADDING_BITS {
             return Ok(0);
         }
@@ -77,8 +83,8 @@ pub(crate) fn parse_movement_section(
     }
 
     // A zero marker ended the section. Inside the loop that is only reachable
-    // with more than the allowed padding behind the move, so anything left
-    // here is a tail; after the magic it may be exactly nothing.
+    // with more than MAX_MOVEMENT_PADDING_BITS behind the move, so anything
+    // left here is a tail; after the magic it may be exactly nothing.
     Ok(reader.bits_remaining())
 }
 

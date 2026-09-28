@@ -77,8 +77,13 @@ pub struct RpcDecodeResult {
     /// that stopped with bits of that window unread.
     ///
     /// A section ends at a 3-bit zero marker, or when at most 31 bits remain
-    /// after a move -- the padding the grammar allows, which is not counted
-    /// here. Every other stop used to return `Ok` with no trace: a zero
+    /// after a move. That second exit is excluded by design and never counted
+    /// here. Its bits are not padding: on real data they are a `000`
+    /// terminator and 8 to 23 bits that are not all zero (crate docs,
+    /// "Measured on real replays"), so a zero tally means no section stopped
+    /// anywhere else, not that every section was read to its last bit.
+    ///
+    /// Every other stop used to return `Ok` with no trace: a zero
     /// marker read with bits still behind it, a window too short for the
     /// 8-bit magic, or one too short for the first marker. A cursor that has
     /// drifted and happens to read `000` takes the first of those exits, and
