@@ -558,10 +558,11 @@ fn ping_latency_is_typed() {
 #[test]
 fn equippable_used_is_an_object_net_guid() {
     // The C# descriptor attaches a custom decoder (DamageParameters.cs:51 ->
-    // ValorantPayloadDecoders.Equippable), invisible to extract_descriptors.py,
-    // so it lands as Raw; that decoder is exactly archive.ReadIntPacked(), our
-    // ObjectNetGuid. Left Raw, the adapter guessed a fixed 16-bit LE integer
-    // that was never a valid NetGUID; tools/apply_type_corrections.py fixes it.
+    // ValorantPayloadDecoders.Equippable) that is exactly
+    // archive.ReadIntPacked(), our ObjectNetGuid. tools/extract_descriptors.py
+    // types it from the decoder's name (PAYLOAD_DECODER_TYPES), and
+    // tools/apply_type_corrections.py EXPECTED only verifies it. Left Raw, the
+    // adapter guessed a fixed 16-bit LE integer that was never a valid NetGUID.
     for group in [DAMAGE_BASE, DAMAGE_POINT] {
         assert_eq!(
             TABLE.lookup(group, "EquippableUsed"),
@@ -715,7 +716,7 @@ fn cypher_trap_fields_follow_the_13_01_rename() {
 /// their chains writes `ReplicatedMovement`, and every AGameObject class whose
 /// rotation is observable decodes at byte width only (AProjectile 38 of 38
 /// byte, AShooterCharacter 7 of 7 short). Evidence and bound:
-/// `retype_game_object_rotators` in `apply_type_corrections.py`.
+/// `GAME_OBJECT_BYTE_ROTATOR_GROUPS` in `apply_type_corrections.py`.
 #[test]
 fn only_the_seeker_nade_keeps_short_rotator_components() {
     const GAME_OBJECTS: [&str; 5] = [
@@ -757,10 +758,12 @@ fn only_the_seeker_nade_keeps_short_rotator_components() {
 
 #[test]
 fn damage_geometry_fields_are_quantized_vectors() {
-    // EquippableUsed's trap again: DamageParameters attaches
-    // ValorantPayloadDecoders.VectorNetQuantize*, invisible to
-    // extract_descriptors.py. Scales are the C# call sites: VectorNetQuantize
-    // = 1, VectorNetQuantize100 = 100, VectorNetQuantizeNormal = unit vector.
+    // Typed like EquippableUsed: the VectorNetQuantize* decoders attached at
+    // DamageParameters.cs:50 and MulticastNotifyDamagePointParameters.cs:40-46
+    // map through extract_descriptors.py's PAYLOAD_DECODER_TYPES, and
+    // apply_type_corrections.py EXPECTED only verifies them. Scales are the C#
+    // call sites: VectorNetQuantize = 1, VectorNetQuantize100 = 100,
+    // VectorNetQuantizeNormal = unit vector.
     const BASE: &str = DAMAGE_BASE;
     const POINT: &str = DAMAGE_POINT;
 
