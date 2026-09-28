@@ -101,15 +101,39 @@ recomputation: each is a 1-in-2^32 chance of an accidental reproduction, and
 each comparison of two implied parents a 1-in-2^32 chance of an accidental
 agreement, so the expected number of each is printed beside the verdicts.
 
-Exit status: 0 when nothing mismatches, 1 when anything does, when nothing
-was checked, or when a parent chain and the sibling tier disagree; 2 when an
-input or a generated table cannot be read completely (an entry that does not
-parse, or a `FieldType` variant `CPP_TYPES` does not classify).
+Expected mismatches
+-------------------
+A mismatch vrfkit keeps on purpose is listed, with its reason and evidence,
+in `tools/fixtures/checksum_types_expected.json`. An item names one mismatch
+SHAPE exactly -- the declared checksum, the wire name, the parent it
+reproduces under (`top level` or a `PARENT_CHAINS` label), the `FieldType`
+vrfkit decodes it with and the C++ type the checksum names -- and covers every
+typed identity and `checksum_table.rs` carrier of that shape, in any group.
+Anything else that mismatches fails the run as before. A mismatch a sibling
+seed decided cannot be listed: its label embeds the pair that established it,
+which is no stable key, so its chain has to be named in `PARENT_CHAINS` first.
+
+An item APPLIES wherever the input declares its checksum outside the
+ClassNetCache groups -- not only where some mismatch carries it, or an item
+whose mismatch had gone would never be looked at. An item that applies and
+covers nothing is STALE and fails the run: the mismatch no longer occurs, or
+occurs in another shape (which then also fails as unlisted). An item whose
+checksum the input does not declare is counted as not applicable, the way
+compare_rpc_params.py counts an expected difference for another replay, so a
+single export can still be checked. All three counts print, zeros included.
+
+Exit status: 0 when every mismatch is one an item names exactly and no item
+is STALE; 1 when a mismatch is not listed, when an item is STALE, when
+nothing was checked, or when a parent chain and the sibling tier disagree; 2
+when an input, a generated table or the expected list cannot be read
+completely (an entry that does not parse, a `FieldType` variant `CPP_TYPES`
+does not classify, or a malformed item).
 
 Usage:
     python tools/check_checksum_types.py --export out/probe [--export ...]
     python tools/check_checksum_types.py --corpus DIR   # DIR/<export>/manifest.json
     python tools/check_checksum_types.py --corpus DIR --json report.json
+    python tools/check_checksum_types.py --corpus DIR --expected other.json
 """
 from __future__ import annotations
 
@@ -136,6 +160,7 @@ SCOPED_RS = DECODE_SRC / "scoped_types.rs"
 CHECKSUM_RS = DECODE_SRC / "checksum_table.rs"
 OVERLAY_RS = DECODE_SRC / "overlay.rs"
 DECODE_RS = DECODE_SRC / "decode.rs"
+EXPECTED_JSON = REPO / "tools" / "fixtures" / "checksum_types_expected.json"
 
 CLASS_NET_CACHE = "_ClassNetCache"
 
@@ -1211,8 +1236,178 @@ def check_checksum_table(ids: dict, resolver: Resolver, checker: Checker, siblin
     return counts, bad
 
 
+# --------------------------------------------------------------------------
+# The expected-mismatch list (see "Expected mismatches" in the docstring)
+
+#: What an item keys on, in `ExpectedItem.shape` order, then why and what
+#: showed it. An item with any other key set is refused.
+EXPECTED_SHAPE = ("checksum", "name", "parent", "vrfkit_type", "declared_type")
+EXPECTED_KEYS = frozenset(EXPECTED_SHAPE + ("reason", "evidence"))
+#: Every state an item can end a run in, each printed with its count.
+EXPECTED_STATES = {
+    "matched": "covers at least one mismatch of exactly its shape",
+    "STALE": "the input declares the checksum, and no mismatch has the listed shape",
+    "not applicable": "the input does not declare the checksum",
+}
+
+
+class ExpectedListError(Exception):
+    """The expected-mismatch list cannot be read whole."""
+
+
+class ExpectedItem(NamedTuple):
+    """One listed mismatch shape, with its reason and evidence."""
+    checksum: int
+    name: str
+    parent: str
+    vrfkit_type: str
+    declared_type: str
+    reason: str
+    evidence: str
+
+    @property
+    def shape(self) -> tuple:
+        return (self.checksum, self.name, self.parent, self.vrfkit_type, self.declared_type)
+
+    def describe(self) -> str:
+        return (f"{self.checksum} {self.name}: vrfkit {self.vrfkit_type}, the checksum "
+                f"reproduces {self.declared_type} under {self.parent}")
+
+
+def load_expected(path: Path, parents) -> list:
+    """The reasoned expected mismatches, as `ExpectedItem`s.
+
+    `parents` are the seed labels an item may name: `top level` and the
+    `PARENT_CHAINS` labels. Anything malformed refuses the whole list rather
+    than dropping an item: a dropped item would turn its mismatch into a
+    failure with no word about why, and a mistyped one would read STALE on
+    every corpus instead of saying what is wrong with it.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ExpectedListError(f"{path}: {exc}") from exc
+    raw_items = data.get("expected") if isinstance(data, dict) else None
+    if not isinstance(raw_items, list):
+        raise ExpectedListError(f"{path}: no `expected` list")
+    items, seen = [], set()
+    for i, raw in enumerate(raw_items):
+        where = f"{path}: item {i}"
+        if not isinstance(raw, dict) or set(raw) != EXPECTED_KEYS:
+            raise ExpectedListError(f"{where} must have exactly the keys {sorted(EXPECTED_KEYS)}")
+        checksum = raw["checksum"]
+        if type(checksum) is not int or not 0 < checksum < 2 ** 32:
+            raise ExpectedListError(f"{where}: checksum must be an integer in 1..2^32-1")
+        for key in EXPECTED_KEYS - {"checksum"}:
+            if not isinstance(raw[key], str) or not raw[key].strip():
+                raise ExpectedListError(f"{where} has no {key}")
+        if raw["parent"] not in parents:
+            raise ExpectedListError(
+                f"{where}: parent {raw['parent']!r} is neither `top level` nor a PARENT_CHAINS "
+                f"label (a mismatch a sibling seed decided needs its chain named first)")
+        try:
+            vrfkit_type = canonical_type(raw["vrfkit_type"])
+        except ValueError as exc:
+            raise ExpectedListError(f"{where}: {exc}") from exc
+        if parse_field_type(vrfkit_type)[0] not in CPP_TYPES:
+            raise ExpectedListError(f"{where}: vrfkit_type {vrfkit_type!r} is not a FieldType "
+                                    f"this tool checks")
+        item = ExpectedItem(checksum, raw["name"], raw["parent"], vrfkit_type,
+                            raw["declared_type"], raw["reason"], raw["evidence"])
+        if item.shape in seen:
+            raise ExpectedListError(f"{where} repeats the shape {item.shape}")
+        seen.add(item.shape)
+        items.append(item)
+    return items
+
+
+class ItemResult(NamedTuple):
+    """What one run made of one item."""
+    item: ExpectedItem
+    state: str                   # a key of EXPECTED_STATES
+    identities: list             # the mismatch rows it covers
+    carriers: list               # the checksum_table.rs carriers it covers
+    why: str                     # for STALE: what the input has at that checksum
+
+
+@dataclass
+class ExpectedOutcome:
+    """The mismatches sorted into expected and unexpected, and every item's state."""
+    results: list = field(default_factory=list)
+    expected_rows: list = field(default_factory=list)
+    unexpected_rows: list = field(default_factory=list)
+    expected_carriers: list = field(default_factory=list)
+    unexpected_carriers: list = field(default_factory=list)
+
+    def count(self, state: str) -> int:
+        return sum(1 for r in self.results if r.state == state)
+
+
+def row_shape(row) -> tuple:
+    """A mismatch row's shape, in `ExpectedItem.shape` order."""
+    return (row["checksum"], row["name"], row["seed"], row["field_type"], row["detail"])
+
+
+def carrier_shape(carrier) -> tuple:
+    """A `checksum_table.rs` carrier's shape, in `ExpectedItem.shape` order."""
+    checksum, field_type, name, spelling, seed = carrier
+    return (checksum, name, seed, field_type, spelling)
+
+
+def _stale_why(item, rows) -> str:
+    same = collections.Counter(
+        f"{r['verdict']} as {r['field_type']}"
+        + (f" (reproduces {r['detail']} under {r['seed']})" if r["verdict"] == "mismatch" else "")
+        for r in rows if r["checksum"] == item.checksum)
+    if not same:
+        return "vrfkit types none of its declarations"
+    return "its typed identities: " + "; ".join(f"{n} {what}" for what, n in sorted(same.items()))
+
+
+def apply_expected(items, rows, mismatches, table_bad, declared_checksums) -> ExpectedOutcome:
+    """Sort the mismatches by the list, and give every item its state.
+
+    A mismatch is expected only when an item names its whole shape. An item
+    applies where `declared_checksums` -- every checksum the input declares
+    outside ClassNetCache groups -- holds its checksum; applying and covering
+    nothing is STALE. `rows` (every typed identity) only explain a STALE item.
+    """
+    by_shape = {item.shape: ([], []) for item in items}
+    outcome = ExpectedOutcome()
+    for row in mismatches:
+        covered = by_shape.get(row_shape(row))
+        (outcome.unexpected_rows if covered is None else outcome.expected_rows).append(row)
+        if covered is not None:
+            covered[0].append(row)
+    for carrier in table_bad:
+        covered = by_shape.get(carrier_shape(carrier))
+        (outcome.unexpected_carriers if covered is None else outcome.expected_carriers).append(carrier)
+        if covered is not None:
+            covered[1].append(carrier)
+    for item in items:
+        identities, carriers = by_shape[item.shape]
+        if identities or carriers:
+            state, why = "matched", ""
+        elif item.checksum in declared_checksums:
+            state, why = "STALE", _stale_why(item, rows)
+        else:
+            state, why = "not applicable", ""
+        outcome.results.append(ItemResult(item, state, identities, carriers, why))
+    return outcome
+
+
+def declared_checksums(ids: dict) -> set:
+    """Every checksum the input declares outside ClassNetCache groups."""
+    return {ident.checksum for ident in ids.values() if not ident.group.endswith(CLASS_NET_CACHE)}
+
+
 def print_report(report: Report, table_counts, table_bad, checker: Checker, declared_counts,
-                 skipped, n_ids, siblings=None) -> None:
+                 skipped, n_ids, siblings=None, outcome=None, expected_path=EXPECTED_JSON) -> None:
+    """Every counter, zeros included. Without an `outcome` (no list applied)
+    every mismatch is unexpected."""
+    if outcome is None:
+        outcome = ExpectedOutcome(unexpected_rows=list(report.mismatches),
+                                  unexpected_carriers=list(table_bad))
     p = print
     p(f"inputs: {declared_counts['exports']} export(s), {declared_counts['main declarations']} main "
       f"declarations, {declared_counts['checkpoint declarations']} checkpoint declarations "
@@ -1276,21 +1471,61 @@ def print_report(report: Report, table_counts, table_bad, checker: Checker, decl
     p(f"\nchecksum trials: {checker.trials}; expected chance reproductions "
       f"{checker.trials / 2 ** 32:.4f} (trials / 2^32)")
     p(f"\nmismatches: {len(report.mismatches)} identities, {len(table_bad)} checksum_table.rs carriers")
-    for row in report.mismatches:
-        p(f"  MISMATCH {row['group']} | {row['name']} | {row['checksum']}: vrfkit "
-          f"{row['field_type']} ({row['source']}), checksum reproduces {row['detail']} "
-          f"under {row['seed']}; builds {','.join(sorted(row['builds']))}")
-    for checksum, field_type, name, spelling, seed in table_bad:
-        p(f"  MISMATCH checksum_table.rs {checksum} -> {field_type}: carrier {name} "
-          f"reproduces {spelling} under {seed}")
+    p(f"  {len(outcome.unexpected_rows):>7} / {len(outcome.unexpected_carriers):<5} unexpected "
+      f"(identities / carriers): no item lists the shape, so each fails the run")
+    p(f"  {len(outcome.expected_rows):>7} / {len(outcome.expected_carriers):<5} expected "
+      f"(identities / carriers): an item of {expected_path.name} lists the exact shape")
+    for row in outcome.unexpected_rows:
+        p(f"  MISMATCH {_row_line(row)}")
+    for carrier in outcome.unexpected_carriers:
+        p(f"  MISMATCH {_carrier_line(carrier)}")
+    p(f"\nexpected mismatches ({_display(expected_path)}): {len(outcome.results)} item(s)")
+    for state, meaning in EXPECTED_STATES.items():
+        p(f"  {outcome.count(state):>7}  {state}: {meaning}")
+    for result in outcome.results:
+        item = result.item
+        p(f"  {result.state:<14} {item.describe()} -- {len(result.identities)} identities, "
+          f"{len(result.carriers)} checksum_table.rs carriers")
+        if result.state == "STALE":
+            p(f"  {'':<14} the input declares {item.checksum}; {result.why}")
+        p(f"  {'':<14} reason: {item.reason}")
+        for row in result.identities:
+            p(f"    EXPECTED {_row_line(row)}")
+        for carrier in result.carriers:
+            p(f"    EXPECTED {_carrier_line(carrier)}")
+
+
+def _display(path: Path) -> str:
+    """`path` relative to the repository when it lies inside it."""
+    try:
+        return Path(path).resolve().relative_to(REPO).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _row_line(row) -> str:
+    return (f"{row['group']} | {row['name']} | {row['checksum']}: vrfkit {row['field_type']} "
+            f"({row['source']}), checksum reproduces {row['detail']} under {row['seed']}; "
+            f"builds {','.join(sorted(row['builds']))}")
+
+
+def _carrier_line(carrier) -> str:
+    checksum, field_type, name, spelling, seed = carrier
+    return (f"checksum_table.rs {checksum} -> {field_type}: carrier {name} reproduces "
+            f"{spelling} under {seed}")
 
 
 DISAGREE = "DISAGREE: a sibling seed other than the chain's"
 
 
-def exit_status(report: Report, table_bad) -> tuple[int, str]:
+def exit_status(report: Report, table_bad, outcome=None,
+                expected_name=EXPECTED_JSON.name) -> tuple[int, str]:
     """`(exit code, closing line)`: 1 for nothing checked, a tier
-    disagreement or any mismatch, else 0."""
+    disagreement, a mismatch no item lists or a STALE item, else 0.
+    Without an `outcome` (no list applied) every mismatch is unexpected."""
+    if outcome is None:
+        outcome = ExpectedOutcome(unexpected_rows=list(report.mismatches),
+                                  unexpected_carriers=list(table_bad))
     if report.identities == 0:
         return 1, ("\nFAILED: nothing checked -- no declared identity is typed by vrfkit, so "
                    "this input is empty or not an export")
@@ -1299,15 +1534,27 @@ def exit_status(report: Report, table_bad) -> tuple[int, str]:
         return 1, (f"\nFAILED: {disagreements} parent-chain seed(s) disagree with the seed the "
                    f"group's own members imply. One of the two tiers is wrong about those "
                    f"members, and no verdict resting on either can be trusted until it is found.")
-    if report.mismatches or table_bad:
-        return 1, (f"\nFAILED: {len(report.mismatches)} typed identit"
-                   f"{'y' if len(report.mismatches) == 1 else 'ies'} and {len(table_bad)} "
-                   f"checksum_table.rs carrier(s) hash as a different C++ type than vrfkit "
-                   f"decodes. Each line above names the spelling that reproduces the replay's "
-                   f"own checksum.")
-    return 0, (f"\nOK: {report.by_verdict['match']} typed identities reproduce their checksum, "
-               f"none reproduces a different type; {report.by_verdict['untestable']} are "
-               f"untestable and say nothing either way.")
+    problems = []
+    rows, carriers = outcome.unexpected_rows, outcome.unexpected_carriers
+    if rows or carriers:
+        problems.append(f"{len(rows)} typed identit{'y' if len(rows) == 1 else 'ies'} and "
+                        f"{len(carriers)} checksum_table.rs carrier(s) hash as a different C++ "
+                        f"type than vrfkit decodes, and no item of {expected_name} lists that "
+                        f"shape. Each MISMATCH line above names the spelling that reproduces "
+                        f"the replay's own checksum.")
+    stale = outcome.count("STALE")
+    if stale:
+        problems.append(f"{stale} item(s) of {expected_name} are STALE: the input declares "
+                        f"the checksum, and no mismatch has the listed shape any more. Correct "
+                        f"or remove each STALE item above.")
+    if problems:
+        return 1, "\n" + "\n".join(f"FAILED: {problem}" for problem in problems)
+    return 0, (f"\nOK: {report.by_verdict['match']} typed identities reproduce their checksum; "
+               f"{len(outcome.expected_rows)} identities and {len(outcome.expected_carriers)} "
+               f"checksum_table.rs carriers reproduce a different type exactly as an item of "
+               f"{expected_name} lists it ({outcome.count('matched')} item(s) matched, "
+               f"{outcome.count('not applicable')} not applicable), and no other does; "
+               f"{report.by_verdict['untestable']} are untestable and say nothing either way.")
 
 
 def main(argv=None) -> int:
@@ -1318,6 +1565,8 @@ def main(argv=None) -> int:
     ap.add_argument("--corpus", type=Path,
                     help="directory whose children are exports (manifest.json each)")
     ap.add_argument("--json", type=Path, help="also write every classified identity here")
+    ap.add_argument("--expected", type=Path, default=EXPECTED_JSON,
+                    help="the reasoned expected-mismatch list (default: %(default)s)")
     args = ap.parse_args(argv)
 
     if args.corpus is not None and not args.corpus.is_dir():
@@ -1351,24 +1600,44 @@ def main(argv=None) -> int:
               f"declare", file=sys.stderr)
         return 2
 
+    seeds = Seeds()
+    try:
+        expected = load_expected(args.expected, {label for label, _ in seeds.named})
+    except ExpectedListError as exc:
+        print(f"FAILED: expected list: {exc}", file=sys.stderr)
+        return 2
+
     try:
         ids, declared_counts = load_declarations(dirs)
     except TableError as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2
-    checker = Checker(Seeds(), object_spellings(class_candidates({i.group for i in ids.values()})))
+    checker = Checker(seeds, object_spellings(class_candidates({i.group for i in ids.values()})))
     siblings = SiblingSeeds(spelling_universe(checker.objects))
     report = check_identities(ids, resolver, checker, siblings)
     table_counts, table_bad = check_checksum_table(ids, resolver, checker, report.sibling_seeds)
-    print_report(report, table_counts, table_bad, checker, declared_counts, skipped, len(ids), siblings)
+    outcome = apply_expected(expected, report.rows, report.mismatches, table_bad,
+                             declared_checksums(ids))
+    print_report(report, table_counts, table_bad, checker, declared_counts, skipped, len(ids),
+                 siblings, outcome, args.expected)
 
     if args.json is not None:
-        rows = [{**r, "builds": sorted(r["builds"])} for r in report.rows]
-        args.json.write_text(json.dumps({"identities": rows, "checksum_table_mismatches": [
-            {"checksum": c, "field_type": t, "name": n, "reproduces": s, "seed": seed}
-            for c, t, n, s, seed in table_bad]}, indent=1), encoding="utf-8")
+        listed = {id(row) for row in outcome.expected_rows}
+        rows = [{**r, "builds": sorted(r["builds"]), "expected": id(r) in listed}
+                for r in report.rows]
+        listed = {id(carrier) for carrier in outcome.expected_carriers}
+        carriers = []
+        for carrier in table_bad:
+            checksum, field_type, name, spelling, seed = carrier
+            carriers.append({"checksum": checksum, "field_type": field_type, "name": name,
+                             "reproduces": spelling, "seed": seed,
+                             "expected": id(carrier) in listed})
+        items = [{**r.item._asdict(), "state": r.state, "identities": len(r.identities),
+                  "carriers": len(r.carriers), "why": r.why} for r in outcome.results]
+        args.json.write_text(json.dumps({"identities": rows, "checksum_table_mismatches": carriers,
+                                         "expected_items": items}, indent=1), encoding="utf-8")
 
-    code, message = exit_status(report, table_bad)
+    code, message = exit_status(report, table_bad, outcome, args.expected.name)
     print(message, file=sys.stderr if code else sys.stdout)
     return code
 

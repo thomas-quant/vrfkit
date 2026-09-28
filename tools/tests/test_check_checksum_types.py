@@ -9,7 +9,10 @@ broken without anything else in the repo noticing:
   * a different type string does NOT reproduce them, so a match is evidence
     of the type and not of the name alone;
   * `untestable` never reaches the match count, and every counter prints
-    even at zero.
+    even at zero;
+  * the expected-mismatch list excuses exactly the shapes it names: any
+    other mismatch still fails, an item that applies to the input and
+    covers nothing is STALE and fails, and every count prints at zero.
 """
 import contextlib
 import io
@@ -708,6 +711,303 @@ class MainTests(unittest.TestCase):
         self.assertEqual([(r["name"], r["verdict"], r["seed"]) for r in rows],
                          [("CorrectionIndex", "match",
                            "AuthServerCorrectRepVariables:FInventoryServerCorrectRepVariables")])
+
+
+# ---------------------------------------------------------------------------
+# The expected-mismatch list
+
+#: `249` (Rotation) in two FTransforms: the committed list's two items.
+ROTATION = 747197698        # under Transform: FTransform
+SPAWN_ROTATION = 1874998526  # under SpawnTransform: FTransform
+EFFECT_RPC = "/Script/ShooterGame.EffectManagerComponent:MulticastPlayContinuousEffect"
+RESPAWN = "/Script/ShooterGame.AresGameStateBase:MulticastResetForRespawn"
+QUAT_CARRIER = (ROTATION, "VectorDouble", "249", "FQuat", "Transform:FTransform")
+
+
+def listed(**changes):
+    """One item of the list as JSON holds it; `changes` replace its keys."""
+    item = {"checksum": ROTATION, "name": "249", "parent": "Transform:FTransform",
+            "vrfkit_type": "VectorDouble", "declared_type": "FQuat",
+            "reason": "FQuat X/Y/Z decoded with VectorDouble on purpose", "evidence": "test"}
+    item.update(changes)
+    return item
+
+
+def expected_item(**changes):
+    item = listed(**changes)
+    return cct.ExpectedItem(**{k: item[k] for k in cct.ExpectedItem._fields})
+
+
+def quat_row(group="/G.A:Fn", **changes):
+    """A mismatch row as `check_identities` writes it: `249` read as VectorDouble."""
+    row = {"group": group, "name": "249", "checksum": ROTATION, "handle": 0,
+           "field_type": "VectorDouble", "source": "name", "verdict": "mismatch",
+           "detail": "FQuat", "seed": "Transform:FTransform", "static_index": 0,
+           "builds": {"13.06"}}
+    row.update(changes)
+    return row
+
+
+class ExpectedShapeTests(unittest.TestCase):
+    """`apply_expected` on synthetic rows: the committed tables play no part."""
+
+    def test_a_listed_shape_is_expected_in_every_group_and_carrier(self):
+        rows = [quat_row("/G.A:Fn"), quat_row("/G.B")]
+        outcome = cct.apply_expected([expected_item()], rows, rows, [QUAT_CARRIER], {ROTATION})
+        self.assertEqual((outcome.expected_rows, outcome.unexpected_rows), (rows, []))
+        self.assertEqual((outcome.expected_carriers, outcome.unexpected_carriers),
+                         ([QUAT_CARRIER], []))
+        (result,) = outcome.results
+        self.assertEqual((result.state, len(result.identities), len(result.carriers)),
+                         ("matched", 2, 1))
+        report = cct.Report(identities=2, mismatches=rows)
+        code, message = cct.exit_status(report, [QUAT_CARRIER], outcome)
+        self.assertEqual(code, 0, message)
+        self.assertIn("2 identities and 1 checksum_table.rs carriers reproduce a different type "
+                      "exactly as an item", message)
+
+    def test_every_part_of_the_shape_is_load_bearing(self):
+        """Change any one of the five keys and the same mismatch is unlisted,
+        and the item -- whose checksum the input still declares -- is STALE."""
+        other = {"checksum": ROTATION + 1, "name": "248", "parent": "SpawnTransform:FTransform",
+                 "vrfkit_type": "VectorFloat", "declared_type": "FRotator"}
+        self.assertEqual(set(other), set(cct.EXPECTED_SHAPE))
+        row = quat_row()
+        for key, value in other.items():
+            with self.subTest(key=key):
+                outcome = cct.apply_expected([expected_item(**{key: value})], [row], [row],
+                                             [QUAT_CARRIER], {ROTATION, ROTATION + 1})
+                self.assertEqual(outcome.unexpected_rows, [row])
+                self.assertEqual(outcome.unexpected_carriers, [QUAT_CARRIER])
+                self.assertEqual([r.state for r in outcome.results], ["STALE"])
+                code, message = cct.exit_status(cct.Report(identities=1, mismatches=[row]),
+                                                [QUAT_CARRIER], outcome)
+                self.assertEqual(code, 1)
+                self.assertIn("no item of", message)
+                self.assertIn("STALE", message)
+
+    def test_a_declared_checksum_with_no_mismatch_left_is_stale(self):
+        """The mismatch went away -- the type was changed, or the name no longer
+        reproduces -- while the input still declares the checksum."""
+        untestable = quat_row(verdict="untestable", detail=cct.NOT_REPRODUCED, seed=None)
+        outcome = cct.apply_expected([expected_item()], [untestable], [], [], {ROTATION})
+        (result,) = outcome.results
+        self.assertEqual(result.state, "STALE")
+        self.assertIn("1 untestable as VectorDouble", result.why)
+        code, message = cct.exit_status(cct.Report(identities=1), [], outcome)
+        self.assertEqual(code, 1)
+        self.assertIn("1 item(s) of checksum_types_expected.json are STALE", message)
+        # and when vrfkit types none of its declarations at all
+        outcome = cct.apply_expected([expected_item()], [], [], [], {ROTATION})
+        self.assertEqual(outcome.results[0].why, "vrfkit types none of its declarations")
+
+    def test_a_checksum_the_input_does_not_declare_leaves_the_item_not_applicable(self):
+        outcome = cct.apply_expected([expected_item()], [], [], [], {ROTATION + 1})
+        self.assertEqual([r.state for r in outcome.results], ["not applicable"])
+        code, message = cct.exit_status(cct.Report(identities=1), [], outcome)
+        self.assertEqual(code, 0, message)
+        self.assertIn("(0 item(s) matched, 1 not applicable)", message)
+
+    def test_declared_checksums_skip_function_slots(self):
+        ids = {k: identity(*k) for k in (("/G.A", "X", 1, 5), ("/G.A_ClassNetCache", "Fn", 2, 6))}
+        self.assertEqual(cct.declared_checksums(ids), {5})
+
+
+class ExpectedListLoadTests(unittest.TestCase):
+    PARENTS = {label for label, _ in cct.Seeds().named}
+
+    def load(self, items):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "expected.json"
+            path.write_text(json.dumps({"expected": items}), encoding="utf-8")
+            return cct.load_expected(path, self.PARENTS)
+
+    def test_an_item_loads_with_its_type_canonical(self):
+        (item,) = self.load([listed(vrfkit_type="FieldType::VectorDouble")])
+        self.assertEqual(item.shape, (ROTATION, "249", "Transform:FTransform", "VectorDouble", "FQuat"))
+
+    def test_a_malformed_item_refuses_the_whole_list(self):
+        no_reason = listed()
+        del no_reason["reason"]
+        bad = {
+            "a key missing": no_reason,
+            "an extra key": listed(groups=7),
+            "a blank reason": listed(reason="  "),
+            "a blank evidence": listed(evidence=""),
+            "a checksum as text": listed(checksum=str(ROTATION)),
+            "a checksum that is a bool": listed(checksum=True),
+            "a checksum of 0": listed(checksum=0),
+            "a checksum past 32 bits": listed(checksum=2 ** 32),
+            "a sibling-seed parent": listed(parent="sibling seed 5 (A:int32 + Bb:int32)"),
+            "an unknown chain": listed(parent="Transform:FRotator"),
+            "an unparsable type": listed(vrfkit_type="Vector Double"),
+            "an untyped FieldType": listed(vrfkit_type="Raw"),
+            "an empty name": listed(name=""),
+        }
+        for label, item in bad.items():
+            with self.subTest(label):
+                with self.assertRaises(cct.ExpectedListError):
+                    self.load([item])
+        with self.assertRaises(cct.ExpectedListError):
+            self.load([listed(), listed(reason="the same shape again")])
+
+    def test_a_file_that_is_not_a_list_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "expected.json"
+            for text in ("not json", json.dumps({"items": []}), json.dumps([listed()])):
+                with self.subTest(text=text[:20]):
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaises(cct.ExpectedListError):
+                        cct.load_expected(path, self.PARENTS)
+            with self.assertRaises(cct.ExpectedListError):
+                cct.load_expected(Path(tmp) / "absent.json", self.PARENTS)
+
+    def test_every_committed_item_is_a_real_mismatch(self):
+        """Each committed item's arithmetic, recomputed with the tool and with
+        the FCrc re-implementation above: the declared type reproduces the
+        checksum under the named parent, and no spelling of vrfkit's type
+        does at any static index. A typo would otherwise read STALE on every
+        corpus instead of saying what is wrong."""
+        seeds = dict(cct.Seeds().named)
+        chains = {" > ".join(f"{n}:{t}" for n, t in c.links): c.links for c in cct.PARENT_CHAINS}
+        items = cct.load_expected(cct.EXPECTED_JSON, set(seeds))
+        self.assertEqual(len(items), 2)
+        for item in items:
+            with self.subTest(item=item.describe()):
+                hashed = cct.HARDCODED_FNAMES.get(item.name, item.name)
+                seed = seeds[item.parent]
+                self.assertEqual(cct.compatible_checksum(hashed, item.declared_type, 0, seed),
+                                 item.checksum)
+                ue_seed = 0
+                for link_name, link_type in chains.get(item.parent, ()):
+                    ue_seed = ue_checksum(link_name, link_type, 0, ue_seed)
+                self.assertEqual(ue_checksum(hashed, item.declared_type, 0, ue_seed), item.checksum)
+                own = cct.spec_for(item.vrfkit_type).expected
+                self.assertNotIn(item.declared_type, own)
+                for spelling in own:
+                    for index in range(cct.MAX_STATIC_INDEX + 1):
+                        self.assertNotEqual(
+                            cct.compatible_checksum(hashed, spelling, index, seed), item.checksum)
+                self.assertTrue(item.reason.isascii() and item.evidence.isascii())
+
+
+class ExpectedMainTests(unittest.TestCase):
+    """End to end, through `main` and the committed tables."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write_list(self, *items) -> Path:
+        path = self.root / "expected.json"
+        path.write_text(json.dumps({"expected": list(items)}), encoding="utf-8")
+        return path
+
+    def rotations(self, **extra):
+        return write_export(self.root, "e", {EFFECT_RPC: [(5, "249", ROTATION)],
+                                             RESPAWN: [(1, "249", SPAWN_ROTATION)], **extra})
+
+    def test_the_committed_list_covers_both_transform_rotations(self):
+        d = self.rotations()
+        out_json = self.root / "report.json"
+        code, out, err = run_main("--export", str(d), "--json", str(out_json))
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("mismatches: 2 identities, 2 checksum_table.rs carriers", out)
+        self.assertIn("      0 / 0     unexpected", out)
+        self.assertIn("      2 / 2     expected", out)
+        self.assertIn("      2  matched", out)
+        self.assertIn("      0  STALE", out)
+        self.assertIn("      0  not applicable", out)
+        self.assertIn(f"EXPECTED {EFFECT_RPC} | 249 | {ROTATION}", out)
+        self.assertIn(f"EXPECTED {RESPAWN} | 249 | {SPAWN_ROTATION}", out)
+        self.assertIn(f"EXPECTED checksum_table.rs {SPAWN_ROTATION} -> VectorDouble", out)
+        self.assertNotIn("MISMATCH", out)
+        self.assertIn("OK:", out)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(sorted((r["name"], r["checksum"], r["expected"]) for r in data["identities"]),
+                         [("249", ROTATION, True), ("249", SPAWN_ROTATION, True)])
+        self.assertEqual([c["expected"] for c in data["checksum_table_mismatches"]], [True, True])
+        self.assertEqual(sorted(i["state"] for i in data["expected_items"]), ["matched", "matched"])
+
+    def test_a_mismatch_the_list_does_not_name_still_fails(self):
+        """Beside a listed mismatch, one the list lacks fails the run -- with
+        the list given explicitly, and with the committed list."""
+        d = self.rotations()
+        code, out, err = run_main("--export", str(d), "--expected", str(self.write_list(listed())))
+        self.assertEqual(code, 1)
+        self.assertIn(f"MISMATCH {RESPAWN} | 249 | {SPAWN_ROTATION}", out)
+        self.assertIn(f"EXPECTED {EFFECT_RPC} | 249 | {ROTATION}", out)
+        self.assertIn("      1 / 1     unexpected", out)
+        self.assertIn("FAILED: 1 typed identity and 1 checksum_table.rs carrier(s)", err)
+        self.assertNotIn("STALE:", err)
+
+        seed = cct.chain_checksum(CORRECT)
+        wrong = cct.compatible_checksum("CorrectionIndex", "uint32", 0, seed)
+        d = write_export(self.root, "f", {EFFECT_RPC: [(5, "249", ROTATION)],
+                                          INVENTORY: [(30, "CorrectionIndex", wrong)]})
+        code, out, err = run_main("--export", str(d))
+        self.assertEqual(code, 1)
+        self.assertIn("MISMATCH /Script/ShooterGame.AresInventory | CorrectionIndex", out)
+        self.assertIn(f"EXPECTED {EFFECT_RPC} | 249 | {ROTATION}", out)
+        self.assertIn("FAILED", err)
+
+    def test_a_changed_shape_is_unlisted_and_leaves_its_item_stale(self):
+        d = self.rotations()
+        path = self.write_list(listed(parent="SpawnTransform:FTransform"),
+                               listed(checksum=SPAWN_ROTATION, parent="SpawnTransform:FTransform"))
+        code, out, err = run_main("--export", str(d), "--expected", str(path))
+        self.assertEqual(code, 1)
+        self.assertIn(f"MISMATCH {EFFECT_RPC} | 249 | {ROTATION}", out)
+        self.assertIn("      1  STALE", out)
+        self.assertIn("reproduces FQuat under Transform:FTransform)", out)  # the STALE line's why
+        self.assertIn("no item of expected.json lists that shape", err)
+        self.assertIn("1 item(s) of expected.json are STALE", err)
+
+    def test_a_declared_checksum_that_no_longer_mismatches_fails_as_stale(self):
+        """`Foo` carries 747197698: the checksum table types it VectorDouble,
+        nothing reproduces it, so it is untestable -- no mismatch. The item
+        applies (the checksum is declared) and covers nothing: STALE."""
+        d = write_export(self.root, "e", {"/Game/X/Foo.Foo_C": [(1, "Foo", ROTATION)]})
+        code, out, err = run_main("--export", str(d))
+        self.assertEqual(code, 1, out)
+        self.assertIn("      0  matched", out)
+        self.assertIn("      1  STALE", out)
+        self.assertIn("      1  not applicable", out)
+        self.assertIn("the input declares 747197698; its typed identities: 1 untestable as "
+                      "VectorDouble", out)
+        self.assertIn("STALE", err)
+        # the same export with an empty list passes: the failure was the item's
+        empty = self.write_list()
+        self.assertEqual(run_main("--export", str(d), "--expected", str(empty))[0], 0)
+
+    def test_an_input_without_the_checksums_prints_every_zero(self):
+        d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
+        code, out, _ = run_main("--export", str(d))
+        self.assertEqual(code, 0, out)
+        self.assertIn("      0 / 0     unexpected", out)
+        self.assertIn("      0 / 0     expected", out)
+        self.assertIn("expected mismatches (tools/fixtures/checksum_types_expected.json): 2 item(s)", out)
+        self.assertIn("      0  matched", out)
+        self.assertIn("      0  STALE", out)
+        self.assertIn("      2  not applicable", out)
+        code, out, _ = run_main("--export", str(d), "--expected", str(self.write_list()))
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 item(s)", out)
+        for state in cct.EXPECTED_STATES:
+            self.assertIn(f"      0  {state}:", out)
+
+    def test_an_unreadable_list_exits_2(self):
+        d = self.rotations()
+        no_reason = listed()
+        del no_reason["reason"]
+        for path in (self.write_list(no_reason), self.root / "absent.json"):
+            with self.subTest(path=path.name):
+                code, _, err = run_main("--export", str(d), "--expected", str(path))
+                self.assertEqual(code, 2)
+                self.assertIn("FAILED: expected list", err)
 
 
 if __name__ == "__main__":

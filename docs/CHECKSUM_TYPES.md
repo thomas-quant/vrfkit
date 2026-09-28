@@ -78,6 +78,8 @@ to expect. On the corpus that is 0.0032 (13,685,166 recomputations).
 
 It checks `checksum_table.rs` too. The table maps a checksum to a type with no
 name, so each entry is recomputed under every name that declares its checksum.
+Last, it sorts every mismatch by the [expected-mismatch list](#expected-mismatches):
+one that no item names by its exact shape fails the run.
 
 ### The resolver is vrfkit's
 
@@ -189,19 +191,62 @@ checksums -- 344 match, 6 mismatch, 108 untestable, 0 without a carrier.
 
 **The mismatches** -- each on every build that declares it:
 
-| identity | vrfkit | the checksum says |
-|---|---|---|
-| `249` in the effect RPCs, `TransformTransitionContext`, `TransitionContext_Sequoia_X_TeleportInfo_C`, `StateContext_ActorTrailTargetingResult_C` (747197698), `MulticastResetForRespawn` (1874998526) | `VectorDouble` | `FQuat`: the X, Y, Z of `FTransform.Rotation`, not a vector or a rotator |
-| `EffectID` in the effect RPCs and `EffectManagerComponent` (2340855891, 2251343646, 1129645208) | `UInt64` | `int64` |
-| `HandleNumber` in `NetMulticast{Apply,Remove}ForceModule` (3336285386) | `Int32` | `uint32` |
+| identity | vrfkit | the checksum says | listed as expected |
+|---|---|---|---|
+| `249` in the effect RPCs, `TransformTransitionContext`, `TransitionContext_Sequoia_X_TeleportInfo_C`, `StateContext_ActorTrailTargetingResult_C` (747197698), `MulticastResetForRespawn` (1874998526) | `VectorDouble` | `FQuat`: the X, Y, Z of `FTransform.Rotation`, not a vector or a rotator | yes: 8 identities |
+| `EffectID` in the effect RPCs and `EffectManagerComponent` (2340855891, 2251343646, 1129645208) | `UInt64` | `int64` | no: 7 identities |
+| `HandleNumber` in `NetMulticast{Apply,Remove}ForceModule` (3336285386) | `Int32` | `uint32` | no: 2 identities |
 
 The same three show up as the 6 `checksum_table.rs` entries (747197698,
 1874998526, 1129645208, 2251343646, 2340855891, 3336285386). None changes a
 decoded bit today: the quaternion's components are the three doubles already
-decoded, and the integers are in range either way. What is wrong is the label a
-consumer reads them by. That is exactly what this check is for, so **the tool
-exits 1 on the corpus**, and it is deliberately not in the required sweep: an
-allowlist that let it pass would be a check that cannot fail.
+decoded, and the integers are in range either way. What differs is the label a
+consumer reads them by. For `249` the difference is kept on purpose and listed
+as expected (next section); `EffectID` and `HandleNumber` are labels to
+correct, and are not listed. So with the tables at `9f92756` **the tool exits 1
+on the corpus**: 9 identities and 4 `checksum_table.rs` carriers mismatch
+unexpectedly, beside the 8 identities and 2 carriers the list expects (both of
+its items matched, none STALE).
+
+## Expected mismatches
+
+`tools/fixtures/checksum_types_expected.json` lists the mismatches vrfkit keeps
+on purpose, each with its `reason` and `evidence`. It holds one property today:
+`249`, the `FQuat` of an `FTransform`, whose X, Y and Z travel as three doubles
+-- `FVector`'s 192-bit layout -- and are decoded with `VectorDouble` rather
+than by a quaternion type that would read the same bits (the DATA.md section
+"RPC transforms: `249` is a rotation quaternion, not a rotator" documents the
+member; the items' `evidence` has the measurements). One item per parent:
+747197698 under `Transform: FTransform`, 1874998526 under `SpawnTransform:
+FTransform`.
+
+A list that let the run pass whatever it held would be a check that cannot
+fail, so it is keyed exactly and can go stale:
+
+- An item names one mismatch **shape**: the declared checksum, the wire name,
+  the parent it reproduces under (`top level` or a `PARENT_CHAINS` label), the
+  `FieldType` vrfkit decodes it with and the C++ type the checksum names. It
+  covers every typed identity and `checksum_table.rs` carrier of exactly that
+  shape, in any group; every other mismatch still fails the run.
+- An item **applies** wherever the input declares its checksum outside the
+  ClassNetCache groups. Applying and covering nothing is **STALE** and fails
+  the run: the mismatch went away, or changed shape -- which then also fails
+  as unlisted. An item whose checksum the input does not declare is counted as
+  not applicable, the way `compare_rpc_params.py` counts an expected difference
+  for another replay, so one export can still be checked on its own.
+- A malformed item -- a key missing or extra, a blank `reason` or `evidence`, a
+  parent that is not a chain label, a type the tool does not check, a repeated
+  shape -- refuses the whole list, exit 2.
+- Every run prints the unexpected and expected counts (identities / carriers)
+  and the matched / STALE / not applicable item counts, zeros included, plus
+  an `EXPECTED` line for each identity and carrier an item covers.
+
+A mismatch a sibling seed decided cannot be listed: its seed label embeds the
+pair of members that established it, which is no stable key, so name its chain
+in `PARENT_CHAINS` first. A mismatch that is simply not fixed yet does not
+belong in the list either: retype it. The tool needs a declaration corpus,
+which is private, so it is not in the CI sweep; run it by hand after changing
+a table or the list.
 
 ## What it cannot tell
 
