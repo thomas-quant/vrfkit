@@ -217,173 +217,28 @@ shows the default main-only export; both modes currently contain zero
 rejected partial rows and occupy 2,505 bytes. The five original main tables remain
 byte-for-byte identical across the checkpoint flag.
 
-Two things about `movement.parquet` worth knowing up front: `timestamp` is the
-128.0 Hz server tick and **resets each round** -- use `time_ms` for a global
-timeline; and posture detail lives in `bCrouchHeld`, not in `movement_state`.
-
 > Column schemas, the `tools/` scripts, the full validation suite, and
 > per-crate usage live in [`docs/USAGE.md`](docs/USAGE.md).
 > This document is about *why it is built this way*.
 
 ## Output
 
-The main export writes six Parquet tables plus `manifest.json`.
-`--checkpoints` adds seven checkpoint tables, for thirteen Parquet files in
-total. String columns are dictionary-encoded with ZSTD.
+The main export writes six Parquet tables plus `manifest.json`; `--checkpoints`
+adds seven checkpoint tables. String columns are dictionary-encoded with ZSTD.
+Every column, table and join rule is in
+[`docs/USAGE.md` section 3](docs/USAGE.md#3-output). Four traps to know before
+reading them:
 
-### `fields.parquet` -- replicated properties and RPC parameters
-
-| Column | Type | Description |
-|---|---|---|
-| `time_ms` | u32 | Milliseconds since replay start |
-| `packet_id` | u32 | Packet sequence number |
-| `channel_index` | u32 | Actor channel |
-| `actor_net_guid` | u32 | Actor NetGUID |
-| `object_net_guid` | u32? | Subobject NetGUID |
-| `group_path` | str | `NetFieldExportGroup` path; RPCs use `<Class>:<Function>` |
-| `handle` | u32 | Field handle within the group |
-| `field_name` | str? | Name the replay declares for that handle |
-| `bit_count` | u32 | Payload size in bits |
-| `raw_bits` | bytes? | Raw payload |
-| `value_i64` / `value_f64` / `value_bool` / `value_str` | | Only when the type is known |
-
-`raw_bits` is nullable. Unnamed replicated properties and unresolved whole
-RPC payloads retain their raw representation; successfully decoded movement
-RPCs and synthesized child rows may instead be represented by their decoded
-output. At most one `value_*` column is filled per row. Reinterpretation
-without re-parsing is possible only where the required raw payload survives.
-
-On top of `raw_bits`, the overlay types per-player economy
-(`MoneyManagementComponent.{Money,StartOfRoundMoney,TotalMoneyGranted}` as
-Int32) and the nested `CombatReport` arrays, among others.
-
-Arrays are flattened, so names look like
-`Rounds[3].Reports[1].Interactions[0].DamageDealt` and can be filtered with
-`LIKE 'Rounds[%].Reports[%].DamageDealt'`.
-
-One exception: a ClassNetCache block whose group cannot be identified cannot be
-walked as an inner stream, so it is emitted only as a preservation row
-(`field_name` = `__vrfkit_unresolved_class_net_cache_payload__`,
-`handle` = `u32::MAX`, full payload in `raw_bits`). Re-interpreting it as
-fields requires re-exporting from the original `.vrf`.
-
-### `movement.parquet` -- character position time series
-
-14 columns: `time_ms`, `packet_id`, `character_net_guid`, `pos_x/y/z`, `yaw`,
-`pitch`, `vel_x/y/z`, `timestamp`, `movement_state`, `move_type`.
-
-- `timestamp` is a **128.0 Hz global server tick** and **resets at each round
-  boundary.** Use it for in-round alignment; use `time_ms` for a global
-  timeline.
-- `movement_state` and `move_type` are constant (0, 1) across all
-  1,034,035,170 exported rows in the historical 2026-08-31 527-replay corpus (builds 13.01,
-  13.02 and 13.04). A future build may break that invariant, so both bytes are
-  exported verbatim.
-- **Posture detail is `bCrouchHeld`, not `movement_state`.** It already ships
-  as a separate field in `fields.parquet`.
-
-### `actors.parquet` -- actor spawn/despawn
-
-`event` (`open` / `close` / `dormant`), `class_path`, `archetype_path`,
-`spawn_x/y/z`, `spawn_pitch/yaw/roll`. This is where weapon and ability
-instance classes are found.
-
-**Three values, not two, and only `close` is a despawn.**
-`ChannelCloseReason::Dormancy` means the server stopped replicating an actor that
-is still alive, so it is exported as `dormant`; every other close reason is the
-actor going away. Both labels were written as `close` until the flag was plumbed
-through to the row, and that cost real time: a persistent effect settling into
-dormancy read as a despawn, so its lifetime ended early and the later wake-up
-re-open read as a *second spawn of the same object*. No row and no timestamp was
-ever lost -- only the label was wrong, and only for the closes that were never
-despawns. Code that pairs spawns with despawns must therefore treat `dormant` as
-neither: the channel keeps its archetype across a dormant close
-(`crates/vrfkit/src/sink/stream.rs`), and the matching `open` is a wake-up, not a
-new instance.
-
-### `net_guids.parquet` -- GUID to path, and containment
-
-`net_guid`, `path`, `outer_net_guid`. `outer_net_guid` is the containment
-chain -- use it to walk from a firing effect's `FiringState` subobject back up
-to the weapon actor.
-
-### `events.parquet` -- the timeline the server wrote itself
-
-`id`, `group`, `metadata`, `time1`, `time2`, `payload_size`, `raw_payload`,
-`word0`, `word1`, `payload_tag`, `payload_name`, `payload_seconds`.
-
-`group` is `characterDeath`, `characterUltimateUsed`, `roundStarted`,
-`spikePlanted`, `spikeDefused`, `spikeExploded`, `switchTeams`, and so on. The
-payload is `[u32 tag][N x u32 words][FString][f32 seconds]`, and `N` is fixed
-per group (CharacterDeath = 2, CharacterUltimateUsed / RoundStart /
-SwitchTeams = 1, SpikePlanted / Defused / Exploded = 0 -- derived as the
-residual-zero count across the corpus). The structural overlay is populated
-only when the arity, stable group tag, public `EReplayEventGroup` name and
-payload time all agree; otherwise every overlay column is null. For
-`characterDeath`, `(word0, word1)` is `(killer, killed)` NetGUID; for
-`roundStarted`, `word0` is the round number. The original bytes always remain
-in `raw_payload`, so a future layout change is preserved losslessly.
-
-### `checkpoint_fields.parquet` -- snapshot
-
-The field columns are preceded by `checkpoint_index` and `checkpoint_id`.
-Separate `checkpoint_actors.parquet` and `checkpoint_net_guids.parquet` preserve
-the snapshot's actor and GUID context with the same identity columns.
-`checkpoint_blocks.parquet` links each content block to its field rows and
-preserves class GUIDs and the path used to resolve the group name. Join
-within that checkpoint: its packet, channel and GUID state is independent of
-the main stream. A snapshot actor open is not a new timeline spawn.
-
-`checkpoint_export_groups.parquet` and `checkpoint_export_fields.parquet`
-preserve the checkpoint's schema declarations, sparse field slots, checksums,
-and raw FName components. `checkpoint_guid_entries.parquet` preserves the
-initial GUID entries, their order, path representation, and raw flags.
-Name indices in that initial stream resolve against the zero-based table of
-literal paths that precede them in the same checkpoint. The existing GUID
-table remains the resolved cache after the frame walk. The manifest records
-the mode and literal/index/resolved counts. See
-[declaration columns and join rules](docs/USAGE.md#checkpoint-schema-declarations).
-The [schema preservation report](docs/CHECKPOINT_SCHEMA_PRESERVATION.md)
-separates the added registry evidence from gameplay interpretation, and the
-[path-resolution report](docs/CHECKPOINT_PATH_RESOLUTION.md) gives the rule and
-its validation boundary.
-
-See [checkpoint output](docs/USAGE.md#checkpoint_fieldsparquet) and
-[current semantic evidence](docs/SEMANTIC_CONTEXT_EXPANSION.md). Older comparisons
-that joined checkpoint and main GUIDs by number do not establish actor identity.
-
-### `partials.parquet` -- unresolved transport payloads
-
-Rejected partial fragments and abandoned accumulators retain their exact raw
-bits in this separate table. Rows record the source stream and checkpoint ID,
-source packet and payload bit offset, channel and sequence, original header
-flags, rejection position and reason. `current_fragment` and
-`accumulated_payload` are distinct: an accumulator's source header describes
-its first fragment, while its `bit_count` describes the assembled raw buffer.
-These rows are preserved evidence, not successfully reconstructed RPCs.
-With `--checkpoints`, both streams share this table and remain distinguishable
-by `source` and `checkpoint_id`. CLI and manifest counters report each stream's
-preserved rows and bits separately.
-
-### `manifest.json`
-
-The full ReplayInfo plus the header, statistics, and **every export group the
-replay declares** (`net_field_export_groups`; 475 for `02d4d478`). The
-handle-to-name mapping lives here.
-
-The `players` array gives each `BombPlayerState` actor's `(actor_net_guid,
-subject, character_net_guid)`. `subject` is the account UUID and
-`character_net_guid` is the `SpawnedCharacter`, which exactly matches
-`movement.parquet`'s `character_net_guid`. This bridges the wire actors to
-stable account identity, so actor-level tables (movement, fields, actors) can
-be joined on it -- and it disambiguates the case where two players pick the
-same agent, where `playerLoadouts`'s `characterId` alone cannot tell them
-apart. In `02d4d478`, 10/10 players join to movement.
-
-`game_specific_data` carries the `playerLoadouts` JSON (per-subject
-`characterId`, skins, sprays). `timestamp_ticks` is a UE `FDateTime`
-(100-nanosecond ticks since 0001-01-01), **not** a Windows FILETIME -- reading
-it as one gives the year 3626.
+- `movement.parquet`'s `timestamp` is the 128 Hz server tick and **resets each
+  round**; use `time_ms` for a global timeline.
+- Posture is `fields.parquet`'s `bCrouchHeld`, not `movement_state`.
+- `actors.parquet`'s `event` is `open` / `close` / `dormant`, and **only `close`
+  is a despawn**. A dormant actor is alive and keeps its channel's archetype
+  (`crates/vrfkit/src/sink/stream.rs`), so the next `open` is a wake-up, not a
+  new instance.
+- `manifest.json`'s `timestamp_ticks` is a UE `FDateTime` (100-nanosecond ticks
+  since 0001-01-01), **not** a Windows FILETIME -- read as one it gives the year
+  3626.
 
 ## Status
 
@@ -697,48 +552,19 @@ shared `MeleeAttackStateComponent_ClassNetCache`. The attribution limitation
 still exists, but the full unresolved payload now survives in `raw_bits` even
 though it cannot yet be expanded into named field rows.
 
-### One bug that took a while
-
-For a while, every replay lost exactly one block and 695 bits. Four hypotheses
-were tried and failed, and it was finally caught by **exhaustive search** --
-re-framing an 831-bit payload from every start offset and scoring each by
-"does it land exactly on the payload end?" Offset 108 passed, and ten blocks
-with sequential even GUIDs (64, 6, 8, 10 ... 22) fit cleanly. We had started at
-109, so it was a **1-bit under-consumption.**
-
-Bit-level instrumentation pinned the location:
-
-| Sub-read | Bits | Position |
-|---|---|---|
-| actor GUID `IntPacked(2)` | 8 | 0..8 |
-| archetype `IntPacked(9)` | 8 | 8..16 |
-| level `IntPacked(3)` | 8 | 16..24 |
-| location (18-bit components) | 63 | 24..87 |
-| rotation (flag, no pitch, yaw, no roll) | 20 | 87..107 |
-| scale, absent | 1 | 107..108 |
-| **velocity, absent** | **1** | **108..109** |
-
-`PlayerController` has `bReplicateMovement = false`, so the server never
-serializes velocity -- the field is not on the wire at all, not "present but
-empty." On the first bunch `bHasPackageMapExports = false`, so the path is not
-registered yet and the actor cannot be identified by archetype; the dynamic
-GUID is a non-zero even number, so 2 is the minimum, and the first dynamic
-actor a replay opens is always the replay controller.
-
-In that historical 215-replay release-13.01 corpus, the fix took malformed
-215 -> 0 and newly decoded 2,150 blocks (10 per replay). Residual under-consumed
-bits dropped to 3,671, and those last four cases were later explained as the
-handle-minimum-width problem and went to 0.
+The controller's opening bunch was once framed nine bits early (the
+spawn-velocity bit and the net-player-index byte); see
+`crates/vrf-net/src/pipeline/spawn.rs` and `docs/archive/PROJECT_STATUS.md` 17-A.
 
 ## Type overlay
 
 For any field whose inner stream can be walked, the raw bits are always
 exported; when the type is known, the `value_*` columns are filled **as an
 overlay.** If the type is unknown, or decoding fails, the row's `raw_bits`
-remains. The only exception is the unresolved ClassNetCache block above: it
-cannot be expanded into fields, so it emits one preservation row (`handle` =
-`u32::MAX`, full payload in `raw_bits`) and an explicit unresolved/raw
-diagnostic rather than pretending the properties were decoded.
+remains. The only exception is a ClassNetCache block whose group cannot be
+identified: it cannot be expanded into fields, so it emits one preservation
+row (`handle` = `u32::MAX`, full payload in `raw_bits`) and an explicit
+unresolved/raw diagnostic rather than pretending the properties were decoded.
 
 The overlay table is extracted mechanically from the C# descriptors
 (`tools/extract_descriptors.py`) -- 224 groups, 1,336 entries, 96 handles.
