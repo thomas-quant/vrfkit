@@ -17,6 +17,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
@@ -97,10 +98,14 @@ def missed_report(extractor_missed: int, measured: bool) -> str:
 
 
 def main(argv: list[str]) -> int:
-    csharp_dir = DEFAULT_CSHARP_DIR
-    for i, arg in enumerate(argv[1:], 1):
-        if arg == "--csharp-dir" and i + 1 < len(argv):
-            csharp_dir = Path(argv[i + 1])
+    # argparse, not a hand match on the two-token form: that dropped
+    # `--csharp-dir=PATH`, a valueless flag, `--help` and typos silently and
+    # classified against the vendored descriptors instead.
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--csharp-dir", type=Path, default=DEFAULT_CSHARP_DIR,
+                        help="C# descriptor directory (default: the vendored "
+                             "third_party/vrp/Replay.Valorant)")
+    csharp_dir = parser.parse_args(argv[1:]).csharp_dir
 
     if not MANIFEST_PATH.exists():
         print(f"ERROR: {MANIFEST_PATH} not found. Run export first.", file=sys.stderr)
