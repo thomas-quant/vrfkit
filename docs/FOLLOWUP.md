@@ -84,6 +84,19 @@ They must not be promoted to shot, reload or purchase event totals without
 independent event evidence. The player join for round balances resolved
 258,680 of 261,360 rows; unresolved ownership remains null.
 
+That 482,849 counts the team-switch credit resets as money decreases, and the
+tool then offered them to purchase snapshots as the nearest decrease. A
+decrease between `switchTeams` and the next `roundStarted` (or the end of the
+stream, when no round follows) is now published separately, as
+`money_decreases_in_team_switch_window`, and joins no snapshot. Re-measured on
+2026-09-28 over the 1,018-export audit corpus (parser 259ed10; the old and new
+`build()` run on every export and compared): 669,892 decreases before, 5,616 of
+them in 936 exports inside those windows -- all 7-10 ms after the switch,
+5,551 landing on 800, 50 on 5000, 12 on 0 and 3 on 6200 -- leaving 664,276.
+5,650 of 636,009 purchase-state snapshots had taken one of them as their
+nearest decrease and none does now; 6,373 snapshots change, only in their
+nearest/nearby-decrease fields, and every other output is identical.
+
 ## Guardian path mapping
 
 The canonical C# path has directory `Dmr`; build 13.02 onward also uses `DMR`.

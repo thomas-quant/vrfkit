@@ -4,7 +4,10 @@
 This is an analytical view over the exported Parquet tables.  It deliberately
 publishes observations and their evidence rather than declaring game metrics
 where the replay cannot support one.  In particular, PurchasedItemComponent
-rows are snapshots; only Money decreases are economic events.
+rows are snapshots; only Money decreases are economic events -- except those
+replicated between `switchTeams` and the next `roundStarted`, when no buy
+phase is open. Those are the team-switch credit reset and are published as
+`money_decreases_in_team_switch_window`, never as purchase evidence.
 
 Usage:
     python tools/extract_match_observations.py --export out/<replay> --out observations.json
@@ -81,6 +84,40 @@ def _changes(samples):
         for (_, _, before), (time_ms, _, after) in zip(values, values[1:])
         if before is not None and after is not None
     ], ambiguous
+
+
+def _team_switch_windows(switches: list[int], round_starts: list[int]) -> list[tuple]:
+    """`[switchTeams, first roundStarted after it)` per switch; end None = end of stream.
+
+    A side switch resets every player's credits (800 at half time, 5000 in
+    overtime), and the reset replicates as an ordinary `Money` write -- a
+    decrease for anyone holding more. Measured on the 1,018-export audit
+    corpus (parser 259ed10, 2026-09-28): 5,616 decreases fall inside these
+    windows, all 7-10 ms after the switch; 5,551 land on 800, 50 on 5000, 12
+    on 0 and 3 on 6200 (every 0 and 6200 follows an overtime switch, the
+    second or later of its match). No buy phase is open before the round
+    starts, so none is a purchase.
+
+    The window is the decrease's own time, not its collapsed interval. A
+    player already on 800 gets no `Money` sample for the reset, so the first
+    buy's `[before_ms, time_ms]` spans the switch; a rule on that interval
+    took 105 real buys out of the same corpus. A switch with no later
+    `roundStarted` -- 11 overtime replays that end seconds after it -- is open
+    to the end of the stream, and the reset is still written 8 ms after it.
+    """
+    windows = []
+    for switch in switches:
+        index = bisect.bisect_right(round_starts, switch)
+        windows.append((switch, round_starts[index] if index < len(round_starts) else None))
+    return windows
+
+
+def _team_switch_window(windows: list[tuple], time_ms: int) -> tuple | None:
+    """The first window containing `time_ms`, or None."""
+    for start, end in windows:
+        if start <= time_ms and (end is None or time_ms < end):
+            return start, end
+    return None
 
 
 def _round_context(round_starts: list[int], time_ms: int) -> int | None:
@@ -177,6 +214,10 @@ def build(export_dir: Path) -> dict:
                           if group == "roundStarted")
     defuse_events = sorted(time for group, time in zip(events["group"], events["time1"])
                            if group == "spikeDefused")
+    switch_windows = _team_switch_windows(
+        sorted(time for group, time in zip(events["group"], events["time1"])
+               if group == "switchTeams"),
+        round_starts)
 
     fields = _read_columns(
         export_dir / "fields.parquet",
@@ -503,6 +544,7 @@ def build(export_dir: Path) -> dict:
             })
 
     money_decreases = []
+    switch_window_decreases = []
     ambiguous_money_packets = 0
     for component, samples in money.items():
         player = outer_of.get(component)
@@ -510,7 +552,7 @@ def build(export_dir: Path) -> dict:
         ambiguous_money_packets += ambiguous
         for time_ms, before, after, delta in changes:
             if delta < 0:
-                money_decreases.append({
+                decrease = {
                     "time_ms": time_ms,
                     "money_component_guid": component,
                     "player_state_guid": player,
@@ -518,7 +560,21 @@ def build(export_dir: Path) -> dict:
                     "after": after,
                     "amount": -delta,
                     "evidence": "MoneyManagementComponent.Money decrease",
-                })
+                }
+                window = _team_switch_window(switch_windows, time_ms)
+                if window is None:
+                    money_decreases.append(decrease)
+                else:
+                    # Kept, not dropped, and kept out of `money_by_player`
+                    # below, so it is never a snapshot's nearest decrease.
+                    switch_window_decreases.append({
+                        **decrease,
+                        "team_switch_ms": window[0],
+                        "next_round_start_ms": window[1],
+                        "evidence": ("MoneyManagementComponent.Money decrease between "
+                                     "switchTeams and the next roundStarted (end of "
+                                     "stream if none); no buy phase is open"),
+                    })
 
     money_by_player = defaultdict(list)
     for event in money_decreases:
@@ -582,6 +638,10 @@ def build(export_dir: Path) -> dict:
             "ammo_shot_join": "decrease carries only a global EffectID observation within +/-300ms",
             "defuse_completion": "events.spikeDefused is authoritative; progress is never completion",
             "purchase": "PurchasedItemComponent rows are snapshots; Money decreases are separate events",
+            "money_team_switch": ("a Money decrease at or after switchTeams and before the "
+                                  "next roundStarted (or the end of the stream) is published "
+                                  "in money_decreases_in_team_switch_window, not "
+                                  "money_decreases, and is never a snapshot's nearest decrease"),
         },
         "ammo_changes": _stable_rows(ammo_changes),
         "equip_intervals": _stable_rows(equip_intervals),
@@ -595,6 +655,12 @@ def build(export_dir: Path) -> dict:
         "round_balances": _stable_rows(round_balances),
         "team_loadouts": _stable_rows(team_loadouts),
         "money_decreases": _stable_rows(money_decreases),
+        "money_decreases_in_team_switch_window": _stable_rows(switch_window_decreases),
+        "team_switch_windows": {
+            "switches": len(switch_windows),
+            "closed_by_round_start": sum(end is not None for _, end in switch_windows),
+            "closed_by_end_of_stream": sum(end is None for _, end in switch_windows),
+        },
         "transaction_snapshots": _stable_rows(transaction_snapshots),
         "attribution_coverage": {
             "equip_owner_outer": {
@@ -642,8 +708,11 @@ def main() -> int:
     for name in ("ammo_changes", "equip_intervals", "reload_intervals",
                  "defuse_progress_transitions", "defuse_completions",
                  "round_balances", "team_loadouts", "money_decreases",
-                 "transaction_snapshots"):
+                 "money_decreases_in_team_switch_window", "transaction_snapshots"):
         print(f"  {name}: {len(result[name])}")
+    windows = result["team_switch_windows"]
+    print(f"  team switch windows: {windows['switches']} "
+          f"({windows['closed_by_end_of_stream']} open to the end of the stream)")
     for gap in result["quality_gaps"]:
         print(f"  quality gap: {gap}")
     return 0

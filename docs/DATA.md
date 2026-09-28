@@ -110,6 +110,11 @@ and update time to the latest preceding round boundary. Fields arrive as
 separate updates: assemble component state and distinguish initialization or
 round-start re-emission from a new item transition. A complete purchase ledger
 requires corroborating credit changes; state rows alone are not that ledger.
+Not every credit decrease is a spend: the side switch at half time and in
+overtime resets credits, and that reset replicates as an ordinary `Money`
+write 7-10 ms after `switchTeams`, before any buy phase opens.
+`extract_match_observations.py` keeps those decreases out of its purchase
+evidence (measured in [FOLLOWUP.md](FOLLOWUP.md#typing-and-data-dictionaries)).
 
 ## Combat — kills & deaths
 
