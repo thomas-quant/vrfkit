@@ -77,10 +77,8 @@ the framing totals still include 87,038,567 skipped bits.
 
 ## Reproduction
 
-Inputs remain private under `$env:LOCALAPPDATA/vrfkit/baseline-corpora`.
-Run artifacts, exact before/after audit script and its report are under
-`$env:LOCALAPPDATA/vrfkit/upstream-reveals-20260924` (`audit.py`, `audit.json`).
-The audit selects the five exact descriptor paths and only Owner, Instigator
+Replay inputs and run artifacts, including the before/after audit script
+and its report, remain private and outside the repository. The audit selects the five exact descriptor paths and only Owner, Instigator
 and ReplicatedMovement, checks main and checkpoint tables, and compares all
 Parquet columns before accepting a typed-only difference.
 

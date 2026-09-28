@@ -1426,8 +1426,9 @@ failure locations, not proof that CachedAttributeSet itself was broken.
 The current implementation retains those tails; the measured decoded/raw split
 is in FOLLOWUP.md. Unresolved RPC payloads are not additional lost blocks.
 
-Adding a new build takes one `SeededTransform` impl -- two constants and three
-word functions. See the README's
+Adding a new build takes one `SeededTransform` impl -- its branch,
+`SEED_ADDEND`, `INIT_A_OFFSET`, optionally `ADD_OFFSET` and `TAIL_XOR`, and
+three word functions. See the README's
 [Supported builds and the cost of a new build](../README.md#supported-builds-and-the-cost-of-a-new-build)
 section.
 

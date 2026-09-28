@@ -2,16 +2,13 @@
 
 `tools/extract_kill_ledger.py` produces one JSON document that retains labelled
 character-death events, component-local KillData state, and explicit links
-between them. Use a measured 13.01, 13.02, 13.04, 13.05 or 13.06 export
-generated with `--checkpoints`; other builds are refused (see
-[measured builds](KILL_OBSERVATIONS.md#measured-builds)):
+between them. Use an export generated with `--checkpoints` from a measured
+build, 11.06--12.09 or 13.01--13.06; 12.10, 12.11, 13.00 and any other build
+are refused (see [measured builds](KILL_OBSERVATIONS.md#measured-builds)):
 
 ```powershell
 python tools/extract_kill_ledger.py --export out/replay --out out/kill-ledger.json
 ```
-
-Exports from 11.06--12.09 are accepted as well; their measurement is in
-[Legacy builds](#legacy-builds-2026-09-28).
 
 The document has schema version 1 and kind
 `vrfkit_character_death_ledger`. It retains the complete

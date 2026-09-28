@@ -137,9 +137,11 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - **Account identity & typed events** — `manifest.players` (account UUID →
   actor → character), event `word0`/`word1` (killer/killed NetGUID, round
   index), ping/latency.
-- **Cross-validated** against the C# reference parser — movement is
-  near-bit-identical, CombatReport identical, and the server-written Event
-  chunk independently confirms the kill count.
+- **Cross-validated** against the C# reference parser on a 13.01 replay --
+  movement near-bit-identical, CombatReport identical -- and the server-written
+  Event chunk independently confirms the kill count. Against a later upstream
+  revision on 13.06, movement differed by up to 5.14 per position axis
+  ([upstream parity](docs/UPSTREAM_PARITY.md)).
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
@@ -178,7 +180,9 @@ vrfkit export   <file.vrf> --out <dir> [--checkpoints]
 `inspect` prints replay info, header, branch, and a chunk summary; it does no
 parsing and returns immediately. `validate` walks every content block through
 the RepLayout grammar and reports a pass rate; it writes no files. `export`
-writes the Parquet tables and manifest described under [Output](#output).
+writes the Parquet tables and manifest described under [Output](#output) into
+`--out`, which must be new, empty or a previous export: anything else in it
+is refused, never deleted.
 
 `export` is a default feature. Drop it with `--no-default-features` and
 `arrow`/`parquet`/`zstd` never enter the dependency tree:
@@ -658,7 +662,9 @@ reads only `archive.BitsRemaining`. Before this fix, all 364 rows of
 The payload transform changes per game build, but far more is **constant**
 across supported releases 11.06 through 13.06: the PRNG and its multipliers, the seed-mix
 skeleton, the 64 -> 32 -> 8 -> tail staging, the tail-XOR handling, and even
-the S-box table itself. What actually changes per build:
+the S-box table itself. Each build supplies its own `word64` / `word32` /
+`byte` operation sequence (order, rotations, complements, and whether the
+S-box stage is used) plus these constants:
 
 | | seed addend | offset | sign | S-box |
 |---|---|---|---|---|
@@ -688,12 +694,15 @@ the S-box table itself. What actually changes per build:
 | release-13.06 | `0xe974593c` | `0x3c` | **+** | used |
 
 In all twenty-four supported builds the **tail-XOR byte equals the low byte of the seed
-addend.** It is a derived value, not an independent constant, and the
-relationship is pinned by a test in `versions/mod.rs` -- if a future build breaks
-the pattern, the test fails instead of the final byte silently corrupting.
+addend.** It is a derived value, not an independent constant: `SeededTransform`
+defaults `TAIL_XOR` to `SEED_ADDEND as u8` (`versions/mod.rs`), and a build
+that broke the pattern would fail its 1- and 7-bit vectors, which
+`vectors_cover_the_staging_boundaries` in `crates/vrf-transform/tests/golden.rs`
+requires for every registered build.
 
-So adding a build is one `SeededTransform` impl: two constants and three word
-functions (`word64` / `word32` / `byte`); everything else is shared.
+So adding a build is one `SeededTransform` impl: its branch, `SEED_ADDEND`,
+`INIT_A_OFFSET`, optionally `ADD_OFFSET` and `TAIL_XOR` (both defaulted), and
+three word functions (`word64` / `word32` / `byte`); everything else is shared.
 
 **13.02 and 13.04 are confirmed by live measurement, not only golden
 vectors.** A 527-replay machine-local sweep on 2026-08-31 covered all three
@@ -760,15 +769,7 @@ reinterpreted. Unresolved ClassNetCache blocks have a whole-payload row rather
 than named parameters; interpreting them requires the corresponding schema
 and framing. Payloads lost before export require parsing the original replay.
 
-### 2. Minimal cost per build update
-
-See [Supported builds](#supported-builds-and-the-cost-of-a-new-build). Across
-the supported builds the only per-build variables are two constants (seed addend,
-offset) and a sign, plus whether the S-box stage is enabled; the PRNG,
-staging, tail-XOR, and S-box table are shared. A new build is one
-`SeededTransform` impl.
-
-### 3. A clean parallelization point
+### 2. A clean parallelization point
 
 The content-block **header and declared bit-length are plaintext**; the
 transform only touches the payload that follows. So framing (sequential,
@@ -776,7 +777,7 @@ unavoidable because of the replication state machine) and block decode (fully
 independent) can be separated. The transform is determined solely by
 `(bits, seed)`, so it parallelizes per block.
 
-### 4. Output is Parquet
+### 3. Output is Parquet
 
 Columnar storage collapses the repeated path and name strings via dictionary
 encoding, zstd compresses it well, and it reads directly in `pyarrow` /
@@ -793,8 +794,8 @@ layered, and the layers catch different things:
   every available replay; per-build clean/checked counts are in the support table.
 - **Framing** (`validate_corpus.py`) -- content-block framing, loss accounting
   and unresolved-payload preservation.
-- **Bytes** (`check_export_baseline.py`, per-file row and byte counts) --
-  regression in any of the 28 export counters.
+- **Bytes** (`check_export_baseline.py`) -- regression in any export counter
+  or in a file's rows, bytes or SHA-256.
 - **Decode** (`check_decode_errors_corpus.py`, scoped export corpora) -- overlay
   type errors, struct-blob failures, array/leaf/truncated-RPC/movement
   failures, unwalked CNC brute-force payloads and movement-section tails; the

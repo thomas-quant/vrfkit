@@ -61,7 +61,7 @@ existing `table.rs` byte for byte.
 ```powershell
 python -W error tools/compare_descriptor_sources.py `
   --baseline third_party/vrp `
-  --candidate "$env:LOCALAPPDATA/vrfkit/upstream-vrp::d23c13e12262fb1da9fc005d1cd0ef9f8d0d36fd" `
+  --candidate "<upstream clone>::d23c13e12262fb1da9fc005d1cd0ef9f8d0d36fd" `
   --downstream-table crates/vrf-decode/src/table.rs --output descriptor-audit.json
 ```
 
@@ -159,10 +159,8 @@ new ability-array routes. Detailed per-identity evidence is in
 
 ## Reproduction and checks
 
-Replay files remain private. The preserved inputs live below
-`$env:LOCALAPPDATA/vrfkit/baseline-corpora`; validation artifacts live below
-`$env:LOCALAPPDATA/vrfkit/upstream-implementation-20260923`. Pass equivalent
-local paths when reproducing elsewhere.
+Replay inputs and run artifacts remain private and outside the repository;
+pass local paths when reproducing.
 
 ```powershell
 cargo +1.86.0 build --release -p vrfkit --locked

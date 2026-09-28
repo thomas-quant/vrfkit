@@ -9,8 +9,9 @@ checkpoint field, declaration and reference tables.
 python tools/extract_kill_observations.py --export out/nested --out out/kill-observations.json
 ```
 
-**Builds.** The extractor accepts exports from 11.06--12.09 and 13.01--13.05
-and refuses any other build before reading a row. The legacy builds were added
+**Builds.** The extractor accepts exports from 11.06--12.09 and 13.01--13.06
+(`MEASURED_BUILDS`) and refuses 12.10, 12.11, 13.00 and any other build before
+reading a row. The legacy builds were added
 on 2026-09-28, once the parser emitted KillData children on them (see the
 [legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
 The committed extractor then accepted all 48 available legacy exports, three
@@ -37,7 +38,8 @@ The extractor fails when declarations differ from the measured group/name/checks
 The extractor reads a build only after its KillData identities and values have
 been measured: 13.01, 13.02, 13.04 and 13.05 on 2026-09-08 (the 714-export
 corpus in the [ledger's validation scope](KILL_LEDGER.md#validation-scope)),
-and 13.06 on 2026-09-28. Any other build, including a future 13.07 whose
+and 11.06--12.09 (above) and 13.06 on 2026-09-28. Any other build, including a
+future 13.07 whose
 declarations happen to match, fails with `replay build is outside the measured
 KillData set` before a row is read. Support in the parser is not enough.
 

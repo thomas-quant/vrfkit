@@ -81,8 +81,9 @@ its name:
 - the decoded cells lie on a grid anchored at the owning actor's spawn
   position (below).
 
-A separate IoStore read of the game's component classes (a parallel branch,
-not in this tree) reached the same class.
+`tools/extract_component_classes` reached the same class from the game's
+IoStore containers ([DATA.md](DATA.md#reading-component-classes-out-of-the-game),
+"Not added, and why").
 
 Route completeness: the same strict decoder, with each replay's declaration,
 was run on every other preserved ClassNetCache window or tail in both field

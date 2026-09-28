@@ -102,6 +102,9 @@ fragments and attributes errors by cause. All old `net_main` and
 | Errors with the reliable flag | 22,169 | 835,967 |
 
 All other cause counts and both under-/over-attribution residuals are zero.
+Attempted bunches equal missing-initial errors on this corpus only; it is not
+an invariant, and `partial_bunches` now also counts partials refused at the
+channel-state guard.
 These are observations under the current header/state interpretation. They do
 not independently prove how the game recorded every partial header. A
 different final-bit ordering found in another Unreal parser does not restore

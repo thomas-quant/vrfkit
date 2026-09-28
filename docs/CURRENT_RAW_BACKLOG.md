@@ -23,10 +23,6 @@ extractor's selection. They became a second route the same day: 250,053 main
 and 181,108 checkpoint windows, all exact, on all 24 builds. The inventory
 below is still the 2026-09-09 measurement, and the open GAS task is unchanged.
 
-Private evidence also validates a numeric FastArray walk over all 26,303
-selected PatchVolume whole/tail windows. PatchVolume still lacks a public
-extraction route and an established class/item/property schema.
-
 ## What the inventory counts
 
 A physical field row is untyped only when all four value columns are null.

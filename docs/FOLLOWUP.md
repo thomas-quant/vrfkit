@@ -334,8 +334,6 @@ Considered on 2026-09-14 and deliberately not done, each with the reason:
   private replay content in this public repository, which
   [SCHEMA_EXPANSION.md](SCHEMA_EXPANSION.md) rules out. They stay covered by
   the machine-local corpus sweeps.
-- Updating the test counts in [CURRENT_STATUS.md](CURRENT_STATUS.md). They
-  describe its dated 2026-09-09 validation run and say so.
 
 Considered on 2026-09-28 and deliberately not done:
 

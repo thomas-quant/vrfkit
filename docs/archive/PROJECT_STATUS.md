@@ -3139,7 +3139,9 @@ only -- `AShooterCharacter` 7 of 7 short, `AProjectile` 38 of 38 byte,
 the default, at corpus scale: all 903 replays that declare `ReplicatedMovement`
 on one of the five (21 builds) were exported with the build before and after,
 and every Parquet file and manifest is byte-identical. The correction is
-`retype_game_object_rotators` in `tools/apply_type_corrections.py`.
+the `GAME_OBJECT_ROTATOR_RETYPE` rule in `tools/apply_type_corrections.py`
+(evidence on `GAME_OBJECT_BYTE_ROTATOR_GROUPS`); until 89fa71c it was the
+function `retype_game_object_rotators`.
 
 Two independent checks that the values are real, not merely bit-exact:
 
