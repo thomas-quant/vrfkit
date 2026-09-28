@@ -427,7 +427,14 @@ fn info_truncated_input_rejected() {
     // Just the magic, then cut off
     let data = 0x43F4_EFDDu32.to_le_bytes();
     let result = info::parse_replay_info(&data);
-    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        ContainerError::Truncated {
+            context: "file version",
+            needed: 4,
+            available: 0
+        }
+    ));
 }
 
 // ===============================================================================
@@ -568,8 +575,16 @@ fn header_negative_custom_version_count_rejected() {
 
 #[test]
 fn header_truncated_rejected() {
+    // Just the network magic, then cut off
     let result = header::parse_replay_header(&[0x3D, 0xA1, 0xF5, 0x2C]);
-    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        ContainerError::Truncated {
+            context: "network version",
+            needed: 4,
+            available: 0
+        }
+    ));
 }
 
 // ===============================================================================
@@ -678,6 +693,8 @@ fn preamble_valid_file() {
     let mut data = helpers::default_replay_info();
     let header_payload = helpers::build_header_payload();
     data.extend_from_slice(&helpers::build_chunk(0, &header_payload));
+    // The chunks after the header start here.
+    let after_header = data.len();
     // Add a ReplayData chunk after
     data.extend_from_slice(&helpers::build_chunk(1, &[0xDE; 16]));
 
@@ -687,7 +704,7 @@ fn preamble_valid_file() {
         preamble.header.replay_version.branch,
         "++Ares-Core+release-12.10"
     );
-    assert!(preamble.remaining_offset > 0);
+    assert_eq!(preamble.remaining_offset, after_header);
 }
 
 #[test]
