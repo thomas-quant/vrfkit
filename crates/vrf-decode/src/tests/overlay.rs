@@ -107,12 +107,19 @@ const REPLICATED_MOVEMENT_CHECKSUM: u32 = 2_749_104_612;
 /// engine-reference fallback can answer. The fallback answers for any group,
 /// so a name it covers is recognised by also answering for a group no table
 /// declares, and is not counted as shadowing.
+///
+/// Unshadowed is not yet reachable. The scoped lookup is a binary search on
+/// `(name, group, checksum)`, and the generator's sort is a separate statement
+/// of that order that nothing on this side checked: an entry out of order goes
+/// unfound and its field silently raw. So the order is asserted, and every
+/// entry must resolve to its own type at its own identity.
 #[test]
 fn no_scoped_identity_is_shadowed_by_the_table() {
     let table = OverlayTable::new(&OVERLAY_TABLE);
     let by_name =
         |group, name| resolve_field_type_with_checksum(&table, group, Some(name), None, None);
-    let shadowed: Vec<(&str, &str, u32)> = crate::scoped_types::SCOPED_TYPES
+    let scoped = &crate::scoped_types::SCOPED_TYPES;
+    let shadowed: Vec<(&str, &str, u32)> = scoped
         .iter()
         .filter(|(name, group, _, _)| {
             by_name(group, name).is_some() && by_name("/Unobserved", name).is_none()
@@ -123,6 +130,21 @@ fn no_scoped_identity_is_shadowed_by_the_table() {
         shadowed.is_empty(),
         "scoped entries the table resolves first, so never read: {shadowed:?}"
     );
+
+    for pair in scoped.windows(2) {
+        let (a, b) = (
+            (pair[0].0, pair[0].1, pair[0].2),
+            (pair[1].0, pair[1].1, pair[1].2),
+        );
+        assert!(a < b, "SCOPED_TYPES not strictly sorted: {a:?} then {b:?}");
+    }
+    for &(name, group, checksum, field_type) in scoped {
+        assert_eq!(
+            resolve_field_type_with_checksum(&table, group, Some(name), None, Some(checksum)),
+            Some(field_type),
+            "unreachable scoped identity {name} / {group} / {checksum}"
+        );
+    }
 }
 
 /// Upstream 8b7afcb's Raze fields are typed by exact identity only: the
@@ -1283,6 +1305,64 @@ fn apply_overlay_graceful_on_decode_failure() {
     assert_eq!(stats.decoded_err, 1);
 }
 
+/// A zero-bit payload is the value 0 for `EnumRemainingBits` -- zero width is
+/// the format's own encoding of 0, argued in
+/// `scalar::decode_enum_remaining_bits` -- and a `ZeroBits` failure for every
+/// other type. A field with no payload attached takes the same arm, and is
+/// `ZeroBits` for every type once it claims a nonzero width.
+#[test]
+fn a_zero_bit_payload_is_zero_only_for_enum_remaining_bits() {
+    static ENTRIES: [OverlayEntry; 2] = [
+        OverlayEntry {
+            group_path: "/test",
+            field_name: "Empty",
+            field_type: FieldType::Int32,
+        },
+        OverlayEntry {
+            group_path: "/test",
+            field_name: "Zero",
+            field_type: FieldType::EnumRemainingBits,
+        },
+    ];
+    let table = OverlayTable::new(&ENTRIES);
+    let empty: &[u8] = &[];
+    for (field, raw_bits, bit_count, want) in [
+        ("Zero", Some(empty), 0, Some(0)),
+        ("Zero", None, 0, Some(0)),
+        ("Zero", None, 8, None),
+        ("Empty", Some(empty), 0, None),
+        ("Empty", None, 8, None),
+    ] {
+        let case = format!("{field} {raw_bits:?} {bit_count}");
+        let mut stats = OverlayStats::default();
+        let r = apply_overlay(
+            &table,
+            "/test",
+            group_hash_state("/test"),
+            Some(field),
+            raw_bits,
+            bit_count,
+            &mut stats,
+        )
+        .expect("a typed field is attempted");
+        let columns = (r.value_i64, r.value_f64, r.value_bool, r.value_str);
+        assert_eq!(columns, (want, None, None, None), "{case}");
+        let kinds: Vec<String> = stats
+            .error_report
+            .top_n(usize::MAX)
+            .iter()
+            .map(|row| row.error_kind.to_string())
+            .collect();
+        if want.is_some() {
+            assert_eq!((stats.decoded_ok, stats.decoded_err), (1, 0), "{case}");
+            assert!(kinds.is_empty(), "{case}: {kinds:?}");
+        } else {
+            assert_eq!((stats.decoded_ok, stats.decoded_err), (0, 1), "{case}");
+            assert_eq!(kinds, ["ZeroBits"], "{case}");
+        }
+    }
+}
+
 /// The error report's `kind` is the only column that tells an operator WHY a
 /// field failed -- `field_name` says which -- and the report is the permanent
 /// schema-drift diagnostic. So each failure must print the label of its own
@@ -1899,23 +1979,6 @@ fn the_engine_fallback_does_not_invent_other_names() {
     }
 }
 
-/// A declared entry still wins: the fallback only runs after the table misses,
-/// so a class that really does spell one of these names differently keeps its
-/// declared type.
-#[test]
-fn a_table_entry_outranks_the_engine_fallback() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "Owner",
-        field_type: FieldType::Raw,
-    }];
-    let table = OverlayTable::new(entries);
-    assert_eq!(
-        resolve_field_type(&table, "/test", Some("Owner"), None),
-        Some(FieldType::Raw),
-    );
-}
-
 /// The 192-bit RPC vectors. Unreal splits an `FTransform` parameter into three
 /// separate double vectors on this wire, and no descriptor declares any of
 /// them, so 54,859 rows on 02d4d478 arrived raw. Read as 3 x f64 they are
@@ -2019,19 +2082,67 @@ fn a_checksum_types_a_field_the_table_never_declared() {
     );
 }
 
-/// The checksum runs last, so anything the table declares still wins.
+/// A declared entry outranks both name-level fallbacks: the engine object
+/// references and the checksum run only after the table misses, so a class
+/// that declares `Owner`, or a `PlayerID` whose checksum another class
+/// donated, keeps its declared type.
+///
+/// Declared `Raw` or `Skip` is a decision not to decode. `raw_or_skip` is the
+/// only counter that reports it, so it is asserted to move, once per field.
 #[test]
-fn a_declared_entry_outranks_the_checksum() {
-    let entries: &[OverlayEntry] = &[OverlayEntry {
-        group_path: "/test",
-        field_name: "PlayerID",
-        field_type: FieldType::Raw,
-    }];
-    let table = OverlayTable::new(entries);
-    assert_eq!(
-        resolve_field_type_with_checksum(&table, "/test", Some("PlayerID"), None, Some(2396673102)),
-        Some(FieldType::Raw),
+fn a_declared_entry_outranks_the_engine_and_checksum_fallbacks() {
+    const fn declared(field_type: FieldType) -> [OverlayEntry; 2] {
+        [
+            OverlayEntry {
+                group_path: "/test",
+                field_name: "Owner",
+                field_type,
+            },
+            OverlayEntry {
+                group_path: "/test",
+                field_name: "PlayerID",
+                field_type,
+            },
+        ]
+    }
+    static RAW: [OverlayEntry; 2] = declared(FieldType::Raw);
+    static SKIP: [OverlayEntry; 2] = declared(FieldType::Skip);
+
+    let mut stats = OverlayStats::default();
+    for (entries, field_type, raw_or_skip) in
+        [(&RAW, FieldType::Raw, 1), (&SKIP, FieldType::Skip, 2)]
+    {
+        let table = OverlayTable::new(entries);
+        assert_eq!(
+            resolve_field_type(&table, "/test", Some("Owner"), None),
+            Some(field_type)
+        );
+        // This checksum types an undeclared `PlayerID` as `Int32` elsewhere.
+        let donated = Some(2396673102);
+        assert_eq!(
+            resolve_field_type_with_checksum(&table, "/test", Some("PlayerID"), None, donated),
+            Some(field_type),
+        );
+        let result = apply_overlay(
+            &table,
+            "/test",
+            group_hash_state("/test"),
+            Some("Owner"),
+            Some(&[1]),
+            1,
+            &mut stats,
+        );
+        assert!(result.is_none(), "{field_type:?} must not be decoded");
+        assert_eq!(stats.raw_or_skip, raw_or_skip, "{stats:?}");
+    }
+    let others = (
+        stats.decoded_ok,
+        stats.decoded_err,
+        stats.not_in_table,
+        stats.no_field_name,
+        stats.handle_conflicts_refused,
     );
+    assert_eq!(others, (0, 0, 0, 0, 0), "{stats:?}");
 }
 
 /// A checksum nothing donated types nothing -- the map asserts only what it
