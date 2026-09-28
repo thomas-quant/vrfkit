@@ -30,21 +30,11 @@ use std::path::{Path, PathBuf};
 
 use vrf_container::{
     ChunkIterator, ChunkType, KNOWN_EVENT_GROUPS, decompress_replay_data_with_trailing,
-    event_payload_seconds_matches_time, known_event_payload_name, known_event_payload_tag,
-    known_event_word_count, parse_event_chunk, parse_event_payload, parse_preamble,
+    event_payload_seconds_matches_time, parse_event_chunk, parse_event_payload, parse_preamble,
 };
 
-/// Fallback used when `VRFKIT_CORPUS_DIR` is unset. Empty so that on a machine
-/// without the corpus `is_dir()` is false and the test skips honestly.
-const DEFAULT_VRF_DIR: &str = "";
-
-fn corpus_dir() -> PathBuf {
-    std::env::var_os("VRFKIT_CORPUS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_VRF_DIR))
-}
-
 /// What one file contributed to the tally.
+#[derive(Default)]
 struct FileReport {
     /// Branch string from the header, when the preamble parsed.
     branch: Option<String>,
@@ -77,16 +67,6 @@ struct KnownEventObservation {
     time1: u32,
 }
 
-/// The parser's own `&'static str` for a known group, so an observation never
-/// retains the wire string. Read from `KNOWN_EVENT_GROUPS` rather than a
-/// third hand-kept copy of the list.
-fn canonical_known_event_group(group: &str) -> Option<&'static str> {
-    KNOWN_EVENT_GROUPS
-        .iter()
-        .find(|known| known.group == group)
-        .map(|known| known.group)
-}
-
 /// Parse one replay as far as the container layer goes, collecting problems
 /// rather than stopping at the first.
 fn scan_file(data: &[u8]) -> FileReport {
@@ -101,13 +81,8 @@ fn scan_file(data: &[u8]) -> FileReport {
         Err(e) => {
             problems.push(format!("preamble: {e}"));
             return FileReport {
-                branch: None,
-                oodle_ok: false,
                 problems,
-                notes,
-                events,
-                event_rows,
-                unknown_event_groups,
+                ..Default::default()
             };
         }
     };
@@ -157,30 +132,28 @@ fn scan_file(data: &[u8]) -> FileReport {
                 problems.push("event chunk Time1 and Time2 no longer agree".to_string());
                 continue;
             }
-            let Some(group) = canonical_known_event_group(&event.group) else {
+            // The table's own `&'static str` is what an observation keeps, so
+            // it never retains the wire string.
+            let Some(known) = KNOWN_EVENT_GROUPS.iter().find(|k| k.group == event.group) else {
                 unknown_event_groups += 1;
                 continue;
             };
-            let word_count =
-                known_event_word_count(group).expect("canonical known group must have an arity");
-            let expected_name = known_event_payload_name(group)
-                .expect("canonical known group must have a payload name");
-            let expected_tag = known_event_payload_tag(group)
-                .expect("canonical known group must have a payload tag");
-            let Some(parsed) = parse_event_payload(event.payload, word_count) else {
+            let group = known.group;
+            let Some(parsed) = parse_event_payload(event.payload, known.word_count) else {
                 problems.push(format!(
-                    "known event group {group} no longer fits its {word_count}-word layout"
+                    "known event group {group} no longer fits its {}-word layout",
+                    known.word_count
                 ));
                 continue;
             };
-            if parsed.name != expected_name {
+            if parsed.name != known.payload_name {
                 // Do not include the unconstrained wire string in diagnostics.
                 problems.push(format!(
                     "known event group {group} no longer carries its public enum-name constant"
                 ));
                 continue;
             }
-            if parsed.tag != expected_tag {
+            if parsed.tag != known.payload_tag {
                 problems.push(format!(
                     "known event group {group} no longer carries its stable tag"
                 ));
@@ -247,7 +220,10 @@ fn scan_file(data: &[u8]) -> FileReport {
 
 #[test]
 fn parse_all_vrf_files() {
-    let corpus = corpus_dir();
+    // Unset means an empty path, which is not a directory: the test skips.
+    let corpus = std::env::var_os("VRFKIT_CORPUS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     if !corpus.is_dir() {
         let message = format!(
             "corpus directory not found at {}; set VRFKIT_CORPUS_DIR to point at one",
