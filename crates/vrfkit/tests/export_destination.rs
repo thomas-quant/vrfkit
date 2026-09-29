@@ -16,9 +16,9 @@
 mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use common::{chunk, header_payload, path_arg, replay_info, vrfkit};
+use common::*;
 
 /// What a plain export leaves in its directory, sorted.
 const MAIN_OUTPUTS: [&str; 7] = [
@@ -43,20 +43,9 @@ const CHECKPOINT_TABLES: [&str; 7] = [
 ];
 
 fn replay() -> Vec<u8> {
-    let mut data = replay_info();
+    let mut data = replay_info(&Info::default());
     data.extend(chunk(0, &header_payload()));
     data
-}
-
-/// A fresh directory under Cargo's per-target scratch area.
-fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("export_destination-{name}-{}", std::process::id()));
-    if dir.exists() {
-        fs::remove_dir_all(&dir).expect("clear a stale scratch directory");
-    }
-    fs::create_dir_all(&dir).expect("create the scratch directory");
-    dir
 }
 
 /// The names in `dir`, sorted.
@@ -72,14 +61,12 @@ fn entries(dir: &Path) -> Vec<String> {
     names
 }
 
-/// `export dir/match.vrf --out dir` exited 0 at 061155a with no warning line
-/// (measured with the pinned 12.10 public fixture) and left `dir` holding only
-/// the export: the replay it had just read, the user's other files and a
-/// subdirectory were deleted. It must exit 1 naming them, and leave the
-/// directory -- and its parent -- exactly as they were.
+/// `export dir/match.vrf --out dir` must exit 1 naming the replay, the user's
+/// other file and the subdirectory, and leave the directory -- and its parent
+/// -- exactly as they were, never publish over them.
 #[test]
 fn export_refuses_a_destination_holding_the_replay_and_other_files() {
-    let dir = scratch("refused");
+    let dir = scratch("export_destination", "refused");
     let out = dir.join("userdir");
     fs::create_dir_all(out.join("sub")).expect("create the destination");
     let replay_path = out.join("match.vrf");
@@ -118,7 +105,7 @@ fn export_refuses_a_destination_holding_the_replay_and_other_files() {
 /// published into.
 #[test]
 fn export_publishes_into_a_missing_or_an_empty_destination() {
-    let dir = scratch("fresh");
+    let dir = scratch("export_destination", "fresh");
     let replay_path = dir.join("match.vrf");
     fs::write(&replay_path, replay()).expect("write the replay");
     let empty = dir.join("empty");
@@ -138,7 +125,7 @@ fn export_publishes_into_a_missing_or_an_empty_destination() {
 /// re-export accepts -- and its summary names each checkpoint table it drops.
 #[test]
 fn a_re_export_replaces_a_prior_export_and_names_the_tables_it_drops() {
-    let dir = scratch("reexport");
+    let dir = scratch("export_destination", "reexport");
     let replay_path = dir.join("match.vrf");
     fs::write(&replay_path, replay()).expect("write the replay");
     let out = dir.join("out");
