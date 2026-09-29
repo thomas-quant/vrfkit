@@ -484,7 +484,8 @@ constants are not in the replay: valorant-api.com publishes `xMultiplier`,
 
 Over 12 maps on 69 replays (121,672,885 live rows, build 13.02) this puts
 100.0000% of live positions inside [0,1]² on eleven maps, with bounding boxes
-filling roughly [0.01, 0.99]; feeding `pos_x` to `u` collapses to 0.9% on Haven
+filling roughly [0.01, 0.99] (containment alone proves nothing: a small enough
+scale contains everything); feeding `pos_x` to `u` collapses to 0.9% on Haven
 and 3.1% on Fracture. Abyss's symmetric constants cannot tell the two orders
 apart. Hidden actors park at `pos_x ≈ -50000, pos_z ≈ -49900`; filter on both
 x and z, since a fall passes through that z.

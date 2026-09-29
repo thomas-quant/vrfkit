@@ -8,8 +8,9 @@ which is the manifest's `level_names_and_times[0].name`. The axes cross:
 Hidden actors sit in a park slot, filtered on both x and z: a falling player
 also reaches z = -50000.
 
-The command prints the share of live movement rows inside [0,1]^2 and exits 1
-for a map without constants or a share below `MIN_INSIDE`.
+The command prints the share of live movement rows inside [0,1]^2 and the u/v
+range, and exits 1 for a map without constants or a share below `MIN_INSIDE`.
+Only the range shows a too-small scale, which containment passes.
 """
 
 from __future__ import annotations
