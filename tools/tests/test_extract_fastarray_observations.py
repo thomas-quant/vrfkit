@@ -14,10 +14,9 @@ import pyarrow.parquet as pq
 from tools import extract_fastarray_observations as fast
 from tools.tests.wire_fixtures import packed
 
-#: Route identities exactly as the parser exports them. Literal rather than
-#: read from the extractor: a misspelled group selects nothing and would pass
-#: every other test, which is how the chained route stayed dead until
-#: 2026-09-28.
+#: Route identities exactly as the parser exports them, literal rather than
+#: read from the extractor: a misspelled group selects nothing and passes
+#: every test that reads the extractor's own spelling.
 CNC_H1 = ("AbilitiesAndBuffsComponent", "_cnc_h1")
 CHAINED = ("/Script/ShooterGame.AresAbilitySystemComponent", "__vrfkit_chained_cnc_h1__")
 
@@ -188,8 +187,7 @@ class FastArrayTests(unittest.TestCase):
                     self.assertEqual(record["raw_bits_hex"], raw.hex())
 
     def test_chained_rows_are_selected_and_decoded_in_both_streams(self):
-        # Literal identities and only extract(): this runs unchanged against the
-        # extractor before 2026-09-28's fix, and fails there at the first check.
+        # Literal identities and only extract(): a misspelled route fails here.
         raw, count = payload([1, 3], [(5, [(0, b"\x96\xab"), (18, b"")])])
         chained = field_row(CHAINED, raw, count)
         with tempfile.TemporaryDirectory() as tmp:

@@ -76,8 +76,7 @@ def fixture(value=-0.0, causer=True):
         ),
         row("MulticastNotifyHeal.LifeChangeBySection", 163390906, parent, pw),
     ]
-    # Typed like the parser types them: the scoped ObjectNetGuid entries in
-    # tools/fixtures/scoped_type_evidence.json put the packed value in value_i64.
+    # Typed as the parser types them: the packed ObjectNetGuid in value_i64.
     for n, h, c, v in [
         ("EventInstigator", 7, 3087885251, 12),
         ("EventInstigatorPawn", 8, 3901949544, 50),
@@ -397,9 +396,8 @@ class Tests(unittest.TestCase):
         self.assertEqual(d["counts"]["source_edge_status"]["causer"]["present"], 1)
 
     def test_untyped_instigator_from_an_older_export_fails_loudly(self):
-        # An export from a parser that predates the scoped typing carries the
-        # raw window only. That must stop the run, not turn the edge "invalid"
-        # behind a successful exit.
+        # A stale export carries the raw window only: that stops the run
+        # rather than turning the edge "invalid" behind a successful exit.
         for name in ("EventInstigator", "EventInstigatorPawn"):
             with self.subTest(field=name):
                 rows = fixture()

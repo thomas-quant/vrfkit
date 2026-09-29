@@ -1,17 +1,11 @@
 """Decode ground-area volume cells (GroundVolumeComponent FragmentInfo items)
 with the item schema each replay declares.
 
-A `Patch_*` actor's `/Script/DynamicVolume.GroundVolumeComponent` replicates
-its cells as the FastArray `FragmentInfo` (handle 0 of
-`GroundVolumeComponent_ClassNetCache`), a custom delta the parser preserves
-raw on two routes (ROUTES). This reads them back with the replay's own
-declared names and checksums and writes one record per changed item: its
-polygon in world coordinates, floor, ceiling, grid coordinates and state,
-plus the owning actor's class. Evidence, counts and what is not established:
-docs/GROUND_VOLUMES.md.
-
-Wire grammar, measured on every window of the 2026-09-28 corpus (see
-docs/GROUND_VOLUMES.md for the counts):
+A `Patch_*` actor's GroundVolumeComponent replicates its cells as the
+FastArray `FragmentInfo` (handle 0 of its ClassNetCache), which the parser
+keeps raw on two routes (ROUTES). One record per changed item: polygon in
+world coordinates, floor, ceiling, grid cell, state and the owner's class.
+Evidence: docs/GROUND_VOLUMES.md. Wire grammar:
 
     window  := entry+                      -- until the window's last bit
     entry   := handle:SerializeInt(max(slots, 2)) width:packed body[width]
@@ -22,13 +16,9 @@ docs/GROUND_VOLUMES.md for the counts):
     array   := count:packed (index+1:packed members)* 0:packed
 
 `slots` is the ClassNetCache group's declared slot count. A `members` handle
-is a RepLayout command index, mapped to the (name, compatible_checksum) the
-SAME replay declares for it: handles move between builds, identities do not.
-MEMBERS then gives the type. Anything that does not close exactly, including
-never-observed shapes (an element out of order or missing a member, a partial
-array, a non-finite float), is a counted rejection with the raw window kept:
-decoding it would be a guess. Item `fields` keep the declared names;
-RESOLVED_NAMES and STATUS_NAMES add the game's names where established.
+maps to the (name, compatible_checksum) the same replay declares (handles move
+between builds, identities do not); MEMBERS gives the type. A window that does
+not close exactly is a counted rejection with its raw bits kept.
 """
 from __future__ import annotations
 
@@ -52,21 +42,15 @@ else:
     from atomic_io import sha256_file as sha, staged_output
     from wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
 
-#: 2: items gained `status_name`, the receipt `declarations.resolved_names`.
 SCHEMA_VERSION = 2
 CLASS_GROUP = "/Script/DynamicVolume.GroundVolumeComponent"
 CNC_GROUP = CLASS_GROUP + "_ClassNetCache"
 UNRESOLVED_CNC = "__vrfkit_unresolved_class_net_cache_payload__"
 REP_LAYOUT_TAIL = "__vrfkit_unparsed_rep_layout_tail__"
-#: field_name -> window kind. Both start at the first ClassNetCache field
-#: header: a ClassNetCache-only block's whole payload, or a block's rest after
-#: its RepLayout terminator.
+#: field_name -> window kind; both start at a ClassNetCache field header.
 WINDOW_KINDS = {UNRESOLVED_CNC: "unresolved_cnc_payload", REP_LAYOUT_TAIL: "rep_layout_tail"}
-#: route -> the exact group_path the parser exports. `PatchVolume` is the
-#: component's subobject name, whose class the parser cannot resolve. Its
-#: windows decode exactly under the replay's GroundVolumeComponent
-#: declaration (docs/GROUND_VOLUMES.md), re-checked on every window: a member
-#: identity outside MEMBERS rejects it.
+#: route -> exported group_path. `PatchVolume` is the component's unresolved
+#: subobject name; each window is checked against the declared class.
 ROUTES = {"bare_patch_volume": "PatchVolume", "declared_class": CLASS_GROUP}
 ROUTE_BY_GROUP = {group: route for route, group in ROUTES.items()}
 STREAMS = ("fields", "checkpoint_fields")
@@ -80,11 +64,9 @@ def _builds(*versions: str) -> frozenset[str]:
     return frozenset(f"++Ares-Core+release-{v}" for v in versions)
 
 
-#: (route, stream) -> builds whose windows all decoded exactly AND passed the
-#: independent checks in docs/GROUND_VOLUMES.md. Measured, not supported:
-#: another build rejects as `unvalidated_build`, an empty set as
-#: `unvalidated_checkpoint_route`. 12.10, 12.11 and 13.00 have no windows in
-#: the corpus, and no checkpoint row carries either route.
+#: (route, stream) -> builds whose windows all decoded exactly and passed the
+#: independent checks: measured, not supported. Another build rejects as
+#: `unvalidated_build`, an empty set as `unvalidated_checkpoint_route`.
 ACCEPTED_BUILDS = {
     ("bare_patch_volume", "fields"): _builds(
         "11.06", "11.07", "11.08", "11.09", "11.10", "11.11",
@@ -97,8 +79,7 @@ ACCEPTED_BUILDS = {
 COLUMNS = ["time_ms", "packet_id", "channel_index", "actor_net_guid",
            "object_net_guid", "group_path", "handle", "field_name",
            "compatible_checksum", "bit_count", "raw_bits"]
-#: Arrays larger than this are rejected before any element is read. The
-#: largest measured hull has 8 points and the largest segment list 4.
+#: Larger arrays reject before any element is read (measured maximum: 8).
 MAX_ARRAY_COUNT = 4096
 
 
@@ -124,13 +105,9 @@ class Untyped:
 
 
 #: Declared (name, compatible_checksum) -> type. Each checksum reproduces from
-#: its parent chain in the 13.06 executable's reflection data as the C++ type
-#: read here (docs/GROUND_VOLUMES.md, Types; the tests recompute each), except
-#: `Status` (an enum) and `Begin`/`End`, which rest on measured widths, exact
-#: consumption and the relations there. `253` (a hardcoded engine name index)
-#: reproduces as `ID : int32`, so it is read signed. TJunctions (11.10 to
-#: 12.02) reproduces as a TArray but was 16 zero bits on every item, an empty
-#: array's count and terminator with no element ever sent: it stays Untyped.
+#: its struct chain as the C++ type read here (the tests recompute each),
+#: except `Status` (an enum) and `Begin`/`End` (measured widths). `253` is
+#: `ID : int32`. TJunctions is a TArray only ever sent empty (16 bits): Untyped.
 MEMBERS = {
     ("253", 1175316786): Scalar("int32", 32),
     ("bIsActive", 518428974): Scalar("bool", 1),
@@ -154,18 +131,16 @@ MEMBERS = {
 #: Identities that belong inside an array element, never directly in an item.
 ELEMENT_IDENTITIES = frozenset(i for spec in MEMBERS.values() if isinstance(spec, Array)
                                for i in spec.elements)
-#: Declared identity -> the game's member path, keyed by the whole (name,
-#: checksum) pair, which reproduces from that path: a differing checksum is
-#: not relabelled (docs/GROUND_VOLUMES.md, Names). Receipt only.
+#: Declared identity -> the game's member path, by the whole (name, checksum)
+#: pair; receipt only.
 RESOLVED_NAMES = {
     ("253", 1175316786): "ID",
     ("X", 2123226522): "GridPos.X",
     ("Y", 2134384775): "GridPos.Y",
 }
-#: `Status` names: EGroundVolumeFragmentStatus in the 13.06 executable (read
-#: statically, 2026-09-28): AllInside 0 .. Invalid 3; 4 is the Count sentinel,
-#: left unnamed like 5-7. A checksum does not encode enum values, so only that
-#: build AND identity are named. Measured values are 0-3.
+#: EGroundVolumeFragmentStatus as the 13.06 executable names it (4 is the Count
+#: sentinel). A checksum does not encode enum values, so only that build and
+#: identity are named.
 STATUS_NAMES_BUILD = "++Ares-Core+release-13.06"
 STATUS_IDENTITY = ("Status", 2380676387)
 STATUS_NAMES = {0: "AllInside", 1: "PartiallyOutside", 2: "PartiallyBlocked", 3: "Invalid"}
@@ -203,8 +178,7 @@ def resolved_names(schema: ReplaySchema) -> dict:
 
 
 def status_label(build: str, identity, value: int) -> tuple:
-    """(enumerator name or None, the counter it is tallied under). The
-    identity test keeps a Status identity added to MEMBERS later unnamed."""
+    """(enumerator name or None, the counter it is tallied under)."""
     if build != STATUS_NAMES_BUILD or identity != STATUS_IDENTITY:
         return None, "status_unnamed_declaration"
     name = STATUS_NAMES.get(value)

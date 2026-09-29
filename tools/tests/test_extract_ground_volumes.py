@@ -60,10 +60,8 @@ CELL = {"253": 7, "bIsActive": True, "Status": 1,
         "Ceiling": 346.0000305175781, "Floor": 99.99999237060547}
 
 
-#: The item struct and its parents, as named in the 13.06 game executable's
-#: reflection data: FragmentInfo:FGroundVolumeFragmentArray -> Items:TArray ->
-#: Items:FGroundVolumeFragment. None of these levels (nor GridPos) is declared
-#: in any export of the corpus; only the members below are.
+#: The item struct's parent chain as the 13.06 executable names it; no export
+#: declares these levels (nor GridPos), only the members below.
 ITEM_CHAIN = [("FragmentInfo", "FGroundVolumeFragmentArray"), ("Items", "TArray"),
               ("Items", "FGroundVolumeFragment")]
 #: Declared identity -> its path below FGroundVolumeFragment, one (name, C++
@@ -366,8 +364,8 @@ class NameTests(unittest.TestCase):
         # Same identity in another build: a checksum does not carry the
         # enumerators, and this one does not even reproduce.
         self.assertEqual(gv.status_label(B1305, STATUS, 1), (None, "status_unnamed_declaration"))
-        # Same build, another checksum under the name. Decoding cannot reach
-        # this today (MEMBERS admits one Status identity), hence a direct call.
+        # Same build, another checksum under the name (a direct call: MEMBERS
+        # admits one Status identity).
         self.assertEqual(gv.status_label(B1306, ("Status", STATUS[1] ^ 1), 1),
                          (None, "status_unnamed_declaration"))
         # Count, the enum's count sentinel, and the rest of the 3-bit range.

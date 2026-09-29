@@ -66,9 +66,8 @@ class ParserTests(unittest.TestCase):
             tool.exact_ref(b"\0\0", 16)
 
 
-#: Builds whose exports carry KillData children and passed every extractor
-#: check on all 48 available replays (2026-09-28, docs/KILL_OBSERVATIONS.md).
-#: Listed explicitly: iterating the tool's own set would test nothing.
+#: Measured legacy builds, listed explicitly: iterating the tool's own set
+#: would test nothing.
 LEGACY_BUILDS = [
     "11.06", "11.07", "11.08", "11.09", "11.10", "11.11", "12.00", "12.01",
     "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09",
@@ -139,10 +138,8 @@ class BuildScopeTests(unittest.TestCase):
                 self.assertTrue(record["members"]["did_kill_trigger_finisher"])
 
     def test_unmeasured_builds_are_still_refused(self):
-        # 12.10, 12.11 and 13.00 export no KillData children: the route is
-        # unobserved there, so an export from them cannot be checked. 13.07's
-        # declarations match every measured identity here; only the build is
-        # new, and a build must be measured before it is read.
+        # 12.10, 12.11 and 13.00 export no KillData children; 13.07 matches
+        # every measured identity, but a build must be measured before it is read.
         for build in ("++Ares-Core+release-12.10", "++Ares-Core+release-12.11",
                       "++Ares-Core+release-13.00", "++Ares-Core+release-13.07",
                       "12.09", "++Ares-Core+release-12.09 ", None):

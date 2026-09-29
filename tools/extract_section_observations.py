@@ -28,9 +28,9 @@ ROUTES = {
     "MulticastNotifyOverhealDecay": (7, 1072798296, "LifeChangeBySection", 1, "DecayApplied", 0, {2: "ChangedComponent", 3: "LifeResult", 4: "DeltaLife", 5: "bAliveAfterChange"}, "positive"),
     "MulticastSectionLifeChange": (8, 1280092974, "LifeChangeEvents", 0, None, None, {1: "ChangedComponent", 2: "LifeResult", 3: "DeltaLife", 4: "bAliveAfterChange"}, "reset"),
 }
-# Measured main declaration identities on builds 13.01/02/04/05. A matching
-# name in a changed schema cannot authorize interpreting a member as f32/ref.
-# Optional parameters outside this map remain uninterpreted raw evidence.
+# Measured main declaration identities (13.01-13.05): a matching name in a
+# changed schema does not authorize reading a member as f32/ref, and parameters
+# outside this map stay raw.
 VALUE_CHECKSUMS = {
     "MulticastNotifyDamage_Point": {0: 373546733, 9: 314962236, 10: 1435614478, 11: 3234979, 12: 3709621854, 13: 3155865075},
     "MulticastNotifyDamage_Base": {0: 2316259323, 9: 771135212, 10: 1477578271, 11: 1537455328, 12: 4098809706, 13: 3883502598},
@@ -263,7 +263,6 @@ def extract(export):
     paths = load_net_guids(export, "path")
     groups = {}; segments = collections.Counter(); selected = []; last = None; last_o = None
     for o, r in selected_rows(export / "fields.parquet", FIELDS):
-        # selected_rows yields only rows named `<route>.`, so this is a route.
         route = route_name(r.get("field_name"))
         key = (r["time_ms"],r["packet_id"],r["channel_index"],r["actor_net_guid"],r["object_net_guid"],r["group_path"],r["handle"])
         groups.setdefault((route,key), []).append((o,r)); selected.append((o,r))

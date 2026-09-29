@@ -28,19 +28,12 @@ else:
     from wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
 
 SCHEMA_VERSION = 2
-#: Every route's rows carry handle 1. A selected row with another handle is
-#: rejected as `route_identity`, so it is counted rather than skipped.
+#: Every route's rows carry handle 1; another handle rejects as `route_identity`.
 ROUTE_HANDLE = 1
 #: route -> the exact (group_path, field_name) pair, not a cross product. Both
-#: are the handle-1 payload of an AbilitiesAndBuffs ClassNetCache stream after
-#: the same fc=34 outer walk (decode_cnc_payload), starting at the FastArray
-#: support bit. In crates/vrfkit/src/sink/stream.rs:
-#:   cnc_h1          emit_brute_forced_cnc_rpcs: whole unresolved CNC payloads,
-#:                   group AbilitiesAndBuffsComponent.
-#:   chained_cnc_h1  on_rep_layout_tail: a CNC tail after a RepLayout prefix,
-#:                   only for the pre-remap identity, exactly one handle-1 RPC
-#:                   and a set first bit (checked on a clone, so it stays in
-#:                   raw_bits); group /Script/ShooterGame.AresAbilitySystemComponent.
+#: are the handle-1 payload of an AbilitiesAndBuffs ClassNetCache stream from
+#: the FastArray support bit (crates/vrfkit/src/sink/stream.rs: `cnc_h1` from
+#: emit_brute_forced_cnc_rpcs, `chained_cnc_h1` from on_rep_layout_tail).
 ROUTES = {
     "cnc_h1": ("AbilitiesAndBuffsComponent", "_cnc_h1"),
     "chained_cnc_h1": ("/Script/ShooterGame.AresAbilitySystemComponent",
@@ -54,23 +47,11 @@ def _builds(*versions: str) -> frozenset[str]:
     return frozenset(f"++Ares-Core+release-{v}" for v in versions)
 
 
-#: (route, stream) -> builds whose windows were all walked exactly: measured,
-#: not supported. Another build rejects as `unvalidated_build`, an empty set as
-#: `unvalidated_checkpoint_route`/`unvalidated_main_route`; each keeps the exit
-#: nonzero until measured. 2026-09-28, parser 259ed10, 1,018 exports, each
-#: route's pair scanned in both tables with any handle; decode() and an
-#: independent reader agreed on every header word, ID and field boundary
-#: (more, and the 2026-09-09 first run: docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md):
-#:   cnc_h1: 3,999,493 of 3,999,493 windows exact, all main, handle 1; none on
-#:     12.10/12.11 or in checkpoints. 13.00 is thin: six windows in one replay,
-#:     one telling this variant from the one-flag-bit-per-item one
-#:     (ChecksumMode::Present, crates/vrf-decode/src/fastarray.rs), against at
-#:     least 6,302 on every other build.
-#:   chained_cnc_h1: 250,053 main and 181,108 checkpoint windows exact, handle
-#:     1, both streams of all 24 builds, each with at least five the
-#:     one-flag-bit variant rejects (12.10, 12.11, 13.00: 5 to 7 per stream).
-#: The same fifteen handles on every changed item of both routes is an
-#: alignment check, not a property schema.
+#: (route, stream) -> builds whose windows were all walked exactly, in
+#: agreement with an independent reader: measured, not supported. Another build
+#: rejects as `unvalidated_build`, an empty set as `unvalidated_*_route`, and
+#: the exit is nonzero. cnc_h1 has no 12.10/12.11 or checkpoint windows; its
+#: 13.00 entry rests on six windows (docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md).
 _LEGACY = ("11.06", "11.07", "11.08", "11.09", "11.10", "11.11", "12.00", "12.01",
            "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09")
 ACCEPTED_BUILDS = {
@@ -140,12 +121,8 @@ def selected_rows(path: Path, checkpoint: bool):
 
 
 def unselected_route_name_rows(path: Path) -> int:
-    """Rows carrying a route's field name under a group no route pairs it with.
-
-    Diagnostic only, neither selected nor decoded: a route once went
-    unselected on every export because nothing counted this. On the
-    2026-09-28 corpus the count is 0 in both streams.
-    """
+    """Rows carrying a route's field name under a group no route pairs it
+    with: counted, neither selected nor decoded (0 on every measured export)."""
     route_names = pa.array(sorted({name for _, name in ROUTES.values()}))
     total = 0
     for batch in pq.ParquetFile(path).iter_batches(columns=["group_path", "field_name"],

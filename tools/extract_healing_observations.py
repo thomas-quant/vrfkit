@@ -61,7 +61,7 @@ SOURCE_STATUSES = (
     "corroborated_static_manifest_character", "conflicting_manifest_characters",
     "no_manifest_character_reference",
 )
-#: The export files read, and the helper modules hashed beside this file.
+#: The export files read.
 INPUT_NAMES = (
     "manifest.json",
     "fields.parquet",

@@ -89,17 +89,10 @@ def _team_switch_windows(switches: list[int], round_starts: list[int]) -> list[t
     """`[switchTeams, first roundStarted after it)` per switch; end None = end of stream.
 
     A side switch resets credits (800 at half time, 5000 in overtime) with an
-    ordinary `Money` write, a decrease for anyone holding more, and no buy
-    phase is open before the round starts. On the 1,018-export corpus (parser
-    259ed10, 2026-09-28; docs/FOLLOWUP.md) 5,616 decreases fall inside, all
-    7-10 ms after the switch: 5,551 to 800, 50 to 5000, 12 to 0 and 3 to 6200
-    (each 0 and 6200 after a second or later overtime switch).
-
-    Keyed on the decrease's own time, not its collapsed interval: a player
-    already on 800 gets no reset sample, so the first buy's interval spans the
-    switch, and an interval rule took 105 real buys. With no later
-    `roundStarted` (11 overtime replays end seconds after the switch) the
-    window runs to the end of the stream; the reset still comes 8 ms after.
+    ordinary `Money` write while no buy phase is open: 5,616 corpus decreases,
+    all 7-10 ms after the switch. Keyed on the decrease's own time, not its
+    collapsed interval: a player already on 800 gets no reset sample, and an
+    interval rule took 105 real buys.
     """
     windows = []
     for switch in switches:

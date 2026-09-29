@@ -24,8 +24,7 @@ else:
     from atomic_io import run_json_cli, sha256_file as file_sha
     from wire_bits import InputError, exact_ref, iter_selected, text
 
-#: Matched lags measure 5-41 ms on the 714-export corpus, and a 100 ms cap
-#: changed no match (docs/KILL_LEDGER.md, "Validation scope").
+#: Matched lags measure 5-41 ms; a 100 ms cap changed no match.
 MAX_REPLICATION_LAG_MS = 50
 #: This file and the modules it runs, hashed as provenance and refused as --out.
 SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','wire_bits.py',

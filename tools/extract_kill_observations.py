@@ -20,11 +20,9 @@ else:
 SCHEMA_VERSION = 1
 GROUP = "/Script/ShooterGame.PlayerMatchStatsComponent"
 PARENT = ("KillData", 1493759848)
-#: Builds whose KillData identities and values were measured, not the parser's
-#: supported builds: any other build fails in declarations() before a row is
-#: read, even when its names and checksums agree. 13.01-13.05 on 2026-09-08;
-#: 11.06-12.09 and 13.06 on 2026-09-28 (method and counts:
-#: docs/KILL_OBSERVATIONS.md, "Measured builds").
+#: Builds whose KillData identities and values were measured (not the parser's
+#: supported builds): any other build fails in declarations() before a row is
+#: read, even when its names and checksums agree.
 MEASURED_BUILDS = {
     # 12.10, 12.11 and 13.00 export no KillData children.
     "++Ares-Core+release-11.06",
