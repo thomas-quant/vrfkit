@@ -41,11 +41,21 @@ AGGREGATE_COLUMNS = (
     "preserved_raw_bit_sum", "missing_raw_nonempty_rows", "missing_declared_bit_sum",
     "zero_bit_marker_rows", "wrong_raw_length_rows",
 )
-GROUP_KEY = ("table_name, replay_build, group_path, group_is_null, field_name, field_is_null, "
-             "checksum_key, checksum_is_null")
+#: Each table's totals: row counts, then the untyped rows' aggregates.
+TOTALS = ("physical_rows", "typed_rows", "untyped_rows", *(f"untyped_{name}" for name in AGGREGATE_COLUMNS[1:]))
+#: A catalog key: text and checksum stored with an is-null flag, so a null
+#: never collides with a literal "" or 0.
+KEY_COLUMNS = {"table_name": "TEXT", "replay_build": "TEXT", "group_path": "TEXT", "group_is_null": "INTEGER",
+               "field_name": "TEXT", "field_is_null": "INTEGER", "checksum_key": "INTEGER",
+               "checksum_is_null": "INTEGER"}
+GROUP_KEY = ", ".join(KEY_COLUMNS)
 #: Adds a shard's or batch's aggregates to an existing catalog key.
 MERGE_AGGREGATES = (f"ON CONFLICT({GROUP_KEY}) DO UPDATE SET "
                     + ", ".join(f"{name} = {name} + excluded.{name}" for name in AGGREGATE_COLUMNS))
+
+
+#: Applies to every catalog entry: a key sums physical rows, not distinct facts.
+RECURRENCE_NOTE = "physical occurrences are retained; this does not assert duplicate facts"
 
 
 class InputError(ValueError):
@@ -110,15 +120,11 @@ def _upsert_groups(connection: sqlite3.Connection, table: str, build: str, expor
                      *(int(item[name]) for name in AGGREGATE_COLUMNS), export_id))
     connection.executemany(
         f"""INSERT INTO groups({GROUP_KEY}, {', '.join(AGGREGATE_COLUMNS)})
-            VALUES ({', '.join('?' * (8 + len(AGGREGATE_COLUMNS)))}) {MERGE_AGGREGATES}""",
+            VALUES ({', '.join('?' * (len(KEY_COLUMNS) + len(AGGREGATE_COLUMNS)))}) {MERGE_AGGREGATES}""",
         [row[:-1] for row in rows],
     )
-    connection.executemany(
-        """INSERT OR IGNORE INTO group_files(table_name, replay_build, group_path, group_is_null, field_name,
-                                               field_is_null, checksum_key, checksum_is_null, export_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        [(*row[:8], row[-1]) for row in rows],
-    )
+    connection.executemany(f"INSERT OR IGNORE INTO group_files({GROUP_KEY}, export_id) VALUES ({', '.join('?' * 9)})",
+                           [(*row[:8], row[-1]) for row in rows])
 
 
 def _scan_table(connection: sqlite3.Connection, directory: Path, export_id: str,
@@ -171,10 +177,7 @@ def _scan_table(connection: sqlite3.Connection, directory: Path, export_id: str,
                         "wrong_raw_length_rows", "missing_declared_bit_sum", "preserved_raw_bit_sum"]).filter(untyped)
             if selected.num_rows:
                 grouped = selected.group_by(["group_path", "field_name", "compatible_checksum"]).aggregate(
-                    [("bit_count", "count"), ("bit_count", "sum"), ("raw_present_rows", "sum"),
-                     ("preserved_raw_rows", "sum"), ("preserved_raw_bit_sum", "sum"),
-                     ("missing_raw_nonempty_rows", "sum"), ("missing_declared_bit_sum", "sum"),
-                     ("zero_bit_marker_rows", "sum"), ("wrong_raw_length_rows", "sum")]
+                    [("bit_count", "count"), ("bit_count", "sum"), *((name, "sum") for name in AGGREGATE_COLUMNS[2:])]
                 ).rename_columns(["group_path", "field_name", "compatible_checksum", *AGGREGATE_COLUMNS])
                 _upsert_groups(connection, table, build, export_id, grouped)
                 del grouped
@@ -188,52 +191,35 @@ def _database(connection: sqlite3.Connection) -> None:
     # sort/index pages spill to the per-run directory, not process memory.
     connection.execute("PRAGMA cache_size = -32768")
     connection.execute("PRAGMA temp_store = FILE")
+    key = ", ".join(f"{name} {kind} NOT NULL" for name, kind in KEY_COLUMNS.items())
+    aggregates = ", ".join(f"{name} INTEGER NOT NULL" for name in AGGREGATE_COLUMNS)
     connection.executescript(
-        """CREATE TABLE groups (
-             table_name TEXT NOT NULL, replay_build TEXT NOT NULL, group_path TEXT NOT NULL, group_is_null INTEGER NOT NULL,
-             field_name TEXT NOT NULL, field_is_null INTEGER NOT NULL, checksum_key INTEGER NOT NULL, checksum_is_null INTEGER NOT NULL,
-             row_count INTEGER NOT NULL, declared_bit_sum INTEGER NOT NULL, raw_present_rows INTEGER NOT NULL,
-             preserved_raw_rows INTEGER NOT NULL, preserved_raw_bit_sum INTEGER NOT NULL,
-             missing_raw_nonempty_rows INTEGER NOT NULL, missing_declared_bit_sum INTEGER NOT NULL,
-             zero_bit_marker_rows INTEGER NOT NULL, wrong_raw_length_rows INTEGER NOT NULL,
-             PRIMARY KEY(table_name, replay_build, group_path, group_is_null, field_name, field_is_null, checksum_key, checksum_is_null));
-           CREATE TABLE group_files (
-             table_name TEXT NOT NULL, replay_build TEXT NOT NULL, group_path TEXT NOT NULL, group_is_null INTEGER NOT NULL,
-             field_name TEXT NOT NULL, field_is_null INTEGER NOT NULL, checksum_key INTEGER NOT NULL, checksum_is_null INTEGER NOT NULL,
-             export_id TEXT NOT NULL,
-             PRIMARY KEY(table_name, replay_build, group_path, group_is_null, field_name, field_is_null, checksum_key, checksum_is_null, export_id));"""
+        f"""CREATE TABLE groups ({key}, {aggregates}, PRIMARY KEY({GROUP_KEY}));
+            CREATE TABLE group_files ({key}, export_id TEXT NOT NULL, PRIMARY KEY({GROUP_KEY}, export_id));"""
     )
 
 
 def _catalog(connection: sqlite3.Connection) -> list[dict]:
     rows = connection.execute(
-        """SELECT g.table_name, g.replay_build, g.group_path, g.group_is_null, g.field_name, g.field_is_null,
-                  g.checksum_key, g.checksum_is_null, g.row_count, g.declared_bit_sum, g.raw_present_rows,
-                  g.preserved_raw_rows, g.preserved_raw_bit_sum, g.missing_raw_nonempty_rows,
-                  g.missing_declared_bit_sum, g.zero_bit_marker_rows, g.wrong_raw_length_rows
-           FROM groups g
-           ORDER BY g.preserved_raw_bit_sum DESC, g.preserved_raw_rows DESC, g.row_count DESC, g.table_name, g.replay_build,
-                    g.group_path, g.group_is_null, g.field_name, g.field_is_null, g.checksum_key, g.checksum_is_null"""
+        f"""SELECT {GROUP_KEY}, {', '.join(AGGREGATE_COLUMNS)} FROM groups
+            ORDER BY preserved_raw_bit_sum DESC, preserved_raw_rows DESC, row_count DESC, {GROUP_KEY}"""
     )
+    match = " AND ".join(f"{name} = ?" for name in KEY_COLUMNS)
     catalog = []
     for row in rows:
-        files = connection.execute(
-            """SELECT export_id FROM group_files
-               WHERE table_name = ? AND replay_build = ? AND group_path = ? AND group_is_null = ?
-                 AND field_name = ? AND field_is_null = ? AND checksum_key = ? AND checksum_is_null = ?
-               ORDER BY export_id""", row[:8]
-        ).fetchall()
-        catalog.append({
-        "table": row[0], "replay_build": row[1], "group_path": None if row[3] else row[2],
-        "field_name": None if row[5] else row[4],
-        "compatible_checksum": None if row[7] else row[6],
-        "physical_untyped_rows": row[8], "declared_bit_sum": row[9], "raw_present_rows": row[10],
-        "preserved_raw_rows": row[11], "preserved_raw_bit_sum": row[12],
-        "missing_raw_nonempty_rows": row[13], "missing_declared_bit_sum": row[14],
-        "zero_bit_marker_rows": row[15], "wrong_raw_length_rows": row[16],
-        "impacted_file_count": len(files), "impacted_export_ids": [item[0] for item in files],
-        "recurrence_note": "physical occurrences are retained; this does not assert duplicate facts",
-        })
+        key = dict(zip(KEY_COLUMNS, row))
+        files = [item[0] for item in connection.execute(
+            f"SELECT export_id FROM group_files WHERE {match} ORDER BY export_id", row[:len(KEY_COLUMNS)])]
+        entry = {
+            "table": key["table_name"], "replay_build": key["replay_build"],
+            "group_path": None if key["group_is_null"] else key["group_path"],
+            "field_name": None if key["field_is_null"] else key["field_name"],
+            "compatible_checksum": None if key["checksum_is_null"] else key["checksum_key"],
+            **dict(zip(AGGREGATE_COLUMNS, row[len(KEY_COLUMNS):])),
+            "impacted_file_count": len(files), "impacted_export_ids": files,
+        }
+        entry["physical_untyped_rows"] = entry.pop("row_count")
+        catalog.append(entry)
     return catalog
 
 
@@ -269,7 +255,7 @@ def _merge_shard(connection: sqlite3.Connection, path: Path, index: int) -> None
     connection.execute(f"ATTACH DATABASE ? AS {alias}", (str(path),))
     try:
         group_rows = connection.execute(f"SELECT * FROM {alias}.groups")
-        statement = (f"INSERT INTO groups VALUES ({', '.join('?' * (8 + len(AGGREGATE_COLUMNS)))}) "
+        statement = (f"INSERT INTO groups VALUES ({', '.join('?' * (len(KEY_COLUMNS) + len(AGGREGATE_COLUMNS)))}) "
                      + MERGE_AGGREGATES)
         while batch := group_rows.fetchmany(10_000):
             connection.executemany(statement, batch)
@@ -318,22 +304,18 @@ def summarize(exports: list[Path], jobs: int = 1, top: int = 25) -> tuple[dict, 
             connection.close()
     table_summary = {}
     for table in TABLES:
-        counts = dict(totals[table])
-        for name in ("physical_rows", "typed_rows", "untyped_rows", "untyped_declared_bit_sum",
-                     "untyped_raw_present_rows", "untyped_preserved_raw_rows", "untyped_preserved_raw_bit_sum",
-                     "untyped_missing_raw_nonempty_rows", "untyped_missing_declared_bit_sum",
-                     "untyped_zero_bit_marker_rows", "untyped_wrong_raw_length_rows"):
-            counts.setdefault(name, 0)
+        counts = {name: 0 for name in TOTALS} | totals[table]
         counts["untyped_fraction"] = counts["untyped_rows"] / counts["physical_rows"] if counts["physical_rows"] else None
         counts["catalog_keys"] = sum(item["table"] == table for item in catalog)
         table_summary[table] = counts
     report = {
-        "schema_version": 1, "complete": not errors, "export_count": len(exports),
+        "schema_version": 2, "complete": not errors, "export_count": len(exports),
         "successful_exports": len(provenance), "failed_exports": len(errors),
         "classification": "untyped means all value_i64/value_f64/value_bool/value_str are null; declared bits and preserved raw payload are separate, and raw equality is never used as a fact",
         "movement_marker_note": "Current stream.rs routes successfully decoded MOVEMENT_RPC batches into movement.parquet and leaves their fields raw_bits null; this explains one observed class only and does not excuse other missing raw payloads.",
         "nested_raw_parent_caveat": "a raw parent payload can contain nested structure; a catalog key prioritizes preserved wire rows and does not prove that the parent is one unresolved semantic field",
         "duplicate_state": "physical row occurrences are summed exactly; recurrence and impacted files are reported separately and do not deduplicate or assert duplicate game facts",
+        "recurrence_note": RECURRENCE_NOTE,
         "tables": table_summary, "top_preserved_raw": catalog[:top],
         "top_missing_declared_bits": sorted(catalog, key=lambda item: (-item["missing_declared_bit_sum"], -item["missing_raw_nonempty_rows"], item["table"], item["replay_build"], item["group_path"] or "", item["field_name"] or ""))[:top],
         "errors": sorted(errors, key=lambda item: item["export"]),
@@ -360,7 +342,8 @@ def main(argv: list[str] | None = None) -> int:
         report["skipped_generated_dirs"] = skipped_report(skipped)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(args.output_dir / "raw_untyped_summary.json", report)
-        _write_json(args.output_dir / "raw_untyped_catalog.json", {"schema_version": 1, "entries": catalog})
+        _write_json(args.output_dir / "raw_untyped_catalog.json",
+                    {"schema_version": 2, "recurrence_note": RECURRENCE_NOTE, "entries": catalog})
     except (OSError, InputError, ValueError, pa.ArrowException) as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 2
