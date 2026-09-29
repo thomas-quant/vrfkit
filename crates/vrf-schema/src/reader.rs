@@ -9,7 +9,7 @@
 //! numLayoutCmdExports: IntPacked
 //! for each export:
 //!   pathNameIndex:  IntPacked
-//!   isExported:    IntPacked (1 = new group, 0 = reference existing)
+//!   isExported:    IntPacked (1 = new group, 0 = reference existing, else an error)
 //!   if isExported:
 //!     pathName:    FString (i32 length + UTF-8/UTF-16 bytes)
 //!     numExports:  IntPacked (declared field-slot count)
@@ -76,7 +76,16 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
 
     for _ in 0..num_exports {
         let path_name_index = reader.read_int_packed()?;
-        let is_exported = reader.read_int_packed()? == 1;
+        let is_exported = match reader.read_int_packed()? {
+            0 => false,
+            1 => true,
+            value => {
+                return Err(SchemaError::BadExportedFlag {
+                    path_name_index,
+                    value,
+                });
+            }
+        };
 
         if is_exported {
             let path_name = reader.read_fstring(MAX_FSTRING_BYTES)?;
@@ -381,6 +390,29 @@ mod tests {
         assert_eq!(group.len(), 4);
         assert_eq!(group.get_field(1).unwrap().name, "ExistingField");
         assert_eq!(group.get_field(3).unwrap().name, "ExpandedField");
+    }
+
+    /// Read as a reference, isExported 2 would overwrite a real field with
+    /// whatever bytes follow, and the read would succeed.
+    #[test]
+    fn an_is_exported_value_other_than_0_or_1_is_an_error() {
+        let mut data = int_packed(2);
+        data.extend(build_new_group(11, "/Game/T.T_C", 1, Some((0, "Real"))));
+        let mut reference = build_existing_group_field(11, 0, "Overwritten", 0);
+        reference[1] = 2 << 1; // isExported: IntPacked 2 in place of 0
+        data.extend(reference);
+
+        let mut cache = NetGuidCache::new();
+        let err = read_net_field_exports(&mut BitReader::new(&data), &mut cache).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaError::BadExportedFlag {
+                path_name_index: 11,
+                value: 2
+            }
+        );
+        let group = cache.get_group_by_index(11).unwrap();
+        assert_eq!(group.get_field(0).unwrap().name, "Real");
     }
 
     #[test]

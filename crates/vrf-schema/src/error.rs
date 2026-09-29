@@ -18,6 +18,13 @@ pub enum SchemaError {
         index: u32,
     },
 
+    /// A net-field export's isExported was neither 0 nor 1: the cursor is
+    /// misaligned, and a reference would read the path's bytes as a field.
+    #[error(
+        "net-field export at path name index {path_name_index}: isExported is {value}, expected 0 or 1"
+    )]
+    BadExportedFlag { path_name_index: u32, value: u32 },
+
     /// A live export group declared more field slots than the checkpoint form
     /// permits.
     #[error("net-field export declares {count} field slots, maximum is {max}")]
