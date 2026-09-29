@@ -325,6 +325,13 @@ class ExportDiscoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "manifest.json"):
                 validate(root, self.SPEC)
 
+    def test_an_export_id_naming_no_tables_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_int_export(root / "done")
+            with self.assertRaisesRegex(ValueError, "typo"):
+                validate(root, self.SPEC, export_ids=["done", "typo"])
+
     def test_only_leftovers_below_the_root_is_an_error_that_counts_them(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -22,6 +22,7 @@ class PhysicalCoverageTests(unittest.TestCase):
 
     def write(self, directory, filename="fields.parquet"):
         directory.mkdir(exist_ok=True)
+        (directory / "manifest.json").write_text("{}", encoding="utf-8")
         pq.write_table(pa.table({
             "group_path": pa.array(["/Game/Test"] * 5),
             "field_name": pa.array(["ReviewedField"] * 5),
@@ -87,8 +88,23 @@ class PhysicalCoverageTests(unittest.TestCase):
         self.assertEqual(report["successful_exports"], 1)
         self.assertEqual(len(report["errors"]), 1)
 
+    def test_a_table_without_a_manifest_is_a_failed_export(self):
+        """vrfkit writes manifest.json last: without it the export may be a
+        partial copy whose checkpoint table has not arrived yet."""
+        self.write(self.root / "done")
+        partial = self.root / "partial"
+        self.write(partial)
+        (partial / "manifest.json").unlink()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = coverage.main([str(self.root)])
+        report = json.loads(output.getvalue())
+        self.assertEqual((code, report["complete"], report["successful_exports"]), (1, False, 1))
+        self.assertIn("manifest.json", report["errors"][0]["error"])
+
     def test_empty_table_has_unknown_fraction_and_schema_is_required(self):
         empty = self.root / "fields.parquet"
+        (self.root / "manifest.json").write_text("{}", encoding="utf-8")
         pq.write_table(pa.table({name: pa.array([], type=pa.int64())
                                 for name in coverage.VALUE_COLUMNS}), empty)
         self.assertEqual(coverage.count_table(empty)["rows"], 0)
@@ -116,6 +132,7 @@ class PhysicalCoverageTests(unittest.TestCase):
 
     def write_path_rows(self, directory):
         directory.mkdir(exist_ok=True)
+        (directory / "manifest.json").write_text("{}", encoding="utf-8")
         pq.write_table(pa.table({
             "group_path": pa.array(["/Game/Combat", "/Game/Combat", "/Game/Other", "/Game/Combat", "/Game/Combat", "/Game/Combat"]),
             "field_name": pa.array([

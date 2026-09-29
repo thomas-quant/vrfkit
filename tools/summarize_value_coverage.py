@@ -64,6 +64,8 @@ discover = discover_exports
 
 
 def count_export(directory: Path) -> dict[str, dict[str, int]]:
+    if not (directory / "manifest.json").is_file():
+        raise ValueError(f"{directory}: no manifest.json -- not a finished export")
     result = {"fields": count_table(directory / "fields.parquet")}
     checkpoint = directory / "checkpoint_fields.parquet"
     if checkpoint.exists():

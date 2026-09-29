@@ -567,11 +567,11 @@ def parquet_files(root: Path, export_ids=None, skipped=None):
         return
     if export_ids:
         for export_id in export_ids:
-            export = root / export_id
-            for name in ("fields.parquet", "checkpoint_fields.parquet"):
-                path = export / name
-                if path.exists():
-                    yield path
+            tables = [root / export_id / name for name in ("fields.parquet", "checkpoint_fields.parquet")
+                      if (root / export_id / name).exists()]
+            if not tables:
+                raise ValueError(f"--export-id {export_id}: no field table in {root / export_id}")
+            yield from tables
         return
     for name in ("fields.parquet", "checkpoint_fields.parquet"):
         for path in root.rglob(name):
