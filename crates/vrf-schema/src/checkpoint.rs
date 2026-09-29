@@ -410,12 +410,12 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::wire::int_packed;
+    use vrf_testkit::{add_fstring_utf16, add_i32, add_int_packed, add_u32};
 
     /// `(net_guid, outer_guid, path or None for a hardcoded name, name index)`.
     type GuidSpec<'a> = (u32, u32, Option<&'a str>, u32);
-    /// `(group path, declared slot count, exported (handle, name, FName number))`.
-    type GroupSpec<'a> = (&'a str, u32, &'a [(u32, &'a str, i32)]);
+    /// `(path, path name index, declared slots, exported (handle, name, FName number))`.
+    type GroupSpec<'a> = (&'a str, u32, u32, &'a [(u32, &'a str, i32)]);
     type GuidEvent = (u32, bool, Option<String>, Option<u32>, u8);
     type FieldEvent = (
         u32,
@@ -445,64 +445,41 @@ mod tests {
     /// Build an archive: prologue, guid entries, group map, then `frame`.
     fn build(guids: &[GuidSpec<'_>], groups: &[GroupSpec<'_>], frame: &[u8]) -> Vec<u8> {
         let mut body = Vec::new();
-        for (guid, outer, path, name_index) in guids {
-            body.extend(int_packed(*guid));
-            body.extend(int_packed(*outer));
+        for &(guid, outer, path, name_index) in guids {
+            add_int_packed(&mut body, guid);
+            add_int_packed(&mut body, outer);
             match path {
                 Some(p) => {
                     body.push(1);
-                    body.extend(fstring_utf16(p));
+                    add_fstring_utf16(&mut body, p);
                 }
                 None => {
                     body.push(0);
-                    body.extend(int_packed(*name_index));
+                    add_int_packed(&mut body, name_index);
                 }
             }
             body.push(0x03);
         }
-        body.extend_from_slice(&(groups.len() as u32).to_le_bytes());
-        for (path, declared, fields) in groups {
-            body.extend(fstring_utf16(path));
-            body.extend(int_packed(7));
-            body.extend(int_packed(*declared));
-            for slot in 0..*declared {
-                match fields.iter().find(|(h, _, _)| *h == slot) {
-                    Some((h, name, number)) => {
+        add_u32(&mut body, groups.len() as u32);
+        for &(path, index, declared, fields) in groups {
+            add_fstring_utf16(&mut body, path);
+            add_int_packed(&mut body, index);
+            add_int_packed(&mut body, declared);
+            for slot in 0..declared {
+                match fields.iter().find(|field| field.0 == slot) {
+                    Some(&(handle, name, number)) => {
                         body.push(1);
-                        body.extend(int_packed(*h));
-                        body.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+                        add_int_packed(&mut body, handle);
+                        add_u32(&mut body, 0xdead_beef);
                         body.push(0); // FName: not hardcoded
-                        body.extend(fstring_utf16(name));
-                        body.extend_from_slice(&number.to_le_bytes());
+                        add_fstring_utf16(&mut body, name);
+                        add_i32(&mut body, number);
                     }
                     None => body.push(0),
                 }
             }
         }
         archive(guids.len() as u32, &body, frame)
-    }
-
-    /// UTF-16LE with a negative length, which is how every corpus string
-    /// arrives.
-    fn fstring_utf16(s: &str) -> Vec<u8> {
-        let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut out = (-(units.len() as i32)).to_le_bytes().to_vec();
-        for u in units {
-            out.extend_from_slice(&u.to_le_bytes());
-        }
-        out
-    }
-
-    /// An archive with no GUID entries and one slotless group per
-    /// `(path, path_name_index)`; `build` writes index 7 for every group.
-    fn groups_at(groups: &[(&str, u32)]) -> Vec<u8> {
-        let mut body = (groups.len() as u32).to_le_bytes().to_vec();
-        for (path, index) in groups {
-            body.extend(fstring_utf16(path));
-            body.extend(int_packed(*index));
-            body.extend(int_packed(0)); // no field slots
-        }
-        archive(0, &body, &[])
     }
 
     #[derive(Default)]
@@ -586,7 +563,7 @@ mod tests {
     fn observer_reports_raw_variants_before_cache_storage() {
         let archive = build(
             &[(7, 0, Some("/Game/X"), 0), (8, 7, None, 0)],
-            &[("/Script/G.Thing", 2, &[(1, "Value", 1)])],
+            &[("/Script/G.Thing", 7, 2, &[(1, "Value", 1)])],
             &[],
         );
         let mut cache = NetGuidCache::new();
@@ -669,7 +646,7 @@ mod tests {
                 (7, 0, Some("/Game/First"), 0),
                 (8, 0, Some("/Game/Second"), 0),
             ],
-            &[("/Script/G.Thing", 0, &[])],
+            &[("/Script/G.Thing", 7, 0, &[])],
             &[0xA5],
         );
         let mut cache = NetGuidCache::new();
@@ -685,7 +662,7 @@ mod tests {
 
     #[test]
     fn observer_sees_zero_slot_group() {
-        let archive = build(&[], &[("/Script/G.Empty", 0, &[])], &[0xA5]);
+        let archive = build(&[], &[("/Script/G.Empty", 7, 0, &[])], &[0xA5]);
         let mut cache = NetGuidCache::new();
         let mut sink = RecordingSink::default();
         read_checkpoint_tables_with_sink(&archive, &mut cache, &mut sink).unwrap();
@@ -697,14 +674,14 @@ mod tests {
     #[test]
     fn observer_preserves_nonzero_wire_flags_and_hardcoded_fname_index() {
         let mut body = 1u32.to_le_bytes().to_vec(); // one group
-        body.extend(fstring_utf16("/Script/G.Raw"));
-        body.extend(int_packed(42));
-        body.extend(int_packed(1));
+        add_fstring_utf16(&mut body, "/Script/G.Raw");
+        add_int_packed(&mut body, 42);
+        add_int_packed(&mut body, 1);
         body.push(9); // nonzero bExported is accepted verbatim
-        body.extend(int_packed(0));
-        body.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+        add_int_packed(&mut body, 0);
+        add_u32(&mut body, 0xdead_beef);
         body.push(2); // nonzero FName kind is a hardcoded index, verbatim
-        body.extend(int_packed(216));
+        add_int_packed(&mut body, 216);
 
         let mut cache = NetGuidCache::new();
         let mut sink = RecordingSink::default();
@@ -734,7 +711,7 @@ mod tests {
                 (9, 7, None, 0),
                 (10, 8, None, 1),
             ],
-            &[("/Script/G.Thing", 2, &[(1, "Value", 0)])],
+            &[("/Script/G.Thing", 7, 2, &[(1, "Value", 0)])],
             &[0xa5],
         );
         let mut legacy_cache = NetGuidCache::new();
@@ -883,6 +860,7 @@ mod tests {
             &[(7, 0, Some("/Game/Maps/Ascent/Ascent"), 0), (5, 7, None, 0)],
             &[(
                 "/Script/ShooterGame.Thing",
+                7,
                 4,
                 &[(1, "Health", 0), (3, "Armor", 2)],
             )],
@@ -914,7 +892,7 @@ mod tests {
     fn a_desynced_table_is_rejected_not_silently_accepted() {
         let mut archive = build(
             &[(7, 0, Some("/Game/X"), 0)],
-            &[("/Script/G.Thing", 2, &[(0, "A", 0)])],
+            &[("/Script/G.Thing", 7, 2, &[(0, "A", 0)])],
             &[0u8; 16],
         );
         // Move the declared frame offset one byte on: the tables still parse,
@@ -934,11 +912,9 @@ mod tests {
     /// or an alias spelling of it, declared again at another index.
     #[test]
     fn two_groups_at_one_index_fail_before_returning_an_untrusted_cache() {
-        // `build` writes path_name_index 7 for every group, so two groups is
-        // exactly the collision.
         let archive = build(
             &[],
-            &[("/Script/G.A", 0, &[]), ("/Script/G.B", 0, &[])],
+            &[("/Script/G.A", 7, 0, &[]), ("/Script/G.B", 7, 0, &[])],
             &[0u8; 8],
         );
         let mut cache = NetGuidCache::new();
@@ -959,7 +935,7 @@ mod tests {
                 "/Game/Characters/_Core/Jett/Jett_C",
             ),
         ] {
-            let archive = groups_at(&[(first, 7), (second, 8)]);
+            let archive = build(&[], &[(first, 7, 0, &[]), (second, 8, 0, &[])], &[]);
             match read_checkpoint_tables(&archive, &mut NetGuidCache::new()) {
                 Err(SchemaError::CheckpointGroupCollision {
                     path,
@@ -978,7 +954,11 @@ mod tests {
     /// counted.
     #[test]
     fn two_groups_at_different_indices_are_not_a_collision() {
-        let archive = groups_at(&[("/Script/G.A", 7), ("/Script/G.B", 8)]);
+        let archive = build(
+            &[],
+            &[("/Script/G.A", 7, 0, &[]), ("/Script/G.B", 8, 0, &[])],
+            &[],
+        );
         let mut cache = NetGuidCache::new();
         let t = read_checkpoint_tables(&archive, &mut cache).unwrap();
         assert_eq!(t.group_count, 2);
@@ -1024,15 +1004,15 @@ mod tests {
         // One exported slot that lies about its handle: a real name on the
         // wrong handle would read as valid data.
         let mut body = 1u32.to_le_bytes().to_vec(); // one group
-        body.extend(fstring_utf16("/Script/G.Thing"));
-        body.extend(int_packed(7));
-        body.extend(int_packed(2)); // two slots
+        add_fstring_utf16(&mut body, "/Script/G.Thing");
+        add_int_packed(&mut body, 7);
+        add_int_packed(&mut body, 2); // two slots
         body.push(0); // slot 0 not exported
         body.push(1); // slot 1 exported
-        body.extend(int_packed(9)); // ... but claims handle 9
-        body.extend_from_slice(&0u32.to_le_bytes());
+        add_int_packed(&mut body, 9); // ... but claims handle 9
+        add_u32(&mut body, 0);
         body.push(1);
-        body.extend(int_packed(216));
+        add_int_packed(&mut body, 216);
 
         let mut cache = NetGuidCache::new();
         let err = read_checkpoint_tables(&archive(0, &body, &[]), &mut cache).unwrap_err();

@@ -353,25 +353,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cache_merge_expands_and_preserves() {
-        let mut cache = NetGuidCache::new();
-        let mut group = NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 2);
-        group.set_field(NetFieldExport {
-            handle: 1,
-            compatible_checksum: 17,
-            name: "ExistingField".into(),
-        });
-        cache.add_export_group(group).unwrap();
-
-        let expanded = NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 4);
-        cache.add_export_group(expanded).unwrap();
-
-        let result = cache.get_group_by_index(7).unwrap();
-        assert_eq!(result.len(), 4);
-        assert_eq!(result.get_field(1).unwrap().name, "ExistingField");
-    }
-
     /// A `path_name_index` reused for another path must not hand the new class
     /// the old class's handle table.
     #[test]
@@ -428,14 +409,6 @@ mod tests {
         let group = cache.get_group_by_index(7).unwrap();
         assert_eq!(group.populated_fields().count(), 0);
         assert_eq!(cache.group_count(), 1);
-    }
-
-    #[test]
-    fn cache_set_net_guid_path_stores_and_resolves() {
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
-
-        assert_eq!(cache.get_path_by_guid(17).unwrap(), "/Game/Test.Test_C");
     }
 
     /// A redundant `set_net_guid_path` (same path, same outer) must not bump

@@ -224,105 +224,63 @@ fn internal_load_object(
     Ok(net_guid)
 }
 
-/// Byte encoders for the tests of both archive readers.
-#[cfg(test)]
-pub(crate) mod wire {
-    /// IntPacked: seven payload bits per byte, low bit set when more follow.
-    pub(crate) fn int_packed(mut value: u32) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1; // continuation flag
-            }
-            bytes.push(next_byte);
-            if value == 0 {
-                return bytes;
-            }
-        }
-    }
-
-    /// FString in UTF-8: i32 length including the null, the bytes, the null.
-    pub(crate) fn fstring(s: &str) -> Vec<u8> {
-        let mut bytes = ((s.len() + 1) as i32).to_le_bytes().to_vec();
-        bytes.extend_from_slice(s.as_bytes());
-        bytes.push(0);
-        bytes
-    }
-
-    /// A string FName: kind 0 (not hardcoded), the FString, the number.
-    pub(crate) fn fname(s: &str, number: i32) -> Vec<u8> {
-        let mut bytes = vec![0];
-        bytes.extend(fstring(s));
-        bytes.extend(number.to_le_bytes());
-        bytes
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::wire::{fname, fstring, int_packed};
     use super::*;
+    use vrf_testkit::{BitWrite, BitWriter, pack};
+
+    type Read = fn(&mut BitReader<'_>, &mut NetGuidCache) -> Result<u32>;
+
+    /// `read` over `w`'s bytes into a fresh cache.
+    fn run(w: &BitWriter, read: Read) -> (Result<u32>, NetGuidCache) {
+        let mut cache = NetGuidCache::new();
+        let result = read(&mut BitReader::new(&pack(w)), &mut cache);
+        (result, cache)
+    }
+
+    /// isFieldExported, the handle, a fixed checksum and a string FName.
+    fn field(w: &mut BitWriter, handle: u32, name: &str, number: i32) {
+        w.u8(1).int_packed(handle).u32(0xAABB_CCDD);
+        w.u8(0).fstring(name).i32(number);
+    }
 
     /// A net-field export command declaring a group, with an optional field.
-    fn build_new_group(
-        path_name_index: u32,
-        path: &str,
-        num_fields: u32,
-        field: Option<(u32, &str)>,
-    ) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend(int_packed(path_name_index));
-        bytes.extend(int_packed(1)); // isExported = true
-        bytes.extend(fstring(path));
-        bytes.extend(int_packed(num_fields));
-        if let Some((handle, name)) = field {
-            bytes.push(1); // isFieldExported = true
-            bytes.extend(int_packed(handle));
-            bytes.extend(0xAABBCCDDu32.to_le_bytes());
-            bytes.extend(fname(name, 0));
-        } else {
-            bytes.push(0); // isFieldExported = false
+    fn new_group(w: &mut BitWriter, index: u32, path: &str, slots: u32, f: Option<(u32, &str)>) {
+        w.int_packed(index)
+            .int_packed(1)
+            .fstring(path)
+            .int_packed(slots);
+        match f {
+            Some((handle, name)) => field(w, handle, name, 0),
+            None => {
+                w.u8(0);
+            }
         }
-        bytes
     }
 
     /// A reference to an existing group that adds one field.
-    fn build_existing_group_field(
-        path_name_index: u32,
-        handle: u32,
-        name: &str,
-        number: i32,
-    ) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend(int_packed(path_name_index));
-        bytes.extend(int_packed(0)); // isExported = false (reference)
-        bytes.push(1); // isFieldExported = true
-        bytes.extend(int_packed(handle));
-        bytes.extend(0xAABBCCDDu32.to_le_bytes());
-        bytes.extend(fname(name, number));
-        bytes
+    fn existing_field(w: &mut BitWriter, index: u32, handle: u32, name: &str, number: i32) {
+        field(w.int_packed(index).int_packed(0), handle, name, number);
     }
 
-    /// An export-GUID payload: one object with HasPath and no outer.
-    fn build_guid_payload(net_guid: u32, path: &str) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend(int_packed(net_guid));
-        bytes.push(ExportFlags::HAS_PATH.0); // flags
-        bytes.extend(int_packed(0)); // outer guid 0: invalid, ends the recursion
-        bytes.extend(fstring(path));
-        bytes
+    /// One length-prefixed export-GUID payload: `guid` with HasPath, outer 0
+    /// (invalid, which ends the recursion), `path`, then `trailing`.
+    fn guid_payload(w: &mut BitWriter, guid: u32, path: &str, trailing: &[u8]) {
+        let mut payload = BitWriter::new();
+        payload
+            .int_packed(guid)
+            .u8(ExportFlags::HAS_PATH.0)
+            .int_packed(0);
+        payload.fstring(path).bytes(trailing);
+        w.i32(payload.len() as i32 / 8).extend_bits(&payload);
     }
 
     #[test]
     fn registers_exported_group() {
-        let mut data = int_packed(1); // 1 export
-        data.extend(build_new_group(11, "/Game/Test.Test_C", 3, None));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        read_net_field_exports(&mut reader, &mut cache).unwrap();
+        let mut w = BitWriter::new();
+        new_group(w.int_packed(1), 11, "/Game/Test.Test_C", 3, None);
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(n, Ok(1));
 
         let group = cache.get_group_by_index(11).unwrap();
         assert_eq!(group.path, "/Game/Test.Test_C");
@@ -333,75 +291,51 @@ mod tests {
 
     #[test]
     fn live_group_rejects_field_count_above_checkpoint_protocol_limit() {
-        let mut data = int_packed(1);
-        data.extend(build_new_group(11, "/Game/Test.Test_C", 65_537, None));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        assert!(matches!(
-            read_net_field_exports(&mut reader, &mut cache).unwrap_err(),
-            SchemaError::FieldCountOverflow {
+        let mut w = BitWriter::new();
+        new_group(w.int_packed(1), 11, "/Game/Test.Test_C", 65_537, None);
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(
+            n,
+            Err(SchemaError::FieldCountOverflow {
                 count: 65_537,
                 max: 65_536
-            }
-        ));
+            })
+        );
         assert_eq!(cache.group_count(), 0);
     }
 
     #[test]
     fn stores_export_by_handle() {
-        let mut data = int_packed(1);
-        data.extend(build_new_group(
+        let mut w = BitWriter::new();
+        new_group(
+            w.int_packed(1),
             11,
-            "/Game/Test.Test_C",
+            "/Game/T.T_C",
             3,
             Some((2, "FieldName")),
-        ));
+        );
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(n, Ok(1));
 
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        read_net_field_exports(&mut reader, &mut cache).unwrap();
-
-        let group = cache.get_group_by_index(11).unwrap();
-        let field = group.get_field(2).unwrap();
+        let field = cache.get_group_by_index(11).unwrap().get_field(2).unwrap();
         assert_eq!(field.handle, 2);
         assert_eq!(field.compatible_checksum, 0xAABBCCDD);
         assert_eq!(field.name, "FieldName");
     }
 
     #[test]
-    fn existing_path_index_updates_group() {
-        let mut data = int_packed(2); // 2 exports
-        data.extend(build_new_group(11, "/Game/Test.Test_C", 3, None));
-        data.extend(build_existing_group_field(11, 1, "LaterField", 0));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        read_net_field_exports(&mut reader, &mut cache).unwrap();
-
-        let group = cache.get_group_by_index(11).unwrap();
-        assert_eq!(group.get_field(1).unwrap().name, "LaterField");
-    }
-
-    #[test]
     fn re_exported_group_expands_without_losing_existing_fields() {
-        let mut data = int_packed(2); // 2 exports
-        data.extend(build_new_group(
+        let mut w = BitWriter::new();
+        new_group(
+            w.int_packed(2),
             11,
-            "/Game/Test.Test_C",
+            "/Game/T.T_C",
             2,
             Some((1, "ExistingField")),
-        ));
-        data.extend(build_new_group(
-            11,
-            "/Game/Test.Test_C",
-            4,
-            Some((3, "ExpandedField")),
-        ));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        read_net_field_exports(&mut reader, &mut cache).unwrap();
+        );
+        new_group(&mut w, 11, "/Game/T.T_C", 4, Some((3, "ExpandedField")));
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(n, Ok(2));
 
         let group = cache.get_group_by_index(11).unwrap();
         assert_eq!(group.len(), 4);
@@ -413,56 +347,45 @@ mod tests {
     /// whatever bytes follow, and the read would succeed.
     #[test]
     fn an_is_exported_value_other_than_0_or_1_is_an_error() {
-        let mut data = int_packed(2);
-        data.extend(build_new_group(11, "/Game/T.T_C", 1, Some((0, "Real"))));
-        let mut reference = build_existing_group_field(11, 0, "Overwritten", 0);
-        reference[1] = 2 << 1; // isExported: IntPacked 2 in place of 0
-        data.extend(reference);
-
-        let mut cache = NetGuidCache::new();
-        let err = read_net_field_exports(&mut BitReader::new(&data), &mut cache).unwrap_err();
+        let mut w = BitWriter::new();
+        new_group(w.int_packed(2), 11, "/Game/T.T_C", 1, Some((0, "Real")));
+        field(w.int_packed(11).int_packed(2), 0, "Overwritten", 0);
+        let (n, cache) = run(&w, read_net_field_exports);
         assert_eq!(
-            err,
-            SchemaError::BadExportedFlag {
+            n,
+            Err(SchemaError::BadExportedFlag {
                 path_name_index: 11,
                 value: 2
-            }
+            })
         );
         let group = cache.get_group_by_index(11).unwrap();
         assert_eq!(group.get_field(0).unwrap().name, "Real");
     }
 
+    /// The error fires before isFieldExported is read.
     #[test]
     fn unknown_path_index_returns_error() {
-        let mut data = int_packed(1); // 1 export
-        data.extend(int_packed(42)); // pathNameIndex
-        data.extend(int_packed(0)); // isExported = false (reference)
-        // The error fires before isFieldExported is read.
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let err = read_net_field_exports(&mut reader, &mut cache).unwrap_err();
-        assert!(matches!(err, SchemaError::UnknownPathIndex { index: 42 }));
+        let mut w = BitWriter::new();
+        w.int_packed(1).int_packed(42).int_packed(0); // one reference, to index 42
+        let (n, _) = run(&w, read_net_field_exports);
+        assert_eq!(n, Err(SchemaError::UnknownPathIndex { index: 42 }));
     }
 
-    /// A handle beyond the group's declared length is dropped and counted. The
-    /// counter (manifest `dropped_field_exports`) read 0 in all 1,018 manifests
-    /// of the 2026-09-28 full-corpus audit, so only this test shows it moves.
+    /// A handle past the declared slots is dropped and counted. The manifest's
+    /// `dropped_field_exports` is 0 on every corpus replay, so only this test
+    /// shows it moves.
     #[test]
     fn out_of_range_handle_is_dropped_and_counted() {
-        // Group has capacity 1, field handle is 2 (out of range).
-        let mut data = int_packed(1);
-        data.extend(build_new_group(
+        let mut w = BitWriter::new();
+        new_group(
+            w.int_packed(1),
             11,
-            "/Game/Test.Test_C",
+            "/Game/T.T_C",
             1,
             Some((2, "OutOfRange")),
-        ));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        // A drop is counted, not an error.
-        read_net_field_exports(&mut reader, &mut cache).unwrap();
+        );
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(n, Ok(1), "a drop is counted, not an error");
 
         assert_eq!(cache.dropped_field_exports(), 1);
         let group = cache.get_group_by_index(11).unwrap();
@@ -474,17 +397,10 @@ mod tests {
     /// on every field would pass the drop test.
     #[test]
     fn in_range_handle_is_placed_and_not_counted() {
-        let mut data = int_packed(1);
-        data.extend(build_new_group(
-            11,
-            "/Game/Test.Test_C",
-            1,
-            Some((0, "InRange")),
-        ));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        read_net_field_exports(&mut reader, &mut cache).unwrap();
+        let mut w = BitWriter::new();
+        new_group(w.int_packed(1), 11, "/Game/T.T_C", 1, Some((0, "InRange")));
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(n, Ok(1));
 
         assert_eq!(cache.dropped_field_exports(), 0);
         let group = cache.get_group_by_index(11).unwrap();
@@ -496,19 +412,12 @@ mod tests {
     /// The number is part of the name: 0 renders bare, 1 renders `_0`.
     #[test]
     fn fname_numbers_disambiguate_two_fields_with_one_base_name() {
-        let mut data = int_packed(3); // 3 exports
-        data.extend(build_new_group(
-            11,
-            "/Game/Test.Test_C",
-            3,
-            Some((0, "Value")),
-        ));
-        data.extend(build_existing_group_field(11, 1, "Value", 1));
-        data.extend(build_existing_group_field(11, 2, "Value", 2));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        read_net_field_exports(&mut reader, &mut cache).unwrap();
+        let mut w = BitWriter::new();
+        new_group(w.int_packed(3), 11, "/Game/T.T_C", 3, Some((0, "Value")));
+        existing_field(&mut w, 11, 1, "Value", 1);
+        existing_field(&mut w, 11, 2, "Value", 2);
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(n, Ok(3));
 
         let group = cache.get_group_by_index(11).unwrap();
         assert_eq!(group.get_field(0).unwrap().name, "Value");
@@ -518,94 +427,58 @@ mod tests {
 
     #[test]
     fn export_guid_registers_path() {
-        let payload = build_guid_payload(17, "/Game/Test.Test_C");
-        let mut data = int_packed(1); // 1 guid
-        data.extend((payload.len() as i32).to_le_bytes());
-        data.extend(&payload);
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        read_export_guids(&mut reader, &mut cache).unwrap();
-
-        assert_eq!(cache.get_path_by_guid(17).unwrap(), "/Game/Test.Test_C");
+        let mut w = BitWriter::new();
+        guid_payload(w.int_packed(1), 17, "/Game/Test.Test_C", &[]);
+        let (n, cache) = run(&w, read_export_guids);
+        assert_eq!(n, Ok(1));
+        assert_eq!(cache.get_path_by_guid(17), Some("/Game/Test.Test_C"));
     }
 
     #[test]
     fn export_guid_negative_size_returns_error() {
-        let mut data = int_packed(1);
-        data.extend((-1i32).to_le_bytes());
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let err = read_export_guids(&mut reader, &mut cache).unwrap_err();
-        assert!(matches!(err, SchemaError::NegativePayloadSize { size: -1 }));
+        let mut w = BitWriter::new();
+        w.int_packed(1).i32(-1);
+        let (n, _) = run(&w, read_export_guids);
+        assert_eq!(n, Err(SchemaError::NegativePayloadSize { size: -1 }));
     }
 
     #[test]
     fn export_guid_trailing_data_returns_error() {
-        let mut payload = build_guid_payload(17, "/Game/Test.Test_C");
-        payload.push(0xFF); // trailing byte
-        let mut data = int_packed(1);
-        data.extend((payload.len() as i32).to_le_bytes());
-        data.extend(&payload);
+        let mut w = BitWriter::new();
+        guid_payload(w.int_packed(1), 17, "/Game/Test.Test_C", &[0xFF]);
+        let (n, _) = run(&w, read_export_guids);
+        assert_eq!(n, Err(SchemaError::TrailingPayloadData { remaining: 1 }));
+    }
 
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let err = read_export_guids(&mut reader, &mut cache).unwrap_err();
-        assert!(matches!(err, SchemaError::TrailingPayloadData { .. }));
+    /// A count with nothing after it: truncation surfaces as a bit-reader error.
+    #[test]
+    fn truncated_input_returns_bitio_error() {
+        let mut w = BitWriter::new();
+        w.int_packed(5);
+        for read in [read_net_field_exports, read_export_guids] {
+            assert!(matches!(run(&w, read).0, Err(SchemaError::Bitio(_))));
+        }
     }
 
     #[test]
-    fn truncated_net_field_exports_returns_bitio_error() {
-        let data = int_packed(5); // says 5 exports, but no data follows.
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let err = read_net_field_exports(&mut reader, &mut cache).unwrap_err();
-        assert!(matches!(err, SchemaError::Bitio(_)));
+    fn zero_counts_are_valid() {
+        let mut w = BitWriter::new();
+        w.int_packed(0);
+        for read in [read_net_field_exports, read_export_guids] {
+            assert_eq!(run(&w, read).0, Ok(0));
+        }
     }
 
-    #[test]
-    fn truncated_export_guids_returns_bitio_error() {
-        // Count says 1 but no payload size follows.
-        let data = int_packed(1);
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let err = read_export_guids(&mut reader, &mut cache).unwrap_err();
-        assert!(matches!(err, SchemaError::Bitio(_)));
-    }
-
-    #[test]
-    fn zero_exports_is_valid() {
-        let data = int_packed(0);
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let n = read_net_field_exports(&mut reader, &mut cache).unwrap();
-        assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn zero_guids_is_valid() {
-        let data = int_packed(0);
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let n = read_export_guids(&mut reader, &mut cache).unwrap();
-        assert_eq!(n, 0);
-    }
-
+    /// Two groups, each with a declared field and one added by reference.
     #[test]
     fn roundtrip_multiple_groups_multiple_fields() {
-        // Register 2 groups each with 2 fields, then verify all survive.
-        let mut data = int_packed(4); // 4 export commands total
-
-        data.extend(build_new_group(1, "/Game/A.A_C", 3, Some((0, "Alpha"))));
-        data.extend(build_existing_group_field(1, 2, "Gamma", 0));
-        data.extend(build_new_group(2, "/Game/B.B_C", 2, Some((1, "Beta"))));
-        data.extend(build_existing_group_field(2, 0, "Delta", 0));
-
-        let mut reader = BitReader::new(&data);
-        let mut cache = NetGuidCache::new();
-        let n = read_net_field_exports(&mut reader, &mut cache).unwrap();
-        assert_eq!(n, 4);
+        let mut w = BitWriter::new();
+        new_group(w.int_packed(4), 1, "/Game/A.A_C", 3, Some((0, "Alpha")));
+        existing_field(&mut w, 1, 2, "Gamma", 0);
+        new_group(&mut w, 2, "/Game/B.B_C", 2, Some((1, "Beta")));
+        existing_field(&mut w, 2, 0, "Delta", 0);
+        let (n, cache) = run(&w, read_net_field_exports);
+        assert_eq!(n, Ok(4));
 
         let a = cache.get_group_by_index(1).unwrap();
         assert_eq!(a.get_field(0).unwrap().name, "Alpha");
