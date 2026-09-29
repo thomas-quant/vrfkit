@@ -45,11 +45,11 @@ def is_generated_sibling(name: str) -> bool:
     return GENERATED_SIBLING.match(name) is not None
 
 
-def child_exports(parent: Path) -> tuple[list[Path], list[Path]]:
+def child_exports(parent: Path, marker: str = "fields.parquet") -> tuple[list[Path], list[Path]]:
     """Split `parent`'s direct child directories into candidates (holding
-    `fields.parquet`) and generated siblings, the latter listed even when
-    empty (a staging directory killed early may hold nothing yet). Both
-    sorted and unresolved."""
+    `marker`) and generated siblings, the latter listed even when empty (a
+    staging directory killed early may hold nothing yet). Both sorted and
+    unresolved."""
     candidates: list[Path] = []
     skipped: list[Path] = []
     for child in sorted(parent.iterdir()):
@@ -57,7 +57,7 @@ def child_exports(parent: Path) -> tuple[list[Path], list[Path]]:
             continue
         if is_generated_sibling(child.name):
             skipped.append(child)
-        elif (child / "fields.parquet").is_file():
+        elif (child / marker).is_file():
             candidates.append(child)
     return candidates, skipped
 

@@ -4,8 +4,11 @@ Every line must be one summary.rs prints, each key must name the argument at
 its position (read off summary.rs, not the spec), each pattern must match
 exactly one printed line, and a line that is not printed must read as missing.
 """
+import contextlib
+import io
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -121,6 +124,22 @@ class SpecTests(unittest.TestCase):
                                                 "cp_array_leaf_decode_errors")],
                          ["Decode errors", "Array decode errors", "Movement tails sized",
                           "Checkpoint Overlay errors", "Checkpoint leaf typed decode errors"])
+
+
+class PinOrDiffTests(unittest.TestCase):
+    def test_a_refused_update_writes_nothing_and_drift_fails(self):
+        def diff(want, got):
+            return [] if want == got else ["moved"]
+        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            path = Path(temp) / "baseline.json"
+            self.assertEqual(sc.pin_or_diff(path, {}, {"n": 1}, True, ["unmeasured"], diff), 1)
+            self.assertFalse(path.exists())
+            self.assertEqual(sc.pin_or_diff(path, {}, {"n": 1}, False, [], diff), 2)
+            self.assertEqual(sc.pin_or_diff(path, {}, {"n": 1}, True, [], diff), 0)
+            stored = sc.load_baseline(path)
+            self.assertIsNone(sc.pin_or_diff(path, stored, {"n": 1}, False, [], diff))
+            self.assertEqual(sc.pin_or_diff(path, stored, {"n": 2}, False, [], diff), 1)
 
 
 if __name__ == "__main__":

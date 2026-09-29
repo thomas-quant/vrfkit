@@ -127,32 +127,6 @@ ORACLE PASS RATE: 100.000000%
         self.assertNotIn("error", result["per_file"]["MATCH.VRF"])
 
 
-class RequiredInputTests(unittest.TestCase):
-    def test_explicit_required_mode_cannot_report_missing_corpus_as_skip(self):
-        with tempfile.TemporaryDirectory() as temp:
-            baseline = Path(temp) / "baseline.json"
-            baseline.write_text(
-                json.dumps({"corpus": "missing-corpus"}), encoding="utf-8"
-            )
-            argv = sys.argv
-            sys.argv = [
-                "check_corpus_baseline.py",
-                "--baseline", str(baseline),
-                "--exe", sys.executable,
-                "--require-input",
-            ]
-            output = io.StringIO()
-            try:
-                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                    code = guard.main()
-            finally:
-                sys.argv = argv
-
-        self.assertEqual(code, 2)
-        self.assertIn("required", output.getvalue().lower())
-        self.assertNotIn("SKIP:", output.getvalue())
-
-
 class UpdateCorpusNameTests(unittest.TestCase):
     """--update must not pin a resolved corpus path (an absolute --corpus, or
     VRFKIT_CORPUS_DIR joined to a relative one) into a new baseline: it would

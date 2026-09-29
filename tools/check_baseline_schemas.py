@@ -252,7 +252,6 @@ def validate_repository(root: Path = BASELINES) -> list[str]:
 
     metrics = loaded["metrics_builds.json"]
     replays = metrics.get("replays") if isinstance(metrics.get("replays"), dict) else {}
-    values = metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {}
 
     for build, filename in CORPUS_BASELINES.items():
         corpus = loaded[filename]

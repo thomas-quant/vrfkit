@@ -1,4 +1,5 @@
-"""The export summary's counter lines, one table for every tool that reads them.
+"""What the guard tools share: the export summary's counter lines as one table,
+and the helpers that run vrfkit and resolve a baseline's input.
 
 Each row is a line `crates/vrfkit/src/driver/summary.rs` prints, whitespace
 collapsed and `report::` formatters expanded, with one key per placeholder.
@@ -10,8 +11,18 @@ Standard library only: check_decode_errors_corpus.py runs without pyarrow.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 from typing import NamedTuple
+
+if __package__:
+    from .atomic_io import atomic_write_text
+else:  # direct script execution
+    from atomic_io import atomic_write_text
 
 #: Who reads a line. P: check_export_baseline.py pins every key (the committed
 #: `*_02d4d478.json` hold exactly these). G: check_decode_errors_corpus.py
@@ -198,3 +209,91 @@ def render(line: Line, values: dict[str, int]) -> str:
 def tail(text: str, lines: int = 3, width: int = 200) -> str:
     """The last non-blank lines of a process's output, for an error message."""
     return " | ".join(l for l in text.splitlines()[-lines:] if l.strip())[:width]
+
+
+def run(cmd, timeout: float | None = None) -> tuple[int, str]:
+    """`(exit code, stdout + stderr)`, decoded as UTF-8 with replacement (the
+    CLI prints glyphs a console codepage cannot decode). A timeout or a
+    process that cannot start raises, for the caller to report."""
+    r = subprocess.run([str(part) for part in cmd], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def vrfkit(exe: Path, verb: str, replay: Path, out: Path | None = None,
+           checkpoints: bool = False, timeout: float | None = None) -> tuple[int, str]:
+    """`vrfkit <verb> <replay> [--out <out>] [--checkpoints]` through `run`."""
+    return run([exe, verb, replay, *(("--out", out) if out else ()),
+                *(("--checkpoints",) if checkpoints else ())], timeout)
+
+
+def no_exe(exe: Path) -> bool:
+    """Whether the vrfkit binary is missing (a usage error, exit 2), said so."""
+    if exe.is_file():
+        return False
+    print(f"build the release binary first: {exe}", file=sys.stderr)
+    return True
+
+
+def load_baseline(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def baseline_input(given: Path | None, stored: str) -> Path | None:
+    """The input a baseline names: `given`, else `stored` with environment
+    variables expanded, a relative path joined to VRFKIT_CORPUS_DIR. None when
+    neither names one -- decided on the text, since Path("") is Path("."),
+    which exists."""
+    named = given or os.path.expandvars(stored)
+    if not named:
+        return None
+    path, corpus_dir = Path(named), os.environ.get("VRFKIT_CORPUS_DIR", "")
+    return Path(corpus_dir) / path if corpus_dir and not path.is_absolute() else path
+
+
+def machine_path(given: Path | None, stored: str, what: str, baseline: Path) -> str | None:
+    """Why `--update` must not pin `given` into a new baseline: a path would
+    put one machine's directory into a committed file."""
+    if stored or given is None or not given.anchor:
+        return None
+    return (f"FAILED: --update would write the path {given} into {baseline.name}; a "
+            f"baseline names its {what} relative to VRFKIT_CORPUS_DIR. Set "
+            f"VRFKIT_CORPUS_DIR to {given.parent} and pass --{what} {given.name}.")
+
+
+def missing_input(message: str, require: bool) -> int:
+    """SKIP (0) an input that lives on another machine, unless --require-input
+    or VRFKIT_REQUIRE_CORPUS makes it fatal (2): a guard that fails on someone
+    else's machine gets disabled."""
+    if require or os.environ.get("VRFKIT_REQUIRE_CORPUS"):
+        print(f"REQUIRED INPUT MISSING: {message}", file=sys.stderr)
+        return 2
+    print(f"SKIP: {message}")
+    return 0
+
+
+def pin_or_diff(baseline: Path, stored: dict, current: dict, update: bool,
+                refusals: list[str], diff) -> int | None:
+    """`--update`: write `current`, or refuse (1) a run with `refusals` -- a
+    figure never measured, pinned, is matched by the same failure next time.
+    Otherwise 2 without a baseline, 1 on drift, None when `current` matches."""
+    if update:
+        if refusals:
+            print(f"FAILED: refusing to pin a run with {len(refusals)} figure(s) never "
+                  f"measured", file=sys.stderr)
+            for line in refusals[:15]:
+                print(f"  {line}", file=sys.stderr)
+            return 1
+        atomic_write_text(baseline, json.dumps(current, indent=1) + "\n")
+        print(f"wrote {baseline}")
+        return 0
+    if not stored:
+        print(f"no baseline at {baseline} -- run with --update", file=sys.stderr)
+        return 2
+    problems = diff(stored, current)
+    if problems:
+        print(f"DRIFT: {len(problems)} difference(s) from {baseline.name}")
+        for line in problems:
+            print(f"  {line}")
+        return 1
+    return None

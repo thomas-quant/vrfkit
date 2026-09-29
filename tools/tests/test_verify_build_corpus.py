@@ -373,57 +373,38 @@ class AuditExecutionTests(unittest.TestCase):
 
 
 class CheckExportTests(unittest.TestCase):
-    """`check_export` must run the checkpoint GUID cross-check and surface it.
+    """`check_export` runs every export check with checkpoints on and surfaces
+    the GUID cross-check's counts; the checks are the baseline guard's."""
 
-    Every other check it calls is stubbed to pass, so these tests see only the
-    cross-check's wiring; the check itself is tested with the baseline guard.
-    """
-
-    def run_check_export(self, crosscheck_result, failing=None):
+    def run_check_export(self, counts, errors=(), lies=()):
         with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
             directory = Path(temp)
             for name in audit.baseline.PARQUET_FILES + audit.baseline.CHECKPOINT_PARQUET_FILES:
                 pq.write_table(pa.table({"value": [1]}), directory / f"{name}.parquet")
             stack.enter_context(patch.object(audit.summary_counters, "read", return_value={}))
             stack.enter_context(patch.object(audit.overlay, "reconcile", return_value=None))
-            for name in ("cross_checks", "checkpoint_manifest_errors",
-                         "reward_opaque_manifest_errors", "targeting_manifest_errors",
-                         "sink_tally_manifest_errors", "frame_skip_manifest_errors",
-                         "checkpoint_trailing_manifest_errors"):
-                stack.enter_context(patch.object(
-                    audit.baseline, name,
-                    return_value=[f"{name} failed"] if name == failing else []))
-            crosscheck = stack.enter_context(patch.object(
-                audit.baseline, "checkpoint_guid_crosscheck", return_value=crosscheck_result))
+            stack.enter_context(patch.object(audit.baseline, "cross_checks",
+                                             return_value=list(lies)))
+            checks = stack.enter_context(patch.object(
+                audit.baseline, "export_errors", return_value=(list(errors), counts)))
             try:
                 return audit.check_export("summary", directory)
             finally:
-                crosscheck.assert_called_once_with(directory)
+                checks.assert_called_once_with(directory, {}, True)
 
-    def test_passing_crosscheck_returns_its_counts_with_the_tables(self):
+    def test_passing_checks_return_the_crosscheck_counts_with_the_tables(self):
         counts = guid_counts(indexed_joined=7, indexed_path_equal=7)
-        tables, returned = self.run_check_export((counts, []))
+        tables, returned = self.run_check_export(counts)
         self.assertEqual(returned, counts)
         self.assertEqual(tables["checkpoint_guid_entries"]["rows"], 1)
 
-    def test_a_sink_tally_disagreement_fails_the_export(self):
-        counts = guid_counts(indexed_joined=7, indexed_path_equal=7)
-        with self.assertRaises(ValueError) as raised:
-            self.run_check_export((counts, []), failing="sink_tally_manifest_errors")
-        self.assertIn("sink_tally_manifest_errors failed", str(raised.exception))
-
-    def test_a_checkpoint_trailing_disagreement_fails_the_export(self):
-        counts = guid_counts(indexed_joined=7, indexed_path_equal=7)
-        with self.assertRaises(ValueError) as raised:
-            self.run_check_export((counts, []), failing="checkpoint_trailing_manifest_errors")
-        self.assertIn("checkpoint_trailing_manifest_errors failed", str(raised.exception))
-
-    def test_failing_crosscheck_fails_the_export_and_keeps_its_counts(self):
+    def test_a_failing_check_fails_the_export_and_keeps_the_counts(self):
         counts = guid_counts(indexed_joined=7, indexed_path_equal=5, indexed_path_differs=2)
-        with self.assertRaises(ValueError) as raised:
-            self.run_check_export((counts, ["checkpoint GUID cross-check: 2 indexed entries differ"]))
-        self.assertIn("2 indexed entries differ", str(raised.exception))
-        self.assertIn("indexed path differs 2", str(raised.exception))
+        for errors, lies in ((["2 indexed entries differ"], []), ([], ["2 indexed entries differ"])):
+            with self.subTest(lies=lies), self.assertRaises(ValueError) as raised:
+                self.run_check_export(counts, errors, lies)
+            self.assertIn("2 indexed entries differ", str(raised.exception))
+            self.assertIn("indexed path differs 2", str(raised.exception))
 
 
 class AuditCommandTests(unittest.TestCase):

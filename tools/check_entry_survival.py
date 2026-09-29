@@ -185,11 +185,11 @@ from pathlib import Path
 if __package__:
     from . import overlay_mirror as mirror
     from .check_component_remaps import remap_entries, table_source, unparsed_entries
-    from .export_scan import is_generated_sibling
+    from .export_scan import child_exports
 else:  # direct script execution
     import overlay_mirror as mirror
     from check_component_remaps import remap_entries, table_source, unparsed_entries
-    from export_scan import is_generated_sibling
+    from export_scan import child_exports
 
 REPO = Path(__file__).resolve().parents[1]
 TABLE_RS = REPO / "crates" / "vrf-decode" / "src" / "table.rs"
@@ -301,8 +301,8 @@ def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
     arms = re.findall(
         r"\(\s*" + STR + r",\s*" + STR + r",\s*Some\(([\d_]+)\),?\s*\)\s*=>\s*\{?\s*"
         r"MeasuredArrayRoute::(\w+)", body, re.S)
-    mirror.check_count("measured_array_route", body.count("MeasuredArrayRoute::"),
-                       body.count("MeasuredArrayRoute::"), len(arms))
+    literal = body.count("MeasuredArrayRoute::")
+    mirror.check_count("measured_array_route", literal, literal, len(arms))
     found = {v: Entry("route", unescape(g), unescape(n), int(c.replace("_", "")))
              for g, n, c, v in arms}
 
@@ -394,7 +394,6 @@ def load_catalog(sources: Sources) -> Catalog:
 class Resolution:
     step: str               # table | alias | scoped | engine | checksum
     entry: Entry | None     # the table / scoped / checksum entry that typed it
-    via_handle: Entry | None
     ftype: str
 
 
@@ -426,12 +425,9 @@ class Overlay:
         if step is None:
             return None
         if step == "engine reference":
-            return Resolution("engine", None, None, OBJECT_NET_GUID)
-        aliased = step.startswith("alias ")
-        via = None
-        if step.endswith("handle"):
-            via = self.handles[(self.aliases[group] if aliased else group, handle)]
-        return Resolution("alias" if aliased else STEP_KINDS[step], hit, via, hit.ftype)
+            return Resolution("engine", None, OBJECT_NET_GUID)
+        return Resolution("alias" if step.startswith("alias ") else STEP_KINDS[step], hit,
+                          hit.ftype)
 
     def handle_state(self, group, name, handle) -> tuple[Entry | None, str]:
         """`(handle entry, state)` for a declaration at an explicit handle.
@@ -491,13 +487,9 @@ def discover(roots: list[Path], exports: list[Path], stats: LoadStats) -> list[P
     for root in roots:
         if not root.is_dir():
             raise InputError(f"--root {root} is not a directory")
-        for child in sorted(root.iterdir()):
-            if not child.is_dir():
-                continue
-            if is_generated_sibling(child.name):
-                stats.skipped.append(child)
-            elif (child / "manifest.json").is_file():
-                found.append(child)
+        children, skipped = child_exports(root, "manifest.json")
+        found += children
+        stats.skipped += skipped
     for export in exports:
         if not (export / "manifest.json").is_file():
             raise InputError(f"--export {export} holds no manifest.json")

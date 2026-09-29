@@ -1,6 +1,7 @@
 """Guards for the export baseline pinner: the Parquet cross-checks, the
-manifest agreement checks, and the refusal to pin an unmeasured counter or a
-machine path. The summary patterns are test_summary_counters.py's."""
+manifest agreement checks, the checkpoint GUID cross-check, and the refusal to
+pin an unmeasured counter or a machine path. The summary patterns are
+test_summary_counters.py's."""
 import contextlib
 import io
 import json
@@ -140,7 +141,7 @@ class CrossCheckTests(unittest.TestCase):
                 "checkpoint_indexed_paths": 0,
                 "checkpoint_resolved_path_indices": 0,
                 "checkpoint_guid_entries": 1}}}), encoding="utf-8")
-            with patch.object(guard.subprocess, "run", return_value=SimpleNamespace(
+            with patch.object(guard.sc.subprocess, "run", return_value=SimpleNamespace(
                     returncode=0, stdout="", stderr="")):
                 with self.assertRaisesRegex(SystemExit, "checkpoint_actors.parquet"):
                     guard.measure(Path("fake.exe"), root / "sample.vrf", out, checkpoints=True)
@@ -191,53 +192,6 @@ class CrossCheckTests(unittest.TestCase):
                     changed = dict(cp, checkpoint_literal_paths=value)
                     manifest.write_text(json.dumps({"quality": {"checkpoints": changed}}), encoding="utf-8")
                     self.assertIn("nonnegative integers", " ".join(guard.checkpoint_manifest_errors(root)))
-
-    def test_reward_opaque_manifest_reconciles_main_and_checkpoint_counts(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            quality = {
-                "sink": {"tracked_rewards_opaque_empty_variants": 4470},
-                "checkpoints": {"sink": {"tracked_rewards_opaque_empty_variants": 7}},
-            }
-            (root / "manifest.json").write_text(
-                json.dumps({"quality": quality}), encoding="utf-8")
-            counters = {"tracked_rewards_opaque_empty_variants": 4470,
-                        "cp_tracked_rewards_opaque_empty_variants": 7}
-            self.assertEqual(guard.reward_opaque_manifest_errors(root, counters, True), [])
-            problems = guard.reward_opaque_manifest_errors(
-                root, dict(counters, tracked_rewards_opaque_empty_variants=1), True)
-            self.assertIn("disagrees", " ".join(problems))
-            problems = guard.reward_opaque_manifest_errors(
-                root, dict(counters, cp_tracked_rewards_opaque_empty_variants=1), True)
-            self.assertIn("cp_tracked_rewards_opaque_empty_variants", " ".join(problems))
-
-    def test_reward_opaque_manifest_rejects_missing_and_noninteger_counts(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            manifest = root / "manifest.json"
-            manifest.write_text(json.dumps({"quality": {}}), encoding="utf-8")
-            self.assertIn("omits", " ".join(guard.reward_opaque_manifest_errors(
-                root, {}, False)))
-            # The real manifest puts sink-owned counters below `quality.sink`;
-            # accepting this tempting flat shape would hide a wiring drift.
-            manifest.write_text(json.dumps({"quality": {
-                "tracked_rewards_opaque_empty_variants": 4470
-            }}), encoding="utf-8")
-            self.assertIn("omits", " ".join(guard.reward_opaque_manifest_errors(
-                root, {}, False)))
-            for value in (None, True, "4470", 4470.0, -1):
-                with self.subTest(value=value):
-                    manifest.write_text(json.dumps({"quality": {
-                        "sink": {"tracked_rewards_opaque_empty_variants": value}
-                    }}), encoding="utf-8")
-                    self.assertIn("nonnegative integers", " ".join(
-                        guard.reward_opaque_manifest_errors(root, {}, False)))
-            manifest.write_text(json.dumps({"quality": {
-                "sink": {"tracked_rewards_opaque_empty_variants": 4470},
-                "checkpoints": {"sink": {"tracked_rewards_opaque_empty_variants": "7"}},
-            }}), encoding="utf-8")
-            self.assertIn("nonnegative integers", " ".join(
-                guard.reward_opaque_manifest_errors(root, {}, True)))
 
 
 #: Checkpoint GUID declarations, independent of how an index is encoded:
@@ -462,7 +416,10 @@ class CheckpointGuidCrossCheckTests(unittest.TestCase):
             self.assertIn(f"{key.replace('_', ' ')} {counts[key]},", line + ",")
         self.assertIn("indexed path differs 0,", line)
 
-    def test_checkpoint_measurement_runs_the_crosscheck_and_prints_it(self):
+    def test_checkpoint_measurement_runs_every_export_check_and_prints_the_crosscheck(self):
+        """`measure` fails on a path the main stream does not declare, on a
+        checkpoint-only manifest count (`Trailing bytes`) the summary
+        misreports, and on dropped checkpoint actor rows."""
         literals = sum(isinstance(d[3], str) for d in DECLARATIONS)
         indices = len(DECLARATIONS) - literals
         summary = (f"Reward opaque: 0 empty variants\nCheckpoint reward opaque: 0 empty variants\n"
@@ -475,7 +432,7 @@ class CheckpointGuidCrossCheckTests(unittest.TestCase):
                    "  Checkpoint envelope trailers: 0 streams / 0 bits\n"
                    "  ActiveBlinds trailers: 0 empty deltas\n"
                    "  Checkpoint ActiveBlinds trailers: 0 empty deltas\n"
-                   "  Trailing bytes:   0\n"
+                   "  Trailing bytes:   {trailing}\n"
                    f"GUID entries: {len(DECLARATIONS)}\n"
                    f"GUID paths: {literals} literals / {indices} indices / {indices} resolved\n")
         sink = {"tracked_rewards_opaque_empty_variants": 0, "targeting_world_locations_decoded": 0,
@@ -489,21 +446,26 @@ class CheckpointGuidCrossCheckTests(unittest.TestCase):
             checkpoint_resolved_path_indices=indices, checkpoint_guid_entries=len(DECLARATIONS))}}
         edited = dict(MAIN_GUIDS)
         edited[12] = ("/Game/F.F_C", 11)
-        for main, passes in ((MAIN_GUIDS, True), (edited, False)):
-            with self.subTest(passes=passes), tempfile.TemporaryDirectory() as temp:
+        for main, trailing, dropped, refusal in (
+                (MAIN_GUIDS, 0, 0, None),
+                (edited, 0, 0, "path the main stream does not declare"),
+                (MAIN_GUIDS, 1, 0, "cp_trailing_bytes=0 disagrees with summary 1"),
+                (MAIN_GUIDS, 0, 2, "checkpoint_actor_rows_dropped=2, expected 0")):
+            with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as temp:
                 out = Path(temp)
                 for name in (*guard.PARQUET_FILES, *guard.CHECKPOINT_PARQUET_FILES):
                     pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
                 write_guid_tables(out, encode_guid_entries(), main)
+                manifest["quality"]["checkpoints"]["checkpoint_actor_rows_dropped"] = dropped
                 (out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
                 printed = io.StringIO()
-                with patch.object(guard.subprocess, "run", return_value=SimpleNamespace(
-                        returncode=0, stdout=summary, stderr="")), \
-                        contextlib.redirect_stdout(printed):
-                    if passes:
+                with patch.object(guard.sc.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout=summary.replace("{trailing}", str(trailing)),
+                        stderr="")), contextlib.redirect_stdout(printed):
+                    if refusal is None:
                         guard.measure(Path("fake.exe"), out / "sample.vrf", out, checkpoints=True)
                     else:
-                        with self.assertRaisesRegex(SystemExit, "path the main stream does not declare"):
+                        with self.assertRaisesRegex(SystemExit, refusal):
                             guard.measure(Path("fake.exe"), out / "sample.vrf", out, checkpoints=True)
                 self.assertIn("Checkpoint GUID cross-check: indexed joined 5,", printed.getvalue())
 
@@ -519,234 +481,110 @@ class ContentIdentityTests(unittest.TestCase):
         self.assertTrue(any("fields.parquet sha256" in p for p in problems), problems)
 
 
-class TargetingCounterTests(unittest.TestCase):
-    def test_targeting_counts_require_matching_main_and_checkpoint_evidence(self):
-        key = "targeting_world_locations_decoded"
+#: A manifest `quality` block carrying every MANIFEST_CHECKS count, distinct
+#: values in each pass, and the summary counters that agree with it.
+MAIN_SINK = {"tracked_rewards_opaque_empty_variants": 4470,
+             "targeting_world_locations_decoded": 12, "movement_envelope_trailers": 11,
+             "movement_envelope_trailer_bits": 264, "active_blinds_empty_trailers": 13}
+CP_SINK = {"tracked_rewards_opaque_empty_variants": 7, "targeting_world_locations_decoded": 0,
+           "movement_envelope_trailers": 21, "movement_envelope_trailer_bits": 504,
+           "active_blinds_empty_trailers": 23}
+MAIN_FRAMES = {"external_data_blobs": 2, "external_data_bytes": 9, "game_specific_bytes": 0,
+               "non_finite_times": 6}
+CP_FRAMES = {"external_data_blobs": 1, "external_data_bytes": 4, "game_specific_bytes": 5,
+             "non_finite_times": 8}
+
+
+def manifest_quality():
+    return {"sink": dict(MAIN_SINK), **{f"frame_{k}": v for k, v in MAIN_FRAMES.items()},
+            "checkpoints": {"sink": dict(CP_SINK), "checkpoint_trailing_bytes": 14,
+                            **{f"checkpoint_frame_{k}": v for k, v in CP_FRAMES.items()}}}
+
+
+AGREEING_COUNTERS = {**MAIN_SINK, **{"cp_" + k: v for k, v in CP_SINK.items()},
+                     **{f"frame_{k}": v for k, v in MAIN_FRAMES.items()},
+                     **{f"cp_frame_{k}": v for k, v in CP_FRAMES.items()},
+                     "cp_trailing_bytes": 14}
+
+
+class ManifestCheckTests(unittest.TestCase):
+    """Each MANIFEST_CHECKS count must equal the summary's in both passes,
+    zeros included, and be a count the manifest actually holds."""
+
+    def errors(self, quality, counters, checkpoints=True):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            manifest = root / "manifest.json"
-            counts = {key: 12, "cp_" + key: 0}
-            data = {"quality": {"sink": {key: 12}, "checkpoints": {"sink": {key: 0}}}}
-            manifest.write_text(json.dumps(data), encoding="utf-8")
-            self.assertEqual(guard.targeting_manifest_errors(root, counts, True), [])
-            for changed in ({key: 11, "cp_" + key: 0}, {key: 12}, {key: 12, "cp_" + key: 1}):
-                self.assertIn("disagrees", " ".join(guard.targeting_manifest_errors(root, changed, True)))
-            for invalid in (True, -1, "0"):
-                data["quality"]["checkpoints"]["sink"][key] = invalid
-                manifest.write_text(json.dumps(data), encoding="utf-8")
-                self.assertIn("nonnegative integers", " ".join(guard.targeting_manifest_errors(root, counts, True)))
-            del data["quality"]["checkpoints"]
-            manifest.write_text(json.dumps(data), encoding="utf-8")
-            self.assertIn("omits", " ".join(guard.targeting_manifest_errors(root, counts, True)))
-            self.assertEqual(guard.targeting_manifest_errors(root, counts, False), [])
+            (root / "manifest.json").write_text(json.dumps({"quality": quality}),
+                                                encoding="utf-8")
+            return " ".join(guard.manifest_errors(root, counters, checkpoints))
 
+    def test_every_count_must_match_the_summary_in_its_pass(self):
+        self.assertEqual(self.errors(manifest_quality(), AGREEING_COUNTERS), "")
+        for key, value in AGREEING_COUNTERS.items():
+            with self.subTest(key=key):
+                self.assertIn(f"manifest {key}={value} disagrees with summary {value + 1}",
+                              self.errors(manifest_quality(),
+                                          dict(AGREEING_COUNTERS, **{key: value + 1})))
+                unprinted = {k: v for k, v in AGREEING_COUNTERS.items() if k != key}
+                self.assertIn(f"manifest {key}={value} disagrees with summary None",
+                              self.errors(manifest_quality(), unprinted))
+        main_only = {k: v for k, v in AGREEING_COUNTERS.items() if not k.startswith("cp_")}
+        quality = manifest_quality()
+        del quality["checkpoints"]
+        self.assertEqual(self.errors(quality, main_only, checkpoints=False), "")
 
-class FrameSkipCounterTests(unittest.TestCase):
-    def write_manifest(self, root: Path, main: dict, checkpoint: dict | None) -> None:
-        quality = {f"frame_{key}": value for key, value in main.items()}
-        if checkpoint is not None:
-            quality["checkpoints"] = {f"checkpoint_frame_{key}": value
-                                      for key, value in checkpoint.items()}
-        (root / "manifest.json").write_text(json.dumps({"quality": quality}), encoding="utf-8")
-
-    def test_frame_skip_counts_must_match_the_manifest_in_both_passes(self):
-        main = {"external_data_blobs": 2, "external_data_bytes": 9, "game_specific_bytes": 0,
-                "non_finite_times": 6}
-        checkpoint = {"external_data_blobs": 1, "external_data_bytes": 4, "game_specific_bytes": 5,
-                      "non_finite_times": 8}
-        counts = {f"frame_{key}": value for key, value in main.items()}
-        counts.update({f"cp_frame_{key}": value for key, value in checkpoint.items()})
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            self.write_manifest(root, main, checkpoint)
-            self.assertEqual(guard.frame_skip_manifest_errors(root, counts, True), [])
-            for key in counts:
-                changed = dict(counts, **{key: counts[key] + 1})
-                self.assertIn(key, " ".join(guard.frame_skip_manifest_errors(root, changed, True)))
-            missing = {k: v for k, v in counts.items() if k != "frame_game_specific_bytes"}
-            self.assertIn("disagrees", " ".join(guard.frame_skip_manifest_errors(root, missing, True)))
-            for invalid in (True, -1, "0"):
-                self.write_manifest(root, dict(main, external_data_bytes=invalid), checkpoint)
-                self.assertIn("nonnegative integers",
-                              " ".join(guard.frame_skip_manifest_errors(root, counts, True)))
-            self.write_manifest(root, main, None)
-            self.assertIn("omits", " ".join(guard.frame_skip_manifest_errors(root, counts, True)))
-            self.assertEqual(guard.frame_skip_manifest_errors(root, counts, False), [])
-
-
-class SinkTallyCounterTests(unittest.TestCase):
-    """The envelope-trailer and ActiveBlinds lines: each number reads its own
-    position in its own block, and each must agree with the manifest."""
-
-    SUMMARY = (
-        "  Envelope trailers: 11 streams / 264 bits\n"
-        "  ActiveBlinds trailers: 13 empty deltas\n"
-        "  Checkpoint envelope trailers: 21 streams / 504 bits\n"
-        "  Checkpoint ActiveBlinds trailers: 23 empty deltas\n"
-    )
-    MAIN = {"movement_envelope_trailers": 11, "movement_envelope_trailer_bits": 264,
-            "active_blinds_empty_trailers": 13}
-    CHECKPOINT = {"movement_envelope_trailers": 21, "movement_envelope_trailer_bits": 504,
-                  "active_blinds_empty_trailers": 23}
-
-    def test_the_counts_must_match_the_manifest_in_both_passes(self):
-        counts = dict(self.MAIN)
-        counts.update({"cp_" + key: value for key, value in self.CHECKPOINT.items()})
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            manifest = root / "manifest.json"
-            data = {"quality": {"sink": dict(self.MAIN),
-                                "checkpoints": {"sink": dict(self.CHECKPOINT)}}}
-            manifest.write_text(json.dumps(data), encoding="utf-8")
-            self.assertEqual(guard.sink_tally_manifest_errors(root, counts, True), [])
-            for key in counts:
-                changed = dict(counts, **{key: counts[key] + 1})
-                self.assertIn(f"manifest {key}=",
-                              " ".join(guard.sink_tally_manifest_errors(root, changed, True)))
-            unprinted = {k: v for k, v in counts.items() if k != "active_blinds_empty_trailers"}
-            self.assertIn("disagrees",
-                          " ".join(guard.sink_tally_manifest_errors(root, unprinted, True)))
-            for invalid in (True, -1, "0"):
-                data["quality"]["checkpoints"]["sink"]["movement_envelope_trailer_bits"] = invalid
-                manifest.write_text(json.dumps(data), encoding="utf-8")
-                self.assertIn("nonnegative integers",
-                              " ".join(guard.sink_tally_manifest_errors(root, counts, True)))
-            del data["quality"]["checkpoints"]
-            manifest.write_text(json.dumps(data), encoding="utf-8")
-            self.assertIn("omits", " ".join(guard.sink_tally_manifest_errors(root, counts, True)))
-            self.assertEqual(guard.sink_tally_manifest_errors(root, counts, False), [])
-
-    def test_a_measurement_whose_manifest_disagrees_is_refused(self):
-        """`measure` runs the check: a summary printing another envelope
-        trailer count than the manifest publishes stops the run."""
-        summary = ("Reward opaque: 0 empty variants\nTarget locations: 0 array children\n"
-                   "Frame skips: 0 external blobs / 0 external bytes / 0 game-specific bytes\n"
-                   "Frame times: 0 non-finite\n" + self.SUMMARY)
-        sink = {"tracked_rewards_opaque_empty_variants": 0,
-                "targeting_world_locations_decoded": 0, **self.MAIN}
-        quality = {"sink": sink, **{f"frame_{key}": 0 for key in guard.FRAME_SKIP_KEYS}}
-        for trailers, passes in ((11, True), (12, False)):
-            with self.subTest(trailers=trailers), tempfile.TemporaryDirectory() as temp:
-                out = Path(temp)
-                for name in guard.PARQUET_FILES:
-                    pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
-                sink["movement_envelope_trailers"] = trailers
-                (out / "manifest.json").write_text(json.dumps({"quality": quality}),
-                                                   encoding="utf-8")
-                with patch.object(guard.subprocess, "run", return_value=SimpleNamespace(
-                        returncode=0, stdout=summary, stderr="")):
-                    if passes:
-                        guard.measure(Path("fake.exe"), out / "sample.vrf", out)
+    def test_a_missing_or_non_count_value_is_named_not_read(self):
+        for what, path in (
+                ("tracked rewards opaque-empty", ("sink", "tracked_rewards_opaque_empty_variants")),
+                ("targeting world-location",
+                 ("checkpoints", "sink", "targeting_world_locations_decoded")),
+                ("sink unread-bits tally",
+                 ("checkpoints", "sink", "movement_envelope_trailer_bits")),
+                ("frame-skip", ("frame_external_data_bytes",)),
+                ("checkpoint trailing-bytes", ("checkpoints", "checkpoint_trailing_bytes"))):
+            for value in (None, True, -1, "0", 0.0, "absent"):
+                with self.subTest(what=what, value=value):
+                    quality = manifest_quality()
+                    parent = quality
+                    for part in path[:-1]:
+                        parent = parent[part]
+                    if value == "absent":
+                        del parent[path[-1]]
                     else:
-                        with self.assertRaisesRegex(SystemExit, "movement_envelope_trailers=12"):
-                            guard.measure(Path("fake.exe"), out / "sample.vrf", out)
+                        parent[path[-1]] = value
+                    self.assertIn(f"manifest omits {what} quality data" if value == "absent"
+                                  else f"{what} counts must be nonnegative integers",
+                                  self.errors(quality, AGREEING_COUNTERS))
+        # The sink counts live below `quality.sink`; a flat shape is a wiring drift.
+        flat = manifest_quality()
+        flat["tracked_rewards_opaque_empty_variants"] = flat["sink"].pop(
+            "tracked_rewards_opaque_empty_variants")
+        self.assertIn("manifest omits tracked rewards opaque-empty",
+                      self.errors(flat, AGREEING_COUNTERS))
 
 
-class CheckpointTrailingCounterTests(unittest.TestCase):
-    """The checkpoint block's `Trailing bytes:` line: read only off its own
-    line, and required to agree with `checkpoint_trailing_bytes`."""
+class MainTests(unittest.TestCase):
+    """`main`'s input handling: a machine path is never pinned, a bare name
+    resolves against VRFKIT_CORPUS_DIR, and a missing replay is fatal only
+    when required."""
 
-    def test_the_count_must_match_the_manifest(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            manifest = root / "manifest.json"
-            data = {"quality": {"checkpoints": {"checkpoint_trailing_bytes": 14}}}
-            manifest.write_text(json.dumps(data), encoding="utf-8")
-            counts = {"cp_trailing_bytes": 14}
-            self.assertEqual(guard.checkpoint_trailing_manifest_errors(root, counts, True), [])
-            self.assertIn("manifest cp_trailing_bytes=14 disagrees with summary 13", " ".join(
-                guard.checkpoint_trailing_manifest_errors(root, {"cp_trailing_bytes": 13}, True)))
-            self.assertIn("disagrees with summary None", " ".join(
-                guard.checkpoint_trailing_manifest_errors(root, {}, True)))
-            for invalid in (None, True, -1, "14", 14.0):
-                with self.subTest(invalid=invalid):
-                    data["quality"]["checkpoints"]["checkpoint_trailing_bytes"] = invalid
-                    manifest.write_text(json.dumps(data), encoding="utf-8")
-                    self.assertIn("nonnegative integers", " ".join(
-                        guard.checkpoint_trailing_manifest_errors(root, counts, True)))
-            del data["quality"]["checkpoints"]["checkpoint_trailing_bytes"]
-            manifest.write_text(json.dumps(data), encoding="utf-8")
-            self.assertIn("omits", " ".join(
-                guard.checkpoint_trailing_manifest_errors(root, counts, True)))
-            self.assertEqual(guard.checkpoint_trailing_manifest_errors(root, counts, False), [])
-
-    def test_a_checkpoint_measurement_whose_manifest_disagrees_is_refused(self):
-        """`measure` runs the check under `--checkpoints`. The other manifest
-        checks and the GUID cross-check are stubbed to pass, so only this
-        wiring decides the outcome."""
-        for printed, passes in ((14, True), (15, False)):
-            with self.subTest(printed=printed), tempfile.TemporaryDirectory() as temp, \
-                    contextlib.ExitStack() as stack:
-                out = Path(temp)
-                for name in (*guard.PARQUET_FILES, *guard.CHECKPOINT_PARQUET_FILES):
-                    pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
-                (out / "manifest.json").write_text(json.dumps(
-                    {"quality": {"checkpoints": {"checkpoint_trailing_bytes": 14}}}),
-                    encoding="utf-8")
-                for name in ("reward_opaque_manifest_errors", "targeting_manifest_errors",
-                             "sink_tally_manifest_errors", "frame_skip_manifest_errors",
-                             "checkpoint_manifest_errors"):
-                    stack.enter_context(patch.object(guard, name, return_value=[]))
-                stack.enter_context(patch.object(
-                    guard, "checkpoint_guid_crosscheck",
-                    return_value=(dict.fromkeys(guard.GUID_CROSSCHECK_KEYS, 0), [])))
-                stack.enter_context(patch.object(guard.subprocess, "run", return_value=SimpleNamespace(
-                    returncode=0, stdout=f"  Trailing bytes:   {printed}\n", stderr="")))
-                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-                if passes:
-                    current = guard.measure(Path("fake.exe"), out / "sample.vrf", out,
-                                            checkpoints=True)
-                    self.assertEqual(current["counters"]["cp_trailing_bytes"], 14)
-                else:
-                    with self.assertRaisesRegex(SystemExit,
-                                                "cp_trailing_bytes=14 disagrees with summary 15"):
-                        guard.measure(Path("fake.exe"), out / "sample.vrf", out, checkpoints=True)
-
-
-class RequiredInputTests(unittest.TestCase):
-    def test_explicit_required_mode_cannot_report_missing_replay_as_skip(self):
-        with tempfile.TemporaryDirectory() as temp:
-            baseline = Path(temp) / "baseline.json"
-            baseline.write_text(
-                json.dumps({"replay": "missing.vrf"}), encoding="utf-8"
-            )
-            argv = sys.argv
-            sys.argv = [
-                "check_export_baseline.py",
-                "--baseline", str(baseline),
-                "--exe", sys.executable,
-                "--require-input",
-            ]
-            output = io.StringIO()
-            try:
-                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                    code = guard.main()
-            finally:
-                sys.argv = argv
-
-        self.assertEqual(code, 2)
-        self.assertIn("required", output.getvalue().lower())
-        self.assertNotIn("SKIP:", output.getvalue())
-
-
-class UpdateReplayNameTests(unittest.TestCase):
-    """--update must not pin a resolved replay path (an absolute --replay, or
-    VRFKIT_CORPUS_DIR joined to a bare one) into a new baseline: it would put
-    one machine's directory into a committed file."""
-
-    def run_update(self, root: Path, replay: str, corpus_dir: str | None):
+    def run_main(self, root: Path, *extra: str, corpus_dir: str | None = None,
+                 require: str | None = None):
         current = measurement(actor_closes=0)
         self.assertEqual(guard.cross_checks(current["counters"], current["parquet"]), [],
                          "the stand-in measurement must reach the update")
         argv = ["check_export_baseline.py", "--baseline", str(root / "baseline.json"),
-                "--exe", sys.executable, "--replay", replay, "--update"]
+                "--exe", sys.executable, *extra]
         output = io.StringIO()
         with patch.dict(os.environ), patch.object(sys, "argv", argv), \
                 patch.object(guard, "measure", return_value=current) as measured, \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             os.environ.pop("VRFKIT_CORPUS_DIR", None)
+            os.environ.pop("VRFKIT_REQUIRE_CORPUS", None)
             if corpus_dir is not None:
                 os.environ["VRFKIT_CORPUS_DIR"] = corpus_dir
+            if require is not None:
+                os.environ["VRFKIT_REQUIRE_CORPUS"] = require
             code = guard.main()
         return code, output.getvalue(), measured
 
@@ -754,9 +592,10 @@ class UpdateReplayNameTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "match.vrf").write_bytes(b"replay")
-            code, output, measured = self.run_update(root, str(root / "match.vrf"), None)
+            code, output, measured = self.run_main(
+                root, "--replay", str(root / "match.vrf"), "--update")
             self.assertEqual(code, 2, output)
-            self.assertIn("bare filename", output)
+            self.assertIn("pass --replay match.vrf", output)
             measured.assert_not_called()
             self.assertFalse((root / "baseline.json").exists())
 
@@ -764,12 +603,26 @@ class UpdateReplayNameTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "match.vrf").write_bytes(b"replay")
-            code, output, measured = self.run_update(root, "match.vrf", str(root))
+            code, output, measured = self.run_main(root, "--replay", "match.vrf", "--update",
+                                                   corpus_dir=str(root))
             self.assertEqual(code, 0, output)
-            measured.assert_called_once()
             self.assertEqual(measured.call_args.args[1], root / "match.vrf")
             stored = json.loads((root / "baseline.json").read_text(encoding="utf-8"))
             self.assertEqual(stored["replay"], "match.vrf")
+
+    def test_a_missing_replay_skips_unless_required(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "baseline.json").write_text(json.dumps({"replay": "missing.vrf"}),
+                                                encoding="utf-8")
+            for extra, require, code, marker in (
+                    ((), None, 0, "SKIP:"), (("--require-input",), None, 2, "REQUIRED INPUT"),
+                    ((), "1", 2, "REQUIRED INPUT MISSING")):
+                with self.subTest(extra=extra, require=require):
+                    got, output, measured = self.run_main(root, *extra, require=require)
+                    self.assertEqual(got, code, output)
+                    self.assertIn(marker, output)
+                    measured.assert_not_called()
 
 
 class TransactionalOutputTests(unittest.TestCase):

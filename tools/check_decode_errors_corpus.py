@@ -166,11 +166,8 @@ def _export_one(
     """Export one replay to a scratch dir and return its counters."""
     out = Path(tempfile.mkdtemp(prefix="vrfkit-decode-"))
     try:
-        cmd = [str(exe), "export", str(replay), "--out", str(out)]
-        r = subprocess.run(cmd + ["--checkpoints"] * with_checkpoints, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=600)
-        return read_counters((r.stdout or "") + (r.stderr or ""),
-                             r.returncode, require_checkpoints=with_checkpoints)
+        code, text = sc.vrfkit(exe, "export", replay, out, with_checkpoints, timeout=600)
+        return read_counters(text, code, require_checkpoints=with_checkpoints)
     except subprocess.TimeoutExpired:
         return None, "timeout"
     finally:

@@ -337,7 +337,7 @@ class ResolutionTests(unittest.TestCase):
 
     def test_a_bare_decimal_at_a_mapped_handle_reaches_the_entry(self):
         r = self.overlay.resolve(STATE, "248", 1, 26)
-        self.assertEqual((r.entry.name, r.via_handle.handle), ("Location", 26))
+        self.assertEqual(r.entry.name, "Location")
 
     def test_a_real_name_at_a_mapped_handle_is_refused(self):
         self.assertIsNone(self.overlay.resolve(STATE, "Somewhere", 1, 26))

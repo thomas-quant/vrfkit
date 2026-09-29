@@ -46,16 +46,12 @@ class UnsafeReplayIdTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.saved = {
-            name: getattr(guard, name)
-            for name in ("REPO", "EXPORTS", "VRF_DIR", "COMPUTE", "VRFKIT", "ADAPTER")
-        }
+        self.saved = {name: getattr(guard, name)
+                      for name in ("REPO", "EXPORTS", "VRF_DIR", "VRFKIT")}
         guard.REPO = self.root / "repo"
         guard.EXPORTS = self.root / "references"
         guard.VRF_DIR = self.root / "replays"
-        guard.COMPUTE = self.root / "compute_metrics.py"
         guard.VRFKIT = Path(sys.executable)
-        guard.ADAPTER = self.root / "to_valplay_bundle.py"
         for directory in (guard.REPO, guard.EXPORTS, guard.VRF_DIR):
             directory.mkdir(parents=True)
 
@@ -94,16 +90,6 @@ class UnsafeReplayIdTests(unittest.TestCase):
         self.assertEqual(result["stage"], "input", result)
         self.assertTrue((export / "keep.txt").is_file())
         self.assertTrue((bundle / "keep.txt").is_file())
-
-
-class SubprocessTimeoutTests(unittest.TestCase):
-    def test_timeout_is_returned_as_a_controlled_stage_error(self):
-        result, error = guard.run_stage(
-            [sys.executable, "-c", "import time; time.sleep(1)"],
-            timeout=0.01,
-        )
-        self.assertIsNone(result)
-        self.assertIn("timeout", error.lower())
 
 
 class FailureTests(unittest.TestCase):
@@ -161,8 +147,8 @@ class MainWiringTests(unittest.TestCase):
         vrf_dir.mkdir()
         exports.mkdir()
 
-        # `run` is patched below, so these are never executed; main() only
-        # requires VRFKIT to exist.
+        # `sc.run` is patched below, so these are never executed; main()
+        # only requires VRFKIT to exist.
         vrfkit, adapter, compute = (root / "vrfkit_stub.py", root / "adapter_stub.py",
                                     root / "compute_stub.py")
         vrfkit.touch()
@@ -176,9 +162,10 @@ class MainWiringTests(unittest.TestCase):
 
         self.run_calls = []
 
-        def run_stub(cmd, **kwargs):
+        def run_stub(cmd, timeout=None):
             """Model successful external stages without executing platform code."""
-            self.run_calls.append((cmd, kwargs))
+            cmd = [str(part) for part in cmd]
+            self.run_calls.append(cmd)
             if cmd[0] == str(vrfkit):
                 Path(cmd[cmd.index("--out") + 1]).mkdir(parents=True, exist_ok=True)
             elif cmd[1] == str(adapter):
@@ -188,16 +175,16 @@ class MainWiringTests(unittest.TestCase):
                 (bundle / "metrics.json").write_text("{}", encoding="utf-8")
             else:  # pragma: no cover - the assertions below name every stage
                 self.fail(f"unexpected subprocess command: {cmd}")
-            return guard.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return 0, ""
 
         self._patches = [
             mock.patch.object(guard, "REPO", root),
             mock.patch.object(guard, "VRF_DIR", vrf_dir),
             mock.patch.object(guard, "EXPORTS", exports),
             mock.patch.object(guard, "VRFKIT", vrfkit),
-            mock.patch.object(guard, "ADAPTER", adapter),
-            mock.patch.object(guard, "COMPUTE", compute),
-            mock.patch.object(guard, "run", side_effect=run_stub),
+            mock.patch.object(guard.cmb, "BUNDLE_TOOL", adapter),
+            mock.patch.object(guard.cmb, "COMPUTE_METRICS", compute),
+            mock.patch.object(guard.cmb.sc, "run", side_effect=run_stub),
             mock.patch.object(guard, "ProcessPoolExecutor", _SyncPool),
         ]
         for p in self._patches:
@@ -231,13 +218,13 @@ class MainWiringTests(unittest.TestCase):
         export_dir = self.root / "out" / "xval" / "a"
         bundle_dir = self.root / "out" / "xval_bundle" / "a"
         self.assertEqual(
-            [cmd for cmd, _ in self.run_calls],
+            self.run_calls,
             [
                 [str(guard.VRFKIT), "export", str(guard.VRF_DIR / "a.vrf"),
                  "--out", str(export_dir)],
-                [sys.executable, str(guard.ADAPTER), str(export_dir), "-o",
+                [sys.executable, str(guard.cmb.BUNDLE_TOOL), str(export_dir), "-o",
                  str(bundle_dir)],
-                [sys.executable, str(guard.COMPUTE), str(bundle_dir)],
+                [sys.executable, str(guard.cmb.COMPUTE_METRICS), str(bundle_dir)],
             ],
         )
 

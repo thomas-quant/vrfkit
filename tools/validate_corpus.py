@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import corpus_scan
+import summary_counters as sc
 
 PATTERNS = {
     "branch": re.compile(r"Branch:\s+(\S+)"),
@@ -74,25 +75,15 @@ def problems(failures, missing) -> list[str]:
 
 
 def _run_one(exe: Path, path: Path) -> tuple[str | None, str]:
-    """Validate one replay. Returns (error, combined output), stdout and
-    stderr both searched. UTF-8 is forced: the CLI writes a few non-ASCII
-    glyphs, and the Windows console codepage would raise UnicodeDecodeError
-    mid-stream.
-    """
+    """Validate one replay: `(error or None, stdout + stderr)`."""
     try:
-        r = subprocess.run(
-            [str(exe), "validate", str(path)],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=300,
-        )
+        code, out = sc.vrfkit(exe, "validate", path, timeout=300)
     except subprocess.TimeoutExpired:
         return "timeout", ""
     except OSError as exc:
         return f"could not start oracle: {exc}", ""
-    out = (r.stdout or "") + (r.stderr or "")
-    if r.returncode != 0:
-        tail = " | ".join(l for l in out.splitlines()[-3:] if l.strip())
-        return f"exit {r.returncode}: {tail[:160]}", out
+    if code != 0:
+        return f"exit {code}: {sc.tail(out, 3, 160)}", out
     return None, out
 
 
@@ -150,10 +141,8 @@ def main(argv: list[str]) -> int:
                 continue
             got, parse_error = parse_oracle_output(out)
             if parse_error is not None:
-                tail = " | ".join(l for l in out.splitlines()[-3:] if l.strip())
-                detail = f"{parse_error}: {tail[:160]}"
                 failures.append((label, corpus_scan.diagnostic(
-                    detail, args.redact_identifiers)))
+                    f"{parse_error}: {sc.tail(out, 3, 160)}", args.redact_identifiers)))
                 continue
             ok += 1
             branches[got["branch"].group(1)] += 1
