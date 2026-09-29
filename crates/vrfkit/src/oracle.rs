@@ -158,7 +158,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         "    Unopened channel:   {} bunches / {} bits",
         stats.bunches_on_unopened_channel, stats.unopened_channel_bits
     );
-    // Not verdict terms: a package-map export bunch's content is never read.
+    // Printed, not (yet) verdict terms: such a bunch's content is never read.
     println!(
         "    Package map exports: {} ({} with RepLayout export)",
         stats.package_map_exports, stats.rep_layout_export_bunches

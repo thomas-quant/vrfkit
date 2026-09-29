@@ -1,11 +1,6 @@
-//! The export summary printed to stderr.
-//!
-//! `tools/check_export_baseline.py` pins the lines its `COUNTERS` and
-//! `CHECKPOINT_COUNTERS` tables name (those tables are the list, not this
-//! file), `tools/verify_build_corpus.py` requires the same labels, and
-//! `tools/check_decode_errors_corpus.py` parses this text too: change a line
-//! deliberately or not at all. A new label must not contain an existing one,
-//! because some patterns are unanchored (`Frames:\s+(\d+)` among them).
+//! The export summary printed to stderr. `tools/summary_counters.py` lists
+//! the counter lines the guard tools read, as whole-line patterns its test
+//! checks against this file: change a line deliberately or not at all.
 
 use std::fs;
 use std::path::Path;
@@ -29,12 +24,11 @@ pub(crate) struct RunTotals {
     pub unknown_chunks: u64,
     /// DemoFrames walked in the ReplayData stream. Packets are counted inside
     /// the frame callback, so a frame that ends before its packet loop moves
-    /// only this. Printed as `ReplayData frames:`, not `Frames:`, which the
-    /// baseline tool's unanchored `Frames:\s+(\d+)` would read as `cp_frames`.
+    /// only this.
     pub frames: u32,
-    /// ExternalData and GameSpecificFrameData bytes those frames stepped over.
-    /// Length-prefixed, so no other number moves when a build starts sending
-    /// them; `Frame skips:` contains no label read unanchored.
+    /// ExternalData and GameSpecificFrameData bytes those frames stepped over:
+    /// length-prefixed, so no other number moves when a build starts sending
+    /// them.
     pub frame_skips: FrameSkips,
     /// Those frames whose time was NaN or infinite, read as 0 ms
     /// (`vrf_frame::FrameWalk::non_finite_times`); printed as `Frame times:`.
@@ -47,8 +41,7 @@ pub(crate) struct RunTotals {
     pub partial_rows: u64,
     pub partial_bits: u64,
     /// Payload bytes an Event chunk declared that its own header layout does
-    /// not reach. Zero across the corpus; counted rather than dropped in
-    /// silence.
+    /// not reach; zero across the corpus.
     pub event_trailing_bytes: u64,
     pub replay_data_trailing_bytes: u64,
     pub elapsed: Duration,
@@ -188,8 +181,8 @@ pub(super) fn print(
         "  Event unread:     {} payload bytes",
         totals.event_trailing_bytes
     );
-    // Zero included: 13.02 moving RoundResults from handle 93 to 81 went
-    // unnoticed without it (see `ExportStats::struct_blobs_failed`).
+    // Zero included: a moved struct handle (RoundResults 93 -> 81 in 13.02)
+    // shows only here.
     eprintln!(
         "  Struct blobs:     {} decoded / {} failed",
         totals.sink.struct_blobs_decoded, totals.sink.struct_blobs_failed
@@ -270,8 +263,7 @@ pub(super) fn print(
     // decodes anything.
     eprintln!("  CNC RPC rows:     {}", totals.sink.cnc_rpcs_emitted);
     // Its failure side: `unwalked` says the fc=34 walk was tried and failed,
-    // `attempted` is its denominator. The label must not share a prefix with
-    // the checkpoint block's, which check_export_baseline.py anchors on.
+    // `attempted` is its denominator.
     eprintln!(
         "  CNC brute force:  {} attempted / {} unwalked",
         totals.sink.cnc_bruteforce_payloads_attempted, totals.sink.cnc_bruteforce_payloads_unwalked
@@ -412,8 +404,7 @@ fn print_checkpoints(cp: &CheckpointStats) {
         cp.sink.overlay.handle_conflicts_refused,
         cp.sink.effect_blobs_decoded
     );
-    // Not `Struct blobs`: labels are check_export_baseline.py's regex anchors,
-    // and a label shared with the main block matches whichever comes first.
+    // Not `Struct blobs`: a label the main block uses would match two lines.
     eprintln!(
         "  Checkpoint blobs: {} decoded / {} failed",
         cp.sink.struct_blobs_decoded, cp.sink.struct_blobs_failed
