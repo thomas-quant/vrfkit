@@ -28,7 +28,7 @@
 //!   payloadSize: i32 (little-endian)
 //!   payload[payloadSize]:
 //!     netGuid:     IntPacked
-//!     exportFlags: u8 (if guid is default or isExportingNetGuidBunch)
+//!     exportFlags: u8
 //!     if HasPath:
 //!       outerGuid:        (recursive InternalLoadObject)
 //!       pathName:         FString
@@ -171,7 +171,7 @@ pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -
         // Exactly `size` bytes, so consumption can be verified.
         let mut payload = reader.sub_reader(byte_count * 8)?;
 
-        internal_load_object(&mut payload, cache, true, 0)?;
+        internal_load_object(&mut payload, cache, 0)?;
 
         if payload.bits_remaining() >= 8 {
             return Err(SchemaError::TrailingPayloadData {
@@ -188,7 +188,6 @@ pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -
 fn internal_load_object(
     reader: &mut BitReader<'_>,
     cache: &mut NetGuidCache,
-    is_exporting: bool,
     depth: u32,
 ) -> Result<NetworkGuid> {
     if depth >= MAX_NET_GUID_RECURSION {
@@ -202,17 +201,13 @@ fn internal_load_object(
         return Ok(net_guid);
     }
 
-    let flags = if net_guid.is_default() || is_exporting {
-        ExportFlags(reader.read_u8()?)
-    } else {
-        ExportFlags::NONE
-    };
+    let flags = ExportFlags(reader.read_u8()?);
 
     if !flags.contains(ExportFlags::HAS_PATH) {
         return Ok(net_guid);
     }
 
-    let outer_guid = internal_load_object(reader, cache, is_exporting, depth + 1)?;
+    let outer_guid = internal_load_object(reader, cache, depth + 1)?;
 
     let path_name = reader.read_fstring(MAX_FSTRING_BYTES)?;
 
