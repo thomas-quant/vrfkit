@@ -241,28 +241,27 @@ fn a_field_longer_than_the_update_window_is_counted() {
 }
 
 #[test]
-fn an_undersized_shooter_guid_field_and_its_orphaned_stream_are_counted() {
-    // A 31-bit GUID field leaves no GUID, so the stream after it is consumed
-    // undecoded: two losses.
+fn a_shooter_guid_field_not_32_bits_wide_and_its_orphaned_stream_are_counted() {
+    // Too narrow for its u32, or wider (a u32 read would keep the low 32
+    // bits): no GUID, so the stream after it is consumed undecoded.
     let stream = build_component_data_stream(&[build_move(false, 7, 1.0, 2.0, 3.0)]);
 
-    let mut update = BitWriter::new();
-    update.int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1);
-    update.int_packed(31); // one bit short of a u32
-    update.bits(0, 31);
-    update.int_packed(COMPONENT_DATA_STREAM_HANDLE + 1);
-    update.int_packed(stream.bit_len());
-    update.extend_bits(&stream);
-    update.int_packed(0);
+    for width in [31, 33] {
+        let mut update = BitWriter::new();
+        update
+            .int_packed(SHOOTER_CHARACTER_NET_GUID_HANDLE + 1)
+            .int_packed(width)
+            .bits(0, width)
+            .int_packed(COMPONENT_DATA_STREAM_HANDLE + 1)
+            .int_packed(stream.bit_len())
+            .extend_bits(&stream)
+            .int_packed(0);
 
-    let (result, moves) = decode(&wrap_updates_array(&single_update_array(&update)));
+        let (result, moves) = decode(&wrap_updates_array(&single_update_array(&update)));
 
-    assert_eq!(result.total_moves, 0);
-    assert!(moves.is_empty());
-    assert_eq!(
-        result.error_count, 2,
-        "the undersized GUID and the stream it orphaned are counted separately"
-    );
+        assert!(moves.is_empty(), "{width} bits");
+        assert_eq!(result.error_count, 2, "{width} bits: the GUID, the stream");
+    }
 }
 
 #[test]
@@ -329,22 +328,33 @@ fn a_stream_that_fails_to_decode_does_not_drop_the_updates_after_it() {
 }
 
 #[test]
-fn a_malformed_trailing_padding_byte_is_counted() {
-    // 8 bits after the array terminator are read as an IntPacked, and this
-    // one's continuation bit asks for a byte that is not there.
-    let mut array = BitWriter::new();
-    array.int_packed(0); // updateCount
-    array.int_packed(0); // array terminator
-    array.u8(0x01); // continuation set, nothing follows
+fn bits_after_the_updates_array_terminator_are_counted_unless_one_int_packed() {
+    // Behind the zero index only 8 bits that parse as an IntPacked are
+    // expected; anything else is lost updates or a drifted cursor.
+    let stream = build_component_data_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)]);
+    let mut update = BitWriter::new();
+    update
+        .int_packed(1)
+        .extend_bits(&update_with_stream(1111, &stream));
+    for (name, declared, after, errors) in [
+        ("an IntPacked", 0, BitWriter::new().u8(0x02).clone(), 0),
+        (
+            "a byte asking for another",
+            0,
+            BitWriter::new().u8(0x01).clone(),
+            1,
+        ),
+        ("16 bits", 0, BitWriter::new().u16(0xBEEF).clone(), 1),
+        ("a real update", 1, update, 1),
+    ] {
+        let mut array = BitWriter::new();
+        array.int_packed(declared).int_packed(0).extend_bits(&after);
 
-    let (result, moves) = decode(&wrap_updates_array(&array));
+        let (result, moves) = decode(&wrap_updates_array(&array));
 
-    assert_eq!(result.total_moves, 0);
-    assert!(moves.is_empty());
-    assert_eq!(
-        result.error_count, 1,
-        "a trailing byte that does not parse must reach the summary"
-    );
+        assert!(moves.is_empty(), "{name}");
+        assert_eq!(result.error_count, errors, "{name}");
+    }
 }
 
 #[test]

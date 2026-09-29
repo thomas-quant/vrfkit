@@ -52,9 +52,10 @@ pub struct RpcDecodeResult {
     /// only itself, being length-delimited; a failed framing read loses the
     /// rest of its updates array, since the cursor is then lost. The framing
     /// anomalies each discard what follows them: an index past the declared
-    /// count, a field longer than its window, a shooter-GUID field under 32
-    /// bits, a stream with no GUID, a trailing padding byte that does not
-    /// parse. Uncounted, any of these looks like well-formed empty updates.
+    /// count, a field longer than its window, a shooter-GUID field not 32
+    /// bits wide, a stream with no GUID, bits after the array's zero index
+    /// other than one IntPacked byte. Uncounted, any of these looks like
+    /// well-formed empty updates.
     pub error_count: u32,
     /// Sections in a window sized by `movementBitCount` that stopped with bits
     /// of it unread: at a zero marker with bits behind it, or in a window too

@@ -79,10 +79,11 @@ fn decode_updates_array(
     while reader.position() < end_bit {
         let encoded_index = reader.read_int_packed()?;
         if encoded_index == 0 {
-            // Exactly 8 bits left: a trailing IntPacked (never seen).
-            // Nothing depends on its value, but one that does not parse means
-            // the grammar drifted, so the failure is counted.
-            if end_bit.saturating_sub(reader.position()) == 8 && reader.read_int_packed().is_err() {
+            // Only a trailing 8-bit IntPacked may follow (never seen); any
+            // other remainder is lost updates or a drifted cursor.
+            if (reader.bits_remaining() == 8 && reader.read_int_packed().is_err())
+                || !reader.at_end()
+            {
                 result.error_count += 1;
             }
             break;
@@ -138,12 +139,12 @@ fn decode_single_update(
         match handle {
             SHOOTER_CHARACTER_NET_GUID_HANDLE => {
                 let mut sub = reader.sub_reader(u64::from(payload_bits))?;
-                if payload_bits >= 32 {
+                if payload_bits == 32 {
                     shooter_guid = Some(sub.read_u32()?);
                 } else {
-                    // Too narrow for its u32. The field is consumed, so the
-                    // framing survives, but the update has no character to
-                    // attribute moves to: a loss, not "no moves".
+                    // Not a u32. The field is consumed, so the framing
+                    // survives, but the update has no character to attribute
+                    // moves to: a loss, not "no moves".
                     result.error_count += 1;
                 }
             }
