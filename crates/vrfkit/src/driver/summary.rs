@@ -105,11 +105,10 @@ pub(super) fn print(
         "  Partial raw rows: {} ({} bits)",
         totals.partial_rows, totals.partial_bits
     );
-    // The RPC, open, close and content-block terms must equal `RPCs:`, `Actor
-    // opens:`, `Actor closes:` and `Content blocks:`: vrf-net calls the sink
-    // beside each of its own increments, so a difference is broken sink
-    // bookkeeping (tools/verify_build_corpus.py checks it via the manifest).
-    // `fields` counts emitted rows and is not comparable with `Fields:`.
+    // `fields` is the fields.parquet row count (check_export_baseline.py);
+    // the other four must equal `RPCs:`, `Actor opens:`, `Actor closes:` and
+    // `Content blocks:`, which vrf-net counts beside each sink call
+    // (tools/verify_build_corpus.py checks them via the manifest).
     eprintln!(
         "  Sink tally:       {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
         totals.sink.fields_emitted,
@@ -419,9 +418,8 @@ fn print_checkpoints(cp: &CheckpointStats) {
         "  Checkpoint blobs: {} decoded / {} failed",
         cp.sink.struct_blobs_decoded, cp.sink.struct_blobs_failed
     );
-    // `Sink tally`'s twin, checked the same way: its RPC, open, close and block
-    // terms must equal `Checkpoint net`'s RPCs and blocks and `Checkpoint
-    // life`'s opens and closes; `fields` matches nothing.
+    // `Sink tally`'s twin, checked the same way against checkpoint_fields.parquet,
+    // `Checkpoint net` and `Checkpoint life`.
     eprintln!(
         "  Checkpoint sink:  {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
         cp.sink.fields_emitted,

@@ -71,6 +71,17 @@ class CrossCheckTests(unittest.TestCase):
         current["parquet"]["partials"]["rows"] = 2
         self.assertTrue(any("Partial raw" in problem for problem in guard.cross_checks(current["counters"], current["parquet"])))
 
+    def test_the_sink_fields_tally_is_each_pass_field_table_row_count(self):
+        for key, table, label in (("fields_emitted", "fields", "Sink tally fields"),
+                                  ("cp_fields_emitted", "checkpoint_fields",
+                                   "Checkpoint sink fields")):
+            with self.subTest(key=key):
+                current = checkpoint_measurement(actor_closes=0, cp_partial_rows=0)
+                self.assertEqual(guard.cross_checks(current["counters"], current["parquet"]), [])
+                current["parquet"][table]["rows"] = 7
+                problems = guard.cross_checks(current["counters"], current["parquet"])
+                self.assertEqual(problems, [f"{label}: summary says 1, Parquet holds 7"])
+
     def test_a_summary_disagreeing_with_its_parquet_is_a_lie(self):
         current = measurement(net_guid_rows=99)
         lies = guard.cross_checks(current["counters"], current["parquet"])

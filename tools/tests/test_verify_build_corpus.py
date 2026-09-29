@@ -47,7 +47,8 @@ def manifest():
                 sink_content_blocks=100)
     quality = dict.fromkeys(("content_blocks_lost", "event_trailing_bytes",
                             "replay_data_trailing_bytes", "event_layout_mismatches",
-                            "overlay_error_buckets", "overlay_errors_reported"), 0)
+                            "overlay_error_buckets", "overlay_errors_reported",
+                            "unknown_chunks"), 0)
     quality.update(checkpoints_enabled=True, net=net, sink=sink,
                    checkpoints={"net": deepcopy(net), "sink": deepcopy(sink),
                                 "checkpoint_chunks": 1, "checkpoint_trailing_bytes": 0})
@@ -72,6 +73,13 @@ class ManifestTests(unittest.TestCase):
                         target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
                         target[category][key] = 1
                         self.assertIn(f"{scope}_{key}=1", audit.manifest_counts(data)[1])
+
+    def test_each_run_level_count_must_be_zero(self):
+        for key in ("content_blocks_lost", "unknown_chunks", "overlay_errors_reported"):
+            with self.subTest(key=key):
+                data = manifest()
+                data["quality"][key] = 2
+                self.assertIn(f"{key}=2", audit.manifest_counts(data)[1])
 
     def test_invalid_counters_are_not_zero(self):
         for bad in (None, -1, True, "0"):

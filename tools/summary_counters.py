@@ -30,6 +30,7 @@ else:  # direct script execution
 #: under `--checkpoints`, so a default run never reads them.
 LINES = (
     ("Chunks: {}", "chunks", "P"),
+    ("Unknown chunks: {}", "unknown_chunks", "P"),
     ("Frame skips: {} external blobs / {} external bytes / {} game-specific bytes",
      "frame_external_data_blobs frame_external_data_bytes frame_game_specific_bytes", "P"),
     ("Frame times: {} non-finite", "frame_non_finite_times", "P"),
@@ -43,6 +44,11 @@ LINES = (
     ("Actor opens: {}", "actor_opens", "P"),
     ("Actor closes: {}", "actor_closes", "P"),
     ("Partial raw rows: {} ({} bits)", "partial_rows partial_bits", "P"),
+    # `fields` is the fields.parquet row count (check_export_baseline.py
+    # cross-checks it); the rest are the sink's twins of RPCs, opens, closes
+    # and content blocks.
+    ("Sink tally: {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
+     "fields_emitted rpcs_emitted sink_actor_opens sink_actor_closes sink_content_blocks", "P"),
     ("Bunches: {}", "bunches", "P"),
     ("Malformed pkts: {}", "malformed_packets", "P"),
     ("Skipped bits: {}", "skipped_bits", "P"),
@@ -107,6 +113,9 @@ LINES = (
      "cp_effect_blobs_decoded", "G"),
     ("Checkpoint blobs: {} decoded / {} failed", "cp_struct_blobs_decoded cp_struct_blobs_failed",
      "PG"),
+    ("Checkpoint sink: {} fields / {} RPCs / {} opens / {} closes / {} content blocks",
+     "cp_fields_emitted cp_rpcs_emitted cp_sink_actor_opens cp_sink_actor_closes "
+     "cp_sink_content_blocks", "P"),
     ("Checkpoint fails: {} array / {} truncated RPC / {} movement",
      "cp_array_errors cp_truncated_rpcs cp_movement_rpc_errors", "G"),
     ("Checkpoint array: {} elements / {} fields / {} truncations / {} root bits / "
