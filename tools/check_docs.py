@@ -73,7 +73,6 @@ GENERATED_INVENTORY = {
     "crates/vrf-transform/tests/data/native_vectors.rs": "tools/capture_native_transforms.py",
 }
 GENERATED_INVENTORY_DOCS = (
-    "README.md",
     "CONTRIBUTING.md",
     ".github/PULL_REQUEST_TEMPLATE.md",
 )
@@ -93,11 +92,11 @@ def read(path: Path) -> str:
 
 
 def check_build_verification(readme: str, usage: str, registry: str, report: dict) -> list[str]:
-    """Both public tables must use the same measured scope and acceptance rule."""
+    """README's build table must cover exactly the registered transforms with the
+    audit's clean/checked counts and one acceptance rule; USAGE's layer table
+    must count the same builds."""
     problems = []
-    # lib.rs's `transforms!` block; the `ALL_VERSIONS` literal is the test fixtures' form.
-    match = (re.search(r"^transforms! \{$(.*?)^\}$", registry, re.S | re.M)
-             or re.search(r"ALL_VERSIONS:.*?=\s*&\[(.*?)\];", registry, re.S))
+    match = re.search(r"^transforms! \{$(.*?)^\}$", registry, re.S | re.M)
     if not match:
         return ["cannot read supported transform registry"]
     versions = {f"{a}.{b}" for a, b in re.findall(r"\bV(\d\d)(\d\d)\b", match[1])}
@@ -126,31 +125,29 @@ def check_build_verification(readme: str, usage: str, registry: str, report: dic
         if (row.get("checkpoint_evidence") != "observed"
                 or any(type(value) is not int or value <= 0 for value in checkpoint_counts)):
             problems.append(f"build audit {version}: no positive checkpoint decoding evidence")
-    for name, doc, readme_table in (("README", readme, True), ("USAGE", usage, False)):
-        for quoted in re.findall(r"Payload transform \((\d+) builds\)", doc):
-            if int(quoted) != len(versions):
-                problems.append(f"{name}: transform layer lists {quoted} builds, registry has {len(versions)}")
-        rows = {}
-        for line in doc.splitlines():
-            cells = [cell.strip().replace("**", "") for cell in line.strip().strip("|").split("|")]
-            if not cells or not re.fullmatch(r"\d{2}\.\d{2}", cells[0]):
-                continue
-            version = cells[0]
-            if version in rows:
-                problems.append(f"{name}: duplicate build row {version}")
-            rows[version] = cells
-        if set(rows) != versions:
-            problems.append(f"{name}: support table differs from supported registry")
-        for version in sorted(versions & set(rows) & set(measured)):
-            cells, actual = rows[version], measured[version]
-            expected = f"{actual['passed']}/{actual['replays']}"
-            count_index = 2 if readme_table else 1
-            if len(cells) != count_index + 2 or cells[count_index] != expected:
-                problems.append(f"{name}: {version} clean/checked must be {expected}")
-            if cells[-1] != BUILD_METHOD:
-                problems.append(f"{name}: {version} uses a different verification method")
-            if readme_table and cells[1] != f"`release-{version}`":
-                problems.append(f"{name}: {version} branch label differs")
+    for quoted in re.findall(r"Payload transform \((\d+) builds\)", readme + usage):
+        if int(quoted) != len(versions):
+            problems.append(f"transform layer lists {quoted} builds, registry has {len(versions)}")
+    rows = {}
+    for line in readme.splitlines():
+        cells = [cell.strip().replace("**", "") for cell in line.strip().strip("|").split("|")]
+        if not cells or not re.fullmatch(r"\d{2}\.\d{2}", cells[0]):
+            continue
+        version = cells[0]
+        if version in rows:
+            problems.append(f"README: duplicate build row {version}")
+        rows[version] = cells
+    if set(rows) != versions:
+        problems.append("README: support table differs from supported registry")
+    for version in sorted(versions & set(rows) & set(measured)):
+        cells, actual = rows[version], measured[version]
+        expected = f"{actual['passed']}/{actual['replays']}"
+        if len(cells) != 4 or cells[2] != expected:
+            problems.append(f"README: {version} clean/checked must be {expected}")
+        if cells[-1] != BUILD_METHOD:
+            problems.append(f"README: {version} uses a different verification method")
+        if cells[1] != f"`release-{version}`":
+            problems.append(f"README: {version} branch label differs")
     return problems
 
 
@@ -864,7 +861,7 @@ def main() -> int:
         measurement_problems,
         stale_measured_counts(every, live_counts),
         check_generated_inventory(generated_docs),
-        check_baseline_figures(docs, baseline_table_figures()),
+        check_baseline_figures({"USAGE.md": usage}, baseline_table_figures()),
         overlay_partition_problems(overlay_counters),
         stale_overlay_counters(every, overlay_counters),
         check_overlay_counters_present(readme, overlay_counters),

@@ -165,31 +165,6 @@ writes the Parquet tables and manifest described under [Output](#output) into
 `--out`, which must be new, empty or a previous export: anything else in it
 is refused, never deleted.
 
-On `02d4d478` (48,215,213 bytes, build 13.01), `export` produces thirteen
-Parquet files plus a manifest when checkpoints are included:
-
-| File | Rows | Bytes |
-|---|---|---|
-| `fields.parquet` | 1,296,660 | 12,691,843 |
-| `movement.parquet` | 1,844,147 | 19,984,802 |
-| `actors.parquet` | 3,827 | 76,830 |
-| `net_guids.parquet` | 16,167 | 114,423 |
-| `events.parquet` | 195 | 12,455 |
-| `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,193,006 |
-| `checkpoint_actors.parquet` | 3,014 | 25,848 |
-| `checkpoint_net_guids.parquet` | 74,270 | 175,916 |
-| `checkpoint_blocks.parquet` | 22,247 | 112,649 |
-| `checkpoint_guid_entries.parquet` | 74,270 | 219,662 |
-| `checkpoint_export_groups.parquet` | 8,307 | 16,481 |
-| `checkpoint_export_fields.parquet` | 49,314 | 106,370 |
-| `manifest.json` |  | ~660,030 |
-
-`checkpoint_fields.parquet` requires `--checkpoints`. The partials row above
-shows the default main-only export; both modes currently contain zero
-rejected partial rows and occupy 2,505 bytes. The five original main tables remain
-byte-for-byte identical across the checkpoint flag.
-
 > Column schemas, the `tools/` scripts, the full validation suite, and
 > per-crate usage live in [`docs/USAGE.md`](docs/USAGE.md).
 > This document is about *why it is built this way*.
@@ -400,16 +375,10 @@ movement stream, JSON parsing was measured at 84% of processing time.
 
 ## Generated files
 
-The following files are generated and must never be edited by hand:
-
-| Generated file | Generator | Notes |
-|---|---|---|
-| `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
-| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including declared geometry and enum shapes; no cross-group propagation |
-| `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` | Expected bytes from pinned original executable readers |
-
-Regenerate them as [`CONTRIBUTING.md`](CONTRIBUTING.md#generated-files--never-hand-edit)
-describes. The S-box and golden vectors are extracted tables whose integrity
+Three files are generated and must never be edited by hand; their targets,
+generators and regeneration steps are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md#generated-files--never-hand-edit). The
+S-box and golden vectors are extracted tables whose integrity
 `extracted_tables_are_intact` (`crates/vrf-transform/tests/golden.rs`) checks.
 The overlay table (`crates/vrf-decode/src/table.rs`) and
 `tools/equippable_table.py` are maintained in the repository, not generated.

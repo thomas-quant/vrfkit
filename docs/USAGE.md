@@ -1203,35 +1203,10 @@ silent change must be impossible.
 
 ## 7. Supported builds
 
-| Build | Clean/checked | Verified by |
-|---|---:|---|
-| 11.06 | 3/3 | Validation + checkpoints + typed/raw |
-| 11.07 | 3/3 | Validation + checkpoints + typed/raw |
-| 11.08 | 3/3 | Validation + checkpoints + typed/raw |
-| 11.09 | 3/3 | Validation + checkpoints + typed/raw |
-| 11.10 | 3/3 | Validation + checkpoints + typed/raw |
-| 11.11 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.00 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.01 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.02 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.03 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.04 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.05 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.06 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.07 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.08 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.09 | 3/3 | Validation + checkpoints + typed/raw |
-| 12.10 | 1/1 | Validation + checkpoints + typed/raw |
-| 12.11 | 1/1 | Validation + checkpoints + typed/raw |
-| 13.00 | 1/1 | Validation + checkpoints + typed/raw |
-| 13.01 | 215/215 | Validation + checkpoints + typed/raw |
-| 13.02 | 205/205 | Validation + checkpoints + typed/raw |
-| 13.04 | 108/108 | Validation + checkpoints + typed/raw |
-| 13.05 | 401/401 | Validation + checkpoints + typed/raw |
-| 13.06 | 38/38 | Validation + checkpoints + typed/raw |
-
-All rows use the [common 2026-09-28 audit](BUILD_VERIFICATION.md): 1,018 unique
-replays, all 1,018 strictly clean. Every
+The per-build table is the README's
+([Supported VALORANT builds](../README.md#supported-valorant-builds)), and every
+row uses the [common audit](BUILD_VERIFICATION.md): 1,018 unique replays, all
+1,018 strictly clean. Every
 replay passes block validation and checkpoint export; all observed evidence
 values match the independent Python decoder. `Clean/checked` also requires
 zero array and array-leaf errors. The report defines each denominator.

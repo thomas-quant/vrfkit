@@ -579,10 +579,7 @@ class BaselineFigureTests(unittest.TestCase):
         self.assertEqual({name: tables.get(name) for name in expected}, expected)
 
     def test_the_shipped_docs_quote_every_live_baseline_figure(self):
-        docs = {
-            "README.md": guard.read(guard.README),
-            "docs/USAGE.md": guard.read(guard.USAGE),
-        }
+        docs = {"docs/USAGE.md": guard.read(guard.USAGE)}
         self.assertEqual(
             guard.check_baseline_figures(docs, guard.baseline_table_figures()), []
         )
