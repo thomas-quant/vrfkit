@@ -560,9 +560,10 @@ impl<'a> ExportSink<'a> {
     }
 
     /// Push one field row, stamped with the current block context. Every
-    /// `FieldRecord` this crate produces is built here, so no call site can get
-    /// the six block-context columns wrong.
+    /// `FieldRecord` this crate produces is built and counted here, so no call
+    /// site can get the six block-context columns or `fields_emitted` wrong.
     fn push_field(&mut self, row: FieldValues) {
+        self.stats.fields_emitted += 1;
         self.records.fields.push(FieldRecord {
             time_ms: self.time_ms,
             packet_id: self.packet_id,

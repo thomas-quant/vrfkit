@@ -26,14 +26,8 @@ use super::ExportStats;
 /// Everything a packet's sink counted, summed across packets.
 #[derive(Debug, Default)]
 pub(crate) struct SinkTotals {
-    /// Rows pushed at the sites that count them (properties, RPC parameters and
-    /// a partial walk's whole-payload row, life-change and path-point members,
-    /// array leaves, struct-blob members, `_cnc_h*` and RepLayout tail rows);
-    /// movement batch rows, zero-bit RPC markers, unwalked RPCs' raw rows,
-    /// unresolved-payload preservation rows and targeting children are not. So
-    /// it matches neither NetStats' `fields` (framed RepLayout properties) nor
-    /// the `fields.parquet` row count: on 02d4d478, 1,060,119 against
-    /// `Fields: 429,648` and 1,296,660 rows.
+    /// Every row `push_field` wrote: the `fields.parquet` (or
+    /// `checkpoint_fields.parquet`) row count, not NetStats' `fields`.
     pub fields_emitted: u64,
     /// The sink's own count of four events vrf-net counts beside the same
     /// callbacks (RPCs, actor opens and closes, content blocks live and

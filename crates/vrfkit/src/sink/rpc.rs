@@ -302,7 +302,6 @@ impl ExportSink<'_> {
                 value_bool,
                 value_str,
             });
-            self.stats.fields_emitted += 1;
 
             emitted_any = true;
         }
@@ -323,7 +322,6 @@ impl ExportSink<'_> {
                 raw_bits: copy_raw_bits(whole_reader, whole_bit_count),
                 ..FieldValues::default()
             });
-            self.stats.fields_emitted += 1;
         }
 
         emitted_any
@@ -362,7 +360,6 @@ impl ExportSink<'_> {
                 &field.raw_bits,
                 columns,
             );
-            self.stats.fields_emitted += 1;
         }
     }
 
@@ -456,7 +453,6 @@ impl ExportSink<'_> {
                 &field.raw_bits,
                 columns,
             );
-            self.stats.fields_emitted += 1;
         }
     }
 

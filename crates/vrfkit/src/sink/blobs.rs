@@ -897,7 +897,6 @@ impl ExportSink<'_> {
                 &f.raw_bits,
                 columns,
             );
-            self.stats.fields_emitted += 1;
 
             // Nested rows follow their raw container row; the whole nested
             // window was validated first, so a bad member cannot leak a prefix.
@@ -910,7 +909,6 @@ impl ExportSink<'_> {
                         &leaf.raw_bits,
                         (Some(leaf.value_i64), None, None, None),
                     );
-                    self.stats.fields_emitted += 1;
                 }
             }
         }
@@ -918,7 +916,7 @@ impl ExportSink<'_> {
 
     /// Push one row decoded out of a parent payload, named by concatenating
     /// `name`. Addressed inside the payload, not by a declared handle, so its
-    /// checksum is null. The caller counts it.
+    /// checksum is null.
     pub(super) fn push_child(
         &mut self,
         handle: u32,
@@ -1180,7 +1178,6 @@ impl ExportSink<'_> {
             value_str,
             ..FieldValues::default()
         });
-        self.stats.fields_emitted += 1;
     }
 }
 

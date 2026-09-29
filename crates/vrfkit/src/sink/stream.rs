@@ -186,7 +186,6 @@ impl FieldSink for ExportSink<'_> {
             value_bool,
             value_str,
         });
-        self.stats.fields_emitted += 1;
     }
 
     fn on_rpc(&mut self, handle: u32, bit_count: u32, reader: BitReader<'_>) {
@@ -395,7 +394,6 @@ impl ExportSink<'_> {
                 raw_bits,
                 ..FieldValues::default()
             });
-            self.stats.fields_emitted += 1;
             self.stats.cnc_rpcs_emitted += 1;
         }
     }
@@ -601,7 +599,6 @@ impl ReplicationSink for ExportSink<'_> {
                             raw_bits: Some(raw_body),
                             ..FieldValues::default()
                         });
-                        self.stats.fields_emitted += 1;
                         self.stats.rpcs_emitted += 1;
                         self.stats.cnc_rpcs_emitted += 1;
                         self.stats.rep_layout_cnc_tails_decoded += 1;
@@ -621,7 +618,6 @@ impl ReplicationSink for ExportSink<'_> {
             raw_bits: Some(raw_tail),
             ..FieldValues::default()
         });
-        self.stats.fields_emitted += 1;
         self.stats.rep_layout_cnc_tails_preserved += 1;
         RepLayoutTailOutcome::Preserved {
             cause: StreamFailureCause::UnverifiedRepLayoutTail,
@@ -986,7 +982,7 @@ mod tests {
         assert!(row.value_f64.is_none());
         assert!(row.value_bool.is_none());
         assert!(row.value_str.is_none());
-        assert_eq!(sink.stats.fields_emitted, 0);
+        assert_eq!(sink.stats.fields_emitted, 1);
         assert_eq!(sink.stats.rpcs_emitted, 0);
         assert_eq!(sink.stats.overlay.decoded_ok, 0);
         assert_eq!(sink.stats.overlay.decoded_err, 0);
@@ -1307,6 +1303,7 @@ mod tests {
             Some(bytes(&array).as_slice())
         );
         assert_eq!(stats.targeting_world_locations_decoded, 1);
+        assert_eq!(stats.fields_emitted, 2, "the child row is counted");
 
         let signed_zero = one_world_location([-0.0, 0.0, -0.0]);
         let (records, stats) = valid_targeting(&signed_zero);
