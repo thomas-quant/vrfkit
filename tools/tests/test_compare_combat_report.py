@@ -54,7 +54,7 @@ class VacuousMatchTests(unittest.TestCase):
         self.assertEqual(guard.compare(one, counters([]), {SHAPE})[2], 1)
         self.assertEqual(guard.compare(counters([]), one, {SHAPE})[2], 1)
 
-    def test_the_absent_on_both_sides_verdict_is_reachable_again(self):
+    def test_the_absent_on_both_sides_verdict_comes_before_equality(self):
         rows, _ok, _checked = guard.compare(counters([]), counters([]), {SHAPE})
         self.assertIn("absent both sides", " ".join(rows))
         self.assertNotIn("MATCH", " ".join(rows))
