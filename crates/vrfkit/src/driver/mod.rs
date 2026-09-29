@@ -14,8 +14,9 @@ mod summary;
 mod writers;
 
 use std::fs;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::thread;
 use std::time::Instant;
 
 use vrf_container::{
@@ -27,14 +28,13 @@ use vrf_export::{
     ActorWriter, CheckpointActorWriter, CheckpointBlockWriter, CheckpointExportFieldWriter,
     CheckpointExportGroupWriter, CheckpointFieldWriter, CheckpointGuidEntryWriter,
     CheckpointNetGuidWriter, EventRecord, EventWriter, FieldWriter, MovementWriter, NetGuidRecord,
-    NetGuidWriter, PartialRecord,
+    NetGuidWriter, PartialRecord, PartialWriter,
 };
 use vrf_schema::NetGuidCache;
 
 use crate::error::CliError;
 use crate::manifest::{self, ManifestQuality};
 use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
-use checkpoints::CheckpointStats;
 use publish::OutputTransaction;
 pub(crate) use summary::RunTotals;
 use writers::WriterThread;
@@ -90,8 +90,8 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     // A couple of hundred rows, so inline like `actors`: far below a thread's
     // worth of encoding.
     let mut event_writer = EventWriter::new(create("events.parquet")?)?;
-    let mut partial_writer = vrf_export::PartialWriter::new(create("partials.parquet")?)?;
-    let mut checkpoint_writer = if with_checkpoints {
+    let mut partial_writer = PartialWriter::new(create("partials.parquet")?)?;
+    let checkpoint_writers = if with_checkpoints {
         Some(checkpoints::CheckpointWriters {
             // The one checkpoint table large enough to take off the decode
             // thread, for the reason `writers` gives for fields and movement.
@@ -126,129 +126,72 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     let mut pass = Pass::new(&replay)?;
     let mut error_report = OverlayErrorReport::default();
     let mut totals = RunTotals::default();
-    let mut cp_stats = CheckpointStats::default();
 
-    for_each_chunk(&data, &replay, |chunk| {
-        match chunk {
-            // The server's own labelled timeline: uncompressed and independent
-            // of replication, so written straight out.
-            Chunk::Event(payload) => {
-                let event = parse_event_chunk(payload)?;
-                totals.event_trailing_bytes += event.trailing_bytes as u64;
-                // Layout [u32 tag][N x u32 words][FString][f32] for groups whose
-                // word count, tag and public name are established; the parse
-                // must consume it exactly and its seconds must match Time1. A
-                // mismatch is counted, never guessed at; `raw_payload` keeps
-                // every byte.
-                let word_count = known_event_word_count(&event.group);
-                let parsed_payload = match word_count {
-                    Some(count) => {
-                        let parsed = parse_known_event_payload(&event.group, event.payload).filter(
-                            |payload| {
-                                event_payload_seconds_matches_time(event.time1, payload.seconds)
-                            },
-                        );
-                        if parsed.is_some() {
-                            totals.event_payloads_decoded += 1;
-                        } else {
-                            totals.event_layout_mismatches += 1;
-                            totals.event_first_layout_mismatch.get_or_insert_with(|| {
-                                format!(
-                                    "{} declared {count} word(s), public tag/name and millisecond time but its {}-byte payload does not fit that layout",
-                                    event.group,
-                                    event.payload.len()
-                                )
-                            });
-                        }
-                        parsed
-                    }
-                    None => {
-                        totals.event_payload_unknown_groups += 1;
-                        None
-                    }
-                };
-                let (word0, word1, payload_tag, payload_name, payload_seconds) =
-                    match parsed_payload {
-                        Some(parsed) => (
-                            parsed.words.first().copied(),
-                            parsed.words.get(1).copied(),
-                            Some(parsed.tag),
-                            Some(parsed.name),
-                            Some(parsed.seconds),
-                        ),
-                        None => (None, None, None, None, None),
-                    };
-                event_writer.push(EventRecord {
-                    id: event.id,
-                    group: event.group,
-                    metadata: event.metadata,
-                    time1: event.time1,
-                    time2: event.time2,
-                    payload_size: event.size_in_bytes,
-                    raw_payload: event.payload.to_vec(),
-                    word0,
-                    word1,
-                    payload_tag,
-                    payload_name,
-                    payload_seconds,
-                })?;
-                totals.event_rows += 1;
-            }
-            Chunk::Checkpoint(payload) => {
-                if let Some(writers) = checkpoint_writer.as_mut() {
-                    let mut partials = Vec::new();
-                    checkpoints::process_chunk(
-                        payload,
-                        &replay,
-                        writers,
-                        &mut cp_stats,
-                        &mut error_report,
-                        &mut partials,
-                    )?;
-                    partial_writer.push_batch(partials)?;
+    // The checkpoint pass shares only the chunk list with this one, so it runs
+    // beside it; a main-pass error waits for it and wins.
+    let (main, checkpoints) = thread::scope(|scope| {
+        let worker = checkpoint_writers
+            .map(|writers| scope.spawn(|| checkpoints::run(&data, &replay, writers)));
+        let main = for_each_chunk(&data, &replay, |chunk| {
+            match chunk {
+                Chunk::Event(payload) => write_event(payload, &mut event_writer, &mut totals)?,
+                Chunk::ReplayData(frames, unread) => {
+                    totals.replay_data_trailing_bytes += unread as u64;
+                    pass.walk(&frames, &mut totals.sink, &mut error_report, |buffers| {
+                        fields.append(&mut buffers.fields)?;
+                        totals.movement_rows += buffers.movement.len() as u64;
+                        movement.append(&mut buffers.movement)?;
+                        actor_writer.push_batch(buffers.actors.drain(..))?;
+                        push_partials(
+                            &mut partial_writer,
+                            buffers.partials.drain(..),
+                            "main",
+                            &mut totals.partial_rows,
+                            &mut totals.partial_bits,
+                        )
+                    })?;
+                    totals.chunks_processed += 1;
                 }
+                Chunk::Checkpoint(_) | Chunk::Other => {}
             }
-            Chunk::ReplayData(frames, unread) => {
-                totals.replay_data_trailing_bytes += unread as u64;
-                pass.walk(&frames, &mut totals.sink, &mut error_report, |buffers| {
-                    fields.append(&mut buffers.fields)?;
-                    totals.movement_rows += buffers.movement.len() as u64;
-                    movement.append(&mut buffers.movement)?;
-                    actor_writer.push_batch(buffers.actors.drain(..))?;
-                    partial_writer.push_batch(label_partials(
-                        &mut buffers.partials,
-                        "main",
-                        None,
-                        &mut totals.partial_rows,
-                        &mut totals.partial_bits,
-                    ))?;
-                    Ok(())
-                })?;
-                totals.chunks_processed += 1;
-            }
-            Chunk::Other => {}
-        }
-        Ok(())
-    })?;
+            Ok(())
+        });
+        let checkpoints = worker.map(|worker| {
+            (worker.join())
+                .unwrap_or_else(|_| Err(CliError::Usage("checkpoint pass panicked".to_owned())))
+        });
+        (main, checkpoints.transpose())
+    });
+    main?;
+    let mut checkpoints = checkpoints?;
 
     // Joined before the elapsed time is taken and any file size is read, so
     // both files are complete and both results are checked.
     fields.finish()?;
     movement.finish()?;
     pass.finish();
-    partial_writer.push_batch(label_partials(
-        &mut pass.buffers.partials,
+    push_partials(
+        &mut partial_writer,
+        pass.buffers.partials.drain(..),
         "main",
-        None,
         &mut totals.partial_rows,
         &mut totals.partial_bits,
-    ))?;
+    )?;
+    // After every main-pass row: partials.parquet is ordered by pass, then
+    // stream position.
+    if let Some(cp) = checkpoints.as_mut() {
+        error_report.merge_from(&cp.errors);
+        push_partials(
+            &mut partial_writer,
+            cp.partials.drain(..),
+            "checkpoint",
+            &mut cp.stats.partial_rows,
+            &mut cp.stats.partial_bits,
+        )?;
+    }
     actor_writer.finish()?;
     event_writer.finish()?;
     partial_writer.finish()?;
-    if let Some(w) = checkpoint_writer.take() {
-        w.finish()?;
-    }
 
     // After the pass: a GUID's outer may be declared in a later chunk than the
     // one that first referenced it.
@@ -287,7 +230,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
             run: &totals,
             net: net_stats,
             error_report: &error_report,
-            checkpoints: with_checkpoints.then_some(&cp_stats),
+            checkpoints: checkpoints.as_ref().map(|cp| &cp.stats),
         },
     )?;
 
@@ -304,29 +247,93 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         net_stats,
         &totals,
         &error_report,
-        with_checkpoints.then_some(&cp_stats),
+        checkpoints.as_ref().map(|cp| &cp.stats),
         &manifest_path,
     );
 
     Ok(())
 }
 
-/// `records` stamped with the pass that produced them, counted into `rows`
-/// and `bits`.
-fn label_partials<'r>(
-    records: &'r mut Vec<PartialRecord>,
+/// The server's own labelled timeline: uncompressed and independent of
+/// replication, so written straight out. Layout [u32 tag][N x u32
+/// words][FString][f32] for groups whose word count, tag and public name are
+/// established; the parse must consume it exactly and its seconds must match
+/// Time1. A mismatch is counted, never guessed at; `raw_payload` keeps every
+/// byte.
+fn write_event<W: Write + Send>(
+    payload: &[u8],
+    writer: &mut EventWriter<W>,
+    totals: &mut RunTotals,
+) -> Result<(), CliError> {
+    let event = parse_event_chunk(payload)?;
+    totals.event_trailing_bytes += event.trailing_bytes as u64;
+    let parsed_payload = match known_event_word_count(&event.group) {
+        Some(count) => {
+            let parsed = parse_known_event_payload(&event.group, event.payload)
+                .filter(|payload| event_payload_seconds_matches_time(event.time1, payload.seconds));
+            if parsed.is_some() {
+                totals.event_payloads_decoded += 1;
+            } else {
+                totals.event_layout_mismatches += 1;
+                totals.event_first_layout_mismatch.get_or_insert_with(|| {
+                    format!(
+                        "{} declared {count} word(s), public tag/name and millisecond time but its {}-byte payload does not fit that layout",
+                        event.group,
+                        event.payload.len()
+                    )
+                });
+            }
+            parsed
+        }
+        None => {
+            totals.event_payload_unknown_groups += 1;
+            None
+        }
+    };
+    let (word0, word1, payload_tag, payload_name, payload_seconds) = match parsed_payload {
+        Some(parsed) => (
+            parsed.words.first().copied(),
+            parsed.words.get(1).copied(),
+            Some(parsed.tag),
+            Some(parsed.name),
+            Some(parsed.seconds),
+        ),
+        None => (None, None, None, None, None),
+    };
+    writer.push(EventRecord {
+        id: event.id,
+        group: event.group,
+        metadata: event.metadata,
+        time1: event.time1,
+        time2: event.time2,
+        payload_size: event.size_in_bytes,
+        raw_payload: event.payload.to_vec(),
+        word0,
+        word1,
+        payload_tag,
+        payload_name,
+        payload_seconds,
+    })?;
+    totals.event_rows += 1;
+    Ok(())
+}
+
+/// Write `records` stamped with the pass that produced them, counting each
+/// into `rows` and `bits` as it reaches the writer.
+fn push_partials<W: Write + Send>(
+    writer: &mut PartialWriter<W>,
+    records: impl IntoIterator<Item = PartialRecord>,
     source: &'static str,
-    checkpoint_id: Option<&'r str>,
-    rows: &'r mut u64,
-    bits: &'r mut u64,
-) -> impl Iterator<Item = PartialRecord> + 'r {
-    records.drain(..).map(move |mut record| {
+    rows: &mut u64,
+    bits: &mut u64,
+) -> Result<(), CliError> {
+    writer.push_batch(records.into_iter().map(|mut record| {
         *rows += 1;
         *bits += record.bit_count;
         record.source = source;
-        record.checkpoint_id = checkpoint_id.map(str::to_owned);
         record
-    })
+    }))?;
+    Ok(())
 }
 
 /// The cache's GUID table as rows, sorted: the cache is a HashMap and the file

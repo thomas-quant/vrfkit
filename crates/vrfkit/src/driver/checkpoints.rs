@@ -9,7 +9,7 @@
 
 use std::io::Write;
 
-use vrf_container::{decompress_checkpoint_with_trailing, parse_checkpoint_chunk};
+use vrf_container::{ChunkType, decompress_checkpoint_with_trailing, parse_checkpoint_chunk};
 use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     CheckpointActorRecord, CheckpointActorWriter, CheckpointBlockWriter,
@@ -22,8 +22,8 @@ use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 use vrf_schema::{CheckpointReadError, CheckpointTableSink, read_checkpoint_tables_with_sink};
 
+use super::net_guid_rows;
 use super::writers::WriterThread;
-use super::{label_partials, net_guid_rows};
 use crate::error::CliError;
 use crate::pass::{Pass, Replay};
 use crate::sink::SinkTotals;
@@ -188,16 +188,46 @@ impl<W: Write + Send> CheckpointTableSink for DeclarationWriter<'_, W> {
     }
 }
 
-/// Decode one Checkpoint chunk and write its rows; its partial rows go to
-/// `partials` for the main thread's writer.
-pub(super) fn process_chunk<W: Write + Send>(
+/// What the checkpoint pass hands back to the main thread.
+#[derive(Default)]
+pub(super) struct CheckpointPass {
+    pub stats: CheckpointStats,
+    /// Merged into the main pass's report: the summary's breakdown is the only
+    /// place a checkpoint-only decode error surfaces.
+    pub errors: OverlayErrorReport,
+    /// For the main thread's `partials.parquet` writer, which counts them.
+    pub partials: Vec<PartialRecord>,
+}
+
+/// Decode every Checkpoint chunk in file order into `writers`, then close
+/// them.
+pub(super) fn run<W: Write + Send>(
+    data: &[u8],
+    replay: &Replay<'_>,
+    mut writers: CheckpointWriters<W>,
+) -> Result<CheckpointPass, CliError> {
+    let mut out = CheckpointPass::default();
+    for chunk in replay.chunks(data) {
+        if let (ChunkType::Checkpoint, payload) = chunk? {
+            process_chunk(payload, replay, &mut writers, &mut out)?;
+        }
+    }
+    writers.finish()?;
+    Ok(out)
+}
+
+/// Decode one Checkpoint chunk and write its rows.
+fn process_chunk<W: Write + Send>(
     payload: &[u8],
     replay: &Replay<'_>,
     writers: &mut CheckpointWriters<W>,
-    stats: &mut CheckpointStats,
-    errors: &mut OverlayErrorReport,
-    partials: &mut Vec<PartialRecord>,
+    out: &mut CheckpointPass,
 ) -> Result<(), CliError> {
+    let CheckpointPass {
+        stats,
+        errors,
+        partials,
+    } = out;
     let cp = parse_checkpoint_chunk(payload)?;
     let (plain, unread) =
         decompress_checkpoint_with_trailing(cp.archive, replay.compressed, replay.encrypted)?;
@@ -247,6 +277,7 @@ pub(super) fn process_chunk<W: Write + Send>(
     let actor_rows_before = stats.actor_rows_written;
     pass.block_scope = Some((checkpoint.clone(), stats.field_rows, 0));
     let mut field_records = Vec::new();
+    let first_partial = partials.len();
     pass.walk(
         &plain[tables.frame_offset..],
         &mut stats.sink,
@@ -270,24 +301,15 @@ pub(super) fn process_chunk<W: Write + Send>(
                     actor,
                 }))?;
             stats.movement_rows_dropped += buffers.movement.len() as u64;
-            partials.extend(label_partials(
-                &mut buffers.partials,
-                "checkpoint",
-                Some(&cp.id),
-                &mut stats.partial_rows,
-                &mut stats.partial_bits,
-            ));
+            partials.append(&mut buffers.partials);
             Ok(())
         },
     )?;
     pass.finish();
-    partials.extend(label_partials(
-        &mut pass.buffers.partials,
-        "checkpoint",
-        Some(&cp.id),
-        &mut stats.partial_rows,
-        &mut stats.partial_bits,
-    ));
+    partials.append(&mut pass.buffers.partials);
+    for record in &mut partials[first_partial..] {
+        record.checkpoint_id = Some(cp.id.clone());
+    }
     let chunk_actor_rows = stats.actor_rows_written - actor_rows_before;
     stats.absorb_chunk_net(&mut pass.reader.stats().clone(), chunk_actor_rows);
 
