@@ -391,9 +391,9 @@ FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
 ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
 CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
 INLINE_LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
-#: A Rust or Python source naming a doc heading. A slug never holds a dot, so
-#: a sentence-ending `.` after the anchor is not read as part of it.
-CODE_ANCHOR_RE = re.compile(r"\b(docs/(?:[\w.-]+/)*[\w.-]+\.md)#([\w-]+)")
+#: A source or fixture naming a doc, with or without a heading. A slug never
+#: holds a dot, so a sentence-ending `.` is not read as part of it.
+CODE_ANCHOR_RE = re.compile(r"\b(docs/(?:[\w.-]+/)*[\w.-]+\.md)(?:#([\w-]+))?")
 
 
 def unfenced_lines(text: str):
@@ -488,39 +488,41 @@ def broken_markdown_anchors(path: Path, text: str, lookup=anchors_of,
 
 def broken_code_anchors(name: str, text: str, lookup=anchors_of,
                         checked: list | None = None) -> list[str]:
-    """`docs/<name>.md#<anchor>` references in one source file that name a
-    doc or a heading that does not exist; each one is appended to
-    `checked`. Paths are repository-relative."""
+    """`docs/<name>.md[#<anchor>]` references in one file that name a doc or
+    a heading that does not exist; each one is appended to `checked`. Paths
+    are repository-relative."""
     problems = []
     for i, line in enumerate(text.splitlines(), 1):
         for doc, fragment in CODE_ANCHOR_RE.findall(line):
+            cite = f"{doc}#{fragment}" if fragment else doc
             if checked is not None:
-                checked.append(f"{doc}#{fragment}")
+                checked.append(cite)
             anchors = lookup((REPO / doc).resolve())
             if anchors is None:
-                problems.append(f"{name}:{i}: cites {doc}#{fragment}, but {doc} does not exist")
-            elif fragment not in anchors:
-                problems.append(f"{name}:{i}: cites {doc}#{fragment}, but {doc} has no such heading")
+                problems.append(f"{name}:{i}: cites {cite}, but {doc} does not exist")
+            elif fragment and fragment not in anchors:
+                problems.append(f"{name}:{i}: cites {cite}, but {doc} has no such heading")
     return problems
 
 
 def anchor_problems(checked: dict[str, list] | None = None) -> list[str]:
-    """Every broken anchor in the link-checked docs and the tracked Rust and
-    Python sources. `checked["docs"]` and `checked["code"]` receive every
-    reference read, so a run that read none can say so. A source list that
-    cannot be read is reported, not treated as an empty one."""
+    """Every broken anchor in the link-checked docs, and every missing doc or
+    heading the tracked Rust, Python and JSON files cite. `checked["docs"]`
+    and `checked["code"]` receive every reference read, so a run that read
+    none can say so. A source list that cannot be read is reported, not
+    treated as an empty one."""
     checked = {} if checked is None else checked
     docs, code = checked.setdefault("docs", []), checked.setdefault("code", [])
     problems = [p for path in link_checked_docs()
                 for p in broken_markdown_anchors(path, read(path), checked=docs)]
-    r = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", "*.rs", "*.py"],
+    r = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", "*.rs", "*.py", "*.json"],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=120)
     if r.returncode != 0:
         return problems + [
-            f"could not list the Rust and Python sources: git ls-files exited "
+            f"could not list the sources: git ls-files exited "
             f"{r.returncode} ({(r.stderr or '').strip()[:120]}); every code "
-            f"anchor went unchecked"]
+            f"reference went unchecked"]
     for name in r.stdout.splitlines():
         if name.strip():
             text = (REPO / name).read_text(encoding="utf-8", errors="replace")
@@ -907,7 +909,7 @@ def main() -> int:
     print(f"docs: {len(ALL_DOCS)} files ({len(link_checked_docs())} link-checked)   "
           f"{n_tools} tools, {n_crates} crates, "
           f"{len(anchors_checked.get('docs', []))} doc links and "
-          f"{len(anchors_checked.get('code', []))} code references to anchors, "
+          f"{len(anchors_checked.get('code', []))} code references to docs, "
           f"{len(checks)} checks")
 
     if problems:

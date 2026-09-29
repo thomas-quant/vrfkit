@@ -165,14 +165,17 @@ class AnchorTests(unittest.TestCase):
         target = "docs/TARGET" ".md"
         text = (f"//! {target}#name-interning.\n"
                 f"// ({target}#name-intern)\n"
-                f"# see docs/GONE" ".md#anything\n")
+                f"# see docs/GONE" ".md#anything\n"
+                f"// {target} with no anchor, then docs/GONE" ".md with none\n")
         checked = []
         problems = guard.broken_code_anchors("x.rs", text, lookup, checked)
-        self.assertEqual(len(checked), 3, checked)
-        self.assertEqual(len(problems), 2, problems)
+        self.assertEqual(len(checked), 5, checked)
+        self.assertEqual(len(problems), 3, problems)
         self.assertIn("x.rs:2", problems[0])
         self.assertIn("#name-intern", problems[0])
         self.assertIn("does not exist", problems[1])
+        self.assertIn("x.rs:4", problems[2])
+        self.assertIn("does not exist", problems[2])
 
     def test_the_archive_is_a_target_but_not_a_source(self):
         sources = {p.relative_to(guard.REPO).as_posix() for p in guard.link_checked_docs()}
