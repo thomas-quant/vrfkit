@@ -120,7 +120,7 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
                 });
             }
 
-            let group = NetFieldExportGroup::try_new(path_name, path_name_index, num_fields)?;
+            let group = NetFieldExportGroup::new(path_name, path_name_index, num_fields);
             cache.add_export_group(group)?;
         } else {
             // A reference to an existing group, which must already be known.

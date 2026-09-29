@@ -34,13 +34,6 @@ pub enum SchemaError {
         max: u32,
     },
 
-    /// Reserving storage for a bounded live export group failed.
-    #[error("could not reserve {count} net-field export slots")]
-    FieldAllocationFailed {
-        /// The requested, already-bounded slot count.
-        count: u32,
-    },
-
     /// An incoming export group's path and index identify two different
     /// canonical groups.
     #[error(
