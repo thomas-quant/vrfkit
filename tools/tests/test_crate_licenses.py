@@ -25,6 +25,7 @@ LICENSE_TEXT_SHA256 = {
 }
 
 THIRD_PARTY_HEADING = "\n# Third-party notices\n"
+UPSTREAM_COPYRIGHT = "Copyright (c) 2026 Michel Giehl"
 
 
 def lf(data: bytes) -> bytes:
@@ -72,6 +73,24 @@ class CrateLicenseTests(unittest.TestCase):
                 self.assertTrue(text.startswith(project),
                                 f"{crate.name}/NOTICE.md does not open with the root's "
                                 "project section")
+
+    def test_every_crate_derived_from_upstream_ships_its_notice(self):
+        # The root NOTICE.md's "What is derived" table names each crate that
+        # holds code derived from or generated out of ValorantReplayParser. A
+        # crate archive carries only its own NOTICE.md, so each named crate
+        # repeats upstream's MIT notice there.
+        notice = lf((REPOSITORY_ROOT / "NOTICE.md").read_bytes()).decode("utf-8")
+        named = sorted({row.split("`")[1].split("/")[1]
+                        for row in notice.splitlines() if row.startswith("| `crates/")})
+        # An empty parse would pass vacuously; the table names vrf-transform.
+        self.assertIn("vrf-transform", named)
+        for name in named:
+            with self.subTest(crate=name):
+                path = REPOSITORY_ROOT / "crates" / name / "NOTICE.md"
+                text = lf(path.read_bytes()).decode("utf-8")
+                self.assertIn("## ValorantReplayParser", text)
+                self.assertIn(UPSTREAM_COPYRIGHT, text,
+                              f"{name}/NOTICE.md lacks ValorantReplayParser's MIT notice")
 
 
 if __name__ == "__main__":
