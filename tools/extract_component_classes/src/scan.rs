@@ -353,68 +353,23 @@ fn native_ancestor(start: &ClassRef, script: &ScriptObjects, classes: &ClassTabl
 mod tests {
     use super::*;
     use crate::script::parse_script_objects;
-    use crate::script::tests::{build_script_objects, script_index};
+    use crate::script::tests::{script_from_paths, script_index};
     use crate::zen::tests::{PackageSpec, build_package};
 
     fn script() -> ScriptObjects {
-        parse_script_objects(&build_script_objects(
-            &[
-                "/Script/Engine",
-                "BlueprintGeneratedClass",
-                "/Script/ShooterGame",
-                "EquippableStateMachineComponent",
-                "AresCharacter",
-                "AnimBlueprintGeneratedClass",
-                "SoundClass",
-                "/Script/UMG",
-                "WidgetBlueprintGeneratedClass",
-                "/Script/CoreUObject",
-                "Function",
-            ],
-            &[
-                (0, 0, "/Script/Engine", None),
-                (
-                    1,
-                    0,
-                    "/Script/Engine.BlueprintGeneratedClass",
-                    Some("/Script/Engine"),
-                ),
-                (2, 0, "/Script/ShooterGame", None),
-                (
-                    3,
-                    0,
-                    "/Script/ShooterGame.EquippableStateMachineComponent",
-                    Some("/Script/ShooterGame"),
-                ),
-                (
-                    4,
-                    0,
-                    "/Script/ShooterGame.AresCharacter",
-                    Some("/Script/ShooterGame"),
-                ),
-                (
-                    5,
-                    0,
-                    "/Script/Engine.AnimBlueprintGeneratedClass",
-                    Some("/Script/Engine"),
-                ),
-                (6, 0, "/Script/Engine.SoundClass", Some("/Script/Engine")),
-                (7, 0, "/Script/UMG", None),
-                (
-                    8,
-                    0,
-                    "/Script/UMG.WidgetBlueprintGeneratedClass",
-                    Some("/Script/UMG"),
-                ),
-                (9, 0, "/Script/CoreUObject", None),
-                (
-                    10,
-                    0,
-                    "/Script/CoreUObject.Function",
-                    Some("/Script/CoreUObject"),
-                ),
-            ],
-        ))
+        parse_script_objects(&script_from_paths(&[
+            "/Script/Engine",
+            "/Script/Engine.BlueprintGeneratedClass",
+            "/Script/ShooterGame",
+            "/Script/ShooterGame.EquippableStateMachineComponent",
+            "/Script/ShooterGame.AresCharacter",
+            "/Script/Engine.AnimBlueprintGeneratedClass",
+            "/Script/Engine.SoundClass",
+            "/Script/UMG",
+            "/Script/UMG.WidgetBlueprintGeneratedClass",
+            "/Script/CoreUObject",
+            "/Script/CoreUObject.Function",
+        ]))
         .unwrap()
     }
 
@@ -445,7 +400,6 @@ mod tests {
                 "InventoryComponent",
                 "SomeMaterial",
             ],
-            package_name: 0,
             exports: vec![
                 (1, 0, u64::MAX, bpgc, character, 0x1111),
                 (2, 0, u64::MAX, 0, u64::MAX, 0x2222),
@@ -456,6 +410,7 @@ mod tests {
             ],
             imported_hashes: vec![0x3333],
             imported_packages: vec![("/Game/Abilities/Comp_Cooldown", 0)],
+            ..PackageSpec::default()
         })
     }
 
@@ -466,10 +421,8 @@ mod tests {
         let esm = script_index("/Script/ShooterGame.EquippableStateMachineComponent");
         build_package(&PackageSpec {
             names: vec!["/Game/Abilities/Comp_Cooldown", "Comp_Cooldown_C"],
-            package_name: 0,
             exports: vec![(1, 0, u64::MAX, bpgc, esm, 0x3333)],
-            imported_hashes: vec![],
-            imported_packages: vec![],
+            ..PackageSpec::default()
         })
     }
 
@@ -484,10 +437,10 @@ mod tests {
                 "/Game/Abilities/Comp_Cooldown_Child",
                 "Comp_Cooldown_Child_C",
             ],
-            package_name: 0,
             exports: vec![(1, 0, u64::MAX, bpgc, parent, 0x5555)],
             imported_hashes: vec![0x3333],
             imported_packages: vec![("/Game/Abilities/Comp_Cooldown", 0)],
+            ..PackageSpec::default()
         }
     }
 
@@ -565,10 +518,8 @@ mod tests {
         let esm = script_index("/Script/ShooterGame.EquippableStateMachineComponent");
         let bytes = build_package(&PackageSpec {
             names: vec!["/Game/P", "X_GEN_VARIABLE"],
-            package_name: 0,
             exports: vec![(1, 3, u64::MAX, esm, u64::MAX, 0)],
-            imported_hashes: vec![],
-            imported_packages: vec![],
+            ..PackageSpec::default()
         });
         let pkg = parse_package_header(&bytes).unwrap();
         let (cands, _) = scan_header(&pkg, 1, &script);
@@ -584,10 +535,9 @@ mod tests {
     fn a_package_import_splits_into_package_and_hash_indices() {
         let bytes = build_package(&PackageSpec {
             names: vec!["/Game/P"],
-            package_name: 0,
-            exports: vec![],
             imported_hashes: vec![0xAAAA, 0xBBBB],
             imported_packages: vec![("/Game/First", 0), ("/Game/Second", 0)],
+            ..PackageSpec::default()
         });
         let pkg = parse_package_header(&bytes).unwrap();
         let index = (KIND_PACKAGE_IMPORT << 62) | (1u64 << 32) | 1;
@@ -605,10 +555,7 @@ mod tests {
     fn an_index_outside_the_package_tables_is_bad_not_guessed() {
         let bytes = build_package(&PackageSpec {
             names: vec!["/Game/P"],
-            package_name: 0,
-            exports: vec![],
-            imported_hashes: vec![],
-            imported_packages: vec![],
+            ..PackageSpec::default()
         });
         let pkg = parse_package_header(&bytes).unwrap();
         let r = class_ref(&pkg, 1, (KIND_PACKAGE_IMPORT << 62) | (5u64 << 32));
@@ -624,10 +571,8 @@ mod tests {
         let sound_class = script_index("/Script/Engine.SoundClass");
         let got = classes_of(&PackageSpec {
             names: vec!["/Engine/EngineSounds/Master", "Master"],
-            package_name: 0,
             exports: vec![(1, 0, u64::MAX, sound_class, u64::MAX, 0x4444)],
-            imported_hashes: vec![],
-            imported_packages: vec![],
+            ..PackageSpec::default()
         });
         assert!(got.is_empty(), "{got:?}");
     }
@@ -642,13 +587,11 @@ mod tests {
         let overridden = script_index("/Script/UMG.UserWidget:Construct");
         let got = classes_of(&PackageSpec {
             names: vec!["/Game/UI/W_Score", "W_Score_C", "Construct"],
-            package_name: 0,
             exports: vec![
                 (1, 0, u64::MAX, widget, parent, 0x1111),
                 (2, 0, 0, function, overridden, 0x2222),
             ],
-            imported_hashes: vec![],
-            imported_packages: vec![],
+            ..PackageSpec::default()
         });
         assert_eq!(got, [(0x1111, "/Game/UI/W_Score.W_Score_C".to_owned())]);
     }
@@ -674,13 +617,11 @@ mod tests {
             let (class, parent) = (script_index(meta), script_index(parent));
             let got = classes_of(&PackageSpec {
                 names: vec!["/Game/P", "X_C", "Default__X_C"],
-                package_name: 0,
                 exports: vec![
                     (1, 0, u64::MAX, class, parent, 0x1111),
                     (2, 0, u64::MAX, 0, u64::MAX, 0x2222),
                 ],
-                imported_hashes: vec![],
-                imported_packages: vec![],
+                ..PackageSpec::default()
             });
             assert_eq!(got, [(0x1111, "/Game/P.X_C".to_owned())], "{meta}");
         }

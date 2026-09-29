@@ -320,6 +320,34 @@ pub(crate) mod tests {
         out
     }
 
+    /// An indexed, unsigned TOC with one chunk (id 1) at `(offset, length)`
+    /// over `blocks` of `(offset, compressed size, uncompressed size, method)`.
+    pub fn one_chunk_toc(
+        chunk_type: u8,
+        (offset, length): (u64, u64),
+        block_size: u32,
+        methods: Vec<&'static str>,
+        blocks: &[(u64, u32, u32, u8)],
+    ) -> TocSpec {
+        let block = |&(offset, compressed_size, uncompressed_size, method)| CompressedBlock {
+            offset,
+            compressed_size,
+            uncompressed_size,
+            method,
+        };
+        TocSpec {
+            flags: FLAG_INDEXED,
+            block_size,
+            methods,
+            chunks: vec![(
+                ChunkId { id: 1, chunk_type },
+                OffsetLength { offset, length },
+            )],
+            blocks: blocks.iter().map(block).collect(),
+            ..TocSpec::default()
+        }
+    }
+
     fn two_chunk_spec() -> TocSpec {
         TocSpec {
             chunks: vec![

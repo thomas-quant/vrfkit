@@ -213,6 +213,7 @@ pub(crate) mod tests {
     /// public export hash)`.
     pub type ExportSpec = (u32, u32, u64, u64, u64, u64);
 
+    #[derive(Default)]
     pub struct PackageSpec<'a> {
         pub names: Vec<&'a str>,
         pub package_name: u32,

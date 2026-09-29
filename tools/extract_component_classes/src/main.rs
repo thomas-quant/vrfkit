@@ -725,27 +725,11 @@ mod tests {
 
     /// A one-chunk TOC over stored (uncompressed) bytes.
     fn stored_toc(len: usize, chunk_type: u8, directory_index: Vec<u8>) -> Vec<u8> {
-        use crate::toc::tests::{TocSpec, build_toc};
-        use crate::toc::{ChunkId, CompressedBlock, FLAG_INDEXED, OffsetLength};
+        use crate::toc::tests::{TocSpec, build_toc, one_chunk_toc};
+        let (l, n) = (len as u64, len as u32);
         build_toc(&TocSpec {
-            flags: FLAG_INDEXED,
-            block_size: 0x10000,
-            methods: vec![],
-            chunks: vec![(
-                ChunkId { id: 1, chunk_type },
-                OffsetLength {
-                    offset: 0,
-                    length: len as u64,
-                },
-            )],
-            blocks: vec![CompressedBlock {
-                offset: 0,
-                compressed_size: len as u32,
-                uncompressed_size: len as u32,
-                method: 0,
-            }],
             directory_index,
-            ..crate::toc::tests::TocSpec::default()
+            ..one_chunk_toc(chunk_type, (0, l), 0x10000, vec![], &[(0, n, n, 0)])
         })
     }
 
@@ -753,11 +737,11 @@ mod tests {
     /// global container and one `other` whose single chunk is not a package,
     /// so the run fails but still reports. Returns the exit code and the JSON.
     fn run_synthetic(test: &str, other_index: Vec<u8>) -> (Result<i32, String>, String) {
-        use crate::script::tests::build_script_objects;
+        use crate::script::tests::script_from_paths;
         let dir = std::env::temp_dir().join(format!("ecc-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let script = build_script_objects(&["/Script/A"], &[(0, 0, "/Script/A", None)]);
+        let script = script_from_paths(&["/Script/A"]);
         let global = stored_toc(script.len(), CHUNK_SCRIPT_OBJECTS, Vec::new());
         std::fs::write(dir.join("global.utoc"), global).unwrap();
         std::fs::write(dir.join("global.ucas"), &script).unwrap();
