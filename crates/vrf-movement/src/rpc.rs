@@ -137,7 +137,7 @@ fn decode_single_update(
                         result.error_count += 1;
                     }
                 } else {
-                    // No GUID: handle 2 was undersized (counted above) or has
+                    // No GUID: handle 2 was not 32 bits (counted above) or has
                     // not arrived, and a single pass cannot rewind to it, so
                     // the moves are dropped. An update hitting both adds two.
                     result.error_count += 1;
