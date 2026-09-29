@@ -28,8 +28,8 @@ pub struct MovementMove {
     pub move_type: u8,
 }
 
-/// A single character update descriptor. The decoder never builds one (moves
-/// go out through its callback); kept for callers that construct it.
+/// A character update descriptor. The decoder never builds one (moves go out
+/// through its callback); kept for callers that construct it.
 #[derive(Debug, Clone)]
 pub struct MovementUpdate {
     /// Index within the batch.
@@ -47,49 +47,30 @@ pub struct RpcDecodeResult {
     pub total_moves: u32,
     /// Number of character updates in the batch.
     pub update_count: u32,
-    /// Decode problems that cost data, counted per occurrence (loss, not
-    /// severity: one update may add several). A failed component stream loses
-    /// only itself, being length-delimited; a failed framing read loses the
-    /// rest of its updates array, since the cursor is then lost. The framing
-    /// anomalies each discard what follows them: an index past the declared
-    /// count, a field longer than its window, a shooter-GUID field not 32
-    /// bits wide, a stream with no GUID, bits after the array's zero index
-    /// other than one IntPacked byte. Uncounted, any of these looks like
-    /// well-formed empty updates.
+    /// Losses, per occurrence; nonzero keeps the batch's payload as a raw row.
+    /// A failed component stream loses itself, a failed framing read the rest
+    /// of its updates array. Also counted, as each would otherwise look like
+    /// empty updates: an index past the declared count, a field longer than its
+    /// window, a shooter-GUID field not 32 bits wide, a stream with no GUID,
+    /// and bits after the array's zero index other than one IntPacked byte.
     pub error_count: u32,
-    /// Sections in a window sized by `movementBitCount` that stopped with bits
-    /// of it unread: at a zero marker with bits behind it, or in a window too
-    /// short for the 8-bit magic or the first marker. A drifted cursor that
-    /// reads `000` stops here and loses every move after it.
-    ///
-    /// Not counted: an empty window (no movement magic, but this counts unread
-    /// bits), and the end at most 31 bits
-    /// after a move. Those bits are not padding but a `000` terminator and 8
-    /// to 23 bits that are not all zero, so a zero tally means no section
-    /// stopped anywhere else, not that every section was read to its last
-    /// bit. No measured stream has a sized window at all (crate docs,
-    /// "Measured on real replays").
-    ///
-    /// A tally, not part of `error_count`: a nonzero `error_count` keeps the
-    /// batch's whole payload as a raw row.
+    /// Sections in a `movementBitCount`-sized window that stopped with bits
+    /// unread: at a zero marker (a drifted cursor loses every later move), or
+    /// too short for the magic or the first marker. Not counted: an empty
+    /// window, or the unread end within 31 bits of a move. A tally, not an error.
     pub sized_section_tails: u32,
     /// Bits left unread by the sections counted in [`Self::sized_section_tails`].
     pub sized_section_tail_bits: u64,
-    /// The same, for sections whose window ran to the end of the component
-    /// stream (`movementBitCount` 0 or larger than what remained). Kept apart:
-    /// after a zero marker in an open window, the rest may be component data
-    /// rather than lost moves.
+    /// The same for windows that ran to the end of the component stream, kept
+    /// apart: after a zero marker there, the rest may be component data.
     pub open_section_tails: u32,
     /// Bits left unread by the sections counted in [`Self::open_section_tails`].
     pub open_section_tail_bits: u64,
-    /// Byte-wrapped component streams, each counted once its envelope is cut
-    /// out, before the section inside is parsed (a failed section still
-    /// counts). Counted whether or not bits follow the envelope, so a trailer
-    /// that vanished reads as [`Self::envelope_trailer_bits`] short of 24 per
-    /// stream, not as streams that were never wrapped.
+    /// Byte-wrapped streams, counted when the envelope is cut out, before its
+    /// section is parsed and whether or not bits follow: a vanished trailer
+    /// reads as bits short of 24 per stream.
     pub envelope_trailer_streams: u32,
-    /// Bits after those envelopes, which nothing reads: exactly 24 per stream
-    /// on every measured replay (crate
-    /// docs, "Measured on real replays"). A tally like the section tails.
+    /// Bits after those envelopes, never read: 24 per stream on every measured
+    /// replay. A tally like the section tails.
     pub envelope_trailer_bits: u64,
 }

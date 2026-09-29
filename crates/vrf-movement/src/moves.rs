@@ -1,9 +1,6 @@
-//! The movement section and the single move record inside it: the innermost
-//! layer, written in the numeric vocabulary of [`crate::primitives`].
-//!
-//! Moves are separated by a 3-bit marker that counts 1 to 7 and wraps to 1. A
-//! marker out of sequence means the cursor has drifted and is an error, not
-//! skipped: continuing from a desynced position yields well-formed nonsense.
+//! The movement section and the move record inside it. A 3-bit marker out of
+//! sequence means the cursor has drifted: an error, not skipped, since reading
+//! on from a desynced position yields well-formed nonsense.
 
 use vrf_bitio::BitReader;
 
@@ -14,19 +11,13 @@ use crate::types::{MovementMove, RpcDecodeResult};
 /// Magic byte at the start of a movement section.
 pub(crate) const MOVEMENT_MAGIC: u8 = 0x52;
 
-/// With at most this many bits left after a move, the section ends without
-/// reading another marker. The bits are not padding: in every stream measured
-/// they are a `000` terminator where the next marker would sit, then 8 to 23
-/// bits that are not all zero (crate docs, "Measured on real replays").
+/// With at most this many bits left after a move the section ends unread: a
+/// `000` terminator, then 8 to 23 bits that are not all zero in every stream.
 const MAX_MOVEMENT_PADDING_BITS: u64 = 31;
 
-/// Parse the movement section: magic byte, then a sequence of moves.
-///
-/// Returns the bits of its window left unread at a stop the grammar does not
-/// explain: a zero marker with bits behind it, or a window too short for the
-/// magic or the first marker. The end within `MAX_MOVEMENT_PADDING_BITS` of a
-/// move returns 0, as does a window read to its last bit. The caller tallies a
-/// nonzero return; [`RpcDecodeResult::sized_section_tails`] says why.
+/// Parse the movement section, returning the bits left unread at a stop the
+/// grammar does not explain (see [`RpcDecodeResult::sized_section_tails`]);
+/// 0 for the end within `MAX_MOVEMENT_PADDING_BITS` of a move.
 pub(crate) fn parse_movement_section(
     reader: &mut BitReader<'_>,
     shooter_guid: u32,
@@ -61,7 +52,6 @@ pub(crate) fn parse_movement_section(
         emit(mv);
         result.total_moves += 1;
 
-        // The section's end; what is left stays unread.
         if reader.bits_remaining() <= MAX_MOVEMENT_PADDING_BITS {
             return Ok(0);
         }
@@ -70,9 +60,7 @@ pub(crate) fn parse_movement_section(
         marker = reader.read_bits(3)? as u8;
     }
 
-    // A zero marker, which in the loop means more than
-    // MAX_MOVEMENT_PADDING_BITS were left: the rest is a tail (or nothing,
-    // straight after the magic).
+    // A zero marker with more than MAX_MOVEMENT_PADDING_BITS left: a tail.
     Ok(reader.bits_remaining())
 }
 
@@ -83,26 +71,19 @@ pub(crate) fn next_marker(marker: u8) -> u8 {
     if next < 2 { 1 } else { next }
 }
 
-/// Parse one MovementMove from the stream. The fields it decodes and drops are
-/// not constant over the 157,457,629 moves of the crate docs' sample:
-/// unusedByte is non-zero in 155,140,482, rotationYawMultiplier
-/// in 29,589,841; rotationInput is off centre in 97,788,473, flag48 set in
-/// 150,351,309, the optional byte present in 9,255,640, variant1Flag in 1,655.
+/// Parse one MovementMove. The fields it drops all vary on real data; their
+/// meaning is unknown.
 fn parse_single_move(
     reader: &mut BitReader<'_>,
     shooter_guid: u32,
 ) -> Result<MovementMove, MovementError> {
-    // -- 25-bit header ----------------------------------------------------
     let header = reader.read_bits(25)?;
     let move_type_flag = (header & 1) != 0; // bit 0
     let _rotation_yaw_multiplier = ((header >> 1) & 0xFF) as u8; // bits [1..9]
     let movement_state = ((header >> 9) & 0xFF) as u8; // bits [9..17]
     let _unused_byte = ((header >> 17) & 0xFF) as u8; // bits [17..25]
 
-    // -- FixedVector: rotationInput (3 x u16), not exported ----------------
-    reader.skip_bits(48)?;
-
-    // -- Timestamp: Unreal's IntPacked ----------------------------------------
+    reader.skip_bits(48)?; // rotationInput, not exported
     let timestamp = reader.read_int_packed()?;
 
     let (pos_x, pos_y, pos_z) = read_quantized_vector(reader, 100)?;
@@ -112,7 +93,6 @@ fn parse_single_move(
         let _optional_byte = reader.read_u8()?;
     }
 
-    // -- 33-bit flag + packed angles --------------------------------------
     let flag_and_angles = reader.read_bits(33)?;
     let _flag48 = (flag_and_angles & 1) != 0;
     let packed_angles = (flag_and_angles >> 1) as u32;
