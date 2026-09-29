@@ -234,3 +234,7 @@ def check(corrupt_name: str | None = None) -> list[str]:
                     f"got {(actual_tag, actual_value)!r}"
                 )
     return failures
+
+
+if __name__ == "__main__":
+    raise SystemExit("no CLI: run python -m unittest tools/tests/test_check_effect_decoder.py")
