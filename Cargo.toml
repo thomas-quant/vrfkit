@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.86"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/yakisoba0728/vrfkit"
 description = "VALORANT replay (.vrf) parser and analysis toolkit"
 
