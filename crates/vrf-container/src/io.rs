@@ -46,8 +46,7 @@ pub(crate) fn read_f32(
     read_u32(reader, context).map(f32::from_bits)
 }
 
-/// Two `u32` halves, so a short read reports the 4-byte half that failed,
-/// the width every other `Truncated` in this crate reports.
+/// Two `u32` halves, so a short read reports 4 bytes like every other `Truncated`.
 pub(crate) fn read_i64(
     reader: &mut BitReader<'_>,
     context: &'static str,
@@ -57,7 +56,6 @@ pub(crate) fn read_i64(
     Ok(i64::from(lo) | (i64::from(hi) << 32))
 }
 
-/// An Unreal GUID: four little-endian `u32`.
 pub(crate) fn read_guid(reader: &mut BitReader<'_>) -> Result<[u32; 4], ContainerError> {
     Ok([
         read_u32(reader, "guid")?,
@@ -68,16 +66,18 @@ pub(crate) fn read_guid(reader: &mut BitReader<'_>) -> Result<[u32; 4], Containe
 }
 
 /// The `size`-byte body after the header `reader` has read from `payload`,
-/// and the count of bytes after it that the layout does not account for.
+/// and the count of bytes after it that the layout does not account for. A
+/// negative `size` is `negative(size)`.
 #[cfg(any(feature = "event", feature = "checkpoint"))]
 pub(crate) fn declared_body<'a>(
     payload: &'a [u8],
     reader: &BitReader<'_>,
-    size: usize,
+    size: i32,
+    negative: fn(i32) -> ContainerError,
     context: &'static str,
 ) -> Result<(&'a [u8], usize), ContainerError> {
-    // Byte-granular reads that all returned Ok leave the reader on a byte
-    // boundary inside `payload`: BitReader::need never advances past it.
+    let size = usize::try_from(size).map_err(|_| negative(size))?;
+    // Whole-byte reads that all succeeded leave a byte boundary inside `payload`.
     let header_end = (reader.position() / 8) as usize;
     let available = payload.len() - header_end;
     if available < size {
@@ -90,8 +90,7 @@ pub(crate) fn declared_body<'a>(
     Ok((&payload[header_end..header_end + size], available - size))
 }
 
-/// `max_bytes` is a parameter because `info` reads FriendlyName under the tighter
-/// `MAX_FRIENDLY_NAME_BYTES`; every other caller passes `MAX_FSTRING_BYTES`.
+/// `max_bytes`: `MAX_FRIENDLY_NAME_BYTES` for the friendly name, else `MAX_FSTRING_BYTES`.
 pub(crate) fn read_fstring(
     reader: &mut BitReader<'_>,
     context: &'static str,
