@@ -360,7 +360,7 @@ fn print_diagnostic_event(index: usize, ev: &DiagnosticEvent) {
     }
     println!("  | archetype_net_guid:  {}", ev.archetype_net_guid);
     if let Some(ref path) = ev.class_path {
-        println!("  | class_path:          {path}");
+        println!("  | archetype_path:      {path}");
     }
     println!("  | bunch_flags:");
     let f = &ev.bunch_flags;

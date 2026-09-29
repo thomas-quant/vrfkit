@@ -276,13 +276,14 @@ pub struct DiagnosticEvent {
     pub channel_index: u32,
     /// Actor network GUID on this channel.
     pub actor_net_guid: u32,
-    /// Always `None`: framing does not resolve paths (the sink owns the GUID
-    /// cache), and nothing fills this in later.
+    /// The actor's path in the sink's GUID cache when the event was recorded;
+    /// usually `None`, as dynamic actors are rarely exported by path.
     pub actor_path: Option<String>,
     /// Archetype GUID the channel's open read; 0 for a static actor (no spawn
     /// block), the wire's no-object GUID rather than a failed read.
     pub archetype_net_guid: u32,
-    /// Always `None`, for the reason [`Self::actor_path`] is.
+    /// The archetype's path in the sink's GUID cache (not a class path,
+    /// despite the name), when it has one.
     pub class_path: Option<String>,
     /// Bunch header flags.
     pub bunch_flags: BunchFlagSnapshot,

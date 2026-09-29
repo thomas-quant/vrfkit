@@ -791,7 +791,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct TestSink {
+    pub(super) struct TestSink {
         fields: Vec<(u32, u32)>,
         rpcs: Vec<(u32, u32)>,
         stream_failures: Vec<StreamFailure>,
@@ -804,7 +804,7 @@ mod tests {
         paths: Vec<(u32, String)>,
         /// GUID-to-path map for `path_for_guid`; empty by default, so every
         /// lookup is `None`.
-        guid_paths: std::collections::HashMap<u32, String>,
+        pub(super) guid_paths: std::collections::HashMap<u32, String>,
         /// Content-block headers, in arrival order.
         content_blocks: Vec<ContentBlockHeader>,
         rep_layout_tails: Vec<(u32, Vec<u8>)>,
@@ -2080,7 +2080,7 @@ mod tests {
     }
 
     /// A diagnostic event names the archetype its channel's open read (9
-    /// here), not a plausible 0. Paths are not resolved by framing: `None`.
+    /// here), not a plausible 0, and both GUIDs' paths from the sink's cache.
     #[test]
     fn a_diagnostic_event_carries_the_channel_archetype() {
         use crate::stats::SkipReason;
@@ -2094,10 +2094,19 @@ mod tests {
             ..Default::default()
         };
 
-        let (reader, _) = run_packets(&[
+        let (mut reader, mut sink) = (reader(), TestSink::default());
+        sink.guid_paths.insert(2, "/Game/Actor".into());
+        sink.guid_paths
+            .insert(9, "/Game/Default__Archetype_C".into());
+        for (id, packet) in [
             build_open_bunch_packet(2, &open),
             build_bunch_packet(&spec, &overrun),
-        ]);
+        ]
+        .iter()
+        .enumerate()
+        {
+            reader.process_packet(packet, id as i32, &mut sink);
+        }
 
         let state = reader.channels[&2]
             .state
@@ -2124,7 +2133,8 @@ mod tests {
             (1, 2, 2)
         );
         assert_eq!(ev.archetype_net_guid, 9);
-        assert!(ev.actor_path.is_none() && ev.class_path.is_none());
+        assert_eq!(ev.actor_path.as_deref(), Some("/Game/Actor"));
+        assert_eq!(ev.class_path.as_deref(), Some("/Game/Default__Archetype_C"));
     }
 
     // --- the controller's net-player-index byte ---
