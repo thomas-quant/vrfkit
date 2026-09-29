@@ -468,6 +468,7 @@ class LoadStats:
     checkpoint_fields: int = 0
     orphan_checkpoint_fields: int = 0
     path_index_mismatches: int = 0
+    repeated_checkpoint_groups: int = 0
     skipped: list = field(default_factory=list)
 
 
@@ -533,31 +534,32 @@ def load_export(directory: Path, stats: LoadStats) -> Replay:
     if group_file.is_file() != field_file.is_file():
         raise InputError(f"{directory}: only one of the two checkpoint declaration tables")
     if group_file.is_file():
+        import pyarrow as pa
+        import pyarrow.compute as pc
         import pyarrow.parquet as pq
 
         stats.exports_with_checkpoints += 1
+        keys = ["checkpoint_index", "group_ordinal"]
         gt = pq.read_table(group_file, columns=[
-            "checkpoint_index", "ordinal", "path_name_index", "group_path"])
-        by_ordinal = {}
-        for index, ordinal, path_index, path in zip(
-                *(gt.column(c).to_pylist() for c in gt.column_names)):
-            path = _intern(path)
-            by_ordinal[(index, ordinal)] = (path_index, path)
-            groups.add(path)
+            "checkpoint_index", "ordinal", "path_name_index", "group_path"]).rename_columns(
+            keys + ["group_path_index", "group_path"])
+        groups.update(map(_intern, pc.unique(gt["group_path"]).to_pylist()))
         stats.checkpoint_groups += gt.num_rows
-        ft = pq.read_table(field_file, columns=[
-            "checkpoint_index", "group_ordinal", "path_name_index", "handle",
-            "compatible_checksum", "rendered_name"])
-        for index, ordinal, path_index, handle, checksum, name in zip(
-                *(ft.column(c).to_pylist() for c in ft.column_names)):
-            joined = by_ordinal.get((index, ordinal))
-            if joined is None:
-                stats.orphan_checkpoint_fields += 1
-                continue
-            if joined[0] != path_index:
-                stats.path_index_mismatches += 1
-                continue
-            fields.add((joined[1], _intern(name), checksum, handle))
+        stats.repeated_checkpoint_groups += gt.num_rows - gt.group_by(keys).aggregate([]).num_rows
+        ft = pq.read_table(field_file, columns=keys + [
+            "path_name_index", "handle", "compatible_checksum", "rendered_name"])
+        joined = ft.join(gt.append_column("declared", pa.repeat(True, gt.num_rows)), keys)
+        declared = pc.is_valid(joined["declared"])
+        mine, theirs = joined["path_name_index"], joined["group_path_index"]
+        same = pc.or_(pc.fill_null(pc.equal(mine, theirs), False),
+                      pc.and_(pc.is_null(mine), pc.is_null(theirs)))
+        stats.orphan_checkpoint_fields += joined.num_rows - pc.count(joined["declared"]).as_py()
+        stats.path_index_mismatches += joined.filter(pc.and_(declared, pc.invert(same))).num_rows
+        unique = joined.filter(pc.and_(declared, same)).group_by(
+            ["group_path", "rendered_name", "compatible_checksum", "handle"]).aggregate([])
+        fields.update(zip(map(_intern, unique["group_path"].to_pylist()),
+                          map(_intern, unique["rendered_name"].to_pylist()),
+                          unique["compatible_checksum"].to_pylist(), unique["handle"].to_pylist()))
         stats.checkpoint_fields += ft.num_rows
     stats.exports += 1
     return Replay(str(directory), build, frozenset(groups), frozenset(fields))
@@ -1186,7 +1188,8 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
           f"{stats.exports_with_checkpoints} export(s) with checkpoint tables, "
           f"{stats.checkpoint_groups} group row(s), {stats.checkpoint_fields} field row(s); "
           f"{stats.orphan_checkpoint_fields} field row(s) joining no group, "
-          f"{stats.path_index_mismatches} path-index mismatch(es)")
+          f"{stats.path_index_mismatches} path-index mismatch(es), "
+          f"{stats.repeated_checkpoint_groups} repeated group key(s)")
     print(f"skipped generated directories: {len(stats.skipped)}")
     for s in stats.skipped:
         print(f"  {s}")
@@ -1222,9 +1225,10 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
         problems.append(f"{len(stale)} item(s) of {expected_name} match no failing "
                         f"finding (STALE): " + "; ".join(
                             f"{i['entry']} {i['build']} {i['finding']}" for i in stale))
-    if stats.orphan_checkpoint_fields or stats.path_index_mismatches:
-        problems.append("checkpoint field declarations that join no group -- the input is "
-                        "inconsistent, so what it declares is not known")
+    if (stats.orphan_checkpoint_fields or stats.path_index_mismatches
+            or stats.repeated_checkpoint_groups):
+        problems.append("checkpoint field declarations that join no group, or no one group -- "
+                        "the input is inconsistent, so what it declares is not known")
     if stats.fields_without_identity:
         problems.append("main-stream field declarations without a name or checksum -- the "
                         "input is inconsistent, so what it declares is not known")

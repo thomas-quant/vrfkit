@@ -6,11 +6,13 @@ compute_metrics.py) on each replay with BOTH a source .vrf and a reference
 metrics.json under VRFKIT_VALPLAY_DIR, then diffs them section by section: a
 section EXACT on one replay and different on ten is not EXACT, it is lucky.
 Nothing under valplay/ is written; outputs go to out/xval/<id>/ and
-out/xval_bundle/<id>/.
+out/xval_bundle/<id>/, and the sections exact on every replay to
+out/xval_summary.json, which `--expect-exact` reads back to fail a run where
+one of them no longer is.
 
 Usage:
     python tools/validate_metrics_corpus.py [--limit N] [--only <id>]
-                                            [--jobs N]
+                                            [--jobs N] [--expect-exact FILE]
 """
 
 from __future__ import annotations
@@ -128,10 +130,21 @@ def main() -> int:
     ap.add_argument("--only", action="append", default=None)
     ap.add_argument("--jobs", type=int, default=3,
                     help="parallel replays; each uses ~2 GB, so keep it small")
+    ap.add_argument("--expect-exact", type=Path, default=None,
+                    help="a JSON with an always_exact list (a pinned xval_summary.json): "
+                         "fail when one of its sections is not EXACT on every replay")
     args = ap.parse_args()
 
-    if not VRFKIT.exists():
-        print(f"build the release binary first: {VRFKIT}", file=sys.stderr)
+    expected = []
+    if args.expect_exact:
+        try:
+            expected = json.loads(args.expect_exact.read_text(encoding="utf-8"))["always_exact"]
+            if not isinstance(expected, list):
+                raise TypeError("always_exact is not a list")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"--expect-exact {args.expect_exact}: {exc!r}", file=sys.stderr)
+            return 2
+    if cmb.sc.no_exe(VRFKIT):
         return 2
 
     ids = args.only or discover()
@@ -193,14 +206,19 @@ def main() -> int:
         {"replays": order, "always_exact": always}, indent=1))
     print(f"\nwrote {summary}")
 
+    lost = sorted(set(expected) - set(always))
+    if args.expect_exact:
+        print(f"expected exact on every replay: {len(expected)}, not exact now: {len(lost)}")
     dead = failures(results)
     if dead:
         print(f"\nFAILED: {len(dead)} of {len(ids)} replay(s) did not complete "
               f"the pipeline", file=sys.stderr)
         for line in dead[:15]:
             print(f"    {line}", file=sys.stderr)
-        return 1
-    return 0
+    if lost:
+        print(f"\nFAILED: expected EXACT on every replay, and not: {', '.join(lost)}",
+              file=sys.stderr)
+    return 1 if dead or lost else 0
 
 
 if __name__ == "__main__":

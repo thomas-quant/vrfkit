@@ -447,19 +447,24 @@ def write_export(directory: Path, build: str, main: dict, checkpoint=None):
 
 class LoadTests(unittest.TestCase):
     def test_a_checkpoint_only_declaration_counts_and_joins_on_the_ordinal(self):
+        new = "/Game/New.New_C"
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "e"
             write_export(d, "13.01", {STATE: [("Other", 12, 4)]}, checkpoint=(
-                [(0, 0, 5, STATE), (0, 1, 6, OLD)],
+                [(0, 0, 5, STATE), (0, 1, 6, OLD), (0, 2, None, new),
+                 (1, 0, 5, STATE), (1, 0, 5, OLD)],        # (1, 0) twice
                 [(0, 1, 6, 17, 21, "Deployed"),     # joins OLD
                  (0, 7, 6, 17, 21, "Ghost"),        # no group ordinal 7
-                 (0, 1, 9, 17, 21, "Mismatch")]))   # path index disagrees
+                 (0, 1, 9, 17, 21, "Mismatch"),     # path index disagrees
+                 (0, 2, None, 17, 21, "NoIndex"),   # no path index on either side
+                 (0, 0, None, 17, 21, "HalfIndex")]))
             stats = guard.LoadStats()
             r = guard.load_export(d, stats)
         self.assertIn(OLD, r.groups)
-        self.assertIn((OLD, "Deployed", 21, 17), r.fields)
-        self.assertNotIn("Ghost", {f[1] for f in r.fields})
-        self.assertEqual((stats.orphan_checkpoint_fields, stats.path_index_mismatches), (1, 1))
+        self.assertEqual({f for f in r.fields if f[0] != STATE},
+                         {(OLD, "Deployed", 21, 17), (new, "NoIndex", 21, 17)})
+        self.assertEqual((stats.orphan_checkpoint_fields, stats.path_index_mismatches,
+                          stats.repeated_checkpoint_groups), (1, 2, 1))
 
     INCOMPLETE = [{"handle": 3, "name": "bArmed", "compatible_checksum": 11},
                   {"handle": 4, "compatible_checksum": 12},
@@ -499,16 +504,18 @@ class LoadTests(unittest.TestCase):
         self.assertIn("with 6 field(s) (4 without a name or checksum)", out.getvalue())
         self.assertIn("without a name or checksum -- the input is inconsistent", err.getvalue())
 
-    def test_an_orphaned_checkpoint_field_fails_the_run(self):
+    def test_a_checkpoint_field_joining_no_or_no_one_group_fails_the_run(self):
         cat = catalog(table(STATE, "bArmed"))
         reps = (many("13.01", 20, {STATE: [("bArmed", 11, 3)]})
                 + many("13.02", 20, {STATE: [("bArmed", 11, 3)]}))
-        stats = guard.LoadStats(orphan_checkpoint_fields=1)
-        err = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            code = guard.run(reps, cat, [], stats)
-        self.assertEqual(code, 1)
-        self.assertIn("join no group", err.getvalue())
+        for counter in ("orphan_checkpoint_fields", "path_index_mismatches",
+                        "repeated_checkpoint_groups"):
+            with self.subTest(counter=counter):
+                err = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = guard.run(reps, cat, [], guard.LoadStats(**{counter: 1}))
+                self.assertEqual(code, 1)
+                self.assertIn("join no group", err.getvalue())
 
     def test_discovery_skips_and_lists_interrupted_exports(self):
         with tempfile.TemporaryDirectory() as tmp:

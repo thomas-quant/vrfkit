@@ -158,7 +158,8 @@ class MainWiringTests(unittest.TestCase):
         # stage before any subprocess runs at all.
         (vrf_dir / "a.vrf").write_bytes(b"replay")
         (exports / "a").mkdir()
-        (exports / "a" / "metrics.json").write_text("{}", encoding="utf-8")
+        (exports / "a" / "metrics.json").write_text(
+            json.dumps({"combat": 1, "economy": 2}), encoding="utf-8")
 
         self.run_calls = []
 
@@ -172,7 +173,8 @@ class MainWiringTests(unittest.TestCase):
                 Path(cmd[cmd.index("-o") + 1]).mkdir(parents=True, exist_ok=True)
             elif cmd[1] == str(compute):
                 bundle = Path(cmd[2])
-                (bundle / "metrics.json").write_text("{}", encoding="utf-8")
+                (bundle / "metrics.json").write_text(
+                    json.dumps({"combat": 1, "economy": 3}), encoding="utf-8")
             else:  # pragma: no cover - the assertions below name every stage
                 self.fail(f"unexpected subprocess command: {cmd}")
             return 0, ""
@@ -193,8 +195,8 @@ class MainWiringTests(unittest.TestCase):
 
         self._argv = sys.argv
 
-    def run_main(self, only=("a", "b")):
-        sys.argv = ["validate_metrics_corpus.py", "--jobs", "1"]
+    def run_main(self, only=("a", "b"), extra=()):
+        sys.argv = ["validate_metrics_corpus.py", "--jobs", "1", *extra]
         for r in only:
             sys.argv += ["--only", r]
         out = io.StringIO()
@@ -211,6 +213,16 @@ class MainWiringTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("FAILED", output)
         self.assertIn("b", output)
+
+    def test_a_section_expected_exact_that_is_not_fails_the_run(self):
+        """`combat` is EXACT and `economy` differs; `rounds` was never produced."""
+        pinned = self.root / "expected.json"
+        for expected, code in ((["combat"], 0), (["combat", "economy"], 1), (["rounds"], 1),
+                               ("combat", 2)):
+            with self.subTest(expected=expected):
+                pinned.write_text(json.dumps({"always_exact": expected}), encoding="utf-8")
+                got, output = self.run_main(("a",), ["--expect-exact", str(pinned)])
+                self.assertEqual(got, code, output)
 
     def test_all_replays_completing_exits_zero(self):
         code, output = self.run_main(only=("a",))
