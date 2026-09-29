@@ -11,9 +11,8 @@ Shots: ReplayPlayContinuousEffectAtLocation's FloatValues, ObjectValues and
 VectorValues blobs are decoded here with the manifest's gameplay-tag table
 into valorant_shot_received events. The gun is the FiringState subobject's
 outer (net_guids.parquet), named from its class path (actors.parquet,
-equippable_table.py): the C# parser's second tier,
-ValorantShotEventEnricher.ResolveFromFiringState. Its first tier, an
-equippable GUID in the blob, is never populated (0 of 2,647 shots, 02d4d478).
+equippable_table.py), the second-tier source. The first tier, an equippable
+GUID in the blob, is never populated (0 of 2,647 shots, 02d4d478).
 
 Usage:
     python tools/to_valplay_bundle.py <vrfkit_export_dir> [-o <output_dir>]
@@ -55,7 +54,7 @@ from atomic_io import remove_tree, require_descendant  # noqa: E402
 # Constants and lookup tables
 # ---------------------------------------------------------------------------
 
-# UE's FNetGUIDCache traversal cap, as in the C# resolver. Real chains on
+# UE's FNetGUIDCache traversal cap. Real chains on
 # 02d4d478 are one hop; the bound keeps a self-referential chain from hanging.
 MAX_OUTER_DEPTH = 16
 
@@ -145,9 +144,9 @@ VECTOR_PROPERTIES = frozenset({
 
 # Replicated properties the parser writes as a JSON object in value_str:
 # FRepMovement's eight members fit no single column (types.rs, its Display),
-# and the reference emits them as an object (ReplayJsonNormalizer.cs:255).
+# and the reference emits them as an object.
 # Listed by name, not sniffed with startswith("{"). ReplicatedMovement is the
-# only FieldType::RepMovement name in the generated table (26 entries).
+# only FieldType::RepMovement name in the overlay table (26 entries).
 # Passed through untouched: `location` is world units on every class the table
 # types (docs/DATA.md has the per-class evidence). Exports from before
 # 2026-09-28 carry location/100 on all classes but one: regenerate, not rescale.
@@ -156,8 +155,8 @@ JSON_OBJECT_PROPERTIES = frozenset({
 })
 
 
-# Damage RPC parameters carrying an FVector_NetQuantize* payload (C# call
-# sites: DamageParameters.cs:50, MulticastNotifyDamagePointParameters.cs:40-46).
+# Damage RPC parameters carrying an FVector_NetQuantize* payload: DamageOrigin
+# on the shared damage base, the four impact fields on point damage only.
 DAMAGE_VECTOR_PARAMS = frozenset({
     "DamageOrigin",
     "DamageImpactLocation",
@@ -167,10 +166,10 @@ DAMAGE_VECTOR_PARAMS = frozenset({
 })
 
 
-# Enum ordinal (int in fields.parquet) -> the reference's string, from the C#
+# Enum ordinal (int in fields.parquet) -> the reference's string, from the
 # enums verbatim; an unmapped ordinal becomes a loud *_unknown_{n}.
 #
-# EAresAlliance.cs: AllianceAlly = 0, AllianceEnemy = 1, AllianceNeutral = 2,
+# EAresAlliance: AllianceAlly = 0, AllianceEnemy = 1, AllianceNeutral = 2,
 # AllianceAny = 3, AllianceCount = 4, AllianceMax = 5. On 02d4d478 ordinal 1
 # occurs 30 times, and the reference says alliance_enemy.
 ALLIANCE_MAP = {
@@ -182,7 +181,7 @@ ALLIANCE_MAP = {
     5: "alliance_max",
 }
 
-# EAresRegionalDamage.cs: RegionalDamage_Normal = 0, _Headshot = 1,
+# EAresRegionalDamage: RegionalDamage_Normal = 0, _Headshot = 1,
 # _Legshot = 2, _RegionCount = 3, _Invalid_Radial = 4, _Invalid = 5,
 # _CountPlusOne = 6. The four strings seen on the wire are verified against
 # 02d4d478's reference bundle (counts inline); the three unobserved sentinels
@@ -505,7 +504,8 @@ def _parse_rotation(val, tally=None) -> dict:
         if len(parts) == 3:
             try:
                 # Rust writes shortest-round-trip f32 decimals; widening each
-                # back through f32 matches the raw-wire decoder and C# exactly.
+                # back through f32 matches the raw-wire decoder and the
+                # reference bundle exactly.
                 components = [
                     _struct.unpack("<f", _struct.pack("<f", float(part)))[0]
                     for part in parts
@@ -1000,7 +1000,8 @@ def _build_shot_event(
         "firing_player_state": firing_player,
         "firing_state": firing_state,
         "attack_vectors": attack_vectors,
-        # The C# parser's tier-1 source; never populated in any observed replay.
+        # The tier-1 source (an equippable GUID in the blob); never populated
+        # in any observed replay.
         "effect_equippable": None,
         "equippable": equippable,
         "fire_mode": fire_mode,
@@ -1037,14 +1038,14 @@ def _build_shot_event(
 #    Reports level; 27/31 and 62/66 one level down). Keyed by name, 3,405 of
 #    20,298 distinct payload paths on 02d4d478 would merge, uncounted.
 #
-# So the bundle keys on the handle: the reference's member name where the C#
-# parser has one, else `_h{handle}`, the label this bundle already carried
+# So the bundle keys on the handle: the reference format's member name where
+# it has one, else `_h{handle}`, the label this bundle already carried
 # (events.ndjson stayed byte-identical). The parser emits what the wire says;
 # relabelling for a consumer is this adapter's presentation concern.
 # ---------------------------------------------------------------------------
 COMBAT_REPORT_GROUP = "CombatReportComponent"
 
-# handle -> the member name the C# reference emits. Leaf handles only: the
+# handle -> the member name the reference format uses. Leaf handles only: the
 # containers (4 Reports, 10 Interactions, 26 DealtInteractions,
 # 61 ReceivedInteractions, 44/79 Regions) keep the parser's schema names.
 COMBAT_REPORT_REFERENCE_NAMES = {
@@ -1112,7 +1113,7 @@ def _combat_report_leaf_name(group_path: str, field_name: str, handle) -> str:
 # ---------------------------------------------------------------------------
 def _normalize_prop_field_name(field_name: str, is_bool: bool) -> str:
     """Strip the 'b' of a boolean property name ('bUltimateActive' ->
-    'UltimateActive'), as the C# parser does and compute_metrics.py expects."""
+    'UltimateActive'), as the reference format does and compute_metrics.py expects."""
     if is_bool and field_name.startswith('b') and len(field_name) > 1 and field_name[1].isupper():
         return field_name[1:]
     return field_name
@@ -1177,7 +1178,7 @@ def _set_nested(root: dict, parts: list, value, tally=None):
     'Rounds[0].Reports[0].DamageDealt') in a nested dict/list payload.
 
     Arrays grow with None/_Node fillers, and each array element gets an
-    'Index' equal to its subscript, as the C# parser writes (compute_metrics
+    'Index' equal to its subscript, as the reference format has it (compute_metrics
     dedups on inter.get("Index")).
 
     A replacement counts once. Rows that disagree about a key's shape ('Foo'
@@ -1276,8 +1277,8 @@ def _get_value(row_i64, row_f64, row_bool, row_str, row_raw, row_bits,
 
 
 def _raw_blob(row_raw, row_bits) -> dict:
-    """The {BitCount, Data} blob of one row's raw bits, as the C# output has
-    it. The one builder, so the key order (part of the bytes) has one source;
+    """The {BitCount, Data} blob of one row's raw bits, as the reference format
+    has it. The one builder, so the key order (part of the bytes) has one source;
     a caller that labels the blob adds `TypeName` after these two."""
     return {"BitCount": row_bits,
             "Data": base64.b64encode(row_raw).decode('ascii')}
@@ -1341,7 +1342,7 @@ def _group_path_to_archetype(gp: str) -> str:
 # ---------------------------------------------------------------------------
 # RPC parameter normalization
 # ---------------------------------------------------------------------------
-#: Damage RPC booleans the C# reference spells without vrfkit's 'b' prefix.
+#: Damage RPC booleans the reference format spells without vrfkit's 'b' prefix.
 _DAMAGE_PARAM_RENAMES = {
     "bDamageKilledTarget": "DamageKilledTarget",
     "bAliveAfterDamage": "AliveAfterDamage",
@@ -1353,7 +1354,7 @@ _DAMAGE_PARAM_RENAMES = {
 
 def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
                          tally=None) -> dict | None:
-    """Rename/reshape one RPC parameter to the C# output; None drops it.
+    """Rename/reshape one RPC parameter to the reference format; None drops it.
 
     Only the damage RPCs are reshaped ('b' booleans, RegionalDamage ordinals,
     vectors, EquippableUsed, blobs, DamagedBone); every other RPC's
@@ -1381,9 +1382,9 @@ def _normalize_rpc_param(rpc_name: str, param: str, value, is_raw: bool,
         if parsed is not None:
             value = parsed
     elif param == "EquippableUsed":
-        # The decoded ObjectNetGuid -> the C# ValorantEquippable shape; an
+        # The decoded ObjectNetGuid -> the reference ValorantEquippable shape; an
         # undecoded value passes its bits through, never a guess. Name and
-        # ClassPath null and Category "unknown", as C# emits them: weapon
+        # ClassPath null and Category "unknown", as the reference has them: weapon
         # instances are dynamic actors with no NetGuidCache path, and valplay
         # resolves the gun from actor_spawned (_actorindex).
         if isinstance(value, int) and not is_raw:
@@ -1603,7 +1604,7 @@ def _load_field_columns(fields_path: Path, verbose: bool) -> _FieldColumns:
         time_ms=_numeric_column_to_pylist(table.column('time_ms')),
         packet_id=_numeric_column_to_pylist(table.column('packet_id')),
         actor=_numeric_column_to_pylist(table.column('actor_net_guid')),
-        # Subobject identity. Null for actor blocks; the C# reference then
+        # Subobject identity. Null for actor blocks; the reference format then
         # repeats the actor guid, so mirror that when emitting.
         obj=(
             _nullable_numeric_to_pylist(table.column('object_net_guid'))

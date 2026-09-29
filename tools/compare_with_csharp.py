@@ -1,4 +1,4 @@
-"""Compare vrfkit (Rust) parser output against ValorantReplayParser (C#) output.
+"""Compare vrfkit (Rust) parser output against the C# reference parser's output.
 
 It is a report, not a gate: vrfkit exports more than the C# parser, so
 "vrfkit only" is expected, and C#-only pairs are listed under INVESTIGATE, not

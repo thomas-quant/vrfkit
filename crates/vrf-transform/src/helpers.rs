@@ -78,7 +78,7 @@ pub const fn reverse_bits64_without_final_16bit_swap(mut v: u64) -> u64 {
     v = ((v & 0x3333_3333_3333_3333) << 2) | ((v >> 2) & 0x3333_3333_3333_3333);
     v = ((v & 0x0F0F_0F0F_0F0F_0F0F) << 4) | ((v >> 4) & 0x0F0F_0F0F_0F0F_0F0F);
     v = ((v & 0x00FF_00FF_00FF_00FF) << 8) | ((v >> 8) & 0x00FF_00FF_00FF_00FF);
-    // The reference's `(v << 32) | (v >> 32)`.
+    // Swap the 32-bit halves: `(v << 32) | (v >> 32)`.
     v.rotate_left(32)
 }
 

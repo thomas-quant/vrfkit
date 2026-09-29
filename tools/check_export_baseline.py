@@ -630,7 +630,7 @@ def sink_tally_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool)
 def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool) -> list[str]:
     """The frame-walk tallies must agree between CLI and manifest, zeros included.
 
-    Not a zero gate: the reference skips these sections too, so a non-zero
+    Not a zero gate: these sections are skipped by design, so a non-zero
     count is data left undecoded, not a failure. It cannot see a pass that
     stops absorbing its frame walk: summary and manifest read one variable, so
     both would say 0, the value 02d4d478's baselines pin.

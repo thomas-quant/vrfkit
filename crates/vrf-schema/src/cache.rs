@@ -265,8 +265,8 @@ impl NetGuidCache {
     }
 
     /// Net-field exports [`Self::set_field_on_group`] could not place (an
-    /// unknown index, or a handle past the declared slots), which C# only
-    /// logs; the manifest reports this.
+    /// unknown index, or a handle past the declared slots); the manifest
+    /// reports this.
     #[must_use]
     pub fn dropped_field_exports(&self) -> u64 {
         self.dropped_field_exports

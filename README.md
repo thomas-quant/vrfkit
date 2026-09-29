@@ -15,11 +15,13 @@ external `oozextract` crate. Edition 2024, MSRV 1.86, Apache-2.0.
 ![unsafe](https://img.shields.io/badge/unsafe-none-success.svg)
 
 Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantReplayParser)
-by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
-by, or approved by Riot Games.
+(MIT), last referenced at
+[`8b7afcb`](https://github.com/michel-giehl/ValorantReplayParser/commit/8b7afcbb98bc4f8d4c342aef8242b142568624ca)
+(2026-09-27); see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed by,
+or approved by Riot Games.
 
 **Verified state (2026-09-28):** Rust has **807 passing** tests; Python has
-**1337 passing** tests. All 24 supported builds received the same verification
+**1233 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. See
 [build verification](docs/BUILD_VERIFICATION.md) for the measured scope, common
 checks and remaining limits.
@@ -29,8 +31,6 @@ checks and remaining limits.
 - Current corpus status and remaining work: [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md)
 - Latest build verification: [`docs/BUILD_VERIFICATION.md`](docs/BUILD_VERIFICATION.md)
 - Historical field inventory: [`docs/TARGETING_AND_HEAL_VALUES.md`](docs/TARGETING_AND_HEAL_VALUES.md)
-- Upstream parity and 13.06 validation: [`docs/UPSTREAM_PARITY.md`](docs/UPSTREAM_PARITY.md)
-- Upstream Warden and Raze review: [`docs/UPSTREAM_RAZE_WARDEN.md`](docs/UPSTREAM_RAZE_WARDEN.md)
 - Character-death and KillData state: [`docs/KILL_LEDGER.md`](docs/KILL_LEDGER.md)
 - Damage, healing, decay and reset observations: [`docs/SECTION_OBSERVATIONS.md`](docs/SECTION_OBSERVATIONS.md)
 - Observed section timelines and explicit continuity gaps: [`docs/SECTION_TIMELINE.md`](docs/SECTION_TIMELINE.md)
@@ -132,11 +132,9 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - **Account identity & typed events** — `manifest.players` (account UUID →
   actor → character), event `word0`/`word1` (killer/killed NetGUID, round
   index), ping/latency.
-- **Cross-validated** against the C# reference parser on a 13.01 replay --
-  movement near-bit-identical, CombatReport identical -- and the server-written
-  Event chunk independently confirms the kill count. Against a later upstream
-  revision on 13.06, movement differed by up to 5.14 per position axis
-  ([upstream parity](docs/UPSTREAM_PARITY.md)).
+- **Cross-validated** -- the server-written Event chunk independently confirms
+  the kill log: 132/132 in order on one 13.01 replay, 9,677/9,677 over 71
+  replays on 13.02.
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
@@ -152,7 +150,6 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - [Output](#output)
 - [Status](#status)
 - [Performance](#performance)
-- [Comparison with the C# reference parser](#comparison-with-the-c-reference-parser)
 - [The Event chunk -- the server's own timeline](#the-event-chunk----the-servers-own-timeline)
 - [Whole-corpus robustness](#whole-corpus-robustness)
 - [Type overlay](#type-overlay)
@@ -242,7 +239,7 @@ reading them:
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**807 passing**; the full Python suite also has **1337 passing** tests. The
+**807 passing**; the full Python suite also has **1233 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
@@ -295,98 +292,10 @@ Figures are wall-clock / peak memory. Output is **byte-for-byte identical**
 before and after. Detail and the optimizations measured and then rejected are
 in `docs/archive/PROJECT_STATUS.md` section 25.
 
-## Comparison with the C# reference parser
-
-The same replay (`02d4d478`) was diffed against the output of the existing C#
-parser. The CombatReport and RPC-parameter comparisons below were re-measured
-on 2026-09-14 against `CliReader export` built from two ValorantReplayParser
-commits: upstream `b51d674`, and `8824794`, the descriptor commit vendored in
-[`third_party/vrp/`](third_party/vrp/README.md). The structure, movement and
-volume figures are from the earlier comparison.
-
-**Structure -- exact match.**
-
-| | C# | vrfkit |
-|---|---|---|
-| Packets / bunches | 530,401 | 530,401 |
-| Actor open / close | 2,028 / 1,799 | 2,028 / 1,799 |
-| Export-group path set | 475 | 475 (intersection 475, both differences 0) |
-
-**Movement -- effectively bit-identical.** Over a 50,000-row join (99.98%
-matched), the maximum position error is 0.0005 (float rounding); yaw, pitch,
-and velocity error is exactly 0. In that earlier comparison, row counts were 1,837,220 (C#) versus 1,839,607
-(ours) -- the gap is the C# limitation of "emit only the last move of each
-update"; we additionally recover 2,387 intermediate moves.
-
-**CombatReport nested array -- every metric-input value matches.** This
-structure is the sole source of K/D/A, ADR, HS%, multi-kills, and wallbangs,
-so it was diffed as a multiset of values (`tools/compare_combat_report.py`,
-against `8824794`; upstream leaves `Rounds` as a raw payload, and `8824794`
-binds upstream's own `CombatRoundReportsDecoder` to it):
-
-```
-..Interactions[].AssistType                               364    364  IDENTICAL
-..Interactions[].DamageDealt                              553    553  IDENTICAL
-..Interactions[].DamageReceived                           553    553  IDENTICAL
-..Interactions[].HitsDealt                                553    553  IDENTICAL
-..Interactions[].HitsReceived                             553    553  IDENTICAL
-..Interactions[].DidKill                                  414    414  IDENTICAL
-..Interactions[].DealtInteractions[].Regions[].Hits       390    390  IDENTICAL
-..Interactions[].DealtInteractions[].Regions[].Damage     390    390  IDENTICAL
-..Interactions[].ReceivedInteractions[].Regions[].Hits    390    390  IDENTICAL
-..Interactions[].ReceivedInteractions[].Regions[].Damage  390    390  IDENTICAL
-```
-
-**Extraction volume -- we export more.** `(group, field)` pairs break down as
-1,450 vrfkit-only / 302 both / 71 C#-only, and 49 of the 71 C#-only are naming
-differences (C# uses `CrouchHeld`; we use the wire name `bCrouchHeld`). RPCs
-are 342,735 versus 230,893 -- 48% more -- because the C# parser drops RPCs
-without a descriptor.
-
-**RPC parameters -- every C# value is also ours, and ours has 14 more
-records.** The ~330,000 RPCs had parameter payloads that were entirely raw;
-they were decoded using the 84 parameter-schema groups (`<Class>:<Function>`
-paths) the replay itself declares. Diffed with `tools/compare_rpc_params.py`
-(record counts; every difference is vrfkit-only, none C#-only):
-
-```
-                                              upstream  8824794  vrfkit
-MulticastNotifyKilledEnemy.KillerCharacter         119      132     132
-MulticastNotifyDamage_Point.DamageDealt            580      580     581
-MulticastEndRound.NewRoundNumber                    17       17      17
-```
-
-The other `KilledEnemy` and `Damage_Point` parameters (`KilledCharacter`,
-`MultikillLevel`; `DamageTaken`, `RegionalDamage`, `bDamageKilledTarget`) have
-the same counts as the line above them.
-
-The 13 kills are the ones by character 576, Gekko (`AggroBot_PC_C`).
-`MulticastNotifyKilledEnemy` is hosted on the killer's character actor, and
-upstream's Gekko descriptor spells the class path `Aggrobot` where the replay
-says `AggroBot`, so upstream drops every RPC on that actor. `8824794` corrects
-the path (`f67ea66`) and agrees with vrfkit, which takes names from the replay
-and never needed the descriptor. The existing pipeline papered over the 13
-missing kills by recovering them later as CombatReport credit, so they vanished
-from the timeline; in vrfkit the timeline itself is complete.
-
-The one extra damage record is a killing blow (29.45 dealt, 20 taken) on the
-`DamageableComponent` of Gekko's E-ability projectile -- actor 27232, packet
-391880, channel 194 -- whose actor closes six packets later. Neither C# build
-can name that component's class: it is stably named `Damageable`, so the wire
-carries no class GUID for it, and the C# resolver's fixed table of
-stably-named components lacks the name, so the block is skipped undecoded.
-With that one name added, C# emits the record with the same 35 values
-([how this was established](docs/FOLLOWUP.md#the-damage-record-only-vrfkit-emits)).
-`compare_rpc_params.py` lists it as its one expected difference, keyed by
-replay, packet, actor, subobject, channel, function and values, and fails if
-it stops occurring exactly so.
-
 ## The Event chunk -- the server's own timeline
 
 The `.vrf` Event chunk is the event list the server labeled and wrote itself,
-stored elsewhere in the file under a different encoding, and **the existing C#
-parser does not even open this chunk** (`ReplayChunkDispatcher.cs:152` --
-`"Skipping event chunk"`). We now read it.
+stored elsewhere in the file under a different encoding. vrfkit reads it.
 
 ```
 characterDeath 132 | characterUltimateUsed 34 | roundStarted 18
@@ -394,11 +303,8 @@ spikePlanted 9 | spikeDefused 1 | switchTeams 1          (02d4d478, 195 events)
 ```
 
 The 132 `characterDeath` events exactly match the 132 `MulticastNotifyKilledEnemy`
-events we extracted from RPCs -- and the C# parser's 119 plus character 576's
-13. The two payload words are the killer/killed NetGUIDs, and **132/132 match
-in order** (0/132 matched reversed). "We are right and the C# parser missed
-them" is no longer our claim; it is the result of diffing against the server's
-own record.
+events we extracted from RPCs. The two payload words are the killer/killed
+NetGUIDs, and **132/132 match in order** (0/132 matched reversed).
 
 Scope, to be precise: the killer/killed pair diff is for **one replay**. A
 separate Event-only sweep covered **527 files and 109,126 chunks** across
@@ -453,13 +359,10 @@ identified: it cannot be expanded into fields, so it emits one preservation
 row (`handle` = `u32::MAX`, full payload in `raw_bits`) and an explicit
 unresolved/raw diagnostic rather than pretending the properties were decoded.
 
-The overlay table is extracted mechanically from the C# descriptors
-(`tools/extract_descriptors.py`) -- 224 groups, 1,336 entries, 96 handles.
-Those descriptors are vendored verbatim in
-[`third_party/vrp/`](third_party/vrp/README.md),
-and CI regenerates the table from them on every push.
-Nothing is transcribed by hand, for the same reason S-boxes and golden vectors
-are not: it is the kind of constant where a typo is invisible in review.
+The overlay table (`crates/vrf-decode/src/table.rs`) -- 224 groups, 1,336
+entries, 96 handles -- was extracted mechanically from descriptors rather
+than transcribed by hand, and `tools/apply_type_corrections.py --check` keeps
+every measured correction in it.
 
 Four names resolve without a table entry: `Owner`, `Instigator`, `AttachParent`
 and `Controller` are `AActor` / `USceneComponent` object references Unreal
@@ -514,7 +417,7 @@ python tools/summarize_value_coverage.py <parent-of-export-directories> --jobs 4
 `Typed` is the ratio printed in the summary: rows the overlay decoded
 successfully (`Decoded OK`) over rows it examined (`Rows offered`). The
 denominator includes every RPC parameter, so it reads low -- most of `Not in
-table` is RPC parameters without a C# descriptor, plus the groups the replay
+table` is RPC parameters without a descriptor, plus the groups the replay
 declares (475) that are not in the table. (Rows with a filled `value_*` also
 include additive decoders like effects and structs, so that is a different
 population from the overlay's input rows.) Unknown ordinary properties retain
@@ -534,19 +437,18 @@ bucket is supposed to be empty. The recipe is in
 Decode errors are checked by `tools/check_decode_errors_corpus.py`, separately,
 because `vrfkit validate` prints no overlay counters and `validate_corpus.py`
 alone cannot see a wrong type. Reaching zero on the 215-replay 13.01 sweep found
-three places where the wire disagreed with the C# declarations; they are
+three places where the wire disagreed with the declared types; they are
 recorded with evidence in `tools/apply_type_corrections.py` (219 corrections,
 verified with `--check`).
 
 | Symptom | Actual | Evidence |
 |---|---|---|
 | Time-related `Float` field consumes more than 32 bits | Wire is `Double` (64-bit) | Every error is "32 bits consumed, 32 bits residual" |
-| `215`/`216` `Int32` field arrives in 3 bits | Variable-width actor bookkeeping | The C# weapon descriptor comment states "width varies per build" |
-| SmokeScreen projectile `ReplicatedMovement` EOF | Rotation is `ByteComponents` | Four other projectiles in the same codebase explicitly use `ByteComponents` |
+| `215`/`216` `Int32` field arrives in 3 bits | 3-bit actor bookkeeping, read as `EnumRemainingBits` | Every row is 3 bits wide and decodes to 3 or 1 |
+| SmokeScreen projectile `ReplicatedMovement` EOF | Rotation is `ByteComponents` | A short read runs off the end: 137 EOF failures on one 13.01 replay, all in this group |
 
 Byte-width handling was also corrected. A byte property inside an array stores
-only its significant bits, so a fixed 8-bit read fails -- the C# parser also
-reads only `archive.BitsRemaining`. Before this fix, all 364 rows of
+only its significant bits, so a fixed 8-bit read fails. Before this fix, all 364 rows of
 `AssistType` (5 bits) were left without a value.
 
 ## Supported builds and the cost of a new build
@@ -602,11 +504,12 @@ transform vectors. The 13.04 corpus was also exported with checkpoints on
 struct-blob and checkpoint failures over 110,152,399 offered rows, 20,756
 decoded struct blobs, 3,129,483 decoded checkpoint fields and 1,872 decoded
 checkpoint blobs. A machine-local corpus can rotate; the reproducible oracle is
-88 mechanically extracted upstream golden vectors (11 staging boundaries per
+88 mechanically extracted golden vectors (11 staging boundaries per
 build, eight builds) plus 1,264 native-machine-code vectors for the sixteen
 recovered 11.06--12.09 builds, with a full 48-sample main/checkpoint validation
 ([build support validation report](docs/LEGACY_BUILD_SUPPORT.md)). 13.06 was
-first validated on six real replays ([upstream parity report](docs/UPSTREAM_PARITY.md));
+first validated on six real replays
+([record](docs/archive/DESCRIPTOR_ADOPTION_VALIDATION.md#1306-replay-validation));
 the 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 38.
 
 The 768-byte S-box is shared across builds, which makes it usable as a
@@ -651,26 +554,24 @@ The following files are generated and must never be edited by hand:
 
 | Generated file | Generator | Notes |
 |---|---|---|
-| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` then `tools/apply_type_corrections.py` | The overlay table (1,336 entries, 224 groups, 96 handles) and handle table, from the vendored descriptors in `third_party/vrp/` |
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` | Replay-observed checksum-to-type propagation table; conflicting donors are omitted |
-| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including upstream-declared geometry and enum shapes; no cross-group propagation |
+| `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` | Exact group/name/checksum types for ambiguous or descriptor-silent field names, including declared geometry and enum shapes; no cross-group propagation |
 | `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` | 768-byte S-box, shared across builds |
 | `crates/vrf-transform/tests/data/golden_vectors.rs` | `tools/extract_golden.py` | Per-build golden test vectors |
 | `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` | Expected bytes from pinned original executable readers |
-| `tools/equippable_table.py` | `tools/extract_equippables.py` | Weapon class path to display name, from the vendored `ValorantEquippableResolver.cs` |
 
 Regenerate them as [`CONTRIBUTING.md`](CONTRIBUTING.md#generated-files--never-hand-edit)
-describes; CI regenerates `table.rs` and `equippable_table.py` from the
-vendored input and fails if either differs. The S-box and golden-vector
-generators need an upstream checkout, and each refuses to write a table that
-fails its integrity check: the S-box must be a permutation of 0..255, and each
-golden vector's hex length must match its bit count.
+describes. The S-box and golden-vector generators need a C# source checkout,
+and each refuses to write a table that fails its integrity check: the S-box
+must be a permutation of 0..255, and each golden vector's hex length must match
+its bit count. The overlay table (`crates/vrf-decode/src/table.rs`) and
+`tools/equippable_table.py` are maintained in the repository, not generated.
 
 ## License
 
 Apache License 2.0; see [`LICENSE`](LICENSE). Releases up to and including
-v0.2.0 were published under the MIT License. Derivation and original
-authorship are in [`NOTICE.md`](NOTICE.md).
+v0.2.0 were published under the MIT License. Third-party notices are in
+[`NOTICE.md`](NOTICE.md).
 
 This is an independent, community-developed tool. It is not affiliated with,
 endorsed by, sponsored by, or approved by Riot Games. VALORANT, Riot Games,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce metrics.json for every replay that has a C# reference bundle.
+"""Reproduce metrics.json for every replay that has a reference bundle.
 
 Every figure in docs/archive/PROJECT_STATUS.md section 6 rests on a single
 replay (02d4d478). This runs the whole pipeline -- vrfkit export, the valplay
@@ -11,8 +11,8 @@ already answers that at the bit level) but "does the section-level agreement
 measured on 02d4d478 generalise". A section that is EXACT on one replay and
 differs on ten is not EXACT; it is lucky.
 
-Nothing under valplay/ or ValorantReplayParser/ is written to. Our outputs
-go to out/xval/<id>/ and out/xval_bundle/<id>/.
+Nothing under valplay/ is written to. Our outputs go to out/xval/<id>/ and
+out/xval_bundle/<id>/.
 
 Usage:
     python tools/validate_metrics_corpus.py [--limit N] [--only <id>]

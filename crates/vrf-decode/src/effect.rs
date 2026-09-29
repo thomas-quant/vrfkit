@@ -23,7 +23,7 @@
 //! The pinned tests and `tools/check_effect_decoder.py` (the Python port) are
 //! fixture checks and no substitute for such a differential.
 //!
-//! # Wire layout (C# reference, corpus-validated)
+//! # Wire layout (corpus-validated)
 //!
 //! ```text
 //! [IntPacked: element_count]
@@ -40,13 +40,10 @@
 //! An element is a gameplay-tag index (IntPacked) and a value: an f32, an
 //! IntPacked net GUID or three f64s, under a handle pair that depends on the
 //! function ([`EffectHandles`](crate::effect::EffectHandles)). Checked against
-//! the C# parser's `events.ndjson` for `02d4d478` (2,647 shots): floats match
-//! at f32 precision, net GUIDs exactly, vectors bit-exact at f64. Tag indices
-//! are replay-specific (`NetworkGameplayTagNodeIndex`); the wiring layer
-//! resolves them to names like `FiringState.AmmoRemaining`. Derived from the
-//! reference's `EffectData{Float,Object,Vector}.cs`,
-//! `ReplayPlayContinuousEffectAtLocationParameters.cs` and
-//! `RepLayoutArrayDecoders.cs`.
+//! an independent parser's `events.ndjson` for `02d4d478` (2,647 shots):
+//! floats match at f32 precision, net GUIDs exactly, vectors bit-exact at f64.
+//! Tag indices are replay-specific (`NetworkGameplayTagNodeIndex`); the wiring
+//! layer resolves them to names like `FiringState.AmmoRemaining`.
 //!
 //! Submodules: `framing` (the shared framing and
 //! [`scan_element_handles`](crate::effect::scan_element_handles), which derives
@@ -203,7 +200,7 @@ impl EffectHandles {
 }
 
 /// `FEffectDataFloat` handles in `ReplayPlayContinuousEffectAtLocation`, as the
-/// C# descriptors state them and the pinned vectors were captured under.
+/// descriptors state them and the pinned vectors were captured under.
 const FLOAT_HANDLES: EffectHandles = EffectHandles::from_base(7);
 
 /// `FEffectDataObject` handles in `ReplayPlayContinuousEffectAtLocation`.

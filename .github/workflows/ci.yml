@@ -17,9 +17,9 @@ concurrency:
 
 env:
   PYTHONUTF8: '1'
-  # Public fixtures, pinned by upstream commit and SHA-256. The 12.10 one is
+  # Public fixtures, pinned by commit and SHA-256. The 12.10 one is
   # also the packaged binary's smoke replay.
-  UPSTREAM_REPLAYS: https://raw.githubusercontent.com/michel-giehl/ValorantReplayParser/b51d67423b7b4952d59051cf91e55efa1c42da05/tests/Test.Integration/Replays
+  PUBLIC_REPLAYS: https://raw.githubusercontent.com/michel-giehl/ValorantReplayParser/b51d67423b7b4952d59051cf91e55efa1c42da05/tests/Test.Integration/Replays
   FIXTURE_1210: 9f8b32c5-c243-41ec-bbbb-832582edf652.12_10.vrf
   FIXTURE_1210_SHA256: a4ce1b72f9bdf99492162013c1c909e6994a0d22bef1899e687fde71fbc86606
 
@@ -109,7 +109,7 @@ jobs:
           python -W error crates/vrf-export/tests/python_interop.py $interopDir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # Builds without a public fixture are covered by the private local audit.
-      - name: corpus baselines on the public upstream fixtures
+      - name: corpus baselines on the public fixtures
         shell: pwsh
         run: |
           cargo +1.86.0 build -p vrfkit --locked
@@ -125,7 +125,7 @@ jobs:
             $corpus = Join-Path $env:RUNNER_TEMP "baseline-corpora/build_$build"
             New-Item -ItemType Directory -Force $corpus | Out-Null
             $replay = Join-Path $corpus $name
-            Invoke-WebRequest -UseBasicParsing -Uri "$env:UPSTREAM_REPLAYS/$name" -OutFile $replay
+            Invoke-WebRequest -UseBasicParsing -Uri "$env:PUBLIC_REPLAYS/$name" -OutFile $replay
             $actual = (Get-FileHash -Algorithm SHA256 $replay).Hash.ToLowerInvariant()
             if ($actual -ne $sha256) {
               Write-Error "fixture $name has SHA-256 $actual, expected $sha256"
@@ -153,20 +153,6 @@ jobs:
             ${{ runner.temp }}/public-fixture-audit/*/error.txt
           retention-days: 14
           if-no-files-found: warn
-      # Fails on a hand edit, a descriptor change committed without its table, or
-      # generator drift. Last because it rewrites table.rs, which would make any
-      # later cargo step recompile.
-      - name: descriptor table regenerates from the vendored source
-        shell: pwsh
-        run: |
-          python -W error tools/extract_descriptors.py third_party/vrp/Replay.Valorant crates/vrf-decode/src/table.rs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -W error tools/apply_type_corrections.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo +1.86.0 fmt -p vrf-decode
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git diff --exit-code -- crates/vrf-decode/src/table.rs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   python-checks:
     name: Python ${{ matrix.python }} / ${{ matrix.os }}
@@ -196,8 +182,6 @@ jobs:
         run: python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
       - name: generated scoped type guard
         run: python -W error tools/generate_scoped_types.py --check
-      - name: generated equippable table guard
-        run: python -W error tools/extract_equippables.py --check
       - name: baseline schemas
         run: python -W error tools/check_baseline_schemas.py
       - name: docs self-check
@@ -282,7 +266,7 @@ jobs:
           $corpus = Join-Path $env:RUNNER_TEMP 'release-corpus'
           New-Item -ItemType Directory $corpus | Out-Null
           $replay = Join-Path $corpus 'public-12.10.vrf'
-          Invoke-WebRequest -Uri "$env:UPSTREAM_REPLAYS/$env:FIXTURE_1210" -OutFile $replay
+          Invoke-WebRequest -Uri "$env:PUBLIC_REPLAYS/$env:FIXTURE_1210" -OutFile $replay
           if ((Get-FileHash -Algorithm SHA256 $replay).Hash.ToLowerInvariant() -ne $env:FIXTURE_1210_SHA256) { throw 'Public replay checksum mismatch' }
           python -W error tools/verify_build_corpus.py --exe (Join-Path $env:RUNNER_TEMP 'release-extracted/vrfkit.exe') --corpus $corpus --work-dir (Join-Path $env:RUNNER_TEMP 'release-audit') --output (Join-Path $env:RUNNER_TEMP 'release-report.json') --jobs 1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

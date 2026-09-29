@@ -1,4 +1,4 @@
-"""vrf-decode's generated overlay tables, parsed, and `overlay::resolve_entry`.
+"""vrf-decode's overlay tables, parsed, and `overlay::resolve_entry`.
 
 The one copy check_checksum_types.py and check_entry_survival.py share. The
 parsers return each `FieldType`'s source text; each tool keeps its own

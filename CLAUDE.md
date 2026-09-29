@@ -83,19 +83,17 @@ Consequences for how you work:
 
 ## Traps that have cost real time
 
-- **`crates/vrf-decode/src/table.rs` is generated.** Edit
-  `tools/extract_descriptors.py`, `tools/apply_type_corrections.py` or the
-  vendored C# descriptors in `third_party/vrp/` instead, then
-  regenerate. The pipeline order is generate -> correct -> `cargo fmt`, and CI
-  fails if the regenerated table differs from the committed one.
+- **Type changes to `crates/vrf-decode/src/table.rs` go through
+  `tools/apply_type_corrections.py`**, with their evidence, then `cargo fmt`.
+  CI runs it with `--check` and fails if a measured correction is missing.
 - **Some entries in that table are unreachable.** The four `LifeChangeEvents`
   member entries never appear as a top-level parameter. "Fixing" one compiles,
   passes tests, and changes no rows. The real typing happens in
   `crates/vrfkit/src/sink/rpc.rs`.
 - **One name entry is dead by design.** `EquippablePickupProjectile_C`'s
   `MyEquippable` no longer matches: FName instance numbers are part of the name,
-  so the wire says `MyEquippable_0`. It resolves through the
-  `compatible_checksum` fallback until the generator learns the number.
+  so the wire says `MyEquippable_0`. It still resolves through the
+  `compatible_checksum` fallback, so no row depends on the entry.
 - **`actors.event` has three values, not two** — `open` / `close` / `dormant`.
   Dormancy is not destruction; only `close` is a despawn.
 - **MSRV 1.86 is not your local toolchain.** `let` chains have already broken a

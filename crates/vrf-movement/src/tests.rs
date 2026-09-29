@@ -199,7 +199,7 @@ fn byte_wrapped(payload: &BitWriter, trailer_bits: u32) -> BitWriter {
 }
 
 /// Build a ComponentDataStream in the direct form: no envelope, the u16 being
-/// the section's own bit count. Accepted, as by the C#; never seen in replays.
+/// the section's own bit count. Accepted; never seen in replays.
 fn build_direct_component_data_stream(moves: &[BitWriter]) -> BitWriter {
     let mut movement = BitWriter::new();
     movement.write_u8(MOVEMENT_MAGIC);
@@ -382,7 +382,7 @@ fn a_component_stream_shorter_than_its_u16_header_is_not_a_valid_empty_update() 
 #[test]
 fn a_stream_that_fails_to_decode_does_not_drop_the_updates_after_it() {
     // The decoder is past the whole length-delimited stream before reading
-    // it, so a failure inside costs only that stream, as in the C#.
+    // it, so a failure inside costs only that stream.
     let mut bad_magic = BitWriter::new();
     bad_magic.write_u16(0);
     bad_magic.write_u8(0x00); // not MOVEMENT_MAGIC
@@ -579,7 +579,7 @@ fn a_sized_section_that_ends_right_after_its_first_marker_is_tallied() {
 
 #[test]
 fn a_sized_window_too_short_for_the_magic_is_tallied() {
-    // Five bits cannot hold the magic: the C#'s "Missing movement magic".
+    // Five bits cannot hold the magic.
     let mut section = BitWriter::new();
     section.write_bits_u64(0b10110, 5);
     let (result, moves) = decode(&build_rpc_payload(77, &component_stream(&section, true)));
@@ -591,7 +591,7 @@ fn a_sized_window_too_short_for_the_magic_is_tallied() {
 
 #[test]
 fn a_window_too_short_for_the_first_marker_is_tallied() {
-    // The magic, then two bits: the C#'s "Missing first movement marker".
+    // The magic, then two bits: no room for the first movement marker.
     let mut section = BitWriter::new();
     section.write_u8(MOVEMENT_MAGIC);
     section.write_bits_u64(0b11, 2);
@@ -626,8 +626,8 @@ fn padding_after_the_last_move_and_an_empty_window_are_not_tails() {
     assert_eq!(moves.len(), 2);
     assert_eq!(tails(&result), (0, 0, 0, 0));
 
-    // An empty open window leaves nothing unread, although the C# reports
-    // "Missing movement magic": the tally counts unread bits.
+    // An empty open window leaves nothing unread, although it holds no
+    // movement magic: the tally counts unread bits.
     let mut empty = BitWriter::new();
     empty.write_u16(0);
     let (result, moves) = decode(&build_rpc_payload(9999, &empty));

@@ -1,5 +1,5 @@
 //! The four fixed sections that precede a DemoFrame's packet loop, one reader
-//! per C# reference type. Three exist only to be skipped, and a miscounted one
+//! per section. Three exist only to be skipped, and a miscounted one
 //! desynchronises the whole frame instead of failing.
 //!
 //! Level names are read and validated, not blind-skipped: 29 names over the
@@ -27,8 +27,7 @@ pub(crate) fn read_export_data(
     Ok(())
 }
 
-/// StreamingLevelFixes (`StreamingLevelFixesReader.cs`): level names, compact
-/// or verbose.
+/// StreamingLevelFixes: level names, compact or verbose.
 pub(crate) fn read_streaming_level_fixes(
     reader: &mut BitReader<'_>,
     has_streaming_fixes: bool,

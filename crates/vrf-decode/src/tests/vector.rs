@@ -1,6 +1,6 @@
-//! Vector, rotator and replicated-movement decoders, ported from the C#
-//! reference's `PrimitiveDecodersVectorTests.cs`. The helpers below write each
-//! wire format with `crate::test_bits`, so a test pins the layout both ways.
+//! Vector, rotator and replicated-movement decoders. The helpers below write
+//! each wire format with `crate::test_bits`, so a test pins the layout both
+//! ways.
 
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
 use crate::test_bits::BitWriter;

@@ -1,5 +1,4 @@
-//! Scalar primitive decoders, ported from the C# reference's
-//! `PrimitiveDecodersScalarTests.cs`.
+//! Scalar primitive decoders.
 
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
 use crate::test_bits::BitWriter;
@@ -157,7 +156,7 @@ fn int64_reads_eight_byte_twos_complement() {
 }
 
 /// `EnumRemainingBits` reads the whole payload up to 32 bits; a wider one is
-/// an error (the C# reference throws), not its low 32 bits. Latent when fixed
+/// an error, not its low 32 bits. Latent when fixed
 /// (d5c35c6): nothing in the data of the time triggered it, which is why it
 /// needs a test.
 #[test]

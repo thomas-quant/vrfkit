@@ -1,12 +1,11 @@
-"""Apply the measured type corrections and ADDITIONS to the generated table.rs.
+"""Apply the measured type corrections and ADDITIONS to table.rs.
 
-Two kinds of entry. A correction retypes an entry the C# descriptors declare
+Two kinds of entry. A correction retypes an entry the descriptors declare
 and the wire contradicts; an ADDITION types a field the descriptors are silent
 on, under the bar written above `ADDITIONS`. Each entry's evidence sits at it.
 
-Run after extract_descriptors.py and before cargo fmt. Rules key on each
-entry's own group, field and type, so they rewrite the one-line layout and the
-rustfmt'd one alike. The verdict is the END STATE of every EXPECTED row, never
+Run before cargo fmt. Rules key on each entry's own group, field and type, so
+they rewrite a one-line layout and the rustfmt'd one alike. The verdict is the END STATE of every EXPECTED row, never
 the operation count, which is 0 both on a corrected table and on a dead rule.
 `--check` verifies the FILE: a correction missing even from the corrected copy
 is a DEAD PATTERN; one the corrected copy has and the file lacks means the file
@@ -39,7 +38,7 @@ SEEKER_NADE_GROUP = (
 )
 
 #: The five AGameObject-derived classes (CoveAbility, DarkCoverAbility and the
-#: three Smonk descriptors) whose `ReplicatedMovement` the C# declares with a
+#: three Smonk descriptors) whose `ReplicatedMovement` is declared with a
 #: bare `.ReplicatedMovement()` -- the builder's ShortComponents default -- and
 #: which their rule in `RETYPES` reads with byte rotator components. Exact
 #: group paths, compared with `==`.
@@ -72,7 +71,7 @@ GAME_OBJECT_BYTE_ROTATOR_GROUPS = (
     "/Game/Characters/Wraith/S0/Ability_4/Zone_Wraith_4_Smoke.Zone_Wraith_4_Smoke_C",
 )
 
-#: The four `EffectID` entries the C# descriptors declare `UInt64`, retyped
+#: The four `EffectID` entries the descriptors declare `UInt64`, retyped
 #: `Int64`: (group, the replay's compatible_checksum, the chain it reproduces).
 #:
 #: Each is `FEffectID.EffectID`, and each checksum reproduces with it typed
@@ -138,9 +137,8 @@ EXPECTED += [
       for _group in GAME_OBJECT_BYTE_ROTATOR_GROUPS],
     *[(_group, "EffectID", "FieldType::Int64") for _group, _c, _chain in EFFECT_ID_INT64],
     ("AresEquippableDataTracker", "OriginalBuyerTeam", "FieldType::FName"),
-    # The next eight are typed by extract_descriptors.py's PAYLOAD_DECODER_TYPES
-    # (`.Decode(ValorantPayloadDecoders.X)`, DamageParameters.cs:50-51 and
-    # MulticastNotifyDamagePointParameters.cs:40-46) and only verified here.
+    # The next eight carry the payload-decoder types the damage RPCs declare
+    # and are only verified here.
     # EquippableUsed on 02d4d478: all 632 values 8/16/24 bits and even, as
     # dynamic NetGUIDs are (116 distinct), and 114 of 115 resolve to a weapon
     # class path in actors.parquet. The reference bundle agrees on the scales:
@@ -170,7 +168,7 @@ EXPECTED += [
      "FieldType::ObjectNetGuid"),
 ]
 
-#: Entries the C# descriptors are SILENT on, typed anyway. A correction says
+#: Entries the descriptors are SILENT on, typed anyway. A correction says
 #: "the descriptor declares X and the wire disagrees"; an ADDITION has nothing
 #: to disagree with, so the bar is higher: complete, self-checking wire
 #: evidence -- one bit width on every row and a value distribution a wrong type
@@ -231,8 +229,8 @@ ADDITIONS = [
     ("/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C", "R", "FieldType::Byte"),
     ("/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C",
      "ProfileName", "FieldType::FString"),
-    # Tidal Wave: types from upstream 99d9646 (pinned at b51d674), each
-    # confirmed against retained payload widths and ranges. AliveChunks is a
+    # Tidal Wave: each type confirmed against retained payload widths and
+    # ranges. AliveChunks is a
     # variable-width collection and stays raw.
     *[("/Game/Characters/Mage/S0/Ability_X/"
        "GameObject_Mage_X_TidalWave_Chunk.GameObject_Mage_X_TidalWave_Chunk_C:"
@@ -241,7 +239,7 @@ ADDITIONS = [
         ("Generation", "FieldType::Int32"),
         ("Num Chunks", "FieldType::Int32"),
         ("ChunkSpacing", "FieldType::Float"),
-        # The replay exports a space; upstream labels handle 4 `VelocityIn`.
+        # The replay exports this name with a space.
         ("Velocity In", "FieldType::Double"),
         ("Anchor Spacing In", "FieldType::Double"),
         ("Num Crossfade Anchors In", "FieldType::Int32"),
@@ -315,17 +313,15 @@ ADDITIONS = [
      "AuthCurrentRandomSeed", "FieldType::Int32"),
     # BaseTeamState, new in 13.02, which deleted BombGameState.TeamEconomy and
     # moved team economy to its own actor under the same property names: a
-    # relocated property whose type the pinned reference declares, not one
-    # guessed from values (GameState/AresTeamEconomy.cs:11-12, `int?
-    # LoadoutValue, int? AverageLoadoutValue`; OwnerExclusivePlayerInfo's
+    # relocated property with a declared type, not one guessed from values
+    # (`int? LoadoutValue, int? AverageLoadoutValue`; OwnerExclusivePlayerInfo's
     # {Start,End}OfRoundLoadoutValue are Int32 too). The wire corroborates: all
     # 44+44 payloads are 32 bits, LE i32 4300/4150 at round 1 up to 34300, and
     # AverageLoadoutValue is exactly LoadoutValue/5 on every row (five players).
     ("/Script/ShooterGame.BaseTeamState", "AverageLoadoutValue", "FieldType::Int32"),
     ("/Script/ShooterGame.BaseTeamState", "LoadoutValue", "FieldType::Int32"),
-    # The heal/decay RPC parameters, carried on the wire by name;
-    # DamageableComponentClassNetCacheDescriptor.cs declares only the two
-    # MulticastNotifyDamage_* functions. On the 98605b1b Demos export: HealTaken
+    # The heal/decay RPC parameters, carried on the wire by name; the
+    # descriptors declare only the two MulticastNotifyDamage_* functions. On the 98605b1b Demos export: HealTaken
     # 32 bits on all 1,252 rows, Float 0.05..400, with 0x3f800000 (1.0f), a
     # float-only pattern, recurring; DecayApplied 32 bits on all 699 rows, Float
     # 0.07..50, clustering at 0.195. The *Instigator/*Causer references are
@@ -392,10 +388,9 @@ ADDITIONS = [
      "ReplayLastTransformUpdateTimeStamp", "FieldType::Float"),
     # MoneyManagementComponent, the live per-player credits, on 13.01 and 13.02
     # (02d4d478 and 13.02 Demos files). No descriptor declares the group: Money
-    # and TotalMoneyGranted appear under no group in the reference, and
-    # StartOfRoundMoney only under OwnerExclusivePlayerInfo
-    # (OwnerExclusivePlayerInfoDescriptor.cs:93, an end-of-round snapshot),
-    # which sources its Int32. All three 32 bits on every row, LE i32: Money is
+    # and TotalMoneyGranted appear under no group, and StartOfRoundMoney only
+    # under OwnerExclusivePlayerInfo (an end-of-round snapshot), which
+    # sources its Int32. All three 32 bits on every row, LE i32: Money is
     # 800 on all ten actors at pistol-round start (t=8 ms) and 0..9000 in steps
     # of 50; StartOfRoundMoney 800 for active players, else 0;
     # TotalMoneyGranted cumulative 800..34200. The group has no other wire field.
@@ -479,7 +474,7 @@ ADDITIONS = [
     # UsableComponent drives every hold-to-interact object: spike plant/defuse,
     # ultimate-orb pickup, doors. HighestProgress is a 0..1 float that advances
     # 1/128 per tick (a u32 read is non-monotonic; only f32 ramps linearly);
-    # bIsActive is the 1-bit "someone is interacting" flag. No C# descriptor --
+    # bIsActive is the 1-bit "someone is interacting" flag. No descriptor --
     # typed from wire evidence, same bar as Ping/Money.
     ("/Script/ShooterGame.UsableComponent", "HighestProgress", "FieldType::Float"),
     ("/Script/ShooterGame.UsableComponent", "bIsActive", "FieldType::Bool"),
@@ -492,9 +487,8 @@ ADDITIONS = [
     # (432,879 / 347,664 / 85,553; 11.06 alone 1,400 / 1,297 / 104); on every
     # 25th export the transitions are only 0 <-> 1 and 0 <-> 2, and 2 holds a
     # median 203 ms. More than a width: the same-width sibling
-    # AutoEquipTransitionContext.AutoEquipSpeed (EnumByte in the vendored
-    # AdditionalComponentDescriptors.cs, 1dee99f -- the same reader, not an
-    # independent authority) holds {0, 1, 2} on every build, equals an
+    # AutoEquipTransitionContext.AutoEquipSpeed (declared EnumByte -- the same
+    # reader, not an independent authority) holds {0, 1, 2} on every build, equals an
     # independent decode on 58,384 of 58,384 sampled rows, and equals
     # AuthEquipSpeed in the same packet on the same actor on 1,986 of 1,999
     # rows; at a uniform 3 bits only SerializedInt max 8 fits, which gives the
@@ -507,8 +501,8 @@ ADDITIONS = [
     # has no EnumByte.
     ("/Script/ShooterGame.ReadyingStateComponent", "AuthEquipSpeed",
      "FieldType::EnumByte"),
-    # AresInventory's server/client correction counters, declared nowhere in
-    # AresInventoryDescriptor.cs. 2026-09-28, the 1,018 audit replays;
+    # AresInventory's server/client correction counters, declared by no
+    # descriptor. 2026-09-28, the 1,018 audit replays;
     # checksums 3198546915 / 1076231069, each carried by this field only.
     # * CorrectionIndex: 1,041,822 main + 181,108 checkpoint rows, 32 bits on
     #   all 24 builds; LE i32 1..2011, never 0 or negative, strictly increasing
@@ -687,9 +681,8 @@ ADDITIONS = [
     # two repel-other-character modules), and NetMulticastRemoveForceModule's
     # ModuleType agrees with the paired Apply on 647,381 of 647,381 rows. Remove
     # is typed by this donor through checksum_table.rs; its value 1 (2,081,004
-    # rows, never on Apply, never paired) has no established meaning. Upstream's
-    # delta declares Remove.ModuleType EnumRemainingBits: vendored, it would make
-    # the donors disagree and drop the checksum, and Remove would go raw unless
+    # rows, never on Apply, never paired) has no established meaning. Declaring
+    # Remove.ModuleType EnumRemainingBits would make the donors disagree and drop the checksum, and Remove would go raw unless
     # it got its own entry. Enum names are unknown; only the integer is typed.
     ("/Script/ShooterGame.ForceModuleManagerComponent:NetMulticastApplyForceModule",
      "ModuleType", "FieldType::EnumByte"),
@@ -781,7 +774,7 @@ ADDITIONS = [
     ("/Game/Characters/Guide/S0/Ability_E/Projectile_Guide_E_HawkFlash."
      "Projectile_Guide_E_HawkFlash_C",
      "PostControlVelocity", "FieldType::VectorDouble"),
-    # HawkFlash's ReplicatedMovement and Banking. third_party/vrp has no
+    # HawkFlash's ReplicatedMovement and Banking. No descriptor names the
     # HawkFlash class, so these are ADDITIONS on the exact group; DATA.md's "no
     # name rule for ReplicatedMovement" stands and checksum 2749104612 stays
     # dropped (byte donors still sit beside Gekko's short, two-decimal
@@ -826,7 +819,7 @@ ADDITIONS = [
      "Projectile_Guide_E_HawkFlash_C",
      "Banking", "FieldType::Double"),
     # Cypher's trapwire and cage, renamed in 13.01. Through 12.08 (and in the
-    # one 13.00 fixture) the classes sit at the paths the C# descriptors name,
+    # one 13.00 fixture) the classes sit at the paths the descriptors name,
     # where the table types them:
     # Ability_E/{Ability,GameObject}_Gumshoe_E_TripWire(_SecondWire)_C and
     # Ability_4/{Ability,Projectile}_Gumshoe_4_CageTrap_C. From 13.01 on they
@@ -906,7 +899,7 @@ def _field_type_of(block: str) -> str | None:
 
     Brace-counted, not a regex: field types contain braces
     (`VectorNetQuantize { scale: 100 }`), and the table exists in TWO layouts
-    -- one entry per line as extract_descriptors.py emits it, and the rustfmt'd
+    -- one entry per line, and the rustfmt'd
     multi-line form that is committed -- so a newline-anchored pattern would
     silently match nothing on one of them. The block's opening
     `OverlayEntry {` is already consumed, so the first unmatched `}` closes it.
@@ -1031,7 +1024,7 @@ class Retype(NamedTuple):
     """One correction: `old` -> `new` on the entries it keys.
 
     `groups` is a predicate on an entry's OWN group path. `expected` is how
-    many entries a freshly generated table must change, and `label` names the
+    many entries an uncorrected table must change, and `label` names the
     rule when another count is refused; `None` makes any count acceptable.
     """
     groups: Callable[[str], bool]
@@ -1146,7 +1139,7 @@ def verify(content: str) -> list[str]:
     return problems
 
 
-#: The two generated header lines this script has to keep true, in file order.
+#: The two header lines this script has to keep true, in file order.
 #: `rewrite_header` recounts both from the parsed entries and `--check` fails
 #: when either disagrees.
 HEADER_RES = (
@@ -1225,10 +1218,9 @@ def resync_handle_table_len(content: str) -> str:
 
 
 def rewrite_header(content: str) -> tuple[str, tuple[str, ...]]:
-    """Recount the table and rewrite both generated header lines.
+    """Recount the table and rewrite both header lines.
 
-    extract_descriptors.py counts the descriptors it read; the corrections
-    and ADDITIONS then change those counts. Counted from the parsed entries,
+    The corrections and ADDITIONS change those counts. Counted from the parsed entries,
     not by substring, so `FieldType::RawPayload` cannot count as `Raw`.
     """
     buckets = Counter()
@@ -1251,9 +1243,8 @@ def rewrite_header(content: str) -> tuple[str, tuple[str, ...]]:
         content, n = pattern.subn(lambda _m, _l=line: _l, content, count=1)
         if n != 1:
             raise SystemExit(
-                f"{TABLE_RS}: expected exactly one generated header line "
-                f"matching {pattern.pattern!r}, found {n}. Regenerate with "
-                f"extract_descriptors.py first."
+                f"{TABLE_RS}: expected exactly one header line "
+                f"matching {pattern.pattern!r}, found {n}."
             )
     return content, lines
 
@@ -1310,25 +1301,24 @@ RETYPES = [
       for field in ACTOR_BOOKKEEPING_FIELDS],
 
     # Byte rotator components for the Astra smoke-screen projectiles.
-    # ProjectileSmokeScreenDescriptor.cs calls a bare `.ReplicatedMovement()`
-    # (ShortComponents, 16 bits per axis) where every other projectile
-    # descriptor -- FlameWall, MageWall, NeonTunnel, EquippablePickup -- passes
-    # ByteComponents. On release-13.01 these payloads are 113-124 bits and a
+    # Their descriptor declares ShortComponents (16 bits per axis) where every
+    # other projectile descriptor -- FlameWall, MageWall, NeonTunnel,
+    # EquippablePickup -- declares ByteComponents. On release-13.01 these payloads are 113-124 bits and a
     # Short read runs off the end: 137 EOF failures on one replay, all from
     # this group.
     Retype(lambda group: "SmokeScreen" in group, "ReplicatedMovement",
            _rep_movement("ShortComponents", "RoundWholeNumber"),
            _rep_movement("ByteComponents", "RoundWholeNumber")),
 
-    # Two-decimal location for Gekko's Wingman pawn; the generator gives every
-    # RepMovement entry whole units, the level of the other 24 classes
-    # (extract_descriptors.py REP_MOVEMENT_LOCATION). Joined to its
+    # Two-decimal location for Gekko's Wingman pawn; uncorrected it is whole
+    # units like every other RepMovement entry, the level of the other 24
+    # classes. Joined to its
     # actors.parquet spawn (the first ReplicatedMovement row at the `open`
     # time_ms, same channel), the packed integer is 100x the coordinate on all
     # 932 actors in 1,018 replays over 15 builds (2026-09-28, 259ed10): median
     # |packed| / |spawn| 100.000, p1..p99 99.998 to 100.001, every component
     # within 0.0502 of spawn after /100; components are 17-22 bits where a
-    # whole-unit class on the same maps needs 10-15. The C# reader's fixed
+    # whole-unit class on the same maps needs 10-15. A fixed
     # VectorNetQuantize100 is right for this class. Every other measured Pawn
     # class also packs two decimals, but none is in the table: a pattern, not
     # evidence for an unmeasured class.
@@ -1346,7 +1336,7 @@ RETYPES = [
     # payloads (22 bone names: Head 69, Spine4 51, L_Shoulder 46, ...).
 
     # EnumByte -> FName for AresEquippableDataTracker.OriginalBuyerTeam.
-    # AdditionalComponentDescriptors.cs declares EnumByte ("a small team
+    # The descriptor declares EnumByte ("a small team
     # enum") and says to fall back if that fails, and it does: no row is 8
     # bits. The 97- and 105-bit payloads (248 on 02d4d478) are an inline FName:
     #
@@ -1383,7 +1373,7 @@ RETYPES = [
     # declarations. AllianceFilter (EAresAlliance) is ONE property, checksum
     # 2270825073, declared `byte AllianceFilter` (EnumByte) by
     # EffectManagerComponent:MulticastPlay{Continuous,OneShot}Effect and
-    # `.EnumRemainingBits()` at ReplayPlayContinuousEffectAtLocationParameters.cs:43.
+    # `.EnumRemainingBits()` by this RPC.
     # extract_checksum_types.py drops a checksum whose donors disagree, so the
     # five RPCs carrying it undeclared stayed untyped:
     # AresEquippable:MulticastPlay{Continuous,OneShot}EffectFromClient under
@@ -1399,7 +1389,7 @@ RETYPES = [
     # (decode_byte refuses 0-bit and >8-bit payloads; EnumRemainingBits answers
     # 0 for no bits and reads up to 32), and at 1..8 bits both give the same
     # integer, so this RPC's 3,094,607 existing rows keep their values (none is
-    # 0 bits wide). The vendored descriptor stays verbatim. checksum_table.rs
+    # 0 bits wide). checksum_table.rs
     # learns 2270825073 -> EnumByte only when extract_checksum_types.py runs
     # after this, and
     # `alliance_filter_donors_agree_so_the_checksum_types_the_receivers` in
@@ -1410,9 +1400,8 @@ RETYPES = [
 
     # Raw -> ObjectNetGuid for DeathMontageEffectOverride and
     # DeathMontageEffectOverrideContext on both MulticastNotifyDamage_* RPCs.
-    # The descriptors declare both with AddRaw
-    # (MulticastNotifyDamagePointParameters.cs:55-56, ...BaseParameters.cs:29-30),
-    # an opaque payload like TransitionContext's, and a Raw table entry wins in
+    # The descriptors declare both raw, an opaque payload like
+    # TransitionContext's, and a Raw table entry wins in
     # resolve_entry before a scoped type or the checksum is consulted.
     # 2026-09-28, the 1,018 replays at 259ed10, both fields, both RPCs: 959,445
     # rows each (Point 632,906, Base 326,539), main stream only; the 3 replays
@@ -1492,11 +1481,10 @@ def main():
                   f"missing from {TABLE_RS}", file=sys.stderr)
             for line in dead:
                 print(f"  {line}", file=sys.stderr)
-            print("A missing correction means extract_descriptors.py no longer "
-                  "emits that entry, emits it at a type no RETYPES rule "
-                  "rewrites, or now declares an ADDITION's key at another "
-                  "type: update RETYPES, ADDITIONS or EXPECTED. The run order "
-                  "cannot cause it; every rule rewrites both layouts.",
+            print("A missing correction means table.rs no longer holds that "
+                  "entry, holds it at a type no RETYPES rule rewrites, or "
+                  "declares an ADDITION's key at another type: update "
+                  "RETYPES, ADDITIONS or EXPECTED.",
                   file=sys.stderr)
         if uncorrected:
             print(f"FAILED: {len(uncorrected)} of {checked} corrections are "
@@ -1512,7 +1500,7 @@ def main():
         for pattern, line in zip(HEADER_RES, header_lines):
             stale = pattern.search(on_disk)
             if stale and stale.group(0) != line:
-                print(f"FAILED: the generated header disagrees with the table.\n"
+                print(f"FAILED: the header disagrees with the table.\n"
                       f"  file says {stale.group(0)}\n"
                       f"  counted   {line}", file=sys.stderr)
                 return 1

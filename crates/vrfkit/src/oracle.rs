@@ -26,14 +26,6 @@
 //! The one-block-per-replay residue, and why its first explanation (a
 //! PlayerController omitting spawn velocity) was false: see
 //! docs/archive/PROJECT_STATUS.md 17-A.
-//!
-//! The C# reference's zero `MalformedContentBlockCount` is not comparable
-//! with ours. Instrumented to print its `BunchPayloadStats`, which its CLI and
-//! manifest never emit, it abandons 34,292 bunches (`MalformedPayloadCount`)
-//! and 49,948,659 bits (`ContentPayloadBitsSkipped`, ~6.2 MB) at the payload
-//! stage on 02d4d478, never framing them, and counts 563,626 content blocks
-//! to the 608,020 vrfkit counted then (~44,000 fewer). Its manifest's
-//! `malformed_packet_count` is a packet-level counter from another struct.
 
 use std::fs;
 use std::time::Instant;

@@ -10,8 +10,7 @@
 //!
 //! # Wire format
 //!
-//! As `parse_class_net_cache` in `vrf-net` and the C#
-//! `ParseClassNetCachePayload` read it:
+//! As `parse_class_net_cache` in `vrf-net` reads it:
 //!
 //! ```text
 //! loop:
@@ -35,8 +34,8 @@
 //!
 //! # Payload kind
 //!
-//! ClassNetCache framing also carries custom-delta properties, which the C#
-//! reader dispatches apart from `ReceivedRPC` after this shared framing, so
+//! ClassNetCache framing also carries custom-delta properties, which are
+//! dispatched apart from `ReceivedRPC` after this shared framing, so
 //! the `CncRpc` and `function_count` names do not prove a function call. See
 //! [`AbilitiesActivation`] for the measured `AbilitiesAndBuffsComponent` payload.
 

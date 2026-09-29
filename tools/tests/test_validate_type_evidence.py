@@ -542,13 +542,12 @@ class DecodeExactTests(unittest.TestCase):
 class ShapedTypeTests(unittest.TestCase):
     """The non-primitive decoders scoped entries may use.
 
-    The base64 vectors are upstream's own recorded payloads from replay
-    42e03082 (tests/Replay.Valorant.Tests/Descriptors/ClayDescriptorTests.cs at
-    8b7afcb), which is not in the local corpus: an independent statement of
-    what those exact bits decode to, and of their exact widths.
+    The base64 vectors are payloads an independent parser's tests recorded
+    from replay 42e03082, which is not in the local corpus: an independent
+    statement of what those exact bits decode to, and of their exact widths.
     """
 
-    def test_upstream_recorded_raze_payloads_consume_their_exact_widths(self):
+    def test_recorded_raze_payloads_consume_their_exact_widths(self):
         self.assertEqual(decode_exact(base64.b64decode("4elLQA=="), 32, "Int32"), 1078716897)
         self.assertEqual(decode_exact(base64.b64decode("AQ=="), 3, "EnumRemainingBits"), 1)
         self.assertEqual(decode_exact(base64.b64decode("Aw=="), 3, "EnumRemainingBits"), 3)
@@ -556,7 +555,7 @@ class ShapedTypeTests(unittest.TestCase):
         self.assertEqual(location, (-782.71, -1366.59, 5.8))
         rotation = decode_exact(base64.b64decode("AYDuJ/f/Bw=="), 51, "RotationShort")
         self.assertEqual(rotation, (90.0, 284.0350341796875, 359.989013671875))
-        # Upstream's truncation case: one byte cannot hold a rotator's flags
+        # The recorded truncation case: one byte cannot hold a rotator's flags
         # and the components they announce.
         with self.assertRaisesRegex(ValueError, "truncated"):
             decode_exact(base64.b64decode("AQ=="), 8, "RotationShort")

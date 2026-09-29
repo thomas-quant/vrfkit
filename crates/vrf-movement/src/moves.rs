@@ -14,11 +14,10 @@ use crate::types::{MovementMove, RpcDecodeResult};
 /// Magic byte at the start of a movement section.
 pub(crate) const MOVEMENT_MAGIC: u8 = 0x52;
 
-/// The C# reference's `MaxMovementPaddingBits`: with at most this many bits
-/// left after a move, the section ends without reading another marker. The
-/// bits are not padding: in every stream measured they are a `000` terminator
-/// where the next marker would sit, then 8 to 23 bits that are not all zero
-/// (crate docs, "Measured on real replays").
+/// With at most this many bits left after a move, the section ends without
+/// reading another marker. The bits are not padding: in every stream measured
+/// they are a `000` terminator where the next marker would sit, then 8 to 23
+/// bits that are not all zero (crate docs, "Measured on real replays").
 const MAX_MOVEMENT_PADDING_BITS: u64 = 31;
 
 /// Parse the movement section: magic byte, then a sequence of moves.
@@ -86,7 +85,7 @@ pub(crate) fn next_marker(marker: u8) -> u8 {
 
 /// Parse one MovementMove from the stream. The fields it decodes and drops are
 /// not constant over the 157,457,629 moves of the crate docs' sample:
-/// unusedByte (the C#'s name) is non-zero in 155,140,482, rotationYawMultiplier
+/// unusedByte is non-zero in 155,140,482, rotationYawMultiplier
 /// in 29,589,841; rotationInput is off centre in 97,788,473, flag48 set in
 /// 150,351,309, the optional byte present in 9,255,640, variant1Flag in 1,655.
 fn parse_single_move(
@@ -103,7 +102,7 @@ fn parse_single_move(
     // -- FixedVector: rotationInput (3 x u16), not exported ----------------
     reader.skip_bits(48)?;
 
-    // -- Timestamp: the C# reference's "VLQ" is Unreal's IntPacked ----------
+    // -- Timestamp: Unreal's IntPacked ----------------------------------------
     let timestamp = reader.read_int_packed()?;
 
     let (pos_x, pos_y, pos_z) = read_quantized_vector(reader, 100)?;

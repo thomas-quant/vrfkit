@@ -12,10 +12,9 @@ pub(super) fn decode_bool(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeE
 
 /// A byte-width enum or `uint8`, as wide as the payload rather than a fixed 8
 /// bits: Unreal writes only the significant bits of byte properties nested in
-/// replicated arrays, and the reference reads the same way
-/// (`ReadBitsToUInt64(BitsRemaining)` in its `ReadByte`). `CombatReport`
-/// `AssistType` is 5 bits; a fixed 8-bit read left all 364 of its rows
-/// untyped. Wider than 8 bits is refused, not truncated: the field is not
+/// replicated arrays. `CombatReport` `AssistType` is 5 bits; a fixed 8-bit
+/// read left all 364 of its rows untyped. Wider than 8 bits is refused, not
+/// truncated: the field is not
 /// byte-sized, and its low byte would be a plausible wrong number.
 pub(super) fn decode_byte(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
     let width = r.bits_remaining();
@@ -82,8 +81,7 @@ pub(super) fn decode_ftext(r: &mut BitReader<'_>) -> Result<DecodedValue, Decode
     Ok(DecodedValue::Str(r.read_fstring(64 * 1024)?))
 }
 
-/// FName, as the reference's `FArchive.ReadFNameCore` reads it: an
-/// `isHardcoded` bit, then either one IntPacked index into the engine's
+/// FName: an `isHardcoded` bit, then either one IntPacked index into the engine's
 /// hardcoded name table (rendered as its decimal) or an inline FString plus an
 /// i32 instance number (0 renders the bare name, `N` renders `Name_{N-1}`; see
 /// docs/DATA.md "FName instance numbers are part of the name"). Replays do send

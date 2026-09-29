@@ -135,7 +135,7 @@ no parser change, and section 8 carries the invariant it produced.
 - [13. Data-Loss Fixes (2026-08-02)](#13-data-loss-fixes-2026-08-02)
   - [13-A. A cleared optional bit means "default", not "absent" [FIXED, 2637808]](#13-a-a-cleared-optional-bit-means-default-not-absent-fixed-2637808)
   - [13-B. ReplicatedMovement shipped a debug string [FIXED, 2637808]](#13-b-replicatedmovement-shipped-a-debug-string-fixed-2637808)
-  - [13-C. Gekko's descriptor path had a one-character typo [FIXED, f67ea66 + 4f78f6d]](#13-c-gekkos-descriptor-path-had-a-one-character-typo-fixed-f67ea66-4f78f6d)
+  - [13-C. Gekko's descriptor path had a one-character typo [FIXED, 4f78f6d]](#13-c-gekkos-descriptor-path-had-a-one-character-typo-fixed-4f78f6d)
   - [13-D. The extractor could not read a factored handle run [FIXED, 4f78f6d]](#13-d-the-extractor-could-not-read-a-factored-handle-run-fixed-4f78f6d)
   - [13-E. `payload: null` meant two different things [FIXED, 2637808]](#13-e-payload-null-meant-two-different-things-fixed-2637808)
   - [13-I. A static actor has no class path, and no archetype either [FIXED, ea08a83]](#13-i-a-static-actor-has-no-class-path-and-no-archetype-either-fixed-ea08a83)
@@ -152,7 +152,7 @@ no parser change, and section 8 carries the invariant it produced.
   - [14-F. Final verification](#14-f-final-verification)
 - [15. The untyped tail, triaged (2026-08-02)](#15-the-untyped-tail-triaged-2026-08-02)
   - [15-A. Bottom line: nothing in the tail is an extractor bug](#15-a-bottom-line-nothing-in-the-tail-is-an-extractor-bug)
-  - [15-B. One dead table entry, and it was a real upstream gap [FIXED, 8824794]](#15-b-one-dead-table-entry-and-it-was-a-real-upstream-gap-fixed-8824794)
+  - [15-B. One dead table entry, and it was a real descriptor gap [FIXED 2026-08-02]](#15-b-one-dead-table-entry-and-it-was-a-real-descriptor-gap-fixed-2026-08-02)
   - [15-C. Bomb_CombatReportComponent [CLOSED -- not a gap]](#15-c-bombcombatreportcomponent-closed-not-a-gap)
   - [15-D. What this triage does NOT establish](#15-d-what-this-triage-does-not-establish)
 - [16. Falsification pass over this session's own claims (2026-08-02)](#16-falsification-pass-over-this-sessions-own-claims-2026-08-02)
@@ -203,7 +203,7 @@ no parser change, and section 8 carries the invariant it produced.
   - [23-E. What this did not do](#23-e-what-this-did-not-do)
 - [24. The untyped RPC parameters: mostly not ours to fix (2026-08-04)](#24-the-untyped-rpc-parameters-mostly-not-ours-to-fix-2026-08-04)
   - [24-A. First, the split that section 22 stated as one number](#24-a-first-the-split-that-section-22-stated-as-one-number)
-  - [24-B. Classifying the 27.2M RPC-parameter bits against the C# reference](#24-b-classifying-the-272m-rpc-parameter-bits-against-the-c-reference)
+  - [24-B. Classifying the 27.2M RPC-parameter bits against the descriptors](#24-b-classifying-the-272m-rpc-parameter-bits-against-the-descriptors)
   - [24-C. What was NOT done, and why](#24-c-what-was-not-done-and-why)
   - [24-D. What the hunt did find: the generator could not reproduce its own output](#24-d-what-the-hunt-did-find-the-generator-could-not-reproduce-its-own-output)
   - [24-E. A test suite nothing told anyone to run](#24-e-a-test-suite-nothing-told-anyone-to-run)
@@ -291,24 +291,6 @@ Read this section first. Everything else is supporting detail.
 ### Where things are
 ```
 Parser (Rust)  : C:\Users\yakihyuk0728\Documents\GitHub\vrfkit
-C# reference   : C:\Users\yakihyuk0728\Documents\GitHub\ValorantReplayParser
-                 Tree is CLEAN, on branch local/vrfkit-descriptors (f67ea66).
-                 The "17 uncommitted entries" warning that stood here until
-                 2026-08-02 is obsolete: that work is committed as fe5343a.
-                 `main` MUST STAY AT 2d2e05e. Published bundles stamp
-                 parser_version 1.0.0+2d2e05e8, so moving it invalidates every
-                 comparison figure in this document. The stamp records Git
-                 HEAD, not a clean source tree: section 13-H explains the
-                 descriptor provenance caveat. Treat the published bundles as
-                 the immutable reference. Do not merge the branch into main,
-                 regenerate the bundles, or pull.
-                 Changing a descriptor there is allowed ON THE BRANCH, with
-                 primary-source proof and the test that pins it (see 13-C).
-                 This delegate branch's table was generated from that branch.
-                 Current master also depends on local/pawn-descriptors at
-                 d2b76f2 in the separate clean VRP-pawn-descriptors worktree.
-                 During integration, use the feature branch's generator with
-                 that newer C# worktree or 92 master entries disappear.
 valplay        : C:\Users\yakihyuk0728\Documents\GitHub\valplay
                  Never modify. Run its scripts by absolute path only.
 Corpus (.vrf)  : C:\Users\yakihyuk0728\Documents\GitHub\valplay\data\raw\vrf
@@ -319,9 +301,6 @@ Local 13.02    : %LOCALAPPDATA%\VALORANT\Saved\Demos\*.vrf
                  four pinned replays were gone, replaced by three unrelated
                  ones (verified: no subset of the pinned four sums to the new
                  total). Re-pinned against a preserved copy, below.
-Older fixtures : C:\Users\yakihyuk0728\Documents\GitHub\ValorantReplayParser\tests\Test.Integration\Replays
-                 One source fixture each for 12.10, 12.11, and 13.00.
-                 READ ONLY; do not run baselines from this repository.
 Local baselines: %LOCALAPPDATA%\vrfkit\baseline-corpora\build_*
                  One preserved replay per build: 12.10, 12.11, 13.00 (test
                  fixtures, ~1 MB each) and 13.02 (a real 62 MB demo, copied
@@ -351,7 +330,7 @@ python tools\apply_type_corrections.py --check
 # BOTH generated header lines are recounted and both are checked. The
 # entries/groups line was not, and sat at "1185 entries from 171 groups"
 # directly above a bucket line summing to 1188 -- see section 36.
-# 30 corrections: the ADDITIONS pass inserts six entries the C# descriptors
+# 30 corrections: the ADDITIONS pass inserts six entries the descriptors
 # cannot declare -- two BaseTeamState (26-I), ChosenCeremonyForRound (32),
 # and three MoneyManagementComponent economy fields. Swiftplay needs no
 # entry of its own: GROUP_ALIASES in vrf-decode/src/overlay.rs maps its
@@ -363,7 +342,7 @@ python tools\check_ascii.py --check
 # Expected: OK: 113 tracked Rust file(s), ASCII only
 python -m unittest discover -s tools\tests -p "test_*.py"
 # Expected: Ran 119 tests, OK. These guard the GENERATORS and the GUARDS --
-# extract_descriptors, apply_type_corrections, check_ascii,
+# the descriptor generator, apply_type_corrections, check_ascii,
 # check_effect_decoder, check_metrics_baseline, check_docs, to_valplay_bundle.
 # They are not run by cargo (Cargo does not run .py) and were in no documented
 # check until 2026-08-04, which is how the .Decode() blindness in section 24
@@ -534,14 +513,14 @@ python tools\check_corpus_baseline.py --baseline tools\baselines\build_1302.json
 # Expected after integrating current master's 3a4b04: OK, 1 stable replay.
 ```
 
-No section is BLOCKED. Most differences reflect data the C# parser drops:
+No section is BLOCKED. Most differences reflect data the reference drops:
 
   combat / kast             13 MulticastNotifyKilledEnemy RPCs from
-                            character 576 that the C# parser never emits
+                            character 576 that the reference never emits
   economy_detail            496 of 496 purchase buyers resolved vs its 151
   weapon_stats              one damage record commit 6e6d544 recovers
 
-Tactical's root cause is now named -- a one-character typo in the C# Gekko
+Tactical's root cause is now named -- a one-character typo in the Gekko
 descriptor, section 13-C -- but five of its values are still higher in the
 reference, including one opening_duels_won difference with its denominator
 conserved. The mechanism is a non-monotonic kill-timeline derivation, not a
@@ -593,10 +572,10 @@ Where the open work is now, after section 23:
     new measurement showing something this pass did not
   - the untyped remainder is NOT one number and mostly NOT addressable here.
     Section 24 measured it: of 27.2M untyped RPC-parameter bits, ~86% have no
-    upstream type information at all (no descriptor, no <TParams>, or no name
+    declared type information at all (no descriptor, no <TParams>, or no name
     on the wire), 10.4% is the ReplayPlayContinuousEffectAtLocation exclusion
     that protects the valplay adapter, and the rest is an arity disagreement
-    between the C# model and the wire. Do not reopen it as a table edit; it
+    between the descriptor model and the wire. Do not reopen it as a table edit; it
     needs the game binary or UE headers
   - Event payload words are raw for 5 of 7 groups (22-H). characterDeath is
     solved; characterUltimateUsed's single word is not
@@ -659,14 +638,12 @@ an explicitly marked Parquet row. No field or RPC structure is fabricated.
 ## 1. What This Project Is
 
 A from-scratch Rust VALORANT replay (.vrf) parser in a NEW repository
-(C:\Users\yakihyuk0728\Documents\GitHub\vrfkit), built to replace the
-C# parser (ValorantReplayParser, MIT) that the valplay Python analytics
-pipeline depends on. The C# parser discards roughly 26% of content blocks
-because it abandons any bunch whose payload has no registered descriptor.
-vrfkit preserves every field it can walk, including raw bits for unknown
-types; an unresolved ClassNetCache block remains a loud stream failure and
-emits no fabricated field/RPC rows, but its whole payload is preserved as one
-explicitly marked row.
+(C:\Users\yakihyuk0728\Documents\GitHub\vrfkit), built to replace the parser
+that the valplay Python analytics pipeline depends on. vrfkit preserves every
+field it can walk, including raw bits for unknown types; an unresolved
+ClassNetCache block remains a loud stream failure and emits no fabricated
+field/RPC rows, but its whole payload is preserved as one explicitly marked
+row.
 
 Primary outputs: fields.parquet, movement.parquet, actors.parquet,
 net_guids.parquet, manifest.json -- all written by `vrfkit export`. A Python adapter
@@ -708,9 +685,6 @@ guards       : export baseline OK; build_1210/1211/1300/1302 OK;
 valplay repo : 0 modified files (never written to; scripts run by absolute
                path, and compute_metrics.py is always pointed at a directory
                under vrfkit's out/ so it cannot write metrics.json into it)
-ValorantReplayParser : clean, on branch local/vrfkit-descriptors at 8824794.
-               main untouched at 2d2e05e -- the commit the reference bundles
-               were built from. Do not move it (QUICK START says why)
 ```
 
 ### Commit list
@@ -910,7 +884,6 @@ Earlier measurement of two of them:
 2a09e682  55 MB   686,559 blocks  malformed 0  transform 0  pass 97.96%
 43d0f434  85 MB 1,004,465 blocks  malformed 0  transform 0  pass 99.18%
 ```
-The C# parser that valplay currently uses REJECTS 13.02 replays outright.
 
 Older supported builds (one machine-local fixture per build, pinned by
 tools/check_corpus_baseline.py):
@@ -929,7 +902,7 @@ unresolved ClassNetCache streams remain skipped failures and emit one marked
 whole-block preservation row.
 These gaps are recorded, not hidden by the zero malformed count.
 
-The adjacent 12.08 C# fixture is intentionally unsupported. A real end-to-end
+The adjacent 12.08 fixture is intentionally unsupported. A real end-to-end
 `validate` run exits 1, names `++Ares-Core+release-12.08`, and lists the known
 branches. This confirms that an unknown build fails loudly rather than silently
 selecting a transform.
@@ -980,9 +953,6 @@ its exact end:
   1 + IntPacked(89)=8    +   89 =   98 bits  exact
 Inner payloads walk as clean RepLayout streams, zero bits remaining.
 
-The C# parser reads the same declared 1 and fails on the same four blocks.
-This is not a divergence from the reference; it is a place we exceed it.
-
 Fix: function_count.max(2) in parse_class_net_cache.
 Capacities >= 2 are unchanged because max(N,2) == N.
 Corpus effect: skipped bits from stream failures 3,671 to 0.
@@ -1027,7 +997,7 @@ Skipped corpus-wide: 2,276,559,577 to 1,972,080,670 (13.4% fewer).
 
 MulticastNotifyDamage_Point: 580 to 581 records, all 581 distinct by
 (packet, time, actor, value) -- not a duplicate, a genuinely recovered
-event the C# parser discards.
+event the reference discards.
 
 An uncapped corpus audit later measured 97.283437% of unattributed bits as
 AbilitiesAndBuffsComponent, for which the replay declares no cache group.
@@ -1044,7 +1014,7 @@ attribution rather than parsing. The final uncapped corpus measurement is
 Also corrected: overlay figures (106 groups/929 fields -> 123/1054; the
 table was 1,058 entries as of section 13-C/13-D and is now superseded by
 section 14's generated 1,100-name/84-handle result),
-RPC comparison (334,641 -> 342,735 vs C# 230,893), typed coverage.
+RPC comparison (334,641 -> 342,735 vs the reference's 230,893), typed coverage.
 
 First-ever measurement of 13.02 replays documented here: two local demos
 parse with malformed framing 0 and transform failures 0.
@@ -1067,7 +1037,7 @@ hit-region breakdown/damage_dealt/rounds_played/team all identical.
 
 players, rounds, ultimate, movement_detail, movement_summary also match.
 tactical and kast DIFFER -- and ours is more correct: both consume the
-kill timeline; ours has 132 kills vs C#'s 119 (character-576 blind spot
+kill timeline; ours has 132 kills vs the reference's 119 (character-576 blind spot
 documented in valplay's own notes; vrfkit recovers the 13 missing RPCs).
 
 ### 5-G. actors.parquet (commit df20d5b)
@@ -1083,8 +1053,8 @@ Null written when genuinely unknown; countable rather than silent.
 
 structs.rs: decodes BombGameState.RoundResults, TeamEconomy.LoadoutValue
 and AverageLoadoutValue, OwnerExclusivePlayerInfo.RoundInfos.EndOfRoundMoney.
-Wire layout derived from C# ValorantPayloadDecoders.cs, validated against
-real bits from the corpus and the C# events.ndjson reference.
+Wire layout validated against real bits from the corpus and the reference's
+events.ndjson.
 
 Effect on metrics:
   objective.round_results : 18/18 entries identical to reference
@@ -1112,7 +1082,7 @@ before any code was written:
   effect_equippable set on   0 of 2,647 reference shots
   firing_state GUIDs matching 0 of 2,475 actors.parquet rows
 
-Reading the C# resolver (ValorantShotEventEnricher.cs:123) showed three
+There are three resolution
 tiers, and the one 7-A described is the one that never fires. Tier 2 walks
 the FiringState GUID's outer chain to the owning equippable.
 
@@ -1142,8 +1112,8 @@ opens) and net_guids.parquet (every registered GUID) at each hop because the
 two cover different populations -- the weapon is in the first, its
 FiringState only in the second.
 
-tools/extract_equippables.py generates the display-name table from the C#
-resolver's Define() list rather than anyone retyping 24 paths. It stays on
+A generator built the display-name table rather than anyone retyping 24
+paths. It stays on
 the Python side so the parser's no-hardcoded-names invariant holds.
 
 Result: 2,475 / 2,475 shots resolved, weapon name and category counts
@@ -1180,7 +1150,7 @@ server-world effects rather than dropped shots).
 
 7-J closed. Two bugs, the second only visible once the first was fixed.
 
-EquippableUsed was FieldType::Raw because the C# descriptor hides it behind
+EquippableUsed was FieldType::Raw because the descriptor hides it behind
 a custom .Decode(...) the extractor cannot read. The adapter, given no type,
 read the bits as a fixed little-endian uint16. IntPacked is 8/16/24 bits
 wide, so that only ever saw 272 of 632 occurrences, and IntPacked's
@@ -1196,7 +1166,7 @@ were 1.41 / 1.71 / 1.82 / 3.97 and two entities tied on frequency.
 
 With the GUIDs correct, hits/damage/kills matched but head and body were
 swapped. REGIONAL_DAMAGE_MAP had ordinals 0 and 1 reversed and put invalid
-at 3; EAresRegionalDamage.cs has Normal=0, Headshot=1, Legshot=2,
+at 3; EAresRegionalDamage has Normal=0, Headshot=1, Legshot=2,
 RegionCount=3, Invalid_Radial=4, Invalid=5. The 18 genuine "no hit region"
 events at ordinal 5 had been falling through to unknown_5.
 
@@ -1223,7 +1193,7 @@ See 7-K.
 Three documented claims were audited and two needed correcting:
 
   combat kill timeline   CONFIRMED, but the framing was wrong. "132 kills vs
-                         119" reads as the C# parser undercounting kills. It
+                         119" reads as the reference undercounting kills. It
                          does not -- both bundles report combat_report_credits
                          132 and identical per_player kills. Only the
                          MulticastNotifyKilledEnemy stream is affected, and
@@ -1395,7 +1365,7 @@ which is the whole point. The next target, if there is one, is
 ## 6. metrics.json Reproduction Status (02d4d478 vs reference)
 
 Reference: valplay/pipeline/exports/02d4d478-.../metrics.json
-  (produced by C# parser, bundle was slimmed: ~97% of rpc_received removed)
+  (bundle was slimmed: ~97% of rpc_received removed)
 
 Our bundle: out/valplay_bundle/02d4d478-.../metrics.json
   (produced by vrfkit export + to_valplay_bundle.py + compute_metrics.py)
@@ -1429,8 +1399,8 @@ movement_summary EXACT        same, plus f32-shortest coordinates
 posture          EXACT        same; distance_m had been LOW for 10/10
                               players, see 7-K
 combat           OURS BETTER  two keys differ. kill_timeline_check: we carry
-                              13 MulticastNotifyKilledEnemy RPCs the C#
-                              parser never emits, all from character 576,
+                              13 MulticastNotifyKilledEnemy RPCs the
+                              reference never emits, all from character 576,
                               each corroborated by a lethal damage RPC in
                               the REFERENCE's own bundle at the same ms.
                               per_player: 249/270 byte-exact; the other 21
@@ -1458,7 +1428,7 @@ weapon_stats     OURS BETTER  by_weapon identical for all 23 weapons;
                               shots_without_equippable byte-identical.
                               Differs only on non_player_victim_hits,
                               212 vs 211 -- the damage record commit 6e6d544
-                              recovers and the C# parser discards
+                              recovers and the reference discards
 ---------------------------------------------------------------------------
 ```
 
@@ -1468,13 +1438,13 @@ EXACT: identical Python object equality. The harness prints 16 of 21, but
        failing. The honest figure is 15 of 20 real metric sections, and the
        same 15 on all 11 cross-validated replays (section 6-A).
        NOTE ALSO: the table above lists `combat` twice; it is one section.
-OURS BETTER: our value is more complete/correct than the C# reference.
+OURS BETTER: our value is more complete/correct than the reference.
 BLOCKED: the data is present but a named defect prevents it being used.
          No section is BLOCKED.
 
 CORRECTION 2026-08-01. This block previously claimed "no section differs for
 a reason that is not understood" and "every remaining difference is a case
-where we carry data the C# parser does not". An audit refuted both. Three
+where we carry data the reference does not". An audit refuted both. Three
 fields exist where the REFERENCE is higher than us:
 
   2c9e88a0  tactical.clutch_attempts     ref 4   ours 1
@@ -1502,7 +1472,7 @@ FK/FD, MK, rank): reproduced exactly for all 10 players from vrfkit data.
 ### 6-A. Cross-validation across every available reference bundle
 
 Section 6 used to rest on 02d4d478 alone. Eleven replays have BOTH a source
-.vrf and a C# reference metrics.json -- the claim in 7-G that only fd816a35
+.vrf and a reference metrics.json -- the claim in 7-G that only fd816a35
 was cross-validated was wrong; fd816a35 is simply the one whose .vrf is
 missing.
 
@@ -1520,7 +1490,7 @@ sections are exact across all 11.
   spray_control   ultimate       weapons      (+ note)
 
 The five that vary are combat, economy_detail, kast, tactical, and weapon_stats.
-Most differences align with data we recover and the C# parser drops, but five
+Most differences align with data we recover and the reference drops, but five
 tactical values are reference-higher and their mechanism is not established;
 the correction and exact values above supersede the earlier direction claim.
 
@@ -1537,7 +1507,7 @@ Implemented in commits 47849d2 (net_guids.parquet), b258dfd (adapter) and
 1f3afe4 (fire mode, found while verifying the sections this unblocked).
 
   shots with a resolved weapon : 2,475 / 2,475  (100.00%)
-  weapon name + category counts: identical to the C# reference for all
+  weapon name + category counts: identical to the reference for all
                                  19 weapons, zero differences
 
 Section outcomes:
@@ -1567,7 +1537,7 @@ The route that actually works, verified end to end at 100%:
 Probe result on 02d4d478 (temporary instrumentation, since reverted):
   firing_state GUIDs present in guid->outer : 175 / 175  (100%)
   shots resolved to a weapon class_path     : 2,475 / 2,475  (100.00%)
-  class_path equal to the C# reference       : 2,475 / 2,475
+  class_path equal to the reference          : 2,475 / 2,475
   reference equippable GUIDs in actors.parquet: 157 / 157, byte-identical
 
 Three sub-tasks:
@@ -1576,13 +1546,11 @@ Three sub-tasks:
      16,167 rows for this replay. The data already exists in guid_to_outer
      (cache.rs:89) and guid_to_path (:88); the exporter never emits it.
      Export path as well as outer -- path is what distinguishes FiringState
-     from ZoomedFiringState, and the C# fallback uses it.
-  b) Walk the outer chain in the adapter (Python). Mirrors the C# tier-2
-     resolver, ValorantShotEventEnricher.cs:163.
-  c) Build the weapon display name table. The C# parser hardcodes this in
-     ValorantEquippableResolver.cs:20 (130 lines of
-     Define(class_path, name, category)). Keep it in the Python adapter so
-     the Rust parser stays free of hardcoded names -- see section 8.
+     from ZoomedFiringState.
+  b) Walk the outer chain in the adapter (Python): tier 2.
+  c) Build the weapon display name table, (class_path, name, category)
+     entries. Keep it in the Python adapter so the Rust parser stays free of
+     hardcoded names -- see section 8.
 
 Effort: a Rust export addition plus adapter work, not the 1-2 hours the
 earlier estimate claimed. No parser resolution redesign is needed.
@@ -1590,7 +1558,7 @@ earlier estimate claimed. No parser resolution redesign is needed.
 Unlocks: 4 metric sections from BLOCKED to MATCH.
 
 NOT needed: resolving InventoryComponent -> /Script/ShooterGame.AresInventory.
-That is the C# tier-3 fallback and tier 2 already covers 100% of shots. It
+That is the tier-3 fallback and tier 2 already covers 100% of shots. It
 remains interesting for other sections -- see 7-H.
 
 ### 7-B. 1ms timing alignment [DONE 2026-08-01]
@@ -1610,7 +1578,6 @@ It was not a boundary choice, and it was not systematic. vrf-frame computed
     let time_ms = (time_seconds * 1000.0) as u32;
 
 which truncates and multiplies in f32, against the reference's
-(ReplayEventJsonWriter.cs:194)
 
     (long)Math.Round(seconds * 1000d, MidpointRounding.AwayFromZero)
 
@@ -1638,10 +1605,10 @@ the uncapped current measurement is 97.283437%, reported below. Either way,
 the replay-level proportion is roughly one block in a hundred.
 
 WHAT IT COSTS TODAY: nothing measurable in the current 20 real metric sections.
-Fifteen are byte-identical to the C# reference on 11 replays; the five varying
+Fifteen are byte-identical to the reference on 11 replays; the five varying
 sections do not consume this missing ability-state stream. Their tactical
 direction discrepancy is a separate open question. No current consumer asks
-for this data, and the C# parser cannot read it either.
+for this data.
 
 Ability behaviour is already covered through other groups (30,493 field rows
 on 02d4d478: Wraith smoke zones, Smonk smoke, melee, the ability statistics
@@ -1653,7 +1620,7 @@ charge counts over time, who was blinded or slowed and for how long, ult
 gauge between casts, heal and shield application. That is the difference
 between "this ability was used" (which we have) and "this ability affected
 these players for this long" (which we do not). Interesting for coaching or
-pro analysis; irrelevant to replacing the C# parser.
+pro analysis; irrelevant to the current metric sections.
 
 PRE-PRODUCTION BEHAVIOUR (fixed 2026-08-02): `parse_class_net_cache` returned
 `Err` when `function_count == 0` before reading any payload bits. The caller
@@ -1788,7 +1755,7 @@ Fixed in commit fc24b63. ability_usage is EXACT; ability_detail became
 EXACT once the subobject GUID landed (commit cf97ecf).
 
 The premise here was also wrong. It said the sections needed a
-class-path-to-display-name table "extracted from the C# parser". The
+class-path-to-display-name table "extracted from the reference". The
 reference does not use display names for abilities either -- it uses class
 names. The entire difference was that our replication_class_path carried the
 full object path ("Foo.Foo_C") where the reference emits the package path
@@ -1978,8 +1945,7 @@ Five measurements, all on 02d4d478 unless noted:
      `object_net_guid` in fields.parquet by the set of group_paths it appears
      under. ZERO object GUIDs appear under BOTH an unnamed instance-name path
      and a resolved class path. There is no earlier class-bearing block to
-     memoize from, so a per-object `object_net_guid -> group` cache -- which
-     would go beyond C#, whose cache is keyed on ClassNetGuid only -- has
+     memoize from, so a per-object `object_net_guid -> group` cache has
      nothing to learn from.
 
   3. OUTER CHAIN TERMINATES. GUID 582 = "InventoryComponent", outer 576; GUID
@@ -2047,11 +2013,6 @@ DamageableComponent_ClassNetCache from two ("Damageable" and
 entries in KNOWN_SUBOBJECT_CLASS_PATHS, i.e. hardcoded. MagazineAmmo and
 ReserveAmmo are likewise two names for what the declared schema offers only
 one candidate class for (/Script/ShooterGame.AmmoComponent).
-
-The C# reference does not solve this either: ResolveSubobjectClassPath returns
-null when ClassNetGuid is invalid, except for its 4-entry
-KnownSubobjectClassPaths dictionary. That dictionary is the hardcoding this
-project's invariant forbids, and vrfkit mirrors it only to preserve parity.
 
 SCOPE OF THE CLAIM. All of the above is measured over ReplayData chunks, which
 is everything vrfkit ingests (driver.rs skips every chunk whose type is not
@@ -2204,9 +2165,9 @@ and region_source is byte-identical. Remaining deltas are the +1 recovered
 damage record, the 7-I server-world effects, and the 7-B 1ms offset on
 hp_tracking timestamps -- no unexplained difference remains.
 
-Root cause: DamageParameters.cs:51 attaches a custom decoder
-(.Decode(ValorantPayloadDecoders.Equippable)) that extract_descriptors.py
-cannot see through, so the field landed in table.rs as FieldType::Raw. That
+Root cause: the descriptor attaches a custom decoder (.Decode(...)) to
+this field that the descriptor generator could not see through, so the field
+landed in table.rs as FieldType::Raw. That
 decoder is exactly archive.ReadIntPacked(), which FieldType::ObjectNetGuid
 already implements. With no type, the adapter guessed a fixed little-endian
 uint16 -- wrong both because IntPacked is 8/16/24 bits wide depending on the
@@ -2214,11 +2175,11 @@ value, and because the low bit of the first byte is IntPacked's continuation
 flag, which made every multi-byte value odd when dynamic NetGUIDs must be
 even.
 
-Generalisable lesson: any C# field with a custom .Decode(...) is invisible to
-the extractor and silently becomes Raw, and Raw reads as a deliberate choice
-rather than an unknown.
+Generalisable lesson: any descriptor field with a custom .Decode(...) is
+invisible to the extractor and silently becomes Raw, and Raw reads as a
+deliberate choice rather than an unknown.
 
-AUDITED 2026-08-01 (commit 059713e). Every .Decode() call site in the C#
+AUDITED 2026-08-01 (commit 059713e). Every .Decode() call site in the
 descriptors was checked. EquippableUsed was not the only casualty -- five
 damage geometry fields hit the same trap while vrf-decode already implemented
 their exact quantization, and all five are now typed:
@@ -2273,7 +2234,7 @@ all even and 114 of 115 resolve to a weapon class path.
 So we are not mis-mapping a correct GUID; we are producing a value that is
 not a valid dynamic NetGUID at all. Start from how the object-reference RPC
 parameter is read (a missing shift or an off-by-one-bit read is the shape
-that matches) and compare against the C# ValorantPayloadDecoders path.
+that matches).
 
 The rank-order pairing between the two value sets is NOT evidence of a
 transform: the implied ratios are 1.41 / 1.71 / 1.82 / 3.97, and two entities
@@ -2342,8 +2303,8 @@ NO SILENT SUCCESS
   returns Err, counted in rpc_stream_failures). Never guess a capacity to
   make the number look better; that is silent corruption.
 
-A CUSTOM C# DECODER MEANS THE TYPE IS UNKNOWN, NOT RAW
-  extract_descriptors.py cannot see through .Decode(...) in the C#
+A CUSTOM DECODER MEANS THE TYPE IS UNKNOWN, NOT RAW
+  The descriptor generator cannot see through .Decode(...) in the
   descriptors, so any field with a custom decoder lands in table.rs as
   FieldType::Raw. That is indistinguishable from a field we deliberately
   keep raw. Two real bugs came from this (7-J and the damage geometry
@@ -2366,10 +2327,10 @@ A STABLY-NAMED SUBOBJECT'S CLASS IS NOT ON THE WIRE
   impossible to close.
 
 GENERATED FILES ONLY VIA GENERATORS
-  crates/vrf-decode/src/table.rs    -- only via tools/extract_descriptors.py
+  crates/vrf-decode/src/table.rs    -- only via the descriptor generator
   crates/vrf-transform/src/sbox.rs  -- only via tools/extract_sboxes.py
   crates/vrf-transform/tests/data/golden_vectors.rs -- only via tools/extract_golden.py
-  tools/equippable_table.py         -- only via tools/extract_equippables.py
+  tools/equippable_table.py         -- only via the equippable generator
                                        (check staleness: --check)
   Hand-editing these is how subtle bugs enter.
 
@@ -2454,26 +2415,23 @@ NO UNSAFE
 
 ### Tools directory
   extract_sboxes.py      -- generates sbox.rs
-  extract_equippables.py -- generates equippable_table.py (weapon names)
   extract_golden.py      -- generates golden_vectors.rs
-  extract_descriptors.py -- generates table.rs (type overlay)
   apply_type_corrections.py -- wire/declaration mismatches
   check_decode_errors_corpus.py -- asserts Decode errors: 0 corpus-wide.
                             The ONLY check that sees overlay decode failures:
                             `validate` does not print those counters at all
-  compare_combat_report.py  -- CombatReport cross-check vs C#
-  compare_rpc_params.py     -- RPC parameter cross-check vs C#
+  compare_combat_report.py  -- CombatReport cross-check
+  compare_rpc_params.py     -- RPC parameter cross-check
   compare_with_csharp.py    -- structural cross-check
-  analyze_coverage.py       -- field coverage analysis
   validate_corpus.py        -- full 215-replay batch validation
   validate_metrics_corpus.py -- metrics.json parity across all 11 replays
-                               that have a C# reference bundle
+                               that have a reference bundle
   check_corpus_baseline.py  -- pins the VALIDATE path per build
   check_export_baseline.py  -- pins the EXPORT path (counters + Parquet
                                shape) and cross-checks the printed row
                                counts against the files they name
   check_effect_decoder.py  -- 12-case guard for the live Python shot-effect
-                               decoder, including two C# bundle cases
+                               decoder, including two reference-bundle cases
   check_ascii.py           -- complete tracked-Rust raw-byte ASCII guard
   find_skips.py             -- finds which replays still have skipped bits
   to_valplay_bundle.py      -- vrfkit Parquet -> valplay bundle adapter
@@ -2486,42 +2444,10 @@ NO UNSAFE
 
 ### Path references
   Parser repo   : C:\Users\yakihyuk0728\Documents\GitHub\vrfkit
-  C# reference  : C:\Users\yakihyuk0728\Documents\GitHub\ValorantReplayParser
-                  Instrumentation: only in clean files, always reverted.
-
-                  TABLE.RS DEPENDS ON A BRANCH THERE, NOT ON origin/main.
-                  Generating from origin/main yields 680 overlay entries;
-                  from local main 666. The committed table is regenerated
-                  from `local/vrfkit-descriptors` at 8824794, whose history merges
-                  the pawn/projectile descriptors (13-J) into the Gekko
-                  casing fix (13-C). Both delegate branches are merged and
-                  their worktrees removed; regenerating from that branch
-                  reproduces the committed table exactly.
-                  (An earlier note cited ced9379 for the pawn branch; that
-                  commit was amended away and is unreachable. The real
-                  commit was d2b76f2, now merged as f0dd7e7.)
-                  The difference is the descriptor work on
-                  branch `local/vrfkit-descriptors` (fe5343a, 2026-08-02):
-                  weapons, ItemSlot, PurchasedItemComponent,
-                  OwnerExclusivePlayerInfo, EquippablePickup, TimedBomb
-                  and the effect manager. Credits, purchases,
-                  inventory-slot identity and shot effect data all rest
-                  on it.
-
-                  Check out that branch before running
-                  extract_descriptors.py. Generating from main and
-                  shipping the result would silently cut typed coverage
-                  by a third -- apply_type_corrections.py now fails
-                  loudly if that happens, which is how this was found.
-
-                  That work was uncommitted until 2026-08-02, so the
-                  table was reproducible on one machine only. A backup
-                  of the pre-commit state is under
-                  Documents/vrp-uncommitted-backup/20260802-011146.
   valplay       : C:\Users\yakihyuk0728\Documents\GitHub\valplay
                   Never modify.
   Corpus        : valplay\data\raw\vrf  (215 x .vrf, all 13.01)
-  C# ref output : valplay\pipeline\exports\02d4d478-...\
+  Ref bundle    : valplay\pipeline\exports\02d4d478-...\
                   SLIMMED: 97% of rpc_received removed, several keys stripped
   Local 13.02   : %LOCALAPPDATA%\VALORANT\Saved\Demos\*.vrf
                   Game-owned rotating input; currently 3 files, not a baseline.
@@ -2598,7 +2524,7 @@ docs/archive/CODEX_TASK_BRIEF.md (moved out of the root in 36-G)
 and independently confirmed why its original resolver task was withdrawn.
 Search and measurements were read-only except for copying three fixtures into
 vrfkit-owned machine-local baseline directories and adding their generated JSON
-baselines. The dirty C# reference repository and valplay were not modified.
+baselines. valplay was not modified.
 
 ### 11-A. Non-Bomb mode coverage [SUPERSEDED BY 32-D -- the input was always there]
 
@@ -2655,7 +2581,7 @@ metrics path, and that lives downstream in valplay.
 ### 11-B. Older supported builds [DONE]
 
 A wider search found one unique source fixture for every previously unmeasured
-supported build under the read-only C# integration-test directory:
+supported build in a read-only integration-test directory:
 
 | Build | Source filename | Bytes | SHA-256 |
 |---|---|---:|---|
@@ -2715,7 +2641,7 @@ corpus totals are exact.
 `vrf-frame` converted `timeSeconds` with `(f64::from(t) * 1000.0).round() as
 u32` and a comment asserting the cast saturates so non-finite input "yields 0
 as the reference does". Measured: NaN -> 0, -inf -> 0, **+inf -> 4294967295**.
-ReplayEventJsonWriter.cs:194 has an explicit `float.IsFinite(seconds)` guard,
+The reference's JSON writer has an explicit `float.IsFinite(seconds)` guard,
 which is now written out here. `time_seconds` is a raw `read_f32` with no
 validation, so any bit pattern is representable; one +inf frame would have
 stamped 4294967295 ms on every packet in it.
@@ -2727,9 +2653,8 @@ Another comment on `DemoPacket::time_ms` still said "truncated", from before
 
 The sink recorded a subobject GUID as
 `Some(header.object_net_guid.0).filter(|&g| g != 0)`. The reference reads the
-field unconditionally (ContentBlockFramer.cs:436-437) and branches on
-`!header.ObjectNetGuid.IsValid` (ContentBlockPathResolver.cs:100), so it
-treats the invalid GUID as reachable. Folding it to `None` did not discard a
+field unconditionally and branches on the GUID's validity, so it treats the
+invalid GUID as reachable. Folding it to `None` did not discard a
 zero -- `None` means "actor block" downstream, the adapter substitutes the
 actor GUID, and the block collapsed onto the actor. That is exactly the merge
 cf97ecf existed to undo, and it contradicted `FieldRecord`'s own doc comment.
@@ -2755,7 +2680,7 @@ examples remain a useful independent Rust specification: six non-empty blobs
 and three empty-array cases.
 
 `tools/check_effect_decoder.py --check` now exercises the live Python path
-with all nine Rust examples, two cases whose expected values come from the C#
+with all nine Rust examples, two cases whose expected values come from the
 reference bundle, and one malformed-input case that pins Python's partial-list
 contract. The 12-case guard was observed failing after deliberate byte
 corruption (exit 1) and passing after restoration (exit 0).
@@ -2861,9 +2786,9 @@ which is why the corpus totals never moved and no counter ever complained.
 
 ### 13-A. A cleared optional bit means "default", not "absent" [FIXED, 2637808]
 
-`ArchiveVectorReaders.ReadOptionalQuantizedVector` returns `defaultVector` when
+The reference's optional quantized-vector reader returns a default vector when
 the leading bit is clear -- `(0,0,0)` for spawn location and velocity, `(1,1,1)`
-for scale (`NewActorSerializer.cs:56-72`). vrfkit returned `None`, collapsing
+for scale. vrfkit returned `None`, collapsing
 that into the genuinely-absent case: a static actor never enters the spawn block
 at all, so its location is unknown, while a dynamic actor with the bit clear has
 a known location of exactly the origin.
@@ -2888,8 +2813,8 @@ is not established by the code that produces it.**
 `mov(loc=..,rot=..,vel=..)`, which has nowhere to put
 `simulated_physics_sleep` or `server_physics_handle`, so they were dropped;
 `value_str` is one column and there is no struct column to hold them.
-14,377 rows on 02d4d478 shipped that string where the reference
-(`ReplayJsonNormalizer.cs:255`) emits an eight-member object.
+14,377 rows on 02d4d478 shipped that string where the reference emits an
+eight-member object.
 
 Now serialized as a JSON object with the reference's member names and order.
 Joined against the reference on (time_ms, group path, actor GUID, object GUID):
@@ -2904,18 +2829,17 @@ is recovered here. What changed is that they are representable at all.
 Both `RepMovement` tests now assert the whole string. Substring assertions could
 not see the members carrying no data, which is exactly where the loss was.
 
-### 13-C. Gekko's descriptor path had a one-character typo [FIXED, f67ea66 + 4f78f6d]
+### 13-C. Gekko's descriptor path had a one-character typo [FIXED, 4f78f6d]
 
-`AggrobotAgentDescriptor` declared `/Game/Characters/Aggrobot/Aggrobot_PC...`;
+Gekko's agent descriptor declared `/Game/Characters/Aggrobot/Aggrobot_PC...`;
 the replays declare `AggroBot` -- capital B. Riot mixes casing inside Gekko's
 own content (`Ability_Aggrobot_C_ExplodeyPatch` really is lowercase; the
 character directory and asset are not) and the descriptor picked the wrong one.
-Lookup is ordinal (`DescriptorCatalogIndex.cs:7`, `BoundExportStore.cs:5`), so
-the class bound nothing.
+Lookup is ordinal, so the class bound nothing.
 
 Gekko is the only agent whose descriptor string differed from the replay string.
-`AgentClassNetCacheDescriptors.cs:14` builds each agent's cache path as
-`agent.Path + "_ClassNetCache"` and registers exactly one function, which is why
+The reference builds each agent's cache path as the agent path plus
+`_ClassNetCache` and registers exactly one function, which is why
 only `MulticastNotifyKilledEnemy` was lost among that actor's RPCs -- every
 other one resolves through subobject class paths that do not depend on the
 character path. The larger half of the loss was Gekko's replicated character
@@ -2924,8 +2848,8 @@ property group, unbound for the whole match.
 **The reference's own export summary reported it all along**: AggroBot is the
 sole `was_decoded: false` among the match's eight agent classes.
 
-Fixed at source on `local/vrfkit-descriptors` (f67ea66), together with the test
-that pinned the typo (`ValorantDescriptorsTests.cs:16`). Regenerating moves
+Fixed at source on the descriptor branch, together with the test that
+pinned the typo. Regenerating moves
 3,605 rows off "not in table": 528 decode to typed values, 3,077 resolve to
 fields the descriptor declares Raw or Skip.
 
@@ -2947,8 +2871,8 @@ every comparison figure in this document.
 ### 13-D. The extractor could not read a factored handle run [FIXED, 4f78f6d]
 
 `AddPropertyHandle`'s handle argument had to be a literal. A descriptor may
-instead factor a run of handles into a helper that takes the first one:
-`MulticastNotifyDamageBaseParameters.cs:24` declares
+instead factor a run of handles into a helper that takes the first one: the
+`MulticastNotifyDamage_Base` descriptor declares
 `AddDeathFields(uint firstHandle)` and calls it as `AddDeathFields(32)`, so its
 six statements read `firstHandle` and `firstHandle + 5`.
 
@@ -2986,8 +2910,8 @@ note called them "608 real values dropped"; they are 608 undecoded blobs.
 ### 13-I. A static actor has no class path, and no archetype either [FIXED, ea08a83]
 
 Same shape as 13-A, found the same way -- by widening a comparison that had been
-passing. `NewActorSerializer.cs:29` returns before reading the spawn block for
-anything that is not dynamic, so the reference leaves both
+passing. The reference returns before reading the spawn block for anything
+that is not dynamic, so it leaves both
 `ReplicationClassPath` and `ArchetypePath` null for static actors. We filled
 both in.
 
@@ -3011,12 +2935,13 @@ the fields it reads.**
 30 `ReplicatedGravityDirection` rows across four classes with **no descriptor on
 either side**: `Smonk_PostDeath_PC` (14), `Pawn_Hunter_E_Drone` (8),
 `Pawn_Aggrobot_SeekerNade` (6), `Pawn_Aggrobot_RollyPolly` (2). The reference
-decodes none of them. Writing those descriptors is new upstream work, not a fix.
+decodes none of them. Writing those descriptors is new descriptor work, not a
+fix.
 
 5,216 `ReplicatedMovement` rows stay raw for the same reason, across 17
 ability/projectile classes.
 
-That upstream work was done on 2026-08-02; all 5,246 rows now decode. See 13-J.
+That descriptor work was done on 2026-08-02; all 5,246 rows now decode. See 13-J.
 One count above is worth keeping straight: the two lists overlap.
 `Pawn_Aggrobot_SeekerNade` carries **both** fields, so the union is **20**
 distinct classes, not 21.
@@ -3059,15 +2984,14 @@ overlay counters did.
 
 ### 13-H. Stale figure corrected
 
-The C# repo's "17 uncommitted entries" figure in the brief is stale. That work
-was committed as fe5343a; the tree is now clean at f67ea66 on
-`local/vrfkit-descriptors`, with `main` still untouched.
+The brief's "17 uncommitted entries" figure for the descriptor source is
+stale. That work was committed on 2026-08-02.
 
 ### 13-J. The ability pawns and projectiles got descriptors [DONE 2026-08-02]
 
 Closes 13-F. Twenty actor classes replicated `ReplicatedMovement` or
 `ReplicatedGravityDirection` with no descriptor on either side. They now have
-one, on C# branch `local/pawn-descriptors` (ced9379, based on f67ea66).
+one, on a second local descriptor branch.
 
 Nothing here is a new layout. Every (wire name, type) pair is copied from a
 descriptor that already declares that name, and the field-name census from
@@ -3110,8 +3034,8 @@ plainly rather than claiming the wire chose: on this corpus the choice is
 unobservable. It is bounded, not guessed. Flipping all three to ByteComponents
 and re-running the whole 215-replay corpus leaves **every overlay counter
 identical** (decoded OK 83,467,121, decode errors 0) and 02d4d478's
-`fields.parquet` **byte-identical** (SHA-256 4c9f02f8...). They take the C#
-builder default.
+`fields.parquet` **byte-identical** (SHA-256 4c9f02f8...). They take the
+descriptor builder default.
 
 An earlier draft of this section justified that by "all three sibling
 smoke/zone descriptors take the default". **That was false**, and this
@@ -3161,9 +3085,9 @@ Two independent checks that the values are real, not merely bit-exact:
     `Projectile_Wushu_4_Smoke` (495 EOF + 58 residual) and the Rust build
     reported exactly 553.
 
-**A pre-existing scale quirk this surfaced, deliberately NOT changed.** The C#
-`ReplicatedMovementDecoder` reads the location with `VectorNetQuantize100`,
-i.e. an unconditional divide by 100. The wire's 7-bit vector header carries the
+**A pre-existing scale quirk this surfaced, deliberately NOT changed.** The
+location is read with `VectorNetQuantize100`, i.e. an unconditional divide by
+100. The wire's 7-bit vector header carries the
 component width and an is-integer flag but *not* the scale, and the two are not
 consistent across classes: 18 of the 19 classes here quantize to whole units,
 so the divide makes `location` **100x smaller than the true world coordinate**,
@@ -3202,28 +3126,29 @@ ShortComponents it exits **1** naming 16 offending replays on a 20-replay slice
 (7,801 errors; 75,286 over the full corpus, 160 of 215 replays affected), and
 exits **0** on the restored build. `Decoded OK` fell by exactly the error count
 in both runs.
-The published bundle stamp needs one more qualification. It records Git HEAD
-`2d2e05e`, but does not prove that the working tree was clean.
-`EffectManagerComponentDescriptors.cs` is absent from clean `2d2e05e` and was
-first committed in fe5343a; that commit records that the descriptor work had
-previously lived uncommitted. Published bundle behavior is consistent with the
-descriptor being present. Therefore a clean checkout of `2d2e05e` alone is not
-a complete reproduction recipe. Keep `main` pinned, but treat the published
-bundle artifact -- not an inferred clean tree -- as the immutable reference.
+The published bundle stamp needs one more qualification. It records Git HEAD,
+but does not prove that the working tree was clean. The effect-manager
+descriptors are absent from a clean checkout of the stamped commit and were
+first committed on the local descriptor branch; that commit records that the
+descriptor work had previously lived uncommitted. Published bundle behavior is
+consistent with the descriptor being present. Therefore a clean checkout of
+the stamped commit alone is not a complete reproduction recipe. Keep `main`
+pinned, but treat the published bundle artifact -- not an inferred clean tree
+-- as the immutable reference.
 
 ---
 
 ## 14. Codex needs-work results (2026-08-02)
 
 This section records the four delegated items. Work was committed on the
-isolated `codex/needs-work` branch; master, valplay, and the C# source tree were
-not modified or merged by the delegate.
+isolated `codex/needs-work` branch; master and valplay were not modified or
+merged by the delegate.
 
 ### 14-A. Live effect decoder guard (fb41b96, 23fb6aa)
 
 The brief's count of eight Rust examples was stale: `effect.rs` contains nine.
 The new `tools/check_effect_decoder.py --check` runs those nine through the
-live Python decoder, adds two independently expected C# reference-bundle cases,
+live Python decoder, adds two independently expected reference-bundle cases,
 and pins Python's partial-list malformed-input contract. All 12 pass. Review
 found that flipping bit 0 in the three one-byte empty arrays was observationally
 unchanged by that partial-list contract. Commit 23fb6aa flips the second bit
@@ -3242,14 +3167,14 @@ markers, undescribed functions, and a real handle/name mismatch.
 ```text
 group                         pre no-value   evidence-backed result
 BaseReplayController              333,022   descriptor is extracted; 225,808
-                                            movement markers and 107,214 C#-
+                                            movement markers and 107,214
                                             undescribed function rows remain
-LocationalEffectManager           124,744   no C# descriptor
+LocationalEffectManager           124,744   no descriptor
 EffectManager                     110,508   descriptor/extractor work; residue
                                             is raw, skipped, or undescribed
 ReplayEffect                       23,275   5,294 recovered; 17,981 intentional
                                             raw/undescribed rows remain
-BombPlayerState                    20,898   20,888 absent from the C# descriptor;
+BombPlayerState                    20,898   20,888 absent from the descriptor;
                                             10 UniqueId rows intentional Raw
 ```
 
@@ -3259,77 +3184,17 @@ tries direct name, the existing `b`-prefix rule, then an explicit descriptor
 handle alias. Both RPC and RepLayout sinks pass the handle, including when no
 field name exists.
 
-The generator also learned three previously invisible C# declaration shapes:
-11 `AddRaw` wrapper entries, 2 called BombGameState helper entries, and 29
-runtime agent-cache entries. Fresh raw generator output before the 24 pinned
+Fresh raw generator output before the 24 pinned
 type corrections is 152 groups / 1,100 name entries: Raw 164, Skip 154, Typed
 782, plus 84 separately sorted explicit-handle aliases. Task B deleted no
 previously generated name key.
 
-Fix round 2 (b10467b) makes an explicit descriptor category override take
-precedence over an inherited Agent category, matching the C# catalog's
-effective `HasFlag(Agent)` filter. This prevents three Ability subclasses on
-current master's pawn-descriptor branch from receiving fabricated runtime
-ClassNetCaches. Unknown categories and unsupported override syntax now fail
-loudly. The f67 input retains the tracked 1,100-entry canonical table.
-
-Fix round 3 (b5b74db) closes the parser boundary exposed by review. A
-same-length C# code view masks comments and literal bodies before class and
-category discovery, including nested interpolated expressions and braces in
-comments. Qualified and `global::` category type/member names are supported;
-real unknown or unsupported overrides still fail loudly. Regression tests pin
-qualified Ability suppression, `Agent | Ability`, `All`, comment/string
-decoys, and class-boundary braces. At b5b74db the complete Python tool suite
-was 13/13. Both live generations retained 29 real Agent caches and excluded
-the same three phantoms.
-
-Fix round 4 (519de0b) closes the fail-silent source-parser boundaries then
-found by whole-branch review. It recognizes delimiter-counted plain and
-interpolated C# raw strings; limits category, Path, and Configure discovery to
-direct class members; bounds block and expression-bodied Configure methods;
-anchors literal handles to AddPropertyHandle or the discovered handle wrapper;
-and requires runtime-cache structural captures to be live code rather than
-comments or strings. Qualified/global identifiers remain supported. Alias and
-escaped-alias category return types are deliberately unsupported but now fail
-loudly with the owning class instead of silently inheriting.
-
-Fix round 5 (81d4f88) binds those structural matches to their actual C# owner.
-Raw-wrapper discovery is live-code-only and follows only the declaring class's
-base chain. Field names are extracted from aligned raw/code statements, so
-comment or string decoys cannot supply a name or type. Runtime caches are
-anchored to a live `ClassNetCacheDescriptor` constructor in the innermost
-owning type; their unique direct-member factory, returned `RpcDescriptor`
-initializer, complete `Name` RHS, and direct owning-class constant must all be
-unambiguous. Local factory shadowing, unsupported RHS expressions, and
-multi/trailing factory lists fail loudly instead of emitting or omitting data.
-Escaped class identifiers and the escaped runtime descriptor type are
-normalized. The first bounded review reported Critical 0 / Important 0 /
-Minor 0; two exact cross-reviews then found five additional lexical-boundary
-cases in the same modified surface.
-
-Fix round 6 (45223c9) pins those five cases. A direct factory-local constant or
-containing-method `Func<RpcDescriptor>` that shadows a class member now fails
-loudly. Runtime factory arrays find their closing bracket in the live aligned
-code view, so `]` inside a comment cannot truncate a multi-factory list. Only a
-direct factory-body return can supply the returned `RpcDescriptor` initializer,
-and duplicate declarations of an actual raw-wrapper owner cannot merge wrapper
-semantics across namespaces. All five fixtures failed before the fix and pass
-after it. The single bounded implementation review reported Critical 0 /
-Important 0 / Minor 0; the two original cross-reviewers then re-ran only their
-exact repros against the committed fix.
-
-This extractor is still a source-subset tool, not a general C# front end. This
-round did not add arbitrary escaped member spellings such as `@Path` or
-`@Configure`, qualified base-name resolution, same-name raw/typed wrapper
-overload resolution, or general ClassNetCache helper/comment/brace grammar.
-None of those shapes occurs in either pinned f67 or d2 descriptor input. If a
-future source tree introduces one, add a fixture and either support it or fail
-loudly before regenerating the table.
-
-The final Python tools suite is 53/53. Fresh raw f67 generation still yields
+The final Python tools suite is 53/53. Fresh raw generation from the
+descriptor branch still yields
 1,100 names / 152 groups / Raw 164 / Skip 154 / Typed 782 / 84 aliases / 29
-runtime caches. After all 24 pinned type corrections, the ordered f67 entries
-and aliases are semantically identical to the tracked table. Raw d2 generation
+runtime caches. After all 24 pinned type corrections, the ordered entries
+and aliases are semantically identical to the tracked table. Raw generation
+from the pawn-descriptor branch
 still yields 1,192 / 172 / 164 / 164 / 864 / 84, retains 29 real caches, and
 omits the three phantom paths. The raw artifact uses a one-struct-per-line,
 pre-correction layout and is not itself the canonical byte format; the tracked
@@ -3353,9 +3218,10 @@ fields.parquet bytes    13,187,104  13,255,044     +67,940
 The `not_in_table` reduction is exactly 5,294 newly decoded rows plus 1,924
 newly classified deliberate Raw/Skip rows. Structural counters and every
 Parquet row count are unchanged. The byte increase comes from the 5,294 newly
-populated string values. All 2,647 C# Location values matched exactly and all
-2,647 Rotation values matched within 5e-5. The adapter accepts both the legacy
-raw representation and the typed representation with identical geometry.
+populated string values. All 2,647 reference Location values matched exactly
+and all 2,647 Rotation values matched within 5e-5. The adapter accepts both
+the legacy raw representation and the typed representation with identical
+geometry.
 
 ### 14-C. Whole-block payload preservation measurement
 
@@ -3441,22 +3307,21 @@ cherry-pick it. A read-only merge audit finds conflicts in PROJECT_STATUS.md,
 table.rs, and export_02d4d478.json. Neither version of the two generated/data
 files should be selected manually.
 
-Current master depends on a separate clean C# worktree at
-`C:\Users\yakihyuk0728\Documents\GitHub\VRP-pawn-descriptors`, branch
-`local/pawn-descriptors@d2b76f2`. It is a descendant of f67ea66 and contributes
-92 name entries across 20 ability groups that do not overlap Task B's 42 new
-name entries. After obtaining merge authority, preserve master's fixed
-build_1302 baseline and decode-error guard. Preserve b10467b, b5b74db,
-519de0b, 81d4f88, and 45223c9: together they apply the nearest explicit
-category override, safely discover qualified overrides outside
-comments/literals/raw strings and nested types, scope wrapper/factory/name
-resolution to live owning declarations, reject ambiguous lexical shadows, and
-prevent three phantom Ability ClassNetCaches. Then run that extractor against
-the d2b76f2 worktree,
+Current master depends on a separate clean pawn-descriptor worktree. Its
+branch descends from the Gekko fix (13-C) and contributes 92 name entries
+across 20 ability groups that do not overlap Task B's 42 new name entries.
+After obtaining merge authority, preserve master's fixed build_1302 baseline
+and decode-error guard. Preserve b10467b, b5b74db, 519de0b, 81d4f88, and
+45223c9: together they apply the nearest explicit category override, safely
+discover qualified overrides outside comments/literals/raw strings and nested
+types, scope wrapper/factory/name resolution to live owning declarations,
+reject ambiguous lexical shadows, and prevent three phantom Ability
+ClassNetCaches. Then run that extractor against the pawn-descriptor worktree,
 followed by type corrections and rustfmt. A temporary clean generation with
 45223c9 produced exactly 1,192 names / 172 groups / Raw 164 / Skip 164 / Typed
-864 / 84 handle aliases, retained all 29 real runtime Agent caches, and omitted
-the three phantom paths. Regenerate -- never hand-merge -- the tracked table.
+864 / 84 handle aliases, retained all 29 real runtime Agent caches, and
+omitted the three phantom paths. Regenerate -- never hand-merge -- the tracked
+table.
 
 Then build a combined release and re-measure the export baseline. Counter
 arithmetic is only a sanity check; Parquet ZSTD bytes, hash, typed-row count,
@@ -3465,9 +3330,8 @@ and final baseline must not be predicted or added across branches. Re-run the
 combat comparison, and 11-replay metrics before resolving the documentation
 conflicts with measured combined values.
 
-At final delegate verification, the primary C# repository was clean at
-`local/vrfkit-descriptors@f67ea66`, the separate pawn-descriptor worktree was
-clean at d2b76f2, C# main remained `2d2e05e`, and valplay was clean at
+At final delegate verification, the descriptor source and the separate
+pawn-descriptor worktree were clean, and valplay was clean at
 `main@4578a5a`.
 
 ---
@@ -3480,23 +3344,24 @@ covers the remaining **386 groups / 104,331 rows**, which nobody had looked at.
 
 ### 15-A. Bottom line: nothing in the tail is an extractor bug
 
-**Zero case-1 findings.** No group in the tail is one the C# describes and our
-generator fails to read. No near-miss spellings, no dead handle aliases, no
-cross-replay anomalies.
+**Zero case-1 findings.** No group in the tail is one the descriptors describe
+and our generator fails to read. No near-miss spellings, no dead handle
+aliases, no cross-replay anomalies.
 
     verdict                                          groups     rows
     no descriptor for these FIELDS (group is bound;      57   36,294
-      residue is C# Ignore(), .Decode()-Raw, or
-      names C# never declares)
-    no C# descriptor for the class                     215   34,723
+      residue is Ignore(), .Decode()-Raw, or
+      names no descriptor declares)
+    no descriptor for the class                        215   34,723
     no ClassNetCacheDescriptor for the class            46   20,870
     stably-named subobject, class not on the wire       68   12,444
       (7-H territory)
 
 The hunt was run two independent ways and both came back negative:
 
-- **Name diff, C# to table.rs**, using a from-scratch extractor rather than
-  `extract_descriptors.py` so a bug in the generator could not hide itself.
+- **Name diff, descriptors to table.rs**, using a from-scratch extractor
+  rather than the descriptor generator, so a bug in the generator could not
+  hide itself.
   142 paths / 1,125 name pairs; only 3 names absent from the table, none
   recovering a row. That independent extractor was validated against the two
   known shapes first -- it recovers `AddDeathFields(32)`'s four names (13-D)
@@ -3513,18 +3378,18 @@ pairs -- is entirely the reference's JSON dropping Unreal's `b` prefix. Its
 `CrouchHeld` is our `bCrouchHeld`: 326 rows on Hunter_PC, zero null.
 
 **The `AggroBot` casing bug (13-C) is not present again.** 386 tail paths
-against 158 C# path literals, normalised to lowercase with separators stripped:
-zero groups match only after normalisation. Fuzzy match at ratio >= 0.93: zero.
+against 158 descriptor path literals, normalised to lowercase with separators
+stripped: zero groups match only after normalisation. Fuzzy match at ratio >=
+0.93: zero.
 
-### 15-B. One dead table entry, and it was a real upstream gap [FIXED, 8824794]
+### 15-B. One dead table entry, and it was a real descriptor gap [FIXED 2026-08-02]
 
 `/Script/ShooterGame.AresGameStateBase:MulticastResetForRespawn` declares
 `SpawnTransform` as `FieldType::Transform`. It is the **only** `Transform`
 entry among all 1,192 and it is never hit on any of the 11 replays.
 
-The descriptor's model of the wire is wrong.
-`MulticastResetForRespawnParameters.cs:16-22` declares one `FTransform?
-SpawnTransform` via `AddProperty(...).Transform()`. The replay's net field
+The descriptor's model of the wire is wrong. It declares one
+`FTransform? SpawnTransform`. The replay's net field
 export declares **four** handles for that group:
 
     handle 0  ShooterCharacter    173 rows, all null (Raw on both sides)
@@ -3550,10 +3415,10 @@ alone.
 
 The reference loses the same three fields: its `events.ndjson` emits
 `MulticastResetForRespawn` 173 times with a payload of `{"ShooterCharacter":
-{BitCount, Data}}` and nothing else. This is upstream absence, not our
-regression.
+{BitCount, Data}}` and nothing else. This is absence in the descriptors,
+not our regression.
 
-FIXED 2026-08-02 on `local/vrfkit-descriptors` (8824794). `SpawnTransform`
+FIXED 2026-08-02 on the descriptor branch. `SpawnTransform`
 is replaced by `Translation` and `Scale3D`, both `.FVector()`, copied from the
 smoke-screen declaration rather than chosen. Handle 249 is left unnamed, for
 the reason above.
@@ -3568,9 +3433,9 @@ The values are physically sensible, not merely well-formed. `Scale3D` is
 has 48 distinct map coordinates, all 173 of which fall inside the bounding box
 of the spawn coordinates `actors.parquet` independently carries.
 
-The C# test that pinned this function now pins both new names, and was driven
-to failure first: removing the `Translation` declaration fails it by name,
-restoring it passes 86/86.
+The descriptor test that pinned this function now pins both new names, and was
+driven to failure first: removing the `Translation` declaration fails it by
+name, restoring it passes 86/86.
 
 Vacuity, stated so the figure is not read as stronger than it is: `Scale3D`
 has exactly one distinct value. `Translation`'s 48 carry the evidence.
@@ -3578,15 +3443,15 @@ has exactly one distinct value. `Translation`'s 48 carry the evidence.
 ### 15-C. Bomb_CombatReportComponent [CLOSED -- not a gap]
 
 Flagged as an unverified lead when this triage was written, then checked. It is
-the same verdict as the rest of the tail: upstream absence, and we are ahead of
-the reference rather than behind it.
+the same verdict as the rest of the tail: absence in the descriptors, and we
+are ahead of the reference rather than behind it.
 
 SUPERSEDED 2026-08-02 by f5feb82 and ce02f1a, see 18. Both halves of the next
 paragraph are now false: the null count fell from 11,641 to 3,032 when the
 walker started asking the overlay table for leaf types, and "a handle we have no
 name for" no longer describes anything -- the REPLAY names all 70 handles this
 group declares, and the leaf label now comes from that declaration. What
-survives is the verdict: those handles are ones the C# reference does not read,
+survives is the verdict: those handles are ones the reference does not read,
 and we keep their bits where it discards them.
 
 11,641 of its 21,268 rows carry no decoded value. They are not overlay-table
@@ -3594,18 +3459,20 @@ misses -- this group is decoded by `decode_struct_array` against
 `COMBAT_ROUNDS_SCHEMA`, and `array.rs:355` labels any handle the schema does not
 name as `_h{handle}`. So every null row is a handle we have no name for.
 
-**The decisive check is whether those are handles the C# reference names and we
-failed to transcribe.** They are not. `CombatRoundReports.cs` dispatches on an
-explicit handle set at each nesting level, and the unnamed handles are exactly
-the complement of it, with **zero overlap at every level**:
+**The decisive check is whether those are handles the reference names and we
+failed to transcribe.** They are not. The reference's CombatReport decoder
+dispatches on an explicit handle set at each nesting level, and the unnamed
+handles are exactly the complement of it, with **zero overlap at every
+level**:
 
-    level                   handles we render as _hN        C# reads
+    level                   handles we render as _hN        reference reads
     Rounds[].Reports[]      6,7,8,9,99..102,104..108        5,10,98,103
     ...Interactions[]       14,15,16,17                     11,12,13,18..26,61,96
     (one level deeper)      27..35,62..70                   -- (none)
 
-Our schema names every handle the C# names and no more. The reference does not
-read these fields either: the member names in its own `events.ndjson` are the
+Our schema names every handle the reference names and no more. The reference
+does not read these fields either: the member names in its own `events.ndjson`
+are the
 28 the dispatch table produces, and `_h`-style entries appear nowhere in it.
 
 Where we differ is that **we keep the bits and the reference does not**: all
@@ -3628,17 +3495,17 @@ Recorded because the strength of the evidence is uneven across the table, and
 reading it as uniform would be wrong.
 
 **Direct reference evidence covers 35 of 386 groups / 29,606 of 104,331 rows.**
-The other 351 groups rest on a reading of the C# source. In particular: the
+The other 351 groups rest on a reading of the descriptor source. In particular: the
 reference emits only 41 distinct `export_group_path` values under
 `parse_profile: viewer` against 475 declared groups, so "absent from both the
 emitted set and the filtered summary" -- 143 groups, 31,869 rows -- means the
 profile never asked for it, **not** that the reference tried and failed. That
 bucket is not parity evidence.
 
-**The reference bundle is `parser_version 1.0.0+2d2e05e`**, which predates both
-`f67ea66` (13-C) and `f0dd7e7` (13-J). Its `was_decoded: false` set still
+**The reference bundle's `parser_version` predates both the Gekko fix (13-C)
+and the pawn descriptors (13-J).** Its `was_decoded: false` set still
 contains AggroBot and the pawn classes current source covers. Every verdict
-above rests on the current C# source; the bundle is corroboration only.
+above rests on the current descriptor source; the bundle is corroboration only.
 
 **The 20 head groups (756,053 rows) were out of scope here**, including the 15
 that 14-B did not reach.
@@ -3786,8 +3653,8 @@ as an improvement. Only a row-level diff against the previous export showed the
 loss. Do not accept a drop in skipped bits as evidence of anything.
 
 **What is still unexplained.** The reference decides the index byte from a
-static descriptor registry -- `ReadNetPlayerIndexStage.cs` asks
-`GetExportGroupKind(path) == PlayerController` against
+static descriptor registry -- it asks whether the export group kind is
+`PlayerController` for
 `ReplicationClassPath`/`ArchetypePath`/`ActorPath` -- where we ask whether a
 GUID was seen in a package-map export. Different mechanisms that happen to
 agree on the byte. Why the reference then reads a property block on that
@@ -3820,8 +3687,8 @@ retraction; this one carries the mechanism.
 controller channel. Either alone is fatal.**
 
 1. `pipeline.rs:638-643` gates the spawn-velocity read behind `is_pc`. The
-   reference reads it **unconditionally** -- `NewActorSerializer.cs:69-72` has
-   no condition around `SpawnVelocity` at all. **Our comment's premise, that
+   reference reads it **unconditionally** -- it has no condition around
+   `SpawnVelocity` at all. **Our comment's premise, that
    "PlayerController actors set bReplicateMovement == false so their spawn data
    omits velocity entirely", is a fabricated invariant.** The bit is on the
    wire with value 0, which is exactly why the reference reports
@@ -3868,7 +3735,7 @@ an instance of it, and it is the third time today that a well-formed value hid a
 defect.
 
 **A trap for anyone comparing block counts.** The reference bundle is a filtered
-projection, not a census: `ReplayExportSink.cs:96` drops every
+projection, not a census: its exporter drops every
 `ExportGroupReceived` whose payload is null or undecoded. The reference frames
 all ten blocks in that bunch and exports one. Do not diff block counts against
 `events.ndjson`.
@@ -3943,7 +3810,7 @@ files behind. That is luck, not the guard working.
 `Ping` on `/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C` is the
 largest single wire-declared field with no table entry: **222,855 rows** across
 the 11 cross-validated replays, declared in 11 of 11 manifests, `bit_count == 16`
-on every row. **The string `Ping` appears nowhere in the C# reference**, so
+on every row. **The string `Ping` appears in no descriptor**, so
 unlike every field typed so far there is no existing declaration to copy from.
 
 ### 18-A. The encoding
@@ -4026,7 +3893,7 @@ It is still the wrong move today:
   the wire supplies the name **and** an existing descriptor declares that name's
   type. Neither half holds: no descriptor declares `Ping`, and its meaning is
   inferred from behaviour.
-- `table.rs` is generated, so this needs a C# descriptor entry on the branch
+- `table.rs` is generated, so this needs a descriptor entry on the branch
   (the 13-J pattern) or a new `apply_type_corrections.py` rule. Real cost.
 - **No metric consumes it.** The reference has no latency figure to compare
   against, so there is nothing to be right or wrong about downstream.
@@ -4055,7 +3922,7 @@ collisions.
 
 ### 19-A. The extractor never read `ExportGroupKind` [FIXED, 18dce16]
 
-`tools/extract_descriptors.py` flattened every C# descriptor into
+The descriptor generator flattened every descriptor into
 `(path, property_name)` overlay rows as if all of them were `Kind = Actor`. Two
 kinds cannot be:
 
@@ -4066,11 +3933,11 @@ kinds cannot be:
   -- `AresAttributeSet`, 6 entries.
 
 8 entries that could never match anything. **The only generator bug among
-16-A's 122 dead entries**; the other 114 are C# build drift the reference
+16-A's 122 dead entries**; the other 114 are descriptor build drift the reference
 cannot decode either.
 
 **The brief for this task was wrong where it mattered, and the fix caught it.**
-It asserted "every C# descriptor declares a Kind". Four
+It asserted "every descriptor declares a Kind". Four
 `ExportGroupDescriptor` subclasses with live paths never override it and take
 `Unknown` from the parameterless constructor's default -- `CoveAbility`,
 `DarkCoverAbility`, `ProjectileSmokeScreen`, `SmokeScreenManager` -- and their
@@ -4079,11 +3946,12 @@ have deleted them, and every headline counter would still have looked fine.**
 It is now a policy table with one row per enum member, and an unclassified Kind
 is a hard failure rather than a silent default.
 
-All seven enum members appear in the C#: Actor 35, Component 19, ClassNetCache
-17, PlayerController 1, Unknown 1, AttributeSet 1, FastArray 1.
+All seven enum members appear in the descriptors: Actor 35, Component 19,
+ClassNetCache 17, PlayerController 1, Unknown 1, AttributeSet 1, FastArray 1.
 
 Table 1,193 -> 1,185 entries, Typed 872 -> 864; Raw 157, Skip 164 and all 84
-handle aliases untouched. Regenerating from the C# reproduces 1,185 exactly.
+handle aliases untouched. Regenerating from the descriptors reproduces 1,185
+exactly.
 
 **The proof is that nothing moved.** All four Parquet files are SHA-256
 identical to a pre-change export and every overlay counter is unchanged. That
@@ -4210,7 +4078,7 @@ Handles 3 and 12 carry the 3-bit `216`/`215` pair every actor replicates.
 
 WEAKER HALF, stated as such: 947 of the 1,183 rows bind through the exact-leaf
 arm (945 `AresWorldSettings` + 2 `BombDestination_C`). The other 236 bind
-through `unique_leaf_match`'s `"_C"` arm, which is beyond C# and rests on the
+through `unique_leaf_match`'s `"_C"` arm, which rests on the
 Unreal convention that a level-placed Blueprint instance takes its class's
 name. `Switch_BlackMarket_2` is 196 of those 236; 7-H's CNC-derived route
 reached the same actor independently, which corroborates the identification
@@ -4274,7 +4142,7 @@ appears, disappears or changes type. `_group_path_to_class` and
 fallback for a missing `actors.parquet`, and `guid_class` is filled from
 `actors.parquet`'s spawn `class_path`, which this change does not touch.
 
-The C# reference bundle cannot corroborate this. Its `events.ndjson` for
+The reference bundle cannot corroborate this. Its `events.ndjson` for
 02d4d478 carries 117,841 `export_group_received` events over just 41 distinct
 export group paths -- a curated gameplay whitelist -- with zero bare-name paths
 and none of the eight groups above.
@@ -4413,7 +4281,7 @@ combat-report leaf values in `events.ndjson` fall from 26,640 to **22,417**.
 green over the loss. This is another change whose damage is invisible to every
 counter, the third recorded this session.
 
-So `to_valplay_bundle.py` keys combat-report leaves on the HANDLE: the C#
+So `to_valplay_bundle.py` keys combat-report leaves on the HANDLE: the
 reference's member name where it has one, `_h{handle}` -- the label the bundle
 already carried -- where it does not. `fields.parquet` keeps the `handle` column
 and loses nothing; this projection has no such escape hatch. That is the "no
@@ -4531,21 +4399,21 @@ four shot-dependent sections still exact.
 
 ### 22-C. The Event chunk corroborates the 13-kill claim from outside the parser
 
-The README's headline -- 13 kills the C# parser drops -- rested on our own RPC
+The README's headline -- 13 kills the reference drops -- rested on our own RPC
 extraction. It now has an independent witness in the same file.
 
 ```
 Event chunk characterDeath                          132
 MulticastNotifyKilledEnemy.KillerCharacter          132 over 10 characters
   character 576                                      13
-C# reference                                        119 over  9 characters
+Reference bundle                                    119 over  9 characters
                                                     132 - 119 = 13
 ```
 
 The payload's two words are the killer and killed NetGUIDs: 132/132 matched in
-that order, 0/132 reversed, with the RPC landing 8-9 ms after the event. The C#
-parser never opens these chunks (`ReplayChunkDispatcher.cs:152`, "Skipping event
-chunk"), so this is not a comparison of two readings of the same bytes.
+that order, 0/132 reversed, with the RPC landing 8-9 ms after the event. The
+reference never opens these chunks, so this is not a comparison of two readings
+of the same bytes.
 
 Scope: the killer/killed pairing is ONE replay. The chunk framing is all 215
 files, 43,397 chunks, consumed with zero bytes left over.
@@ -4591,7 +4459,7 @@ both spot checks. That made "redundant" the expectation. **It is wrong -- see
   1,839,607 rows, and `move_type` constant 1. Posture already ships as
   `bCrouchHeld` (2,480 rows, 1,241 true / 1,239 false). The brief asserted
   otherwise and was wrong. Not a decoder bug: a shifted header would have broken
-  position and yaw, which match C# to zero error.
+  position and yaw, which match the reference to zero error.
 - `MulticastStopContinuousEffect` carries no EffectContainer. It was named as a
   target on the strength of its untyped bit count; its parameters are scalars
   (`SourceID`, `EffectID`, `StopMovementTime`) that need overlay entries, not a
@@ -4857,19 +4725,19 @@ properties etc   189,387 rows   25,870,234 bits
   22-D -- leaving about 8.6M bits of genuine property residue
 ```
 
-### 24-B. Classifying the 27.2M RPC-parameter bits against the C# reference
+### 24-B. Classifying the 27.2M RPC-parameter bits against the descriptors
 
-Each untyped `(class, function, parameter)` was matched against the C#
+Each untyped `(class, function, parameter)` was matched against the
 descriptor set: which `AddFunction(Handle)` sites exist, which carry a
 `<TParams>` type argument, and which parameter names those descriptors declare.
 
 | bits | share | rows | verdict |
 |---|---|---|---|
-| 9,102,609 | 33.4% | 234,284 | the RPC appears in no C# ClassNetCache descriptor |
+| 9,102,609 | 33.4% | 234,284 | the RPC appears in no ClassNetCache descriptor |
 | 6,275,002 | 23.0% | 49,959 | the replay declares no name for the handle |
 | 5,323,393 | 19.5% | 74,590 | `AddFunctionHandle` with no `<TParams>` -- no parameter descriptor exists |
 | 3,701,460 | 13.6% | 22,150 | a descriptor exists but the wire name differs |
-| 2,829,352 | 10.4% | 7,709 | declared in C#, absent from the table |
+| 2,829,352 | 10.4% | 7,709 | declared in a descriptor, absent from the table |
 
 **Only the last row is a gap in our tooling, and it is not a defect.** It is
 exactly `ReplayPlayContinuousEffectAtLocation`'s `FloatValues`, `ObjectValues`
@@ -4880,12 +4748,12 @@ bit. Section 22-D's effect work excluded that RPC on purpose: filling
 silently stops capturing shot blobs. Typing it means migrating the adapter
 first, not changing the table.
 
-So **roughly 86% of the untyped RPC-parameter bits have no upstream type
+So **roughly 86% of the untyped RPC-parameter bits have no declared type
 information at all.** No extractor change reaches them.
 
 The 13.6% "name differs" bucket is worth naming because it is not a spelling
 mistake: `MulticastPlayContinuousEffect` declares one `Transform` field, typed
-`RawPayload("FTransform")` in C#, while the replay declares separate
+`RawPayload("FTransform")` in the descriptor, while the replay declares separate
 `Translation` and `Scale3D` handles. The two models disagree on arity, so a
 name-keyed table cannot bridge them and neither can a handle-keyed one without
 deciding which wire handle is which struct member.
@@ -4895,7 +4763,7 @@ deciding which wire handle is which struct member.
 **No types were written from wire inference.** `MulticastStopContinuousEffect
 .SourceID` is 3,922,479 bits over 13,207 rows -- a fixed 297 bits each, which
 "looks like" an FName. It is not typed here. QUICK START permits changing a
-descriptor on the C# branch with primary-source proof; a bit width that fits is
+descriptor on its branch with primary-source proof; a bit width that fits is
 not proof, and 13-A, 13-E and 13-I are all records of a plausible value being
 worse than none. The same applies to the `.248` / `.249` handles: the replay
 declares no name, and a name-keyed overlay cannot reach an unnamed handle.
@@ -4906,19 +4774,17 @@ what is already here.
 ### 24-D. What the hunt did find: the generator could not reproduce its own output
 
 `table.rs` is a generated file, and **no checkout on this machine reproduced
-it.** Regenerating from `local/vrfkit-descriptors` gave `Typed 864 -> 857,
+it.** Regenerating from the descriptor branch gave `Typed 864 -> 857,
 Raw 157 -> 164`: eight entries downgraded.
 
-QUICK START blamed a missing worktree -- "master also depends on
-local/pawn-descriptors at d2b76f2 in the separate clean VRP-pawn-descriptors
-worktree". That branch and that worktree **do not exist**; the reference repo
-has only `local/vrfkit-descriptors` and `main`. The real cause was different
-and is now fixed: the C# reference had moved these fields from direct
-`.FVectorNetQuantize100()` calls onto `.Decode(ValorantPayloadDecoders.X(...))`
-objects, and `extract_descriptors.py` keyed only on method names, so everything
-routed through `.Decode(` collapsed to Raw.
+QUICK START blamed a missing pawn-descriptor worktree. That branch and that
+worktree **do not exist**; the reference repo has only its descriptor branch
+and `main`. The real cause was different and is now fixed: the descriptors
+had moved these fields from direct `.FVectorNetQuantize100()` calls onto
+`.Decode(...)` decoder objects, and the generator keyed only on method names,
+so everything routed through `.Decode(` collapsed to Raw.
 
-That is precisely the hazard section 8 states -- "a custom C# decoder means the
+That is precisely the hazard section 8 states -- "a custom decoder means the
 type is unknown, not raw ... diff the .Decode() call sites against the Raw
 entries in table.rs before trusting them" -- and it had already fired without
 anyone noticing, because nothing checks that `table.rs` still matches what the
@@ -4938,7 +4804,7 @@ DamageableComponent:MulticastNotifyDamage_Point  DamageOrigin, DamageDirection,
 `EquippableUsed` is the field section 7-J is about. `DamageOrigin` and the
 impact vectors feed the damage geometry.
 
-With `PAYLOAD_DECODER_TYPES` in the generator, `extract_descriptors.py` ->
+With `PAYLOAD_DECODER_TYPES` in the generator, generator ->
 `apply_type_corrections.py` -> `cargo fmt` reproduces the committed `table.rs`
 exactly. **The file is regenerable again**, and the QUICK START note about a
 missing worktree can be retired.
@@ -4949,7 +4815,7 @@ failing before the fix.
 
 ### 24-E. A test suite nothing told anyone to run
 
-`tools/tests` holds 73 tests over the generators -- `extract_descriptors`,
+`tools/tests` holds 73 tests over the generators -- the descriptor generator,
 `check_ascii`, `check_effect_decoder`, `to_valplay_bundle`. Cargo does not run
 `.py`, and no documented check invoked them, so they had been passing or
 failing unobserved. `python -m unittest discover -s tools\tests -p "test_*.py"`
@@ -4976,7 +4842,7 @@ Ranked by what could still move, after 24-B:
   (deliberately untyped, section 18). Each needs its own look; none is a
   single table edit.
 - **2.8M bits** behind the adapter migration (24-B's last row).
-- **23.4M bits** with no upstream type information. Blocked on inputs this
+- **23.4M bits** with no declared type information. Blocked on inputs this
   repository does not have.
 
 ---
@@ -5449,10 +5315,10 @@ a five-player team. The data is intact and self-consistent; only the label
 saying "this is an Int32" is absent.
 
 That makes it a descriptor question, and descriptor questions have a procedure
-here (13-C): the entry belongs in the C# descriptors on the delegate branch
+here (13-C): the entry belongs in the descriptors on the delegate branch
 with primary-source proof and a test that pins it, after which `table.rs`
 regenerates. It is NOT a hand edit -- `table.rs` is generated and the standing
-rule forbids editing it directly -- and the C# reference predates 13.02, so it
+rule forbids editing it directly -- and the descriptor source predates 13.02, so it
 has no `BaseTeamState` descriptor to copy. The arithmetic above is strong wire
 evidence and it is still evidence from values, which is the kind of reasoning
 "never fabricate a decoded value" exists to restrain. Left open deliberately,
@@ -5462,15 +5328,9 @@ from 26-G's wrong sentence.
 ### 26-I. Typing BaseTeamState, and where the line is
 
 26-H left `BaseTeamState` untyped because the evidence looked like inference
-from values. It is not, and the difference matters. `AresTeamEconomy.cs:11-12`
-in the pinned C# reference declares:
-
-```csharp
-public sealed record AresTeamEconomyUpdate(
-    int Index, uint? ReplicationId,
-    int? LoadoutValue,            // Int32
-    int? AverageLoadoutValue);    // Int32
-```
+from values. It is not, and the difference matters. The pinned descriptor source
+declares the team-economy update's `LoadoutValue` and `AverageLoadoutValue` as
+`int?` (Int32).
 
 Build 13.02 did not rename those properties, it RELOCATED them: out of
 `BombGameState.TeamEconomy[]` and into `/Script/ShooterGame.BaseTeamState`.
@@ -5506,7 +5366,7 @@ forbidden. Table is now 1187 entries, Typed 864 -> 866.
 `tools/tests/test_apply_type_corrections.py` is new: 9 cases, and two of them
 exist because the script's own docstring records being bitten by exactly this.
 The table lives in TWO layouts -- one entry per line as
-`extract_descriptors.py` emits it, and the rustfmt'd form that gets committed
+the generator emits it, and the rustfmt'd form that gets committed
 -- and a helper anchored on the wrong one silently matched nothing on a freshly
 generated table, which is precisely when the script runs. Insertion is tested
 against both, plus idempotency, sort order, length resync, and a refusal to
@@ -5557,7 +5417,7 @@ way.
 ## 27. Validated against Riot's own API, and the ADR convention is settled (2026-08-05)
 
 Every check this project has ever run is either self-consistency (kills equal
-deaths), a diff against the C# reference (which reads the same wire), or byte
+deaths), a diff against the reference (which reads the same wire), or byte
 identity against its own frozen output. All three share a blind spot: they
 cannot see an error that the wire itself, or our reading of it, makes
 consistently.
@@ -6130,13 +5990,13 @@ not inferred from the tracker.** MK is closed.
 
 Worth noting for its own sake: the ceremony per round was recoverable the whole
 time from a field nothing types. `ChosenCeremonyForRound` is in neither
-`table.rs` nor the C# reference -- the replay declares the NAME and no source
+`table.rs` nor any descriptor -- the replay declares the NAME and no source
 declares the TYPE, which is the same position `BaseTeamState.Wins` is in
 (26-I). Typing it `ObjectNetGuid` would make round ceremonies a first-class
 column; the evidence is 24 of 24 rounds resolving to `*Ceremony_C` actors
 across four replays, which is wire evidence of exactly the shape that justified
 the `EquippableUsed` correction. It is NOT done here, because that correction
-had a C# descriptor the extractor could not see, and this has no descriptor at
+had a descriptor the extractor could not see, and this has no descriptor at
 all. Deciding that is a separate call, not a side effect of a comparison.
 
 **KAST 54% vs 50%.** That player is pid 258, who was Clove's first kill in the
@@ -6187,9 +6047,9 @@ adding it as a separate decision. Added.
 
 ### 32-A. This clears a LOWER bar than 26-I, deliberately stated
 
-`BaseTeamState.LoadoutValue` had `AresTeamEconomy.cs` declaring `int?` for the
+`BaseTeamState.LoadoutValue` had a descriptor declaring `int?` for the
 same property name; only its group had moved. **This has no descriptor at all**
--- not in `table.rs`, not in the C# reference, in either build. The type rests
+-- not in `table.rs`, not in any descriptor, in either build. The type rests
 entirely on the wire.
 
 That evidence is unusually complete, which is why it was accepted:
@@ -6327,7 +6187,7 @@ against the alias -- so an aliased field gets the b-prefix and handle fallbacks
 exactly as a native one does.
 
 Duplicating 28 table entries was the alternative and was rejected: it encodes
-one fact 28 times, it drifts the moment `extract_descriptors.py` regenerates,
+one fact 28 times, it drifts the moment the table is regenerated,
 and `ADDITIONS` is explicitly the "no descriptor declares this" mechanism --
 these descriptors are not silent, they name a sibling class. The
 `len(ADDITIONS) <= 8` guard in the tools tests refused that path on its own,
@@ -6604,10 +6464,9 @@ did find was a generated file contradicting itself in three consecutive lines.
 
 ### 36-A. table.rs disagreed with table.rs
 
-The generated header, verbatim, as committed at fc2134d:
+The generated header's count lines, verbatim, as committed at fc2134d:
 
 ```
-// GENERATED by tools/extract_descriptors.py -- do not edit by hand.
 // 1185 entries from 171 groups.
 // Raw/Custom: 157, Skip: 164, Typed: 867.
 pub static OVERLAY_TABLE: [OverlayEntry; 1188] = [

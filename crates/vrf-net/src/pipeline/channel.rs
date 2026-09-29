@@ -46,8 +46,9 @@ pub(super) fn is_player_controller_path(path: &str) -> bool {
 /// controller, which decides the net-player-index byte.
 ///
 /// Unreal writes that 1-byte player index between the spawn data and the first
-/// content block only for a dynamic PlayerController (`ReadNetPlayerIndexStage.cs`:
-/// `OpenedDynamicActor && IsPlayerController(archetype/class/actor path)`).
+/// content block only for a dynamic PlayerController. vrfkit recognises one as
+/// an opened dynamic actor whose archetype or actor path names a
+/// PlayerController.
 /// Paths come from the sink's cache (`GuidPathSink::path_for_guid` says why).
 /// A missed byte does not desync visibly: with the spawn-velocity bit in
 /// [`super::spawn`] the misframed header re-synchronises a few bits later
@@ -137,8 +138,8 @@ pub(super) fn handle_channel_open(
         open_packet_id: header.packet_id,
     };
 
-    // A dynamic actor's spawn block is mandatory (`NewActorSerializer.cs`
-    // reads it unconditionally), so a payload that ends here fails the read.
+    // A dynamic actor's spawn block is mandatory (read unconditionally), so a
+    // payload that ends here fails the read.
     // The shape is counted so a corpus run can say whether it ever occurs.
     if actor_net_guid.is_dynamic() {
         if payload.at_end() {

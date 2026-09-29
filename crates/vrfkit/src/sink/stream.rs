@@ -461,11 +461,11 @@ impl ReplicationSink for ExportSink<'_> {
             );
         }
 
-        // A static actor has no archetype, so no class_path: the reference
-        // (NewActorSerializer.cs:29) reads no spawn block for it and leaves
-        // ReplicationClassPath and ArchetypePath null. Its GUID path is the
-        // level's instance name, not a class: as a fallback it put `Ascent_C_0`,
-        // `AresWorldSettings` and the like on 27 opens of 02d4d478, each
+        // A static actor has no archetype, so no class_path: it has no spawn
+        // block, and its class and archetype paths stay null. Its GUID path is
+        // the level's instance name, not a class: as a fallback it put
+        // `Ascent_C_0`, `AresWorldSettings` and the like on 27 opens of
+        // 02d4d478, each
         // byte-identical to net_guids.parquet's `path` for the same GUID.
         let (class_path, archetype_path) = self.actor_paths(Some(state.archetype_net_guid));
 
@@ -541,9 +541,8 @@ impl ReplicationSink for ExportSink<'_> {
         self.current_actor_guid = actor_net_guid.0;
         // An actor block carries no subobject GUID; a subobject block's GUID
         // tells a character's inventory slots apart (merged, a player seems to
-        // hold one item). A GUID of 0 stays `Some(0)`: the reference reads it
-        // unconditionally (`ContentBlockFramer.cs:436-437`) and branches on its
-        // validity (`ContentBlockPathResolver.cs:100`), while downstream `None`
+        // hold one item). A GUID of 0 stays `Some(0)`: it is read
+        // unconditionally and branched on by validity, while downstream `None`
         // means "actor block", the adapter substitutes the actor GUID, and the
         // block collapses onto the actor -- the merge cf97ecf undid.
         self.current_object_guid = if header.is_actor {
@@ -2090,7 +2089,7 @@ mod tests {
 
     #[test]
     fn possession_never_makes_an_ability_pawn_a_player_body() {
-        // Upstream 2b66c65 regression: body hits still count during possession,
+        // Regression case: body hits still count during possession,
         // and releasing a device must not leave it registered as a player.
         for device in [412, 798, 1170, 1534, 1884] {
             let mut cache = NetGuidCache::new();

@@ -15,12 +15,12 @@ The first alone cannot tell a missing record from one the other side has at
 another packet with the same values; the record check can, and it is what an
 expected difference (below) is keyed on.
 
-The C# side is CliReader's `export` of the 13.01 reference replay, kept
-machine-local because it carries per-player values; docs/USAGE.md section 6
-has the commands that produce it.
+The C# side is the C# reference parser's `export` of the 13.01 reference
+replay, kept machine-local because it carries per-player values; docs/USAGE.md
+section 6 has the commands that produce it.
 
 `EXPECTED_DIFFERENCES` lists records whose absence from the C# export is
-explained, keyed by the replay's SHA-256 (from the `manifest.json` CliReader
+explained, keyed by the replay's SHA-256 (from the `manifest.json` the export
 writes beside the reference, which must stay there), the record's identity and
 its values; an entry is excluded from both checks only when all of that holds
 exactly. On its replay, an entry that does not occur exactly as listed is
@@ -49,12 +49,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-#: The rpc_received lines for the functions below, from CliReader's export of
-#: replay 02d4d478, built from ValorantReplayParser 8824794 (the commit
-#: vendored in third_party/vrp). The whole events.ndjson works too; other
-#: lines are skipped. CliReader's manifest.json must stay beside it: it is
+#: The rpc_received lines for the functions below, from the C# reference
+#: parser's export of replay 02d4d478. The whole events.ndjson works too; other
+#: lines are skipped. The export's manifest.json must stay beside it: it is
 #: where the replay's SHA-256 comes from.
-DEFAULT_REFERENCE = (r"%LOCALAPPDATA%\vrfkit\csharp-reference\8824794"
+DEFAULT_REFERENCE = (r"%LOCALAPPDATA%\vrfkit\csharp-reference"
                      r"\02d4d478-1dfb-4412-9a77-29ca29105a9d\rpc_params.ndjson")
 #: vrfkit's export of the same replay.
 DEFAULT_OURS = "out/nested/fields.parquet"
@@ -180,7 +179,7 @@ EXPECTED_DIFFERENCES = (
             "content block carries no class NetGUID, and the C# "
             "ContentBlockPathResolver resolves such a subobject only through "
             "its four-name KnownSubobjectClassPaths table, which lacks "
-            "'Damageable'. The block is skipped undecoded, and CliReader's "
+            "'Damageable'. The block is skipped undecoded, and the C# "
             "export omits undecoded groups, so nothing for the packet reaches "
             "the reference. Adding that one name to the C# table makes it emit "
             "this record with the same 35 parameter values"),
@@ -372,7 +371,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--reference", default=DEFAULT_REFERENCE,
                         help="C# export events.ndjson, or its rpc_received lines; "
-                             "CliReader's manifest.json must be beside it "
+                             "the export's manifest.json must be beside it "
                              "(default: %(default)s)")
     parser.add_argument("--ours", default=DEFAULT_OURS,
                         help="vrfkit fields.parquet of the same replay "
@@ -477,7 +476,7 @@ def main(argv=None, *, cs_records=None, rust_records=None, rpcs=None,
         if unchecked:
             print(f"INCOMPLETE: the replay is unknown, so {len(unchecked)} "
                   f"expected difference(s) could not be checked -- keep "
-                  f"CliReader's manifest.json beside the reference.")
+                  f"the export's manifest.json beside the reference.")
         return 2
     if not failed:
         print(f"ALL {checked} RPC PARAMETER VALUES AND ALL {len(cs_records)} "

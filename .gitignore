@@ -9,9 +9,8 @@ tools/extract_component_classes/target/
 __pycache__/
 *.py[cod]
 
-# Working copy of the upstream C# sources, kept only so the generators in tools/
-# can be re-run. Not vendored: the generated outputs (S-box tables, golden
-# vectors) are committed instead, and README documents how to refresh them.
+# Working copy of the C# sources the S-box and golden-vector generators read.
+# Their outputs are committed instead.
 /.refsrc/
 
 # Replay binaries and parsed output are large and user-specific.

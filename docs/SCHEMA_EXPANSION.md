@@ -47,10 +47,10 @@ different handles/checksums. Its rejected proposal is kept in
 [type_evidence_rejected.json](../tools/fixtures/type_evidence_rejected.json).
 `AliveChunks` also remains raw.
 
-The overlay remains generated from the existing descriptor input plus explicit
-corrections. No wholesale upstream refresh was performed. The table now has
-1,309 entries in 214 groups and 84 explicit handle entries; the correction
-guard checks 185 expectations, including 124 additions.
+The overlay is the existing table plus explicit corrections; no wholesale
+refresh was performed. The table now has 1,309 entries in 214 groups and 84
+explicit handle entries; the correction guard checks 185 expectations,
+including 124 additions.
 
 ## Verification and baseline changes
 
@@ -114,10 +114,6 @@ than complete retention of every payload in the input VRF.
   export/build applicability. Null-safe unions prevent duplicate counting;
   catalog hashes and full claim definitions identify the basis. No catalog
   means no semantic-coverage claim.
-- `compare_descriptor_sources.py` compares pinned C# inputs without changing
-  checkouts. It exposes source-file and parsed type/handle changes plus local
-  entries that regeneration would remove or overwrite. It records input and
-  extractor hashes. Unsupported C# forms remain visible as source changes.
 - `extract_ability_lifecycle.py` emits ability-path actor candidates, observed
   lifecycle events and explicit Owner/Instigator evidence. Player references
   remain separate from proof of casts. Conflicts, same-packet reuse ambiguity,

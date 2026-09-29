@@ -1,9 +1,8 @@
-//! Numeric FastArray custom-delta framing, without a gameplay item schema: a
-//! port of `ReplayReader.ReceiveCustomDeltaProperty` / `NetDeltaSerialize` in
-//! ValorantReplayParserPlayground at 6931a70. The measured body is a support
-//! bit (must be true; false is unvalidated), four little-endian i32 header
-//! words, deleted IDs, then changed IDs with handle/width field streams ending
-//! at encoded handle 0.
+//! Numeric FastArray custom-delta framing (`ReceiveCustomDeltaProperty` /
+//! `NetDeltaSerialize`), without a gameplay item schema. The measured body is
+//! a support bit (must be true; false is unvalidated), four little-endian i32
+//! header words, deleted IDs, then changed IDs with handle/width field streams
+//! ending at encoded handle 0.
 //!
 //! AbilitiesAndBuffs uses [`crate::fastarray::ChecksumMode::Absent`]. Both
 //! modes can consume the same body, so the mode must come from independent

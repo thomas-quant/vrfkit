@@ -61,8 +61,8 @@ pub struct RpcDecodeResult {
     /// short for the 8-bit magic or the first marker. A drifted cursor that
     /// reads `000` stops here and loses every move after it.
     ///
-    /// Not counted: an empty window (the C# reference reports "Missing
-    /// movement magic"; this counts unread bits), and the end at most 31 bits
+    /// Not counted: an empty window (no movement magic, but this counts unread
+    /// bits), and the end at most 31 bits
     /// after a move. Those bits are not padding but a `000` terminator and 8
     /// to 23 bits that are not all zero, so a zero tally means no section
     /// stopped anywhere else, not that every section was read to its last
@@ -87,8 +87,8 @@ pub struct RpcDecodeResult {
     /// that vanished reads as [`Self::envelope_trailer_bits`] short of 24 per
     /// stream, not as streams that were never wrapped.
     pub envelope_trailer_streams: u32,
-    /// Bits after those envelopes, which nothing reads (the C# reference seeks
-    /// past them too): exactly 24 per stream on every measured replay (crate
+    /// Bits after those envelopes, which nothing reads: exactly 24 per stream
+    /// on every measured replay (crate
     /// docs, "Measured on real replays"). A tally like the section tails.
     pub envelope_trailer_bits: u64,
 }

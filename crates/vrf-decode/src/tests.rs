@@ -1,7 +1,6 @@
-//! The primitive decoders' tests, ported from the C# reference's
-//! `PrimitiveDecodersScalarTests.cs` and `PrimitiveDecodersVectorTests.cs`,
-//! and the overlay's. The array, struct-blob and effect decoders keep their
-//! tests next to their own modules.
+//! The primitive decoders' tests, scalar and vector, and the overlay's. The
+//! array, struct-blob and effect decoders keep their tests next to their own
+//! modules.
 
 #[cfg(feature = "overlay")]
 mod blueprint_fields;

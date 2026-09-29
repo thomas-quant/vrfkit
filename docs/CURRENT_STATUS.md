@@ -7,9 +7,8 @@ replays pass, 38 of them 13.06 (32 added since the 986-replay audit of
 2026-09-25). The [README support table](../README.md#supported-valorant-builds)
 reports the same run, and the README carries the workspace test counts.
 Start with [DATA.md](DATA.md) for the schema and [USAGE.md](USAGE.md) for
-commands; [LEGACY_BUILD_SUPPORT.md](LEGACY_BUILD_SUPPORT.md) and
-[UPSTREAM_PARITY.md](UPSTREAM_PARITY.md) record how 11.06--12.09 and 13.06 were
-added.
+commands; [LEGACY_BUILD_SUPPORT.md](LEGACY_BUILD_SUPPORT.md) records how
+11.06--12.09 were added.
 
 ## Historical physical field inventory, 2026-09-09
 

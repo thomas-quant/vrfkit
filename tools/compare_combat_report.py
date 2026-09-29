@@ -18,9 +18,9 @@ compared; sharing it is deliberate, since a second copy could drift and this
 comparison would quietly stop testing anything. `INTERESTING` stays in the C#
 spelling, as the reference's own `events.ndjson` has it.
 
-The reference is CliReader's `export` of the 13.01 reference replay, kept
-machine-local because it carries per-player values; docs/USAGE.md section 6
-has the commands that produce it.
+The reference is the C# reference parser's `export` of the 13.01 reference
+replay, kept machine-local because it carries per-player values; docs/USAGE.md
+section 6 has the commands that produce it.
 
 Usage:
     python tools/compare_combat_report.py [--reference EVENTS] [--ours PARQUET]
@@ -38,13 +38,12 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from to_valplay_bundle import _combat_report_leaf_name  # noqa: E402
 
-#: The CombatReport lines of CliReader's export of replay 02d4d478, built from
-#: ValorantReplayParser 8824794 -- the commit vendored in third_party/vrp, and
-#: the only one that decodes Rounds: upstream (2d2e05e, b51d674) declares it
-#: RawPayload, and 8824794's fe5343a binds upstream's own
-#: CombatRoundReportsDecoder to it. The whole events.ndjson works too; only
+#: The CombatReport lines of the C# reference parser's export of replay
+#: 02d4d478. The export must come from a C# build that binds its
+#: CombatRoundReportsDecoder to Rounds; a build that declares Rounds a raw
+#: payload has no values to compare. The whole events.ndjson works too; only
 #: lines naming CombatReportComponent are read.
-DEFAULT_REFERENCE = (r"%LOCALAPPDATA%\vrfkit\csharp-reference\8824794"
+DEFAULT_REFERENCE = (r"%LOCALAPPDATA%\vrfkit\csharp-reference"
                      r"\02d4d478-1dfb-4412-9a77-29ca29105a9d\combat_report.ndjson")
 #: vrfkit's export of the same replay.
 DEFAULT_OURS = "out/nested/fields.parquet"

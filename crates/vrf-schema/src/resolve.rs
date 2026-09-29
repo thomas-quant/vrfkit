@@ -75,8 +75,7 @@ pub(crate) fn register_leaf(by_leaf: &mut FxHashMap<String, usize>, path: &str, 
 
 impl NetGuidCache {
     /// Resolve a bare class name to the one group whose path ends in `.{name}`,
-    /// as C# `ContentBlockPathResolver.UniqueLeafMatch` does, then by two
-    /// Rust-only fallbacks: `name + "Component"` (subobject GUIDs such as
+    /// then by two fallbacks: `name + "Component"` (subobject GUIDs such as
     /// `EquippableStateMachine` omit it) and `name + "_C"` (Blueprint classes
     /// such as `Comp_*`).
     #[must_use]

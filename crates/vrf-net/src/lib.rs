@@ -1,9 +1,9 @@
 //! Unreal Engine replication layer: packets -> bunches -> content blocks -> fields.
 //!
-//! No field payload is skipped, descriptor or not (the upstream parser skips
-//! any field it has no descriptor for). Every property and RPC reaches the
-//! caller's sink as `(handle, bit_count, raw_bits)`, which works because the
-//! field stream is self-describing: each field carries its handle and length.
+//! No field payload is skipped, descriptor or not. Every property and RPC
+//! reaches the caller's sink as `(handle, bit_count, raw_bits)`, which works
+//! because the field stream is self-describing: each field carries its handle
+//! and length.
 //!
 //! ```text
 //! packet  : sentinel-trimmed byte slice -> bit stream

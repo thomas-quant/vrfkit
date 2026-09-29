@@ -93,7 +93,7 @@ impl NetFieldExportGroup {
     }
 
     /// Insert or overwrite the field at its handle. An out-of-range handle
-    /// returns `false` (the C# reference logs and skips); the caller counts it.
+    /// returns `false`; the caller counts it.
     pub fn set_field(&mut self, field: NetFieldExport) -> bool {
         let idx = field.handle as usize;
         if idx >= self.fields.len() {

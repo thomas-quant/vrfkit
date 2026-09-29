@@ -48,7 +48,7 @@ use measured_routes::{MeasuredArrayRoute, MeasuredArrayRoutes};
 use paths::{BlockPathMemo, ChannelArchetype};
 use rpc::RpcParamGroupMemo;
 
-/// Static overlay table built from C# descriptors.
+/// Static overlay table.
 static TABLE: OverlayTable = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
 
 /// How many stream-failure lines to retain. See [`ChannelState::stream_failures`].

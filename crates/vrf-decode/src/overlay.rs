@@ -1,6 +1,6 @@
 //! Overlay table: `(group_path, field_name)` -> [`FieldType`], plus decoding.
-//! The entries are generated into `table.rs` as a sorted slice; this module
-//! adds the hash index ([`index`], answering the ~2M probes a replay makes) and
+//! The entries live in `table.rs` as a sorted slice; this module adds the hash
+//! index ([`index`], answering the ~2M probes a replay makes) and
 //! the resolution order ([`apply_overlay_with_handle`]). `table_is_sorted`
 //! still asserts the order: the reference binary search the index is tested
 //! against needs it.
@@ -26,7 +26,7 @@ pub struct OverlayEntry {
     pub field_type: FieldType,
 }
 
-/// Maps a C# descriptor's explicit property handle back to its field name.
+/// Maps a descriptor's explicit property handle back to its field name.
 /// The type stays in [`OverlayEntry`], so type corrections apply to both
 /// lookups alike.
 #[derive(Debug, Clone, Copy)]
@@ -379,8 +379,9 @@ pub fn resolve_field_type_with_checksum(
 /// where Bomb declares `Bomb{GameState,PlayerState}_C`, with identical field
 /// names (`RoundResults`, `BombState`, `PlayerInfo`, `CompetitiveTier`, ...).
 ///
-/// An alias, not 28 duplicated entries: those would drift on regeneration, and
-/// `ADDITIONS` in `apply_type_corrections.py` is for silent descriptors. It is
+/// An alias, not 28 duplicated entries: those would drift as the table
+/// changes, and `ADDITIONS` in `apply_type_corrections.py` is for silent
+/// descriptors. It is
 /// sound while same-name properties have equal widths on both classes, which
 /// `check_decode_errors_corpus.py` tests on the five Swiftplay replays. The
 /// `_ClassNetCache` and `<Class>:<Function>` forms are not aliased: the table
@@ -417,7 +418,7 @@ pub fn canonical_group(group_path: &str) -> &str {
 }
 
 /// `AActor` / `USceneComponent` object references Unreal replicates on every
-/// actor, always as a NetGUID. The C# descriptors declare them only for the
+/// actor, always as a NetGUID. The descriptors declare them only for the
 /// classes they cover: on 02d4d478 they are typed on 129 group/field pairs
 /// (4,601 rows) and untyped on 203 more (6,048 rows). The engine fixes the
 /// type, so this is a fallback by name, not table rows (the 203 pairs are one

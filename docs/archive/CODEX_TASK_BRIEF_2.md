@@ -20,12 +20,12 @@ fanning out is strictly better than one linear pass.
 ## The repository in one paragraph
 
 `vrfkit` is a from-scratch Rust parser for VALORANT replay files (`.vrf`),
-written to replace a C# reference parser (`ValorantReplayParser`) that a Python
-analytics pipeline (`valplay`) depends on. It parses the replay to Parquet
+written to replace the parser a Python analytics pipeline (`valplay`)
+depended on. It parses the replay to Parquet
 (`fields`, `movement`, `actors`, `net_guids`), and a Python adapter
 (`tools/to_valplay_bundle.py`) converts that into the event-bundle shape
 `valplay/pipeline/metrics/compute_metrics.py` already consumes. Correctness is
-measured by comparing our output to the C# reference's, field by field.
+measured by comparing our output to the reference bundles, field by field.
 
 Read `PROJECT_STATUS.md` before touching anything. Sections 8 (invariants),
 13 (this week's fixes and the lessons attached to them) and the QUICK START
@@ -42,12 +42,12 @@ you must not "fix" it.** Any change that moves them toward the reference is a
 regression, and it will be rejected.
 
 - `combat` / `economy_detail` / `weapon_stats` differ because **we recover data
-  the reference drops** — 13 kill RPCs the C# never emits, 496 of 496 purchase
-  buyers resolved against its 151, one damage record it discards. Direction
-  established and documented.
+  the reference drops** — 13 kill RPCs the reference never emits, 496 of 496
+  purchase buyers resolved against its 151, one damage record it discards.
+  Direction established and documented.
 - `tactical` / `kast` differ because the **published reference bundles were
-  built by the C# parser with a bug in it** — Gekko's descriptor path had a
-  casing typo (`Aggrobot` vs `AggroBot`), so the reference is missing that
+  built with a bug in them** — Gekko's descriptor path had a casing typo
+  (`Aggrobot` vs `AggroBot`), so the reference is missing that
   character's kills entirely. The typo is now fixed at source, but the bundles
   predate the fix and cannot be regenerated without invalidating every
   comparison figure in `PROJECT_STATUS.md`. Section 13-C has the full
@@ -62,11 +62,6 @@ stop and report instead.
   scripts by absolute path. `compute_metrics.py` writes `metrics.json` into
   whatever directory you hand it, so **always pass a directory under vrfkit's
   `out/`**, never one inside valplay.
-- `ValorantReplayParser`'s `main` branch — **must stay at `2d2e05e`.** That is
-  the commit the reference bundles were built from (they stamp
-  `parser_version: 1.0.0+2d2e05e8`). Do not merge, do not pull, do not rebase.
-  Descriptor work happens on `local/vrfkit-descriptors` (currently `f67ea66`),
-  which is also the branch that must be checked out to regenerate `table.rs`.
 - Generated files by hand: `crates/vrf-decode/src/table.rs`,
   `crates/vrf-transform/src/sbox.rs`, `golden_vectors.rs`,
   `tools/equippable_table.py`. Change the generator and regenerate.
@@ -162,15 +157,15 @@ vector (demonstrate this, do not assert it), and passes clean afterwards.
 
 **The question to answer, per group, is binary:**
 
-1. **The C# has a descriptor and our extractor fails to read it.** That is a
+1. **A descriptor exists and our extractor fails to read it.** That is a
    generator bug and worth fixing. There is a worked precedent: commit
    `4f78f6d` found that `AddPropertyHandle`'s handle argument had to be a
    literal, so a descriptor that factored a run of handles into a helper
    (`AddDeathFields(uint firstHandle)`, called as `AddDeathFields(32)`) was
    invisible. Four fields came back. **Look for more shapes like that** — that
    is the highest-value thing in this task.
-2. **The C# genuinely has no descriptor for it.** Then the reference cannot
-   decode those rows either, and writing one is new upstream work, not a fix.
+2. **No descriptor exists for it.** Then the reference cannot
+   decode those rows either, and writing one is new descriptor work, not a fix.
    Say so and stop. Do not write speculative descriptors.
 
 Verify (2) rather than asserting it: check whether the reference bundle emits

@@ -1,5 +1,5 @@
-//! Model types mirroring the C# `Replay.Models.Unreal` ones, as plain data;
-//! their `Display` impls produce the string written to `value_str`.
+//! Model types for Unreal replay values, as plain data; their `Display` impls
+//! produce the string written to `value_str`.
 
 use core::fmt;
 
@@ -130,8 +130,9 @@ fn write_vector_json(f: &mut fmt::Formatter<'_>, v: &FVector) -> fmt::Result {
 
 /// A JSON object, not the compact form, which has nowhere to put
 /// `simulated_physics_sleep` or `server_physics_handle`. Member names and
-/// order follow the reference exactly (docs/archive/PROJECT_STATUS.md 13-B: a
-/// 14,377-row regression). Finiteness is enforced by
+/// order follow the reference bundle exactly
+/// (docs/archive/PROJECT_STATUS.md 13-B: a 14,377-row regression). Finiteness
+/// is enforced by
 /// `DecodeError::NonFiniteComponent`, not by construction: the
 /// componentBitCount == 0 raw-float fallback can carry NaN (docs/OVERLAY_RESOLUTION.md
 /// "FRepMovement finiteness is enforced"). Any other constructor owes that check.

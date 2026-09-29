@@ -52,7 +52,7 @@ The overlay's boolean fallback asks for `b` + the wire's field name (see
 entry whose name starts with `b` is *also* inserted under its stripped name,
 so the fallback probe reuses the hash already computed for the direct probe
 and never builds a key. Stripped keys are unique for the same reason direct
-keys are: `(group_path, field_name)` is unique in the generated table, so two
+keys are: `(group_path, field_name)` is unique in the table, so two
 entries in one group cannot both be `b` + X for the same X.
 
 ## The b-prefix fallback
@@ -64,22 +64,22 @@ spelling of it, then the explicit property handle.
 
 ### Why the b-prefix step exists
 
-The C# descriptors bind a property to its handle number and carry a name
+The descriptors bind a property to its handle number and carry a name
 only as a label, so a descriptor that spells a boolean
 `bDeathMontageEffectOverrideIsQueued` still matches a wire field the replay
 declares as `DeathMontageEffectOverrideIsQueued`. Our table is keyed on the
 name, so that spelling difference makes the lookup miss and the field stays
-raw where the reference has a plain bool.
+raw where it should be a plain bool.
 
 Narrow by construction: it only fires when the direct lookup already missed,
-and it can only hit an entry that the C# author spelled with the Unreal
-boolean prefix. Re-measured against the then 1,310-entry table by joining
-every distinct `(group, name)` 02d4d478 exports against it, RPC parameters
-under the group `sink/rpc.rs` actually asks with: 632 rows resolve this way
-and no others. They are ONE property name, arriving on two RPC groups --
-`MulticastNotifyDamage_Point` (581 rows) and `_Base` (51). The figure stood
-at "581 rows, exactly one field", measured when the table held 1,054
-entries; it counted the larger group and not its sibling.
+and it can only hit an entry spelled with the Unreal boolean prefix.
+Re-measured against the then 1,310-entry table by joining every distinct
+`(group, name)` 02d4d478 exports against it, RPC parameters under the group
+`sink/rpc.rs` actually asks with: 632 rows resolve this way and no others.
+They are ONE property name, arriving on two RPC groups --
+`MulticastNotifyDamage_Point` (581 rows) and `_Base` (51). The figure stood at
+"581 rows, exactly one field", measured when the table held 1,054 entries; it
+counted the larger group and not its sibling.
 
 ## Fail-closed on a handle conflict
 

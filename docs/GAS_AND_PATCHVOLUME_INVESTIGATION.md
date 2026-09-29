@@ -73,10 +73,9 @@ successful decomposition cannot establish the word meanings.
 The parser comments and the legacy `key_pair()` accessor documentation now
 describe raw words instead of asserting those game-side roles.
 
-A primary wire implementation supplies a stronger interpretation:
-[`ReplayReader.cs` at `6931a70`](https://github.com/michel-giehl/ValorantReplayParserPlayground/blob/6931a70b644c3d5157da71f87aba80f7626a99f9/src/Unreal.Core/ReplayReader.cs#L1557-L1635)
-reads a custom-delta support bit followed by four signed little-endian i32
-words: ArrayReplicationKey, BaseReplicationKey, NumDeletes, NumChanged.
+A primary wire implementation supplies a stronger interpretation: its replay
+reader reads a custom-delta support bit followed by four signed little-endian
+i32 words: ArrayReplicationKey, BaseReplicationKey, NumDeletes, NumChanged.
 Deleted IDs follow, then each changed ID and its packed handle/width property
 stream. This identifies replication bookkeeping, not a PredictionKey or cast.
 

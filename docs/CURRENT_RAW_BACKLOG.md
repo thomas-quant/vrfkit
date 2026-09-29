@@ -71,8 +71,7 @@ and actor/channel lifetime boundaries.
 The seven InputEventData tags and their lengths in DATA are a historical
 53,605-row measurement. This new inventory measures the current row/bit
 population; it has not independently revalidated tag frequencies or the
-historical grammar on all 42,545,425 rows. Historical upstream C# byte-array
-storage does not establish the wire grammar or action labels.
+historical grammar on all 42,545,425 rows.
 
 PatchVolume's schema and public route are in
 [ground-area volumes](GROUND_VOLUMES.md); the meanings of `Status` and

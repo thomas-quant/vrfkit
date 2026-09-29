@@ -1,6 +1,5 @@
-//! Type-aware field decoders for Unreal Engine replay primitives, ported from
-//! the C# reference parser: every field update arrives as raw bits, and this
-//! crate turns them into typed values.
+//! Type-aware field decoders for Unreal Engine replay primitives: every field
+//! update arrives as raw bits, and this crate turns them into typed values.
 //!
 //! # Design: additive overlay
 //!
@@ -24,7 +23,8 @@
 //! | `decode` | `FieldType`, `DecodedValue` and the dispatch; `scalar` and `geometry` hold the readers |
 //! | `ftext` | The strict `FText` history-tree reader |
 //! | `overlay` | The `(group_path, field_name)` table, its hash index and the resolution order |
-//! | `table`, `checksum_table`, `scoped_types` | GENERATED -- never hand-edited |
+//! | `table` | The overlay table, maintained here; `tools/apply_type_corrections.py` rewrites its counts |
+//! | `checksum_table`, `scoped_types` | GENERATED -- never hand-edited |
 //! | `array` | The RepLayout dynamic-array walker and the nesting schema |
 //! | `structs` | The three named struct blobs, one module each |
 //! | `effect` | The `EffectContainer` arrays: framing, elements, JSON |
@@ -38,13 +38,13 @@
 //!
 //! | Feature | Brings in |
 //! |---------|-----------|
-//! | `overlay` | [`OverlayTable`], [`apply_overlay_with_handle`], `OVERLAY_TABLE` and the other generated tables |
+//! | `overlay` | [`OverlayTable`], [`apply_overlay_with_handle`], `OVERLAY_TABLE` and the checksum and scoped tables |
 //! | `array` | [`decode_struct_array`] and [`COMBAT_ROUNDS_SCHEMA`] |
 //! | `structs` | [`structs`] |
 //! | `effect` | [`effect`] |
 //!
 //! `overlay` is the one worth dropping if the primitive decoders are all you
-//! want: it is what pulls in the generated table.
+//! want: it is what pulls in the overlay tables.
 
 #![forbid(unsafe_code)]
 

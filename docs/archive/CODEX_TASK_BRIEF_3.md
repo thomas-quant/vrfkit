@@ -168,12 +168,8 @@ pairs, bootstrap CI — was sound; reuse it.
 - `valplay` is **read only**. Run its scripts by absolute path.
   `compute_metrics.py` writes `metrics.json` into whatever directory you give
   it, so always pass a directory under vrfkit's `out/`.
-- Generated files only via their generators. If you touch `table.rs` at all:
-  regenerate from `ValorantReplayParser` on `local/vrfkit-descriptors`
-  (currently `f0dd7e7`), then `apply_type_corrections.py`, then `cargo fmt`.
-  `main` there **must stay at `2d2e05e`** — it is the commit the reference
-  bundles were built from. You should not need to touch `table.rs` for this
-  task at all.
+- Generated files only via their generators. You should not need to touch
+  `table.rs` for this task at all.
 
 ---
 

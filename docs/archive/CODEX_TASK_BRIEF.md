@@ -26,9 +26,9 @@ That framing matters in three practical ways:
 
 ## 1. What this project is
 
-A from-scratch Rust parser (`vrfkit`) that replaces a C# reference parser
-(`ValorantReplayParser`) for a Python analytics pipeline (`valplay`). It
-reads VALORANT `.vrf` replays and writes Parquet.
+A from-scratch Rust parser (`vrfkit`) that replaces the parser a Python
+analytics pipeline (`valplay`) depended on. It reads VALORANT `.vrf` replays
+and writes Parquet.
 
 Current state, all measured, all reproducible with the commands in section 4:
 
@@ -37,15 +37,16 @@ tests                236 passing, clippy 0 warnings, fmt clean
 13.01 corpus         215/215 parse, malformed framing 0
 13.02 demos          4/4 parse, malformed framing 0
 oracle pass rate     97.49% - 99.68% (median 99.32%)
-metrics parity       15 of 20 metric sections byte-identical to the C#
-                     reference on ALL 11 replays with a reference bundle
+metrics parity       15 of 20 metric sections byte-identical to an
+                     independent parser's on ALL 11 replays with a reference bundle
                      (the harness prints 16/21; one of those keys is `note`,
                      a fixed provenance string that cannot fail)
 ```
 
 Most differences in the 5 varying sections reflect data vrfkit carries and the
-C# parser drops. Tactical is not fully explained: five values are higher in the
-reference, including an opening-duels outcome with its denominator conserved.
+reference bundles lack. Tactical is not fully explained: five values are
+higher in the reference, including an opening-duels outcome with its
+denominator conserved.
 
 `PROJECT_STATUS.md` is the project's record. Read it after this file — but
 see section 5 first, because its prose is reliable and its **figures are
@@ -57,12 +58,6 @@ not**.
 
 ```
 Parser (work here)  C:\Users\yakihyuk0728\Documents\GitHub\vrfkit
-C# reference        C:\Users\yakihyuk0728\Documents\GitHub\ValorantReplayParser
-                    READ ONLY. Contains the user's uncommitted work --
-                    17 entries in git status. Never commit, stash, reset or
-                    modify. If you must instrument it: add ONE clean file,
-                    run it, `git checkout -- <that file>`, and verify the
-                    status is still 17 entries.
 valplay             C:\Users\yakihyuk0728\Documents\GitHub\valplay
                     READ ONLY. Run its scripts by absolute path only.
                     compute_metrics.py writes metrics.json into whatever
@@ -110,20 +105,20 @@ capacity or group to make a number look better.
 
 **NO HARDCODED NAMES IN THE PARSER.** Resolution uses data the replay itself
 declares. Adding a list of component or weapon names to a Rust crate is an
-automatic fail. Display-name mapping lives in the Python adapter, generated
-by `tools/extract_equippables.py`.
+automatic fail. Display-name mapping lives in the Python adapter
+(`tools/equippable_table.py`).
 
 **GENERATED FILES ONLY VIA GENERATORS.**
 ```
-crates/vrf-decode/src/table.rs                    <- tools/extract_descriptors.py
+crates/vrf-decode/src/table.rs                    <- the descriptor generator
                                                      then tools/apply_type_corrections.py
 crates/vrf-transform/src/sbox.rs                  <- tools/extract_sboxes.py
 crates/vrf-transform/tests/data/golden_vectors.rs <- tools/extract_golden.py
-tools/equippable_table.py                         <- tools/extract_equippables.py
+tools/equippable_table.py                         <- the equippable generator
 ```
 
-**A CUSTOM C# DECODER MEANS THE TYPE IS UNKNOWN, NOT RAW.**
-`extract_descriptors.py` cannot see through `.Decode(...)` in the C#
+**A CUSTOM DECODER MEANS THE TYPE IS UNKNOWN, NOT RAW.**
+The descriptor generator cannot see through `.Decode(...)` in the
 descriptors, so those fields land as `FieldType::Raw` — indistinguishable
 from a field deliberately kept raw. Two real bugs came from this.
 
@@ -403,7 +398,7 @@ corrections are as valuable as the fixes.
 - anything you found that was **not** in scope but looks wrong — last session
   found three separate bugs that way
 
-**Do not** modify valplay or ValorantReplayParser. Read them freely.
+**Do not** modify valplay. Read it freely.
 
 **Assume you will be checked.** The main session re-runs the corpus, the
 guards and the parity harness on everything you hand back. State uncertainty
