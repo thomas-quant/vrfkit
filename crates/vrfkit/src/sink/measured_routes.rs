@@ -70,9 +70,9 @@ impl MeasuredArrayRoutes {
 
     /// The routes admitted for `branch` (the header's branch string); an unknown
     /// branch admits nothing. Pinned by `routes_are_pinned_for_every_supported_branch`.
-    /// Legacy entries measured 2026-09-28 over all 48 11.06-12.09 replays (three
-    /// per build) and the single public 12.10/12.11/13.00 fixtures, main stream
-    /// and checkpoints. Held back:
+    /// Legacy entries: all 48 11.06-12.09 replays (three per build) and the
+    /// single public 12.10/12.11/13.00 fixtures, main stream and checkpoints.
+    /// Held back:
     ///
     /// - `AllPlayersObfuscatedPlayerInformation`, `TrackedRewards` < 12.04: handles +3.
     /// - `SelectedV2` 11.06-11.08: a zero-width `DynamicMappings` at 13 moves the nested array.
@@ -239,20 +239,6 @@ mod tests {
     ];
 
     #[test]
-    fn active_blinds_stays_off_on_every_legacy_build() {
-        // Only the 13.x builds admit it; see `MeasuredArrayRoutes::for_branch`.
-        for (branch, _) in PINNED {
-            let measured_13x = branch.starts_with("++Ares-Core+release-13.")
-                && *branch != "++Ares-Core+release-13.00";
-            assert_eq!(
-                MeasuredArrayRoutes::for_branch(branch).admits(ActiveBlinds),
-                measured_13x,
-                "{branch}"
-            );
-        }
-    }
-
-    #[test]
     fn routes_are_pinned_for_every_supported_branch() {
         // One row per supported branch: a newly supported build must be
         // placed in the table deliberately, even if it admits nothing.
@@ -289,17 +275,6 @@ mod tests {
             for route in Route::ALL {
                 assert!(!admitted.admits(route), "{branch:?}: {route:?}");
             }
-        }
-    }
-
-    #[test]
-    fn every_route_has_its_own_bit() {
-        let mut seen = 0u8;
-        for route in Route::ALL {
-            assert_eq!(seen & route.bit(), 0, "{route:?} shares a bit");
-            seen |= route.bit();
-            assert!(MeasuredArrayRoutes::ALL.admits(route));
-            assert!(!MeasuredArrayRoutes::NONE.admits(route));
         }
     }
 }

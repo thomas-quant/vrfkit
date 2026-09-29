@@ -318,122 +318,63 @@ mod movement_stats_tests {
     use super::ExportStats;
     use vrf_movement::{MovementError, RpcDecodeResult};
 
-    fn ok(
-        total_moves: u32,
-        update_count: u32,
-        error_count: u32,
-    ) -> Result<RpcDecodeResult, MovementError> {
+    /// A clean-framed batch with `error_count` soft errors and the six tallies
+    /// (sized tails, bits, open tails, bits, envelope trailers, bits).
+    fn batch(error_count: u32, t: [u32; 6]) -> Result<RpcDecodeResult, MovementError> {
         Ok(RpcDecodeResult {
-            total_moves,
-            update_count,
             error_count,
+            sized_section_tails: t[0],
+            sized_section_tail_bits: t[1].into(),
+            open_section_tails: t[2],
+            open_section_tail_bits: t[3].into(),
+            envelope_trailer_streams: t[4],
+            envelope_trailer_bits: t[5].into(),
             ..Default::default()
         })
     }
 
-    fn with_tails(
-        error_count: u32,
-        sized: (u32, u64),
-        open: (u32, u64),
-    ) -> Result<RpcDecodeResult, MovementError> {
-        Ok(RpcDecodeResult {
-            total_moves: 1,
-            update_count: 1,
-            error_count,
-            sized_section_tails: sized.0,
-            sized_section_tail_bits: sized.1,
-            open_section_tails: open.0,
-            open_section_tail_bits: open.1,
-            ..Default::default()
-        })
-    }
-
-    fn with_trailers(
-        error_count: u32,
-        streams: u32,
-        bits: u64,
-    ) -> Result<RpcDecodeResult, MovementError> {
-        Ok(RpcDecodeResult {
-            total_moves: 1,
-            update_count: streams,
-            error_count,
-            envelope_trailer_streams: streams,
-            envelope_trailer_bits: bits,
-            ..Default::default()
-        })
-    }
-
-    /// Envelope trailers are summed from every `Ok` decode like the tails, and
-    /// never count as a movement error.
+    /// Each tail and trailer tally sums into its own counter from every `Ok`
+    /// decode, soft errors or not, and none is a movement error (which would
+    /// keep the batch as a raw row); an `Err` carries no tally.
     #[test]
-    fn envelope_trailers_are_summed_from_every_ok_decode_and_are_not_errors() {
+    fn tallies_sum_field_by_field_and_are_not_errors() {
         let mut s = ExportStats::default();
-        s.record_movement_decode(with_trailers(0, 3, 72).as_ref());
-        s.record_movement_decode(with_trailers(1, 2, 37).as_ref());
-        assert_eq!(s.movement_envelope_trailers, 5);
-        assert_eq!(s.movement_envelope_trailer_bits, 109);
-        assert_eq!(s.movement_rpc_errors, 1, "only the soft error");
-        assert_eq!(
-            (
-                s.movement_sized_section_tails,
-                s.movement_open_section_tails
-            ),
-            (0, 0),
-            "not read as section tails"
-        );
+        s.record_movement_decode(batch(0, [1, 2, 3, 4, 5, 6]).as_ref());
+        s.record_movement_decode(batch(1, [10, 20, 30, 40, 50, 60]).as_ref());
         s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
-        assert_eq!(s.movement_envelope_trailers, 5, "an Err carries no tally");
+        let tallies = [
+            s.movement_sized_section_tails,
+            s.movement_sized_section_tail_bits,
+            s.movement_open_section_tails,
+            s.movement_open_section_tail_bits,
+            s.movement_envelope_trailers,
+            s.movement_envelope_trailer_bits,
+        ];
+        assert_eq!(tallies, [11, 22, 33, 44, 55, 66]);
+        assert_eq!(s.movement_rpc_errors, 2, "the soft error and the Err");
     }
 
-    /// Section tails are summed from every `Ok` decode, soft errors or not, and
-    /// never count as a movement error (which would keep the batch as a raw row).
+    /// A clean decode records nothing; soft errors count per occurrence and
+    /// keep the first text; a later hard error adds one without overwriting
+    /// it; a first hard error records its Display.
     #[test]
-    fn section_tails_are_summed_from_every_ok_decode_and_are_not_errors() {
+    fn movement_errors_count_every_occurrence_and_keep_the_first() {
         let mut s = ExportStats::default();
-        s.record_movement_decode(with_tails(0, (1, 40), (0, 0)).as_ref());
-        s.record_movement_decode(with_tails(2, (2, 7), (3, 90)).as_ref());
-        assert_eq!(s.movement_sized_section_tails, 3);
-        assert_eq!(s.movement_sized_section_tail_bits, 47);
-        assert_eq!(s.movement_open_section_tails, 3);
-        assert_eq!(s.movement_open_section_tail_bits, 90);
-        assert_eq!(s.movement_rpc_errors, 2, "only the soft errors");
-        s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
-        assert_eq!(s.movement_sized_section_tails, 3, "an Err carries no tally");
-    }
-
-    #[test]
-    fn a_clean_decode_records_nothing() {
-        let mut s = ExportStats::default();
-        s.record_movement_decode(ok(5, 1, 0).as_ref());
+        s.record_movement_decode(batch(0, [0; 6]).as_ref());
         assert_eq!(s.movement_rpc_errors, 0);
         assert!(s.movement_first_error.is_none());
-    }
-
-    #[test]
-    fn soft_errors_are_counted_and_first_error_is_kept() {
-        let mut s = ExportStats::default();
-        s.record_movement_decode(ok(2, 5, 3).as_ref());
-        assert_eq!(s.movement_rpc_errors, 3);
-        // `error_count` counts decode problems per occurrence; the updates
-        // after a failed stream are still decoded, so none were "skipped".
+        s.record_movement_decode(batch(3, [0; 6]).as_ref());
+        s.record_movement_decode(Err(MovementError::InvalidMagic(0x00)).as_ref());
+        assert_eq!(s.movement_rpc_errors, 4);
         assert_eq!(
             s.movement_first_error.as_deref(),
             Some("3 movement decode error(s) in one RPC batch")
         );
-        // A later hard failure adds to the count but must not overwrite the
-        // first error.
-        let first = s.movement_first_error.clone();
-        s.record_movement_decode(Err(MovementError::InvalidMagic(0x00)).as_ref());
-        assert_eq!(s.movement_rpc_errors, 4);
-        assert_eq!(s.movement_first_error, first);
-    }
 
-    #[test]
-    fn a_hard_error_records_its_display() {
-        let mut s = ExportStats::default();
-        s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
-        assert_eq!(s.movement_rpc_errors, 1);
-        let msg = s.movement_first_error.expect("first error recorded");
+        let mut hard = ExportStats::default();
+        hard.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
+        assert_eq!(hard.movement_rpc_errors, 1);
+        let msg = hard.movement_first_error.expect("first error recorded");
         assert!(msg.contains("sentinel"), "got: {msg}");
     }
 }

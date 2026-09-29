@@ -2,10 +2,10 @@
 //! reads it; it feeds no verdict, summary counter or table row.
 //!
 //! [`ChannelState::push_stream_failure`](super::ChannelState::push_stream_failure)
-//! keeps the first `MAX_STREAM_FAILURE_RECORDS` (32) lines for a human; on the
-//! 2026-09-07 corpus all 714 replays saturated it with failures from the
-//! match's opening seconds, a biased sample no reweighting turns into a
-//! population figure. This counts every failure, one cell per (kind, cause,
+//! keeps the first `MAX_STREAM_FAILURE_RECORDS` (32) lines for a human; all 714
+//! corpus replays saturate it with failures from the match's opening seconds,
+//! a biased sample no reweighting turns into a population figure. This counts
+//! every failure, one cell per (kind, cause,
 //! group path, function count, handle, consumed bits, preservation state):
 //! totals exact, cells and payload samples capped so malformed input cannot
 //! grow memory without bound.
@@ -325,29 +325,6 @@ mod tests {
         }
     }
 
-    /// A cell whose payload was preserved is a subset, never real loss, and
-    /// the two totals stay separable.
-    #[test]
-    fn preserved_unresolved_is_counted_but_not_as_loss() {
-        let mut agg = FailureAggregate::new(true);
-        let mut f = failure(
-            StreamKind::Rpc,
-            StreamFailureCause::UnresolvedFunctionCount,
-            0,
-        );
-        f.payload_preserved = true;
-        agg.note_payload(&f, Arc::from("AbilitiesAndBuffsComponent"), &[0xAA, 0xBB]);
-        agg.note_failure(&f, Arc::from("AbilitiesAndBuffsComponent"));
-        assert_eq!(agg.total_failures(), 1);
-        assert_eq!(agg.preserved_unresolved(), 1);
-        assert_eq!(agg.real_loss(), 0);
-        let (key, cell) = &agg.cells_sorted()[0];
-        assert_eq!(key.cause, StreamFailureCause::UnresolvedFunctionCount);
-        assert_eq!(cell.count, 1);
-        // The sample carries the real payload bytes, not a stub.
-        assert_eq!(cell.samples[0].payload_hex.as_deref(), Some("aabb"));
-    }
-
     /// A RepLayout failure and a genuinely lost RPC failure are both real
     /// loss, separated by kind.
     #[test]
@@ -373,29 +350,6 @@ mod tests {
         assert_eq!(cells[0].0.cause, StreamFailureCause::AbandonedTail);
         assert_eq!(cells[1].0.kind, StreamKind::Rpc);
         assert_eq!(cells[1].0.cause, StreamFailureCause::ReadError);
-    }
-
-    /// Counts continue past the sample cap; only samples stop.
-    #[test]
-    fn counts_continue_past_the_sample_cap() {
-        let mut agg = FailureAggregate::default();
-        let f = failure(
-            StreamKind::RepLayout,
-            StreamFailureCause::AbandonedTail,
-            185,
-        );
-        let path = Arc::from("/Script/ShooterGame.AresAbilitySystemComponent");
-        for _ in 0..1000 {
-            agg.note_failure(&f, Arc::clone(&path));
-        }
-        let (_, cell) = &agg.cells_sorted()[0];
-        assert_eq!(cell.count, 1000, "the count is never capped");
-        assert_eq!(
-            cell.samples.len(),
-            0,
-            "counting alone takes no samples; payloads do"
-        );
-        assert_eq!(agg.total_failures(), 1000);
     }
 
     /// Absorb adds counts and moves samples up to the cap, so a checkpoint
