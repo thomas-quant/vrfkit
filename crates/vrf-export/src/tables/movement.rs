@@ -20,25 +20,6 @@ pub const DEFAULT_MOVEMENT_ROW_GROUP_SIZE: usize = 262_144;
 pub struct MovementTable;
 
 /// Streaming Parquet writer for movement records.
-///
-/// # Usage
-///
-/// ```no_run
-/// # use vrf_export::{MovementWriter, MovementRecord, ExportError};
-/// # fn example() -> Result<(), ExportError> {
-/// let file = std::fs::File::create("movement.parquet")?;
-/// let mut writer = MovementWriter::new(file)?;
-/// writer.push(MovementRecord {
-///     time_ms: 5000, packet_id: 100, character_net_guid: 42,
-///     pos_x: 1000.0, pos_y: 2000.0, pos_z: 300.0,
-///     yaw: 45.0, pitch: 350.0,
-///     vel_x: 100.0, vel_y: 0.0, vel_z: 0.0,
-///     timestamp: 31_337, movement_state: 2, move_type: 1,
-/// })?;
-/// writer.finish()?;
-/// # Ok(())
-/// # }
-/// ```
 pub type MovementWriter<W> = TableWriter<MovementTable, W>;
 
 impl Table for MovementTable {
