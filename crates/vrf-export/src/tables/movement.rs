@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use arrow_array::{ArrayRef, Float32Array, RecordBatch, UInt8Array, UInt32Array};
+use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use super::columns::batch;
+use super::batch;
 use crate::error::ExportError;
 use crate::record::MovementRecord;
 use crate::schema::movement_schema_ref;
@@ -69,36 +69,6 @@ impl Table for MovementTable {
     }
 
     fn build_batch(rows: &[MovementRecord]) -> Result<RecordBatch, ExportError> {
-        batch(
-            movement_schema_ref(),
-            vec![
-                Arc::new(UInt32Array::from_iter_values(
-                    rows.iter().map(|r| r.time_ms),
-                )) as ArrayRef,
-                Arc::new(UInt32Array::from_iter_values(
-                    rows.iter().map(|r| r.packet_id),
-                )),
-                Arc::new(UInt32Array::from_iter_values(
-                    rows.iter().map(|r| r.character_net_guid),
-                )),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_x))),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_y))),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pos_z))),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.yaw))),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.pitch))),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_x))),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_y))),
-                Arc::new(Float32Array::from_iter_values(rows.iter().map(|r| r.vel_z))),
-                Arc::new(UInt32Array::from_iter_values(
-                    rows.iter().map(|r| r.timestamp),
-                )),
-                Arc::new(UInt8Array::from_iter_values(
-                    rows.iter().map(|r| r.movement_state),
-                )),
-                Arc::new(UInt8Array::from_iter_values(
-                    rows.iter().map(|r| r.move_type),
-                )),
-            ],
-        )
+        batch(Self::schema(), MovementRecord::columns(rows.iter()))
     }
 }

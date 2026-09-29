@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use super::columns::{actor_columns, batch};
+use super::batch;
 use crate::error::ExportError;
 use crate::record::ActorRecord;
 use crate::schema::actors_schema_ref;
@@ -45,6 +45,6 @@ impl Table for ActorsTable {
     }
 
     fn build_batch(rows: &[ActorRecord]) -> Result<RecordBatch, ExportError> {
-        batch(actors_schema_ref(), actor_columns(rows.iter(), rows.len()))
+        batch(Self::schema(), ActorRecord::columns(rows.iter()))
     }
 }

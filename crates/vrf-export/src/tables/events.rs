@@ -3,12 +3,10 @@
 
 use std::sync::Arc;
 
-use arrow_array::{
-    ArrayRef, BinaryArray, Float32Array, Int32Array, RecordBatch, StringArray, UInt32Array,
-};
+use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use super::columns::{batch, dict};
+use super::batch;
 use crate::error::ExportError;
 use crate::record::EventRecord;
 use crate::schema::events_schema_ref;
@@ -55,40 +53,6 @@ impl Table for EventsTable {
     }
 
     fn build_batch(rows: &[EventRecord]) -> Result<RecordBatch, ExportError> {
-        let len = rows.len();
-        batch(
-            events_schema_ref(),
-            vec![
-                Arc::new(StringArray::from_iter_values(
-                    rows.iter().map(|r| r.id.as_str()),
-                )) as ArrayRef,
-                dict(
-                    len,
-                    16,
-                    len * 24,
-                    rows.iter().map(|r| Some(r.group.as_str())),
-                ),
-                Arc::new(StringArray::from_iter_values(
-                    rows.iter().map(|r| r.metadata.as_str()),
-                )),
-                Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time1))),
-                Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.time2))),
-                Arc::new(Int32Array::from_iter_values(
-                    rows.iter().map(|r| r.payload_size),
-                )),
-                Arc::new(BinaryArray::from_iter_values(
-                    rows.iter().map(|r| r.raw_payload.as_slice()),
-                )),
-                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word0))),
-                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.word1))),
-                Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.payload_tag))),
-                Arc::new(StringArray::from_iter(
-                    rows.iter().map(|r| r.payload_name.as_deref()),
-                )),
-                Arc::new(Float32Array::from_iter(
-                    rows.iter().map(|r| r.payload_seconds),
-                )),
-            ],
-        )
+        batch(Self::schema(), EventRecord::columns(rows.iter()))
     }
 }

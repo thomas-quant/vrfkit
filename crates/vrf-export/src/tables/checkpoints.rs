@@ -12,18 +12,15 @@
 
 use std::sync::Arc;
 
-use arrow_array::{
-    ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray, UInt8Array, UInt32Array,
-    UInt64Array,
-};
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::Schema;
 
-use super::columns::{actor_columns, batch, field_columns, net_guid_columns};
+use super::batch;
 use crate::ExportError;
 use crate::record::{
-    CheckpointActorRecord, CheckpointBlockRecord, CheckpointExportFieldRecord,
+    ActorRecord, CheckpointActorRecord, CheckpointBlockRecord, CheckpointExportFieldRecord,
     CheckpointExportGroupRecord, CheckpointFieldRecord, CheckpointGuidEntryRecord,
-    CheckpointIdentity, CheckpointNetGuidRecord,
+    CheckpointIdentity, CheckpointNetGuidRecord, FieldRecord, NetGuidRecord,
 };
 use crate::schema::{
     checkpoint_actors_schema_ref, checkpoint_blocks_schema_ref,
@@ -52,17 +49,10 @@ pub type CheckpointExportFieldWriter<W> = TableWriter<CheckpointExportFieldsTabl
 /// then `columns`.
 fn checkpoint_batch<'a>(
     schema: Arc<Schema>,
-    identities: impl Iterator<Item = &'a CheckpointIdentity> + Clone,
+    identities: impl ExactSizeIterator<Item = &'a CheckpointIdentity> + Clone,
     columns: Vec<ArrayRef>,
 ) -> Result<RecordBatch, ExportError> {
-    let mut all: Vec<ArrayRef> = vec![
-        Arc::new(UInt32Array::from_iter_values(
-            identities.clone().map(|i| i.checkpoint_index),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            identities.map(|i| i.checkpoint_id.as_ref()),
-        )),
-    ];
+    let mut all = CheckpointIdentity::columns(identities);
     all.extend(columns);
     batch(schema, all)
 }
@@ -83,25 +73,7 @@ impl Table for CheckpointGuidEntriesTable {
         row.checkpoint.checkpoint_id.len() + row.literal_path.as_ref().map_or(0, String::len)
     }
     fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
-        let columns = vec![
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.ordinal),
-            )) as ArrayRef,
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.net_guid),
-            )),
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.outer_net_guid),
-            )),
-            Arc::new(BooleanArray::from_iter(
-                rows.iter().map(|r| Some(r.path_is_string)),
-            )),
-            Arc::new(StringArray::from_iter(
-                rows.iter().map(|r| r.literal_path.as_deref()),
-            )),
-            Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.name_index))),
-            Arc::new(UInt8Array::from_iter_values(rows.iter().map(|r| r.flags))),
-        ];
+        let columns = CheckpointGuidEntryRecord::columns(rows.iter());
         checkpoint_batch(Self::schema(), rows.iter().map(|r| &r.checkpoint), columns)
     }
 }
@@ -122,20 +94,7 @@ impl Table for CheckpointExportGroupsTable {
         row.checkpoint.checkpoint_id.len() + row.group_path.len()
     }
     fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
-        let columns = vec![
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.ordinal),
-            )) as ArrayRef,
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.path_name_index),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|r| r.group_path.as_str()),
-            )),
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.declared_slots),
-            )),
-        ];
+        let columns = CheckpointExportGroupRecord::columns(rows.iter());
         checkpoint_batch(Self::schema(), rows.iter().map(|r| &r.checkpoint), columns)
     }
 }
@@ -162,33 +121,7 @@ impl Table for CheckpointExportFieldsTable {
             + row.fname_base.as_ref().map_or(0, String::len)
     }
     fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
-        let columns = vec![
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.group_ordinal),
-            )) as ArrayRef,
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.path_name_index),
-            )),
-            Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.slot))),
-            Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.handle))),
-            Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|r| r.compatible_checksum),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|r| r.rendered_name.as_str()),
-            )),
-            Arc::new(UInt8Array::from_iter_values(
-                rows.iter().map(|r| r.exported_flag),
-            )),
-            Arc::new(UInt8Array::from_iter_values(
-                rows.iter().map(|r| r.fname_kind),
-            )),
-            Arc::new(StringArray::from_iter(
-                rows.iter().map(|r| r.fname_base.as_deref()),
-            )),
-            Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.fname_index))),
-            Arc::new(Int32Array::from_iter(rows.iter().map(|r| r.fname_number))),
-        ];
+        let columns = CheckpointExportFieldRecord::columns(rows.iter());
         checkpoint_batch(Self::schema(), rows.iter().map(|r| &r.checkpoint), columns)
     }
 }
@@ -223,59 +156,7 @@ impl Table for CheckpointBlocksTable {
         checkpoint_blocks_schema_ref()
     }
     fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
-        macro_rules! values {
-            ($ty:ty, $field:ident) => {
-                Arc::new(<$ty>::from_iter_values(rows.iter().map(|r| r.$field))) as ArrayRef
-            };
-        }
-        macro_rules! optional {
-            ($ty:ty, $field:ident) => {
-                Arc::new(<$ty>::from_iter(rows.iter().map(|r| r.$field))) as ArrayRef
-            };
-        }
-        macro_rules! booleans {
-            ($field:ident) => {
-                Arc::new(BooleanArray::from_iter(rows.iter().map(|r| Some(r.$field)))) as ArrayRef
-            };
-        }
-        macro_rules! paths {
-            ($field:ident) => {
-                Arc::new(StringArray::from_iter(
-                    rows.iter().map(|r| r.$field.as_deref()),
-                )) as ArrayRef
-            };
-        }
-        let columns = vec![
-            values!(UInt32Array, block_index),
-            values!(UInt32Array, time_ms),
-            values!(UInt32Array, packet_id),
-            values!(UInt32Array, channel_index),
-            values!(UInt32Array, actor_net_guid),
-            optional!(UInt32Array, object_net_guid),
-            optional!(UInt32Array, class_net_guid),
-            optional!(UInt32Array, outer_net_guid),
-            booleans!(has_rep_layout),
-            booleans!(is_actor),
-            booleans!(is_deleted),
-            booleans!(is_stably_named),
-            values!(UInt8Array, delete_flags),
-            Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|r| r.resolved_group_path.as_ref()),
-            )),
-            values!(StringArray, group_resolution_source),
-            booleans!(group_declared),
-            booleans!(resolution_memo_hit),
-            values!(UInt32Array, function_count),
-            values!(StringArray, function_count_source),
-            paths!(actor_archetype_path),
-            paths!(actor_archetype_outer_path),
-            paths!(actor_guid_path),
-            paths!(class_guid_path),
-            paths!(object_guid_path),
-            paths!(object_outer_path),
-            values!(UInt64Array, field_row_start),
-            values!(UInt32Array, field_row_count),
-        ];
+        let columns = CheckpointBlockRecord::columns(rows.iter());
         checkpoint_batch(Self::schema(), rows.iter().map(|r| &r.checkpoint), columns)
     }
 }
@@ -310,7 +191,7 @@ impl Table for CheckpointFieldsTable {
         checkpoint_fields_schema_ref()
     }
     fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
-        let columns = field_columns(rows.iter().map(|r| &r.field), rows.len());
+        let columns = FieldRecord::columns(rows.iter().map(|r| &r.field));
         checkpoint_batch(Self::schema(), rows.iter().map(|r| &r.checkpoint), columns)
     }
 }
@@ -344,7 +225,7 @@ impl Table for CheckpointActorsTable {
         4096
     }
     fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
-        let columns = actor_columns(rows.iter().map(|r| &r.actor), rows.len());
+        let columns = ActorRecord::columns(rows.iter().map(|r| &r.actor));
         checkpoint_batch(Self::schema(), rows.iter().map(|r| &r.checkpoint), columns)
     }
 }
@@ -364,7 +245,7 @@ impl Table for CheckpointNetGuidsTable {
         4096
     }
     fn build_batch(rows: &[Self::Row]) -> Result<RecordBatch, ExportError> {
-        let columns = net_guid_columns(rows.iter().map(|r| &r.net_guid), rows.len());
+        let columns = NetGuidRecord::columns(rows.iter().map(|r| &r.net_guid));
         checkpoint_batch(Self::schema(), rows.iter().map(|r| &r.checkpoint), columns)
     }
 }

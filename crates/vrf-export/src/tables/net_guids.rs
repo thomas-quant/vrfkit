@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use super::columns::{batch, net_guid_columns};
+use super::batch;
 use crate::error::ExportError;
 use crate::record::NetGuidRecord;
 use crate::schema::net_guids_schema_ref;
@@ -41,9 +41,6 @@ impl Table for NetGuidsTable {
     }
 
     fn build_batch(rows: &[NetGuidRecord]) -> Result<RecordBatch, ExportError> {
-        batch(
-            net_guids_schema_ref(),
-            net_guid_columns(rows.iter(), rows.len()),
-        )
+        batch(Self::schema(), NetGuidRecord::columns(rows.iter()))
     }
 }

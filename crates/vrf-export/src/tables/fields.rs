@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 
-use super::columns::{batch, field_columns};
+use super::batch;
 use crate::error::ExportError;
 use crate::record::FieldRecord;
 use crate::schema::fields_schema_ref;
@@ -52,6 +52,6 @@ impl Table for FieldsTable {
     }
 
     fn build_batch(rows: &[FieldRecord]) -> Result<RecordBatch, ExportError> {
-        batch(fields_schema_ref(), field_columns(rows.iter(), rows.len()))
+        batch(Self::schema(), FieldRecord::columns(rows.iter()))
     }
 }
