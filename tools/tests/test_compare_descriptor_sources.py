@@ -65,7 +65,8 @@ pub static OVERLAY_HANDLE_TABLE: [OverlayHandleEntry; 2] = [
 ''', encoding="utf-8")
             output = root / "audit.json"
             result = subprocess.run([sys.executable, str(TOOL), "--baseline", str(old), "--candidate", str(new),
-                "--downstream-table", str(table), "--output", str(output)], capture_output=True, text=True, encoding="utf-8")
+                "--downstream-table", str(table), "--output", str(output)], capture_output=True, text=True,
+                encoding="utf-8", errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertTrue(report["read_only"])
@@ -125,19 +126,21 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
             descriptor(repo, '        AddProperty(x => x.Value).Float();')
             for args in (("init",), ("config", "user.email", "test@example.com"),
                          ("config", "user.name", "Test"), ("add", "."), ("commit", "-m", "fixture")):
-                subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+                subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+                               encoding="utf-8", errors="strict")
             before_head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
-                capture_output=True, text=True).stdout
+                capture_output=True, text=True, encoding="utf-8", errors="strict").stdout
             before_status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1"], check=True,
-                capture_output=True, text=True).stdout
+                capture_output=True, text=True, encoding="utf-8", errors="strict").stdout
             output = root / "audit.json"
             result = subprocess.run([sys.executable, str(TOOL), "--baseline", f"{repo}::HEAD",
-                "--candidate", f"{repo}::HEAD", "--output", str(output)], capture_output=True, text=True, encoding="utf-8")
+                "--candidate", f"{repo}::HEAD", "--output", str(output)], capture_output=True, text=True,
+                encoding="utf-8", errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
             self.assertEqual(result.returncode, 0, result.stderr)
             after_head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
-                capture_output=True, text=True).stdout
+                capture_output=True, text=True, encoding="utf-8", errors="strict").stdout
             after_status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1"], check=True,
-                capture_output=True, text=True).stdout
+                capture_output=True, text=True, encoding="utf-8", errors="strict").stdout
             self.assertEqual((after_head, after_status), (before_head, before_status))
 
     def test_git_revision_input_does_not_depend_on_the_tar_on_path(self):
@@ -150,7 +153,8 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
             descriptor(repo, '        AddProperty(x => x.Value).Float();')
             for args in (("init",), ("config", "user.email", "test@example.com"),
                          ("config", "user.name", "Test"), ("add", "."), ("commit", "-m", "fixture")):
-                subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+                subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+                               encoding="utf-8", errors="strict")
             broken = root / "broken-bin"
             broken.mkdir()
             if os.name == "nt":
@@ -159,11 +163,12 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
                 script = broken / "tar"
                 script.write_text("#!/bin/sh\nexit 1\n", encoding="ascii")
                 script.chmod(0o755)
-            env = dict(os.environ, PATH=str(broken) + os.pathsep + os.environ.get("PATH", ""))
+            env = dict(os.environ, PATH=str(broken) + os.pathsep + os.environ.get("PATH", ""),
+                       PYTHONIOENCODING="utf-8")
             output = root / "audit.json"
             result = subprocess.run([sys.executable, str(TOOL), "--baseline", f"{repo}::HEAD",
                 "--candidate", f"{repo}::HEAD", "--output", str(output)], capture_output=True,
-                text=True, encoding="utf-8", env=env)
+                text=True, encoding="utf-8", errors="strict", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(output.exists())
 
@@ -221,7 +226,8 @@ OverlayHandleEntry { group_path: "g", handle: 1, field_name: "two" },
             root = Path(temp)
             output = root / "audit.json"
             result = subprocess.run([sys.executable, str(TOOL), "--baseline", str(root / "missing"),
-                "--candidate", str(root / "missing"), "--output", str(output)], capture_output=True, text=True, encoding="utf-8")
+                "--candidate", str(root / "missing"), "--output", str(output)], capture_output=True, text=True,
+                encoding="utf-8", errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(output.exists())
 

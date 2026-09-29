@@ -1,4 +1,5 @@
 import shutil
+import os
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,8 @@ class CheckAsciiTests(unittest.TestCase):
             cwd=NESTED_WORKING_DIRECTORY,
             capture_output=True,
             text=True,
+            encoding="utf-8", errors="strict",
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"),
             check=False,
         )
 
@@ -27,7 +30,7 @@ class CheckAsciiTests(unittest.TestCase):
         whenever the codebase grows is edited without being read."""
         tracked = subprocess.run(
             ["git", "-C", str(REPOSITORY_ROOT), "ls-files", "*.rs"],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="strict", check=True,
         ).stdout.split()
         self.assertGreater(len(tracked), 0, "no tracked Rust files found")
 
@@ -72,6 +75,7 @@ class CheckAsciiTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(copied_script), "--check"],
                 cwd=repository, capture_output=True, text=True, check=False,
+                encoding="utf-8", errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"),
             )
 
         self.assertNotEqual(result.returncode, 0, result.stdout)
@@ -110,6 +114,8 @@ class CheckAsciiTests(unittest.TestCase):
                 cwd=nested_directory,
                 capture_output=True,
                 text=True,
+                encoding="utf-8", errors="strict",
+                env=dict(os.environ, PYTHONIOENCODING="utf-8"),
                 check=False,
             )
 

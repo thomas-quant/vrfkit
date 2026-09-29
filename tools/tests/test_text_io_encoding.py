@@ -129,6 +129,23 @@ class TextIoEncodingTests(unittest.TestCase):
                          "text-mode subprocess output without encoding= and errors= "
                          "decodes with the locale")
 
+    def test_every_text_mode_subprocess_call_in_the_tests_names_encoding_and_errors(self):
+        # The tests run the tools as children and read what they print, so a
+        # locale decode fails them on a cp949 host just as it fails the tools.
+        scripts = sorted((TOOLS / "tests").glob("*.py"))
+        self.assertIn(TOOLS / "tests" / "test_check_ascii.py", scripts)
+        flagged, checked = [], 0
+        for script in scripts:
+            lines, count = undecided_subprocess_text(
+                script.read_text(encoding="utf-8"), str(script))
+            flagged += [f"{script.name}:{line}" for line in lines]
+            checked += count
+        # Non-vacuous: tools/tests held 25 text-mode calls when this was added.
+        self.assertGreater(checked, 20)
+        self.assertEqual(flagged, [],
+                         "text-mode subprocess output without encoding= and errors= "
+                         "decodes with the locale")
+
     def test_the_subprocess_scanner_flags_each_undecided_shape(self):
         cases = {
             "import subprocess\nsubprocess.run(c, text=True)": 1,

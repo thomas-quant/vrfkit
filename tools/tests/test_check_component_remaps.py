@@ -5,6 +5,7 @@ Fixture row counts are measured shapes from real exports, named per test.
 """
 import contextlib
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -276,7 +277,8 @@ class MainTests(unittest.TestCase):
     def _run(self, directory):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--export", str(directory)],
-            capture_output=True, text=True, check=False)
+            capture_output=True, text=True, check=False,
+            encoding="utf-8", errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         return result
 
     def test_an_export_with_no_remap_at_all_does_not_report_OK(self):

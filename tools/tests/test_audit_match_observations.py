@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
+import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -177,6 +182,38 @@ class MatchObservationAuditTests(unittest.TestCase):
             (staging / "fields.parquet").write_bytes(b"PAR1 no footer")
             with self.assertRaisesRegex(ValueError, r"no export directories found.*1 "):
                 audit.audit_exports(root)
+
+    def test_an_edit_to_the_imported_helper_changes_the_provenance(self):
+        """`_collapse` comes from extract_match_observations.py, so its file is
+        hashed beside the tool's own, which does not move."""
+        tools = Path(audit.__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            copy = root / "tools"
+            copy.mkdir()
+            for name in ("audit_match_observations.py", "extract_match_observations.py",
+                         "atomic_io.py", "export_scan.py"):
+                shutil.copyfile(tools / name, copy / name)
+            helper = copy / "extract_match_observations.py"
+            write_complete_export(root / "export", self.corroborated_rows())
+
+            def provenance() -> dict:
+                out = root / "audit.json"
+                subprocess.run([sys.executable, "-B", str(copy / "audit_match_observations.py"),
+                                "--export", str(root / "export"), "--out", str(out)],
+                               check=True, capture_output=True, text=True, encoding="utf-8",
+                               errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+                return json.loads(out.read_text(encoding="utf-8"))["provenance"]
+
+            before = provenance()
+            with helper.open("a", encoding="utf-8") as handle:
+                handle.write("\n# an edit that changes no behaviour\n")
+            after = provenance()
+            helper_sha256 = hashlib.sha256(helper.read_bytes()).hexdigest()
+        self.assertEqual(after["tool_sha256"], before["tool_sha256"])
+        self.assertNotEqual(after["extract_match_observations_sha256"],
+                            before["extract_match_observations_sha256"])
+        self.assertEqual(after["extract_match_observations_sha256"], helper_sha256)
 
     def test_conflicting_weapon_identity_cannot_corroborate(self):
         with tempfile.TemporaryDirectory() as temp:

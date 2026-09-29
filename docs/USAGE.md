@@ -667,6 +667,7 @@ Every loss and fallback counter for the run, including the checkpoint pass when
 | `movement_envelope_trailers`, `movement_envelope_trailer_bits` | In each `sink` block: byte-wrapped movement streams and the bits after their envelopes, which nothing reads. Printed as `Envelope trailers:` (`Checkpoint envelope trailers:`); 24 bits per stream on every measured replay, which `verify_build_corpus.py` requires. |
 | `active_blinds_empty_trailers` | In each `sink` block: empty `ActiveBlinds` deltas whose one trailing zero byte the strict array walker was spared; the parent row keeps it. Printed as `ActiveBlinds trailers:` (`Checkpoint ActiveBlinds trailers:`). |
 | `frame_non_finite_times` | DemoFrames whose time was NaN or infinite; their packets carry 0 ms, as in the reference. `checkpoints.checkpoint_frame_non_finite_times` counts the snapshot frames. Printed as `Frame times:` (`Checkpoint frame times:`), and by `validate`. |
+| `checkpoints.checkpoint_trailing_bytes` | Checkpoint bytes no reader consumed: bytes after an archive inside its chunk, and archive bytes the Oodle codec never read -- the checkpoint twin of `replay_data_trailing_bytes`. Printed as `Trailing bytes:` under `=== Checkpoints ===`, and by `diag --json` as `checkpoint_meta.trailing_bytes`. 0 in all 19,166 checkpoint archives of 1,014 replays, 11.06-13.06 (census, 2026-09-28); `verify_build_corpus.py` fails a replay where it is not. |
 
 `content_blocks_lost` is `malformed_content_blocks + transform_failures + field_stream_failures +
 max(0, rpc_stream_failures - unresolved_rpc_payloads_preserved)`, computed by
@@ -907,11 +908,14 @@ path independently recountable. `bundle_schema_version`
 names the shape; valplay's resume marker records it and rebuilds when it moves.
 
 `losses` carries every counter, zero included, so a clean conversion reads as
-zeros rather than as missing keys; the console summary prints only the ones
-that fired. `property_key_collisions` counts property values a same-named row
-of the same event overwrote -- rows the export tells apart only by `handle`, so
-the lost value is a different property, not an older copy (24,060 on
-02d4d478). `non_finite_movement_rows` counts movement lines holding a
+zeros rather than as missing keys; the console summary prints every counter
+too. `property_key_collisions` counts property values a same-named row
+of the same event overwrote, typed values and raw blobs alike -- rows the
+export tells apart only by `handle`, so the lost value is a different property,
+not an older copy (28,845 on 02d4d478). `payload_shape_conflicts` counts only
+rows that disagree about a key's shape, members against a row's own value (272
+on 02d4d478, each a nested array's container blob replaced by its decoded
+elements). `non_finite_movement_rows` counts movement lines holding a
 non-finite position, velocity, yaw or pitch. Those are written `Infinity` /
 `-Infinity` / `NaN`, as every non-finite float in the bundle is spelled: Python's
 `json` reads them, a strict parser such as orjson rejects the line. None occurs
@@ -1217,7 +1221,7 @@ type inference, so it establishes preservation and schema drift, not meaning.
 
 The pre-PR sweep, and what CI runs, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr); the suites have
-806 Rust tests and 1324 Python tests.
+807 Rust tests and 1337 Python tests.
 
 **The ASCII rule is correctness, not style.** The Windows console is cp949, so a
 single non-ASCII character in a format string truncates output at that point.

@@ -360,6 +360,9 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
                         cp.resolved_path_indices.to_string(),
                     ),
                     ("checkpoint_chunks", cp.chunks.to_string()),
+                    // The summary's `Trailing bytes:`; its ReplayData twin is
+                    // `replay_data_trailing_bytes` above.
+                    ("checkpoint_trailing_bytes", cp.trailing_bytes.to_string()),
                     ("checkpoint_guid_entries", cp.guid_entries.to_string()),
                     ("checkpoint_group_records", cp.group_records.to_string()),
                     ("checkpoint_exported_fields", cp.exported_fields.to_string()),
@@ -858,6 +861,7 @@ mod tests {
             "event_payloads_decoded",
             "event_payload_unknown_groups",
             "checkpoint_chunks",
+            "checkpoint_trailing_bytes",
             "checkpoint_path_resolution_mode",
             "checkpoint_literal_paths",
             "checkpoint_indexed_paths",

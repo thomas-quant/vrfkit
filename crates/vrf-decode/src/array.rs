@@ -95,9 +95,12 @@ pub struct ArrayDecodeStats {
     /// window, and in the object-reference walker the payload of any field
     /// after an element's first. A tally, not an error (`decode_struct_fields`).
     pub unconsumed_nested_bits: u64,
-    /// Bits left after the root array's explicit terminator or an early stop
-    /// of the array loop (an element that fails has moved its own counter, and
-    /// the bits after it are not counted again). They stay in the parent's raw
+    /// Bits the walk left in the root window: only those after the array's
+    /// explicit index terminator (a nonzero trailer included). Every stop that
+    /// moves `errors` or `truncations`, at the array level or in an element,
+    /// consumes the rest of the stream, so it is that one anomaly and is not
+    /// counted again here; a stop that moves no other counter must leave its
+    /// bits here, or it would go unreported. They stay in the parent's raw
     /// bits; the nested equivalent is [`Self::unconsumed_nested_bits`].
     pub unconsumed_root_bits: u64,
     /// Times an element's field loop or an array level ended because the reader
@@ -252,6 +255,9 @@ pub fn decode_object_ref_array_with_stats(
     out
 }
 
+/// Every stop that moves `errors` or `truncations` skips the rest of the
+/// stream, as in `decode_array_level`: the caller tallies what is left as
+/// `unconsumed_root_bits`, which would count the same stop twice.
 fn decode_object_ref_array_reader(
     reader: &mut BitReader<'_>,
     stats: &mut ArrayDecodeStats,
@@ -260,10 +266,12 @@ fn decode_object_ref_array_reader(
 
     let Ok(element_count) = reader.read_int_packed() else {
         stats.errors += 1;
+        reader.skip_remaining();
         return out;
     };
     if element_count > MAX_ELEMENTS {
         stats.truncations += 1;
+        reader.skip_remaining();
         return out;
     }
 
@@ -280,13 +288,20 @@ fn decode_object_ref_array_reader(
         if elements_seen == MAX_ELEMENTS {
             match take_zero_int_packed(reader) {
                 Ok(true) => consume_optional_trailing_int_packed(reader, stats),
-                Ok(false) => stats.truncations += 1,
-                Err(_) => stats.errors += 1,
+                Ok(false) => {
+                    stats.truncations += 1;
+                    reader.skip_remaining();
+                }
+                Err(_) => {
+                    stats.errors += 1;
+                    reader.skip_remaining();
+                }
             }
             return out;
         }
         let Ok(encoded_index) = reader.read_int_packed() else {
             stats.errors += 1;
+            reader.skip_remaining();
             break;
         };
         if encoded_index == 0 {
@@ -378,6 +393,11 @@ fn decode_object_ref_array_reader(
 }
 
 /// Recursively decode one array level.
+///
+/// Every stop that moves `errors` or `truncations` consumes the rest of the
+/// stream, skipped or kept as a `._raw` leaf: the caller tallies what is left
+/// as `unconsumed_root_bits` (`unconsumed_nested_bits` in a nested window),
+/// which would count the same stop twice.
 fn decode_array_level(
     reader: &mut BitReader<'_>,
     walk: &mut Walk<'_, '_>,
@@ -391,6 +411,7 @@ fn decode_array_level(
 
     let Ok(element_count) = reader.read_int_packed() else {
         stats.errors += 1;
+        reader.skip_remaining();
         return;
     };
 
@@ -418,12 +439,16 @@ fn decode_array_level(
                     stats.truncations += 1;
                     emit_remaining_raw(reader, walk, stats);
                 }
-                Err(_) => stats.errors += 1,
+                Err(_) => {
+                    stats.errors += 1;
+                    reader.skip_remaining();
+                }
             }
             break;
         }
         let Ok(encoded_index) = reader.read_int_packed() else {
             stats.errors += 1;
+            reader.skip_remaining();
             break;
         };
 
@@ -1537,9 +1562,9 @@ mod tests {
     /// After `MAX_ELEMENTS` elements both walkers read the next IntPacked in
     /// the limit check: the index terminator, then the optional trailer as
     /// after any terminator; another index, one truncation; or a failed read,
-    /// one error. The limit stops the array loop, so the bits it leaves go to
-    /// `unconsumed_root_bits`, except that the struct walker keeps a truncated
-    /// tail as a `._raw` leaf.
+    /// one error. Only bits after the terminator are root residual: the other
+    /// two are one anomaly each, the struct walker keeping a truncated tail as
+    /// a `._raw` leaf.
     #[test]
     fn both_walkers_read_the_next_int_packed_at_the_element_limit() {
         // (the tail after the last element as `bits(value, width)`, the struct
@@ -1549,8 +1574,8 @@ mod tests {
             (0x0000, 16, [0; 5], None, [0; 5]), // terminator, zero trailer
             (0x0200, 16, [0, 0, 0, 8, 0], None, [0, 0, 0, 8, 0]), // terminator, trailer 1
             (0x0100, 16, [1, 0, 0, 0, 0], None, [1, 0, 0, 0, 0]), // terminator, cut trailer
-            (0x0002, 16, [0, 1, 0, 0, 0], Some(16), [0, 1, 0, 16, 0]), // one element too many
-            (0b111, 3, [1, 0, 0, 3, 0], None, [1, 0, 0, 3, 0]), // too few bits to read
+            (0x0002, 16, [0, 1, 0, 0, 0], Some(16), [0, 1, 0, 0, 0]), // one element too many
+            (0b111, 3, [1, 0, 0, 0, 0], None, [1, 0, 0, 0, 0]), // too few bits to read
         ];
         for (tail, width, struct_counters, raw_width, object_ref_counters) in cases {
             let case = format!("tail {tail:#06x}/{width}");
@@ -1579,6 +1604,77 @@ mod tests {
             assert_eq!(stats.elements_decoded, u64::from(MAX_ELEMENTS), "{case}");
             assert_eq!(anomalies(&stats), object_ref_counters, "{case}: {stats:?}");
         }
+    }
+
+    /// The other array-level stops that move `errors` or `truncations` are one
+    /// anomaly each in both walkers as well: a failed element-count read, a
+    /// declared count over `MAX_ELEMENTS` (the struct walker keeps the rest as
+    /// a `._raw` leaf), a failed index read and an index out of range. The
+    /// tail is neither root residual nor, in a nested window, nested residual,
+    /// and what was decoded before the stop is kept.
+    #[test]
+    fn an_array_level_stop_counts_once_in_both_walkers() {
+        let mut count_cut = BitWriter::new();
+        count_cut.repeat(true, 3); // too few bits for the element count
+        let mut over_limit = BitWriter::new();
+        over_limit.int_packed(MAX_ELEMENTS + 1).repeat(true, 16);
+        let mut index_cut = BitWriter::new();
+        index_cut.int_packed(2); // elementCount
+        push_one_closed_item(&mut index_cut);
+        index_cut.repeat(true, 3); // too few bits for the next index
+        let mut out_of_range = BitWriter::new();
+        out_of_range.int_packed(1).int_packed(2).repeat(true, 16); // index 1 of 1
+
+        // (case, bits, both walkers' counters, the struct walker's leaves, the
+        // object-ref walker's items)
+        let cases = [
+            ("count read", count_cut, [1, 0, 0, 0, 0], vec![], vec![]),
+            (
+                "count over the limit",
+                over_limit,
+                [0, 1, 0, 0, 0],
+                vec![("._raw", 16)],
+                vec![],
+            ),
+            (
+                "index read",
+                index_cut,
+                [1, 0, 0, 0, 0],
+                vec![("[0]._h2", 8)],
+                vec![(0, 5)],
+            ),
+            (
+                "index out of range",
+                out_of_range,
+                [1, 0, 0, 0, 0],
+                vec![],
+                vec![],
+            ),
+        ];
+        for (case, bits, counters, leaves, items) in cases {
+            let (data, bit_count) = bits.finish();
+            let mut stats = ArrayDecodeStats::default();
+            let fields = decode_struct_array(&data, bit_count, None, &[], &mut stats);
+            let got: Vec<(&str, u32)> = fields
+                .iter()
+                .map(|f| (f.path.as_str(), f.bit_count))
+                .collect();
+            assert_eq!(got, leaves, "{case}");
+            assert_eq!(anomalies(&stats), counters, "{case}: {stats:?}");
+
+            let mut stats = ArrayDecodeStats::default();
+            let guids = decode_object_ref_array_with_stats(&data, bit_count, &mut stats);
+            assert_eq!(guids, items, "{case}");
+            assert_eq!(anomalies(&stats), counters, "{case}: {stats:?}");
+        }
+
+        // A nested array whose index read fails: one error, and the outer walk
+        // still reads its own element and array terminators.
+        let (data, bit_count) = nested(BitWriter::new().int_packed(1), 3);
+        let mut stats = ArrayDecodeStats::default();
+        let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &[], &mut stats);
+        assert!(fields.is_empty(), "{fields:?}");
+        assert_eq!(anomalies(&stats), [1, 0, 0, 0, 0], "{stats:?}");
     }
 
     /// `AbilityCastsThisRound[].Effects[]` is a nested array only its schema

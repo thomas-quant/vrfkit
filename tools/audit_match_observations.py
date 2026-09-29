@@ -128,6 +128,9 @@ def audit_export(export_dir: Path, *, window_ms: int = 300) -> dict:
         "source": str(export_dir.resolve()),
         "provenance": {
             "tool_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            # `_collapse`'s file: it shapes the counts too.
+            "extract_match_observations_sha256": hashlib.sha256(
+                Path(__file__).with_name("extract_match_observations.py").read_bytes()).hexdigest(),
             "manifest_sha256": hashlib.sha256((export_dir / "manifest.json").read_bytes()).hexdigest()
                 if (export_dir / "manifest.json").is_file() else None,
             "replay_build": json.loads((export_dir / "manifest.json").read_text(encoding="utf-8")).get("replay_build")

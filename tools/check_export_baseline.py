@@ -64,9 +64,10 @@ DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
 
 # Counters the export summary prints, anchored on the exact labels
 # crates/vrfkit/src/driver/summary.rs emits. Not every line is pinned: on
-# 2026-09-28, 57 of the 114 labelled `eprintln!` lines in summary.rs had no
-# pattern here or in CHECKPOINT_COUNTERS. A listed label that stops being
-# printed reads as missing (None), never as 0.
+# 2026-09-29, 56 of the 120 labelled `eprintln!` literals in summary.rs,
+# rendered as test_check_export_baseline.py's SummaryLabelTests renders them,
+# matched no pattern here or in CHECKPOINT_COUNTERS. A listed label that
+# stops being printed reads as missing (None), never as 0.
 COUNTERS = {
     "chunks": r"Chunks:\s+(\d+)",
     "packets": r"Packets:\s+(\d+)",
@@ -198,6 +199,9 @@ CHECKPOINT_COUNTERS = {
     "cp_partial_rows": r"Checkpoint partial raw:\s+(\d+) rows",
     "cp_partial_bits": r"Checkpoint partial raw:\s+\d+ rows / (\d+) bits",
     "cp_chunks": r"Checkpoints:\s+(\d+)",
+    # Checkpoint bytes no reader consumed. Anchored: the free-text error lines
+    # printed before it (`Struct blob err:`, `Movement err:`) could quote it.
+    "cp_trailing_bytes": r"(?m)^\s*Trailing bytes:\s+(\d+)\s*$",
     "cp_guid_entries": r"(?m)^\s*GUID entries:\s+(\d+)",
     "cp_group_records": r"Group records:\s+(\d+)",
     "cp_exported_fields": r"Exported fields:\s+(\d+)",
@@ -642,6 +646,22 @@ def frame_skip_manifest_errors(out_dir: Path, counters: dict, checkpoints: bool)
     return _manifest_agreement(out_dir, counters, "frame-skip", pick)
 
 
+def checkpoint_trailing_manifest_errors(out_dir: Path, counters: dict,
+                                        checkpoints: bool) -> list[str]:
+    """`Trailing bytes:` must agree with the manifest's
+    `checkpoints.checkpoint_trailing_bytes`, zeros included. Not a zero gate
+    here: verify_build_corpus.py is one, and the baseline pins the value.
+
+    As with the frame skips, summary and manifest read one field, so a chunk
+    whose count never reaches `CheckpointStats` reads 0 in both;
+    crates/vrfkit/tests/checkpoint_unread.rs guards that wiring.
+    """
+    if not checkpoints:
+        return []
+    return _manifest_agreement(out_dir, counters, "checkpoint trailing-bytes", lambda quality: {
+        "cp_trailing_bytes": quality["checkpoints"]["checkpoint_trailing_bytes"]})
+
+
 def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -> dict:
     """Export one replay and collect the summary counters and Parquet shape.
 
@@ -687,7 +707,8 @@ def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -
     manifest_errors = (reward_opaque_manifest_errors(out_dir, counters, checkpoints)
                        + targeting_manifest_errors(out_dir, counters, checkpoints)
                        + sink_tally_manifest_errors(out_dir, counters, checkpoints)
-                       + frame_skip_manifest_errors(out_dir, counters, checkpoints))
+                       + frame_skip_manifest_errors(out_dir, counters, checkpoints)
+                       + checkpoint_trailing_manifest_errors(out_dir, counters, checkpoints))
     if manifest_errors:
         raise SystemExit("; ".join(manifest_errors))
 

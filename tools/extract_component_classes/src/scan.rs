@@ -15,9 +15,10 @@ use crate::container::Container;
 use crate::reader::{Result, fail};
 use crate::script::{
     KIND_EXPORT, KIND_NULL, KIND_PACKAGE_IMPORT, KIND_SCRIPT_IMPORT, ScriptObjects, index_kind,
+    is_null,
 };
 use crate::toc::CHUNK_EXPORT_BUNDLE_DATA;
-use crate::zen::{PackageHeader, declared_header_size, parse_package_header};
+use crate::zen::{ExportEntry, PackageHeader, declared_header_size, parse_package_header};
 
 pub const GEN_VARIABLE_SUFFIX: &str = "_GEN_VARIABLE";
 pub const CDO_PREFIX: &str = "Default__";
@@ -108,13 +109,19 @@ pub fn class_ref(pkg: &PackageHeader, package_id: u64, index: u64) -> ClassRef {
     }
 }
 
-/// A heuristic for a class object: its own class is native and named `*Class`
-/// (`/Script/Engine.BlueprintGeneratedClass`, `/Script/CoreUObject.Class`).
-fn is_class_object(script: &ScriptObjects, class_index: u64) -> bool {
-    if index_kind(class_index) != KIND_SCRIPT_IMPORT {
+/// A class object: its own class is native and named `*Class`, and it has a
+/// super, which the export map sets only on structs. Neither test suffices
+/// alone. Over the 2,654,770 exports of the 13.06 containers the name also
+/// admits 257 objects with no super (250 `MVVMViewClass`, 4
+/// `EnvQueryGenerator_ActorsOfClass`, 2 `BlackboardKeyType_Class`, 1
+/// `SoundClass`), and the super 21,059 public `Function` and `ScriptStruct`
+/// exports; the 73,057 that pass both are exactly the exports a class default
+/// object in their package instantiates.
+fn is_class_object(script: &ScriptObjects, export: &ExportEntry) -> bool {
+    if index_kind(export.class_index) != KIND_SCRIPT_IMPORT || is_null(export.super_index) {
         return false;
     }
-    script.path_of(class_index).is_some_and(|p| {
+    script.path_of(export.class_index).is_some_and(|p| {
         p.rsplit(['.', ':'])
             .next()
             .is_some_and(|leaf| leaf.ends_with("Class"))
@@ -142,7 +149,7 @@ pub fn scan_header(
         };
         let outer_name = outer.map_or_else(String::new, |o| pkg.export_name(o));
 
-        if is_class_object(script, export.class_index) && export.public_export_hash != 0 {
+        if is_class_object(script, export) && export.public_export_hash != 0 {
             let path = match outer {
                 None => format!("{}.{rendered}", pkg.name),
                 Some(_) => format!("{}.{outer_name}:{rendered}", pkg.name),
@@ -345,6 +352,12 @@ mod tests {
                 "/Script/ShooterGame",
                 "EquippableStateMachineComponent",
                 "AresCharacter",
+                "AnimBlueprintGeneratedClass",
+                "SoundClass",
+                "/Script/UMG",
+                "WidgetBlueprintGeneratedClass",
+                "/Script/CoreUObject",
+                "Function",
             ],
             &[
                 (0, 0, "/Script/Engine", None),
@@ -367,9 +380,37 @@ mod tests {
                     "/Script/ShooterGame.AresCharacter",
                     Some("/Script/ShooterGame"),
                 ),
+                (
+                    5,
+                    0,
+                    "/Script/Engine.AnimBlueprintGeneratedClass",
+                    Some("/Script/Engine"),
+                ),
+                (6, 0, "/Script/Engine.SoundClass", Some("/Script/Engine")),
+                (7, 0, "/Script/UMG", None),
+                (
+                    8,
+                    0,
+                    "/Script/UMG.WidgetBlueprintGeneratedClass",
+                    Some("/Script/UMG"),
+                ),
+                (9, 0, "/Script/CoreUObject", None),
+                (
+                    10,
+                    0,
+                    "/Script/CoreUObject.Function",
+                    Some("/Script/CoreUObject"),
+                ),
             ],
         ))
         .unwrap()
+    }
+
+    /// The class objects `scan_header` records for a one-package spec.
+    fn classes_of(spec: &PackageSpec<'_>) -> Vec<(u64, String)> {
+        let pkg = parse_package_header(&build_package(spec)).unwrap();
+        let (_, classes) = scan_header(&pkg, 1, &script());
+        classes.into_iter().map(|(h, c)| (h, c.path)).collect()
     }
 
     /// A character Blueprint: its class (export 0), its CDO (export 1), one
@@ -418,6 +459,24 @@ mod tests {
             imported_hashes: vec![],
             imported_packages: vec![],
         })
+    }
+
+    /// A child Blueprint: its class's super is `cooldown()`'s class, in
+    /// another package.
+    fn cooldown_child() -> PackageSpec<'static> {
+        let bpgc = script_index("/Script/Engine.BlueprintGeneratedClass");
+        // Imported package 0, imported hash 0.
+        let parent = KIND_PACKAGE_IMPORT << 62;
+        PackageSpec {
+            names: vec![
+                "/Game/Abilities/Comp_Cooldown_Child",
+                "Comp_Cooldown_Child_C",
+            ],
+            package_name: 0,
+            exports: vec![(1, 0, u64::MAX, bpgc, parent, 0x5555)],
+            imported_hashes: vec![0x3333],
+            imported_packages: vec![("/Game/Abilities/Comp_Cooldown", 0)],
+        }
     }
 
     #[test]
@@ -544,5 +603,120 @@ mod tests {
         assert!(matches!(r, ClassRef::Bad(_)));
         assert!(matches!(class_ref(&pkg, 1, 4), ClassRef::Bad(_)));
         assert_eq!(class_ref(&pkg, 1, u64::MAX), ClassRef::Null);
+    }
+
+    /// The name alone: `/Engine/EngineSounds/Master` in 13.06 is a public
+    /// `SoundClass` asset with no super.
+    #[test]
+    fn an_asset_whose_class_is_named_like_a_metaclass_is_not_a_class() {
+        let sound_class = script_index("/Script/Engine.SoundClass");
+        let got = classes_of(&PackageSpec {
+            names: vec!["/Engine/EngineSounds/Master", "Master"],
+            package_name: 0,
+            exports: vec![(1, 0, u64::MAX, sound_class, u64::MAX, 0x4444)],
+            imported_hashes: vec![],
+            imported_packages: vec![],
+        });
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    /// The super alone: a Blueprint function overriding a native one is public
+    /// and has a super, the function it overrides.
+    #[test]
+    fn a_function_with_a_super_is_not_a_class() {
+        let widget = script_index("/Script/UMG.WidgetBlueprintGeneratedClass");
+        let parent = script_index("/Script/UMG.UserWidget");
+        let function = script_index("/Script/CoreUObject.Function");
+        let overridden = script_index("/Script/UMG.UserWidget:Construct");
+        let got = classes_of(&PackageSpec {
+            names: vec!["/Game/UI/W_Score", "W_Score_C", "Construct"],
+            package_name: 0,
+            exports: vec![
+                (1, 0, u64::MAX, widget, parent, 0x1111),
+                (2, 0, 0, function, overridden, 0x2222),
+            ],
+            imported_hashes: vec![],
+            imported_packages: vec![],
+        });
+        assert_eq!(got, [(0x1111, "/Game/UI/W_Score.W_Score_C".to_owned())]);
+    }
+
+    /// Each metaclass the 13.06 containers' classes have, with the class
+    /// default object beside the class as in a cooked package.
+    #[test]
+    fn each_blueprint_metaclass_in_the_game_makes_a_class() {
+        for (meta, parent) in [
+            (
+                "/Script/Engine.BlueprintGeneratedClass",
+                "/Script/ShooterGame.EquippableStateMachineComponent",
+            ),
+            (
+                "/Script/UMG.WidgetBlueprintGeneratedClass",
+                "/Script/UMG.UserWidget",
+            ),
+            (
+                "/Script/Engine.AnimBlueprintGeneratedClass",
+                "/Script/Engine.AnimInstance",
+            ),
+        ] {
+            let (class, parent) = (script_index(meta), script_index(parent));
+            let got = classes_of(&PackageSpec {
+                names: vec!["/Game/P", "X_C", "Default__X_C"],
+                package_name: 0,
+                exports: vec![
+                    (1, 0, u64::MAX, class, parent, 0x1111),
+                    (2, 0, u64::MAX, 0, u64::MAX, 0x2222),
+                ],
+                imported_hashes: vec![],
+                imported_packages: vec![],
+            });
+            assert_eq!(got, [(0x1111, "/Game/P.X_C".to_owned())], "{meta}");
+        }
+    }
+
+    /// 31,594 of the 73,057 class objects in the 13.06 containers have a super
+    /// in another package. The other 41,463 have a native super; none has one
+    /// in its own package.
+    #[test]
+    fn a_blueprint_whose_parent_is_another_packages_blueprint_is_a_class() {
+        let got = classes_of(&cooldown_child());
+        assert_eq!(
+            got,
+            [(
+                0x5555,
+                "/Game/Abilities/Comp_Cooldown_Child.Comp_Cooldown_Child_C".to_owned()
+            )]
+        );
+    }
+
+    /// Of the 13.06 containers' 26,109 rows whose class is another package's,
+    /// 3,265 reach the native class through two to five supers and the rest
+    /// through one.
+    #[test]
+    fn a_child_blueprint_class_resolves_up_two_supers_to_the_native_class() {
+        let script = script();
+        let mut table = ClassTable::new();
+        for bytes in [cooldown(), build_package(&cooldown_child())] {
+            let pkg = parse_package_header(&bytes).unwrap();
+            let id = hash_package_name(&pkg.name);
+            for (hash, class) in scan_header(&pkg, id, &script).1 {
+                table.insert((id, hash), class);
+            }
+        }
+        let child = "/Game/Abilities/Comp_Cooldown_Child";
+        let r = resolve(
+            &ClassRef::Package(hash_package_name(child), child.to_owned(), 0x5555),
+            &script,
+            &table,
+        );
+        assert_eq!(
+            r.class,
+            "/Game/Abilities/Comp_Cooldown_Child.Comp_Cooldown_Child_C"
+        );
+        assert_eq!(r.class_kind, "package_import");
+        assert_eq!(
+            r.native_class,
+            "/Script/ShooterGame.EquippableStateMachineComponent"
+        );
     }
 }
