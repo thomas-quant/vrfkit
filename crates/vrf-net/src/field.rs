@@ -149,11 +149,7 @@ fn parse_rep_layout_impl(
             let payload_bits = reader.read_int_packed()?;
 
             if payload_bits as u64 > reader.bits_remaining() {
-                // Declared more bits than remain: hand the abandoned span back
-                // for `skipped_bits`.
-                let abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-                remainder = RepLayoutRemainder::Malformed(abandoned_bits);
-                reader.skip_remaining();
+                remainder = RepLayoutRemainder::Malformed(abandon(reader, record_start));
                 break;
             }
 
@@ -193,20 +189,11 @@ pub fn parse_class_net_cache(
     function_count: u32,
     sink: &mut dyn FieldSink,
 ) -> Result<(u32, u64)> {
-    let (count, outcome) = parse_class_net_cache_impl(reader, function_count, sink, None);
+    let (count, outcome) = parse_class_net_cache_content_block(reader, function_count, sink, None);
     Ok((count, outcome?))
 }
 
 pub(crate) fn parse_class_net_cache_content_block(
-    reader: &mut BitReader<'_>,
-    function_count: u32,
-    sink: &mut dyn FieldSink,
-    ctx: Option<&mut WalkContext>,
-) -> Walk<u64> {
-    parse_class_net_cache_impl(reader, function_count, sink, ctx)
-}
-
-fn parse_class_net_cache_impl(
     reader: &mut BitReader<'_>,
     function_count: u32,
     sink: &mut dyn FieldSink,
@@ -237,19 +224,15 @@ fn parse_class_net_cache_impl(
                 ctx.last_handle = Some(handle);
             }
 
+            // Too few bits for a payload length is a malformed tail, charged
+            // together with its handle, as is a payload that overruns.
             if reader.bits_remaining() < 8 {
-                // Too few bits for a payload length: a malformed tail, charged
-                // together with its handle.
-                abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-                reader.skip_remaining();
+                abandoned_bits = abandon(reader, record_start);
                 break;
             }
-
             let payload_bits = reader.read_int_packed()?;
-
             if payload_bits as u64 > reader.bits_remaining() {
-                abandoned_bits = (reader.position() - record_start) + reader.bits_remaining();
-                reader.skip_remaining();
+                abandoned_bits = abandon(reader, record_start);
                 break;
             }
 
@@ -259,6 +242,13 @@ fn parse_class_net_cache_impl(
         }
         Ok(abandoned_bits)
     })
+}
+
+/// Skip the rest of the block and return the bits abandoned from the start
+/// of the failing record: its handle and length bits die with it.
+fn abandon(reader: &mut BitReader<'_>, record_start: u64) -> u64 {
+    reader.skip_remaining();
+    reader.len_bits() - record_start
 }
 
 #[cfg(test)]

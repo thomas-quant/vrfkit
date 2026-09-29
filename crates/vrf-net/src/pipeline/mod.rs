@@ -26,7 +26,8 @@ use vrf_bitio::BitReader;
 use vrf_transform::TransformVersion;
 
 use crate::bunch::{
-    PartialBunchAccumulator, PartialDiscardCause, PartialResourceLimit, RawBunchHeader,
+    PartialBunchAccumulator, PartialDiscardCause, PartialResourceLimit, PreservedPartial,
+    RawBunchHeader,
 };
 use crate::content::ContentBlockHeader;
 use crate::error::{PartialSequenceKind, Result};
@@ -42,7 +43,7 @@ use std::collections::HashMap;
 use framing::BunchContext;
 
 /// Per-channel actor state tracked during replication.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ActorChannelState {
     pub channel_index: u32,
     pub is_open: bool,
@@ -168,6 +169,41 @@ pub struct RejectedPartialFragment<'a> {
     pub bit_count: usize,
     pub payload: &'a [u8],
     pub rejection_packet_id: Option<i32>,
+}
+
+impl<'a> RejectedPartialFragment<'a> {
+    /// An assembly the accumulator gave up, with the fragments it had buffered.
+    fn accumulated(
+        partial: &'a PreservedPartial,
+        reason: PartialPayloadReason,
+        rejection_packet_id: Option<i32>,
+    ) -> Self {
+        Self {
+            header: &partial.header,
+            payload_kind: "accumulated_payload",
+            reason,
+            bit_count: partial.bit_count,
+            payload: &partial.buffer,
+            rejection_packet_id,
+        }
+    }
+
+    /// The fragment being handled, refused before it was buffered.
+    fn current(
+        header: &'a RawBunchHeader,
+        reason: PartialPayloadReason,
+        bit_count: usize,
+        payload: &'a [u8],
+    ) -> Self {
+        Self {
+            header,
+            payload_kind: "current_fragment",
+            reason,
+            bit_count,
+            payload,
+            rejection_packet_id: Some(header.packet_id),
+        }
+    }
 }
 
 /// Trait for receiving all replication events: fields, RPCs and actor
@@ -357,14 +393,10 @@ impl ReplicationReader {
             self.stats.unfinished_partials += 1;
             self.stats.unfinished_partial_bits += partial.bit_count as u64;
             if let Some(sink) = sink.as_deref_mut() {
-                sink.on_rejected_partial(RejectedPartialFragment {
-                    header: &partial.header,
-                    payload_kind: "accumulated_payload",
-                    reason: PartialPayloadReason::EndOfStream,
-                    bit_count: partial.bit_count,
-                    payload: &partial.buffer,
-                    rejection_packet_id: None,
-                });
+                let reason = PartialPayloadReason::EndOfStream;
+                sink.on_rejected_partial(RejectedPartialFragment::accumulated(
+                    &partial, reason, None,
+                ));
             }
         }
     }
@@ -408,11 +440,11 @@ impl ReplicationReader {
         let result = packet_reader.read_packet(packet_data, packet_id, |header, payload| {
             stage.stats.bunches += 1;
 
-            // The global index is the value *before* the increment, the
-            // per-channel one the value *after*: what those fields have always
-            // meant in `DiagnosticEvent`.
-            let global_index = *global_bunch_index;
+            // The global and in-packet indexes are the values *before* the
+            // increment, the per-channel one the value *after*.
+            let (global_index, index_in_packet) = (*global_bunch_index, bunch_index_in_packet);
             *global_bunch_index += 1;
+            bunch_index_in_packet += 1;
             if header.has_channel_limit_error
                 || (!stage.channels.contains_key(&header.ch_index)
                     && stage.channels.len() >= MAX_ACTIVE_CHANNELS)
@@ -423,34 +455,26 @@ impl ReplicationReader {
                     // return skips `process_bunch`, which counts the rest.
                     stage.stats.partial_bunches += 1;
                     let bit_count = payload.bits_remaining() as usize;
-                    let byte_count = stage_fragment(payload.clone(), fragment_stage);
-                    sink.on_rejected_partial(RejectedPartialFragment {
-                        header,
-                        payload_kind: "current_fragment",
-                        reason: PartialPayloadReason::ChannelStateLimit,
-                        bit_count,
-                        payload: &fragment_stage[..byte_count],
-                        rejection_packet_id: Some(header.packet_id),
-                    });
+                    let staged = stage_fragment(payload.clone(), fragment_stage);
+                    let reason = PartialPayloadReason::ChannelStateLimit;
+                    let row = RejectedPartialFragment::current(header, reason, bit_count, staged);
+                    sink.on_rejected_partial(row);
                 }
-                Self::abandon_bunch(&mut payload.clone(), &mut stage);
-                // A refused open did not complete. Retired before the close, so
-                // an open+close bunch closes nothing it did not open.
-                Self::retire_after_failed_open(header, &mut stage);
+                // Retired before the close, so an open+close bunch closes
+                // nothing it did not open.
+                Self::abandon_bunch(header, &mut payload.clone(), &mut stage);
                 if header.b_close {
                     Self::close_channel(header, &mut stage, accumulator, sink);
                 }
-                bunch_index_in_packet += 1;
                 return;
             }
             let slot = stage.channels.entry(header.ch_index).or_default();
             slot.bunch_count += 1;
             let ids = BunchIds {
-                bunch_index_in_packet,
+                bunch_index_in_packet: index_in_packet,
                 global_bunch_index: global_index,
                 channel_bunch_index: slot.bunch_count,
             };
-            bunch_index_in_packet += 1;
 
             Self::process_bunch(
                 header,
@@ -484,7 +508,7 @@ impl ReplicationReader {
 
         if header.b_partial {
             stage.stats.partial_bunches += 1;
-            let byte_count = stage_fragment(payload, fragment_stage);
+            let staged = stage_fragment(payload, fragment_stage);
 
             // The accumulator is the one reassembly authority, so it sees none
             // of the packet reader's partial verdicts (see `RawPacketReader`):
@@ -498,7 +522,7 @@ impl ReplicationReader {
             let result = accumulator.add_fragment(
                 ch_index,
                 fragment_header,
-                &fragment_stage[..byte_count],
+                staged,
                 bit_count as usize,
                 &mut stage.stats.partial_errors,
                 &mut stage.stats.partial_fragments,
@@ -511,15 +535,11 @@ impl ReplicationReader {
                 .map(PartialDiscardCause::Sequence)
                 .or_else(|| result.resource_limit.map(PartialDiscardCause::Resource))
                 .map(partial_payload_reason);
-            for (displaced, discard_cause) in &result.displaced {
-                sink.on_rejected_partial(RejectedPartialFragment {
-                    header: &displaced.header,
-                    payload_kind: "accumulated_payload",
-                    reason: partial_payload_reason(*discard_cause),
-                    bit_count: displaced.bit_count,
-                    payload: &displaced.buffer,
-                    rejection_packet_id: Some(header.packet_id),
-                });
+            for (displaced, cause) in &result.displaced {
+                let reason = partial_payload_reason(*cause);
+                let row =
+                    RejectedPartialFragment::accumulated(displaced, reason, Some(header.packet_id));
+                sink.on_rejected_partial(row);
             }
             // A current-fragment row only for a fragment the accumulator
             // refused, under the cause it named. An overlapping initial is not
@@ -529,14 +549,9 @@ impl ReplicationReader {
             if let Some(reason) = reason.filter(|reason| {
                 !result.should_process && *reason != PartialPayloadReason::OverlappingInitial
             }) {
-                sink.on_rejected_partial(RejectedPartialFragment {
-                    header,
-                    payload_kind: "current_fragment",
-                    reason,
-                    bit_count: bit_count as usize,
-                    payload: &fragment_stage[..byte_count],
-                    rejection_packet_id: Some(header.packet_id),
-                });
+                let row =
+                    RejectedPartialFragment::current(header, reason, bit_count as usize, staged);
+                sink.on_rejected_partial(row);
             }
 
             if result.overlapping_initial {
@@ -629,28 +644,26 @@ impl ReplicationReader {
             stage.stats.partial_errors += 1;
             stage.stats.partial_channel_close += 1;
             stage.stats.skipped_bits += discarded.bit_count as u64;
-            sink.on_rejected_partial(RejectedPartialFragment {
-                header: &discarded.header,
-                payload_kind: "accumulated_payload",
-                reason: PartialPayloadReason::ChannelClosed,
-                bit_count: discarded.bit_count,
-                payload: &discarded.buffer,
-                rejection_packet_id: Some(header.packet_id),
-            });
+            let reason = PartialPayloadReason::ChannelClosed;
+            let row =
+                RejectedPartialFragment::accumulated(&discarded, reason, Some(header.packet_id));
+            sink.on_rejected_partial(row);
         }
     }
 
-    /// Count a bunch-header failure and abandon the bunch.
+    /// Count a bunch-header failure, abandon the bunch and retire the actor
+    /// an open in it displaced.
     ///
-    /// All three header stages (package-map exports, must-be-mapped GUIDs, the
-    /// channel open) leave the reader at an indeterminate bit when they fail,
-    /// so the rest of the bunch cannot be framed. The charge is the whole
-    /// window (`payload`'s window is this bunch's payload), never
-    /// `bits_remaining()`, by the rule on `framing::abort`.
-    fn abandon_bunch(payload: &mut BitReader<'_>, stage: &mut Stage<'_>) {
+    /// A bunch refused at the channel-state limit, and each header stage that
+    /// fails (package-map exports, must-be-mapped GUIDs, the channel open),
+    /// leave the reader at an indeterminate bit, so the rest cannot be framed.
+    /// The charge is the whole window, never `bits_remaining()`, by the rule on
+    /// `framing::abort`.
+    fn abandon_bunch(header: &RawBunchHeader, payload: &mut BitReader<'_>, stage: &mut Stage<'_>) {
         stage.stats.bunch_header_failures += 1;
         stage.stats.skipped_bits += payload.len_bits();
         payload.skip_remaining();
+        Self::retire_after_failed_open(header, stage);
     }
 
     /// Take the channel away from the actor it held when an open bunch does not
@@ -716,46 +729,34 @@ impl ReplicationReader {
         if header.b_has_package_map_exports {
             if channel::read_package_map_exports(payload, stage.stats, sink).is_ok() {
                 stage.stats.package_map_exports += 1;
+                Self::retire_after_failed_open(header, stage);
             } else {
-                Self::abandon_bunch(payload, stage);
+                Self::abandon_bunch(header, payload, stage);
             }
-            Self::retire_after_failed_open(header, stage);
             return;
         }
 
-        // A failed must-be-mapped read leaves the reader at an indeterminate
-        // bit: abandon the bunch, and any open behind the list with it.
-        if header.b_has_must_be_mapped_guids
-            && channel::read_must_be_mapped_guids(payload, stage.stats).is_err()
+        // A failed must-be-mapped read abandons any open behind the list with
+        // the bunch; a failed open writes no state.
+        if (header.b_has_must_be_mapped_guids
+            && channel::read_must_be_mapped_guids(payload, stage.stats).is_err())
+            || (header.b_open
+                && channel::handle_channel_open(header, payload, stage.channels, stage.stats, sink)
+                    .is_err())
         {
-            Self::abandon_bunch(payload, stage);
-            Self::retire_after_failed_open(header, stage);
-            return;
-        }
-
-        // A failed open writes no state; `retire_after_failed_open` clears the
-        // old actor's.
-        if header.b_open
-            && channel::handle_channel_open(header, payload, stage.channels, stage.stats, sink)
-                .is_err()
-        {
-            Self::abandon_bunch(payload, stage);
-            Self::retire_after_failed_open(header, stage);
-            return;
+            return Self::abandon_bunch(header, payload, stage);
         }
 
         // No open actor on this channel: nothing to frame the rest under.
-        let Some(ch) = stage.channels.get(&ch_index).and_then(|s| s.state.as_ref()) else {
-            Self::drop_unopened(payload, stage);
-            return;
+        let Some(ch) = stage
+            .channels
+            .get(&ch_index)
+            .and_then(|s| s.state.as_ref())
+            .filter(|s| s.is_open)
+        else {
+            return Self::drop_unopened(payload, stage);
         };
-        let (actor_net_guid, is_open, archetype_net_guid) =
-            (ch.actor_net_guid, ch.is_open, ch.archetype_net_guid);
-
-        if !is_open {
-            Self::drop_unopened(payload, stage);
-            return;
-        }
+        let (actor_net_guid, archetype_net_guid) = (ch.actor_net_guid, ch.archetype_net_guid);
 
         // ReadNetPlayerIndex. The cheap flags come first: the path check costs
         // two NetGuidCache lookups and two normalisations, and only open
@@ -780,22 +781,21 @@ impl ReplicationReader {
     }
 }
 
-/// Copy a partial bunch's payload into `buffer`, byte-aligned, and return how
-/// many bytes it occupies: [`PartialBunchAccumulator::add_fragment`]
-/// concatenates bytes, but a payload is a bit window at any offset. `buffer`
-/// only grows and its tail is stale, but `copy_bits_to` rewrites all of
-/// `[..byte_count]`, padding bits included, so the caller's prefix never is.
-fn stage_fragment(payload: BitReader<'_>, buffer: &mut Vec<u8>) -> usize {
+/// Copy a partial bunch's payload into `buffer`, byte-aligned, and return the
+/// bytes it occupies: [`PartialBunchAccumulator::add_fragment`] concatenates
+/// bytes, but a payload is a bit window at any offset. `buffer` only grows and
+/// its tail is stale, but `copy_bits_to` rewrites the whole returned prefix,
+/// padding bits included.
+fn stage_fragment<'b>(mut payload: BitReader<'_>, buffer: &'b mut Vec<u8>) -> &'b [u8] {
     let bit_count = payload.bits_remaining();
     let byte_count = (bit_count as usize).div_ceil(8);
     if buffer.len() < byte_count {
         buffer.resize(byte_count, 0);
     }
-    if bit_count > 0 {
-        let mut src = payload;
-        let _ = src.copy_bits_to(buffer, bit_count);
-    }
-    byte_count
+    payload
+        .copy_bits_to(buffer, bit_count)
+        .expect("the buffer holds the whole window");
+    &buffer[..byte_count]
 }
 
 /// Map an accumulator discard cause to the reason reported to the sink, shared
@@ -964,16 +964,14 @@ mod tests {
         let mut buffer = Vec::new();
 
         let long = [0xFFu8; 4];
-        let byte_count = stage_fragment(BitReader::with_bit_len(&long, 32).unwrap(), &mut buffer);
-        assert_eq!(byte_count, 4);
-        assert_eq!(&buffer[..byte_count], &[0xFF, 0xFF, 0xFF, 0xFF]);
+        let staged = stage_fragment(BitReader::with_bit_len(&long, 32).unwrap(), &mut buffer);
+        assert_eq!(staged, &[0xFF; 4]);
 
         // Five zero bits: one byte, and the three padding bits above them must
         // be cleared even though the buffer still holds 0xFF underneath.
         let short = [0x00u8];
-        let byte_count = stage_fragment(BitReader::with_bit_len(&short, 5).unwrap(), &mut buffer);
-        assert_eq!(byte_count, 1);
-        assert_eq!(&buffer[..byte_count], &[0x00]);
+        let staged = stage_fragment(BitReader::with_bit_len(&short, 5).unwrap(), &mut buffer);
+        assert_eq!(staged, &[0x00]);
         assert_eq!(
             buffer.len(),
             4,
@@ -981,9 +979,8 @@ mod tests {
         );
 
         // A zero-bit fragment stages nothing and must report zero bytes.
-        assert_eq!(
-            stage_fragment(BitReader::with_bit_len(&short, 0).unwrap(), &mut buffer,),
-            0
+        assert!(
+            stage_fragment(BitReader::with_bit_len(&short, 0).unwrap(), &mut buffer).is_empty()
         );
     }
 
@@ -2068,8 +2065,7 @@ mod tests {
         let window = reader.sub_reader(8).unwrap();
 
         let mut buffer = Vec::new();
-        assert_eq!(stage_fragment(window, &mut buffer), 1);
-        assert_eq!(buffer[0], 0b1111_1111);
+        assert_eq!(stage_fragment(window, &mut buffer), &[0b1111_1111]);
     }
 
     #[test]

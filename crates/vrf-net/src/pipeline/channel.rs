@@ -85,7 +85,8 @@ pub(super) fn read_package_map_exports(
     }
 
     let num_guids = payload.read_i32()?;
-    if num_guids < 0 || num_guids as u32 > MAX_GUID_COUNT {
+    // A negative count casts above 2^31, so the one test rejects it too.
+    if num_guids as u32 > MAX_GUID_COUNT {
         return Err(NetError::InvalidGuidCount {
             count: num_guids,
             max: MAX_GUID_COUNT,
@@ -127,15 +128,9 @@ pub(super) fn handle_channel_open(
     let mut state = ActorChannelState {
         channel_index: ch_index,
         is_open: true,
-        is_dormant: false,
         actor_net_guid,
-        archetype_net_guid: NetworkGuid(0),
-        level_guid: NetworkGuid(0),
-        spawn_location: None,
-        spawn_rotation: None,
-        spawn_scale: None,
-        spawn_velocity: None,
         open_packet_id: header.packet_id,
+        ..Default::default()
     };
 
     // A dynamic actor's spawn block is mandatory (read unconditionally), so a

@@ -6,7 +6,7 @@
 
 use vrf_bitio::BitReader;
 
-use crate::bunch::RawBunchHeader;
+use crate::bunch::{RawBunchHeader, continues};
 use crate::error::{PartialSequenceKind, Result};
 use crate::types::{ChannelCloseReason, MAX_ACTIVE_CHANNELS, MAX_PACKET_SIZE_BITS};
 
@@ -306,26 +306,12 @@ impl RawPacketReader {
     }
 
     fn validate_continuation(&self, header: &RawBunchHeader) -> Option<PartialSequenceKind> {
-        let state = match self.partial_bunches.get(&header.ch_index) {
-            None => return Some(PartialSequenceKind::MissingInitial),
-            Some(s) => s,
+        let Some(state) = self.partial_bunches.get(&header.ch_index) else {
+            return Some(PartialSequenceKind::MissingInitial);
         };
-
-        if state.reliable != header.b_reliable {
-            return Some(PartialSequenceKind::MismatchedContinuation);
-        }
-
-        let seq_ok = if state.reliable {
-            header.ch_sequence == state.ch_sequence + 1
-        } else {
-            header.ch_sequence == state.ch_sequence + 1 || header.ch_sequence == state.ch_sequence
-        };
-
-        if !seq_ok {
-            return Some(PartialSequenceKind::MismatchedContinuation);
-        }
-
-        None
+        let ok = state.reliable == header.b_reliable
+            && continues(state.reliable, state.ch_sequence, header.ch_sequence);
+        (!ok).then_some(PartialSequenceKind::MismatchedContinuation)
     }
 
     fn retire_channel(&mut self, ch_index: u32) {
@@ -587,6 +573,23 @@ mod tests {
         let result = reader.read_packet(&packet, 2, |h, _| headers.push(h.clone()));
         assert_eq!(result.partial_error_count, 1);
         assert!(headers[1].has_partial_error);
+    }
+
+    /// The advisory tracker's continuation rule does not overflow either: an
+    /// unreliable partial's sequence is its packet id.
+    #[test]
+    fn a_continuation_at_the_largest_packet_id_does_not_overflow() {
+        let mut bits = Vec::new();
+        for (initial, last) in [(true, false), (false, true)] {
+            let spec = BunchSpec {
+                b_reliable: false,
+                ..fragment(2, initial, last)
+            };
+            write_bunch(&mut bits, &spec, &[false; 8]);
+        }
+        let mut reader = RawPacketReader::new();
+        let result = reader.read_packet(&build_packet(&bits), i32::MAX, |_, _| {});
+        assert_eq!((result.bunch_count, result.partial_error_count), (2, 0));
     }
 
     #[test]
