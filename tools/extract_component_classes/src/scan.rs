@@ -461,6 +461,24 @@ mod tests {
         })
     }
 
+    /// A child Blueprint: its class's super is `cooldown()`'s class, in
+    /// another package.
+    fn cooldown_child() -> PackageSpec<'static> {
+        let bpgc = script_index("/Script/Engine.BlueprintGeneratedClass");
+        // Imported package 0, imported hash 0.
+        let parent = KIND_PACKAGE_IMPORT << 62;
+        PackageSpec {
+            names: vec![
+                "/Game/Abilities/Comp_Cooldown_Child",
+                "Comp_Cooldown_Child_C",
+            ],
+            package_name: 0,
+            exports: vec![(1, 0, u64::MAX, bpgc, parent, 0x5555)],
+            imported_hashes: vec![0x3333],
+            imported_packages: vec![("/Game/Abilities/Comp_Cooldown", 0)],
+        }
+    }
+
     #[test]
     fn components_are_found_by_both_shapes_and_resolved() {
         let script = script();
@@ -654,5 +672,51 @@ mod tests {
             });
             assert_eq!(got, [(0x1111, "/Game/P.X_C".to_owned())], "{meta}");
         }
+    }
+
+    /// 31,594 of the 73,057 class objects in the 13.06 containers have a super
+    /// in another package. The other 41,463 have a native super; none has one
+    /// in its own package.
+    #[test]
+    fn a_blueprint_whose_parent_is_another_packages_blueprint_is_a_class() {
+        let got = classes_of(&cooldown_child());
+        assert_eq!(
+            got,
+            [(
+                0x5555,
+                "/Game/Abilities/Comp_Cooldown_Child.Comp_Cooldown_Child_C".to_owned()
+            )]
+        );
+    }
+
+    /// Of the 13.06 containers' 26,109 rows whose class is another package's,
+    /// 3,265 reach the native class through two to five supers and the rest
+    /// through one.
+    #[test]
+    fn a_child_blueprint_class_resolves_up_two_supers_to_the_native_class() {
+        let script = script();
+        let mut table = ClassTable::new();
+        for bytes in [cooldown(), build_package(&cooldown_child())] {
+            let pkg = parse_package_header(&bytes).unwrap();
+            let id = hash_package_name(&pkg.name);
+            for (hash, class) in scan_header(&pkg, id, &script).1 {
+                table.insert((id, hash), class);
+            }
+        }
+        let child = "/Game/Abilities/Comp_Cooldown_Child";
+        let r = resolve(
+            &ClassRef::Package(hash_package_name(child), child.to_owned(), 0x5555),
+            &script,
+            &table,
+        );
+        assert_eq!(
+            r.class,
+            "/Game/Abilities/Comp_Cooldown_Child.Comp_Cooldown_Child_C"
+        );
+        assert_eq!(r.class_kind, "package_import");
+        assert_eq!(
+            r.native_class,
+            "/Script/ShooterGame.EquippableStateMachineComponent"
+        );
     }
 }
