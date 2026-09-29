@@ -21,6 +21,8 @@ struct FileReport {
     oodle_ok: bool,
     /// Every problem found in this file; empty means clean.
     problems: Vec<String>,
+    /// Chunks whose type is none of Header, ReplayData, Checkpoint, Event.
+    unknown_chunks: u64,
     event_rows: u64,
     unknown_event_groups: u64,
     /// Event payloads that matched their group's measured layout.
@@ -63,6 +65,11 @@ fn scan_file(data: &[u8]) -> FileReport {
             }
         };
 
+        if let ChunkType::Unknown(raw) = chunk.chunk_type {
+            report.unknown_chunks += 1;
+            problems.push(format!("unknown chunk type {raw}"));
+            continue;
+        }
         let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
         if chunk.chunk_type == ChunkType::Event {
             report.event_rows += 1;
@@ -175,6 +182,7 @@ fn parse_all_vrf_files() {
     let mut branches: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut oodle_ok = 0u32;
     let mut failures: Vec<(String, String)> = Vec::new();
+    let mut unknown_chunks = 0u64;
     let mut event_rows = 0u64;
     let mut unknown_event_groups = 0u64;
     let mut known_events = 0u64;
@@ -207,6 +215,7 @@ fn parse_all_vrf_files() {
         if report.problems.is_empty() {
             clean += 1;
         }
+        unknown_chunks += report.unknown_chunks;
         event_rows += report.event_rows;
         unknown_event_groups += report.unknown_event_groups;
         known_events += report.known_events;
@@ -226,6 +235,7 @@ fn parse_all_vrf_files() {
         eprintln!("  {branch}: {count}");
     }
     eprintln!("Oodle decompress OK: {oodle_ok}");
+    eprintln!("Unknown-type chunks: {unknown_chunks}");
     eprintln!(
         "Event payloads: {known_events}/{event_rows} known layouts; \
          {unknown_event_groups} unknown group(s)"
@@ -352,6 +362,8 @@ fn the_fixture_replay_scans_without_problems() {
 fn each_defect_is_reported() {
     let mut stray_bytes = fixture::minimal_replay();
     stray_bytes.extend_from_slice(&[0; 4]);
+    let mut unknown_type = fixture::minimal_replay();
+    unknown_type.extend(vrf_testkit::chunk(4, &[]));
     for (data, expected) in [
         (
             fixture::header_only_replay(),
@@ -370,6 +382,7 @@ fn each_defect_is_reported() {
             "known event group roundStarted no longer carries its stable tag",
         ),
         (stray_bytes, "chunk:"),
+        (unknown_type, "unknown chunk type 4"),
     ] {
         let problems = scan_file(&data).problems;
         assert!(
