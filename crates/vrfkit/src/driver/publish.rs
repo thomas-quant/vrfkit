@@ -886,6 +886,10 @@ mod tests {
             fs::read(impostor.join("part-0.parquet")).unwrap(),
             b"someone else's dataset"
         );
+        assert_eq!(
+            fs::read(destination.join(MANIFEST)).unwrap(),
+            b"old complete"
+        );
     }
 
     #[test]

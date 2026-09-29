@@ -96,6 +96,11 @@ fn export_refuses_a_destination_holding_the_replay_and_other_files() {
         "{}",
         run.stderr
     );
+    assert!(
+        run.stderr.contains("choose a new or empty directory"),
+        "the refusal must say how to proceed: {}",
+        run.stderr
+    );
     assert_eq!(entries(&out), ["match.vrf", "precious.txt", "sub"]);
     assert_eq!(entries(&dir), ["userdir"], "no staging directory is left");
     fs::remove_dir_all(dir).ok();
