@@ -81,8 +81,8 @@ fn decode_updates_array(
         }
 
         // An index (`encoded_index - 1`) past the declared count, or a failed
-        // framing read (a handle or a payload length), after which the next
-        // index cannot be located: the rest of the window is lost, and counted.
+        // framing read (a handle, a length, or a field longer than the window),
+        // after which the next index cannot be located: the rest is lost, counted.
         if encoded_index > update_count || decode_single_update(reader, result, emit).is_err() {
             result.error_count += 1;
             break;
@@ -105,15 +105,6 @@ fn decode_single_update(
         }
         let handle = encoded_handle - 1;
         let payload_bits = reader.read_int_packed()?;
-
-        if u64::from(payload_bits) > reader.bits_remaining() {
-            // Longer than the rest of the updates window: the framing no
-            // longer describes the payload, and every update queued behind
-            // this one goes with the window.
-            result.error_count += 1;
-            reader.skip_remaining();
-            break;
-        }
 
         match handle {
             SHOOTER_CHARACTER_NET_GUID_HANDLE => {
