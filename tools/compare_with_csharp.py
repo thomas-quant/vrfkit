@@ -215,14 +215,13 @@ def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
 def vrfkit_rpc_names(vk_parquet_path: Path) -> Counter:
     """vrfkit's RPC function names in fields.parquet, with their row counts.
 
-    vrfkit writes no RPC-name column or manifest key. Its RPC rows are the
-    ones in a ClassNetCache group -- the rows to_valplay_bundle.py builds
-    rpc_received from -- and the function is the field_name before the first
-    '.': "Func.Param", "Func._hN", or a zero-parameter RPC's bare "Func".
-    Array leaves such as "Rounds[3].Score" carry a '.' too, in RepLayout
-    groups, so the prefix alone would count them as RPCs. A ClassNetCache
-    custom-delta property is counted as the bundle publishes it, among the
-    functions: on 02d4d478 that is `ActiveGameplayEffects`, one of 128 names.
+    vrfkit writes no RPC-name column: its RPC rows are those in a ClassNetCache
+    group (the rows to_valplay_bundle.py builds rpc_received from), and the
+    function is the field_name before the first '.' ("Func.Param", "Func._hN",
+    or a zero-parameter RPC's bare "Func"). The group check keeps array leaves
+    such as "Rounds[3].Score" out. A ClassNetCache custom-delta property
+    (`ActiveGameplayEffects` on 02d4d478) counts among the functions, as the
+    bundle publishes it.
     """
     tbl = pq.read_table(vk_parquet_path, columns=["group_path", "field_name"])
     names: Counter = Counter()

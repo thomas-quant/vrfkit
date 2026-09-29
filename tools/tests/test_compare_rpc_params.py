@@ -1,10 +1,11 @@
 """Guards for the RPC parameter comparison.
 
-Both sides empty must not exit 0 (the shared `verdict` itself is tested in
-test_compare_combat_report.py). The one expected difference (a 02d4d478 damage record only vrfkit emits; see
-docs/FOLLOWUP.md) is driven through the real loaders over written files, and
-must not widen (another record, other values, another packet, another replay,
-no manifest) or outlive what it describes (STALE fails the run).
+Both sides empty must not exit 0 (the shared `verdict` is tested in
+test_compare_combat_report.py). The one expected difference (a 02d4d478
+damage record only vrfkit emits; see docs/FOLLOWUP.md) is driven through the
+real loaders over written files, and must not widen (another record, other
+values, another packet, another replay, no manifest) or outlive what it
+describes (STALE fails the run).
 """
 import collections
 import io
