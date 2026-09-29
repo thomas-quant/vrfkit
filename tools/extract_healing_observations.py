@@ -67,6 +67,19 @@ FIELD_COLS = [
 CHECKPOINT_FIELD_COLS = ["checkpoint_index", "checkpoint_id", *FIELD_COLS]
 #: Every status `edge()` can return, so the per-edge tally prints zeros too.
 EDGE_STATUSES = ("present", "null", "absent", "duplicate", "invalid")
+#: Every status `active_instance()` can return.
+LIFECYCLE_STATUSES = (
+    "active", "lifecycle_time_regression", "ambiguous_actor_lifecycle",
+    "lifecycle_boundary_same_time", "no_prior_actor_open",
+    "actor_reopened_without_unique_active_instance", "actor_close_without_open", "actor_closed",
+)
+#: Every final source status: a non-present causer edge, a non-active causer
+#: lifecycle, or the reference outcome of an active one.
+SOURCE_STATUSES = (
+    *EDGE_STATUSES[1:], *LIFECYCLE_STATUSES[1:], "reference_update_same_time",
+    "corroborated_static_manifest_character", "conflicting_manifest_characters",
+    "no_manifest_character_reference",
+)
 #: The export files read, and the helper modules hashed beside this file.
 INPUT_NAMES = (
     "manifest.json",
@@ -615,9 +628,13 @@ def extract(export):
         k: dict.fromkeys(EDGE_STATUSES, 0)
         for k in ("causer", "event_instigator", "event_instigator_pawn")
     }
+    source_status = dict.fromkeys(SOURCE_STATUSES, 0)
+    recipient_status = dict.fromkeys(LIFECYCLE_STATUSES, 0)
     for x in observations:
         for k, tally in edge_status.items():
             tally[x["source_corroboration"][k]["status"]] += 1
+        source_status[x["source_corroboration"]["status"]] += 1
+        recipient_status[x["recipient_corroboration"]["lifecycle_status"]] += 1
     by_section = collections.Counter()
     by_recipient = collections.Counter()
     for x in valid:
@@ -666,6 +683,8 @@ def extract(export):
             ),
             "ambiguous_groups": sum(bool(x["ambiguity_reasons"]) for x in observations),
             "source_edge_status": edge_status,
+            "source_status": source_status,
+            "recipient_lifecycle_status": recipient_status,
         },
     }
 
@@ -690,6 +709,8 @@ def main(argv=None):
         print(f"FAILED: {e}", file=sys.stderr)
         return 1
     print(f"wrote {a.out} ({d['counts']['main_coordinate_groups']} observations)")
+    for key in ("source_status", "recipient_lifecycle_status", "source_edge_status"):
+        print(f"  {key}: {json.dumps(d['counts'][key], sort_keys=True)}")
     return 0
 
 

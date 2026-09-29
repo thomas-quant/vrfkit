@@ -1,4 +1,4 @@
-import copy, json, os, struct, sys, tempfile, unittest
+import contextlib, copy, io, json, os, struct, sys, tempfile, unittest
 from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
@@ -188,6 +188,26 @@ class Tests(unittest.TestCase):
             "serialized_heal_amount_sum",
             next(k for k in d["summaries"] if "recipient" in k),
         )
+
+    def test_source_and_recipient_statuses_are_tallied_and_printed_with_zeros(self):
+        opened = [{"time_ms": 10, "packet_id": 1, "channel_index": c, "actor_net_guid": g,
+                   "event": "open", "class_path": "/Game/X.X_C"} for c, g in ((8, 40), (9, 70))]
+        for actors, source, recipient in (
+                (None, "no_prior_actor_open", "no_prior_actor_open"),
+                (opened, "no_manifest_character_reference", "active")):
+            with self.subTest(source=source):
+                td, p = self.make(actors=actors)
+                self.addCleanup(td.cleanup)
+                counts = tool.extract(p)["counts"]
+                self.assertEqual(counts["source_status"],
+                                 {s: int(s == source) for s in tool.SOURCE_STATUSES})
+                self.assertEqual(counts["recipient_lifecycle_status"],
+                                 {s: int(s == recipient) for s in tool.LIFECYCLE_STATUSES})
+                out = p / "out.json"
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 0)
+                self.assertIn(f'"{source}": 1', printed.getvalue())
+                self.assertIn('"actor_closed": 0', printed.getvalue())
 
     def test_parent_child_mismatch_is_retained_invalid(self):
         rows = fixture()
