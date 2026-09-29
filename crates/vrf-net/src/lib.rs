@@ -20,14 +20,6 @@
 //! Not every lost bit is tallied: a malformed packet's tail is counted only
 //! as a packet, a RepLayout-export bunch only as a bunch, and the payload
 //! after a cleanly read package-map export list not at all.
-//!
-//! # Features
-//!
-//! `diagnostics` (default) adds only the per-failure event log in [`stats`]:
-//! `DiagnosticEvent`, `SkipReason`, the two snapshot types and the two
-//! `NetStats` fields that hold them. The counters are in every build -- a
-//! build without them would lose data silently -- and nothing else is
-//! optional: packets, bunches, content blocks and fields are one state machine.
 
 #![forbid(unsafe_code)]
 

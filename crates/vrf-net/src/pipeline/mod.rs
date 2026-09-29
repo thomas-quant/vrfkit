@@ -310,10 +310,7 @@ struct Stage<'a> {
     scratch: &'a mut Vec<u8>,
 }
 
-/// Where a bunch sits in the stream. Every field feeds a `DiagnosticEvent`, so
-/// without that feature they are never read; they are threaded through anyway
-/// so the hot path reads the same in both builds (the optimiser drops them).
-#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+/// Where a bunch sits in the stream; read only by a `DiagnosticEvent`.
 #[derive(Clone, Copy)]
 struct BunchIds {
     bunch_index_in_packet: u32,
@@ -1077,15 +1074,12 @@ mod tests {
             assert_eq!(stats.actor_closes, u64::from(b_close));
             assert_eq!(sink.closes, if b_close { vec![2] } else { vec![] });
             // A clean pass records and drops no diagnostic event.
-            #[cfg(feature = "diagnostics")]
-            {
-                assert!(
-                    stats.diagnostics.is_empty(),
-                    "a clean pass recorded diagnostic events: {:?}",
-                    stats.diagnostics
-                );
-                assert_eq!(stats.diagnostics_dropped, 0);
-            }
+            assert!(
+                stats.diagnostics.is_empty(),
+                "a clean pass recorded diagnostic events: {:?}",
+                stats.diagnostics
+            );
+            assert_eq!(stats.diagnostics_dropped, 0);
         }
     }
 
@@ -1746,13 +1740,10 @@ mod tests {
             );
             assert!(sink.stream_failures.is_empty());
             assert!(sink.fields.is_empty() && sink.rpcs.is_empty());
-            #[cfg(feature = "diagnostics")]
-            {
-                assert!(
-                    stats.diagnostics.is_empty(),
-                    "the event is the framing loop's to record"
-                );
-            }
+            assert!(
+                stats.diagnostics.is_empty(),
+                "the event is the framing loop's to record"
+            );
         }
 
         // Through the framing loop, a block whose transform ran records no
@@ -1764,10 +1755,7 @@ mod tests {
         assert_eq!(stats.class_net_cache_blocks, 1);
         assert_eq!(stats.transform_failures, 0);
         assert_eq!(sink.unresolved_payloads.len(), 1);
-        #[cfg(feature = "diagnostics")]
-        {
-            assert!(stats.diagnostics.is_empty());
-        }
+        assert!(stats.diagnostics.is_empty());
     }
 
     /// A ClassNetCache walk that returns `Ok` but abandons bits is a stream
@@ -2014,14 +2002,11 @@ mod tests {
         assert_eq!(stats.skipped_bits, 12, "the whole failed block, not 0");
         assert_eq!(stats.content_blocks, 0);
         assert!(sink.content_blocks.is_empty());
-        #[cfg(feature = "diagnostics")]
-        {
-            use crate::stats::SkipReason;
-            let ev = &stats.diagnostics[0];
-            assert!(matches!(ev.reason, SkipReason::HeaderReadError));
-            assert_eq!(ev.bits_skipped, 12);
-            assert_eq!((ev.consumed_bits, ev.remaining_bits), (0, 0));
-        }
+        use crate::stats::SkipReason;
+        let ev = &stats.diagnostics[0];
+        assert!(matches!(ev.reason, SkipReason::HeaderReadError));
+        assert_eq!(ev.bits_skipped, 12);
+        assert_eq!((ev.consumed_bits, ev.remaining_bits), (0, 0));
     }
 
     /// A `content_bits` continuation byte at the end of the bunch consumes 8
@@ -2036,14 +2021,11 @@ mod tests {
         assert_eq!(stats.content_block_framing_failures, 1);
         assert_eq!(stats.skipped_bits, 10);
         assert_eq!(stats.content_blocks, 0);
-        #[cfg(feature = "diagnostics")]
-        {
-            use crate::stats::SkipReason;
-            let ev = &stats.diagnostics[0];
-            assert!(matches!(ev.reason, SkipReason::ContentBitsReadError));
-            assert_eq!(ev.bits_skipped, 10);
-            assert_eq!((ev.consumed_bits, ev.remaining_bits), (2, 0));
-        }
+        use crate::stats::SkipReason;
+        let ev = &stats.diagnostics[0];
+        assert!(matches!(ev.reason, SkipReason::ContentBitsReadError));
+        assert_eq!(ev.bits_skipped, 10);
+        assert_eq!((ev.consumed_bits, ev.remaining_bits), (2, 0));
     }
 
     /// The charge starts at the failing block, not at the bunch: a block that
@@ -2064,7 +2046,6 @@ mod tests {
     /// A content-block overrun is a `DiagnosticEvent` with full context,
     /// charged from the block's first bit: 2 + 16 + 8 = 26 bits, while 8
     /// remained after the read.
-    #[cfg(feature = "diagnostics")]
     #[test]
     fn content_bits_overrun_emits_diagnostic() {
         use crate::stats::SkipReason;
@@ -2103,7 +2084,6 @@ mod tests {
 
     /// A diagnostic event names the archetype its channel's open read (9
     /// here), not a plausible 0. Paths are not resolved by framing: `None`.
-    #[cfg(feature = "diagnostics")]
     #[test]
     fn a_diagnostic_event_carries_the_channel_archetype() {
         use crate::stats::SkipReason;

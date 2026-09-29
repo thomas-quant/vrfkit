@@ -17,8 +17,8 @@ thiserror = { workspace = true }
 [dev-dependencies]
 vrf-testkit = { workspace = true }
 
-# `diagnostics` is the per-failure event log only; the counters are never
-# optional. See the "Features" section of src/lib.rs.
+# `diagnostics` is a no-op kept for dependents that name it: the event log is
+# always built.
 [features]
 default = ["diagnostics"]
 diagnostics = []

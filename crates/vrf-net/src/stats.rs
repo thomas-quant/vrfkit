@@ -14,10 +14,8 @@
 //!
 //! Only the event log is capped (`MAX_DIAGNOSTIC_EVENTS` says why), never the
 //! counters. On a healthy replay it stays empty: 02d4d478 prints no events
-//! under `validate --diagnostics`. The log exists only with the `diagnostics`
-//! feature (see the crate docs' "Features").
+//! under `validate --diagnostics`.
 
-#[cfg(feature = "diagnostics")]
 use crate::content::ContentBlockHeader;
 
 /// Upper bound on [`NetStats::diagnostics`].
@@ -26,7 +24,6 @@ use crate::content::ContentBlockHeader;
 /// bunches on 02d4d478 -- and at about 200 bytes an event, an unbounded log
 /// would hold ~100 MB for a run whose counters already say it failed. This
 /// caps it near 3 MB; overflow is counted in [`NetStats::diagnostics_dropped`].
-#[cfg(feature = "diagnostics")]
 pub const MAX_DIAGNOSTIC_EVENTS: usize = 16_384;
 
 /// Cumulative counters for one replay's replication pass.
@@ -166,11 +163,9 @@ pub struct NetStats {
     pub must_be_mapped_guids: u64,
     /// Diagnostic events, capped at [`MAX_DIAGNOSTIC_EVENTS`]: the context to
     /// locate a failure in the replay.
-    #[cfg(feature = "diagnostics")]
     pub diagnostics: Vec<DiagnosticEvent>,
     /// Events the cap refused. Non-zero means [`Self::diagnostics`] is a
     /// prefix; the failure counters are complete either way.
-    #[cfg(feature = "diagnostics")]
     pub diagnostics_dropped: u64,
 }
 
@@ -247,14 +242,11 @@ impl NetStats {
         self.rep_layout_export_bunches += other.rep_layout_export_bunches;
         self.exported_guids += other.exported_guids;
         self.must_be_mapped_guids += other.must_be_mapped_guids;
-        #[cfg(feature = "diagnostics")]
-        {
-            let available = MAX_DIAGNOSTIC_EVENTS.saturating_sub(self.diagnostics.len());
-            let keep = available.min(other.diagnostics.len());
-            self.diagnostics.extend(other.diagnostics.drain(..keep));
-            self.diagnostics_dropped += other.diagnostics_dropped + other.diagnostics.len() as u64;
-            other.diagnostics.clear();
-        }
+        let available = MAX_DIAGNOSTIC_EVENTS.saturating_sub(self.diagnostics.len());
+        let keep = available.min(other.diagnostics.len());
+        self.diagnostics.extend(other.diagnostics.drain(..keep));
+        self.diagnostics_dropped += other.diagnostics_dropped + other.diagnostics.len() as u64;
+        other.diagnostics.clear();
     }
 
     /// Content blocks whose payload never reached the exported tables: the one
@@ -289,7 +281,6 @@ impl NetStats {
 
     /// Record one diagnostic event, or count it dropped if the log is full; the
     /// closure builds the event only when it will be kept.
-    #[cfg(feature = "diagnostics")]
     pub fn record_diagnostic(&mut self, event: impl FnOnce() -> DiagnosticEvent) {
         if self.diagnostics.len() < MAX_DIAGNOSTIC_EVENTS {
             self.diagnostics.push(event());
@@ -300,7 +291,6 @@ impl NetStats {
 }
 
 /// Why a content block or bunch tail was skipped.
-#[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone)]
 pub enum SkipReason {
     /// `content_bits` (from `ReadIntPacked`) exceeded `bits_remaining` in the
@@ -332,7 +322,6 @@ pub enum SkipReason {
 
 /// Full context snapshot at the point a content block was skipped or malformed,
 /// so one event dump can identify the root cause.
-#[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone)]
 pub struct DiagnosticEvent {
     /// Why this event was recorded.
@@ -379,7 +368,6 @@ pub struct DiagnosticEvent {
 }
 
 /// Snapshot of all bunch header flags for diagnostic reporting.
-#[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone)]
 pub struct BunchFlagSnapshot {
     pub b_open: bool,
@@ -394,7 +382,6 @@ pub struct BunchFlagSnapshot {
 }
 
 /// Snapshot of the content block header fields for diagnostic reporting.
-#[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone)]
 pub struct ContentBlockHeaderSnapshot {
     pub has_rep_layout: bool,
@@ -407,7 +394,6 @@ pub struct ContentBlockHeaderSnapshot {
     pub delete_flags: u8,
 }
 
-#[cfg(feature = "diagnostics")]
 impl From<&ContentBlockHeader> for ContentBlockHeaderSnapshot {
     fn from(h: &ContentBlockHeader) -> Self {
         Self {
@@ -423,10 +409,8 @@ impl From<&ContentBlockHeader> for ContentBlockHeaderSnapshot {
     }
 }
 
-/// Loss-accounting tests, outside the `diagnostics`-gated module below:
-/// `lost_content_blocks` is read by the manifest in every build.
 #[cfg(test)]
-mod loss_tests {
+mod tests {
     use super::*;
 
     /// Each depth listed here reaches the loss total, and they add rather than
@@ -540,11 +524,6 @@ mod loss_tests {
         };
         assert_eq!(stats.lost_content_blocks(), 0);
     }
-}
-
-#[cfg(all(test, feature = "diagnostics"))]
-mod tests {
-    use super::*;
 
     fn dummy_event(block_index: u32) -> DiagnosticEvent {
         DiagnosticEvent {

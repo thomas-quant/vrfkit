@@ -22,7 +22,6 @@ use crate::field::{self, RepLayoutRemainder};
 use crate::stats::NetStats;
 use crate::types::NetworkGuid;
 
-#[cfg(feature = "diagnostics")]
 use crate::stats::{BunchFlagSnapshot, ContentBlockHeaderSnapshot, DiagnosticEvent, SkipReason};
 
 use super::{
@@ -30,9 +29,7 @@ use super::{
 };
 
 /// Per-bunch context. Only the channel (`header.ch_index`) and the actor are
-/// read on the success path; the rest feeds diagnostic events, which is why
-/// they are threaded through a build without that feature ([`super::BunchIds`]).
-#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+/// read on the success path; the rest feeds diagnostic events.
 pub(super) struct BunchContext<'a> {
     pub header: &'a RawBunchHeader,
     pub ids: super::BunchIds,
@@ -42,7 +39,6 @@ pub(super) struct BunchContext<'a> {
 }
 
 /// Why a block produced a diagnostic event, with what it had read by then.
-#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum Failure<'h> {
     HeaderRead,
@@ -174,9 +170,7 @@ fn abort(
     payload.skip_remaining();
 }
 
-/// Record one diagnostic event. Without the `diagnostics` feature the body is
-/// empty, so the loop reads the same in both builds and the call optimises away.
-#[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
+/// Record one diagnostic event (built only if the capped log keeps it).
 fn record(
     stats: &mut NetStats,
     ctx: &BunchContext<'_>,
@@ -186,7 +180,6 @@ fn record(
     bits_skipped: u64,
     failure: Failure<'_>,
 ) {
-    #[cfg(feature = "diagnostics")]
     stats.record_diagnostic(|| {
         let (reason, block, content_bits) = match failure {
             Failure::HeaderRead => (SkipReason::HeaderReadError, None, None),
@@ -412,7 +405,7 @@ fn report(
     stats.skipped_bits += charge;
 }
 
-#[cfg(all(test, feature = "diagnostics"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::stats::SkipReason;
