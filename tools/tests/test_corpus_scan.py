@@ -1,21 +1,5 @@
-"""Guards for the shared `.vrf` corpus discovery.
-
-The defect: `validate_corpus.py` walked a corpus with `root.rglob("*.vrf")`
-and `check_decode_errors_corpus.py` walked the same corpus with
-`args.corpus.glob("*.vrf")`. Pointed at the same directory these produced 153
-files versus 126 -- the 27-file gap lived in a `Demos/old` subdirectory, and
-those 27 replays had their framing checked but never their overlay or
-struct-blob decoders, with nothing printed to say the two tools disagreed.
-
-`corpus_scan.discover()` is the single place both tools now ask "what is the
-corpus", so they cannot drift apart again. The default is non-recursive (a
-subdirectory is not guaranteed to hold more of the same corpus -- it could be
-`Demos/old`, the live client's own archive of replays it is rotating out,
-which may span builds); `--recursive` opts in on both tools at once. Whichever
-mode runs, `discover()` reports how many files a non-recursive scan left out,
-so the scope is legible from the printed output alone, not just from reading
-which glob call a tool happens to make.
-"""
+"""Guards for the shared `.vrf` corpus discovery: top level by default, the
+subdirectory files it leaves out always counted, case-insensitive suffixes."""
 import sys
 import tempfile
 import unittest
@@ -27,46 +11,23 @@ import corpus_scan  # noqa: E402
 
 
 class DiscoverTests(unittest.TestCase):
-    def _make_corpus(self, directory: Path) -> None:
-        (directory / "a.vrf").write_bytes(b"")
-        (directory / "b.vrf").write_bytes(b"")
-        nested = directory / "old"
-        nested.mkdir()
-        (nested / "c.vrf").write_bytes(b"")
-        (nested / "d.vrf").write_bytes(b"")
-        (nested / "e.vrf").write_bytes(b"")
-        # A non-.vrf file must never be picked up by either mode.
-        (directory / "notes.txt").write_bytes(b"")
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        for name in ("a.vrf", "b.vrf", "old/c.vrf", "old/d.vrf", "old/e.vrf", "notes.txt"):
+            (self.root / name).parent.mkdir(exist_ok=True)
+            (self.root / name).write_bytes(b"")
 
-    def test_non_recursive_scans_top_level_only(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._make_corpus(root)
-            scan = corpus_scan.discover(root, recursive=False)
-            self.assertEqual([p.name for p in scan.files], ["a.vrf", "b.vrf"])
-
-    def test_non_recursive_reports_the_excluded_count(self):
-        """The 27-file gap from the audit: this is the number that must print."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._make_corpus(root)
-            scan = corpus_scan.discover(root, recursive=False)
-            self.assertEqual(scan.excluded, 3)
+    def test_top_level_only_by_default_with_the_rest_counted(self):
+        scan = corpus_scan.discover(self.root, recursive=False)
+        self.assertEqual([p.name for p in scan.files], ["a.vrf", "b.vrf"])
+        self.assertEqual((scan.excluded, scan.recursive), (3, False))
 
     def test_recursive_scans_everything_and_excludes_nothing(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._make_corpus(root)
-            scan = corpus_scan.discover(root, recursive=True)
-            self.assertEqual(len(scan.files), 5)
-            self.assertEqual(scan.excluded, 0)
-
-    def test_recursive_flag_is_recorded_on_the_scan(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._make_corpus(root)
-            self.assertFalse(corpus_scan.discover(root, recursive=False).recursive)
-            self.assertTrue(corpus_scan.discover(root, recursive=True).recursive)
+        scan = corpus_scan.discover(self.root, recursive=True)
+        self.assertEqual(len(scan.files), 5)
+        self.assertEqual((scan.excluded, scan.recursive), (0, True))
 
     def test_a_flat_corpus_excludes_nothing_either_way(self):
         """No subdirectory at all: both modes must agree, and say so."""
@@ -92,20 +53,13 @@ class DiscoverTests(unittest.TestCase):
                 """Expose POSIX-style glob results even when this test runs on Windows."""
 
                 def glob(self, pattern):
-                    self_pattern = pattern
-                    if self_pattern == "*.vrf":
+                    if pattern == "*.vrf":
                         return iter([lower])
-                    if self_pattern == "*":
+                    if pattern == "*":
                         return iter([lower, upper])
-                    raise AssertionError(self_pattern)
+                    raise AssertionError(pattern)
 
-                def rglob(self, pattern):
-                    self_pattern = pattern
-                    if self_pattern == "*.vrf":
-                        return iter([lower])
-                    if self_pattern == "*":
-                        return iter([lower, upper])
-                    raise AssertionError(self_pattern)
+                rglob = glob
 
             scan = corpus_scan.discover(CaseSensitiveRoot(), recursive=True)
 

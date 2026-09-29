@@ -13,34 +13,17 @@ class BaselineSchemaTests(unittest.TestCase):
     def test_committed_baselines_are_schema_valid_and_cross_consistent(self):
         self.assertEqual(schemas.validate_repository(), [])
 
-    def test_legacy_export_without_hashes_fails(self):
-        data = {
-            "replay": "sample.vrf",
-            "counters": {key: 0 for key in schemas.MAIN_COUNTERS},
-            "parquet": {
-                name: {"rows": 0, "bytes": 0} for name in schemas.MAIN_PARQUET
-            },
-        }
-        problems = schemas.validate_export_baseline(Path("export_sample.json"), data)
-        self.assertTrue(any("sha256" in problem for problem in problems), problems)
-
-    def test_a_non_sha256_placeholder_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            data = {
-                "replay": "sample.vrf",
-                "counters": {key: 0 for key in schemas.MAIN_COUNTERS},
-                "parquet": {
-                    name: {"rows": 0, "bytes": 0, "sha256": "not-measured"}
-                    for name in schemas.MAIN_PARQUET
-                },
-            }
-            path = root / "export_sample.json"
-            path.write_text(json.dumps(data), encoding="utf-8")
-
-            problems = schemas.validate_export_baseline(path, data)
-
-        self.assertTrue(any("sha256" in problem for problem in problems), problems)
+    def test_an_export_without_a_measured_sha256_fails(self):
+        for digest in (None, "not-measured"):
+            with self.subTest(digest=digest):
+                record = {"rows": 0, "bytes": 0}
+                if digest is not None:
+                    record["sha256"] = digest
+                data = {"replay": "sample.vrf",
+                        "counters": {key: 0 for key in schemas.MAIN_COUNTERS},
+                        "parquet": {name: dict(record) for name in schemas.MAIN_PARQUET}}
+                problems = schemas.validate_export_baseline(Path("export_sample.json"), data)
+                self.assertTrue(any("sha256" in problem for problem in problems), problems)
 
     def test_checkpoint_baseline_requires_actor_and_guid_tables_and_counters(self):
         data = {

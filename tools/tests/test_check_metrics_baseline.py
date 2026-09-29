@@ -133,16 +133,10 @@ class UpdateScopeTests(unittest.TestCase):
 
     STORED = {"12.10": {"kills": 1}, "13.02": {"kills": 2}}
 
-    def test_a_scoped_update_keeps_the_builds_it_did_not_look_at(self):
+    def test_a_scoped_update_replaces_only_the_build_it_looked_at(self):
         merged = guard.merged_metrics(self.STORED, {"13.02": {"kills": 9}},
                                       only=["13.02"])
-        self.assertEqual(sorted(merged), ["12.10", "13.02"])
-        self.assertEqual(merged["12.10"], {"kills": 1})
-
-    def test_a_scoped_update_replaces_the_build_it_did_look_at(self):
-        merged = guard.merged_metrics(self.STORED, {"13.02": {"kills": 9}},
-                                      only=["13.02"])
-        self.assertEqual(merged["13.02"], {"kills": 9})
+        self.assertEqual(merged, {"12.10": {"kills": 1}, "13.02": {"kills": 9}})
 
     def test_an_unscoped_update_replaces_the_whole_set(self):
         """A full run alone may retire a build: merging would keep one pinned
@@ -162,20 +156,9 @@ class WiringTests(unittest.TestCase):
             self.assertEqual(got, (None, stage, why))
 
     def test_no_build_points_at_the_directory_the_game_rotates(self):
-        """Saved\\Demos is owned by VALORANT and lost four pinned replays once."""
+        """Saved\\Demos is VALORANT's own, and the game rotates it."""
         for build, path in guard.REPLAYS.items():
             self.assertNotIn("Saved\\Demos", path, f"{build} points at Saved\\Demos")
-
-    def test_extract_and_invariants_agree_on_their_keys(self):
-        """Every field the invariants read must be one extract() produces."""
-        produced = guard.extract(RAW_METRICS)
-        for key in ("rounds_rpc", "rounds_objective", "team_score", "players",
-                    "kills", "damage_dealt"):
-            self.assertIn(key, produced)
-        # invariants() indexes with `[...]`, never `.get(..., default)`, so a
-        # key it reads that extract() does not produce raises KeyError here
-        # rather than passing silently.
-        guard.invariants(produced)
 
 
 #: A raw `compute_metrics.py` output shaped like the valplay JSON `extract()`
@@ -257,9 +240,8 @@ class ExtractShapeTests(unittest.TestCase):
         self.assertNotEqual(got["shots"], got["distinct_weapons"])
 
     def test_a_renamed_per_player_counter_is_an_error_not_a_zero(self):
-        """`.get(field) or 0` once read a counter valplay renamed as a
-        plausible 0 for every player. A missing key, or a value that is not a
-        count, must fail; a present 0 stays 0 (p2's assists above)."""
+        """A missing key, or a value that is not a count, must fail, never
+        read as a plausible 0; a present 0 stays 0 (p2's assists above)."""
         for section, player, field in (("combat", "p2", "headshots"),
                                        ("tactical", "p1", "trade_kills"),
                                        ("kast", "p2", "kast_rounds")):

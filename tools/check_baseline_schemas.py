@@ -237,9 +237,7 @@ def validate_repository(root: Path = BASELINES) -> list[str]:
         if export.get("counters", {}).get(key) != checkpoint.get("counters", {}).get(key):
             problems.append(f"export/checkpoint counter {key} disagrees")
     for name in MAIN_PARQUET:
-        # This additive table contains both streams when --checkpoints is on.
-        # Each baseline pins its complete file independently. Unlike the five
-        # original main-only tables, whole-file equality across flags is false.
+        # partials.parquet holds both streams under --checkpoints.
         if name == "partials":
             continue
         if export.get("parquet", {}).get(name) != checkpoint.get("parquet", {}).get(name):

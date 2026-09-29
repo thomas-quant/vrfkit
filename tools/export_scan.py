@@ -3,14 +3,10 @@
 `vrfkit export` builds in `.{out}.vrfkit-staging-{pid}-{nonce}` and renames
 it over `--out` once complete, moving a prior `--out` to
 `.{out}.vrfkit-previous-{pid}-{nonce}` for one rename; a killed run or an
-undeletable backup leaves them behind. Measured at 259ed10: `Stop-Process
--Force` 1.5 s into an export left a staging directory holding a
-1,561,999-byte `fields.parquet` with no footer and no manifest, which the
-audit counted as a failed export (candidate_exports 2, exit 1). A
-`previous` sibling is a complete export, so tools read the replay twice and
-exited 0: on one export beside its `previous` copy, the audit reported 2
-corroborated RPCs for 1, the coverage summary 10 rows for 5, the raw
-inventory 2 physical rows for 1, the type evidence 2 rows for 1.
+undeletable backup leaves them behind. A staging directory can hold a
+footerless `fields.parquet` and no manifest, and a `previous` one is a
+complete export that doubles every count read beside its successor, so
+neither is an export.
 
 `is_generated_sibling` is the one definition of those names, matched exactly
 as crates/vrfkit/src/driver/publish.rs builds them (test_export_scan.py reads

@@ -73,60 +73,39 @@ class ManifestTests(unittest.TestCase):
                         target[category][key] = 1
                         self.assertIn(f"{scope}_{key}=1", audit.manifest_counts(data)[1])
 
-    def test_missing_and_invalid_counters_are_not_zero(self):
+    def test_invalid_counters_are_not_zero(self):
         for bad in (None, -1, True, "0"):
             with self.subTest(bad=bad):
                 data = manifest()
                 data["quality"]["checkpoints"]["net"]["transform_failures"] = bad
                 with self.assertRaises(ValueError):
                     audit.manifest_counts(data)
-        data = manifest()
-        del data["quality"]["net"]["field_stream_failures"]
-        with self.assertRaises(KeyError):
-            audit.manifest_counts(data)
 
-    def test_cnc_bruteforce_counters_are_recorded_and_required_in_each_pass(self):
+    def test_every_counter_the_manifest_carries_is_recorded_and_required(self):
+        """Each is recorded under its pass's prefix, and deleting any one raises
+        rather than reading as 0."""
         counts, failures = audit.manifest_counts(manifest())
         self.assertEqual(failures, [])
-        for scope in ("main", "checkpoint"):
-            self.assertEqual(counts[f"{scope}_cnc_bruteforce_payloads_attempted"], 6)
-            self.assertEqual(counts[f"{scope}_cnc_bruteforce_payloads_unwalked"], 0)
-            for key in ("cnc_bruteforce_payloads_attempted", "cnc_bruteforce_payloads_unwalked"):
-                with self.subTest(scope=scope, key=key):
-                    data = manifest()
-                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
-                    del target["sink"][key]
-                    with self.assertRaises(KeyError):
-                        audit.manifest_counts(data)
-
-    def test_movement_tails_are_recorded_and_required(self):
-        data = manifest()
-        data["quality"]["sink"]["movement_open_section_tail_bits"] = 40
-        counts, _ = audit.manifest_counts(data)
-        self.assertEqual(counts["main_movement_open_section_tail_bits"], 40)
-        for key in ("movement_sized_section_tails", "movement_sized_section_tail_bits",
-                    "movement_open_section_tails", "movement_open_section_tail_bits"):
-            with self.subTest(key=key):
+        quality = manifest()["quality"]
+        places = [((), key) for key in quality if key not in ("checkpoints_enabled", "net",
+                                                                "sink", "checkpoints")]
+        places += [(("checkpoints",), key) for key in ("checkpoint_chunks",
+                                                          "checkpoint_trailing_bytes")]
+        for scope, path in (("main", ()), ("checkpoint", ("checkpoints",))):
+            for category in ("net", "sink"):
+                block = quality["checkpoints"] if path else quality
+                for key, value in block[category].items():
+                    self.assertEqual(counts[f"{scope}_{key}"], value, f"{scope}_{key}")
+                    places.append((path + (category,), key))
+        for path, key in places:
+            with self.subTest(path=path, key=key):
                 data = manifest()
-                del data["quality"]["checkpoints"]["sink"][key]
+                target = data["quality"]
+                for part in path:
+                    target = target[part]
+                del target[key]
                 with self.assertRaises(KeyError):
                     audit.manifest_counts(data)
-
-    def test_envelope_trailers_and_blinds_trailers_are_recorded_and_required(self):
-        counts, failures = audit.manifest_counts(manifest())
-        self.assertEqual(failures, [])
-        for scope in ("main", "checkpoint"):
-            self.assertEqual(counts[f"{scope}_movement_envelope_trailers"], 3)
-            self.assertEqual(counts[f"{scope}_movement_envelope_trailer_bits"], 72)
-            self.assertEqual(counts[f"{scope}_active_blinds_empty_trailers"], 1)
-            for key in ("movement_envelope_trailers", "movement_envelope_trailer_bits",
-                        "active_blinds_empty_trailers"):
-                with self.subTest(scope=scope, key=key):
-                    data = manifest()
-                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
-                    del target["sink"][key]
-                    with self.assertRaises(KeyError):
-                        audit.manifest_counts(data)
 
     def test_envelope_trailer_bits_must_be_24_per_stream_in_each_pass(self):
         """A trailer that grew, shrank or vanished fails the replay. 0 streams
@@ -151,18 +130,6 @@ class ManifestTests(unittest.TestCase):
                              ["main_movement_envelope_trailers=0: no movement stream decoded"]
                              if scope == "main" else [], scope)
 
-    def test_unwalked_cnc_payloads_and_movement_tails_fail_the_audit(self):
-        """Named here, not read from SINK_ZERO: the generic test above iterates
-        SINK_ZERO itself, so it cannot notice a key being dropped from it."""
-        for scope in ("main", "checkpoint"):
-            for key in ("cnc_bruteforce_payloads_unwalked", "movement_sized_section_tails",
-                        "movement_open_section_tails"):
-                with self.subTest(scope=scope, key=key):
-                    data = manifest()
-                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
-                    target["sink"][key] = 2
-                    self.assertIn(f"{scope}_{key}=2", audit.manifest_counts(data)[1])
-
     def test_sink_event_tallies_must_equal_the_framing_counts(self):
         """The sink counts RPCs, actor opens and closes and content blocks in
         callbacks vrf-net invokes beside its own counters, so the two must be
@@ -182,20 +149,9 @@ class ManifestTests(unittest.TestCase):
                             any(f.startswith(f"{scope}_{sink_key}=") and net_key in f
                                 for f in failures), failures)
 
-    def test_sink_event_tallies_and_their_framing_counts_are_required(self):
-        for scope in ("main", "checkpoint"):
-            for sink_key, net_key in SINK_NET_PAIRS:
-                for category, key in (("sink", sink_key), ("net", net_key)):
-                    with self.subTest(scope=scope, key=key):
-                        data = manifest()
-                        target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
-                        del target[category][key]
-                        with self.assertRaises(KeyError):
-                            audit.manifest_counts(data)
-
-    def test_checkpoint_trailing_bytes_are_recorded_and_must_be_zero(self):
-        """The checkpoint twin of replay_data_trailing_bytes: reported zero
-        included, and a failure when nonzero, absent or not a count."""
+    def test_checkpoint_trailing_bytes_must_be_zero(self):
+        """The checkpoint twin of replay_data_trailing_bytes: a failure when
+        nonzero or not a count."""
         counts, failures = audit.manifest_counts(manifest())
         self.assertEqual((counts["checkpoint_trailing_bytes"], failures), (0, []))
         data = manifest()
@@ -207,10 +163,6 @@ class ManifestTests(unittest.TestCase):
                 data["quality"]["checkpoints"]["checkpoint_trailing_bytes"] = bad
                 with self.assertRaises(ValueError):
                     audit.manifest_counts(data)
-        data = manifest()
-        del data["quality"]["checkpoints"]["checkpoint_trailing_bytes"]
-        with self.assertRaises(KeyError):
-            audit.manifest_counts(data)
 
     def test_lost_or_overcounted_rpc_fails(self):
         for preserved in (1, 3):

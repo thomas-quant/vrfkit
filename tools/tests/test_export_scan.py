@@ -24,13 +24,9 @@ def rust_str_constant(source: str, name: str) -> str:
 
 
 class RustContractTests(unittest.TestCase):
-    """`crates/vrfkit/tests/adapter_contract.rs` pins Rust constants that the
-    bundle adapter repeats; this is the same shape the other way round.
-    Renaming `STAGING` alone in `publish.rs` fails one Rust test (measured),
-    only because that test spells the measured leftover's name out. Update
-    that literal along with the constant and nothing on the Rust side knows
-    this filter exists, while every tool here goes back to reading leftovers
-    as exports. This test is the one that fails then."""
+    """publish.rs's names, read back from the Rust source: renamed there
+    alone, every tool here would read leftovers as exports again, and no Rust
+    test knows this filter exists."""
 
     def test_the_rust_generator_and_this_filter_name_the_same_directories(self):
         source = PUBLISH_RS.read_text(encoding="utf-8")

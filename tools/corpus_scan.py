@@ -1,47 +1,14 @@
-"""Shared `.vrf` discovery for `validate_corpus.py` and
-`check_decode_errors_corpus.py`.
+"""Shared `.vrf` discovery for validate_corpus.py and
+check_decode_errors_corpus.py, so the two cannot scan different sets as "the
+corpus" without saying so.
 
-The defect this closes: pointed at the same directory, `validate_corpus.py`
-walked it with `root.rglob("*.vrf")` and `check_decode_errors_corpus.py`
-walked it with `args.corpus.glob("*.vrf")` -- 153 files against 126. The
-27-file gap lived in a `Demos/old` subdirectory, and those 27 replays had
-their framing checked (by the recursive tool) but never their overlay or
-struct-blob decoders (by the non-recursive one). Nothing printed that the two
-counts disagreed; an auditor had to notice it by hand and run the missing 27
-separately.
-
-Neither glob was wrong on its own -- the defect was that a reader comparing
-the two tools' output could not tell they had scanned different sets. This
-module is the fix: both tools now ask this one function what "the corpus" is,
-so they cannot silently drift apart on the answer again.
-
-**The default is non-recursive**, deliberately, even though that narrows
-`validate_corpus.py`'s prior behaviour (it used to walk `Demos/old` and, in
-the incident above, that is exactly how the 27 files were noticed missing
-from the other tool -- this trades that framing coverage away). A
-subdirectory is not guaranteed to hold more of the same corpus: `Demos/old`
-is where the live VALORANT client archives replays it is about to rotate
-out, which may span a build boundary, and a preserved corpus could just as
-easily carry an `archive/` or `duplicates/` folder nobody meant to include in
-a sweep. CONTRIBUTING.md already tells contributors not to point a *baseline*
-at the live Demos folder for this reason; defaulting a *sweep* to recurse into
-it silently would reintroduce the same risk one level down. `--recursive`
-turns the choice into something visible on the command line, on both tools at
-once, rather than something that depends on which glob call a given script
-happens to use.
-
-Because the trade must never be silent either, `discover()` always reports
-`excluded` -- the number of `.vrf` files that exist under `root`, in
-subdirectories, that a non-recursive scan will not touch. It is computed
-whether or not the caller asked for it, and callers print it unconditionally,
-zero included: a line that only appears when `excluded > 0` cannot tell "nothing
-was left out" from "this code stopped checking", which is the exact failure
-mode this whole toolset exists to avoid (see `CLAUDE.md`).
-
-`limit`, where a caller applies one, is the caller's job, applied strictly
-after `discover()` returns -- so `excluded` always means "invisible to this
-run because of the recursion setting", never "left out because of a caller's
-`--limit`, and blamed on the wrong knob".
+Non-recursive by default: a subdirectory need not hold more of the same
+corpus (the live client's `Demos/old` holds replays it is about to rotate out,
+possibly across a build boundary). `--recursive` opts in on both tools.
+`discover()` always counts the `.vrf` files a non-recursive scan leaves out,
+and callers print that count unconditionally, zero included. A caller's
+`limit` applies after discovery, so `excluded` is only ever the recursion
+setting's doing.
 """
 from __future__ import annotations
 
@@ -51,8 +18,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class CorpusScan:
-    """What one discovery call found, and enough about how it looked to make
-    the scope legible without re-reading the code that produced it."""
+    """What one discovery call found, and how it looked."""
 
     files: list[Path]
     scanned_root: Path
@@ -63,13 +29,9 @@ class CorpusScan:
 
 
 def find_replays(root: Path, recursive: bool) -> list[Path]:
-    """Return replay files using the wire-format suffix, case-insensitively.
-
-    ``Path.glob("*.vrf")`` inherits the host filesystem's case rules.  That
-    made ``MATCH.VRF`` part of a corpus on Windows but invisible on POSIX.
-    Enumerating candidates and classifying the suffix gives both hosts the
-    same answer (and excludes a directory merely named ``something.vrf``).
-    """
+    """Replay files by suffix, case-insensitively on every host
+    (`Path.glob("*.vrf")` follows the filesystem's case rules); a directory
+    named `x.vrf` is not one."""
     candidates = root.rglob("*") if recursive else root.glob("*")
     return sorted(
         path for path in candidates
@@ -78,12 +40,8 @@ def find_replays(root: Path, recursive: bool) -> list[Path]:
 
 
 def discover(root: Path, recursive: bool) -> CorpusScan:
-    """Find the `.vrf` files that make up "the corpus" rooted at `root`.
-
-    Always computes the recursive count so `excluded` is a real number, not a
-    guess -- the cost is one extra `rglob` on the non-recursive path, which is
-    negligible next to the `vrfkit` subprocess each file goes on to cost.
-    """
+    """The `.vrf` files that make up the corpus at `root`; `excluded` is
+    counted with one extra rglob, never guessed."""
     top = find_replays(root, recursive=False)
     if recursive:
         everything = find_replays(root, recursive=True)
@@ -96,13 +54,8 @@ def discover(root: Path, recursive: bool) -> CorpusScan:
 
 
 def replay_label(path: Path, index: int, redact_identifiers: bool) -> str:
-    """Return a diagnostic label without exposing a replay filename.
-
-    Replay filenames are frequently account- or session-derived identifiers.
-    Corpus tools still need a stable label within one sorted sweep so an
-    operator can correlate the rate and failure sections without printing the
-    underlying filename.
-    """
+    """A diagnostic label: under redaction `replay-NNNN`, stable within one
+    sorted sweep, since filenames are often account- or session-derived."""
     return f"replay-{index:04d}" if redact_identifiers else path.name
 
 
@@ -114,12 +67,7 @@ def diagnostic(detail: str, redact_identifiers: bool) -> str:
 
 
 def scope_line(scan: CorpusScan, redact_identifiers: bool = False) -> str:
-    """One line that states the corpus scope from the printed output alone.
-
-    Printed unconditionally by callers, `excluded=0` included -- see the
-    module docstring for why a conditional line here would reintroduce the
-    defect this module exists to close.
-    """
+    """One line stating the corpus scope, `excluded` included at 0."""
     mode = "recursive" if scan.recursive else "top-level only"
     root = "<private corpus>" if redact_identifiers else str(scan.scanned_root)
     line = (f"corpus scope: {len(scan.files)} .vrf file(s) under "
