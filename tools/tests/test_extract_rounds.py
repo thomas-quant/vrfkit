@@ -107,19 +107,25 @@ class ExtractRoundsTests(unittest.TestCase):
         _, _, problems = rounds.build(self.two_rounds(result_rows(2600, 5, "Red", "attacker", "elimination")))
         self.assertEqual(problems, ["RoundResults round 5 (elimination) has no played round"])
 
-    def test_a_repeated_phase_keeps_the_first_and_opens_no_round(self):
-        rows, counts, problems = rounds.build(self.two_rounds([(1050, rounds.SET_PHASE, 3, None)]))
+    def test_a_repeated_or_unknown_phase_opens_no_round(self):
+        rows, counts, problems = rounds.build(self.two_rounds([(1050, rounds.SET_PHASE, 3, None),
+                                                               (1060, rounds.SET_PHASE, 7, None)]))
         self.assertEqual((len(rows), rows[0]["start_ms"], problems), (2, 1010, []))
-        self.assertEqual(counts["phase repeated in a round (first kept)"], 1)
+        self.assertEqual((counts["phase repeated in a round (first kept)"], counts["phase other"]), (1, 1))
 
     def test_a_missing_phase_stays_null_and_a_side_switch_joins_the_round_before(self):
-        fields = [*phase_rows(1000), (1600, rounds.SET_PHASE, 6, None),
-                  (1600, "Multicast Side Switch Event", None, None),
-                  *phase_rows(2000, buy_end=False, post=False)]
-        rows, _, problems = rounds.build(self.write(fields, []))
+        def fields(rpc_ms):
+            return [*phase_rows(1000), (1600, rounds.SET_PHASE, 6, None),
+                    (rpc_ms, "Multicast Side Switch Event", None, None),
+                    *phase_rows(2000, buy_end=False, post=False)]
+        rows, _, problems = rounds.build(self.write(fields(1600), []))
         self.assertEqual(problems, [])
         self.assertEqual([(r["side_switch_ms"], r["buy_end_ms"], r["round_number"]) for r in rows],
                          [(1600, 1100, None), (None, None, None)])
+        self.write(fields(1601), [])
+        code, _, stderr = self.run_main(Path(self._tmp.name) / "rounds.parquet")
+        self.assertEqual(code, 1)
+        self.assertIn("phase 6", stderr)
 
     def test_a_second_plant_in_a_round_is_left_null_and_counted(self):
         events = [("spikePlanted", 2200, None), ("spikePlanted", 2300, None), ("roundStarted", 500, 9)]
@@ -136,6 +142,7 @@ class ExtractRoundsTests(unittest.TestCase):
         self.assertEqual(pq.read_table(out).schema, rounds.SCHEMA)
         for key in rounds.COUNT_KEYS:
             self.assertIn(f"  {key}: ", stdout)
+        self.assertIn("  non-null: round_ordinal 2, round_number 2, reset_ms 2", stdout)
         self.assertEqual(self.run_main(self.export / "fields.parquet")[0], 1)
 
 

@@ -57,8 +57,9 @@ class MinimapTests(unittest.TestCase):
         self.assertEqual(self.export([(0, 0, 0)], dict.fromkeys(CONSTANTS, 0)), 1)
 
     def test_the_check_passes_a_fitting_projection_and_ignores_parked_rows(self):
-        fitting = {"xMultiplier": 0.001, "yMultiplier": -0.001, "xScalarToAdd": 0.5, "yScalarToAdd": 0.5}
-        positions = [(100, -200, 0), (-300, 400, 50), (-50000, 0, -49900)]
+        # Asymmetric: |pos_y| <= 500 and |pos_x| <= 5000 fit, so only the crossed order passes.
+        fitting = {"xMultiplier": 0.001, "yMultiplier": -0.0001, "xScalarToAdd": 0.5, "yScalarToAdd": 0.5}
+        positions = [(4000, 400, 0), (-300, -450, 50), (-50000, 0, -49900)]
         self.assertEqual(self.export(positions, fitting), 0)
         self.assertEqual(self.export(positions + [(100, 5000, 0)], fitting), 1)
 
