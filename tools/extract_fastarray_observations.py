@@ -13,21 +13,18 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import json
-import os
 from pathlib import Path
-import shutil
 import sys
-import tempfile
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import sha256_file as sha
+    from .atomic_io import sha256_file as sha, staged_output
     from .wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
 else:
-    from atomic_io import sha256_file as sha
+    from atomic_io import sha256_file as sha, staged_output
     from wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
 
 SCHEMA_VERSION = 2
@@ -206,24 +203,13 @@ def tally(counts: Counter, prefix: str, record: dict) -> None:
 
 
 def extract(export_dir: Path, out_dir: Path) -> dict:
-    export_dir, out_dir = export_dir.resolve(), out_dir.resolve()
-    if out_dir == export_dir or out_dir.is_relative_to(export_dir):
-        raise ValueError("output must be outside the source export")
-    if out_dir.exists():
-        raise ValueError("output directory already exists")
-    paths = [export_dir / n for n in ("manifest.json", "fields.parquet", "checkpoint_fields.parquet")]
-    before = {str(path): sha(path) for path in paths}
-    build = json.loads(paths[0].read_text(encoding="utf-8"))["replay_build"]
-    script_hash = sha(Path(__file__))
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".fastarray-", dir=out_dir.parent))
-    counts = empty_counts()
-    reasons = Counter()
-    try:
+    def write(stage: Path) -> dict:
+        build = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))["replay_build"]
+        counts, reasons = empty_counts(), Counter()
         output = stage / "observations.ndjson"
         with output.open("w", encoding="utf-8", newline="\n") as handle:
-            for path in paths[1:]:
-                stream = path.stem
+            for stream in STREAMS:
+                path = export_dir / f"{stream}.parquet"
                 counts[f"unselected_route_name.{stream}.rows"] += unselected_route_name_rows(path)
                 for ordinal, row in selected_rows(path, stream == "checkpoint_fields"):
                     record = observation(row, ordinal, stream, build)
@@ -233,23 +219,14 @@ def extract(export_dir: Path, out_dir: Path) -> dict:
                     if record["structure"] is None:
                         reasons[record["status"]] += 1
                     handle.write(json.dumps(record, separators=(",", ":")) + "\n")
-        after = {str(path): sha(path) for path in paths}
-        if before != after or sha(Path(__file__)) != script_hash:
-            raise ValueError("input or extractor changed during read")
-        receipt = {"schema_version": SCHEMA_VERSION, "replay_build": build,
-                   "routes": {route: {"group_path": group, "field_name": name, "handle": ROUTE_HANDLE}
-                              for route, (group, name) in ROUTES.items()},
-                   "counts": dict(counts), "rejection_reasons": dict(reasons),
-                   "input_sha256_before": before, "input_sha256_after": after,
-                   "extractor_sha256": script_hash, "observations_sha256": sha(output),
-                   "scope": "Numeric FastArray boundaries; no field names, gameplay meanings, casts, or player attribution."}
-        (stage / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8",
-                                            newline="\n")
-        os.rename(stage, out_dir)
-        return receipt
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+        return {"schema_version": SCHEMA_VERSION, "replay_build": build,
+                "routes": {route: {"group_path": group, "field_name": name, "handle": ROUTE_HANDLE}
+                           for route, (group, name) in ROUTES.items()},
+                "counts": dict(counts), "rejection_reasons": dict(reasons),
+                "extractor_sha256": sha(Path(__file__)), "observations_sha256": sha(output),
+                "scope": "Numeric FastArray boundaries; no field names, gameplay meanings, casts, or player attribution."}
+    return staged_output(export_dir, out_dir, ("manifest.json", *(f"{s}.parquet" for s in STREAMS)),
+                         write, prefix=".fastarray-")
 
 
 def main() -> int:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -84,6 +85,34 @@ def atomic_write_text(
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def staged_output(export_dir: Path, out_dir: Path, inputs, write, *, prefix: str) -> dict:
+    """Create `out_dir`, outside the export, from a staging directory that
+    `write(stage)` fills and whose receipt it returns. The receipt gains the
+    export `inputs`' hashes before and after; the stage is renamed into place
+    only if they are equal, and removed otherwise."""
+    export_dir, out_dir = export_dir.resolve(), out_dir.resolve()
+    if out_dir == export_dir or out_dir.is_relative_to(export_dir):
+        raise ValueError("output must be outside the source export")
+    if out_dir.exists():
+        raise ValueError("output directory already exists")
+    before = {name: sha256_file(export_dir / name) for name in inputs}
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=prefix, dir=out_dir.parent))
+    try:
+        receipt = write(stage)
+        after = {name: sha256_file(export_dir / name) for name in inputs}
+        if before != after:
+            raise ValueError("input changed during read")
+        receipt.update(input_sha256_before=before, input_sha256_after=after)
+        (stage / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+                                            encoding="utf-8", newline="\n")
+        os.rename(stage, out_dir)
+        return receipt
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
 
 
 def atomic_write_file(path: Path, write) -> None:

@@ -37,22 +37,19 @@ from collections import Counter
 from dataclasses import dataclass
 import json
 import math
-import os
 from pathlib import Path
-import shutil
 import struct
 import sys
-import tempfile
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import sha256_file as sha
+    from .atomic_io import sha256_file as sha, staged_output
     from .wire_bits import Bits, WireError, fastarray_header, iter_selected, text
 else:
-    from atomic_io import sha256_file as sha
+    from atomic_io import sha256_file as sha, staged_output
     from wire_bits import Bits, WireError, fastarray_header, iter_selected, text
 
 #: 2: items gained `status_name`, the receipt `declarations.resolved_names`.
@@ -73,6 +70,8 @@ WINDOW_KINDS = {UNRESOLVED_CNC: "unresolved_cnc_payload", REP_LAYOUT_TAIL: "rep_
 ROUTES = {"bare_patch_volume": "PatchVolume", "declared_class": CLASS_GROUP}
 ROUTE_BY_GROUP = {group: route for route, group in ROUTES.items()}
 STREAMS = ("fields", "checkpoint_fields")
+INPUTS = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "actors.parquet",
+          "net_guids.parquet", "checkpoint_export_groups.parquet", "checkpoint_export_fields.parquet")
 #: The CNC field that carries the items, by its declared identity.
 FRAGMENT_INFO = ("FragmentInfo", 2225407835)
 
@@ -479,75 +478,57 @@ def item_record(window: dict, item: dict, owners: dict, objects: dict,
 
 
 def extract(export_dir: Path, out_dir: Path) -> dict:
-    export_dir, out_dir = export_dir.resolve(), out_dir.resolve()
-    if out_dir == export_dir or out_dir.is_relative_to(export_dir):
-        raise ValueError("output must be outside the source export")
-    if out_dir.exists():
-        raise ValueError("output directory already exists")
-    inputs = [export_dir / n for n in (
-        "manifest.json", "fields.parquet", "checkpoint_fields.parquet", "actors.parquet",
-        "net_guids.parquet", "checkpoint_export_groups.parquet", "checkpoint_export_fields.parquet")]
-    before = {path.name: sha(path) for path in inputs}
-    script_hash = sha(Path(__file__))
-    manifest = json.loads(inputs[0].read_text(encoding="utf-8"))
+    return staged_output(export_dir, out_dir, INPUTS, lambda stage: write(export_dir, stage),
+                         prefix=".ground-volumes-")
+
+
+def write(export_dir: Path, stage: Path) -> dict:
+    """Write items and windows into `stage`; return the receipt."""
+    manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
     build = manifest["replay_build"]
     schema = load_schema(export_dir, manifest)
     owners, objects = owner_classes(export_dir), object_paths(export_dir)
     declared_items = schema.item_identities()
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".ground-volumes-", dir=out_dir.parent))
     counts = Counter({k: 0 for k in COUNTERS})
     reasons = Counter()
-    try:
-        with (stage / "windows.ndjson").open("w", encoding="utf-8", newline="\n") as windows, \
-                (stage / "items.ndjson").open("w", encoding="utf-8", newline="\n") as items_out:
-            for stream in STREAMS:
-                for ordinal, row in selected_rows(export_dir / f"{stream}.parquet", stream != "fields"):
-                    record, items, window_counts = window_record(row, ordinal, stream, build, schema)
-                    counts["rows"] += 1
-                    counts[f"rows_{stream}"] += 1
-                    counts[f"rows_{record['route']}"] += 1
-                    counts[f"rows_{record['window_kind']}"] += 1
-                    if record["status"] == "decoded_exact":
-                        counts["windows_exact"] += 1
-                        counts.update(window_counts)
-                        counts["entries"] += len(record["entries"])
-                        counts["deleted_items"] += sum(len(e["deleted_item_ids"]) for e in record["entries"])
-                        counts["changed_items"] += len(items)
-                        for item in items:
-                            out = item_record(record, item, owners, objects, declared_items, counts, build)
-                            items_out.write(json.dumps(out, separators=(",", ":"), allow_nan=False) + "\n")
-                    else:
-                        counts["rejected"] += 1
-                        reasons[record["status"]] += 1
-                    windows.write(json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n")
-        after = {path.name: sha(path) for path in inputs}
-        if before != after or sha(Path(__file__)) != script_hash:
-            raise ValueError("input or extractor changed during read")
-        receipt = {
-            "schema_version": SCHEMA_VERSION, "replay_build": build,
-            "counts": dict(counts), "rejection_reasons": dict(reasons),
-            "declarations": {
-                "class_group": {str(h): list(i) for h, i in sorted(schema.members.items())},
-                "cnc_group": {str(h): list(i) for h, i in sorted(schema.cnc.items())},
-                "cnc_declared_slots": schema.cnc_slots, "schema_error": schema.error,
-                "resolved_names": resolved_names(schema)},
-            "input_sha256_before": before, "input_sha256_after": after,
-            "extractor_sha256": script_hash,
-            "windows_sha256": sha(stage / "windows.ndjson"),
-            "items_sha256": sha(stage / "items.ndjson"),
-            "scope": ("GroundVolumeComponent FragmentInfo cells decoded with the replay's own "
-                      "declared names; resolved_names by exact (name, checksum); Status "
-                      "enumerator names for the 13.06 declaration only; no ability or player "
-                      "semantics."),
-        }
-        (stage / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n",
-                                            encoding="utf-8", newline="\n")
-        os.rename(stage, out_dir)
-        return receipt
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+    with (stage / "windows.ndjson").open("w", encoding="utf-8", newline="\n") as windows, \
+            (stage / "items.ndjson").open("w", encoding="utf-8", newline="\n") as items_out:
+        for stream in STREAMS:
+            for ordinal, row in selected_rows(export_dir / f"{stream}.parquet", stream != "fields"):
+                record, items, window_counts = window_record(row, ordinal, stream, build, schema)
+                counts["rows"] += 1
+                counts[f"rows_{stream}"] += 1
+                counts[f"rows_{record['route']}"] += 1
+                counts[f"rows_{record['window_kind']}"] += 1
+                if record["status"] == "decoded_exact":
+                    counts["windows_exact"] += 1
+                    counts.update(window_counts)
+                    counts["entries"] += len(record["entries"])
+                    counts["deleted_items"] += sum(len(e["deleted_item_ids"]) for e in record["entries"])
+                    counts["changed_items"] += len(items)
+                    for item in items:
+                        out = item_record(record, item, owners, objects, declared_items, counts, build)
+                        items_out.write(json.dumps(out, separators=(",", ":"), allow_nan=False) + "\n")
+                else:
+                    counts["rejected"] += 1
+                    reasons[record["status"]] += 1
+                windows.write(json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n")
+    return {
+        "schema_version": SCHEMA_VERSION, "replay_build": build,
+        "counts": dict(counts), "rejection_reasons": dict(reasons),
+        "declarations": {
+            "class_group": {str(h): list(i) for h, i in sorted(schema.members.items())},
+            "cnc_group": {str(h): list(i) for h, i in sorted(schema.cnc.items())},
+            "cnc_declared_slots": schema.cnc_slots, "schema_error": schema.error,
+            "resolved_names": resolved_names(schema)},
+        "extractor_sha256": sha(Path(__file__)),
+        "windows_sha256": sha(stage / "windows.ndjson"),
+        "items_sha256": sha(stage / "items.ndjson"),
+        "scope": ("GroundVolumeComponent FragmentInfo cells decoded with the replay's own "
+                  "declared names; resolved_names by exact (name, checksum); Status "
+                  "enumerator names for the 13.06 declaration only; no ability or player "
+                  "semantics."),
+    }
 
 
 def main() -> int:
