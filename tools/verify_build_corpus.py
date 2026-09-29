@@ -124,6 +124,9 @@ def manifest_counts(manifest):
         if bits != ENVELOPE_TRAILER_BITS * streams:
             failures.append(f"{prefix}_movement_envelope_trailer_bits={bits} != "
                             f"{ENVELOPE_TRAILER_BITS} x {prefix}_movement_envelope_trailers={streams}")
+        # Main only: no checkpoint RPC reaches the movement decoder.
+        if prefix == "main" and not streams:
+            failures.append("main_movement_envelope_trailers=0: no movement stream decoded")
         lost = counts[f"{prefix}_rpc_stream_failures"] - counts[f"{prefix}_unresolved_rpc_payloads_preserved"]
         counts[f"{prefix}_rpc_loss"] = lost
         if lost != 0:

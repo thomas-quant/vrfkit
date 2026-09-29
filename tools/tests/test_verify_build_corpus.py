@@ -129,9 +129,9 @@ class ManifestTests(unittest.TestCase):
                         audit.manifest_counts(data)
 
     def test_envelope_trailer_bits_must_be_24_per_stream_in_each_pass(self):
-        """A trailer that grew, shrank or vanished (bits short of 24 per stream,
-        down to 0) fails the replay; 0 streams with 0 bits -- a pass with no
-        movement RPC, like every checkpoint pass measured -- does not."""
+        """A trailer that grew, shrank or vanished fails the replay. 0 streams
+        passes the checkpoint pass, which no movement RPC reaches, but not the
+        main pass: a renumbered movement handle decodes nothing, and 0 = 24 x 0."""
         for scope in ("main", "checkpoint"):
             for streams, bits in ((3, 71), (3, 73), (3, 0), (0, 24)):
                 with self.subTest(scope=scope, streams=streams, bits=bits):
@@ -147,7 +147,9 @@ class ManifestTests(unittest.TestCase):
             target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
             target["sink"].update(movement_envelope_trailers=0,
                                   movement_envelope_trailer_bits=0)
-            self.assertEqual(audit.manifest_counts(data)[1], [], scope)
+            self.assertEqual(audit.manifest_counts(data)[1],
+                             ["main_movement_envelope_trailers=0: no movement stream decoded"]
+                             if scope == "main" else [], scope)
 
     def test_unwalked_cnc_payloads_and_movement_tails_fail_the_audit(self):
         """Named here, not read from SINK_ZERO: the generic test above iterates

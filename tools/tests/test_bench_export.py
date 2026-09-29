@@ -206,6 +206,13 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(
             schemas.validate_bench_baseline(self.baseline, data), [])
 
+    def test_a_missing_binary_is_a_usage_error_not_a_skip(self):
+        """A typo'd --exe must not read as a benchmark that passed."""
+        self.exe = self.root / "relase" / "vrfkit"
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.run_bench(self.replay("m.vrf")), 2)
+        self.assertIn("build the release binary first", err.getvalue())
+
     def test_checkpoints_without_update_still_reports_the_timing(self):
         """Refusing to RECORD must not stop the tool from measuring."""
         argv = sys.argv

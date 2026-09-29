@@ -113,40 +113,20 @@ class DiscoverTests(unittest.TestCase):
 
 
 class ScopeLineTests(unittest.TestCase):
-    """The line a reader sees is the only thing that has to prove the scope."""
+    """The whole line, so count, root, mode and the excluded count -- zero
+    included -- are each pinned."""
 
-    def test_scope_line_names_file_count_and_root(self):
-        scan = corpus_scan.CorpusScan(
-            files=[Path("a.vrf"), Path("b.vrf")], scanned_root=Path("/corpus"),
-            recursive=False, excluded=3)
-        line = corpus_scan.scope_line(scan)
-        self.assertIn("2", line)
-        self.assertIn("corpus", line)
-
-    def test_scope_line_states_the_excluded_count_even_when_nonzero(self):
-        scan = corpus_scan.CorpusScan(
-            files=[], scanned_root=Path("/corpus"), recursive=False, excluded=27)
-        self.assertIn("27", corpus_scan.scope_line(scan))
-
-    def test_scope_line_states_zero_excluded_explicitly(self):
-        """A silent line here is how the original defect happened -- print 0."""
-        scan = corpus_scan.CorpusScan(
-            files=[], scanned_root=Path("/corpus"), recursive=False, excluded=0)
-        self.assertIn("0", corpus_scan.scope_line(scan))
-
-    def test_scope_line_names_recursive_mode(self):
-        scan = corpus_scan.CorpusScan(
-            files=[], scanned_root=Path("/corpus"), recursive=True, excluded=0)
-        self.assertIn("recursive", corpus_scan.scope_line(scan))
-
-    def test_redacted_scope_does_not_print_the_private_root(self):
-        scan = corpus_scan.CorpusScan(
-            files=[Path("private-name.vrf")],
-            scanned_root=Path("/private/player/corpus"),
-            recursive=False, excluded=0)
-        line = corpus_scan.scope_line(scan, redact_identifiers=True)
-        self.assertNotIn("/private/player/corpus", line)
-        self.assertIn("<private corpus>", line)
+    def test_the_line_states_count_root_mode_and_excluded(self):
+        root = Path("/private/player/corpus")
+        top = corpus_scan.CorpusScan(files=[Path("a.vrf"), Path("b.vrf")],
+                                     scanned_root=root, recursive=False, excluded=27)
+        self.assertEqual(corpus_scan.scope_line(top),
+                         f"corpus scope: 2 .vrf file(s) under {root} (top-level only); "
+                         f"27 more in subdirectories excluded (pass --recursive to include)")
+        deep = corpus_scan.CorpusScan(files=[], scanned_root=root, recursive=True, excluded=0)
+        self.assertEqual(corpus_scan.scope_line(deep, redact_identifiers=True),
+                         "corpus scope: 0 .vrf file(s) under <private corpus> (recursive); "
+                         "0 more in subdirectories excluded")
 
 
 class ReplayLabelTests(unittest.TestCase):

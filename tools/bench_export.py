@@ -146,10 +146,12 @@ def main() -> int:
                     help="rewrite the baseline with this run's numbers")
     args = ap.parse_args()
 
-    for path, what in ((args.exe, "binary"), (args.replay, "replay")):
-        if not path.exists():
-            print(f"SKIP: no {what} at {path}", file=sys.stderr)
-            return 0
+    if not args.exe.is_file():
+        print(f"build the release binary first: {args.exe}", file=sys.stderr)
+        return 2
+    if not args.replay.exists():
+        print(f"SKIP: no replay at {args.replay}", file=sys.stderr)
+        return 0
 
     key = TIMING_KEYS[bool(args.checkpoints)]
 
