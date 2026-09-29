@@ -33,6 +33,8 @@ import os
 import sys
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -122,19 +124,17 @@ def load_cs(path):
 
 
 def load_ours(parquet=DEFAULT_OURS):
-    t = pq.read_table(parquet)
-    cols = {
-        n: t.column(n).to_pylist()
-        for n in ("group_path", "field_name", "handle",
-                  "value_i64", "value_f64", "value_bool", "value_str")
-    }
+    columns = ["group_path", "field_name", "handle",
+               "value_i64", "value_f64", "value_bool", "value_str"]
+    t = pq.read_table(parquet, columns=columns)
+    # Only the CombatReport Rounds rows become Python objects (of ~1.3M).
+    keep = pc.and_(
+        pc.match_substring(t.column("group_path").cast(pa.string()), "CombatReportComponent"),
+        pc.starts_with(t.column("field_name").cast(pa.string()), "Rounds"))
+    t = t.filter(pc.fill_null(keep, False))
+    cols = {n: t.column(n).to_pylist() for n in columns}
     ours = collections.defaultdict(collections.Counter)
-    for i, g in enumerate(cols["group_path"]):
-        if "CombatReportComponent" not in g:
-            continue
-        n = cols["field_name"][i]
-        if not n or not n.startswith("Rounds"):
-            continue
+    for i, (g, n) in enumerate(zip(cols["group_path"], cols["field_name"])):
         s = shape(_combat_report_leaf_name(g, n, cols["handle"][i]))
         if s not in INTERESTING:
             continue
