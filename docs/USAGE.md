@@ -1217,7 +1217,7 @@ type inference, so it establishes preservation and schema drift, not meaning.
 
 The pre-PR sweep, and what CI runs, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr); the suites have
-806 Rust tests and 1321 Python tests.
+807 Rust tests and 1321 Python tests.
 
 **The ASCII rule is correctness, not style.** The Windows console is cp949, so a
 single non-ASCII character in a format string truncates output at that point.

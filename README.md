@@ -18,7 +18,7 @@ Derived from [ValorantReplayParser](https://github.com/michel-giehl/ValorantRepl
 by Michel Giehl; see [`NOTICE.md`](NOTICE.md). Not affiliated with, endorsed
 by, or approved by Riot Games.
 
-**Verified state (2026-09-28):** Rust has **806 passing** tests; Python has
+**Verified state (2026-09-28):** Rust has **807 passing** tests; Python has
 **1321 passing** tests. All 24 supported builds received the same verification
 on **1,018 unique replays**; all **1,018** meet every strict criterion. See
 [build verification](docs/BUILD_VERIFICATION.md) for the measured scope, common
@@ -140,7 +140,7 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
-- **806 Rust tests** plus a layered validation suite (framing / bytes / decode
+- **807 Rust tests** plus a layered validation suite (framing / bytes / decode
   errors / semantics).
 
 ## Table of contents
@@ -242,7 +242,7 @@ reading them:
 ## Status
 
 Work in progress. Currently verified: `cargo +1.86.0 test --workspace --locked`
-**806 passing**; the full Python suite also has **1321 passing** tests. The
+**807 passing**; the full Python suite also has **1321 passing** tests. The
 full documentation check passes. The latest [common build audit](docs/BUILD_VERIFICATION.md)
 records replay validation, checkpoint export, independent value checks and
 the resolved array findings and remaining semantic limits for each supported build.
