@@ -283,20 +283,7 @@ pub fn walk_demo_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn push_int_packed(data: &mut Vec<u8>, mut value: u32) {
-        loop {
-            let mut byte = ((value & 0x7f) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                byte |= 1;
-            }
-            data.push(byte);
-            if value == 0 {
-                return;
-            }
-        }
-    }
+    use vrf_testkit::add_int_packed;
 
     /// One DemoFrame: `exports` is the whole ExportData section, then no
     /// streaming levels, the ExternalData blobs `(numBits, netGuid, payload)`,
@@ -319,8 +306,8 @@ mod tests {
             data.extend_from_slice(&0u64.to_le_bytes()); // externalOffset
         }
         for &(num_bits, net_guid, payload) in external {
-            push_int_packed(&mut data, num_bits);
-            push_int_packed(&mut data, net_guid);
+            add_int_packed(&mut data, num_bits);
+            add_int_packed(&mut data, net_guid);
             data.extend_from_slice(payload);
         }
         data.push(0); // ExternalData terminator
@@ -343,16 +330,16 @@ mod tests {
     /// `field_count` slots, no field and no export GUIDs.
     fn group_export(field_count: u32) -> Vec<u8> {
         let mut data = Vec::new();
-        push_int_packed(&mut data, 1); // one layout export
-        push_int_packed(&mut data, 7); // path-name index
-        push_int_packed(&mut data, 1); // path is exported
+        add_int_packed(&mut data, 1); // one layout export
+        add_int_packed(&mut data, 7); // path-name index
+        add_int_packed(&mut data, 1); // path is exported
         let path = b"/Script/G.Thing";
         data.extend_from_slice(&((path.len() + 1) as i32).to_le_bytes());
         data.extend_from_slice(path);
         data.push(0);
-        push_int_packed(&mut data, field_count);
+        add_int_packed(&mut data, field_count);
         data.push(0); // no field exported
-        push_int_packed(&mut data, 0); // no export GUIDs
+        add_int_packed(&mut data, 0); // no export GUIDs
         data
     }
 
