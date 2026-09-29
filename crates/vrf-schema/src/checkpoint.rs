@@ -33,7 +33,7 @@
 //! ```
 //!
 //! `PathIsString`'s polarity is the opposite of an FName's leading byte, where
-//! nonzero means "hardcoded index"; neither FName reader may be pointed at it.
+//! nonzero means "hardcoded index"; the FName reader must not be pointed at it.
 //!
 //! # NetFieldExportGroup
 //!
@@ -50,10 +50,9 @@
 //!         ExportName         : FName
 //! ```
 //!
-//! `NumNetFieldExports` is IntPacked while the section count is a u32. Read as
-//! a u32 it doubles small counts (IntPacked shifts left by one) and overruns
-//! into plausible garbage, which is why [`read_checkpoint_tables`] ends by
-//! asserting the prologue's frame offset.
+//! Read as a u32, `NumNetFieldExports` doubles small counts and overruns into
+//! plausible garbage, which is why [`read_checkpoint_tables`] ends by asserting
+//! the prologue's frame offset.
 
 use vrf_bitio::{BitError, BitReader};
 
@@ -122,12 +121,10 @@ pub enum CheckpointReadError<E> {
     Sink(E),
 }
 
-/// Sanity bound on the guid-cache entry count; the largest corpus checkpoint
-/// carries about 12,000.
+/// The largest corpus checkpoint carries about 12,000 guid entries.
 const MAX_GUID_ENTRIES: u32 = 1_000_000;
 
-/// Sanity bound on the export-group count; the largest corpus checkpoint
-/// declares 543.
+/// The largest corpus checkpoint declares 543 export groups.
 const MAX_GROUPS: u32 = 100_000;
 
 /// What [`read_checkpoint_tables`] consumed, for the caller to report.
@@ -141,8 +138,7 @@ pub struct CheckpointTables {
     pub exported_fields: u32,
     /// Byte offset where the DemoFrame begins.
     pub frame_offset: usize,
-    /// Entries whose path arrived as a GUID-path table index, not a string.
-    /// The name is historical: these are not hardcoded Unreal EName values.
+    /// Entries whose path arrived as an index into the literal paths (not an EName).
     pub hardcoded_paths: u32,
     /// Literal GUID-path entries read, in either mode.
     pub literal_paths: u32,
@@ -153,10 +149,9 @@ pub struct CheckpointTables {
 /// Interpretation of checkpoint GUID path indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointPathMode {
-    /// Retain the former decimal rendering for callers comparing legacy output.
+    /// The index in decimal, for comparing with legacy output.
     LegacyDecimal,
-    /// Resolve zero-based indices into this checkpoint's preceding literal GUID
-    /// paths: the default, measured as described at [`read_checkpoint_tables`].
+    /// Resolve an index into this checkpoint's preceding literal paths (the default).
     LiteralPathTable,
 }
 
@@ -171,12 +166,10 @@ pub enum CheckpointPathMode {
 ///
 /// An indexed path is a zero-based position among the literal paths before it
 /// in this checkpoint; references are not appended, and the table resets per
-/// call. Measured on 714 replays of 13.01-13.05 (2026-09-08), then matched
-/// against the main stream's own paths on 1,018 replays of all 24 builds
-/// (2026-09-28); counts and method are in docs/CHECKPOINT_PATH_RESOLUTION.md,
-/// and the export guards repeat the comparison. That is agreement between two
-/// readers, not an engine specification. An index past the preceding literals
-/// is rejected before the frame; raw indices stay available to
+/// call. It matches the main stream's own paths on 1,018 replays of 24 builds
+/// (docs/CHECKPOINT_PATH_RESOLUTION.md; the export guards repeat the check):
+/// agreement between two readers, not an engine specification. An index past
+/// the preceding literals is rejected; raw indices stay available to
 /// [`CheckpointTableSink`], and [`CheckpointPathMode::LegacyDecimal`] (via
 /// [`read_checkpoint_tables_with_sink_mode`]) reproduces legacy paths.
 ///
@@ -184,8 +177,7 @@ pub enum CheckpointPathMode {
 ///
 /// Beyond truncation, each `Checkpoint*` [`SchemaError`] is a check that the
 /// cursor is still aligned. `PathIsString` accepts only 0 and 1; the FName
-/// kind and exported-slot flag accept any nonzero byte, as the legacy reader
-/// did.
+/// kind and exported-slot flag accept any nonzero byte.
 pub fn read_checkpoint_tables(data: &[u8], cache: &mut NetGuidCache) -> Result<CheckpointTables> {
     let mut sink = NoopCheckpointTableSink;
     match read_checkpoint_tables_with_sink(data, cache, &mut sink) {
@@ -320,10 +312,8 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
             .into());
         }
 
-        // Exactly the two lookups `add_export_group` merges on: `by_path`
-        // (aliases included) and `by_index`. The cache is fresh, so a hit
-        // means this checkpoint declared the group twice; refuse it before an
-        // ambiguous cache reaches frame decode.
+        // The two lookups `add_export_group` merges on (`by_path` with aliases,
+        // `by_index`): in a fresh cache, a hit means a group declared twice.
         if cache.get_group_by_index(path_name_index).is_some()
             || cache.get_group_by_path(&path).is_some()
         {
@@ -385,7 +375,7 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         }
     }
 
-    // -- The one end-to-end check -----------------------------------------
+    // The one end-to-end check.
     let map_end = (reader.position() / 8) as usize;
     let expected = frame_offset_word as usize + 8;
     if map_end != expected {

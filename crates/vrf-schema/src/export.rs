@@ -1,20 +1,13 @@
-//! Net field export groups: one object path each (e.g.
-//! `/Game/Abilities/GrenadeExplodeIndicator.GrenadeExplodeIndicator_C:MulticastTriggerExplodeIndicator`)
-//! with a sparse table of [`NetFieldExport`] descriptors keyed by handle.
+//! Net field export groups: one object path each, with a sparse table of
+//! [`NetFieldExport`] descriptors keyed by handle.
 
-/// Apply an `FName`'s instance number to its string, Unreal's way: the number
-/// is the displayed suffix plus one, so 0 renders the bare name and `N`
-/// renders `Name_{N-1}`. Dropping it merged distinct handles under one name,
-/// unreported.
-///
-/// A negative number has no display form and is appended as it is, never
-/// wrapped into a plausible positive suffix. Both schema readers render
-/// through this; `vrf-decode`'s `scalar::render_fname` applies the same rule,
-/// copied because the two crates share no dependency edge.
+/// An `FName`'s instance number is its displayed suffix plus one: 0 renders
+/// the bare name, `N` renders `Name_{N-1}`. A negative number has no display
+/// form and is appended as is, never wrapped into a plausible suffix
+/// (`vrf-decode`'s reader rejects one; the schema must still name the field).
 pub(crate) fn render_fname(name: String, number: i32) -> String {
     match number {
         0 => name,
-        // `n - 1` cannot overflow for `n > 0`; negatives are never wrapped.
         n if n > 0 => format!("{name}_{}", n - 1),
         n => format!("{name}_{n}"),
     }

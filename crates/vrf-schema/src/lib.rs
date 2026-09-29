@@ -24,8 +24,7 @@
 //! |---------|---------|--------|
 //! | `checkpoint` | on | [`read_checkpoint_tables`] and [`CheckpointTables`]. A consumer reading only the ReplayData stream never calls them |
 //!
-//! The cache, the export types and the ReplayData readers are ungated: every
-//! consumer needs them.
+//! The cache, the export types and the ReplayData readers are ungated.
 
 #![forbid(unsafe_code)]
 

@@ -10,77 +10,46 @@ pub enum SchemaError {
     #[error("bit-level read failed: {0}")]
     Bitio(#[from] BitError),
 
-    /// A net-field export references a `path_name_index` never registered: the
-    /// stream is corrupt or out of order.
+    /// The stream is corrupt or out of order.
     #[error("net-field export references unknown path name index {index}")]
-    UnknownPathIndex {
-        /// The unregistered index.
-        index: u32,
-    },
+    UnknownPathIndex { index: u32 },
 
-    /// A net-field export's isExported was neither 0 nor 1: the cursor is
-    /// misaligned, and a reference would read the path's bytes as a field.
+    /// The cursor is misaligned: a reference would read the path's bytes as a field.
     #[error(
         "net-field export at path name index {path_name_index}: isExported is {value}, expected 0 or 1"
     )]
     BadExportedFlag { path_name_index: u32, value: u32 },
 
-    /// A live export group declared more field slots than the checkpoint form
-    /// permits.
+    /// A live group declared more slots than the checkpoint form permits.
     #[error("net-field export declares {count} field slots, maximum is {max}")]
-    FieldCountOverflow {
-        /// The declared slot count.
-        count: u32,
-        max: u32,
-    },
+    FieldCountOverflow { count: u32, max: u32 },
 
-    /// An incoming export group's path and index identify two different
-    /// canonical groups.
+    /// `path_group` and `index_group` are the canonical paths the incoming path
+    /// and index select.
     #[error(
         "net-field export path '{path}' identifies '{path_group}', but index {path_name_index} identifies '{index_group}'"
     )]
     CrossedExportGroupIdentity {
         path: String,
         path_name_index: u32,
-        /// Canonical path selected by the incoming path.
         path_group: String,
-        /// Canonical path selected by the incoming index.
         index_group: String,
     },
 
-    /// An export GUID payload declared a negative size.
     #[error("export GUID payload size is negative: {size}")]
-    NegativePayloadSize {
-        /// The declared size.
-        size: i32,
-    },
+    NegativePayloadSize { size: i32 },
 
-    /// The export GUID payload was not fully consumed after reading.
     #[error("export GUID payload has {remaining} trailing byte(s)")]
-    TrailingPayloadData {
-        /// Whole bytes left over.
-        remaining: usize,
-    },
+    TrailingPayloadData { remaining: usize },
 
-    /// NetGUID object recursion exceeded the safety limit.
     #[error("net GUID object recursion depth exceeded {limit}")]
-    RecursionLimitExceeded {
-        /// The maximum depth.
-        limit: u32,
-    },
+    RecursionLimitExceeded { limit: u32 },
 
-    /// A checkpoint guid-cache entry's path discriminator was neither 0 nor 1.
-    /// Only those occur across 17,186,645 corpus entries, so a third value
-    /// means the cursor is misaligned.
+    /// Only 0 and 1 occur across 17,186,645 corpus entries: a third value is a
+    /// misaligned cursor.
     #[error("checkpoint guid entry {entry}: path discriminator is {byte}, expected 0 or 1")]
-    CheckpointBadPathKind {
-        /// Index of the entry being read.
-        entry: u32,
-        byte: u8,
-    },
+    CheckpointBadPathKind { entry: u32, byte: u8 },
 
-    /// A checkpoint GUID entry's path index points past the literal paths that
-    /// precede it in that checkpoint.
     #[error(
         "checkpoint guid entry {entry}: path index {index} exceeds {literals} preceding literals"
     )]
@@ -90,55 +59,35 @@ pub enum SchemaError {
         literals: u32,
     },
 
-    /// A checkpoint export-group slot declared a handle other than its own
-    /// index. `handle == slot` holds for all 11,529,869 exported corpus slots;
-    /// a mismatch means the stream desynchronised and would attach real names
-    /// to the wrong handles.
+    /// `handle == slot` holds for all 11,529,869 exported corpus slots; a
+    /// mismatch would attach real names to the wrong handles.
     #[error("checkpoint group '{group}' slot {slot}: declared handle {handle}")]
     CheckpointHandleNotSlot {
-        /// Path of the group being read.
         group: String,
         slot: u32,
         handle: u32,
     },
 
-    /// The export-group map did not end where the prologue says the DemoFrame
-    /// begins. `map_end == prologue_offset + 8` holds for all 4,024 corpus
-    /// checkpoints; this is the only end-to-end check on both table parses.
+    /// `map_end == prologue offset + 8` holds for all 4,024 corpus checkpoints:
+    /// the only end-to-end check on both table parses.
     #[error("checkpoint tables ended at {map_end}, prologue implies {expected}")]
-    CheckpointFrameOffsetMismatch {
-        /// Where parsing finished; `expected` is where the prologue says.
-        map_end: usize,
-        expected: usize,
-    },
+    CheckpointFrameOffsetMismatch { map_end: usize, expected: usize },
 
     /// A reserved prologue word (bytes 4, 8, 12; zero in all 4,024 corpus
-    /// checkpoints) was non-zero: an unknown field, and every later offset is
-    /// suspect.
+    /// checkpoints) is an unknown field, and every later offset is suspect.
     #[error("checkpoint prologue word at byte {offset} is {value}, expected 0")]
-    CheckpointReservedWordSet {
-        /// Byte offset of the word.
-        offset: usize,
-        value: u32,
-    },
+    CheckpointReservedWordSet { offset: usize, value: u32 },
 
-    /// A checkpoint count field exceeded its sanity bound.
     #[error("checkpoint {field}: count {count} exceeds maximum {max}")]
     CheckpointCountOverflow {
-        /// Which count overflowed.
         field: &'static str,
         count: u32,
         max: u32,
     },
 
-    /// A checkpoint declared an export-group path or index more than once.
+    /// A path or index declared twice in one checkpoint; `path` is the later one.
     #[error("checkpoint export group '{path}' collides at path-name index {path_name_index}")]
-    CheckpointGroupCollision {
-        /// The later declaration's path.
-        path: String,
-        path_name_index: u32,
-    },
+    CheckpointGroupCollision { path: String, path_name_index: u32 },
 }
 
-/// Result alias for schema operations.
 pub type Result<T> = core::result::Result<T, SchemaError>;

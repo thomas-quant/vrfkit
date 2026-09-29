@@ -1,9 +1,6 @@
-//! Wire-format readers for net field exports and export GUIDs.
+//! Byte-aligned readers for a DemoFrame's ExportData section.
 //!
-//! These functions consume bytes from a [`vrf_bitio::BitReader`] using the exact
-//! layout that Unreal Engine's `ExportDataReader` writes:
-//!
-//! ## `ReadNetFieldExports` byte layout (byte-aligned, not bit-aligned)
+//! ## [`read_net_field_exports`]
 //!
 //! ```text
 //! numLayoutCmdExports: IntPacked
@@ -13,24 +10,24 @@
 //!   if isExported:
 //!     pathName:    FString (i32 length + UTF-8/UTF-16 bytes)
 //!     numExports:  IntPacked (declared field-slot count)
-//!   isFieldExported: u8 boolean (1 byte, not 1 bit -- this is FBinaryArchive)
+//!   isFieldExported: u8 (a byte, not a bit)
 //!   if isFieldExported:
 //!     handle:             IntPacked
-//!     compatibleChecksum: u32 (little-endian, 4 bytes)
-//!     name:               FName (isHardcoded: u8 bool, then FString + i32 number)
+//!     compatibleChecksum: u32
+//!     name:               FName (u8 kind, then IntPacked index or FString + i32 number)
 //! ```
 //!
-//! ## `ReadExportGuids` byte layout
+//! ## [`read_export_guids`]
 //!
 //! ```text
 //! numGuids: IntPacked
 //! for each guid:
-//!   payloadSize: i32 (little-endian)
+//!   payloadSize: i32
 //!   payload[payloadSize]:
-//!     netGuid:     IntPacked
+//!     netGuid:     IntPacked (0 ends the object)
 //!     exportFlags: u8
 //!     if HasPath:
-//!       outerGuid:        (recursive InternalLoadObject)
+//!       outerGuid:        (this object layout, recursively)
 //!       pathName:         FString
 //!       if HasNetworkChecksum: u32
 //! ```
@@ -45,12 +42,10 @@ use crate::guid::{ExportFlags, NetworkGuid};
 /// Cap on a path-name FString, so a corrupt prefix cannot size an allocation.
 pub(crate) const MAX_FSTRING_BYTES: i64 = 1024 * 1024; // 1 MiB
 
-/// Maximum recursion depth for nested NetGUID objects.
 const MAX_NET_GUID_RECURSION: u32 = 16;
 
-/// Slot cap for an export group, shared with the checkpoint form: no corpus
-/// group reaches 65,536, and it stops a five-byte IntPacked count from sizing
-/// an allocation.
+/// Slot cap shared with the checkpoint form: no corpus group reaches it, and it
+/// keeps a corrupt count from sizing an allocation.
 pub(crate) const MAX_FIELDS_PER_GROUP: u32 = 65_536;
 
 /// A byte-aligned FName as sent, with the name the schema stores.
@@ -89,9 +84,8 @@ pub(crate) fn read_fname(reader: &mut BitReader<'_>) -> Result<FName> {
     })
 }
 
-/// Read one frame's net-field export commands into `cache`, which accumulates
-/// them across frames: new groups, and fields added to existing ones. Returns
-/// the number of commands read.
+/// Read one frame's net-field export commands (new groups, and fields added to
+/// known ones) into `cache`. Returns the number of commands read.
 #[must_use = "the export count is a tally; bind it or discard it explicitly"]
 pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -> Result<u32> {
     let num_exports = reader.read_int_packed()?;
@@ -122,41 +116,30 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
 
             let group = NetFieldExportGroup::new(path_name, path_name_index, num_fields);
             cache.add_export_group(group)?;
-        } else {
-            // A reference to an existing group, which must already be known.
-            if cache.get_group_by_index(path_name_index).is_none() {
-                return Err(SchemaError::UnknownPathIndex {
-                    index: path_name_index,
-                });
-            }
+        } else if cache.get_group_by_index(path_name_index).is_none() {
+            return Err(SchemaError::UnknownPathIndex {
+                index: path_name_index,
+            });
         }
 
-        let is_field_exported = reader.read_u8()? != 0;
-        if !is_field_exported {
-            continue;
+        if reader.read_u8()? == 0 {
+            continue; // isFieldExported
         }
-
-        let handle = reader.read_int_packed()?;
-        let compatible_checksum = reader.read_u32()?;
-        let name = read_fname(reader)?.rendered;
-
+        // Struct fields evaluate in the order written, which is the wire order.
         let field = NetFieldExport {
-            handle,
-            compatible_checksum,
-            name,
+            handle: reader.read_int_packed()?,
+            compatible_checksum: reader.read_u32()?,
+            name: read_fname(reader)?.rendered,
         };
-
-        // Out-of-range handles are dropped and counted (manifest
-        // `dropped_field_exports`).
+        // An out-of-range handle is dropped and counted (`dropped_field_exports`).
         cache.set_field_on_group(path_name_index, field);
     }
 
     Ok(num_exports)
 }
 
-/// Read one frame's exported NetGUID payloads into `cache`: each maps a GUID to
-/// a path and optionally an outer GUID, and is length-prefixed so it can be
-/// checked for complete consumption. Returns the number of payloads read.
+/// Read one frame's exported NetGUID payloads (GUID -> path and outer) into
+/// `cache`, each checked for complete consumption. Returns the number read.
 #[must_use = "the GUID payload count is a tally; bind it or discard it explicitly"]
 pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -> Result<u32> {
     let num_guids = reader.read_int_packed()?;
@@ -166,11 +149,7 @@ pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -
         if size < 0 {
             return Err(SchemaError::NegativePayloadSize { size });
         }
-        let byte_count = size as u64;
-
-        // Exactly `size` bytes, so consumption can be verified.
-        let mut payload = reader.sub_reader(byte_count * 8)?;
-
+        let mut payload = reader.sub_reader(size as u64 * 8)?;
         internal_load_object(&mut payload, cache, 0)?;
 
         if payload.bits_remaining() >= 8 {
@@ -183,8 +162,7 @@ pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -
     Ok(num_guids)
 }
 
-/// Read a NetGUID object reference, recursing into its outer, and register it
-/// (`NetGuidObjectReader.InternalLoadObject`).
+/// Read a NetGUID object reference, recursing into its outer, and register it.
 fn internal_load_object(
     reader: &mut BitReader<'_>,
     cache: &mut NetGuidCache,
@@ -202,15 +180,11 @@ fn internal_load_object(
     }
 
     let flags = ExportFlags(reader.read_u8()?);
-
     if !flags.contains(ExportFlags::HAS_PATH) {
         return Ok(net_guid);
     }
-
     let outer_guid = internal_load_object(reader, cache, depth + 1)?;
-
     let path_name = reader.read_fstring(MAX_FSTRING_BYTES)?;
-
     if flags.contains(ExportFlags::HAS_NETWORK_CHECKSUM) {
         let _checksum = reader.read_u32()?;
     }
