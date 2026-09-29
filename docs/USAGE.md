@@ -1058,9 +1058,9 @@ so a sample without Cypher on 13.01 or later lists them as `missing`. `tools/fix
 separately covers the existing Swiftplay class-alias propagation of the
 original additions, checked in the 714-replay corpus. Run on a sample, the
 `missing` list names every entry that sample lacks, and the exit status is 1
-for that reason alone; `--allow-missing` lists them without failing. The tool
-also reads `tools/fixtures/scoped_type_evidence.json`, the source of
-`scoped_types.rs`, directly: an RPC parameter's `Class:Function` group is
+for that reason alone; `--allow-missing` lists them without failing. The
+evidence file may also be `tools/fixtures/scoped_type_evidence.json`, the
+source of `scoped_types.rs`: an RPC parameter's `Class:Function` group is
 matched as the exported `Class_ClassNetCache` group and `Function.field` name.
 Few samples carry every one of its identities, so run it with
 `--allow-missing`. A specimen must not be promoted to gameplay semantics
