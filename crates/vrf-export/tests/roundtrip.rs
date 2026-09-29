@@ -387,6 +387,9 @@ fn make_actor_record(i: u32, is_open: bool) -> ActorRecord {
         } else {
             None
         },
+        spawn_vx: is_open.then_some(-(i as f32)),
+        spawn_vy: is_open.then_some(0.0),
+        spawn_vz: is_open.then_some(3200.0),
     }
 }
 
@@ -416,10 +419,14 @@ fn actor_roundtrip_keeps_events_null_paths_and_open_only_spawns() {
         "/Game/Characters/Agent_1/Agent_1_PC.Agent_1_PC_C"
     );
 
-    // An open carries a spawn location; a close does not.
+    // An open carries a spawn location and velocity; a close does not.
     let spawn_x = col(&batch, "spawn_x").as_primitive::<Float32Type>();
     assert_eq!(spawn_x.value(4), 40.0);
     assert!(spawn_x.is_null(5));
+    let velocity = ["spawn_vx", "spawn_vy", "spawn_vz"]
+        .map(|name| col(&batch, name).as_primitive::<Float32Type>().clone());
+    assert_eq!(velocity.each_ref().map(|v| v.value(4)), [-4.0, 0.0, 3200.0]);
+    assert!(velocity.iter().all(|v| v.is_null(5)));
 }
 
 // --- net_guids -------------------------------------------------------------

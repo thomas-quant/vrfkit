@@ -4,8 +4,10 @@ Only `SpawnedCharacter` proves a body: `PossessedCharacter`, `Owner`,
 `Instigator` and a pawn's own `PlayerState` can name a device (Astra's
 `Rift_TargetingForm_PC_C` carries the player's PlayerState).
 
-The manifest keeps the last non-zero value, dropping a pre-reconnect pawn
-(docs/DATA.md, "Player identity": 1510 -> 0 -> 45530). The rule is as static:
+The manifest's `character_net_guid` is the last non-zero value, so it drops a
+pre-reconnect pawn (docs/DATA.md, "Player identity": 1510 -> 0 -> 45530); its
+`character_net_guids` lists every pawn, and this history must reproduce it
+(`manifest_history_disagreements`). The rule is as static:
 a pawn named by exactly one PlayerState is that player's body for the whole
 export. Not time-scoped: 347 effect rows on 24 pawns share the naming write's
 `time_ms` but precede it by packet id (the spawn tick).
@@ -101,6 +103,7 @@ def player_bodies(manifest: dict, rows: list[dict]) -> PlayerBodies:
 
     subject_of = {}
     final_of = {}
+    bodies_of = {}
     states = defaultdict(set)
     subjects = defaultdict(set)
     finals = set()
@@ -110,6 +113,7 @@ def player_bodies(manifest: dict, rows: list[dict]) -> PlayerBodies:
         if state is not None:
             subject_of[int(state)] = player.get("subject")
             final_of[int(state)] = int(character) if character else None
+            bodies_of[int(state)] = player.get("character_net_guids")
         if character:
             finals.add(int(character))
             subjects[int(character)].add(player.get("subject"))
@@ -124,7 +128,9 @@ def player_bodies(manifest: dict, rows: list[dict]) -> PlayerBodies:
             # The manifest lists only PlayerStates whose Subject arrived; a
             # pawn of any other has no subject to join, so it stays unlabelled.
             counts["spawned_character_player_states_not_in_manifest"] += 1
-        elif final_of[state] != named[-1]:
+        elif final_of[state] != named[-1] or bodies_of[state] not in (
+                None, list(dict.fromkeys(reversed(named)))[::-1]):
+            # The manifest's list is ordered by each pawn's last write.
             counts["manifest_history_disagreements"] += 1
         for pawn in set(named):
             states[pawn].add(state)

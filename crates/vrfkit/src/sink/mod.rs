@@ -54,7 +54,9 @@ const MAX_STREAM_FAILURE_RECORDS: usize = 32;
 #[derive(Debug, Clone, Default)]
 pub struct PlayerIdentity {
     pub subject: Option<String>,
-    pub character_net_guid: Option<u32>,
+    /// Every non-zero `SpawnedCharacter`, once each, ordered by its last write:
+    /// the last is the current body, earlier ones pawns a reconnect replaced.
+    pub character_net_guids: Vec<u32>,
 }
 
 /// State that must outlive a packet. `ExportSink` is rebuilt for every packet

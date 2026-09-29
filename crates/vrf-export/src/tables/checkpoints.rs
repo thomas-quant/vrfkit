@@ -293,13 +293,8 @@ mod tests {
                 actor_net_guid: 9,
                 event: "open",
                 class_path: Some("class".into()),
-                archetype_path: None,
                 spawn_x: Some(1.0),
-                spawn_y: None,
-                spawn_z: None,
-                spawn_pitch: None,
-                spawn_yaw: None,
-                spawn_roll: None,
+                ..ActorRecord::default()
             },
         };
         let actors =

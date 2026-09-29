@@ -82,7 +82,7 @@ pub struct MovementRecord {
 
 /// A single actor lifecycle record ready for export. The paths are not
 /// interned: ~3,800 rows a match, under 0.1 MB to save.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ActorRecord {
     pub time_ms: u32,
     pub packet_id: u32,
@@ -104,6 +104,11 @@ pub struct ActorRecord {
     pub spawn_pitch: Option<f32>,
     pub spawn_yaw: Option<f32>,
     pub spawn_roll: Option<f32>,
+    /// Spawn velocity in world units per second (only for dynamic actor
+    /// opens; zero when the wire sent none, as the engine reads it).
+    pub spawn_vx: Option<f32>,
+    pub spawn_vy: Option<f32>,
+    pub spawn_vz: Option<f32>,
 }
 
 /// A single NetGUID registration ready for export.

@@ -11,8 +11,8 @@
 use smallvec::SmallVec;
 use vrf_bitio::BitReader;
 use vrf_decode::{
-    ABILITY_CASTS_SCHEMA, ArrayDecodeStats, COMBAT_ROUNDS_SCHEMA, FieldType, FlattenedField,
-    structs,
+    ABILITY_CASTS_SCHEMA, ArrayDecodeStats, COMBAT_ROUNDS_SCHEMA, EffectArrayKind, FieldType,
+    FlattenedField, structs,
 };
 use vrf_schema::NetGuidCache;
 
@@ -35,6 +35,8 @@ enum Leaf {
     Field(FieldType),
     /// KillData `WeaponTheme`: an FString that must carry its null terminator.
     WeaponTheme,
+    /// An `FEffectData*` array, as the RPC parameters of the same name.
+    Effect(EffectArrayKind),
     /// A raw container whose own array is typed by [`NESTED_RULES`].
     Nested,
 }
@@ -68,7 +70,8 @@ type LeafRule = (
 #[rustfmt::skip]
 const LEAF_RULES: &[LeafRule] = {
     use FieldType::{Bool, Byte, EnumByte, FName, FTextTree, Float, Int32, Int64, ObjectNetGuid, UInt32, VectorDouble};
-    use Leaf::{Field, Nested, WeaponTheme};
+    use EffectArrayKind::{Float as Floats, Object as Objects};
+    use Leaf::{Effect, Field, Nested, WeaponTheme};
     use MeasuredArrayRoute::*;
     use Overlay::*;
     &[
@@ -102,6 +105,8 @@ const LEAF_RULES: &[LeafRule] = {
         (ServerActiveEffects, 6, None, None, Field(Bool), SameType, &[]),
         (ServerActiveEffects, 7, None, None, Field(ObjectNetGuid), SameType, &[]),
         (ServerActiveEffects, 8, None, None, Field(ObjectNetGuid), SameType, &[]),
+        (ServerActiveEffects, 9, Some("FloatValues"), Some(3_597_032_544), Effect(Floats), NoEntry, &[]),
+        (ServerActiveEffects, 17, Some("ObjectValues"), Some(865_691_585), Effect(Objects), NoEntry, &[]),
         // No top-level overlay; the exact 192-bit windows decode on every measured build.
         (ServerActiveEffects, 30, Some("Translation"), None, Field(VectorDouble), NoneOrSame, &[]),
         (ServerActiveEffects, 31, Some("Scale3D"), None, Field(VectorDouble), NoneOrSame, &[]),
@@ -318,6 +323,7 @@ fn decode_leaf(leaf: Leaf, raw: &[u8], bit_count: u32, failures: &mut u64) -> De
         }
         Leaf::Nested => return (None, None, None, None),
         Leaf::WeaponTheme => kill_weapon_theme(raw, bit_count),
+        Leaf::Effect(kind) => vrf_decode::decode_effect_blob_json(kind, raw, bit_count).ok(),
     };
     if text.is_none() {
         *failures = failures.saturating_add(1);
@@ -2323,6 +2329,46 @@ mod tests {
         let parent = &records.fields[1];
         assert_eq!(parent.raw_bits.as_deref(), Some(pack(&bits).as_slice()));
         assert_eq!(stats.array_leaf_decode_errors, 1);
+    }
+
+    /// `FloatValues` (9) and `ObjectValues` (17) are effect arrays: the effect
+    /// decoder's JSON, only under the declared name and checksum, and a blob
+    /// it refuses counts as a leaf error.
+    #[test]
+    fn measured_effect_value_arrays_render_as_effect_json() {
+        let float = unpack(&[
+            2, 2, 0x10, 0x20, 0x39, 4, 0x12, 0x40, 0, 0, 0x80, 0x3f, 0, 0,
+        ]);
+        let object = unpack(&[2, 2, 0x20, 0x20, 0x37, 4, 0x22, 0x20, 0x1d, 0x30, 0, 0]);
+        let identity = (EFFECTS_GROUP, "ServerActiveEffects", 3_301_618_856);
+        for (handle, name, checksum, payload, want, errors) in [
+            (
+                9,
+                "FloatValues",
+                3_597_032_544,
+                &float,
+                Some("[{\"tag\":284,\"value\":1}]"),
+                0,
+            ),
+            (
+                17,
+                "ObjectValues",
+                865_691_585,
+                &object,
+                Some("[{\"tag\":283,\"value\":3086}]"),
+                0,
+            ),
+            (9, "FloatValues", 0, &float, None, 0),
+            (17, "ObjectValues", 865_691_585, &float, None, 1),
+        ] {
+            let bits = one_leaf(handle, payload);
+            let leaves = [(handle, name, checksum)];
+            let (records, stats) = export_array(identity, &leaves, &bits, Some(MEASURED_BUILD));
+            let child = &records.fields[0];
+            assert_eq!(child.value_str.as_deref(), want, "{name} {checksum}");
+            assert_eq!(child.raw_bits.as_deref(), Some(pack(payload).as_slice()));
+            assert_eq!(stats.array_leaf_decode_errors, errors, "{name} {checksum}");
+        }
     }
 
     #[test]

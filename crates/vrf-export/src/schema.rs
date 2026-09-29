@@ -330,6 +330,9 @@ columns! {
         spawn_pitch?: f32,
         spawn_yaw?: f32,
         spawn_roll?: f32,
+        spawn_vx?: f32,
+        spawn_vy?: f32,
+        spawn_vz?: f32,
     }
 }
 

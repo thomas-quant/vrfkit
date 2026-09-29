@@ -19,7 +19,7 @@ use vrf_net::pipeline::{
     ActorChannelState, PartialPayloadReason, RejectedPartialFragment, RepLayoutTailOutcome,
     ReplicationSink, StreamFailure, StreamFailureCause,
 };
-use vrf_net::types::NetworkGuid;
+use vrf_net::types::{FVector, NetworkGuid};
 
 use super::intern::put;
 use super::paths::{
@@ -307,11 +307,11 @@ impl ExportSink<'_> {
                     entry.subject = Some(s.to_owned());
                 }
             }
-            // Last *non-zero* write wins: a disconnect replicates it again as
-            // 0, which is not a NetGUID.
+            // A disconnect replicates it again as 0, which is not a NetGUID.
             "SpawnedCharacter" => {
-                if let Some(c) = character.filter(|c| *c != 0) {
-                    entry.character_net_guid = Some(c as u32);
+                if let Some(c) = character.filter(|c| *c != 0).map(|c| c as u32) {
+                    entry.character_net_guids.retain(|&g| g != c);
+                    entry.character_net_guids.push(c);
                 }
             }
             // PossessedCharacter can be a camera, drone or other ability pawn.
@@ -368,6 +368,11 @@ impl ExportSink<'_> {
 }
 
 /// One walked CNC RPC's body: a reader over its `payload_bits` bits.
+/// Three optional spawn components from one optional vector: all or none.
+fn transpose(v: Option<[f32; 3]>) -> [Option<f32>; 3] {
+    v.map_or([None; 3], |v| v.map(Some))
+}
+
 fn cnc_body<'p>(payload: &'p [u8], bit_count: u32, rpc: &CncRpc) -> Option<BitReader<'p>> {
     let mut reader = BitReader::with_bit_len(payload, u64::from(bit_count)).ok()?;
     reader.skip_bits(rpc.payload_offset).ok()?;
@@ -439,15 +444,11 @@ impl ReplicationSink for ExportSink<'_> {
         // (`Ascent_C_0`), not a class.
         let (class_path, archetype_path) = self.actor_paths(Some(state.archetype_net_guid));
 
-        let (spawn_x, spawn_y, spawn_z) = match state.spawn_location {
-            Some(loc) => (Some(loc.x as f32), Some(loc.y as f32), Some(loc.z as f32)),
-            None => (None, None, None),
-        };
-
-        let (spawn_pitch, spawn_yaw, spawn_roll) = match state.spawn_rotation {
-            Some(rot) => (Some(rot.pitch), Some(rot.yaw), Some(rot.roll)),
-            None => (None, None, None),
-        };
+        let xyz = |v: Option<FVector>| v.map(|v| [v.x, v.y, v.z].map(|c| c as f32));
+        let [spawn_x, spawn_y, spawn_z] = transpose(xyz(state.spawn_location));
+        let [spawn_vx, spawn_vy, spawn_vz] = transpose(xyz(state.spawn_velocity));
+        let rotation = state.spawn_rotation.map(|r| [r.pitch, r.yaw, r.roll]);
+        let [spawn_pitch, spawn_yaw, spawn_roll] = transpose(rotation);
 
         self.records.actors.push(ActorRecord {
             time_ms: self.time_ms,
@@ -463,6 +464,9 @@ impl ReplicationSink for ExportSink<'_> {
             spawn_pitch,
             spawn_yaw,
             spawn_roll,
+            spawn_vx,
+            spawn_vy,
+            spawn_vz,
         });
     }
 
@@ -487,12 +491,7 @@ impl ReplicationSink for ExportSink<'_> {
             event,
             class_path,
             archetype_path,
-            spawn_x: None,
-            spawn_y: None,
-            spawn_z: None,
-            spawn_pitch: None,
-            spawn_yaw: None,
-            spawn_roll: None,
+            ..ActorRecord::default()
         });
         if !dormant {
             retire_channel_archetype(self.channel_state, channel_index);
@@ -1739,6 +1738,45 @@ mod tests {
         assert_eq!(sink.records.fields.len(), 2);
     }
 
+    /// A dynamic open carries its spawn location, rotation and velocity, each
+    /// in its own columns; a static open and every close carry none.
+    #[test]
+    fn spawn_vectors_reach_their_own_columns_on_opens_only() {
+        use vrf_net::types::FRotator;
+        let v = |x, y, z| Some(FVector { x, y, z });
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
+        sink.on_actor_open(&ActorChannelState {
+            spawn_location: v(1.5, -2.0, 3.0),
+            spawn_rotation: Some(FRotator {
+                pitch: 4.0,
+                yaw: 5.0,
+                roll: 6.0,
+            }),
+            spawn_velocity: v(-1000.0, 0.0, 3200.0),
+            ..channel_open(3, 42, 8)
+        });
+        sink.on_actor_open(&channel_open(4, 43, 0));
+        sink.on_actor_close(3, NetworkGuid(42), false);
+        let spawn = |row: &ActorRecord| {
+            [
+                [row.spawn_x, row.spawn_y, row.spawn_z],
+                [row.spawn_pitch, row.spawn_yaw, row.spawn_roll],
+                [row.spawn_vx, row.spawn_vy, row.spawn_vz],
+            ]
+        };
+        let rows: Vec<_> = sink.records.actors.iter().map(spawn).collect();
+        assert_eq!(
+            rows[0],
+            [
+                [Some(1.5), Some(-2.0), Some(3.0)],
+                [Some(4.0), Some(5.0), Some(6.0)],
+                [Some(-1000.0), Some(0.0), Some(3200.0)],
+            ]
+        );
+        assert_eq!(rows[1..], [[[None; 3]; 3]; 2]);
+    }
+
     /// A static actor's close row, like its open row, gets no class_path from
     /// its own GUID path (the level's instance name, not a class).
     #[test]
@@ -1784,29 +1822,39 @@ mod tests {
     }
 
     /// `Subject` and `SpawnedCharacter` are captured on the bomb PlayerState and
-    /// on Swiftplay's (through `canonical_group`). A later 0 is a disconnect and
-    /// keeps the body; a lone 0 stays `None`, not a NetGUID-looking 0; and
-    /// `PossessedCharacter` (a camera, drone or ability pawn) never sets or
-    /// replaces it.
+    /// on Swiftplay's (through `canonical_group`). A 0 is a disconnect, never a
+    /// body; a reconnect's pawn is appended and a repeat moves to the end, so
+    /// the last is the current body; `PossessedCharacter` (a camera, drone or
+    /// ability pawn) never enters the history.
     #[test]
     fn player_identity_keeps_the_spawned_body() {
         const SWIFT: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
         const SPAWNED: &str = "SpawnedCharacter";
         const POSSESSED: &str = "PossessedCharacter";
         for (path, writes, want) in [
-            (BOMB_PLAYER_STATE, vec![(SPAWNED, 576)], Some(576)),
-            (SWIFT, vec![(SPAWNED, 576)], Some(576)),
+            (BOMB_PLAYER_STATE, vec![(SPAWNED, 576)], vec![576]),
+            (SWIFT, vec![(SPAWNED, 576)], vec![576]),
             (
                 BOMB_PLAYER_STATE,
                 vec![(SPAWNED, 1368), (SPAWNED, 0)],
-                Some(1368),
+                vec![1368],
             ),
-            (BOMB_PLAYER_STATE, vec![(SPAWNED, 0)], None),
-            (BOMB_PLAYER_STATE, vec![(POSSESSED, 412)], None),
+            (
+                BOMB_PLAYER_STATE,
+                vec![(SPAWNED, 1510), (SPAWNED, 0), (SPAWNED, 45530)],
+                vec![1510, 45530],
+            ),
+            (
+                BOMB_PLAYER_STATE,
+                vec![(SPAWNED, 7), (SPAWNED, 8), (SPAWNED, 7), (SPAWNED, 7)],
+                vec![8, 7],
+            ),
+            (BOMB_PLAYER_STATE, vec![(SPAWNED, 0)], vec![]),
+            (BOMB_PLAYER_STATE, vec![(POSSESSED, 412)], vec![]),
             (
                 BOMB_PLAYER_STATE,
                 vec![(SPAWNED, 20), (POSSESSED, 20), (POSSESSED, 412)],
-                Some(20),
+                vec![20],
             ),
         ] {
             let mut rig = Rig::default();
@@ -1819,7 +1867,7 @@ mod tests {
             }
             let entry = &sink.channel_state.players[&42];
             assert_eq!(entry.subject.as_deref(), Some("uuid-here"), "{path}");
-            assert_eq!(entry.character_net_guid, want, "{path} {writes:?}");
+            assert_eq!(entry.character_net_guids, want, "{path} {writes:?}");
         }
     }
 
