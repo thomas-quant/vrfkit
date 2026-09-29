@@ -726,15 +726,13 @@ are not generated: they are maintained in the repository.
 | `extract_sboxes.py` | `crates/vrf-transform/src/sbox.rs` |
 | `extract_golden.py` | `crates/vrf-transform/tests/data/golden_vectors.rs` |
 
-Run `apply_type_corrections.py` -> `cargo fmt`. The corrections key on each
+Run `apply_type_corrections.py`. The corrections key on each
 entry's own group, field and type, so they rewrite the one-line form and the
 rustfmt form alike; the script **re-verifies the final state after applying**
 rather than trusting its apply count, and fails if the two disagree.
 
 ```bash
 python tools/apply_type_corrections.py           # apply, then verify (219 corrections)
-cargo +1.86.0 fmt -p vrf-decode
-
 python tools/apply_type_corrections.py --check   # verify only
 ```
 

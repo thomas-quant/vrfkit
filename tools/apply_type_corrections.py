@@ -990,11 +990,8 @@ def apply_additions(content: str) -> tuple[str, int]:
     return _insert_sorted(
         content, "    OverlayEntry {", ADDITIONS, _entry_key,
         lambda group, field, ftype: (
-            "    OverlayEntry {\n"
-            f'        group_path: "{group}",\n'
-            f'        field_name: "{field}",\n'
-            f"        field_type: {ftype},\n"
-            "    },\n"
+            f'    OverlayEntry {{ group_path: "{group}", field_name: "{field}", '
+            f"field_type: {ftype} }},\n"
         ),
         lambda group, field, _ftype: f"{group}/{field}", "OVERLAY_TABLE", str.find)
 
@@ -1195,11 +1192,8 @@ def apply_handle_additions(content: str) -> tuple[str, int]:
     return _insert_sorted(
         content, "    OverlayHandleEntry {", HANDLE_ADDITIONS, _handle_key,
         lambda group, handle, field: (
-            "    OverlayHandleEntry {\n"
-            f'        group_path: "{group}",\n'
-            f"        handle: {handle},\n"
-            f'        field_name: "{field}",\n'
-            "    },\n"
+            f'    OverlayHandleEntry {{ group_path: "{group}", handle: {handle}, '
+            f'field_name: "{field}" }},\n'
         ),
         lambda group, handle, _field: f"{group}/handle {handle}",
         "OVERLAY_HANDLE_TABLE", str.rfind)

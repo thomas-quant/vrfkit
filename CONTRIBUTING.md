@@ -272,11 +272,10 @@ These corrupt downstream consumers silently — no test fails when they break.
 The overlay table `crates/vrf-decode/src/table.rs` and
 `tools/equippable_table.py` are not generated. A type change to the table goes
 into `tools/apply_type_corrections.py` with its evidence; run it, then
-`cargo fmt`, then `extract_checksum_types.py` against a **fresh** export:
+`extract_checksum_types.py` against a **fresh** export:
 
 ```bash
 python tools/apply_type_corrections.py
-cargo +1.86.0 fmt -p vrf-decode
 ```
 
 The checksum step is last because it learns from what the overlay table

@@ -84,7 +84,7 @@ Consequences for how you work:
 ## Traps that have cost real time
 
 - **Type changes to `crates/vrf-decode/src/table.rs` go through
-  `tools/apply_type_corrections.py`**, with their evidence, then `cargo fmt`.
+  `tools/apply_type_corrections.py`**, with their evidence.
   CI runs it with `--check` and fails if a measured correction is missing.
 - **Some entries in that table are unreachable.** The four `LifeChangeEvents`
   member entries never appear as a top-level parameter. "Fixing" one compiles,
