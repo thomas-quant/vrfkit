@@ -7,31 +7,36 @@ open/close lifetime, all in actors.parquet. This filters the effect actors,
 pairs each open with its close into a lifetime, classifies the effect and
 writes one row per effect instance.
 
-`spawn_x/y/z` is the spawn transform: a placed effect's world location. For
-the few that relocate, fields.parquet carries the live `ReplicatedMovement`
-location or `MulticastAddSmokeScreenPoint.Translation`, in the same units.
+`spawn_x/y/z` is the spawn transform: a placed effect's world location.
+`--tracks` also writes actor_tracks.parquet, one row per `ReplicatedMovement`
+update (location, velocity, yaw; world units) or
+`MulticastAddSmokeScreenPoint.Translation` wall point. An untyped row stays,
+with null coordinates, and is counted by class.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import atomic_write_file
+    from .wire_bits import iter_selected, text
 else:
     from atomic_io import atomic_write_file
+    from wire_bits import iter_selected, text
 
-# Substrings marking a persistent effect, matched case-insensitively on the
-# class path. Broad on purpose; the three names that match a keyword they do
-# not mean are handled: Chamber's ult gun ("fire" in "FIreRate", 17,304 rows)
-# by the `gun_` leaf exclusion, Breach's ThroughWalls flash by
-# NOT_EFFECT_TOKENS, and Brimstone's OrbitalStrike by `classify` (damage_zone).
+# Case-insensitive class-path substrings, broad on purpose. Three false matches
+# are handled: Chamber's ult gun ("fire" in "FIreRate", 17,304 rows) by the
+# `gun_` leaf exclusion, Breach's ThroughWalls flash by NOT_EFFECT_TOKENS,
+# Brimstone's OrbitalStrike by `classify`.
 EFFECT_KEYWORDS = (
     "smoke",
     "smokezone",
@@ -156,15 +161,13 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
             (time_ms[i], event[i], sx[i], sy[i], sz[i], cp)
         )
 
-    # `went_dormant` counts INSTANCES that saw at least one `dormant` event,
-    # once each, however they end: it is not a share of the open-ended rows
-    # and can exceed them.
+    # Instances that saw a `dormant` event, once each, however they end.
     tally = {"went_dormant": 0}
     rows: list[dict] = []
     for g, evs in events.items():
         evs.sort(key=lambda e: e[0])
-        pending = None  # (open_ms, sx, sy, sz, class_path) of the current open instance
-        pending_went_dormant = False  # did THIS instance see a dormant event
+        pending = None  # (open_ms, sx, sy, sz, class_path)
+        pending_went_dormant = False
         for t, ev, x, y, z, cp in evs:
             if ev == "open":
                 if pending is not None:  # reopened before closing: keep it open-ended
@@ -207,6 +210,42 @@ def _row(guid: int, open_rec: tuple, close_ms):
     }
 
 
+TRACK_FIELDS = ("ReplicatedMovement", "MulticastAddSmokeScreenPoint.Translation")
+TRACK_SCHEMA = pa.schema([
+    pa.field("time_ms", pa.int64()), pa.field("packet_id", pa.int64()),
+    pa.field("actor_net_guid", pa.int64()), pa.field("class_name", pa.string()),
+    pa.field("source", pa.string()),
+    *(pa.field(axis, pa.float64()) for axis in ("x", "y", "z", "vx", "vy", "vz", "yaw")),
+])
+
+
+def tracks(export: Path) -> tuple[list[dict], Counter]:
+    """`(rows, untyped rows by class)` for actor_tracks.parquet, in wire order."""
+    columns = ["time_ms", "packet_id", "actor_net_guid", "group_path", "field_name", "value_str"]
+    selected = iter_selected(export / "fields.parquet", columns,
+                             lambda b: pc.is_in(text(b, "field_name"), value_set=pa.array(TRACK_FIELDS)))
+    rows, untyped = [], Counter()
+    for _, row in selected:
+        out = dict.fromkeys(TRACK_SCHEMA.names)
+        out.update(time_ms=row["time_ms"], packet_id=row["packet_id"], actor_net_guid=row["actor_net_guid"],
+                   class_name=row["group_path"].rsplit(".", 1)[-1].removesuffix("_ClassNetCache"),
+                   source=row["field_name"].split(".", 1)[0])
+        value = row["value_str"]
+        if value is None:
+            untyped[out["class_name"]] += 1
+        elif out["source"] == "ReplicatedMovement":
+            movement = json.loads(value)
+            location = movement.get("location") or {}
+            velocity = movement.get("linear_velocity") or {}
+            out.update(x=location.get("x"), y=location.get("y"), z=location.get("z"),
+                       vx=velocity.get("x"), vy=velocity.get("y"), vz=velocity.get("z"),
+                       yaw=(movement.get("rotation") or {}).get("yaw"))
+        else:
+            out["x"], out["y"], out["z"] = (float(part) for part in value.strip("()").split(","))
+        rows.append(out)
+    return rows, untyped
+
+
 SCHEMA = pa.schema([
     pa.field("actor_net_guid", pa.int32()),
     pa.field("class_path", pa.string()),
@@ -222,13 +261,14 @@ SCHEMA = pa.schema([
 ])
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--export", type=Path, required=True,
                     help="directory written by `vrfkit export` (must hold actors.parquet)")
     ap.add_argument("--out", type=Path, required=True,
                     help="output active_effects.parquet path")
-    args = ap.parse_args()
+    ap.add_argument("--tracks", type=Path, help="also write actor_tracks.parquet here")
+    args = ap.parse_args(argv)
 
     rows, tally = build_with_tally(args.export)
     cols = {name: [r[name] for r in rows] for name in SCHEMA.names}
@@ -248,6 +288,17 @@ def main() -> int:
     print(f"  {'open-ended':12s} {open_ended}")
     print(f"  {'':12s} ({tally['went_dormant']} instance(s) went dormant at "
           f"some point, open-ended or not)")
+    if args.tracks:
+        track_rows, untyped = tracks(args.export)
+        table = pa.Table.from_pylist(track_rows, schema=TRACK_SCHEMA)
+        atomic_write_file(args.tracks, lambda out: pq.write_table(table, out, compression="zstd"))
+        print(f"wrote {args.tracks} ({len(track_rows)} track rows)")
+        for field in TRACK_FIELDS:
+            source = field.split(".", 1)[0]
+            print(f"  {source}: {sum(r['source'] == source for r in track_rows)}")
+        print(f"  untyped rows, kept with null coordinates: {sum(untyped.values())}")
+        for name, count in untyped.most_common():
+            print(f"    {name}: {count}")
     return 0
 
 

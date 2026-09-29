@@ -3,7 +3,10 @@ open-ended instance is counted as `went_dormant`; the classifier's keyword
 false positives stay excluded."""
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,7 +39,6 @@ def _export(tmp: Path, rows: list[tuple[int, str, int]]) -> Path:
 
 class DormantCloseTests(unittest.TestCase):
     def setUp(self):
-        import tempfile
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
@@ -135,11 +137,50 @@ class ActorKindTests(unittest.TestCase):
                 self.assertEqual(effects.actor_kind(path), kind)
 
     def test_every_row_carries_its_actor_kind(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as temp:
             rows = effects.build_with_tally(_export(Path(temp), [(7, "open", 100), (7, "close", 500)]))[0]
         self.assertEqual(rows[0]["actor_kind"], "game_object")
         self.assertIn("actor_kind", effects.SCHEMA.names)
+
+
+SMOKE = "/Game/Characters/Wushu/S0/Ability_4/Projectile_Wushu_4_Smoke.Projectile_Wushu_4_Smoke_C"
+WALL_MANAGER = "/Game/Characters/Phoenix/Wall_Manager.Wall_Manager_C_ClassNetCache"
+MOVEMENT = ('{"linear_velocity":{"x":643,"y":-766,"z":-29},"location":{"x":-339,"y":954,"z":515},'
+            '"rotation":{"pitch":1.4,"yaw":310.78125,"roll":0}}')
+
+
+class TracksTests(unittest.TestCase):
+    """`--tracks` flattens movement rows; an untyped one stays, counted."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.export = _export(Path(self._tmp.name), [(7, "open", 100)])
+        rows = [(SMOKE, "ReplicatedMovement", MOVEMENT), (SMOKE, "ReplicatedMovement", None),
+                (WALL_MANAGER, "MulticastAddSmokeScreenPoint.Translation", "(1.5,-2,3)"),
+                (SMOKE, "Other", "x")]
+        pq.write_table(pa.table({
+            "time_ms": [10, 20, 30, 40], "packet_id": [1, 2, 3, 4], "actor_net_guid": [5, 5, 6, 5],
+            "group_path": [r[0] for r in rows], "field_name": [r[1] for r in rows],
+            "value_str": pa.array([r[2] for r in rows], pa.string())}), self.export / "fields.parquet")
+
+    def test_movement_and_wall_points_flatten_and_untyped_rows_stay(self):
+        rows, untyped = effects.tracks(self.export)
+        self.assertEqual([(r["source"], r["class_name"], r["x"], r["y"], r["z"], r["vz"], r["yaw"])
+                          for r in rows], [
+            ("ReplicatedMovement", "Projectile_Wushu_4_Smoke_C", -339, 954, 515, -29, 310.78125),
+            ("ReplicatedMovement", "Projectile_Wushu_4_Smoke_C", None, None, None, None, None),
+            ("MulticastAddSmokeScreenPoint", "Wall_Manager_C", 1.5, -2.0, 3.0, None, None)])
+        self.assertEqual(untyped, {"Projectile_Wushu_4_Smoke_C": 1})
+
+    def test_the_cli_writes_the_tracks_and_prints_the_untyped_count(self):
+        out = Path(self._tmp.name)
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            code = effects.main(["--export", str(self.export), "--out", str(out / "effects.parquet"),
+                                 "--tracks", str(out / "tracks.parquet")])
+        self.assertEqual(code, 0)
+        self.assertEqual(pq.read_table(out / "tracks.parquet").num_rows, 3)
+        self.assertIn("untyped rows, kept with null coordinates: 1", stdout.getvalue())
 
 
 if __name__ == "__main__":
