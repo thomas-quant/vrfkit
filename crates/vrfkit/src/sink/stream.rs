@@ -129,28 +129,13 @@ impl FieldSink for ExportSink<'_> {
         let (field_name, field_checksum) = self.resolve_field_name_and_checksum(handle);
         let raw_bits = copy_raw_bits(reader, bit_count);
 
-        // Additive passes; the parent row with the whole payload is still
-        // emitted below. 1: a known DynamicArray, one row per leaf.
-        if self.is_known_array_field(field_name.as_deref(), field_checksum) {
-            if let Some(ref raw) = raw_bits {
-                self.emit_flattened_array(field_name.as_deref(), field_checksum, raw, bit_count);
-            }
-        }
-
-        // 2: a struct blob with a dedicated decoder.
-        if self.is_struct_blob_field(field_name.as_deref()) {
-            // The `Arc` is cloned, not the string: `decode_struct_blob` takes
-            // `&mut self` while the name is still borrowed.
-            if let (Some(raw), Some(name)) = (raw_bits.as_deref(), field_name.clone()) {
-                self.decode_struct_blob(&name, raw, bit_count);
-            }
-        }
-
-        // 3: `MultiItemSlot.MultiContents`, one row per item NetGUID.
-        if self.is_multi_contents_field(field_name.as_deref()) {
-            if let Some(raw) = raw_bits.as_deref() {
-                self.emit_multi_contents(raw, bit_count);
-            }
+        // Additive passes, each a no-op unless it owns the field; the parent row
+        // with the whole payload is still emitted below.
+        if let Some(raw) = raw_bits.as_deref() {
+            let name = field_name.as_deref();
+            self.emit_flattened_array(name, field_checksum, raw, bit_count);
+            self.decode_struct_blob(name, raw, bit_count);
+            self.emit_multi_contents(name, raw, bit_count);
         }
 
         let (value_i64, value_f64, value_bool, value_str) = match apply_overlay_with_checksum(
@@ -1741,33 +1726,6 @@ mod tests {
             }
             mask <<= 1;
         }
-    }
-
-    /// `AbilityCastsThisRound` must be recognised as a flattenable array
-    /// under the `AbilityStatisticsReplicator` group, and NOT under other
-    /// groups (where handle 2 means something else).
-    #[test]
-    fn ability_casts_this_round_is_known_array_under_correct_group() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-        // Under the correct group: is_known_array_field returns true.
-        sink.set_current_group_path(Arc::from(
-            "/Game/Characters/_Core/Comp_AbilityStatisticsReplicator.Comp_AbilityStatisticsReplicator_C",
-        ));
-        assert!(
-            sink.is_known_array_field(Some("AbilityCastsThisRound"), None),
-            "should be known under AbilityStatisticsReplicator"
-        );
-
-        // Under an unrelated group: returns false.
-        sink.set_current_group_path(Arc::from("/Script/ShooterGame.SomeOtherComponent"));
-        assert!(
-            !sink.is_known_array_field(Some("AbilityCastsThisRound"), None),
-            "should NOT be known under an unrelated group"
-        );
     }
 
     /// An unresolved `AbilitiesAndBuffsComponent` payload that walks cleanly

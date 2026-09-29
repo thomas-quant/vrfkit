@@ -10,7 +10,10 @@
 
 use smallvec::SmallVec;
 use vrf_bitio::BitReader;
-use vrf_decode::{ABILITY_CASTS_SCHEMA, COMBAT_ROUNDS_SCHEMA, FieldType, structs};
+use vrf_decode::{
+    ABILITY_CASTS_SCHEMA, ArrayDecodeStats, COMBAT_ROUNDS_SCHEMA, FieldType, FlattenedField,
+    structs,
+};
 use vrf_schema::NetGuidCache;
 
 use super::intern::put;
@@ -21,61 +24,160 @@ use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 /// why this is four nullable columns rather than a union.
 type DecodedColumns = (Option<i64>, Option<f64>, Option<bool>, Option<String>);
 
-/// What the replay declares at `handle`: one slot of
-/// `ExportSink::declared_handle_names` or `declared_handle_checksums`.
+/// What the replay declares at `handle`.
 fn declared_at<T: Copy>(slots: &[Option<T>], handle: u32) -> Option<T> {
     slots.get(handle as usize).copied().flatten()
 }
 
-#[derive(Clone, Copy)]
-enum VerifiedArrayLeaf {
+/// How a measured-route leaf is typed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Leaf {
     Field(FieldType),
-    KillWeaponTheme,
-    TrackedRewardLocalizedText,
+    /// KillData `WeaponTheme`: an FString that must carry its null terminator.
+    WeaponTheme,
+    /// TrackedRewards `LocalizedRewardName`: the full FText reader.
+    LocalizedText,
+    /// A raw container whose own array is typed by [`NESTED_RULES`].
+    Nested,
 }
 
-struct VerifiedNestedLeaf {
-    path: String,
-    handle: u32,
-    bit_count: u32,
-    raw_bits: Vec<u8>,
-    value_i64: i64,
+/// What the overlay may say about a leaf a rule types.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Overlay {
+    NoEntry,
+    NoneOrSame,
+    SameType,
+    /// Exactly `Raw`: a descriptor kept raw in the table that the rule reads.
+    RawEntry,
 }
 
-/// Identities measured with exact consumption on all 714 replays. They qualify
-/// wire windows only, claiming no gameplay ownership or order for the references.
-fn verified_nested_container(
-    parent: &str,
+/// `(route, handle, declared name, declared checksum, leaf, overlay, widths)`.
+/// A leaf is typed only when every column matches; `None` and `&[]` leave that
+/// column unchecked. Anything else stays an exact raw child.
+type LeafRule = (
+    MeasuredArrayRoute,
+    u32,
+    Option<&'static str>,
+    Option<u32>,
+    Leaf,
+    Overlay,
+    &'static [u32],
+);
+
+/// The leaf windows the measured routes type: wire types measured across the
+/// corpus (the nested and KillData identities with exact consumption on all
+/// 714 replays), not the values' meaning or units.
+#[rustfmt::skip]
+const LEAF_RULES: &[LeafRule] = {
+    use FieldType::{Bool, Byte, EnumByte, FName, Float, Int32, Int64, ObjectNetGuid, UInt32, VectorDouble};
+    use Leaf::{Field, LocalizedText, Nested, WeaponTheme};
+    use MeasuredArrayRoute::*;
+    use Overlay::*;
+    &[
+        (AllPlayersObfuscatedPlayerInformation, 49, None, None, Field(Bool), SameType, &[]),
+        (AllPlayersObfuscatedPlayerInformation, 50, None, None, Field(EnumByte), SameType, &[]),
+        (TrackedRewards, 28, Some("RewardName"), Some(1_337_472_711), Field(FName), SameType, &[]),
+        (TrackedRewards, 29, Some("LocalizedRewardName"), Some(483_770_233), LocalizedText, RawEntry, &[]),
+        (TrackedRewards, 30, Some("InstancesOfReward"), Some(2_922_243_316), Field(Int32), SameType, &[]),
+        (TrackedRewards, 31, Some("RewardGrantStrategy"), Some(3_589_631_714), Field(EnumByte), SameType, &[]),
+        (TrackedRewards, 32, Some("Source"), Some(1_118_571_008), Field(EnumByte), SameType, &[]),
+        (SelectedV2, 3, Some("EquippableDataAsset"), Some(1_793_937_854), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (SelectedV2, 4, Some("EquippableSkinDataAsset"), Some(3_765_038_216), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (SelectedV2, 5, Some("EquippableSkinLevelDataAsset"), Some(603_923_741), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (SelectedV2, 6, Some("EquippableSkinChromaDataAsset"), Some(3_166_589_204), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (SelectedV2, 7, Some("EquippableCharmDataAsset"), Some(3_345_806_642), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (SelectedV2, 8, Some("EquippableCharmLevelDataAsset"), Some(1_087_985_310), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (SelectedV2, 13, Some("EquippableAttachments"), Some(3_137_596_882), Nested, NoEntry, &[]),
+        (KillData, 3, Some("Victim"), Some(3_990_035_472), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (KillData, 4, Some("KillingEquippableClass"), Some(2_071_131_011), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (KillData, 5, Some("WeaponTheme"), Some(1_839_952_321), WeaponTheme, NoEntry, &[]),
+        (KillData, 6, Some("AssistingPlayers"), Some(1_689_463_717), Nested, NoEntry, &[]),
+        (KillData, 9, Some("DamageType"), Some(2_992_423_760), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (KillData, 10, Some("DamageTaken"), Some(2_001_471_495), Field(Float), NoneOrSame, &[]),
+        // The observed byte code; no enum label is claimed.
+        (KillData, 11, Some("DamageRegion"), Some(3_229_265_809), Field(Byte), NoneOrSame, &[]),
+        (KillData, 12, Some("GameTimeElapsed"), Some(3_684_431_363), Field(Float), NoneOrSame, &[]),
+        (KillData, 13, Some("RoundTimestamp"), Some(2_328_473_242), Field(Float), NoneOrSame, &[]),
+        (KillData, 14, Some("RoundNumber"), Some(843_024_485), Field(Int32), NoneOrSame, &[]),
+        (KillData, 15, Some("bDidKillTriggerFinisher"), Some(2_795_684_046), Field(Bool), NoneOrSame, &[]),
+        (ServerActiveEffects, 5, None, None, Field(Bool), SameType, &[]),
+        (ServerActiveEffects, 6, None, None, Field(Bool), SameType, &[]),
+        (ServerActiveEffects, 7, None, None, Field(ObjectNetGuid), SameType, &[]),
+        (ServerActiveEffects, 8, None, None, Field(ObjectNetGuid), SameType, &[]),
+        // No top-level overlay; the exact 192-bit windows decode on every measured build.
+        (ServerActiveEffects, 30, Some("Translation"), None, Field(VectorDouble), NoneOrSame, &[]),
+        (ServerActiveEffects, 31, Some("Scale3D"), None, Field(VectorDouble), NoneOrSame, &[]),
+        (ServerActiveEffects, 33, None, None, Field(Float), SameType, &[]),
+        (ServerActiveEffects, 34, None, None, Field(EnumByte), SameType, &[]),
+        (RequestedIgnoreActors, 5, Some("RequestedIgnoreActors"), Some(3_344_674_359), Field(ObjectNetGuid), NoneOrSame, &[]),
+        // All or nothing (`emit_flattened_array`), at the measured widths.
+        (ActiveBlinds, 3, Some("BlindId"), Some(2_836_858_544), Field(UInt32), NoneOrSame, &[32]),
+        // Signed: 3321413110 reproduces only as int64 (uint64 gives 2854897423),
+        // recomputed in tools/tests/test_compatible_checksum_facts.py.
+        (ActiveBlinds, 4, Some("EffectID"), Some(3_321_413_110), Field(Int64), NoneOrSame, &[64]),
+        (ActiveBlinds, 5, Some("SourceID"), Some(4_130_766_059), Field(FName), NoneOrSame, &[297]),
+        (ActiveBlinds, 6, Some("bLocalEffect"), Some(2_802_682_995), Field(Bool), NoneOrSame, &[1]),
+        (ActiveBlinds, 7, Some("bTransient"), Some(815_378_154), Field(Bool), NoneOrSame, &[1]),
+        (ActiveBlinds, 8, Some("InitialDuration"), Some(1_370_668_337), Field(Float), NoneOrSame, &[32]),
+        (ActiveBlinds, 9, Some("StartNetMovementTime"), Some(2_358_118_895), Field(Float), NoneOrSame, &[32]),
+        (ActiveBlinds, 10, Some("BlindConfig"), Some(4_121_438_116), Field(ObjectNetGuid), NoneOrSame, &[16]),
+        // A null actor is the one-byte IntPacked zero (59 windows in the 81-file audit).
+        (ActiveBlinds, 11, Some("CausingActor"), Some(2_370_661_694), Field(ObjectNetGuid), NoneOrSame, &[8, 16, 24]),
+    ]
+};
+
+/// The members of a [`Leaf::Nested`] container's array, apart from
+/// [`LEAF_RULES`] so a top-level leaf at the same handle is never typed.
+#[rustfmt::skip]
+const NESTED_RULES: &[LeafRule] = {
+    use FieldType::ObjectNetGuid;
+    use Leaf::Field;
+    use MeasuredArrayRoute::{KillData, SelectedV2};
+    use Overlay::NoneOrSame;
+    &[
+        (SelectedV2, 14, Some("SocketAsset"), Some(3_666_994_016), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (SelectedV2, 15, Some("AttachmentAsset"), Some(856_446_005), Field(ObjectNetGuid), NoneOrSame, &[]),
+        (KillData, 7, Some("AssistingPlayers"), Some(1_417_448_159), Field(ObjectNetGuid), NoneOrSame, &[]),
+    ]
+};
+
+/// The rule in `rules` for `route`'s `handle`, if the leaf meets every column.
+fn leaf_rule(
+    rules: &[LeafRule],
+    route: MeasuredArrayRoute,
     handle: u32,
+    width: u32,
     name: Option<&str>,
     checksum: Option<u32>,
     resolved: Option<FieldType>,
-) -> bool {
-    let expected = match parent {
-        "SelectedV2" => (13, "EquippableAttachments", 3_137_596_882),
-        "KillData" => (6, "AssistingPlayers", 1_689_463_717),
-        _ => return false,
+) -> Option<Leaf> {
+    let &(_, _, want_name, want_checksum, leaf, overlay, widths) = rules
+        .iter()
+        .find(|rule| rule.0 == route && rule.1 == handle)?;
+    let wanted = match leaf {
+        Leaf::Field(field_type) => Some(field_type),
+        _ => None,
     };
-    (handle, name, checksum) == (expected.0, Some(expected.1), Some(expected.2))
-        && resolved.is_none()
+    let overlay_agrees = match overlay {
+        Overlay::NoEntry => resolved.is_none(),
+        Overlay::NoneOrSame => resolved.is_none() || resolved == wanted,
+        Overlay::SameType => resolved.is_some() && resolved == wanted,
+        Overlay::RawEntry => resolved == Some(FieldType::Raw),
+    };
+    (overlay_agrees
+        && want_name.is_none_or(|want| name == Some(want))
+        && want_checksum.is_none_or(|want| checksum == Some(want))
+        && (widths.is_empty() || widths.contains(&width)))
+    .then_some(leaf)
 }
 
-fn verified_nested_member(
-    parent: &str,
-    handle: u32,
-    name: Option<&str>,
-    checksum: Option<u32>,
-    resolved: Option<FieldType>,
-) -> bool {
-    let expected = match (parent, handle) {
-        ("SelectedV2", 14) => ("SocketAsset", 3_666_994_016),
-        ("SelectedV2", 15) => ("AttachmentAsset", 856_446_005),
-        ("KillData", 7) => ("AssistingPlayers", 1_417_448_159),
-        _ => return false,
-    };
-    name == Some(expected.0)
-        && checksum == Some(expected.1)
-        && (resolved.is_none() || resolved == Some(FieldType::ObjectNetGuid))
+/// The handles `rules` types for `route`: all a strict preflight admits.
+fn rule_handles(rules: &[LeafRule], route: MeasuredArrayRoute) -> SmallVec<[u32; 16]> {
+    rules
+        .iter()
+        .filter(|rule| rule.0 == route)
+        .map(|rule| rule.1)
+        .collect()
 }
 
 pub(super) fn strict_nested_array_preflight(raw: &[u8], bit_count: u32, allowed: &[u32]) -> bool {
@@ -138,181 +240,62 @@ pub(super) fn strict_nested_array_preflight(raw: &[u8], bit_count: u32, allowed:
     }
 }
 
-fn decode_verified_nested_array(
-    parent: &str,
-    container: &vrf_decode::FlattenedField,
-    declared_names: &[Option<&str>],
-    declared_checksums: &[Option<u32>],
+/// The array inside a [`Leaf::Nested`] container, all or nothing: the strict
+/// preflight, a clean exact walk, then every member matching [`NESTED_RULES`]
+/// and decoding. A member refused after a clean walk counts once in `failures`.
+fn decode_nested(
+    route: MeasuredArrayRoute,
+    container: &FlattenedField,
+    names: &[Option<&str>],
+    checksums: &[Option<u32>],
     group_path: &str,
-) -> (
-    Option<Vec<VerifiedNestedLeaf>>,
-    vrf_decode::ArrayDecodeStats,
-    u64,
-) {
-    let declared_name = declared_at(declared_names, container.handle);
-    let declared_checksum = declared_at(declared_checksums, container.handle);
-    let resolved =
-        vrf_decode::resolve_field_type(&TABLE, group_path, declared_name, Some(container.handle));
-    if !verified_nested_container(
-        parent,
-        container.handle,
-        declared_name,
-        declared_checksum,
-        resolved,
-    ) {
-        return (None, vrf_decode::ArrayDecodeStats::default(), 0);
+    array: &mut ArrayDecodeStats,
+    failures: &mut u64,
+) -> Option<Vec<(FlattenedField, DecodedColumns)>> {
+    let (raw, bit_count) = (&container.raw_bits, container.bit_count);
+    if !strict_nested_array_preflight(raw, bit_count, &rule_handles(NESTED_RULES, route)) {
+        array.errors += 1;
+        return None;
     }
-
-    let allowed: &[u32] = if parent == "SelectedV2" {
-        &[14, 15]
-    } else {
-        &[7]
-    };
-    if !strict_nested_array_preflight(&container.raw_bits, container.bit_count, allowed) {
-        let stats = vrf_decode::ArrayDecodeStats {
-            errors: 1,
-            ..Default::default()
-        };
-        return (None, stats, 0);
+    let mut walk = ArrayDecodeStats::default();
+    let flattened = vrf_decode::decode_struct_array_exact(raw, bit_count, names, &mut walk);
+    array.merge_from(&walk);
+    if !walk.is_clean() {
+        return None;
     }
-
-    let mut stats = vrf_decode::ArrayDecodeStats::default();
-    let flattened = vrf_decode::decode_struct_array_exact(
-        &container.raw_bits,
-        container.bit_count,
-        declared_names,
-        &mut stats,
-    );
-    if !stats.is_clean() {
-        return (None, stats, 0);
-    }
-
-    let mut decoded = Vec::with_capacity(flattened.len());
+    let mut members = Vec::with_capacity(flattened.len());
     for leaf in flattened {
-        let declared_name = declared_at(declared_names, leaf.handle);
-        let declared_checksum = declared_at(declared_checksums, leaf.handle);
-        let resolved =
-            vrf_decode::resolve_field_type(&TABLE, group_path, declared_name, Some(leaf.handle));
-        if !verified_nested_member(
-            parent,
+        let name = declared_at(names, leaf.handle);
+        let resolved = vrf_decode::resolve_field_type(&TABLE, group_path, name, Some(leaf.handle));
+        let checksum = declared_at(checksums, leaf.handle);
+        let rule = leaf_rule(
+            NESTED_RULES,
+            route,
             leaf.handle,
-            declared_name,
-            declared_checksum,
-            resolved,
-        ) {
-            return (None, stats, 1);
-        }
-        let mut failures = 0;
-        let (value_i64, value_f64, value_bool, value_str) = decode_leaf_with_stats(
-            FieldType::ObjectNetGuid,
-            &leaf.raw_bits,
             leaf.bit_count,
-            &mut failures,
+            name,
+            checksum,
+            resolved,
         );
-        let Some(value_i64) = value_i64 else {
-            return (None, stats, failures.max(1));
+        let Some(Leaf::Field(field_type)) = rule else {
+            *failures += 1;
+            return None;
         };
-        if value_f64.is_some() || value_bool.is_some() || value_str.is_some() {
-            return (None, stats, failures.max(1));
+        // A failed decode is all-`None` and already counted.
+        let columns = decode_leaf_with_stats(field_type, &leaf.raw_bits, leaf.bit_count, failures);
+        if columns == (None, None, None, None) {
+            return None;
         }
-        decoded.push(VerifiedNestedLeaf {
-            path: leaf.path,
-            handle: leaf.handle,
-            bit_count: leaf.bit_count,
-            raw_bits: leaf.raw_bits,
-            value_i64,
-        });
+        members.push((leaf, columns));
     }
-    (Some(decoded), stats, 0)
-}
-
-/// New structural-array routes may type only leaf windows independently
-/// validated across the corpus. Everything else remains an exact raw child.
-fn verified_array_leaf_type(
-    parent: &str,
-    checksum: Option<u32>,
-    handle: u32,
-    resolved: Option<FieldType>,
-    declared_name: Option<&str>,
-) -> Option<FieldType> {
-    let wanted = match (parent, checksum, handle) {
-        ("AllPlayersObfuscatedPlayerInformation", Some(1_349_268_968), 49) => FieldType::Bool,
-        ("AllPlayersObfuscatedPlayerInformation", Some(1_349_268_968), 50) => FieldType::EnumByte,
-        ("ServerActiveEffects", Some(3_301_618_856), 5 | 6) => FieldType::Bool,
-        ("ServerActiveEffects", Some(3_301_618_856), 7 | 8) => FieldType::ObjectNetGuid,
-        ("ServerActiveEffects", Some(3_301_618_856), 30 | 31) => FieldType::VectorDouble,
-        ("ServerActiveEffects", Some(3_301_618_856), 33) => FieldType::Float,
-        ("ServerActiveEffects", Some(3_301_618_856), 34) => FieldType::EnumByte,
-        _ => return None,
-    };
-    // No top-level overlay for these two; their exact 192-bit windows were
-    // decoded independently on all measured builds. Scoped to this parent.
-    let measured_vector = parent == "ServerActiveEffects"
-        && checksum == Some(3_301_618_856)
-        && matches!(
-            (handle, declared_name),
-            (30, Some("Translation")) | (31, Some("Scale3D"))
-        );
-    (resolved == Some(wanted) || (resolved.is_none() && measured_vector)).then_some(wanted)
-}
-
-/// ActiveBlinds members, which have no top-level overlay. The enclosing checksum
-/// and every member declaration were observed unchanged in 13.02 and 13.05; a
-/// changed name or checksum, or a conflicting overlay, refuses typing.
-///
-/// `EffectID` is signed: checksum 3321413110 reproduces only as
-/// `AuthBlindManagerState: FBlindManagerState -> ActiveBlinds: TArray ->
-/// FActiveBlind -> BlindEffectID: FEffectID -> EffectID: int64` (`uint64` gives
-/// 2854897423), and the 13.06 executable's reflection has `FEffectID.EffectID`
-/// as Int64 too; the chain is recomputed in
-/// tools/tests/test_compatible_checksum_facts.py. Below 2^63 both readings
-/// agree; UInt64 refused the rest.
-fn verified_blind_leaf_type(
-    handle: u32,
-    name: Option<&str>,
-    checksum: Option<u32>,
-    resolved: Option<FieldType>,
-) -> Option<FieldType> {
-    let (wanted_name, wanted_checksum, wanted_type) = match handle {
-        3 => ("BlindId", 2_836_858_544, FieldType::UInt32),
-        4 => ("EffectID", 3_321_413_110, FieldType::Int64),
-        5 => ("SourceID", 4_130_766_059, FieldType::FName),
-        6 => ("bLocalEffect", 2_802_682_995, FieldType::Bool),
-        7 => ("bTransient", 815_378_154, FieldType::Bool),
-        8 => ("InitialDuration", 1_370_668_337, FieldType::Float),
-        9 => ("StartNetMovementTime", 2_358_118_895, FieldType::Float),
-        10 => ("BlindConfig", 4_121_438_116, FieldType::ObjectNetGuid),
-        11 => ("CausingActor", 2_370_661_694, FieldType::ObjectNetGuid),
-        _ => return None,
-    };
-    (name == Some(wanted_name)
-        && checksum == Some(wanted_checksum)
-        && (resolved.is_none() || resolved == Some(wanted_type)))
-    .then_some(wanted_type)
-}
-
-fn blind_member_width_valid(handle: u32, width: u32) -> bool {
-    match handle {
-        3 => width == 32,
-        4 => width == 64,
-        5 => width == 297,
-        6 | 7 => width == 1,
-        8 | 9 => width == 32,
-        10 => width == 16,
-        // Object references use IntPacked. A null actor is the one-byte zero,
-        // observed in 59 main/checkpoint windows across the 81-file audit.
-        11 => matches!(width, 8 | 16 | 24),
-        _ => false,
-    }
+    Some(members)
 }
 
 /// The array bits minus the one extra zero IntPacked an empty ActiveBlinds delta
-/// may carry after its index terminator: 57 windows in 13.01/13.02/13.04/13.05
-/// among the 986 replays of the 2026-09-25 audit that prompted it, and 60 in 41
-/// of the 1,018 corpus replays on 2026-09-29, 3 of them in 13.06, all in the
-/// main pass. The parent keeps its original bits, and each spared byte is
-/// counted (`ExportStats::active_blinds_empty_trailers`). Populated arrays,
-/// nonzero tails and other trailers keep the exact-window checks.
+/// may carry after its index terminator (60 windows in 41 of the 1,018 corpus
+/// replays, all main pass). The parent keeps its bits and each spared byte is
+/// counted (`ExportStats::active_blinds_empty_trailers`); every other shape
+/// keeps the exact-window checks.
 fn active_blind_array_bits(raw: &[u8], bit_count: u32) -> u32 {
     let without_empty_trailer = (|| {
         let mut reader = BitReader::with_bit_len(raw, u64::from(bit_count)).ok()?;
@@ -328,209 +311,51 @@ fn active_blind_array_bits(raw: &[u8], bit_count: u32) -> u32 {
     without_empty_trailer.unwrap_or(bit_count)
 }
 
-/// `TrackedRewards` leaf types have independent full-corpus evidence. The
-/// enclosing exact-array route proves the framing; each typed leaf still needs
-/// its own declared name, handle, checksum, and overlay type to agree.
-fn verified_reward_leaf_type(
-    handle: u32,
-    declared_name: Option<&str>,
-    declared_checksum: Option<u32>,
-    resolved: Option<FieldType>,
-) -> Option<FieldType> {
-    let (name, checksum, wanted) = match handle {
-        28 => ("RewardName", 1_337_472_711, FieldType::FName),
-        30 => ("InstancesOfReward", 2_922_243_316, FieldType::Int32),
-        31 => ("RewardGrantStrategy", 3_589_631_714, FieldType::EnumByte),
-        32 => ("Source", 1_118_571_008, FieldType::EnumByte),
-        _ => return None,
-    };
-    (declared_name == Some(name) && declared_checksum == Some(checksum) && resolved == Some(wanted))
-        .then_some(wanted)
-}
-
-/// RequestedIgnoreActors is an exact array route, but its child reference has
-/// no descriptor overlay. Admit only the measured declaration and only while
-/// resolution is absent or agrees; explicit Raw, Skip, and conflicts stay raw.
-fn verified_requested_ignore_actor_leaf(
-    handle: u32,
-    declared_name: Option<&str>,
-    declared_checksum: Option<u32>,
-    resolved: Option<FieldType>,
-) -> Option<FieldType> {
-    (handle == 5
-        && declared_name == Some("RequestedIgnoreActors")
-        && declared_checksum == Some(3_344_674_359)
-        && matches!(resolved, None | Some(FieldType::ObjectNetGuid)))
-    .then_some(FieldType::ObjectNetGuid)
-}
-
-/// This descriptor is deliberately Raw in the overlay table. The full FText
-/// reader is admitted only for this measured parent leaf; Skip, a conflict, or
-/// any future declared type change remains raw.
-fn verified_reward_localized_text(
-    handle: u32,
-    declared_name: Option<&str>,
-    declared_checksum: Option<u32>,
-    resolved: Option<FieldType>,
-) -> bool {
-    handle == 29
-        && declared_name == Some("LocalizedRewardName")
-        && declared_checksum == Some(483_770_233)
-        && resolved == Some(FieldType::Raw)
-}
-
-fn decode_tracked_reward_localized_text(
-    raw: &[u8],
-    bit_count: u32,
-    failures: &mut u64,
-) -> DecodedColumns {
-    match vrf_decode::decode_ftext_tree(raw, bit_count) {
-        Ok(value) => (None, None, None, Some(value.to_json())),
-        Err(_) => {
-            *failures = failures.saturating_add(1);
-            (None, None, None, None)
+/// Decode a leaf a rule typed; a failure counts in `failures` and leaves the
+/// columns null.
+fn decode_leaf(leaf: Leaf, raw: &[u8], bit_count: u32, failures: &mut u64) -> DecodedColumns {
+    let text = match leaf {
+        Leaf::Field(field_type) => {
+            return decode_leaf_with_stats(field_type, raw, bit_count, failures);
         }
+        Leaf::Nested => return (None, None, None, None),
+        Leaf::WeaponTheme => kill_weapon_theme(raw, bit_count),
+        Leaf::LocalizedText => vrf_decode::decode_ftext_tree(raw, bit_count)
+            .ok()
+            .map(|value| value.to_json()),
+    };
+    if text.is_none() {
+        *failures = failures.saturating_add(1);
     }
+    (None, None, None, text)
 }
 
-/// `SelectedV2`'s six observed, declaration-qualified IntPacked NetGUID leaves.
-/// The overlay has no entry for them; one that later names a different type is
-/// a refusal, not something this route silently overrides.
-fn verified_selected_v2_leaf_type(
-    handle: u32,
-    declared_name: Option<&str>,
-    declared_checksum: Option<u32>,
-    resolved: Option<FieldType>,
-) -> Option<FieldType> {
-    let (name, checksum) = match handle {
-        3 => ("EquippableDataAsset", 1_793_937_854),
-        4 => ("EquippableSkinDataAsset", 3_765_038_216),
-        5 => ("EquippableSkinLevelDataAsset", 603_923_741),
-        6 => ("EquippableSkinChromaDataAsset", 3_166_589_204),
-        7 => ("EquippableCharmDataAsset", 3_345_806_642),
-        8 => ("EquippableCharmLevelDataAsset", 1_087_985_310),
-        _ => return None,
-    };
-    (declared_name == Some(name)
-        && declared_checksum == Some(checksum)
-        && matches!(resolved, None | Some(FieldType::ObjectNetGuid)))
-    .then_some(FieldType::ObjectNetGuid)
-}
-
-/// KillData primitive windows, measured over 714 replays: their wire types,
-/// not the values' meaning or units. Scoped to the exact parent route and the
-/// declared handle, name and checksum; any overlay disagreement, Raw or Skip
-/// included, refuses the type.
-fn verified_kill_data_leaf(
-    handle: u32,
-    declared_name: Option<&str>,
-    declared_checksum: Option<u32>,
-    resolved: Option<FieldType>,
-) -> Option<VerifiedArrayLeaf> {
-    let (name, checksum, kind) = match handle {
-        3 => (
-            "Victim",
-            3_990_035_472,
-            VerifiedArrayLeaf::Field(FieldType::ObjectNetGuid),
-        ),
-        4 => (
-            "KillingEquippableClass",
-            2_071_131_011,
-            VerifiedArrayLeaf::Field(FieldType::ObjectNetGuid),
-        ),
-        5 => (
-            "WeaponTheme",
-            1_839_952_321,
-            VerifiedArrayLeaf::KillWeaponTheme,
-        ),
-        9 => (
-            "DamageType",
-            2_992_423_760,
-            VerifiedArrayLeaf::Field(FieldType::ObjectNetGuid),
-        ),
-        10 => (
-            "DamageTaken",
-            2_001_471_495,
-            VerifiedArrayLeaf::Field(FieldType::Float),
-        ),
-        11 => (
-            "DamageRegion",
-            3_229_265_809,
-            // Preserve the observed byte code; no enum-label meaning is claimed.
-            VerifiedArrayLeaf::Field(FieldType::Byte),
-        ),
-        12 => (
-            "GameTimeElapsed",
-            3_684_431_363,
-            VerifiedArrayLeaf::Field(FieldType::Float),
-        ),
-        13 => (
-            "RoundTimestamp",
-            2_328_473_242,
-            VerifiedArrayLeaf::Field(FieldType::Float),
-        ),
-        14 => (
-            "RoundNumber",
-            843_024_485,
-            VerifiedArrayLeaf::Field(FieldType::Int32),
-        ),
-        15 => (
-            "bDidKillTriggerFinisher",
-            2_795_684_046,
-            VerifiedArrayLeaf::Field(FieldType::Bool),
-        ),
-        _ => return None,
-    };
-    if declared_name != Some(name) || declared_checksum != Some(checksum) {
+/// A set bit, then an FString whose null terminator is required for every
+/// nonzero length (the generic reader tolerates its absence) and checked, a
+/// valid character in its slot included, before decoding; nothing may follow.
+fn kill_weapon_theme(raw: &[u8], bit_count: u32) -> Option<String> {
+    let mut reader = BitReader::with_bit_len(raw, u64::from(bit_count)).ok()?;
+    if !reader.read_bit().ok()? {
         return None;
     }
-    match kind {
-        VerifiedArrayLeaf::Field(wanted) if resolved.is_none() || resolved == Some(wanted) => {
-            Some(kind)
-        }
-        VerifiedArrayLeaf::KillWeaponTheme if resolved.is_none() => Some(kind),
-        _ => None,
+    let mut framing = reader.clone();
+    let length = framing.read_i32().ok()?;
+    let units = i64::from(length).unsigned_abs();
+    let unit_bits = if length < 0 { 16 } else { 8 };
+    if units * (unit_bits / 8) > 64 * 1024 {
+        return None;
     }
-}
-
-fn decode_kill_weapon_theme(raw: &[u8], bit_count: u32, failures: &mut u64) -> DecodedColumns {
-    let decoded = (|| {
-        let mut reader = BitReader::with_bit_len(raw, u64::from(bit_count)).map_err(|_| ())?;
-        if !reader.read_bit().map_err(|_| ())? {
-            return Err(());
-        }
-        // The generic FString reader tolerates a missing null terminator; this
-        // shape needs one for every nonzero length, checked (a valid character
-        // in the terminator slot included) before decoding.
-        let mut framing = reader.clone();
-        let length = framing.read_i32().map_err(|_| ())?;
-        let units = i64::from(length).unsigned_abs();
-        let unit_bits = if length < 0 { 16 } else { 8 };
-        if units * (unit_bits / 8) > 64 * 1024 {
-            return Err(());
-        }
-        if units != 0 {
-            framing.skip_bits((units - 1) * unit_bits).map_err(|_| ())?;
-            if framing.read_bits(unit_bits as u32).map_err(|_| ())? != 0 {
-                return Err(());
-            }
-        }
-        if framing.bits_remaining() != 0 {
-            return Err(());
-        }
-        let value = reader.read_fstring(64 * 1024).map_err(|_| ())?;
-        if reader.bits_remaining() != 0 {
-            return Err(());
-        }
-        Ok(value)
-    })();
-    match decoded {
-        Ok(value) => (None, None, None, Some(value)),
-        Err(()) => {
-            *failures = failures.saturating_add(1);
-            (None, None, None, None)
+    if units != 0 {
+        framing.skip_bits((units - 1) * unit_bits).ok()?;
+        if framing.read_bits(unit_bits as u32).ok()? != 0 {
+            return None;
         }
     }
+    if framing.bits_remaining() != 0 {
+        return None;
+    }
+    let value = reader.read_fstring(64 * 1024).ok()?;
+    (reader.bits_remaining() == 0).then_some(value)
 }
 
 /// The measured route a flattened-array parent belongs to, from its exact
@@ -574,26 +399,16 @@ fn measured_array_route(
     Some(route)
 }
 
-/// The sole measured empty `TrackedRewards` variant, a 24-bit `02 00 00` window:
-/// capacity one, the index-zero terminator, and an opaque zero byte. A literal
-/// route, not a relaxation of `decode_struct_array_exact`: nothing else matches.
-fn is_tracked_rewards_opaque_empty_variant(
-    group: &str,
-    parent: &str,
-    checksum: Option<u32>,
-    raw: &[u8],
-    bit_count: u32,
-) -> bool {
-    matches!(
-        (group, parent, checksum, bit_count, raw),
-        (
-            "/Script/ShooterGame.OwnerExclusivePlayerInfo",
-            "TrackedRewards",
-            Some(976_048_801),
-            24,
-            [0x02, 0x00, 0x00]
-        )
-    )
+/// A flattened array this module expands.
+#[derive(Clone, Copy, PartialEq)]
+enum ArrayKind {
+    /// `CombatReportComponent.Rounds`: the overlay, then [`decode_array_leaf`].
+    Rounds,
+    /// `AbilityCastsThisRound`, whose `Effects` array the walker sees only
+    /// through [`ABILITY_CASTS_SCHEMA`].
+    AbilityCasts,
+    /// A checksum-gated route this replay's branch admits.
+    Measured(MeasuredArrayRoute),
 }
 
 /// The struct-blob fields that have a dedicated decoder in `vrf-decode`.
@@ -604,82 +419,47 @@ enum StructBlob {
     RoundInfos,
 }
 
+/// One struct-blob element's `(member, value_i64, value_str)` rows.
+type BlobMembers = Vec<(&'static str, Option<i64>, Option<String>)>;
+
 impl ExportSink<'_> {
-    /// Every name the replay declares for `group_path`, by handle (empty for an
-    /// unknown group), borrowed from `cache` alone so `&mut self.stats` stays free.
-    fn declared_handle_names<'g>(
+    /// The replay's declared name and checksum for every handle of
+    /// `group_path` (empty for an unknown group), borrowed from `cache` alone so
+    /// `&mut self.stats` stays free.
+    fn declared_handles<'g>(
         cache: &'g NetGuidCache,
         group_path: &str,
-    ) -> Vec<Option<&'g str>> {
+    ) -> (Vec<Option<&'g str>>, Vec<Option<u32>>) {
         let Some(group) = cache.get_group_by_path(group_path) else {
-            return Vec::new();
+            return Default::default();
         };
         group
             .fields
             .iter()
-            .map(|slot| slot.as_ref().map(|f| f.name.as_str()))
-            .collect()
+            .map(|slot| match slot {
+                Some(field) => (Some(field.name.as_str()), Some(field.compatible_checksum)),
+                None => (None, None),
+            })
+            .unzip()
     }
 
-    /// The declared checksums, by handle like the names, so leaf typing cannot
-    /// infer a checksum from a child's position.
-    fn declared_handle_checksums(cache: &NetGuidCache, group_path: &str) -> Vec<Option<u32>> {
-        let Some(group) = cache.get_group_by_path(group_path) else {
-            return Vec::new();
-        };
-        group
-            .fields
-            .iter()
-            .map(|slot| slot.as_ref().map(|field| field.compatible_checksum))
-            .collect()
-    }
-
-    /// Check if a field name is a known DynamicArray that should be flattened.
-    pub(super) fn is_known_array_field(
-        &self,
-        field_name: Option<&str>,
-        checksum: Option<u32>,
-    ) -> bool {
-        match (field_name, checksum) {
-            (Some("Rounds"), _) => self.current_group_path.contains("CombatReportComponent"),
-            // Ability-cast structs (a GUID FString at handle 3, ints, floats,
-            // vectors): leaves are named from the replay's declarations or
-            // `_h{N}`; `get_array_schema` adds only the nested `Effects` schema.
-            (Some("AbilityCastsThisRound"), _) => self
-                .current_group_path
-                .contains("AbilityStatisticsReplicator"),
-            // The measured routes: the same identity-to-route map that picks
-            // the exact walker in `emit_flattened_array`, gated per branch.
-            (Some(name), _) => measured_array_route(&self.current_group_path, name, checksum)
-                .is_some_and(|route| self.admits(route)),
-            (None, _) => false,
+    /// Which array `parent` is on this group, if any: one classifier for the
+    /// schema, the walker and the leaf typing.
+    fn array_kind(&self, parent: &str, checksum: Option<u32>) -> Option<ArrayKind> {
+        let group = &*self.current_group_path;
+        match parent {
+            "Rounds" if group.contains("CombatReportComponent") => Some(ArrayKind::Rounds),
+            "AbilityCastsThisRound" if group.contains("Comp_AbilityStatisticsReplicator") => {
+                Some(ArrayKind::AbilityCasts)
+            }
+            _ => measured_array_route(group, parent, checksum)
+                .filter(|&route| self.admits(route))
+                .map(ArrayKind::Measured),
         }
     }
 
-    /// Get the array schema for a known DynamicArray field.
-    fn get_array_schema(
-        &self,
-        field_name: Option<&str>,
-    ) -> Option<&'static vrf_decode::ArrayFieldSchema> {
-        match field_name {
-            Some("Rounds") if self.current_group_path.contains("CombatReportComponent") => {
-                Some(&COMBAT_ROUNDS_SCHEMA)
-            }
-            // Each cast carries an `Effects` array of the statistics it produced,
-            // naming the players each landed on -- nesting the walker sees only
-            // through this schema, or the debuff log stays one opaque leaf.
-            Some("AbilityCastsThisRound")
-                if self
-                    .current_group_path
-                    .contains("Comp_AbilityStatisticsReplicator") =>
-            {
-                Some(&ABILITY_CASTS_SCHEMA)
-            }
-            _ => None,
-        }
-    }
-
-    /// Flatten a known DynamicArray field and emit one row per leaf.
+    /// Flatten a known array field and emit one row per leaf, each nested row
+    /// after its raw container.
     pub(super) fn emit_flattened_array(
         &mut self,
         field_name: Option<&str>,
@@ -687,229 +467,139 @@ impl ExportSink<'_> {
         raw: &[u8],
         bit_count: u32,
     ) {
-        let schema = self.get_array_schema(field_name);
-        let declared = Self::declared_handle_names(self.cache, &self.current_group_path);
-        let declared_checksums =
-            Self::declared_handle_checksums(self.cache, &self.current_group_path);
-        let parent_name = field_name.unwrap_or("_array");
-        let measured = measured_array_route(&self.current_group_path, parent_name, checksum)
-            .is_some_and(|route| self.admits(route));
-        let array_bits = if measured && parent_name == "ActiveBlinds" {
-            active_blind_array_bits(raw, bit_count)
-        } else {
-            bit_count
-        };
-        if array_bits != bit_count {
-            self.stats.active_blinds_empty_trailers += 1;
-        }
-        if measured
-            && parent_name == "ActiveBlinds"
-            && !strict_nested_array_preflight(raw, array_bits, &[3, 4, 5, 6, 7, 8, 9, 10, 11])
-        {
-            self.stats.array.errors += 1;
+        let Some(parent) = field_name else {
             return;
-        }
-        if measured
-            && is_tracked_rewards_opaque_empty_variant(
-                &self.current_group_path,
-                parent_name,
-                checksum,
-                raw,
-                bit_count,
-            )
-        {
-            self.stats.tracked_rewards_opaque_empty_variants += 1;
-            return;
-        }
-        let mut isolated = vrf_decode::ArrayDecodeStats::default();
-        let flattened = if measured {
-            vrf_decode::decode_struct_array_exact(raw, array_bits, &declared, &mut isolated)
-        } else {
-            vrf_decode::decode_struct_array(
-                raw,
-                bit_count,
-                schema,
-                &declared,
-                &mut self.stats.array,
-            )
         };
-        if measured {
-            self.stats.array.merge_from(&isolated);
-            if !isolated.is_clean() {
-                return;
-            }
-            if parent_name == "ActiveBlinds"
-                && flattened
-                    .iter()
-                    .any(|field| !blind_member_width_valid(field.handle, field.bit_count))
-            {
-                self.stats.array_leaf_decode_errors += 1;
-                return;
-            }
-            if parent_name == "ActiveBlinds"
-                && flattened.iter().any(|field| {
-                    let name = declared_at(&declared, field.handle);
-                    let checksum = declared_at(&declared_checksums, field.handle);
-                    let resolved = vrf_decode::resolve_field_type(
-                        &TABLE,
-                        &self.current_group_path,
-                        name,
-                        Some(field.handle),
-                    );
-                    verified_blind_leaf_type(field.handle, name, checksum, resolved).is_none()
-                })
-            {
-                self.stats.array_leaf_decode_errors += 1;
-                return;
-            }
-        }
-
-        // Resolve every leaf's type before touching `self.records`: the overlay
-        // first, keyed on the name the replay declares for the handle (the
-        // table types most flattened members), with
-        // `decode_array_leaf`'s hardcoded map only for names the table lacks.
-        // That map alone left `DeathLocation` (handle 104, `VectorDouble` in the
-        // table) an all-null `_h104` on all 3,492 arrivals on 02d4d478.
-        let leaf_types: Vec<Option<VerifiedArrayLeaf>> = flattened
-            .iter()
-            .map(|f| {
-                // The full resolution order (name, b-prefixed name, handle ->
-                // descriptor name), as an ordinary field gets, so a property
-                // types the same inside an array as outside.
-                let name = declared_at(&declared, f.handle);
-                let declared_resolved = vrf_decode::resolve_field_type(
-                    &TABLE,
-                    &self.current_group_path,
-                    name,
-                    Some(f.handle),
-                );
-                let resolved =
-                    declared_resolved.filter(|ft| !matches!(ft, FieldType::Raw | FieldType::Skip));
-                let declared_checksum = declared_at(&declared_checksums, f.handle);
-                if measured && parent_name == "TrackedRewards" {
-                    if verified_reward_localized_text(
-                        f.handle,
-                        name,
-                        declared_checksum,
-                        declared_resolved,
-                    ) {
-                        Some(VerifiedArrayLeaf::TrackedRewardLocalizedText)
-                    } else {
-                        verified_reward_leaf_type(f.handle, name, declared_checksum, resolved)
-                            .map(VerifiedArrayLeaf::Field)
-                    }
-                } else if measured && parent_name == "RequestedIgnoreActors" {
-                    verified_requested_ignore_actor_leaf(
-                        f.handle,
-                        name,
-                        declared_checksum,
-                        declared_resolved,
-                    )
-                    .map(VerifiedArrayLeaf::Field)
-                } else if measured && parent_name == "ActiveBlinds" {
-                    verified_blind_leaf_type(f.handle, name, declared_checksum, declared_resolved)
-                        .map(VerifiedArrayLeaf::Field)
-                } else if measured && parent_name == "SelectedV2" {
-                    verified_selected_v2_leaf_type(
-                        f.handle,
-                        name,
-                        declared_checksum,
-                        declared_resolved,
-                    )
-                    .map(VerifiedArrayLeaf::Field)
-                } else if measured && parent_name == "KillData" {
-                    verified_kill_data_leaf(f.handle, name, declared_checksum, declared_resolved)
-                } else if measured {
-                    verified_array_leaf_type(parent_name, checksum, f.handle, resolved, name)
-                        .map(VerifiedArrayLeaf::Field)
+        let Some(kind) = self.array_kind(parent, checksum) else {
+            return;
+        };
+        let (names, checksums) = Self::declared_handles(self.cache, &self.current_group_path);
+        let route = match kind {
+            ArrayKind::Measured(route) => Some(route),
+            ArrayKind::Rounds | ArrayKind::AbilityCasts => None,
+        };
+        let flattened = match route {
+            None => {
+                let schema = if kind == ArrayKind::Rounds {
+                    &COMBAT_ROUNDS_SCHEMA
                 } else {
-                    resolved.map(VerifiedArrayLeaf::Field)
+                    &ABILITY_CASTS_SCHEMA
+                };
+                vrf_decode::decode_struct_array(
+                    raw,
+                    bit_count,
+                    Some(schema),
+                    &names,
+                    &mut self.stats.array,
+                )
+            }
+            Some(route) => {
+                let blinds = route == MeasuredArrayRoute::ActiveBlinds;
+                let array_bits = if blinds {
+                    active_blind_array_bits(raw, bit_count)
+                } else {
+                    bit_count
+                };
+                if array_bits != bit_count {
+                    self.stats.active_blinds_empty_trailers += 1;
                 }
-            })
-            .collect();
-
-        let nested_results: Vec<_> = flattened
-            .iter()
-            .map(|f| {
-                if measured
-                    && matches!(
-                        (parent_name, f.handle),
-                        ("SelectedV2", 13) | ("KillData", 6)
+                if blinds
+                    && !strict_nested_array_preflight(
+                        raw,
+                        array_bits,
+                        &rule_handles(LEAF_RULES, route),
                     )
                 {
-                    decode_verified_nested_array(
-                        parent_name,
-                        f,
-                        &declared,
-                        &declared_checksums,
-                        &self.current_group_path,
-                    )
-                } else {
-                    (None, vrf_decode::ArrayDecodeStats::default(), 0)
+                    self.stats.array.errors += 1;
+                    return;
                 }
+                // The sole measured empty variant: capacity one, the index-zero
+                // terminator and an opaque zero byte. A literal, not a relaxation.
+                if route == MeasuredArrayRoute::TrackedRewards
+                    && bit_count == 24
+                    && raw == [2, 0, 0]
+                {
+                    self.stats.tracked_rewards_opaque_empty_variants += 1;
+                    return;
+                }
+                let mut walk = ArrayDecodeStats::default();
+                let flattened =
+                    vrf_decode::decode_struct_array_exact(raw, array_bits, &names, &mut walk);
+                self.stats.array.merge_from(&walk);
+                if !walk.is_clean() {
+                    return;
+                }
+                flattened
+            }
+        };
+
+        // Every leaf is typed before any row is pushed, by the overlay keyed on
+        // the declared name: an ordinary field's resolution order minus the
+        // checksum-keyed steps (scoped types, checksum fallback), which type
+        // none of the untyped array leaves measured.
+        let group_path = &*self.current_group_path;
+        let (array, leaf_errors) = (
+            &mut self.stats.array,
+            &mut self.stats.array_leaf_decode_errors,
+        );
+        let leaves: Vec<_> = flattened
+            .iter()
+            .map(|f| {
+                let name = declared_at(&names, f.handle);
+                let resolved =
+                    vrf_decode::resolve_field_type(&TABLE, group_path, name, Some(f.handle));
+                let Some(route) = route else {
+                    let typed = resolved.filter(|t| !matches!(t, FieldType::Raw | FieldType::Skip));
+                    return (typed.map(Leaf::Field), None);
+                };
+                let checksum = declared_at(&checksums, f.handle);
+                let leaf = leaf_rule(
+                    LEAF_RULES,
+                    route,
+                    f.handle,
+                    f.bit_count,
+                    name,
+                    checksum,
+                    resolved,
+                );
+                let nested = if leaf == Some(Leaf::Nested) {
+                    decode_nested(route, f, &names, &checksums, group_path, array, leaf_errors)
+                } else {
+                    None
+                };
+                (leaf, nested)
             })
             .collect();
-        for (_, nested_stats, nested_failures) in &nested_results {
-            self.stats.array.merge_from(nested_stats);
-            self.stats.array_leaf_decode_errors = self
-                .stats
-                .array_leaf_decode_errors
-                .saturating_add(*nested_failures);
+        if route == Some(MeasuredArrayRoute::ActiveBlinds)
+            && leaves.iter().any(|(leaf, _)| leaf.is_none())
+        {
+            self.stats.array_leaf_decode_errors += 1;
+            return;
         }
 
-        for ((f, declared_type), (nested, _, _)) in
-            flattened.iter().zip(leaf_types).zip(nested_results)
-        {
-            let columns = match declared_type {
-                Some(VerifiedArrayLeaf::Field(ft)) => decode_leaf_with_stats(
-                    ft,
-                    &f.raw_bits,
-                    f.bit_count,
-                    &mut self.stats.array_leaf_decode_errors,
-                ),
-                Some(VerifiedArrayLeaf::KillWeaponTheme) => decode_kill_weapon_theme(
-                    &f.raw_bits,
-                    f.bit_count,
-                    &mut self.stats.array_leaf_decode_errors,
-                ),
-                Some(VerifiedArrayLeaf::TrackedRewardLocalizedText) => {
-                    decode_tracked_reward_localized_text(
-                        &f.raw_bits,
-                        f.bit_count,
-                        &mut self.stats.array_leaf_decode_errors,
-                    )
+        for (f, (leaf, nested)) in flattened.iter().zip(leaves) {
+            let errors = &mut self.stats.array_leaf_decode_errors;
+            let columns = match leaf {
+                Some(leaf) => decode_leaf(leaf, &f.raw_bits, f.bit_count, errors),
+                // CombatReport-only: handle 3 is Int32 there and an FString in
+                // AbilityCastsThisRound.
+                None if kind == ArrayKind::Rounds => {
+                    decode_array_leaf(f.handle, &f.raw_bits, f.bit_count, errors)
                 }
-                // The hardcoded map is CombatReport-only: handle 3 is Int32
-                // there and an FString in AbilityCastsThisRound.
-                None if parent_name == "Rounds" => decode_array_leaf(
-                    f.handle,
-                    &f.raw_bits,
-                    f.bit_count,
-                    &mut self.stats.array_leaf_decode_errors,
-                ),
                 None => (None, None, None, None),
             };
             // `f.path` carries its own leading separator: "Rounds[0].RoundNumber".
             self.push_child(
                 f.handle,
-                &[parent_name, &f.path],
+                &[parent, &f.path],
                 f.bit_count,
                 &f.raw_bits,
                 columns,
             );
-
-            // Nested rows follow their raw container row; the whole nested
-            // window was validated first, so a bad member cannot leak a prefix.
-            if let Some(nested) = nested {
-                for leaf in nested {
-                    self.push_child(
-                        leaf.handle,
-                        &[parent_name, &f.path, &leaf.path],
-                        leaf.bit_count,
-                        &leaf.raw_bits,
-                        (Some(leaf.value_i64), None, None, None),
-                    );
-                }
+            for (member, columns) in nested.into_iter().flatten() {
+                let (handle, bits) = (member.handle, member.bit_count);
+                let name: [&str; 3] = [parent, &f.path, &member.path];
+                self.push_child(handle, &name, bits, &member.raw_bits, columns);
             }
         }
     }
@@ -942,29 +632,17 @@ impl ExportSink<'_> {
         });
     }
 
-    /// The block's group with game-mode siblings mapped to the class the blob
-    /// gates key on: Swiftplay carries `RoundResults` and `TeamEconomy` on
-    /// `Swiftplay_EoRCredits_GameState_C`, which a bare
-    /// `contains("BombGameState")` misses -- a clean-looking export with no
-    /// score (docs/archive/PROJECT_STATUS.md sections 26 and 33).
-    /// `vrf_decode::canonical_group` is the overlay's own alias table, so the
-    /// two agree on what a game state is.
-    fn canonical_group(&self) -> &str {
-        vrf_decode::canonical_group(&self.current_group_path)
-    }
-
-    /// Which dedicated decoder owns this field on this group, if any. One
-    /// classifier for both the predicate and the dispatcher: two copies that
-    /// disagreed would divert a blob and then decline it, losing its leaves
-    /// with no counter moving.
+    /// Which dedicated decoder owns this field on this group, if any. The
+    /// group goes through `vrf_decode::canonical_group`, the overlay's own
+    /// alias table: Swiftplay carries `RoundResults` and `TeamEconomy` on
+    /// `Swiftplay_EoRCredits_GameState_C`, which a bare `BombGameState` test
+    /// misses.
     fn struct_blob_kind(&self, field_name: Option<&str>) -> Option<StructBlob> {
+        let game_state =
+            || vrf_decode::canonical_group(&self.current_group_path).contains("BombGameState");
         match field_name? {
-            "RoundResults" if self.canonical_group().contains("BombGameState") => {
-                Some(StructBlob::RoundResults)
-            }
-            "TeamEconomy" if self.canonical_group().contains("BombGameState") => {
-                Some(StructBlob::TeamEconomy)
-            }
+            "RoundResults" if game_state() => Some(StructBlob::RoundResults),
+            "TeamEconomy" if game_state() => Some(StructBlob::TeamEconomy),
             "RoundInfos" if self.current_group_path.contains("OwnerExclusivePlayerInfo") => {
                 Some(StructBlob::RoundInfos)
             }
@@ -972,25 +650,21 @@ impl ExportSink<'_> {
         }
     }
 
-    /// Check if a field is a struct blob that has a dedicated decoder.
-    pub(super) fn is_struct_blob_field(&self, field_name: Option<&str>) -> bool {
-        self.struct_blob_kind(field_name).is_some()
-    }
-
-    /// Whether this is a `MultiItemSlot.MultiContents` blob; the parent stays
-    /// `Raw` and the items become extra `MultiContents[i]` rows.
-    pub(super) fn is_multi_contents_field(&self, field_name: Option<&str>) -> bool {
-        matches!(field_name, Some("MultiContents"))
-            && self.current_group_path.contains("MultiItemSlot")
-    }
-
-    /// Decode a `MultiContents` blob (`TArray<AAresItem*>`) into one
-    /// `MultiContents[index]` row per item, the NetGUID in `value_i64` as for
-    /// `ItemSlot.Contents`. [`vrf_decode::decode_object_ref_array_with_stats`]
-    /// returns `(wire element index, NetGUID)` pairs, and the wire index labels
-    /// the row: arrays are delta-replicated per element, so a re-send may carry
-    /// only the changed slot, which arrival order would put in slot 0.
-    pub(super) fn emit_multi_contents(&mut self, raw: &[u8], bit_count: u32) {
+    /// Decode a `MultiItemSlot.MultiContents` blob (`TArray<AAresItem*>`) into
+    /// one `MultiContents[index]` row per item, the NetGUID in `value_i64` as
+    /// for `ItemSlot.Contents`; the parent stays `Raw`. The wire element index
+    /// labels the row: arrays are delta-replicated per element, so a re-send may
+    /// carry only the changed slot, which arrival order would put in slot 0.
+    pub(super) fn emit_multi_contents(
+        &mut self,
+        field_name: Option<&str>,
+        raw: &[u8],
+        bit_count: u32,
+    ) {
+        if field_name != Some("MultiContents") || !self.current_group_path.contains("MultiItemSlot")
+        {
+            return;
+        }
         let guids =
             vrf_decode::decode_object_ref_array_with_stats(raw, bit_count, &mut self.stats.array);
         for (index, guid) in &guids {
@@ -1003,24 +677,94 @@ impl ExportSink<'_> {
         }
     }
 
-    /// Decode a struct blob and emit flattened sub-field rows.
-    /// Returns true if decoding succeeded and sub-fields were emitted.
+    /// Decode a struct blob with its dedicated decoder and emit one
+    /// `{field}[{index}].{member}` row per member that has a value.
     pub(super) fn decode_struct_blob(
         &mut self,
-        field_name: &str,
+        field_name: Option<&str>,
         raw: &[u8],
         bit_count: u32,
-    ) -> bool {
-        let emitted = match self.struct_blob_kind(Some(field_name)) {
-            Some(StructBlob::RoundResults) => self.decode_round_results_blob(raw, bit_count),
-            Some(StructBlob::TeamEconomy) => self.decode_team_economy_blob(raw, bit_count),
-            Some(StructBlob::RoundInfos) => self.decode_round_infos_blob(raw, bit_count),
-            None => false,
+    ) {
+        let (Some(name), Some(kind)) = (field_name, self.struct_blob_kind(field_name)) else {
+            return;
         };
-        if emitted {
+        let elements: Option<Vec<(u32, BlobMembers)>> = match kind {
+            StructBlob::RoundResults => {
+                let decoded = self.decode_blob(raw, bit_count, structs::decode_round_results);
+                decoded.map(|rows| {
+                    rows.into_iter()
+                        .map(|rr| {
+                            let role = rr.winning_team_role.map(|r| r.as_str().to_owned());
+                            let outcome = rr.round_result.map(|o| o.as_str().to_owned());
+                            let members = vec![
+                                ("RoundNumber", Some(i64::from(rr.round_number)), None),
+                                ("WinningTeam", None, rr.winning_team),
+                                ("WinningTeamRole", None, role),
+                                ("RoundResult", None, outcome),
+                            ];
+                            (rr.round_number, members)
+                        })
+                        .collect()
+                })
+            }
+            StructBlob::TeamEconomy => {
+                let decoded =
+                    self.decode_blob(raw, bit_count, structs::decode_team_economy_declared);
+                decoded.map(|rows| {
+                    rows.into_iter()
+                        .map(|te| {
+                            let members = vec![
+                                ("Index", Some(i64::from(te.index)), None),
+                                ("ReplicationId", te.replication_id.map(i64::from), None),
+                                ("LoadoutValue", te.loadout_value.map(i64::from), None),
+                                (
+                                    "AverageLoadoutValue",
+                                    te.average_loadout_value.map(i64::from),
+                                    None,
+                                ),
+                            ];
+                            (te.index, members)
+                        })
+                        .collect()
+                })
+            }
+            StructBlob::RoundInfos => {
+                let decoded = self.decode_blob(raw, bit_count, structs::decode_round_infos);
+                decoded.map(|rows| {
+                    rows.into_iter()
+                        .map(|ri| {
+                            let members = [
+                                ("RoundNumber", ri.round_number),
+                                ("StartOfRoundMoney", ri.start_of_round_money),
+                                ("StartOfRoundLoadoutValue", ri.start_of_round_loadout_value),
+                                ("EndOfRoundMoney", ri.end_of_round_money),
+                                ("EndOfRoundLoadoutValue", ri.end_of_round_loadout_value),
+                            ];
+                            let members =
+                                members.map(|(member, v)| (member, v.map(i64::from), None));
+                            (ri.index, Vec::from(members))
+                        })
+                        .collect()
+                })
+            }
+        };
+        let Some(elements) = elements else {
+            return;
+        };
+        if !elements.is_empty() {
             self.stats.struct_blobs_decoded += 1;
         }
-        emitted
+        for (index, members) in elements {
+            for (member, value_i64, value_str) in members {
+                if value_i64.is_some() || value_str.is_some() {
+                    self.emit_struct_sub_field(
+                        |out| put(out, format_args!("{name}[{index}].{member}")),
+                        value_i64,
+                        value_str,
+                    );
+                }
+            }
+        }
     }
 
     /// Count a struct-blob failure rather than drop it: it costs no rows (the
@@ -1047,116 +791,14 @@ impl ExportSink<'_> {
         };
         // The decoded elements own their strings, so once `decode` returns
         // nothing borrows `self.cache` and a failure can be recorded.
-        let declared = Self::declared_handle_names(self.cache, &self.current_group_path);
-        match decode(&mut reader, &declared) {
+        let (names, _) = Self::declared_handles(self.cache, &self.current_group_path);
+        match decode(&mut reader, &names) {
             Ok(results) => Some(results),
             Err(err) => {
                 self.record_blob_failure(&err);
                 None
             }
         }
-    }
-
-    /// Decode RoundResults blob and emit sub-field rows.
-    fn decode_round_results_blob(&mut self, raw: &[u8], bit_count: u32) -> bool {
-        let Some(results) = self.decode_blob(raw, bit_count, structs::decode_round_results) else {
-            return false;
-        };
-
-        for rr in &results {
-            let index = rr.round_number;
-            self.emit_struct_sub_field(
-                |out| put(out, format_args!("RoundResults[{index}].RoundNumber")),
-                Some(i64::from(rr.round_number)),
-                None,
-            );
-            if let Some(ref team) = rr.winning_team {
-                self.emit_struct_sub_field(
-                    |out| put(out, format_args!("RoundResults[{index}].WinningTeam")),
-                    None,
-                    Some(team.clone()),
-                );
-            }
-            for (member, text) in [
-                ("WinningTeamRole", rr.winning_team_role.map(|r| r.as_str())),
-                ("RoundResult", rr.round_result.map(|o| o.as_str())),
-            ] {
-                if let Some(text) = text {
-                    self.emit_struct_sub_field(
-                        |out| put(out, format_args!("RoundResults[{index}].{member}")),
-                        None,
-                        Some(text.to_owned()),
-                    );
-                }
-            }
-        }
-
-        !results.is_empty()
-    }
-
-    /// Decode TeamEconomy blob and emit sub-field rows.
-    fn decode_team_economy_blob(&mut self, raw: &[u8], bit_count: u32) -> bool {
-        let Some(results) = self.decode_blob(raw, bit_count, structs::decode_team_economy_declared)
-        else {
-            return false;
-        };
-
-        for te in &results {
-            let index = te.index;
-            self.emit_struct_sub_field(
-                |out| put(out, format_args!("TeamEconomy[{index}].Index")),
-                Some(i64::from(te.index)),
-                None,
-            );
-            // Widened to i64 here rather than in the loop body: the members
-            // are a mix of u32 and i32 and the array has to be one type.
-            for (member, value) in [
-                ("ReplicationId", te.replication_id.map(i64::from)),
-                ("LoadoutValue", te.loadout_value.map(i64::from)),
-                (
-                    "AverageLoadoutValue",
-                    te.average_loadout_value.map(i64::from),
-                ),
-            ] {
-                if let Some(v) = value {
-                    self.emit_struct_sub_field(
-                        |out| put(out, format_args!("TeamEconomy[{index}].{member}")),
-                        Some(v),
-                        None,
-                    );
-                }
-            }
-        }
-
-        !results.is_empty()
-    }
-
-    /// Decode RoundInfos blob and emit sub-field rows.
-    fn decode_round_infos_blob(&mut self, raw: &[u8], bit_count: u32) -> bool {
-        let Some(results) = self.decode_blob(raw, bit_count, structs::decode_round_infos) else {
-            return false;
-        };
-
-        for ri in &results {
-            let index = ri.index;
-            for (member, value) in [
-                ("RoundNumber", ri.round_number),
-                ("StartOfRoundMoney", ri.start_of_round_money),
-                ("StartOfRoundLoadoutValue", ri.start_of_round_loadout_value),
-                ("EndOfRoundMoney", ri.end_of_round_money),
-                ("EndOfRoundLoadoutValue", ri.end_of_round_loadout_value),
-            ] {
-                if let Some(v) = value {
-                    self.emit_struct_sub_field(
-                        |out| put(out, format_args!("RoundInfos[{index}].{member}")),
-                        Some(i64::from(v)),
-                        None,
-                    );
-                }
-            }
-        }
-
-        !results.is_empty()
     }
 
     /// Emit one struct-blob member row, its name built by `name` straight into
@@ -1272,6 +914,25 @@ mod tests {
             row.value_f64,
             row.value_bool,
             row.value_str.as_deref(),
+        )
+    }
+
+    /// `leaf_rule` for a top-level leaf whose width no rule checks.
+    fn typed(
+        route: MeasuredArrayRoute,
+        handle: u32,
+        name: &str,
+        checksum: u32,
+        resolved: Option<FieldType>,
+    ) -> Option<Leaf> {
+        leaf_rule(
+            LEAF_RULES,
+            route,
+            handle,
+            0,
+            Some(name),
+            Some(checksum),
+            resolved,
         )
     }
 
@@ -1590,10 +1251,11 @@ mod tests {
             assert_eq!(records.fields[0].value_i64, None, "{name}/{checksum}");
         }
         assert_eq!(
-            verified_reward_leaf_type(
+            typed(
+                MeasuredArrayRoute::TrackedRewards,
                 30,
-                Some("InstancesOfReward"),
-                Some(2_922_243_316),
+                "InstancesOfReward",
+                2_922_243_316,
                 Some(FieldType::Float),
             ),
             None
@@ -1602,42 +1264,25 @@ mod tests {
 
     #[test]
     fn tracked_rewards_localized_text_requires_its_raw_declaration() {
-        assert!(verified_reward_localized_text(
-            29,
-            Some("LocalizedRewardName"),
-            Some(483_770_233),
-            Some(FieldType::Raw),
-        ));
+        let rewards = MeasuredArrayRoute::TrackedRewards;
+        assert_eq!(
+            typed(
+                rewards,
+                29,
+                "LocalizedRewardName",
+                483_770_233,
+                Some(FieldType::Raw)
+            ),
+            Some(Leaf::LocalizedText)
+        );
         for (handle, name, checksum, resolved) in [
-            (29, Some("Other"), Some(483_770_233), Some(FieldType::Raw)),
-            (
-                29,
-                Some("LocalizedRewardName"),
-                Some(0),
-                Some(FieldType::Raw),
-            ),
-            (
-                29,
-                Some("LocalizedRewardName"),
-                Some(483_770_233),
-                Some(FieldType::Skip),
-            ),
-            (
-                29,
-                Some("LocalizedRewardName"),
-                Some(483_770_233),
-                Some(FieldType::FText),
-            ),
-            (
-                28,
-                Some("LocalizedRewardName"),
-                Some(483_770_233),
-                Some(FieldType::Raw),
-            ),
+            (29, "Other", 483_770_233, FieldType::Raw),
+            (29, "LocalizedRewardName", 0, FieldType::Raw),
+            (29, "LocalizedRewardName", 483_770_233, FieldType::Skip),
+            (29, "LocalizedRewardName", 483_770_233, FieldType::FText),
+            (28, "LocalizedRewardName", 483_770_233, FieldType::Raw),
         ] {
-            assert!(!verified_reward_localized_text(
-                handle, name, checksum, resolved
-            ));
+            assert_eq!(typed(rewards, handle, name, checksum, Some(resolved)), None);
         }
     }
 
@@ -1760,26 +1405,19 @@ mod tests {
             );
             assert_eq!(records.fields[0].value_i64, None, "{name} remains raw");
         }
-        assert_eq!(
-            verified_selected_v2_leaf_type(
-                3,
-                Some("EquippableDataAsset"),
-                Some(1_793_937_854),
-                Some(FieldType::Float),
-            ),
-            None,
-            "a contradictory overlay must leave the leaf raw"
-        );
-        for blocked in [FieldType::Raw, FieldType::Skip] {
+        // A contradictory overlay, or an explicit Raw/Skip (not an absent
+        // overlay), leaves the leaf raw.
+        for blocked in [FieldType::Float, FieldType::Raw, FieldType::Skip] {
             assert_eq!(
-                verified_selected_v2_leaf_type(
+                typed(
+                    MeasuredArrayRoute::SelectedV2,
                     3,
-                    Some("EquippableDataAsset"),
-                    Some(1_793_937_854),
+                    "EquippableDataAsset",
+                    1_793_937_854,
                     Some(blocked),
                 ),
                 None,
-                "an explicit raw/skip declaration is not an absent overlay"
+                "{blocked:?}"
             );
         }
     }
@@ -1960,11 +1598,10 @@ mod tests {
 
     #[test]
     fn kill_data_refuses_wrong_child_identity_and_any_overlay_disagreement() {
-        assert!(
-            verified_kill_data_leaf(10, Some("DamageTaken"), Some(2_001_471_495), None).is_some()
-        );
+        let kill = MeasuredArrayRoute::KillData;
+        assert!(typed(kill, 10, "DamageTaken", 2_001_471_495, None).is_some());
         for (name, checksum) in [("Other", 2_001_471_495), ("DamageTaken", 0)] {
-            assert!(verified_kill_data_leaf(10, Some(name), Some(checksum), None).is_none());
+            assert!(typed(kill, 10, name, checksum, None).is_none());
             let payload = bits_from_bytes(&1.5f32.to_le_bytes());
             let (records, _) = export_array_with_child_checksum(
                 (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
@@ -1987,25 +1624,10 @@ mod tests {
         );
         assert_eq!(records.fields[0].value_str, None);
         for blocked in [FieldType::Int32, FieldType::Raw, FieldType::Skip] {
-            assert!(
-                verified_kill_data_leaf(
-                    10,
-                    Some("DamageTaken"),
-                    Some(2_001_471_495),
-                    Some(blocked)
-                )
-                .is_none()
-            );
+            assert!(typed(kill, 10, "DamageTaken", 2_001_471_495, Some(blocked)).is_none());
         }
-        assert!(
-            verified_kill_data_leaf(
-                5,
-                Some("WeaponTheme"),
-                Some(1_839_952_321),
-                Some(FieldType::FString)
-            )
-            .is_none()
-        );
+        let theme = Some(FieldType::FString);
+        assert!(typed(kill, 5, "WeaponTheme", 1_839_952_321, theme).is_none());
     }
 
     #[test]
@@ -2408,7 +2030,7 @@ mod tests {
         assert_eq!(stats.array_leaf_decode_errors, 1);
     }
 
-    /// `EffectID` is an `int64` (see `verified_blind_leaf_type`): bit 63 set is a
+    /// `EffectID` is an `int64` (see `LEAF_RULES`): bit 63 set is a
     /// negative ID, not an overflow a `UInt64` read would refuse.
     #[test]
     fn active_blinds_effect_id_is_signed() {
@@ -2430,44 +2052,31 @@ mod tests {
 
     #[test]
     fn nested_array_identity_and_overlay_disagreements_are_refused() {
-        assert!(verified_nested_container(
-            "KillData",
-            6,
-            Some("AssistingPlayers"),
-            Some(1_689_463_717),
-            None
-        ));
-        assert!(!verified_nested_container(
-            "KillData",
-            6,
-            Some("Other"),
-            Some(1_689_463_717),
-            None
-        ));
-        assert!(!verified_nested_container(
-            "KillData",
-            6,
-            Some("AssistingPlayers"),
-            Some(0),
-            None
-        ));
+        let kill = MeasuredArrayRoute::KillData;
+        let container = |name, checksum, resolved| typed(kill, 6, name, checksum, resolved);
+        assert_eq!(
+            container("AssistingPlayers", 1_689_463_717, None),
+            Some(Leaf::Nested)
+        );
+        assert_eq!(container("Other", 1_689_463_717, None), None);
+        assert_eq!(container("AssistingPlayers", 0, None), None);
         for blocked in [FieldType::ObjectNetGuid, FieldType::Raw, FieldType::Skip] {
-            assert!(!verified_nested_container(
-                "KillData",
-                6,
-                Some("AssistingPlayers"),
-                Some(1_689_463_717),
-                Some(blocked)
-            ));
+            assert_eq!(
+                container("AssistingPlayers", 1_689_463_717, Some(blocked)),
+                None
+            );
         }
         for blocked in [FieldType::Float, FieldType::Raw, FieldType::Skip] {
-            assert!(!verified_nested_member(
-                "SelectedV2",
+            let member = leaf_rule(
+                NESTED_RULES,
+                MeasuredArrayRoute::SelectedV2,
                 14,
+                0,
                 Some("SocketAsset"),
                 Some(3_666_994_016),
-                Some(blocked)
-            ));
+                Some(blocked),
+            );
+            assert_eq!(member, None, "{blocked:?}");
         }
     }
 
@@ -2769,6 +2378,18 @@ mod tests {
             records.fields[0].field_name.as_deref(),
             Some("AbilityCastsThisRound[0].CastTime_4_5AE288704801A9B74D6D159DFC2BD147")
         );
+        // Elsewhere its handles mean something else: one raw row.
+        let (records, _) = export_array(
+            (
+                "/Script/ShooterGame.SomeOtherComponent",
+                "AbilityCastsThisRound",
+                0,
+            ),
+            (7, "CastTime_4_5AE288704801A9B74D6D159DFC2BD147"),
+            &bits,
+            None,
+        );
+        assert_eq!(records.fields.len(), 1);
     }
 
     #[test]
@@ -2924,77 +2545,55 @@ mod tests {
 
     #[test]
     fn new_routes_type_only_the_verified_leaf_windows() {
+        let effects = |handle, resolved| {
+            leaf_rule(
+                LEAF_RULES,
+                MeasuredArrayRoute::ServerActiveEffects,
+                handle,
+                0,
+                None,
+                None,
+                resolved,
+            )
+        };
         assert_eq!(
-            verified_array_leaf_type(
-                "ServerActiveEffects",
-                Some(3_301_618_856),
-                33,
-                Some(FieldType::Float),
-                None
-            ),
-            Some(FieldType::Float)
+            effects(33, Some(FieldType::Float)),
+            Some(Leaf::Field(FieldType::Float))
         );
-        assert_eq!(
-            verified_array_leaf_type(
-                "RequestedIgnoreActors",
-                Some(1_063_739_204),
-                5,
-                Some(FieldType::ObjectNetGuid),
-                None
-            ),
-            None,
-            "packed wire integers remain raw without an identity claim"
-        );
-        assert_eq!(
-            verified_array_leaf_type(
-                "ServerActiveEffects",
-                Some(3_301_618_856),
-                33,
-                Some(FieldType::Double),
-                None
-            ),
-            None
-        );
+        assert_eq!(effects(33, Some(FieldType::Double)), None);
     }
 
     #[test]
     fn requested_ignore_actor_requires_exact_child_identity_and_non_raw_resolution() {
+        let ignore = MeasuredArrayRoute::RequestedIgnoreActors;
         assert_eq!(
-            verified_requested_ignore_actor_leaf(
-                5,
-                Some("RequestedIgnoreActors"),
-                Some(3_344_674_359),
-                None,
-            ),
-            Some(FieldType::ObjectNetGuid)
+            typed(ignore, 5, "RequestedIgnoreActors", 3_344_674_359, None),
+            Some(Leaf::Field(FieldType::ObjectNetGuid))
         );
         for (handle, name, checksum, resolved) in [
             (
                 5,
-                Some("RequestedIgnoreActors"),
-                Some(3_344_674_359),
+                "RequestedIgnoreActors",
+                3_344_674_359,
                 Some(FieldType::Raw),
             ),
             (
                 5,
-                Some("RequestedIgnoreActors"),
-                Some(3_344_674_359),
+                "RequestedIgnoreActors",
+                3_344_674_359,
                 Some(FieldType::Skip),
             ),
             (
                 5,
-                Some("RequestedIgnoreActors"),
-                Some(3_344_674_359),
+                "RequestedIgnoreActors",
+                3_344_674_359,
                 Some(FieldType::Int32),
             ),
-            (5, Some("Other"), Some(3_344_674_359), None),
-            (5, Some("RequestedIgnoreActors"), Some(0), None),
-            (4, Some("RequestedIgnoreActors"), Some(3_344_674_359), None),
+            (5, "Other", 3_344_674_359, None),
+            (5, "RequestedIgnoreActors", 0, None),
+            (4, "RequestedIgnoreActors", 3_344_674_359, None),
         ] {
-            assert_eq!(
-                verified_requested_ignore_actor_leaf(handle, name, checksum, resolved),
-                None
-            );
+            assert_eq!(typed(ignore, handle, name, checksum, resolved), None);
         }
     }
 
@@ -3058,14 +2657,10 @@ mod tests {
                 Some("(1.25,-0,-2.5)")
             );
         }
+        let effects = MeasuredArrayRoute::ServerActiveEffects;
+        let member = Some("DifferentMember");
         assert_eq!(
-            verified_array_leaf_type(
-                "ServerActiveEffects",
-                Some(3_301_618_856),
-                30,
-                None,
-                Some("DifferentMember")
-            ),
+            leaf_rule(LEAF_RULES, effects, 30, 192, member, None, None),
             None
         );
     }
