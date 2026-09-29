@@ -1,17 +1,13 @@
-//! Columnar (Parquet) output for decoded replay records.
-//!
-//! Parquet because a replay yields ~1.25 M field rows and ~1.8 M movement
-//! samples, and readers (pandas, DuckDB, Spark) decode only the columns they
-//! need; the NDJSON pipeline before it spent 84% of its time parsing JSON.
+//! Columnar (Parquet) output for decoded replay records: a replay yields
+//! ~1.3 M field rows and ~1.8 M movement samples, and readers (pandas, DuckDB,
+//! Spark) decode only the columns they need.
 //!
 //! # Layout
 //!
 //! - [`record`] -- the input structs. No Arrow types, never feature-gated.
-//! - `schema` -- the Arrow schema for each table, defined once so writer and
-//!   reader agree.
+//! - `schema` -- each table's columns, declared once for its schema and arrays.
 //! - `writer` -- the buffer-and-flush row-group machinery, written once.
-//! - `tables` -- one module per table, supplying the three things that
-//!   actually differ between them.
+//! - `tables` -- one module per table: row-group size and dictionary columns.
 //!
 //! A `fields` row carries at most one typed value, in four sparse nullable
 //! columns rather than an Arrow Union: nulls compress to almost nothing and
@@ -35,8 +31,7 @@
 //!
 //! With `--no-default-features` the crate is the record structs and
 //! [`ExportError`] alone, without arrow, parquet or zstd: what `vrfkit
-//! validate` uses, since it drives the whole decode and writes no file. Why
-//! ZSTD is always on and Snappy opt-in: the `[features]` comment in Cargo.toml.
+//! validate` uses, since it drives the whole decode and writes no file.
 
 #![forbid(unsafe_code)]
 
