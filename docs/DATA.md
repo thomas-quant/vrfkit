@@ -237,38 +237,24 @@ with 100.
 
 ### `CastTime` is not measured from `roundStarted`
 
-Its zero is the barrier drop -- the *end* of the buy phase -- while
-`events.roundStarted` fires when the round begins, at the buy phase's start.
-Joining a cast on `roundStarted + CastTime` therefore lands 30 seconds **early**,
-or 45 on the first round of each half.
+Its zero is the barrier drop: the round's `ClientBuyPhaseEnd` (`MulticastSetPhase`
+4), which `tools/extract_rounds.py` writes as `buy_end_ms`. `events.roundStarted`
+fires at the buy phase's start instead. The absolute time is
 
-Measured on 10,460 casts over 20 replays, the residual
-`(cast row's time_ms - roundStarted) / 1000 - CastTime` is, for the first
-fourteen rounds:
+    buy_end_ms + CastTime
 
-| round | n | median residual |
-|---|---|---|
-| 1 | 394 | **44.99 s** |
-| 2-12 | 6,247 | **29.88-29.91 s** |
-| 13 | 347 | **44.89 s** |
-| 14 | 364 | **29.89 s** |
+On 13.01 the residual `(cast row's time_ms - buy_end_ms) / 1000 - CastTime` has
+median -0.000 s over 420 first sends (13.05: -0.002 s over 106; 13.06: 0.000 s
+over 406), with `buy_end_ms` and the raw `ClientBuyPhaseEnd` rows picking the
+same epoch for every cast row. Against `roundStarted` the same casts read
+29.89 s, and 10,460 casts over 20 replays read 44.99 s on the first round of
+each half and 29.88-29.91 s otherwise: the 45/30 s buy phases. Do not hardcode
+them; the public fixtures' buy phases last 0.1-15.5 s.
 
-Those are the buy-phase lengths the game uses -- 45 s on the first round of each
-half, 30 s otherwise -- so this is confirmed against a constant the replay does
-not carry, not fitted to the data. The correct absolute time is
-
-    roundStarted + buyPhaseLength(round) + CastTime
-
-Overtime follows the same rule: on the full 71 replays round 25 -- the first of
-overtime -- reads 44.88 s, so the 45 s buy phase applies there too.
-
-The median is the statistic to use here, not the mean. `AbilityCastsThisRound`
-is a replicated array that accumulates over the round, so a cast is re-sent on
-every later replication and its `time_ms` drifts upward; the residual is exact
-only on the first send. The share landing within 29-31 s therefore depends on
-how much re-replication the sample carries -- 60.1% on the 20-replay set above,
-57.4% over all 71 -- and the rest of the mass is that tail, not disagreement
-about the epoch.
+Use the median of first sends, not the mean. `AbilityCastsThisRound` is a
+replicated array that accumulates over the round, so a cast is re-sent on every
+later replication and its `time_ms` drifts upward (median 0.066 s over all 579
+cast rows on 13.01; 299 of the 420 first sends land within 0.5 s).
 
 ### Status effects, and where they actually live
 
