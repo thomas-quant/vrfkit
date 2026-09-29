@@ -406,7 +406,7 @@ ADDITIONS = pins([
     (HAWK_FLASH, "VectorDouble", "PostControlVelocity"),
     # ByteComponents consumes all 1,033,952 rows exactly, where Short fails on
     # 54.6%. Location in whole units: the first update lies within 0.87 cm of
-    # the actors.parquet spawn on all 8,265 actors (REP_MOVEMENT_LOCATION_EVIDENCE).
+    # the actors.parquet spawn on all 8,265 actors.
     # Checksum 2749104612 stays dropped: Gekko's Wingman is Short.
     (HAWK_FLASH, BYTE_WHOLE, "ReplicatedMovement"),
     # 64 bits on all 801,700 rows: LE f64 in [-180, 180] with the low 29 mantissa

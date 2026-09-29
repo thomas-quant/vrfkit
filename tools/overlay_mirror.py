@@ -150,8 +150,8 @@ def is_fname_index(name: str | None) -> bool:
 class Resolver:
     """`overlay::resolve_entry` over parsed tables, whatever each key maps to.
 
-    `entries` {(group, name): value}, `handles` {(group, handle): the
-    descriptor's field name}, `scoped` {(name, group, checksum): value},
+    `entries` {(group, name): value}, `handles` {(group, handle): field
+    name}, `scoped` {(name, group, checksum): value},
     `checksums` {checksum: value}, `aliases` {group: canonical group},
     `engine_refs` the names typed as engine object references, which resolve
     to `engine_value`.
@@ -175,12 +175,12 @@ class Resolver:
                     return value, step
         if handle is None:
             return None, None
-        descriptor = self.handles.get((group, handle))
-        if descriptor is None:
+        named = self.handles.get((group, handle))
+        if named is None:
             return None, None
-        if name is not None and name != descriptor and not is_fname_index(name):
+        if name is not None and name != named and not is_fname_index(name):
             return None, None  # refused: the wire declares something else here
-        value = self.entries.get((group, descriptor))
+        value = self.entries.get((group, named))
         return (value, "handle") if value is not None else (None, None)
 
     def resolve(self, group, name, handle, checksum):

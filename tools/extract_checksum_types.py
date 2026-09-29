@@ -237,7 +237,6 @@ def main() -> int:
 
     table = load_overlay_table()
     resolved, conflicts = learn(manifests, table)
-    rendered = render(resolved)
 
     for checksum, (types, names) in sorted(conflicts.items()):
         print(f"  dropped {checksum}: {names} declared as {types}")

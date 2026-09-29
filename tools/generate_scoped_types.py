@@ -6,8 +6,7 @@ validate_type_evidence.py. A RepMovement type carries its rotator width, since
 `ReplicatedMovement` has one checksum for both, and a measured
 `location_quantization`, since exact consumption cannot catch a wrong level:
 join the first update to the actors.parquet spawn (docs/DATA.md,
-"`ReplicatedMovement.location` is world units, at a per-class level") and add
-the group to REP_MOVEMENT_LOCATION_EVIDENCE in vrf-decode tests::overlay.
+"`ReplicatedMovement.location` is world units, at a per-class level").
 
 `--check` fails when scoped_types.rs or the fixture's own layout
 (`dump_evidence`) is stale; without it, both are rewritten.

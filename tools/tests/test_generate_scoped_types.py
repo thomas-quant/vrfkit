@@ -15,7 +15,7 @@ class ScopedTypeGenerationTests(unittest.TestCase):
         entries = gen.load(gen.EVIDENCE)
         # 943211507 is the 32-bit B -- the second player-state GUID word, not
         # the byte-shaped B fields. It may only ever be UInt32, and only on the
-        # two player-state groups (it was excluded outright until 2026-09-28).
+        # two player-state groups.
         wide_b = sorted((e["group"].rsplit(".", 1)[-1], e["field"], e["type"])
                         for e in entries if e["checksum"] == 943211507)
         self.assertEqual(wide_b, [("BombPlayerState_C", "B", "UInt32"),
@@ -68,9 +68,7 @@ class ScopedTypeGenerationTests(unittest.TestCase):
                 self.assertIn(expression.removeprefix("FieldType::").split(" ")[0], variants)
 
     def test_every_type_name_has_an_independent_decoder(self):
-        # The module docs require it before an entry may use a type, and
-        # nothing checked it: VectorDouble had scoped entries and no reader in
-        # validate_type_evidence.py until 2026-09-28.
+        # The module docs require it before an entry may use a type.
         import validate_type_evidence
         missing = sorted(set(gen.TYPES) - set(validate_type_evidence.TYPED_COLUMNS))
         self.assertEqual(missing, [])

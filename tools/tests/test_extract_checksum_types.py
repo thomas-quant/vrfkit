@@ -184,7 +184,7 @@ class ParseTests(unittest.TestCase):
             self.assertIsInstance(checksum, int)
             self.assertTrue(ftype.startswith("FieldType::"), ftype)
 
-    def test_the_overlay_table_is_read_in_one_spelling_for_both_layouts(self):
+    def test_the_overlay_table_is_read_in_the_spelling_render_writes(self):
         """A braced type broken over lines with a trailing comma reads as the
         one-line spelling `render` writes, and an escaped key is unescaped."""
         table = (
