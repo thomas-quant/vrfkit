@@ -1,4 +1,7 @@
 import base64
+import contextlib
+import io
+import json
 import struct
 import sys
 import tempfile
@@ -9,10 +12,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+TOOLS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TOOLS))
 from validate_type_evidence import (  # noqa: E402
-    decode_exact, exported_matches, exported_value, spec_rows, validate,
-    values_match)
+    decode_exact, exported_matches, exported_value, load_specifications, main,
+    spec_rows, validate, values_match)
 
 
 def pack_bits(*fields: tuple[int, int]) -> tuple[bytes, int]:
@@ -352,6 +356,28 @@ class ExportDiscoveryTests(unittest.TestCase):
             ):
                 self.assertEqual(report["fields"]["g::f"]["rows"], 1)
                 self.assertEqual(report["skipped_generated_dirs"], [])
+
+
+class SpecificationFileTests(unittest.TestCase):
+    def test_the_scoped_fixture_is_read_in_the_exported_spelling(self):
+        specs = load_specifications(TOOLS / "fixtures" / "scoped_type_evidence.json")
+        self.assertIn({"group": "/Script/ShooterGame.DamageableComponent_ClassNetCache",
+                       "field": "MulticastNotifyHeal.EventInstigator",
+                       "checksum": 3087885251, "type": "ObjectNetGuid"}, specs)
+        self.assertEqual([s for s in specs if ":" in s["group"]], [])
+
+    def test_allow_missing_lists_an_absent_identity_without_failing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_int_export(root / "a")
+            spec = root / "spec.json"
+            spec.write_text(json.dumps([{"group": "g", "field": "f", "type": "Int32"},
+                                        {"group": "g", "field": "absent", "type": "Int32"}]))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                codes = (main([str(root), str(spec)]), main([str(root), str(spec), "--allow-missing"]))
+        self.assertEqual(codes, (1, 0))
+        self.assertEqual(output.getvalue().count('"g::absent"'), 2)
 
 
 class DecodeExactTests(unittest.TestCase):

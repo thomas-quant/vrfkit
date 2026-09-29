@@ -724,6 +724,24 @@ def validate(export_root: Path, specifications: list[dict], export_ids=None, com
     }
 
 
+def load_specifications(path: Path) -> list[dict]:
+    """A specification list, or `scoped_type_evidence.json` (`{"entries":
+    [...]}`), whose RPC parameter group `Class:Function` is exported as group
+    `Class_ClassNetCache`, field `Function.field`."""
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        return document
+    specifications = []
+    for entry in document["entries"]:
+        group, field = entry["group"], entry["field"]
+        if ":" in group:
+            group, function = group.split(":", 1)
+            group, field = f"{group}_ClassNetCache", f"{function}.{field}"
+        specifications.append({"group": group, "field": field,
+                               "checksum": entry["checksum"], "type": entry["type"]})
+    return specifications
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("export_root", type=Path)
@@ -731,8 +749,10 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--export-id", action="append", dest="export_ids")
     parser.add_argument("--compare-typed", action="store_true")
+    parser.add_argument("--allow-missing", action="store_true",
+                        help="list specified identities with no row under `missing` without failing")
     args = parser.parse_args(argv)
-    specifications = json.loads(args.evidence.read_text(encoding="utf-8"))
+    specifications = load_specifications(args.evidence)
     report = validate(args.export_root, specifications, args.export_ids, args.compare_typed)
     report["provenance"] = {
         "export_root": str(args.export_root.resolve()),
@@ -745,7 +765,7 @@ def main(argv=None):
     if args.output:
         args.output.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
-    return 1 if (report["missing"] or report["failure_count"]
+    return 1 if ((report["missing"] and not args.allow_missing) or report["failure_count"]
                  or report["typed_mismatch_count"]) else 0
 
 
