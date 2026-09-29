@@ -169,8 +169,7 @@ to 212,099,080 rows (+6,232,453, exactly the new indexed array children), with
 11,975,340 more rows typed and 20,113,218 more named -- overlapping counts,
 since existing rows can gain names and types without a new row. Typed presence
 was then 70.6364% main (713,488,311 of 1,010,086,119 rows), 81.3258%
-checkpoint (172,491,241) and 72.4914% combined, before the
-[structured-array expansion](STRUCTURED_ARRAY_EXPANSION.md); neither the share
+checkpoint (172,491,241) and 72.4914% combined, before the structured-array expansion; neither the share
 of bytes decoded nor of meaning understood.
 
 Of 198,461,491 previous raw checkpoint rows, 198,344,356 kept their handle, bit

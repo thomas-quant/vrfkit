@@ -1,8 +1,8 @@
 # September 2026 corpus follow-up
 
 **Superseded in part:** its partial missing-initial figures are the old
-parser's misclassification ([header-order correction](PARTIAL_HEADER_CORRECTION.md)),
-and the [schema expansion](SCHEMA_EXPANSION.md) supersedes its typed-value
+parser's misclassification (header-order correction),
+and the schema expansion supersedes its typed-value
 percentages and four-file cause classification. The tail-preservation
 before/after figures below remain this batch's.
 
@@ -279,8 +279,7 @@ Considered on 2026-09-14 and deliberately not done, each with the reason:
 - Committing raw bits cut from private replays so CI's real-bytes type check
   covers KillData, SelectedV2, HealCauser and the other fields typed in #10. CI
   covers the eight typed fields the public fixtures carry; the rest would put
-  private replay content in this public repository, which
-  [SCHEMA_EXPANSION.md](SCHEMA_EXPANSION.md) rules out. They stay covered by
+  private replay content in this public repository. They stay covered by
   the machine-local corpus sweeps.
 
 Considered on 2026-09-28 and deliberately not done:
@@ -289,8 +288,8 @@ Considered on 2026-09-28 and deliberately not done:
   `crates/vrf-net/src/packet.rs`). Nothing in this workspace reads what it
   produces -- the pipeline strips its header flags, and never sums
   `PacketReadResult::partial_error_count` -- but `RawPacketReader::read_packet`
-  and that field are published API, and an extractor built directly on the
-  reader is on record in [TRANSPORT_PRESERVATION.md](TRANSPORT_PRESERVATION.md).
+  and that field are published API for an extractor built directly on the
+  reader.
   Deleting the tracker would remove the field or leave it a permanent 0, which
   is the counter-that-cannot-move shape this repository refuses. It stays,
   documented as advisory, and the pipeline's strip keeps it that way.

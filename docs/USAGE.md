@@ -313,9 +313,7 @@ expected, not a decode fault. The player-state GUID words `A`..`D` are
 `UInt32`, so their `value_i64` is never negative even when the high bit is
 set. Multi-click vectors appear as additive indexed
 children immediately before their raw parent. Their inner declaration handle
-differs from the exported enclosing function handle. See
-[TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) for exact routes,
-counts and interpretation limits.
+differs from the exported enclosing function handle.
 
 **`compatible_checksum` is what separates "nobody described this" from "we
 missed this".** Unreal hashes a property's type into it alongside its name, so
@@ -575,10 +573,6 @@ the original selected branch. A null `class_net_guid` means the header did not
 carry a class GUID; zero means the field was read with the invalid GUID value.
 These are lookup observations, not proof that an unresolved numeric group is
 the enclosing actor's class.
-
-Historical snapshot-versus-main percentages predate the partial-header fix and
-do not validate cross-stream identity. See [current context and semantic
-evidence](SEMANTIC_CONTEXT_EXPANSION.md).
 
 ### Checkpoint schema declarations
 
@@ -1372,8 +1366,7 @@ live in `%LOCALAPPDATA%\vrfkit\baseline-corpora`.
 recovers the seven protected 11.06--12.00 code images from SHA-256-pinned EXE
 and `stub.dll` pairs. It needs optional `pefile`, `unicorn` and `numpy` packages.
 Only analysis copies are written; both input and output hashes are checked.
-Use `--build 11.06` to select one build, or omit it for all seven. See the
-[offline recovery measurements](BUILD_RECOVERY_RESEARCH.md).
+Use `--build 11.06` to select one build, or omit it for all seven.
 
 `capture_native_transforms.py --binaries <archive-root> --recovered-binaries <recovered-root> --check`
 verifies all 1,264 committed 11.06--12.09 vectors against the pinned native

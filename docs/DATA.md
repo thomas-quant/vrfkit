@@ -10,20 +10,9 @@ Legend: ✅ typed (value decoded) · ◐ raw or derivable · ❌ unavailable in 
 stated observation scope. Absence in a sample is not proof of format-wide absence.
 
 Current validation is [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md): one
-acceptance rule on 1,018 replays of 24 builds, with the
-[resolved findings](BUILD_VERIFICATION.md#resolved-findings) (among them the
-2026-09-25 ActiveBlinds fix). Structured-array children are admitted per build
-and per route: every measured route on 13.01--13.06, only the routes that
-matched and decoded cleanly on 11.06--13.00, where the other parents stay raw
-([legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
-The dated batches that added types and context are the phase reports --
-[targeting and heal values](TARGETING_AND_HEAL_VALUES.md) (with the 2026-09-09
-714-replay physical coverage), [schema expansion](SCHEMA_EXPANSION.md),
-[partial-header correction](PARTIAL_HEADER_CORRECTION.md),
-[semantic context](SEMANTIC_CONTEXT_EXPANSION.md) and
-[checkpoint path resolution](CHECKPOINT_PATH_RESOLUTION.md) -- and the KillData
-[observations](KILL_OBSERVATIONS.md) and [ledger](KILL_LEDGER.md). Physical
-row ratios are not semantic completeness.
+acceptance rule on 1,018 replays of 24 builds. Structured-array children are
+admitted per build and per route ([below](#structured-array-children)).
+Physical row ratios are not semantic completeness.
 
 ---
 
@@ -124,7 +113,7 @@ resurrection count; `Rounds[N].Reports[1]` existing marks such a round.
 | Death-montage context | `MulticastNotifyDamage_{Point,Base}.DeathMontageEffectOverrideContext` → `actors.parquet` (a dynamic actor: `net_guids` has no path for it) | ✅ ObjectNetGuid; 0 (the null reference) except on kills, where it is a player-character pawn open at the event. Not established as the killer or the victim |
 | ADR | derived from CombatReport | ◐ +0.1–0.2 vs trackers (wire damage is fractional; not a bug) |
 | Health / armour / overheal, absolute | `DamageableComponent` RPCs → `LifeChangeEvents[]` / `LifeChangeBySection[]` | ✅ typed section updates; actor/section timelines require joins, see below |
-| Heal / overheal-decay source references | `MulticastNotifyHeal` `HealCauser`, `EventInstigator`, `EventInstigatorPawn`; `MulticastNotifyOverhealDecay` `DecayCauser`, `EventInstigator`, `EventInstigatorPawn` | ✅ `ObjectNetGuid` by exact group/name/checksum. `EventInstigator` is the instigator's PlayerController: it never joins to `actors.parquet` (join through the pawn's `Controller`/`Owner`), and that is expected, not a decode fault. `DecayCauser` = 0 means no causer. No heal credit is implied; see [TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) |
+| Heal / overheal-decay source references | `MulticastNotifyHeal` `HealCauser`, `EventInstigator`, `EventInstigatorPawn`; `MulticastNotifyOverhealDecay` `DecayCauser`, `EventInstigator`, `EventInstigatorPawn` | ✅ `ObjectNetGuid` by exact group/name/checksum. `EventInstigator` is the instigator's PlayerController: it never joins to `actors.parquet` (join through the pawn's `Controller`/`Owner`), and that is expected, not a decode fault. `DecayCauser` = 0 means no causer. No heal credit is implied |
 
 **The "multiset-identical" figures compare against an independent parser on
 build 13.01 or earlier.** A result from that fixture does not establish
@@ -685,7 +674,7 @@ otherwise reports a 999-round reserve.
 | Round-loss streak | `BombGameState_C.CurrentLossStreak` / `LossStreakTeam` (Swiftplay's game state carries `LossStreakTeam` too) | ✅ exact identity since 2026-09-28: Int32, 0..2 on every observed row; ObjectNetGuid, GUID 0 or the `RedTeam` / `BlueTeam` object in `net_guids` |
 | Match-timer override flag | `BombGameState_C.ShouldOverrideMatchTimer` (and Swiftplay's) | ✅ Bool, exact identity. Always sent in the same packet as `OverrideMatchTimerText`: true with its formatted-number form, false with its empty form, on every observed row |
 | Round-end ceremony and its subject | `{Default,Ace,Clutch,Closer,Flawless,Thrifty,TeamAce}Ceremony_C.bShouldDisplayCeremony`; `ClutchCeremony_C.ClutchPlayer`, `CloserCeremony_C.CloserPlayer`; `FlawlessCeremony_C.FlawlessTeam`, `ThriftyCeremony_C.SalvagingTeam`, `TeamAceCeremony_C.TeamAcingTeam`; `ThriftyCeremony_C.{Blue,Red}TeamStartingAvgInventoryValue` | ✅ exact identity since 2026-09-28: Bool; ObjectNetGuid (GUID 0, or a `BombPlayerState_C` / Swiftplay player-state actor, or the `RedTeam` / `BlueTeam` object in `net_guids`); Int32. In every packet that carries both, the flag is true exactly when the ceremony's player or team is non-null. The ceremony actor chosen for a round is `ChosenCeremonyForRound` |
-| Match-timer override text | `BombGameState_C.OverrideMatchTimerText` (and Swiftplay's) | ✅ `FTextTree`, exact identity: the FText history tree as JSON in `value_str` -- the empty history 255 (`{"flags":0,"history":255,"kind":"empty"}`) or history 4, a number the game formats itself (`kind: "as_number"`, a `source.double`, the `format` options -- always two integral and two fractional digits here -- and a `culture`). Observed source values 0.01..36.95. What the number counts down is not established. See [TEXT_HISTORY_EXPANSION.md](TEXT_HISTORY_EXPANSION.md#history-4-a-formatted-number) |
+| Match-timer override text | `BombGameState_C.OverrideMatchTimerText` (and Swiftplay's) | ✅ `FTextTree`, exact identity: the FText history tree as JSON in `value_str` -- the empty history 255 (`{"flags":0,"history":255,"kind":"empty"}`) or history 4, a number the game formats itself (`kind: "as_number"`, a `source.double`, the `format` options -- always two integral and two fractional digits here -- and a `culture`). Observed source values 0.01..36.95. What the number counts down is not established. See [below](#history-4-a-formatted-number) |
 
 ## Spike & objective
 
@@ -736,6 +725,71 @@ intervals carried that player's subject; now none does.
 | GUID → object path | `net_guids.parquet` | ✅ |
 | Containment chain (subobject → parent) | `net_guids.outer_net_guid` | ✅ |
 | Full declared schema (475 groups, handle→name) | `manifest.net_field_export_groups` | ✅ |
+
+## Structured-array children
+
+A measured array route expands one exact (group, parent, checksum) identity
+into additive child rows that follow the raw parent, which is kept. A route
+runs only on the builds `MeasuredArrayRoutes::for_branch`
+(`crates/vrfkit/src/sink/measured_routes.rs`) admits: every route on
+13.01--13.06, a measured subset on 11.06--13.00
+([route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes)).
+
+| Array | Members | Column | Meaning |
+|---|---|---|---|
+| `SelectedV2` | `EquippableDataAsset`, `EquippableSkinDataAsset`, `EquippableSkinLevelDataAsset`, `EquippableSkinChromaDataAsset`, `EquippableCharmDataAsset`, `EquippableCharmLevelDataAsset` | `value_i64` | Object references into the GUID table |
+| `SelectedV2[i].EquippableAttachments[j]` | `SocketAsset`, `AttachmentAsset` | `value_i64` | Object references into the GUID table |
+| `KillData` | `Victim` | `value_i64` | A dynamic actor ID (`actors.parquet`), never in the static GUID table |
+| `KillData` | `KillingEquippableClass`, `DamageType` | `value_i64` | Object references into the GUID table |
+| `KillData[i].AssistingPlayers[j]` | `AssistingPlayers` | `value_i64` | Actor references |
+| `KillData` | `DamageTaken`, `GameTimeElapsed`, `RoundTimestamp` | `value_f64` | f32 widened; units and attribution unverified |
+| `KillData` | `RoundNumber` | `value_i64` | Signed 32-bit, observed 0-35 |
+| `KillData` | `bDidKillTriggerFinisher` | `value_bool` | One bit; `false` is decoded, not absent |
+| `KillData` | `DamageRegion` | `value_i64` | Unsigned byte, observed 0, 1, 2, 5; labels unverified |
+| `KillData` | `WeaponTheme` | `value_str` | A true prefix, then a terminated FString (not an FName) |
+| `RequestedIgnoreActors` | its child | `value_i64` | Packed NetGUID |
+| `TrackedRewards` | `LocalizedRewardName` | `value_str` | The FText history tree as JSON, below |
+
+A reference of 0 is a null reference; a null `value_i64` means nothing was
+decoded. Checkpoint rows also join on `checkpoint_index`. A malformed window
+stays raw and moves `array_leaf_decode_errors`. `TransitionContext`
+(`EquippableStateMachineComponent`) is a packed NetGUID in `value_i64` too, and
+all its checkpoint observations are 0.
+
+### FText history trees
+
+`LocalizedRewardName` (and the timer text below) keeps its raw bytes and adds
+the whole text-history tree as JSON. History 11 is a string-table entry:
+
+```json
+{"flags":0,"history":11,"kind":"string_table","table":{"name":"/Game/GameModes/Bomb/BombMode_Strings.BombMode_Strings","number":0},"key":"Kill"}
+```
+
+History 3 is `kind: "format"` with a nested `source` tree and an ordered
+`arguments` array; each argument keeps its name and wire tag, tag 0 as
+`{"bits_u64":"1"}` (all 64 bits as a decimal string), tag 4 as a nested tree.
+History 255 is `{"flags":0,"history":255,"kind":"empty"}` with a zero wire
+length. Any other history or argument tag fails visibly and stays raw. The
+reader bounds strings at 64 KiB, arguments at 128, depth below 16 and nodes at
+256, and requires full bit consumption. No localized label is rendered.
+
+### History 4: a formatted number
+
+`FieldType::FTextTree` applies the same reader to a whole property:
+`BombGameState_C.OverrideMatchTimerText` (and Swiftplay's copy), by exact
+identity. It sends the empty form or a 376-bit history 4:
+
+```json
+{"flags":1,"history":4,"kind":"as_number","source":{"tag":3,"double":15.614009857177734},"format":{"always_sign":false,"use_grouping":true,"rounding_mode":0,"minimum_integral_digits":2,"maximum_integral_digits":2,"minimum_fractional_digits":2,"maximum_fractional_digits":2},"culture":""}
+```
+
+After the flags and history byte: the source type byte (only 3, a double, is
+read; any other is refused), the double, an archive bool for whether
+`FNumberFormattingOptions` follow, those options (two bools, the rounding-mode
+byte, four i32 digit limits), and the culture FString. A non-finite double is
+refused. On all 1,018 replays, 7,099 rows were history 4 and 14,005 empty, and
+an independent reader (`validate_type_evidence.py`, `FTextTree`) agreed on
+every row.
 
 ## Replay metadata
 

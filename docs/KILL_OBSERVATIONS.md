@@ -13,7 +13,7 @@ python tools/extract_kill_observations.py --export out/nested --out out/kill-obs
 (`MEASURED_BUILDS`) and refuses 12.10, 12.11, 13.00 and any other build before
 reading a row. The legacy builds were added on 2026-09-28, once the parser
 emitted KillData children on them (see the
-[legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+[legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes)).
 The committed extractor then accepted all 48 available legacy exports, three
 per build, made by parser `2e7acce` with `--checkpoints`: 7,334 main and 8,876
 checkpoint parents, 7,347 and 73,518 element updates (12 of them main partial

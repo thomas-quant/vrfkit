@@ -228,7 +228,4 @@ for any of the common replay checks.
 ## Earlier measurements
 
 [Build recovery](LEGACY_BUILD_SUPPORT.md) records the 48 samples used while
-adding 11.06--12.09. The physical-field and gameplay-observation
-measurements in [CURRENT_STATUS.md](CURRENT_STATUS.md) and related phase reports
-retain their own dates and denominators. This audit does not recompute those
-historical semantic inventories.
+adding 11.06--12.09.

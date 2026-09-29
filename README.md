@@ -28,9 +28,8 @@ checks and remaining limits.
 
 - Run it: [`docs/USAGE.md`](docs/USAGE.md)
 - What's extractable: [`docs/DATA.md`](docs/DATA.md)
-- Current corpus status and remaining work: [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md)
+- Remaining work: [`docs/FOLLOWUP.md`](docs/FOLLOWUP.md)
 - Latest build verification: [`docs/BUILD_VERIFICATION.md`](docs/BUILD_VERIFICATION.md)
-- Historical field inventory: [`docs/TARGETING_AND_HEAL_VALUES.md`](docs/TARGETING_AND_HEAL_VALUES.md)
 - Character-death and KillData state: [`docs/KILL_LEDGER.md`](docs/KILL_LEDGER.md)
 - Damage, healing, decay and reset observations: [`docs/SECTION_OBSERVATIONS.md`](docs/SECTION_OBSERVATIONS.md)
 - Section timelines, strict and packet-ordered: [`docs/SECTION_TIMELINE.md`](docs/SECTION_TIMELINE.md)
@@ -89,7 +88,7 @@ observed evidence fields, and the strict array and array-leaf error counters.
 ✅ **1,018/1,018** are clean -- not a claim that every field is understood.
 Structured-array child rows are admitted per build and per route: all
 measured routes on 13.01--13.06, a measured subset on 11.06--13.00
-([legacy route table](docs/LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+([legacy route table](docs/LEGACY_BUILD_SUPPORT.md#measured-array-routes)).
 
 All branches are `++Ares-Core+release-<build>`. Adding a build is one
 `SeededTransform` impl; see [Adding a new build](#supported-builds-and-the-cost-of-a-new-build).

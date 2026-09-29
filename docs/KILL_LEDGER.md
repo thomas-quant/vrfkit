@@ -88,7 +88,7 @@ manifest or the implementation files are refused.
 The ledger reads KillData through the [observation extractor](KILL_OBSERVATIONS.md),
 so it accepts the builds that extractor admits. 11.06--12.09 were added once the
 parser emitted KillData children on them (see the
-[legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes-2026-09-28)).
+[legacy route table](LEGACY_BUILD_SUPPORT.md#measured-array-routes)).
 The committed command completed all 48 available exports, three per build,
 made by parser `2e7acce` with `--checkpoints`, one process at a time.
 

@@ -2,7 +2,7 @@
 
 Measured 2026-09-09 on the 714 accepted exports from parser commit `fc50bfe`;
 the derived-observation tools through `14e58e5` do not change these Parquet
-field counts. See [current status](CURRENT_STATUS.md) for the completed work
+field counts. See the status for the completed work
 and [DATA](DATA.md) for the available values. The numeric FastArray walk over
 the AbilitiesAndBuffs windows, and its 2026-09-28 build scope and second route,
 are in the [GAS investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md): it adds
