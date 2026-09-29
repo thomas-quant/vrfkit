@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use vrf_bitio::BitError;
 
-use crate::decode::FieldType;
+use crate::decode::{DecodeError, FieldType};
+use crate::ftext::FTextTreeError;
 
 /// Why a decode failed, so the operator knows whether to fix the overlay type,
 /// the bit-count expectation or something structural. It is the report's only
@@ -67,6 +68,40 @@ impl DecodeErrorKind {
             | BitError::InvalidBitLength { .. }
             | BitError::InvalidString { .. } => Self::Malformed,
             BitError::InvalidSerializedIntMax { .. } => Self::Rejected,
+        }
+    }
+
+    /// The kind of an overlay decode failure. A refusal (the bits read fine but
+    /// say something the decoder will not return) is `Rejected`: a mistyped
+    /// FText, this repo's costliest bug shape, must not read as leftover bits.
+    pub(crate) fn from_decode_error(err: &DecodeError) -> Self {
+        match err {
+            DecodeError::BitIo(bit) => Self::from_bit_error(bit),
+            DecodeError::NotFullyConsumed { .. } => Self::Residual,
+            // Unreachable: the overlay returns before decoding Raw/Skip.
+            DecodeError::RawOrSkip => Self::ZeroBits,
+            DecodeError::UnsignedOverflow { .. }
+            | DecodeError::UnsupportedTextHistory { .. }
+            | DecodeError::NonFiniteComponent { .. }
+            | DecodeError::InvalidQuantizationScale { .. }
+            | DecodeError::InvalidFNameNumber { .. }
+            | DecodeError::ByteArrayLengthCapExceeded { .. } => Self::Rejected,
+            DecodeError::FTextTree(tree) => match tree {
+                FTextTreeError::BitIo(bit) => Self::from_bit_error(bit),
+                FTextTreeError::TrailingBits { .. } => Self::Residual,
+                FTextTreeError::UnsupportedHistory { .. }
+                | FTextTreeError::UnsupportedNameForm
+                | FTextTreeError::UnsupportedArgumentTag { .. }
+                | FTextTreeError::NegativeNameSuffix { .. }
+                | FTextTreeError::NonFiniteNumber => Self::Rejected,
+                FTextTreeError::InvalidArgumentCount { .. }
+                | FTextTreeError::InvalidEmptyForm
+                | FTextTreeError::InvalidBool { .. }
+                | FTextTreeError::StringTooLong { .. }
+                | FTextTreeError::MissingStringTerminator
+                | FTextTreeError::DepthLimit { .. }
+                | FTextTreeError::NodeLimit { .. } => Self::Malformed,
+            },
         }
     }
 }

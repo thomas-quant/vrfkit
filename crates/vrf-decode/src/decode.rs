@@ -19,9 +19,8 @@ pub enum FieldType {
     EnumByte,
     Int32,
     UInt32,
-    /// A signed 64-bit integer. `FEffectID::EffectID` is one: its
-    /// `compatible_checksum` reproduces only with the C++ type `int64`, so
-    /// `tools/apply_type_corrections.py` retypes the descriptors' `UInt64`.
+    /// `FEffectID::EffectID` is one: its checksum reproduces only as `int64`,
+    /// so `tools/apply_type_corrections.py` retypes the descriptors' `UInt64`.
     Int64,
     UInt64,
     Float,
@@ -66,14 +65,27 @@ pub enum FieldType {
     Skip,
 }
 
-/// The result of a successful decode. Exactly one variant is populated;
-/// the caller maps it to the appropriate `value_*` column.
+/// The result of a successful decode: one of the four `value_*` columns.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodedValue {
     I64(i64),
     F64(f64),
     Bool(bool),
     Str(String),
+}
+
+impl DecodedValue {
+    /// The `(value_i64, value_f64, value_bool, value_str)` columns, exactly one
+    /// of them `Some`.
+    #[must_use]
+    pub fn into_columns(self) -> (Option<i64>, Option<f64>, Option<bool>, Option<String>) {
+        match self {
+            Self::I64(v) => (Some(v), None, None, None),
+            Self::F64(v) => (None, Some(v), None, None),
+            Self::Bool(v) => (None, None, Some(v), None),
+            Self::Str(v) => (None, None, None, Some(v)),
+        }
+    }
 }
 
 /// Decode failure. Non-fatal: the field stays as raw_bits only.
@@ -85,112 +97,95 @@ pub enum DecodeError {
     NotFullyConsumed { remaining: u64 },
     #[error("field type is Raw/Skip -- no decode attempted")]
     RawOrSkip,
-    /// A `UInt64` above `i64::MAX`. The overlay stores `i64`, so this is
-    /// refused rather than sign-flipped into a plausible negative number.
+    /// Refused rather than sign-flipped into a plausible negative `i64`.
     #[error("unsigned value {value} (0x{value:016X}) exceeds i64::MAX")]
     UnsignedOverflow { value: u64 },
     /// A geometry component decoded to `NaN` or an infinity; see
     /// [`crate::types::FRepMovement`]'s `Display` for why it is not coerced.
     #[error("{context} component is not finite")]
     NonFiniteComponent { context: &'static str },
-
-    /// A `VectorNetQuantize` descriptor supplied a zero divisor.
     #[error("quantized vector scale must be non-zero, got {scale}")]
     InvalidQuantizationScale { scale: u32 },
-
-    /// An inline FName carried a negative instance number, which Unreal does
-    /// not define a display spelling for.
+    /// Unreal defines no display spelling for a negative instance number.
     #[error("FName instance number must be non-negative, got {number}")]
     InvalidFNameNumber { number: i32 },
-
     /// A valid `FText` tree of a history `FieldType::FText` has no key for.
     #[error("FText history {history_type} carries no string-table key")]
     UnsupportedTextHistory { history_type: u8 },
-
-    /// A `ByteArray`'s `IntPacked` count exceeded the table's `max_bytes`. It
-    /// fires before any payload byte is read, so it is not a layout mismatch
-    /// ([`Self::NotFullyConsumed`]): the fix is raising the table constant.
+    /// Fires before any payload byte is read, so it is not a layout mismatch:
+    /// the fix is raising the table's `max_bytes`.
     #[error("byte array declared {declared} bytes, exceeding the {max} configured for this field")]
     ByteArrayLengthCapExceeded { declared: u32, max: u32 },
-
-    /// The full-tree FText reader refused the payload; see
-    /// [`crate::FTextTreeError`] for the reason.
     #[error("FText tree: {0}")]
     FTextTree(crate::FTextTreeError),
 }
 
-/// Decode raw bits according to the given [`FieldType`].
-///
-/// `Raw` and `Skip` return `Err(DecodeError::RawOrSkip)`; the caller leaves
-/// `value_*` null. Bits left after decoding are
-/// `Err(DecodeError::NotFullyConsumed)`: a layout mismatch, e.g. version drift.
+/// Decode raw bits according to the given [`FieldType`]. `Raw` and `Skip` are
+/// [`DecodeError::RawOrSkip`]; bits left over are
+/// [`DecodeError::NotFullyConsumed`], a layout mismatch such as version drift.
 pub fn decode_field(
     field_type: FieldType,
     data: &[u8],
     bit_count: u32,
 ) -> Result<DecodedValue, DecodeError> {
-    if matches!(field_type, FieldType::Raw | FieldType::Skip) {
-        return Err(DecodeError::RawOrSkip);
-    }
     let mut reader = BitReader::with_bit_len(data, u64::from(bit_count))?;
-    let value = dispatch_decode(field_type, &mut reader, bit_count)?;
-    let remaining = reader.bits_remaining();
-    // No exemption, not even for `EnumRemainingBits` (it reads at most 32
-    // bits): leftover bits are an error.
-    if remaining != 0 {
-        return Err(DecodeError::NotFullyConsumed { remaining });
+    let value = dispatch_decode(field_type, &mut reader)?;
+    // No exemption, not even for `EnumRemainingBits`: leftover bits are an error.
+    match reader.bits_remaining() {
+        0 => Ok(value),
+        remaining => Err(DecodeError::NotFullyConsumed { remaining }),
     }
-    Ok(value)
 }
 
-fn dispatch_decode(
-    ft: FieldType,
-    r: &mut BitReader<'_>,
-    bit_count: u32,
-) -> Result<DecodedValue, DecodeError> {
-    match ft {
-        FieldType::Bool => scalar::decode_bool(r),
-        FieldType::Byte | FieldType::EnumByte => scalar::decode_byte(r),
-        FieldType::Int32 => scalar::decode_i32(r),
-        FieldType::UInt32 => scalar::decode_u32(r),
-        FieldType::Int64 => scalar::decode_i64(r),
-        FieldType::UInt64 => scalar::decode_u64(r),
-        FieldType::Float => scalar::decode_float(r),
-        FieldType::Double => scalar::decode_double(r),
-        FieldType::FString => scalar::decode_fstring(r),
+fn dispatch_decode(ft: FieldType, r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
+    use DecodedValue::{Bool, F64, I64, Str};
+    Ok(match ft {
+        FieldType::Bool => Bool(r.read_bit()?),
+        FieldType::Byte | FieldType::EnumByte => scalar::decode_byte(r)?,
+        FieldType::Int32 => I64(i64::from(r.read_i32()?)),
+        FieldType::UInt32 => I64(i64::from(r.read_u32()?)),
+        // Two's complement: every bit pattern is a value.
+        FieldType::Int64 => I64(r.read_u64()? as i64),
+        FieldType::UInt64 => scalar::decode_u64(r)?,
+        FieldType::Float => F64(f64::from(r.read_f32()?)),
+        FieldType::Double => F64(r.read_f64()?),
+        FieldType::FString => Str(r.read_fstring(64 * 1024)?),
         FieldType::FText => match decode_ftext_tree_from(r).map_err(DecodeError::FTextTree)? {
-            FTextTree::StringTable { key, .. } => Ok(DecodedValue::Str(key)),
-            tree => Err(DecodeError::UnsupportedTextHistory {
-                history_type: tree.history(),
-            }),
+            FTextTree::StringTable { key, .. } => Str(key),
+            tree => {
+                return Err(DecodeError::UnsupportedTextHistory {
+                    history_type: tree.history(),
+                });
+            }
         },
-        FieldType::FTextTree => decode_ftext_tree_from(r)
-            .map(|tree| DecodedValue::Str(tree.to_json()))
-            .map_err(DecodeError::FTextTree),
-        FieldType::FName => scalar::decode_fname(r),
-        FieldType::ObjectNetGuid | FieldType::GameplayTag => scalar::decode_int_packed(r),
-        FieldType::Guid => scalar::decode_guid(r),
-        FieldType::SerializedInt { max } => scalar::decode_serialized_int(r, max),
-        FieldType::EnumRemainingBits => scalar::decode_enum_remaining_bits(r, bit_count),
-        FieldType::ByteArray { max_bytes } => scalar::decode_byte_array(r, max_bytes),
-        FieldType::VectorFloat => Ok(render(geometry::read_float_vector(r)?)),
-        FieldType::VectorDouble => Ok(render(geometry::read_double_vector(r)?)),
-        FieldType::VectorNetQuantize { scale } => geometry::decode_vector_net_quantize(r, scale),
-        FieldType::VectorNetQuantizeNormal => Ok(render(geometry::read_fixed_vector_normal(r)?)),
-        FieldType::RotationShort => Ok(render(geometry::read_rotation(r, 16)?)),
-        FieldType::RotationByte => Ok(render(geometry::read_rotation(r, 8)?)),
-        FieldType::Transform => Ok(render(geometry::read_transform(r)?)),
-        FieldType::RepMovement { rotation, location } => {
-            Ok(render(geometry::read_rep_movement(r, rotation, location)?))
+        FieldType::FTextTree => Str(decode_ftext_tree_from(r)
+            .map_err(DecodeError::FTextTree)?
+            .to_json()),
+        FieldType::FName => Str(scalar::read_fname::<DecodeError>(r, 64 * 1024)?),
+        // Both are wire IntPacked values; only the declared type tells them apart.
+        FieldType::ObjectNetGuid | FieldType::GameplayTag => I64(i64::from(r.read_int_packed()?)),
+        FieldType::Guid => Str(scalar::read_guid(r)?),
+        FieldType::SerializedInt { max } => I64(i64::from(r.read_serialized_int(max)?)),
+        FieldType::EnumRemainingBits => scalar::decode_enum_remaining_bits(r)?,
+        FieldType::ByteArray { max_bytes } => Str(scalar::read_byte_array_hex(r, max_bytes)?),
+        FieldType::VectorFloat => render(geometry::read_float_vector(r)?),
+        FieldType::VectorDouble => render(geometry::read_double_vector(r)?),
+        FieldType::VectorNetQuantize { scale } => {
+            render(geometry::read_vector_net_quantize(r, scale)?)
         }
-        FieldType::Raw | FieldType::Skip => Err(DecodeError::RawOrSkip),
-    }
+        FieldType::VectorNetQuantizeNormal => render(geometry::read_fixed_vector_normal(r)?),
+        FieldType::RotationShort => render(geometry::read_rotation(r, 16)?),
+        FieldType::RotationByte => render(geometry::read_rotation(r, 8)?),
+        FieldType::Transform => render(geometry::read_transform(r)?),
+        FieldType::RepMovement { rotation, location } => {
+            render(geometry::read_rep_movement(r, rotation, location)?)
+        }
+        FieldType::Raw | FieldType::Skip => return Err(DecodeError::RawOrSkip),
+    })
 }
 
-/// Render a `Display` value into [`DecodedValue::Str`], deliberately with
-/// plain `to_string()`: pre-reserving 32 bytes (vector) or 256
-/// (`ReplicatedMovement`) measured no faster end to end and raised peak RSS
-/// by ~3 MB, dead space in the row buffer for every short value like `(0,0,0)`.
+/// Plain `to_string()` on purpose: pre-reserving 32 or 256 bytes measured no
+/// faster end to end and raised peak RSS by ~3 MB of dead row-buffer space.
 fn render(value: impl core::fmt::Display) -> DecodedValue {
     DecodedValue::Str(value.to_string())
 }

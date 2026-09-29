@@ -123,50 +123,49 @@ pub struct FRepMovement {
     pub server_physics_handle: Option<u32>,
 }
 
-/// Writes an [`FVector`] as `{"x":..,"y":..,"z":..}`, not its compact `Display`.
-fn write_vector_json(f: &mut fmt::Formatter<'_>, v: &FVector) -> fmt::Result {
-    write!(f, "{{\"x\":{},\"y\":{},\"z\":{}}}", v.x, v.y, v.z)
+/// An [`FVector`] as the JSON object `{"x":..,"y":..,"z":..}`, not its compact
+/// `Display`; the effect JSON writes vectors the same way.
+pub(crate) struct VectorJson<'a>(pub(crate) &'a FVector);
+
+impl fmt::Display for VectorJson<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let FVector { x, y, z } = self.0;
+        write!(f, "{{\"x\":{x},\"y\":{y},\"z\":{z}}}")
+    }
 }
 
-/// A JSON object, not the compact form, which has nowhere to put
-/// `simulated_physics_sleep` or `server_physics_handle`. Member names and
-/// order follow the reference bundle exactly
-/// (docs/archive/PROJECT_STATUS.md 13-B: a 14,377-row regression). Finiteness
-/// is enforced by
-/// `DecodeError::NonFiniteComponent`, not by construction: the
-/// componentBitCount == 0 raw-float fallback can carry NaN (docs/OVERLAY_RESOLUTION.md
-/// "FRepMovement finiteness is enforced"). Any other constructor owes that check.
+/// `Some(v)` as `v`, `None` as JSON `null`.
+struct OrNull<T>(Option<T>);
+
+impl<T: fmt::Display> fmt::Display for OrNull<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(v) => v.fmt(f),
+            None => f.write_str("null"),
+        }
+    }
+}
+
+/// A JSON object whose member names and order match the reference bundle byte
+/// for byte. Finiteness is `DecodeError::NonFiniteComponent`'s job, not the
+/// type's: the raw-float fallback can carry NaN, so any other constructor owes
+/// that check (docs/OVERLAY_RESOLUTION.md "FRepMovement finiteness is enforced").
 impl fmt::Display for FRepMovement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("{\"linear_velocity\":")?;
-        write_vector_json(f, &self.linear_velocity)?;
-        f.write_str(",\"angular_velocity\":")?;
-        match self.angular_velocity {
-            Some(ref av) => write_vector_json(f, av)?,
-            None => f.write_str("null")?,
-        }
-        f.write_str(",\"location\":")?;
-        write_vector_json(f, &self.location)?;
+        let FRotator { pitch, yaw, roll } = self.rotation;
         write!(
             f,
-            ",\"rotation\":{{\"pitch\":{},\"yaw\":{},\"roll\":{}}}",
-            self.rotation.pitch, self.rotation.yaw, self.rotation.roll
-        )?;
-        write!(
-            f,
-            ",\"simulated_physics_sleep\":{},\"rep_physics\":{}",
-            self.simulated_physics_sleep, self.rep_physics
-        )?;
-        f.write_str(",\"server_frame\":")?;
-        match self.server_frame {
-            Some(v) => write!(f, "{v}")?,
-            None => f.write_str("null")?,
-        }
-        f.write_str(",\"server_physics_handle\":")?;
-        match self.server_physics_handle {
-            Some(v) => write!(f, "{v}")?,
-            None => f.write_str("null")?,
-        }
-        f.write_str("}")
+            "{{\"linear_velocity\":{},\"angular_velocity\":{},\"location\":{},\
+             \"rotation\":{{\"pitch\":{pitch},\"yaw\":{yaw},\"roll\":{roll}}},\
+             \"simulated_physics_sleep\":{},\"rep_physics\":{},\
+             \"server_frame\":{},\"server_physics_handle\":{}}}",
+            VectorJson(&self.linear_velocity),
+            OrNull(self.angular_velocity.as_ref().map(VectorJson)),
+            VectorJson(&self.location),
+            self.simulated_physics_sleep,
+            self.rep_physics,
+            OrNull(self.server_frame),
+            OrNull(self.server_physics_handle),
+        )
     }
 }
