@@ -491,11 +491,10 @@ impl Sink for ObjectSink {
 }
 
 /// Append a handle's label: the replay's declared name, then the schema's,
-/// then `_h{handle}`. The replay wins because the schema can disagree with the
-/// wire (`DamageRecieved` is Riot's spelling); containers pass `&[]`, as the
-/// schema decides the nesting. `declared` applies at every depth: Unreal
-/// flattens a `TArray` of structs onto the ENCLOSING group's handles, so one
-/// handle space spans the tree.
+/// then `_h{handle}`. Containers pass `&[]`: their path spelling is an output
+/// contract, and the replay declares both 44 and 79 `RegionalDamageInteractions`.
+/// `declared` applies at every depth: Unreal flattens a `TArray` of structs
+/// onto the ENCLOSING group's handles, so one handle space spans the tree.
 fn push_label(
     path: &mut String,
     declared: &[Option<&str>],
@@ -516,12 +515,12 @@ mod tests {
     use super::*;
     use vrf_testkit::{BitWrite, BitWriter};
 
-    /// Handle 4 at depth 0 is a sub-array, `Reports`, with no further nesting;
-    /// handle 3 is a leaf the schema names `RoundNumber`.
     static INNER: ArrayFieldSchema = ArrayFieldSchema {
         sub_arrays: &[],
         field_names: &[],
     };
+    /// Handle 4 is a sub-array, `Reports`, with no further nesting; handle 3 is
+    /// a leaf the schema names `RoundNumber`.
     static OUTER: ArrayFieldSchema = ArrayFieldSchema {
         sub_arrays: &[(4, &INNER)],
         field_names: &[(3, "RoundNumber"), (4, "Reports")],
@@ -668,8 +667,7 @@ mod tests {
         assert_eq!(fields[0].path, "[0]._h7");
     }
 
-    /// Container segments keep the schema's name even when the replay declares
-    /// a different one, because the schema is what decides the nesting.
+    /// A container segment keeps the production schema's name over a declared one.
     #[test]
     fn a_container_segment_keeps_its_schema_name() {
         // Outer element 0 carries handle 4 (Reports, a sub-array) whose single
@@ -683,7 +681,8 @@ mod tests {
         declared[5] = Some("RoundNumber");
 
         let mut stats = ArrayDecodeStats::default();
-        let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &declared, &mut stats);
+        let schema = Some(&COMBAT_ROUNDS_SCHEMA);
+        let fields = decode_struct_array(&data, bit_count, schema, &declared, &mut stats);
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].path, "[0].Reports[0].RoundNumber");
