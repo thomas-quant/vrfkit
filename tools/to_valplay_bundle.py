@@ -245,8 +245,6 @@ class _Tally(dict):
         "effect_array_residual_bits":
             "shot effect blobs with bits left over after decoding "
             "(framing did not end where this parse expected)",
-        "missing_manifest":
-            "manifest.json absent (replay metadata substituted)",
         "empty_gameplay_tag_table":
             "shots decoded with no gameplay-tag table (fields keyed by index)",
         "events_time_ms_regressions":
@@ -592,17 +590,9 @@ def _resolve_equippable(net_guid, guid_outer, guid_path, guid_class):
 
 
 def _load_net_guids(export_dir):
-    """Read net_guids.parquet into (guid -> outer, guid -> path, row count).
-
-    An absent file gives empty dicts and a `None` row count: older exports
-    still convert, with weapon identity unresolved, and None is not 0 because
-    only an empty table can be compared with a declared count. The row count
-    is the table's height, not either dict's size: both drop rows.
-    """
-    path = export_dir / "net_guids.parquet"
-    if not path.exists():
-        return {}, {}, None
-    table = pq.read_table(path)
+    """Read net_guids.parquet into (guid -> outer, guid -> path, row count);
+    the count is the table's height, since both dicts drop rows."""
+    table = pq.read_table(export_dir / "net_guids.parquet")
     guids = table.column("net_guid").to_pylist()
     paths = table.column("path").cast("string").to_pylist()
     outers = table.column("outer_net_guid").to_pylist()
@@ -1308,16 +1298,6 @@ def _split_rpc_field(field_name: str):
     return name, (param if dot else None)
 
 
-# ---------------------------------------------------------------------------
-# Actor class inference: map group_path to replication_class_path
-# ---------------------------------------------------------------------------
-def _group_path_to_class(gp: str) -> str:
-    """An actor's class from its first group_path, for the legacy fallback
-    without actors.parquet: a property group_path IS the class path, and an
-    RPC group's is the class plus the _ClassNetCache suffix."""
-    return gp.replace(CLASS_NET_CACHE_SUFFIX, '')
-
-
 def _to_package_path(class_path: str) -> str:
     """Drop the `.ClassName_C` suffix, leaving the UE package path.
 
@@ -1333,14 +1313,6 @@ def _to_package_path(class_path: str) -> str:
     if "." not in tail:
         return class_path
     return class_path[: slash + 1] + tail.split(".", 1)[0]
-
-
-def _group_path_to_archetype(gp: str) -> str:
-    """'.../Wushu_PC.Wushu_PC_C' -> 'Default__Wushu_PC_C' (legacy fallback)."""
-    if '.' in gp:
-        leaf = gp.rsplit('.', 1)[-1]
-        return f"Default__{leaf}"
-    return f"Default__{gp.rsplit('/', 1)[-1]}"
 
 
 # ---------------------------------------------------------------------------
@@ -1610,11 +1582,7 @@ def _load_field_columns(fields_path: Path, verbose: bool) -> _FieldColumns:
         actor=_numeric_column_to_pylist(table.column('actor_net_guid')),
         # Subobject identity. Null for actor blocks; the reference format then
         # repeats the actor guid, so mirror that when emitting.
-        obj=(
-            _nullable_numeric_to_pylist(table.column('object_net_guid'))
-            if 'object_net_guid' in table.schema.names
-            else [None] * n_rows
-        ),
+        obj=_nullable_numeric_to_pylist(table.column('object_net_guid')),
         channel=_numeric_column_to_pylist(table.column('channel_index')),
         group_path=_dict_column_to_pylist(table.column('group_path')),
         handle=_numeric_column_to_pylist(table.column('handle')),
@@ -1633,53 +1601,25 @@ def _load_field_columns(fields_path: Path, verbose: bool) -> _FieldColumns:
 
 
 def _group_rows(cols: _FieldColumns):
-    """Group field rows into property and RPC groups (row indices by key),
-    plus each actor's first/last appearance.
-
-    RPC rows are those whose group_path contains '_ClassNetCache'. One pass:
-    the dicts' insertion order decides how events tying on (packet_id,
-    time_ms) are written, and splitting the loop would reshuffle them.
-    """
-    # First/last appearance: the lifetime fallback without actors.parquet.
-    actor_first = {}  # actor_net_guid -> (time_ms, packet_id, group_path)
-    actor_last = {}   # actor_net_guid -> (time_ms, packet_id)
+    """Group field rows into property and RPC (group_path contains
+    '_ClassNetCache') groups of row indices, in one pass: the dicts' insertion
+    order decides how events tying on (packet_id, time_ms) are written."""
     prop_groups = defaultdict(list)
     rpc_groups = defaultdict(list)
     # Counted, to compare with quality.net.unresolved_rpc_payloads_preserved.
     unresolved_cnc_rows = 0
-
-    col_time = cols.time_ms
-    col_pid = cols.packet_id
-    col_actor = cols.actor
-    col_obj = cols.obj
-    col_gp = cols.group_path
-    col_handle = cols.handle
-    col_fn = cols.field_name
-
-    for i in range(cols.n_rows):
-        if col_fn[i] == UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME:
+    for i, (pid, actor, obj, gp, handle, fn) in enumerate(zip(
+            cols.packet_id, cols.actor, cols.obj, cols.group_path, cols.handle,
+            cols.field_name)):
+        if fn == UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME:
             unresolved_cnc_rows += 1
-            continue
-
-        actor = col_actor[i]
-        gp = col_gp[i]
-        pid = col_pid[i]
-        ms = col_time[i]
-
-        if actor not in actor_first:
-            actor_first[actor] = (ms, pid, gp)
-        actor_last[actor] = (ms, pid)
-
-        is_rpc = CLASS_NET_CACHE_SUFFIX in gp
-        if is_rpc:
-            handle = col_handle[i]
+        elif CLASS_NET_CACHE_SUFFIX in gp:
             rpc_groups[(pid, actor, gp, handle)].append(i)
         else:
-            # Keyed by subobject too: a character's several ItemSlot
-            # subobjects would otherwise merge into one slot.
-            prop_groups[(pid, actor, col_obj[i], gp)].append(i)
-
-    return actor_first, actor_last, prop_groups, rpc_groups, unresolved_cnc_rows
+            # Keyed by subobject too: a character's ItemSlot subobjects
+            # would otherwise merge into one slot.
+            prop_groups[(pid, actor, obj, gp)].append(i)
+    return prop_groups, rpc_groups, unresolved_cnc_rows
 
 
 #: `actors.event` -> the bundle event type (`open` is actor_spawned). THREE
@@ -1764,29 +1704,18 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
     events.parquet also holds a replay-scoped id, free-form metadata and raw
     payload bytes, any of which may identify an account or match, so none
     crosses. The payload FString crosses only when it equals the group's
-    public enum constant and the tag/time tuple matches the measured layout;
-    older exports lack those columns. Returns ``(events, rows_read)``,
-    rows_read None when the table is absent (not 0: it is reconciled).
+    public enum constant and the tag/time tuple matches the measured layout.
+    Returns ``(events, rows_read)``.
     """
-    path = export_dir / "events.parquet"
-    if not path.exists():
-        return [], None
-
-    table = pq.read_table(path)
+    table = pq.read_table(export_dir / "events.parquet")
     groups = _dict_column_to_pylist(table.column("group"))
     time1 = _numeric_column_to_pylist(table.column("time1"))
     time2 = _numeric_column_to_pylist(table.column("time2"))
     word0 = _nullable_numeric_to_pylist(table.column("word0"))
     word1 = _nullable_numeric_to_pylist(table.column("word1"))
-
-    def optional(name, read):  # an additive column an older export lacks
-        if name in table.column_names:
-            return read(table.column(name))
-        return [None] * len(table)
-
-    payload_tag = optional("payload_tag", _nullable_numeric_to_pylist)
-    payload_name = optional("payload_name", pa.ChunkedArray.to_pylist)
-    payload_seconds = optional("payload_seconds", _nullable_numeric_to_pylist)
+    payload_tag = _nullable_numeric_to_pylist(table.column("payload_tag"))
+    payload_name = table.column("payload_name").to_pylist()
+    payload_seconds = _nullable_numeric_to_pylist(table.column("payload_seconds"))
     packet_index = _PacketTimeIndex(cols)
     events = []
 
@@ -1830,138 +1759,60 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
     return events, len(table)
 
 
-def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
-                        verbose: bool, tally: "_Tally"):
+def _spawn_axes(row: dict, axes: tuple):
+    """Float32 spawn values written shortest; null when all are null (a
+    static actor: {0,0,0} would merge it with the actors really spawning at
+    the origin), a single null axis 0."""
+    values = [row["spawn_" + axis] for axis in axes]
+    if all(value is None for value in values):
+        return None
+    return {axis: 0 if value is None else _f32_shortest(value)
+            for axis, value in zip(axes, values)}
+
+
+def _build_actor_events(export_dir: Path, verbose: bool, tally: "_Tally"):
     """Build actor_spawned / actor_closed / actor_dormant events.
 
     Returns ``(events, guid_class)``; `guid_class` (actor GUID -> spawn class
-    path) is filled in the same pass for the shots' weapon identity. `tally`
-    is required: only its unknown-value counter says a fourth value appeared.
+    path) is filled in the same pass for the shots' weapon identity.
     """
     events = []
-    guid_class = {}  # actor net guid -> spawn class path
-    actor_event_counts = Counter(dict.fromkeys(_ACTOR_EVENT_TYPES.values(), 0))
+    guid_class = {}
+    counts = Counter(dict.fromkeys(_ACTOR_EVENT_TYPES.values(), 0))
+    rows = pq.read_table(export_dir / "actors.parquet").to_pylist()
+    for row in rows:
+        raw_event = row["event"]
+        event_type = ("actor_spawned" if raw_event == "open"
+                      else _ACTOR_EVENT_TYPES.get(raw_event))
+        if event_type is None:
+            # A visible unknown carrying the raw value, never a plausible close.
+            tally.bump("unknown_actor_lifecycle_events")
+            event_type = "actor_lifecycle_unknown"
+        event = {"type": event_type, "time_ms": row["time_ms"],
+                 "actor_net_guid": row["actor_net_guid"],
+                 "channel": row["channel_index"]}
+        if raw_event != "open":
+            counts[event_type] += 1
+            event["actor_event"] = raw_event  # the wire's value, to audit the mapping
+        else:
+            class_path = row["class_path"]
+            if class_path:
+                # First open wins: a reused GUID keeps its first life's class.
+                guid_class.setdefault(row["actor_net_guid"], class_path)
+            # The event carries the reference's package path, guid_class the
+            # object path the weapon lookup matches; the archetype is null
+            # for a static actor, never a bare "Default__".
+            event["replication_class_path"] = (
+                _to_package_path(class_path) if class_path else None)
+            event["archetype_path"] = row["archetype_path"]
+            event["location"] = _spawn_axes(row, ("x", "y", "z"))
+            event["rotation"] = _spawn_axes(row, ("pitch", "yaw", "roll"))
+        events.append((row["packet_id"], row["time_ms"], event))
 
-    # actors.parquet is authoritative: class, archetype and location come from
-    # the spawn data itself.
-    actors_path = export_dir / "actors.parquet"
-    if actors_path.exists():
-        actors_table = pq.read_table(actors_path)
-        a_time = actors_table.column('time_ms').to_pylist()
-        a_pid = actors_table.column('packet_id').to_pylist()
-        a_chan = actors_table.column('channel_index').to_pylist()
-        a_guid = actors_table.column('actor_net_guid').to_pylist()
-        a_event = actors_table.column('event').to_pylist()
-        a_class = _dict_column_to_pylist(actors_table.column('class_path'))
-        a_arch = _dict_column_to_pylist(actors_table.column('archetype_path'))
-        a_sx = actors_table.column('spawn_x').to_pylist()
-        a_sy = actors_table.column('spawn_y').to_pylist()
-        a_sz = actors_table.column('spawn_z').to_pylist()
-        a_spitch = actors_table.column('spawn_pitch').to_pylist()
-        a_syaw = actors_table.column('spawn_yaw').to_pylist()
-        a_sroll = actors_table.column('spawn_roll').to_pylist()
-
-        for i in range(len(actors_table)):
-            if a_event[i] == 'open':
-                # Float32 spawn coordinates, written shortest. A missing one
-                # stays null: only static actors lack spawn data (27 opens on
-                # 02d4d478; for a dynamic actor with its location bit clear the
-                # parser writes the wire's (0,0,0) default, pipeline.rs
-                # read_optional_quantized_vector), and {0,0,0} would mix them
-                # with the 66 that really spawn at the origin.
-                has_loc = a_sx[i] is not None or a_sy[i] is not None or a_sz[i] is not None
-                location = _vec3(
-                    _f32_shortest(a_sx[i]) if a_sx[i] is not None else 0,
-                    _f32_shortest(a_sy[i]) if a_sy[i] is not None else 0,
-                    _f32_shortest(a_sz[i]) if a_sz[i] is not None else 0,
-                ) if has_loc else None
-                # Rotation is independent of location (a projectile at the
-                # origin may carry a direction); null when all three are null.
-                has_rotation = (
-                    a_spitch[i] is not None
-                    or a_syaw[i] is not None
-                    or a_sroll[i] is not None
-                )
-                rotation = {
-                    axis: _f32_shortest(value) if value is not None else 0
-                    for axis, value in (
-                        ("pitch", a_spitch[i]),
-                        ("yaw", a_syaw[i]),
-                        ("roll", a_sroll[i]),
-                    )
-                } if has_rotation else None
-                class_path = a_class[i]
-                if class_path:
-                    # First open wins: a GUID reused after a close still
-                    # belongs, for the shots, to its first life.
-                    guid_class.setdefault(a_guid[i], class_path)
-                # Null for a static actor, as in the reference; never a bare
-                # "Default__".
-                archetype = a_arch[i]
-                # guid_class keeps the full object path the weapon lookup
-                # matches; the event carries the reference's package path.
-                event = {
-                    "type": "actor_spawned",
-                    "time_ms": a_time[i],
-                    "actor_net_guid": a_guid[i],
-                    "channel": a_chan[i],
-                    "replication_class_path": _to_package_path(class_path) if class_path else None,
-                    "archetype_path": archetype,
-                    "location": location,
-                    "rotation": rotation,
-                }
-                events.append((a_pid[i], a_time[i], event))
-            else:
-                # close, dormant, or a value this adapter does not know: see
-                # _ACTOR_EVENT_TYPES, and BUNDLE_SCHEMA_VERSION for the bump.
-                raw_event = a_event[i]
-                event_type = _ACTOR_EVENT_TYPES.get(raw_event)
-                if event_type is None:
-                    # Its own type with the raw value, and counted: a visible
-                    # unknown, never a plausible close.
-                    tally.bump("unknown_actor_lifecycle_events")
-                    event_type = "actor_lifecycle_unknown"
-                actor_event_counts[event_type] += 1
-                event = {
-                    "type": event_type,
-                    "time_ms": a_time[i],
-                    "actor_net_guid": a_guid[i],
-                    "channel": a_chan[i],
-                    # The wire's value, so a consumer can audit the mapping.
-                    "actor_event": raw_event,
-                }
-                events.append((a_pid[i], a_time[i], event))
-
-        if verbose:
-            print(f"  {len(actors_table):,} actor lifecycle events from actors.parquet")
-            for name, count in sorted(actor_event_counts.items()):
-                print(f"    {name}: {count:,}")
-    else:
-        # Legacy fallback: lifetimes from the first/last field row.
-        for actor, (ms, pid, gp) in actor_first.items():
-            class_path = _group_path_to_class(gp)
-            archetype = _group_path_to_archetype(gp)
-            event = {
-                "type": "actor_spawned",
-                "time_ms": ms,
-                "actor_net_guid": actor,
-                "replication_class_path": class_path,
-                "archetype_path": archetype,
-                "location": {"x": 0, "y": 0, "z": 0},
-            }
-            events.append((pid, ms, event))
-
-        # No `event` column here: the last field row cannot tell a despawn
-        # from dormancy, so `actor_event` is null, not "close".
-        for actor, (ms, pid) in actor_last.items():
-            event = {
-                "type": "actor_closed",
-                "time_ms": ms,
-                "actor_net_guid": actor,
-                "actor_event": None,
-            }
-            events.append((pid + 1, ms, event))
-
+    if verbose:
+        print(f"  {len(rows):,} actor lifecycle events from actors.parquet")
+        for name, count in sorted(counts.items()):
+            print(f"    {name}: {count:,}")
     return events, guid_class
 
 
@@ -2302,22 +2153,14 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     """Write movement.ndjson, keeping the last sub-move per (packet, character).
 
     Returns ``(rows_read, rows_written, non_finite_rows)``. Only rows_read
-    (None when the table is absent) compares with the export's declared
-    count; rows_written is short by the intended collapse. non_finite_rows
+    compares with the export's declared count; rows_written is short by the
+    intended collapse. non_finite_rows
     counts WRITTEN rows with a non-finite value, spelled Infinity/-Infinity/
     NaN as everywhere in this bundle: Python's json reads them, a strict
     parser rejects the line, and valplay (orjson when installed) then
     recounts fewer rows than `adapter.movement_rows_written` and refuses to
     publish. The count names the cause.
     """
-    if not movement_path.exists():
-        # Written empty, not skipped: `convert` requires movement.ndjson, and
-        # an empty file says "this replay has no movement".
-        (output_dir / "movement.ndjson").write_text("", encoding='utf-8')
-        if verbose:
-            print("  movement.parquet not found, movement.ndjson written empty")
-        return None, 0, 0
-
     t0 = time.time()
     if verbose:
         print("Converting movement.parquet...")
@@ -2435,34 +2278,20 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
 # ---------------------------------------------------------------------------
 def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     """Read vrfkit Parquet export and write valplay-compatible bundle."""
-    fields_path = export_dir / "fields.parquet"
-    movement_path = export_dir / "movement.parquet"
-    manifest_path = export_dir / "manifest.json"
-
     tally = _Tally()
-
-    # An absent manifest leaves a bundle that does not look damaged: plausible
-    # header defaults ("unknown", 0, "") and an empty tag table, so every
-    # shot reports null ammo, firing state, player and attack vectors. So it
-    # is counted, here and below once it is known whether any shot paid.
-    manifest = {}
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    else:
-        tally.bump("missing_manifest")
+    manifest = json.loads((export_dir / "manifest.json").read_text(encoding='utf-8'))
     upstream_quality = manifest.get("quality")
     if not isinstance(upstream_quality, dict):
         # Not a loss (older vrfkit emitted none), so not counted; published
         # as `"quality": null`, "nobody counted", never a plausible zero.
         upstream_quality = None
 
-    cols = _load_field_columns(fields_path, verbose)
+    cols = _load_field_columns(export_dir / "fields.parquet", verbose)
 
     t0 = time.time()
     if verbose:
         print("Grouping rows into events...")
-    (actor_first, actor_last, prop_groups, rpc_groups,
-     unresolved_cnc_rows) = _group_rows(cols)
+    prop_groups, rpc_groups, unresolved_cnc_rows = _group_rows(cols)
     if verbose:
         print(f"  {len(prop_groups):,} property events, {len(rpc_groups):,} RPC invocations")
         print(f"  Grouped in {time.time()-t0:.1f}s")
@@ -2476,9 +2305,7 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     # in "Conversion phases" order: actors, properties, RPCs, timeline.
     guid_outer, guid_path, net_guid_rows_read = _load_net_guids(export_dir)
 
-    events, guid_class = _build_actor_events(
-        export_dir, actor_first, actor_last, verbose, tally
-    )
+    events, guid_class = _build_actor_events(export_dir, verbose, tally)
 
     events += _build_property_events(cols, prop_groups, tally)
 
@@ -2518,7 +2345,7 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
         tally.bump("events_time_ms_regressions", time_ms_regressions)
 
     movement_rows_read, movement_written, non_finite_movement_rows = _write_movement(
-        movement_path, output_dir, verbose
+        export_dir / "movement.parquet", output_dir, verbose
     )
     # Not a loss either, but a strict parser rejects the line.
     tally.bump("non_finite_movement_rows", non_finite_movement_rows)
@@ -2638,9 +2465,12 @@ def _publish_bundle(staging: Path, output_dir: Path) -> None:
 def convert(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     """Transactionally convert one export without modifying either old tree."""
     export_dir, output_dir = _validate_separate_trees(export_dir, output_dir)
-    fields_path = export_dir / "fields.parquet"
-    if not fields_path.is_file():
-        raise FileNotFoundError(f"fields.parquet not found in {export_dir}")
+    # `vrfkit export` writes all six in one transaction: an export missing
+    # one predates it and is regenerated, never converted with stand-ins.
+    for name in ("manifest.json", "fields.parquet", "actors.parquet",
+                 "net_guids.parquet", "events.parquet", "movement.parquet"):
+        if not (export_dir / name).is_file():
+            raise FileNotFoundError(f"{name} not found in {export_dir}")
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     parent = output_dir.parent.resolve()
@@ -2677,7 +2507,7 @@ def main():
         description="Convert vrfkit Parquet export to valplay NDJSON bundle"
     )
     parser.add_argument("export_dir", type=Path,
-                        help="vrfkit export directory (contains fields.parquet)")
+                        help="vrfkit export directory")
     parser.add_argument("-o", "--output", type=Path, default=None,
                         help="Output bundle directory (default: out/valplay_bundle/<stem>)")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -2688,13 +2518,9 @@ def main():
     if args.output:
         output_dir = args.output.resolve()
     else:
-        manifest_path = export_dir / "manifest.json"
-        if manifest_path.exists():
-            m = json.loads(manifest_path.read_text(encoding='utf-8'))
-            source = m.get("source_file", "")
-            stem = PureWindowsPath(source).stem if source else export_dir.name
-        else:
-            stem = export_dir.name
+        manifest = json.loads((export_dir / "manifest.json").read_text(encoding='utf-8'))
+        source = manifest.get("source_file")
+        stem = PureWindowsPath(source).stem if source else export_dir.name
         output_dir = Path(__file__).resolve().parent.parent / "out" / "valplay_bundle" / stem
 
     convert(export_dir, output_dir, verbose=args.verbose)

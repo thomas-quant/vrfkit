@@ -943,7 +943,7 @@ only `word0`/`word1` for groups whose fixed payload arity Rust already
 validated. The neutral `payload_tag`, `payload_name` and `payload_seconds`
 fields cross only as a complete tuple after the adapter independently checks
 the exact public tag/name allowlist, finiteness and the same 1.001 ms time
-tolerance. Older exports and any mismatching row simply omit the tuple. Replay
+tolerance; a mismatching row omits the tuple. Replay
 event id, free-form metadata, payload size and raw payload never enter the
 NDJSON bundle. Actor lifecycle rows likewise retain the
 already-decoded channel and spawn rotation; absent rotation stays null rather
