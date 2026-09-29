@@ -45,11 +45,6 @@ and the exact indexed grammar
 `Rounds[].Reports[].Interactions[].ParticipantSubject`. The corpus contains
 298 concrete indexed paths. Synthesized checksums are null.
 
-The [catalog](../tools/fixtures/semantic_evidence.json) records separate main and
-checkpoint claims, exact group identity, and the four measured builds. Schema 2
-supports literal identifier segments and decimal array indices only; generic
-regex, prefix and suffix claims are excluded.
-
 Existing BombPlayerState `Subject` checks also matched header identities:
 6,924 main and 136,350 checkpoint rows. Main `SpawnedCharacter` has 6,993 nonzero
 movement references and 131 zero sentinels. The old **checkpoint**

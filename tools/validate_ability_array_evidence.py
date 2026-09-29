@@ -13,131 +13,75 @@ from collections import Counter
 import json
 import math
 from pathlib import Path
-import struct
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+if __package__:
+    from .validate_type_evidence import Bits, fname
+else:
+    from validate_type_evidence import Bits, fname
 
-ROUTES = {
-    ("/Script/ShooterGame.BlindManagerComponent", "ActiveBlinds", 3853965310): {
-        3: ("BlindId", None),
-        4: ("EffectID", None),
-        5: ("SourceID", None),
-        6: ("bLocalEffect", 1),
-        7: ("bTransient", 1),
-        8: ("InitialDuration", 32),
-        9: ("StartNetMovementTime", 32),
-        10: ("BlindConfig", None),
-        11: ("CausingActor", None),
-    },
-    (
-        "/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache",
-        "MulticastSetPath.NetworkedProjectilePath",
-        2930105559,
-    ): {
-        1: ("ElapsedSeconds", 32),
-        2: ("Location", 192),
-        3: ("Velocity", 192),
-    },
-}
-
-BLIND_DECLARATIONS = {
-    2: ("ActiveBlinds", 3853965310),
-    3: ("BlindId", 2836858544),
-    4: ("EffectID", 3321413110),
-    5: ("SourceID", 4130766059),
-    6: ("bLocalEffect", 2802682995),
-    7: ("bTransient", 815378154),
-    8: ("InitialDuration", 1370668337),
-    9: ("StartNetMovementTime", 2358118895),
-    10: ("BlindConfig", 4121438116),
-    11: ("CausingActor", 2370661694),
-}
+BLINDS = ("/Script/ShooterGame.BlindManagerComponent", "ActiveBlinds", 3853965310)
+PATH = ("/Script/ShooterGame.PrecalculatedProjectileMovementComponent_ClassNetCache",
+        "MulticastSetPath.NetworkedProjectilePath", 2930105559)
 PATH_GROUP = "/Script/ShooterGame.PrecalculatedProjectileMovementComponent:MulticastSetPath"
 
+#: route -> {member handle: (name, allowed widths, declared checksum)}
+ROUTES = {
+    BLINDS: {
+        3: ("BlindId", (32,), 2836858544),
+        4: ("EffectID", (64,), 3321413110),
+        5: ("SourceID", (297,), 4130766059),
+        6: ("bLocalEffect", (1,), 2802682995),
+        7: ("bTransient", (1,), 815378154),
+        8: ("InitialDuration", (32,), 1370668337),
+        9: ("StartNetMovementTime", (32,), 2358118895),
+        10: ("BlindConfig", (16,), 4121438116),
+        11: ("CausingActor", (8, 16, 24), 2370661694),
+    },
+    PATH: {
+        1: ("ElapsedSeconds", (32,), None),
+        2: ("Location", (192,), None),
+        3: ("Velocity", (192,), None),
+    },
+}
 
-class Bits:
-    def __init__(self, data: bytes, length: int):
-        # A ValueError, which main() reports per row, not an assert: that
-        # escapes as a traceback, and `python -O` removes it.
-        if len(data) * 8 < length:
-            raise ValueError(f"raw_bits holds {len(data) * 8} bits, bit_count says {length}")
-        self.data = data
-        self.length = length
-        self.pos = 0
-
-    def read(self, width: int) -> int:
-        if self.pos + width > self.length:
-            raise ValueError(f"short read at bit {self.pos}: wanted {width}")
-        value = 0
-        for shift in range(width):
-            value |= ((self.data[self.pos >> 3] >> (self.pos & 7)) & 1) << shift
-            self.pos += 1
-        return value
-
-    def packed(self) -> int:
-        value = 0
-        for shift in range(0, 35, 7):
-            byte = self.read(8)
-            if shift == 28 and byte >> 1 > 15:
-                # Past 32 bits: vrf-bitio and validate_type_evidence refuse it.
-                raise ValueError("IntPacked overflow")
-            value |= (byte >> 1) << shift
-            if byte & 1 == 0:
-                return value
-        raise ValueError("IntPacked overflow")
+#: route -> (label, manifest group, {handle: (name, checksum)} it must declare)
+DECLARATIONS = {
+    BLINDS[1]: ("BlindManager", BLINDS[0], {2: BLINDS[1:], **{
+        handle: (name, checksum) for handle, (name, _, checksum) in ROUTES[BLINDS].items()}}),
+    PATH[1]: ("MulticastSetPath", PATH_GROUP, {0: ("NetworkedProjectilePath", PATH[2])}),
+}
 
 
 def member_value(handle: int, data: bytes, width: int, path_point: bool):
+    """`(column, value)` of one member window, read independently."""
     bits = Bits(data, width)
     if path_point:
-        if handle == 1:
-            value = struct.unpack("<f", bits.read(32).to_bytes(4, "little"))[0]
-            result = ("value_f64", value)
-        else:
-            result = (
-                "value_str",
-                tuple(struct.unpack("<d", bits.read(64).to_bytes(8, "little"))[0] for _ in range(3)),
-            )
+        result = ("value_f64", bits.ieee(32)) if handle == 1 else ("value_str", tuple(bits.ieee(64) for _ in range(3)))
     elif handle in (3, 4):
-        result = ("value_i64", bits.read(width))
+        result = ("value_i64", bits.bits(width))
     elif handle == 5:
-        if bits.read(1):
-            name = str(bits.packed())
-        else:
-            length_raw = bits.read(32)
-            length = length_raw - (1 << 32) if length_raw >= 1 << 31 else length_raw
-            if abs(length) > 65536:
-                raise ValueError("FName string too large")
-            unit_count = abs(length)
-            unit_width = 16 if length < 0 else 8
-            text = b"".join(bits.read(unit_width).to_bytes(unit_width // 8, "little") for _ in range(unit_count))
-            name = text.decode("utf-16-le" if length < 0 else "utf-8").rstrip("\0")
-            number = bits.read(32)
-            if number >= 1 << 31:
-                raise ValueError("negative FName instance")
-            if number:
-                name += f"_{number - 1}"
-        result = ("value_str", name)
+        result = ("value_str", fname(bits))
     elif handle in (6, 7):
-        result = ("value_bool", bool(bits.read(1)))
+        result = ("value_bool", bits.bit())
     elif handle in (8, 9):
-        result = ("value_f64", struct.unpack("<f", bits.read(32).to_bytes(4, "little"))[0])
+        result = ("value_f64", bits.ieee(32))
     else:
-        result = ("value_i64", bits.packed())
-    if bits.pos != width:
+        result = ("value_i64", bits.int_packed())
+    if bits.remaining():
         raise ValueError(f"member {handle} consumed {bits.pos} of {width} bits")
-    if result[0] == "value_f64" and not math.isfinite(result[1]):
+    numbers = result[1] if isinstance(result[1], tuple) else (result[1],)
+    if any(isinstance(n, float) and not math.isfinite(n) for n in numbers):
         raise ValueError(f"member {handle} is non-finite")
-    if path_point and handle in (2, 3) and not all(math.isfinite(v) for v in result[1]):
-        raise ValueError(f"vector member {handle} is non-finite")
     return result
 
 
 def inspect(row: dict, spec: dict) -> tuple[int, Counter, dict]:
     bits = Bits(row["raw_bits"], row["bit_count"])
-    capacity = bits.packed()
+    capacity = bits.int_packed()
     if capacity > 4096:
         raise ValueError(f"array capacity {capacity} exceeds decoder limit")
     observations = Counter()
@@ -145,7 +89,7 @@ def inspect(row: dict, spec: dict) -> tuple[int, Counter, dict]:
     path_point = row["field_name"].startswith("MulticastSetPath.")
     seen = 0
     while True:
-        encoded_index = bits.packed()
+        encoded_index = bits.int_packed()
         if encoded_index == 0:
             break
         if encoded_index - 1 >= capacity:
@@ -155,24 +99,19 @@ def inspect(row: dict, spec: dict) -> tuple[int, Counter, dict]:
             raise ValueError("too many array elements")
         fields = 0
         while True:
-            encoded_handle = bits.packed()
+            encoded_handle = bits.int_packed()
             if encoded_handle == 0:
                 break
             handle = encoded_handle - 1
-            width = bits.packed()
-            name, expected = spec.get(handle, (None, None))
-            if name is None:
+            width = bits.int_packed()
+            if handle not in spec:
                 raise ValueError(f"unknown member handle {handle}")
-            if expected is not None and width != expected:
-                raise ValueError(f"{name} width {width}, expected {expected}")
-            if not path_point and handle in (3, 4, 5, 10, 11):
-                allowed = {3: (32,), 4: (64,), 5: (297,), 10: (16,), 11: (8, 16, 24)}[handle]
-                if width not in allowed:
-                    raise ValueError(f"{name} width {width}, expected {allowed}")
-            start = bits.pos
-            if start + width > bits.length:
+            name, allowed, _checksum = spec[handle]
+            if width not in allowed:
+                raise ValueError(f"{name} width {width}, expected {allowed}")
+            if width > bits.remaining():
                 raise ValueError(f"{name} extends past parent")
-            raw = bits.read(width).to_bytes((width + 7) // 8, "little")
+            raw = bits.bits(width).to_bytes((width + 7) // 8, "little")
             child_name = f"{row['field_name']}[{encoded_index - 1}].{name}"
             if child_name in children:
                 raise ValueError(f"duplicate child {child_name}")
@@ -182,14 +121,13 @@ def inspect(row: dict, spec: dict) -> tuple[int, Counter, dict]:
             fields += 1
             if fields > 128:
                 raise ValueError("too many member fields")
-    # ActiveBlinds is delta-replicated: a frame can update only selected
-    # members, or change no elements and include one additional zero trailer.
-    # Projectile path points still require all three members and no trailer.
-    if not path_point and seen == 0 and bits.length - bits.pos == 8:
-        if bits.packed() != 0:
+    # An ActiveBlinds delta may update some members, or none plus one zero
+    # trailer byte; a path point needs all three members and no trailer.
+    if not path_point and seen == 0 and bits.remaining() == 8:
+        if bits.int_packed() != 0:
             raise ValueError("nonzero empty-array trailer")
-    if bits.pos != bits.length:
-        raise ValueError(f"{bits.length - bits.pos} unconsumed bits")
+    if bits.remaining():
+        raise ValueError(f"{bits.remaining()} unconsumed bits")
     if path_point and len(children) != seen * 3:
         raise ValueError(f"{len(children)} members for {seen} elements")
     return seen, observations, children
@@ -202,18 +140,13 @@ def check_declarations(export: Path, rows: Counter) -> None:
             "net_field_export_groups"
         ]
     }
-    if rows["ActiveBlinds"]:
-        fields = groups["/Script/ShooterGame.BlindManagerComponent"]
-        observed = {field["handle"]: (field["name"], field["compatible_checksum"]) for field in fields}
-        for handle, declaration in BLIND_DECLARATIONS.items():
+    for route, (label, group, wanted) in DECLARATIONS.items():
+        if not rows[route]:
+            continue
+        observed = {field["handle"]: (field["name"], field["compatible_checksum"]) for field in groups[group]}
+        for handle, declaration in wanted.items():
             if observed.get(handle) != declaration:
-                raise ValueError(f"BlindManager handle {handle}: {observed.get(handle)} != {declaration}")
-    if rows["MulticastSetPath.NetworkedProjectilePath"]:
-        fields = groups[PATH_GROUP]
-        observed = {field["handle"]: (field["name"], field["compatible_checksum"]) for field in fields}
-        wanted = ("NetworkedProjectilePath", 2930105559)
-        if observed.get(0) != wanted:
-            raise ValueError(f"MulticastSetPath handle 0: {observed.get(0)} != {wanted}")
+                raise ValueError(f"{label} handle {handle}: {observed.get(handle)} != {declaration}")
 
 
 def compare_children(parent: dict, expected: dict, emitted: list[dict]) -> None:
@@ -254,25 +187,22 @@ def relevant_rows(export: Path, compare_typed: bool):
             "time_ms", "packet_id", "channel_index", "actor_net_guid", "object_net_guid",
             "handle", "value_i64", "value_f64", "value_bool", "value_str",
         ]
-    parent_names = {key[1] for key in ROUTES}
+    parents = [key[1] for key in ROUTES]
     for batch in pq.ParquetFile(export / "fields.parquet").iter_batches(batch_size=65536, columns=columns):
-        names = batch["field_name"].to_pylist()
-        indices = [
-            i for i, name in enumerate(names)
-            if name in parent_names or (
-                compare_typed and isinstance(name, str) and any(name.startswith(parent + "[") for parent in parent_names)
-            )
-        ]
-        if indices:
-            yield from batch.take(pa.array(indices, type=pa.int32())).to_pylist()
+        names = pc.cast(batch["field_name"], pa.string())
+        mask = pc.is_in(names, value_set=pa.array(parents))
+        if compare_typed:
+            for parent in parents:
+                mask = pc.or_(mask, pc.starts_with(names, parent + "["))
+        yield from batch.filter(pc.fill_null(mask, False)).to_pylist()
 
 
-def main() -> None:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exports", nargs="+", type=Path)
     parser.add_argument("--require-routes", action="store_true", help="fail if either route has zero rows across all exports")
     parser.add_argument("--compare-typed", action="store_true", help="compare emitted child rows to an independent decode of parent raw bits")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     failed = False
     total_rows = Counter()
     for export in args.exports:
@@ -322,9 +252,8 @@ def main() -> None:
     if args.require_routes and any(total_rows[key[1]] == 0 for key in ROUTES):
         failed = True
         print(f"missing observed route: {dict(total_rows)}")
-    if failed:
-        raise SystemExit(1)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

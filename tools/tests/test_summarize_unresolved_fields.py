@@ -97,7 +97,7 @@ class RawPriorityTests(unittest.TestCase):
 
     def test_export_leftovers_beside_an_export_are_not_counted(self):
         """A `previous` sibling carries its own manifest, so only discovery
-        can skip it (the 259ed10 measurements are export_scan.py's)."""
+        can skip it."""
         rows = [field("/A", "raw", 9, 8, b"\x01")]
         with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as out:
             parent = Path(td)

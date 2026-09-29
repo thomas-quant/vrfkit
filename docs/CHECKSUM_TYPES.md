@@ -79,7 +79,7 @@ property keeps its checksum across all of them -- `249` in the effect RPCs is
 
 Every recomputation is a 1-in-2^32 chance of an accidental reproduction, so the
 tool counts them and prints `trials / 2^32`, the number of chance reproductions
-to expect (0.0034 on the corpus run below).
+to expect (0.0031 on the corpus run below).
 
 It checks `checksum_table.rs` too. The table maps a checksum to a type with no
 name, so each entry is recomputed under every name that declares its checksum.
@@ -195,7 +195,7 @@ without a seed), 64 with no known parent seed. Tier 2 examined 793 groups:
 124 candidate agreements, 124 established, 0 refused, from 48,537 implied-parent
 comparisons (0.0000 chance agreements expected). `checksum_table.rs`: 459
 checksums -- 349 match, 2 mismatch, 108 untestable, 0 without a carrier.
-The run made 14,410,131 recomputations: 0.0034 chance reproductions expected.
+The run made 13,140,716 recomputations: 0.0031 chance reproductions expected.
 
 **The mismatches** -- each on every build that declares it:
 

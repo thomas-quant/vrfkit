@@ -373,12 +373,18 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn("/private/replay-name", error.getvalue())
 
     def test_build_help_states_the_default_builds(self):
-        """--help names exactly the builds a default run samples."""
+        """--help names the builds a default run samples."""
         printed = io.StringIO()
         with redirect_stdout(printed), self.assertRaises(SystemExit):
             raw_inventory.parse_args(["--help"])
         text = " ".join(printed.getvalue().split())
-        self.assertIn(f"(default: {', '.join(raw_inventory.DEFAULT_BUILDS)})", text)
+        self.assertIn(f"(default: the newest {raw_inventory.DEFAULT_BUILD_COUNT} builds found)", text)
+
+    def test_the_default_builds_are_the_newest_by_number(self):
+        """Compared as text, 9.10 would outrank 13.06 and 13.2 would outrank 13.10."""
+        labels = ["13.06", "9.10", "12.10", "13.05", "11.06", "13.06", "10.01"]
+        self.assertEqual(raw_inventory.newest_builds(labels), ("12.10", "13.05", "13.06"))
+        self.assertEqual(raw_inventory.newest_builds(["13.10", "13.2", "13.06"], 2), ("13.06", "13.10"))
 
 
 if __name__ == "__main__":
