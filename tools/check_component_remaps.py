@@ -47,9 +47,9 @@ A rename appears under its NEW name as a bare group no pair claims:
 on (a replay legitimately carries bare Blueprint components with no remap).
 Read the list against the previous build's.
 
-`SKIP` means there was no export to read; `FAILED: nothing checked` means the
-export held not one pair of the table, a fault, since a real match exercises
-many of them.
+Exit 2 when `--export` holds no fields.parquet; `FAILED: nothing checked`
+(exit 1) when the export held not one pair of the table, a fault, since a real
+match exercises many of them.
 
 Usage:
     python tools/check_component_remaps.py --export out/probe
@@ -195,13 +195,8 @@ def unmapped_bare_groups(rows_by_group, pairs, min_rows: int = 1) -> list:
     )
 
 
-def exit_code(verdicts_) -> int:
-    return 1 if any(v.state == "broken" for v in verdicts_) else 0
-
-
 def nothing_checked(verdicts_) -> bool:
-    """True when no pair appeared in this export, so the run verified nothing
-    (unlike `SKIP`, which had no export to read)."""
+    """True when no pair appeared in this export, so the run verified nothing."""
     return all(v.state == "absent" for v in verdicts_)
 
 
@@ -257,8 +252,8 @@ def main() -> int:
 
     fields = args.export / "fields.parquet"
     if not fields.is_file():
-        print(f"SKIP: no fields.parquet in {args.export}", file=sys.stderr)
-        return 0
+        print(f"FAILED: no fields.parquet in {args.export}", file=sys.stderr)
+        return 2
 
     table = table_source()
     pairs = remap_pairs(table)

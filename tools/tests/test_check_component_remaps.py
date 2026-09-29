@@ -78,15 +78,6 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(counts["AbilitiesAndBuffsComponent"], 0)
         self.assertEqual(counts["ZoomStateMachine"], 70)
 
-    def test_exit_code_is_nonzero_only_when_something_is_broken(self):
-        ok = guard.verdicts(
-            PAIRS, {"/Script/ShooterGame.EquippableStateMachineComponent": 1}, KINDS)
-        broken = guard.verdicts(PAIRS, {"ZoomStateMachine": 1}, KINDS)
-        absent = guard.verdicts(PAIRS, {}, KINDS)
-        self.assertEqual(guard.exit_code(ok), 0)
-        self.assertEqual(guard.exit_code(absent), 0)
-        self.assertEqual(guard.exit_code(broken), 1)
-
 
 class StrictRepLayoutTests(unittest.TestCase):
     """A RepLayout pair is broken by any RepLayout row left bare: healthy is
@@ -150,7 +141,6 @@ class ClassNetCachePairTests(unittest.TestCase):
         v = self.verdict(rows)
         self.assertEqual(v.state, "ok")
         self.assertIn("1 RepLayout rows under the leaf", v.detail)
-        self.assertEqual(guard.exit_code([v]), 0)
 
     def test_a_remap_that_did_not_fire_is_broken(self):
         """The same replay exported by the scratch build: 0 routed, the one
@@ -220,7 +210,6 @@ class RenameSignalTests(unittest.TestCase):
             "ZoomStateMachineV2": 8112,
         }, KINDS)
         self.assertEqual([x.state for x in v], ["ok"])
-        self.assertEqual(guard.exit_code(v), 0)
 
     def test_the_renamed_leaf_surfaces_as_an_unclaimed_bare_group(self):
         suspects = guard.unmapped_bare_groups({
@@ -280,6 +269,18 @@ class MainTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
             encoding="utf-8", errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
         return result
+
+    def test_a_missing_export_fails_with_exit_2(self):
+        """`--export` is required, so no fields.parquet is a wrong path, not a
+        skip. A child process: the exit code a caller chains on is the point."""
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "-W", "error", str(SCRIPT), "--export",
+                 str(Path(directory) / "missing")],
+                capture_output=True, text=True, check=False,
+                encoding="utf-8", errors="strict")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("FAILED: no fields.parquet", result.stderr)
 
     def test_an_export_with_no_remap_at_all_does_not_report_OK(self):
         """Not the same as having no export: this one ran and learned nothing."""
