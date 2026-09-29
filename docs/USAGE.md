@@ -716,7 +716,7 @@ needs it.
 ### Generators
 
 **Never hand-edit the output.** The overlay table
-`crates/vrf-decode/src/table.rs` (1,336 + 96 handles) and `equippable_table.py`
+`crates/vrf-decode/src/table.rs` (1,118 + 96 handles) and `equippable_table.py`
 are not generated: they are maintained in the repository.
 
 | Script | Produces |
