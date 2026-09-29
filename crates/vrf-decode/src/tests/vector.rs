@@ -1,10 +1,10 @@
 //! Vector, rotator and replicated-movement decoders. The helpers below write
-//! each wire format with `crate::test_bits`, so a test pins the layout both
+//! each wire format with `vrf_testkit`, so a test pins the layout both
 //! ways.
 
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
-use crate::test_bits::BitWriter;
 use crate::types::{RotatorQuantization, VectorQuantization};
+use vrf_testkit::{BitWrite, BitWriter};
 
 /// A scaled packed vector: a SerializedInt(128) header of `width | 1 << 6`
 /// (the "scaled integer" flag), then three `width`-bit signed components.
@@ -113,7 +113,7 @@ fn rep_movement_bits(
     rotation: [u16; 3],
     rotation_width: u32,
 ) -> BitWriter {
-    let mut bits = BitWriter(flags.to_vec());
+    let mut bits = flags.to_vec();
     packed_vector(&mut bits, location, location_bits);
     for component in rotation {
         rotator_component(&mut bits, component, rotation_width);
@@ -230,7 +230,7 @@ fn rep_movement_location_is_divided_by_the_declared_quantization() {
 /// docs/OVERLAY_RESOLUTION.md "FRepMovement finiteness is enforced".
 #[test]
 fn rep_movement_with_a_non_finite_component_is_rejected() {
-    let mut bits = BitWriter(vec![false; 4]);
+    let mut bits = vec![false; 4];
     // Location: header 0 selects three raw f32 words; the first is a NaN.
     bits.serialized_int(0, 1 << 7);
     for word in [0x7fc0_0000u32, 1.0f32.to_bits(), 2.0f32.to_bits()] {

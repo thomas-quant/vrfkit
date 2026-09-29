@@ -2,7 +2,7 @@
 
 use crate::FTextTreeError;
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
-use crate::test_bits::BitWriter;
+use vrf_testkit::{BitWrite, BitWriter};
 
 fn str_value(s: &str) -> DecodedValue {
     DecodedValue::Str(s.to_owned())

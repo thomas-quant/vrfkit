@@ -112,86 +112,11 @@ pub use overlay::{
 #[cfg(feature = "overlay")]
 pub use table::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
 
-/// The encoder side of `vrf_bitio::BitReader`'s formats, for every module's
-/// tests: least significant bit first, the order the reader takes bits out.
-#[cfg(test)]
+/// Hex fixtures for the effect and struct-blob tests; the bit encoders are
+/// `vrf_testkit`'s.
+#[cfg(all(test, any(feature = "effect", feature = "structs")))]
 pub(crate) mod test_bits {
-    /// A bit string under construction.
-    #[derive(Debug, Default)]
-    pub(crate) struct BitWriter(pub(crate) Vec<bool>);
-
-    impl BitWriter {
-        pub(crate) fn new() -> Self {
-            Self::default()
-        }
-
-        /// The low `width` (at most 64) bits of `value`.
-        pub(crate) fn bits(&mut self, value: u64, width: u32) -> &mut Self {
-            self.0.extend((0..width).map(|i| (value >> i) & 1 != 0));
-            self
-        }
-
-        /// `count` copies of `bit`.
-        pub(crate) fn repeat(&mut self, bit: bool, count: usize) -> &mut Self {
-            self.0.extend(std::iter::repeat_n(bit, count));
-            self
-        }
-
-        /// Unreal's `SerializeIntPacked`: seven value bits per byte, above a
-        /// continuation bit that is set while more bytes follow.
-        pub(crate) fn int_packed(&mut self, mut value: u32) -> &mut Self {
-            loop {
-                let more = value > 0x7f;
-                self.bits(u64::from(((value & 0x7f) << 1) | u32::from(more)), 8);
-                value >>= 7;
-                if !more {
-                    return self;
-                }
-            }
-        }
-
-        /// Unreal's `SerializeInt(value, max)`: only the bits that could still
-        /// raise the value without reaching `max`.
-        pub(crate) fn serialized_int(&mut self, value: u32, max: u32) -> &mut Self {
-            let (mut written, mut mask) = (0u32, 1u32);
-            while written.saturating_add(mask) < max {
-                let bit = value & mask != 0;
-                self.0.push(bit);
-                if bit {
-                    written |= mask;
-                }
-                mask <<= 1;
-            }
-            self
-        }
-
-        pub(crate) fn i32(&mut self, value: i32) -> &mut Self {
-            self.bits(u64::from(value as u32), 32)
-        }
-
-        /// Another writer's bits, after these.
-        #[cfg_attr(not(any(feature = "array", feature = "structs")), allow(dead_code))]
-        pub(crate) fn append(&mut self, other: &Self) -> &mut Self {
-            self.0.extend_from_slice(&other.0);
-            self
-        }
-
-        pub(crate) fn bit_len(&self) -> u32 {
-            self.0.len() as u32
-        }
-
-        /// The bytes, zero-padded to a whole byte, and the exact bit count.
-        pub(crate) fn finish(&self) -> (Vec<u8>, u32) {
-            let mut bytes = vec![0u8; self.0.len().div_ceil(8)];
-            for (i, _) in self.0.iter().enumerate().filter(|(_, bit)| **bit) {
-                bytes[i / 8] |= 1 << (i % 8);
-            }
-            (bytes, self.bit_len())
-        }
-    }
-
     /// Bytes from hex digits; whitespace between them is ignored.
-    #[cfg_attr(not(any(feature = "effect", feature = "structs")), allow(dead_code))]
     pub(crate) fn hex(digits: &str) -> Vec<u8> {
         let clean: Vec<u8> = digits
             .bytes()

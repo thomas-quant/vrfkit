@@ -162,7 +162,7 @@ pub fn decode_abilities_and_buffs_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::BitWriter;
+    use vrf_testkit::{BitWrite, BitWriter};
 
     /// A ClassNetCache stream with one RPC at handle 1, written with
     /// `function_count`'s handle width. The payload is 1-filled on purpose: in

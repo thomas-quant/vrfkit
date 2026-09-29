@@ -149,7 +149,7 @@ pub fn decode_fast_array_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::BitWriter;
+    use vrf_testkit::{BitWrite, BitWriter};
 
     fn header(deletes: u32, changed: u32) -> BitWriter {
         let mut bits = BitWriter::new();
@@ -194,10 +194,10 @@ mod tests {
         let mut b = header(0, 0);
         let (data, bit_count) = b.finish();
         assert!(decode_fast_array_delta(&data, bit_count - 1, ChecksumMode::Absent).is_none());
-        b.0[0] = false;
+        b[0] = false;
         assert!(decode(&b, ChecksumMode::Absent).is_none());
-        b.0[0] = true;
-        b.0.push(true);
+        b[0] = true;
+        b.push(true);
         assert!(decode(&b, ChecksumMode::Absent).is_none());
     }
 

@@ -408,7 +408,7 @@ fn json_string(s: &mut String, value: &str) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::BitWriter;
+    use vrf_testkit::{BitWrite, BitWriter};
 
     /// The FText pieces these tests assemble, on the shared writer.
     trait FTextBits {

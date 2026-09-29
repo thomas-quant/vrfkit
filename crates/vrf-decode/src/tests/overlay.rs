@@ -10,9 +10,9 @@ use crate::overlay::{
     apply_overlay_with_handle, canonical_group, group_hash_state, lookup_checksum,
     resolve_field_type, resolve_field_type_with_checksum,
 };
-use crate::test_bits::BitWriter;
 use crate::types::{RotatorQuantization, VectorQuantization};
 use crate::{OVERLAY_HANDLE_TABLE, OVERLAY_TABLE};
+use vrf_testkit::{BitWrite, BitWriter};
 
 /// The table production resolves through: every entry and the explicit-handle
 /// fallback. One static, so its hash index is built once for the suite.

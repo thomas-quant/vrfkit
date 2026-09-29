@@ -514,7 +514,7 @@ fn push_label(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::BitWriter;
+    use vrf_testkit::{BitWrite, BitWriter};
 
     /// Handle 4 at depth 0 is a sub-array, `Reports`, with no further nesting;
     /// handle 3 is a leaf the schema names `RoundNumber`.
@@ -552,7 +552,7 @@ mod tests {
         bits.int_packed(1); // encodedIndex=1
         bits.int_packed(5); // encodedHandle=5 -> handle 4
         bits.int_packed(inner.bit_len() + tail as u32);
-        bits.append(inner).repeat(true, tail);
+        bits.extend_bits(inner).repeat(true, tail);
         bits.int_packed(0); // end outer element
         bits.int_packed(0); // outer array terminator
         bits.finish()

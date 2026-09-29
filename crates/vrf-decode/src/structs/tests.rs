@@ -2,8 +2,9 @@
 //! produced for the same bytes.
 
 use super::*;
-use crate::test_bits::{BitWriter, hex};
+use crate::test_bits::hex;
 use vrf_bitio::BitReader;
+use vrf_testkit::{BitWrite, BitWriter};
 
 // -- Declarations ---------------------------------------------------------
 //
@@ -461,7 +462,7 @@ fn struct_fname_rejects_a_negative_instance_number() {
     bits.int_packed(1); // encoded index -> round 0
     bits.int_packed(94);
     bits.int_packed(fname.bit_len());
-    bits.append(&fname);
+    bits.extend_bits(&fname);
     bits.int_packed(0); // end of element
     bits.int_packed(0); // end of array
     let (data, bit_len) = bits.finish();
