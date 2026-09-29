@@ -12,6 +12,9 @@ vrf-bitio = { workspace = true }
 vrf-transform = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+vrf-testkit = { workspace = true }
+
 # `diagnostics` is the per-failure event log only; the counters are never
 # optional. See the "Features" section of src/lib.rs.
 [features]

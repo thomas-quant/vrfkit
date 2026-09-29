@@ -31,3 +31,6 @@ vrf-bitio = { workspace = true }
 thiserror = { workspace = true }
 # MIT-licensed; not `oozle`, whose GPL-3.0-or-later would relicense this crate.
 oozextract = { workspace = true, optional = true }
+
+[dev-dependencies]
+vrf-testkit = { workspace = true }

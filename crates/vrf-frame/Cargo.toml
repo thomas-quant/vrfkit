@@ -11,3 +11,6 @@ description = "DemoFrame iteration: decompressed replay-data chunk -> (time_ms, 
 vrf-bitio = { workspace = true }
 vrf-schema = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+vrf-testkit = { workspace = true }

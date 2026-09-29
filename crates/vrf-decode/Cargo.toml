@@ -11,6 +11,9 @@ description = "Type-aware field decoders for Unreal Engine replay primitives"
 vrf-bitio = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+vrf-testkit = { workspace = true }
+
 # Four independent decoders over the always-compiled core, all on by default;
 # the crate docs (src/lib.rs, "Feature flags") describe each.
 [features]
