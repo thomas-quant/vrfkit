@@ -1,11 +1,10 @@
 """Guards for the export baseline pinner: the Parquet cross-checks, the
-refusal to pin an unmeasured counter or a machine path, and summary patterns
-that must each read exactly one line."""
+manifest agreement checks, and the refusal to pin an unmeasured counter or a
+machine path. The summary patterns are test_summary_counters.py's."""
 import contextlib
 import io
 import json
 import os
-import re
 import sys
 import tempfile
 import unittest
@@ -114,21 +113,6 @@ class CrossCheckTests(unittest.TestCase):
                 current["counters"][written] = None
                 self.assertIn("did not print", " ".join(guard.cross_checks(
                     current["counters"], current["parquet"])))
-
-    def test_guid_writer_label_cannot_hide_missing_parser_count(self):
-        summary = "  Checkpoint GUID entries: 42 rows\n"
-        self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_guid_entries"], summary))
-        summary += "  GUID entries: 43\n"
-        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_guid_entries"], summary).group(1), "43")
-
-    def test_guid_path_counter_regexes_are_exactly_anchored(self):
-        summary = "  Checkpoint GUID paths: 1 literals / 2 indices / 2 resolved\n"
-        for key in ("cp_literal_paths", "cp_indexed_paths", "cp_resolved_path_indices"):
-            self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS[key], summary))
-        summary = "  GUID paths: 1 literals / 2 indices / 2 resolved\n"
-        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_literal_paths"], summary).group(1), "1")
-        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_indexed_paths"], summary).group(1), "2")
-        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_resolved_path_indices"], summary).group(1), "2")
 
     def test_guid_path_counters_reject_omission_and_arithmetic_mismatch(self):
         current = checkpoint_measurement(actor_closes=0, cp_partial_rows=0)
@@ -555,129 +539,9 @@ class TargetingCounterTests(unittest.TestCase):
             manifest.write_text(json.dumps(data), encoding="utf-8")
             self.assertIn("omits", " ".join(guard.targeting_manifest_errors(root, counts, True)))
             self.assertEqual(guard.targeting_manifest_errors(root, counts, False), [])
-        text = "Target locations: 12 array children\nCheckpoint targets: 0 array children\n"
-        self.assertEqual(guard.PATTERNS[key].search(text).group(1), "12")
-        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_" + key], text).group(1), "0")
-        self.assertIsNone(guard.PATTERNS[key].search("Checkpoint targets: 12 array children"))
-
-
-class CncCounterTests(unittest.TestCase):
-    """The brute-force and tail lines, main and checkpoint, read their own line."""
-
-    SUMMARY = (
-        "  CNC RPC rows:     529\n"
-        "  CNC brute force:  454 attempted / 0 unwalked\n"
-        "  RepLayout tails:  75 decoded / 17 preserved\n"
-        "  Checkpoint CNC:   3 RPC rows\n"
-        "  Checkpoint CNC brute force: 3 attempted / 1 unwalked\n"
-        "  Checkpoint tails: 0 decoded / 2 preserved\n"
-    )
-    MAIN = {"cnc_rpcs_emitted": 529, "cnc_bruteforce_payloads_attempted": 454,
-            "cnc_bruteforce_payloads_unwalked": 0, "rep_layout_cnc_tails_decoded": 75,
-            "rep_layout_cnc_tails_preserved": 17}
-    CHECKPOINT = {"cp_cnc_rpcs_emitted": 3, "cp_cnc_bruteforce_payloads_attempted": 3,
-                  "cp_cnc_bruteforce_payloads_unwalked": 1,
-                  "cp_rep_layout_cnc_tails_decoded": 0,
-                  "cp_rep_layout_cnc_tails_preserved": 2}
-
-    def test_each_counter_reads_its_own_value(self):
-        for key, value in self.MAIN.items():
-            with self.subTest(key=key):
-                self.assertEqual(int(guard.PATTERNS[key].search(self.SUMMARY).group(1)), value)
-        for key, value in self.CHECKPOINT.items():
-            with self.subTest(key=key):
-                self.assertEqual(
-                    int(re.search(guard.CHECKPOINT_COUNTERS[key], self.SUMMARY).group(1)), value)
-
-    def test_a_missing_main_line_is_not_read_off_the_checkpoint_block(self):
-        """`Checkpoint CNC brute force:` contains `CNC brute force:`; an
-        unanchored main pattern would silently pin the checkpoint value."""
-        checkpoint_only = "".join(
-            line for line in self.SUMMARY.splitlines(True) if "Checkpoint" in line)
-        for key in self.MAIN:
-            with self.subTest(key=key):
-                self.assertIsNone(guard.PATTERNS[key].search(checkpoint_only))
-        main_only = "".join(
-            line for line in self.SUMMARY.splitlines(True) if "Checkpoint" not in line)
-        for key in self.CHECKPOINT:
-            with self.subTest(key=key):
-                self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS[key], main_only))
-
-    def test_the_counters_cannot_be_pinned_when_unprinted(self):
-        reasons = guard.unpinnable(measurement(cnc_bruteforce_payloads_unwalked=None))
-        self.assertIn("cnc_bruteforce_payloads_unwalked", " ".join(reasons))
-
-
-class RpcCounterTests(unittest.TestCase):
-    """`RPCs:` is a suffix of `Truncated RPCs:`, so an unanchored pattern
-    would read whichever of the two lines came first."""
-
-    def test_the_rpc_count_is_not_read_off_the_truncated_rpcs_line(self):
-        pattern = guard.PATTERNS["rpcs"]
-        for summary in ("  RPCs:             529\n  Truncated RPCs:   7\n",
-                        "  Truncated RPCs:   7\n  RPCs:             529\n"):
-            with self.subTest(summary=summary):
-                self.assertEqual(pattern.search(summary).group(1), "529")
-        self.assertIsNone(pattern.search("  Truncated RPCs:   7\n"))
-
-
-class SummaryLabelTests(unittest.TestCase):
-    """Every counter pattern reads exactly one line summary.rs can print, each
-    quoted `"  ..."` literal rendered with its placeholders filled in: a
-    pattern matching two reads whichever comes first, and one matching none
-    reports a printed counter as missing on every run. A literal whose first
-    argument is a `report::` formatter prints that formatter's text
-    (report.rs) in place of its first placeholder."""
-
-    SUMMARY_RS = (Path(__file__).resolve().parents[2]
-                  / "crates" / "vrfkit" / "src" / "driver" / "summary.rs")
-    REPORT_RS = SUMMARY_RS.parents[1] / "report.rs"
-
-    def test_every_counter_pattern_reads_exactly_one_summary_line(self):
-        source = self.SUMMARY_RS.read_text(encoding="utf-8")
-        formatters = dict(re.findall(
-            r'pub fn (\w+)\([^)]*\) -> String \{\s*format!\(\s*"([^"\\]*)"',
-            self.REPORT_RS.read_text(encoding="utf-8")))
-        self.assertIn("frame_skips", formatters, "report.rs formatters were not found")
-        literals = re.findall(
-            r'"(  [^"\\]*(?:\\.[^"\\]*)*)"(?:,\s*report::(\w+)\()?', source)
-        rendered = [re.sub(r"\{[^{}]*\}", "7",
-                           literal.replace("{}", formatters[call], 1) if call else literal)
-                    for literal, call in literals]
-        self.assertGreater(len(rendered), 100, "summary.rs literals were not found")
-        patterns = {**guard.COUNTERS, **guard.CHECKPOINT_COUNTERS}
-        for key, pattern in patterns.items():
-            with self.subTest(counter=key):
-                hits = [line for line in rendered if re.search(pattern, line + "\n")]
-                self.assertEqual(len(hits), 1, hits)
-
-
-class MovementTailCounterTests(unittest.TestCase):
-    """Each of the four numbers on each tails line reads its own position."""
-
-    SUMMARY = (
-        "  Movement tails:   11 sized (12 bits) / 13 open (14 bits)\n"
-        "  Checkpoint movement tails: 21 sized (22 bits) / 23 open (24 bits)\n"
-    )
-
-    def test_each_position_is_its_own_counter_in_its_own_block(self):
-        names = ("movement_sized_section_tails", "movement_sized_section_tail_bits",
-                 "movement_open_section_tails", "movement_open_section_tail_bits")
-        for offset, name in enumerate(names):
-            with self.subTest(name=name):
-                self.assertEqual(int(guard.PATTERNS[name].search(self.SUMMARY).group(1)),
-                                 11 + offset)
-                self.assertEqual(int(re.search(guard.CHECKPOINT_COUNTERS["cp_" + name],
-                                               self.SUMMARY).group(1)), 21 + offset)
-                checkpoint_only = self.SUMMARY.splitlines(True)[1]
-                self.assertIsNone(guard.PATTERNS[name].search(checkpoint_only))
 
 
 class FrameSkipCounterTests(unittest.TestCase):
-    MAIN = "  Frame skips:      2 external blobs / 9 external bytes / 0 game-specific bytes\n"
-    CHECKPOINT = ("  Checkpoint frame skips: 1 external blobs / 4 external bytes"
-                  " / 5 game-specific bytes\n")
-
     def write_manifest(self, root: Path, main: dict, checkpoint: dict | None) -> None:
         quality = {f"frame_{key}": value for key, value in main.items()}
         if checkpoint is not None:
@@ -709,37 +573,6 @@ class FrameSkipCounterTests(unittest.TestCase):
             self.assertIn("omits", " ".join(guard.frame_skip_manifest_errors(root, counts, True)))
             self.assertEqual(guard.frame_skip_manifest_errors(root, counts, False), [])
 
-    def test_frame_skip_lines_are_read_only_by_their_own_patterns(self):
-        text = self.MAIN + self.CHECKPOINT + "  Frames:           3\n"
-        found = {key: int(guard.PATTERNS[key].search(text).group(1))
-                 for key in ("frame_external_data_blobs", "frame_external_data_bytes",
-                             "frame_game_specific_bytes")}
-        self.assertEqual(found, {"frame_external_data_blobs": 2,
-                                 "frame_external_data_bytes": 9,
-                                 "frame_game_specific_bytes": 0})
-        cp = {key: int(re.search(guard.CHECKPOINT_COUNTERS[key], text).group(1))
-              for key in ("cp_frame_external_data_blobs", "cp_frame_external_data_bytes",
-                          "cp_frame_game_specific_bytes")}
-        self.assertEqual(cp, {"cp_frame_external_data_blobs": 1,
-                              "cp_frame_external_data_bytes": 4,
-                              "cp_frame_game_specific_bytes": 5})
-        # Neither label may be read as the other, nor as the checkpoint `Frames:`.
-        self.assertIsNone(guard.PATTERNS["frame_external_data_blobs"].search(self.CHECKPOINT))
-        self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_frame_external_data_blobs"],
-                                    self.MAIN))
-        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_frames"], text).group(1), "3")
-
-    def test_frame_time_lines_are_read_only_by_their_own_patterns(self):
-        main = "  Frame times:      6 non-finite\n"
-        checkpoint = "  Checkpoint frame times: 8 non-finite\n"
-        text = main + checkpoint + "  Frames:           3\n"
-        self.assertEqual(guard.PATTERNS["frame_non_finite_times"].search(text).group(1), "6")
-        self.assertEqual(
-            re.search(guard.CHECKPOINT_COUNTERS["cp_frame_non_finite_times"], text).group(1), "8")
-        self.assertIsNone(guard.PATTERNS["frame_non_finite_times"].search(checkpoint))
-        self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_frame_non_finite_times"], main))
-        self.assertEqual(re.search(guard.CHECKPOINT_COUNTERS["cp_frames"], text).group(1), "3")
-
 
 class SinkTallyCounterTests(unittest.TestCase):
     """The envelope-trailer and ActiveBlinds lines: each number reads its own
@@ -755,19 +588,6 @@ class SinkTallyCounterTests(unittest.TestCase):
             "active_blinds_empty_trailers": 13}
     CHECKPOINT = {"movement_envelope_trailers": 21, "movement_envelope_trailer_bits": 504,
                   "active_blinds_empty_trailers": 23}
-
-    def test_each_number_is_its_own_counter_in_its_own_block(self):
-        self.assertEqual(set(self.MAIN), set(guard.SINK_TALLY_KEYS))
-        main_only, checkpoint_only = self.SUMMARY.split("  Checkpoint envelope", 1)
-        checkpoint_only = "  Checkpoint envelope" + checkpoint_only
-        for key in guard.SINK_TALLY_KEYS:
-            with self.subTest(key=key):
-                self.assertEqual(int(guard.PATTERNS[key].search(self.SUMMARY).group(1)),
-                                 self.MAIN[key])
-                self.assertEqual(int(re.search(guard.CHECKPOINT_COUNTERS["cp_" + key],
-                                               self.SUMMARY).group(1)), self.CHECKPOINT[key])
-                self.assertIsNone(guard.PATTERNS[key].search(checkpoint_only))
-                self.assertIsNone(re.search(guard.CHECKPOINT_COUNTERS["cp_" + key], main_only))
 
     def test_the_counts_must_match_the_manifest_in_both_passes(self):
         counts = dict(self.MAIN)
@@ -825,16 +645,6 @@ class SinkTallyCounterTests(unittest.TestCase):
 class CheckpointTrailingCounterTests(unittest.TestCase):
     """The checkpoint block's `Trailing bytes:` line: read only off its own
     line, and required to agree with `checkpoint_trailing_bytes`."""
-
-    LINE = "  Trailing bytes:   14\n"
-
-    def test_the_count_is_read_only_off_its_own_line(self):
-        pattern = guard.CHECKPOINT_COUNTERS["cp_trailing_bytes"]
-        quoted = "  Struct blob err:  Trailing bytes: 9\n"
-        for text in (quoted + self.LINE, self.LINE + quoted):
-            with self.subTest(text=text):
-                self.assertEqual(re.search(pattern, text).group(1), "14")
-        self.assertIsNone(re.search(pattern, quoted))
 
     def test_the_count_must_match_the_manifest(self):
         with tempfile.TemporaryDirectory() as temp:

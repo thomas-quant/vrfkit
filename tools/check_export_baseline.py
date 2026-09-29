@@ -46,7 +46,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -55,133 +54,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 if __package__:
+    from . import summary_counters as sc
     from .atomic_io import atomic_write_text, sha256_file
 else:  # direct script execution
+    import summary_counters as sc
     from atomic_io import atomic_write_text, sha256_file
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
 
-# Counters the export summary prints, anchored on the exact labels
-# crates/vrfkit/src/driver/summary.rs emits. Not every line is pinned: on
-# 2026-09-29, 56 of the 120 labelled `eprintln!` literals in summary.rs,
-# rendered as test_check_export_baseline.py's SummaryLabelTests renders them,
-# matched no pattern here or in CHECKPOINT_COUNTERS. A listed label that
-# stops being printed reads as missing (None), never as 0.
-COUNTERS = {
-    "chunks": r"Chunks:\s+(\d+)",
-    "packets": r"Packets:\s+(\d+)",
-    "export_groups": r"Export groups:\s+(\d+)",
-    "content_blocks": r"Content blocks:\s+(\d+)",
-    "rep_layout_blocks": r"RepLayout blocks:\s+(\d+)",
-    "class_net_cache_blocks": r"ClassNetCache:\s+(\d+)",
-    "fields": r"Fields:\s+(\d+)",
-    # Anchored: unanchored, it also read `Truncated RPCs:` whenever that line
-    # came first or this one went missing.
-    "rpcs": r"(?m)^\s*RPCs:\s+(\d+)\s*$",
-    "actor_opens": r"Actor opens:\s+(\d+)",
-    "actor_closes": r"Actor closes:\s+(\d+)",
-    "bunches": r"Bunches:\s+(\d+)",
-    "malformed_packets": r"Malformed pkts:\s+(\d+)",
-    "skipped_bits": r"Skipped bits:\s+(\d+)",
-    "movement_rows": r"Movement rows:\s+(\d+)",
-    "net_guid_rows": r"NetGUID rows:\s+(\d+)",
-    "event_rows": r"Event rows:\s+(\d+)",
-    "partial_rows": r"Partial raw rows:\s+(\d+)",
-    "partial_bits": r"Partial raw rows:\s+\d+ \((\d+) bits\)",
-    "event_layout_mismatches": r"Event layout err:\s+(\d+)",
-    "event_payloads_decoded": r"Event payloads:\s+(\d+) decoded",
-    "event_payload_unknown_groups": r"Event payloads:\s+\d+ decoded / (\d+) unknown groups",
-    "overlay_decoded_ok": r"Decoded OK:\s+(\d+)",
-    "overlay_decode_errors": r"Decode errors:\s+(\d+)",
-    "overlay_raw_skip": r"Raw/Skip:\s+(\d+)",
-    "overlay_not_in_table": r"Not in table:\s+(\d+)",
-    "overlay_no_field_name": r"No field name:\s+(\d+)",
-    "overlay_rows_offered": r"Rows offered:\s+(\d+)",
-    # Outside the overlay ratio: the overlay buckets are decided before the
-    # effect pass runs, so without this line only fields.parquet's byte count
-    # would show the effect decoder ran, and bytes cannot say it made values.
-    "effect_blobs_decoded": r"Effect blobs:\s+(\d+)",
-    # Additive decoders: when 13.02 moved RoundResults from handle 93 to 81,
-    # nothing else on this summary moved and the match score vanished from the
-    # Parquet. `failed` is the alarm; `decoded` keeps a decoder that stops
-    # running (0 decoded, 0 failed) from reading as a clean one.
-    "struct_blobs_decoded": r"Struct blobs:\s+(\d+) decoded",
-    "struct_blobs_failed": r"Struct blobs:\s+\d+ decoded / (\d+) failed",
-    "targeting_world_locations_decoded": r"(?m)^\s*Target locations:\s+(\d+) array children\s*$",
-    # This is a measured opaque shape, not a decode-error counter: the main
-    # corpus is expected to contain it. Require its unconditional summary
-    # line and reconcile it with the manifest instead of requiring zero.
-    "tracked_rewards_opaque_empty_variants": (
-        r"(?m)^\s*Reward opaque:\s+(\d+) empty variants\s*$"
-    ),
-    # The AbilitiesAndBuffs ClassNetCache brute force and the post-RepLayout
-    # tails. `CNC RPC rows` counts successes (tail decodes included), so it can
-    # only shrink when the fc=34 walk stops fitting; `unwalked` names that
-    # failure and `attempted` its denominator. Anchored at the line start:
-    # "Checkpoint CNC brute force:" contains "CNC brute force:".
-    "cnc_rpcs_emitted": r"(?m)^\s*CNC RPC rows:\s+(\d+)\s*$",
-    "cnc_bruteforce_payloads_attempted": (
-        r"(?m)^\s*CNC brute force:\s+(\d+) attempted / \d+ unwalked\s*$"
-    ),
-    "cnc_bruteforce_payloads_unwalked": (
-        r"(?m)^\s*CNC brute force:\s+\d+ attempted / (\d+) unwalked\s*$"
-    ),
-    "rep_layout_cnc_tails_decoded": (
-        r"(?m)^\s*RepLayout tails:\s+(\d+) decoded / \d+ preserved\s*$"
-    ),
-    "rep_layout_cnc_tails_preserved": (
-        r"(?m)^\s*RepLayout tails:\s+\d+ decoded / (\d+) preserved\s*$"
-    ),
-    # Movement sections that stopped with bits of their window unread, in
-    # sized and open windows. A measured tally, not a loss verdict: pinned so
-    # a change in either direction on the reference replay is seen.
-    "movement_sized_section_tails": (
-        r"(?m)^\s*Movement tails:\s+(\d+) sized \(\d+ bits\) / \d+ open \(\d+ bits\)\s*$"
-    ),
-    "movement_sized_section_tail_bits": (
-        r"(?m)^\s*Movement tails:\s+\d+ sized \((\d+) bits\) / \d+ open \(\d+ bits\)\s*$"
-    ),
-    "movement_open_section_tails": (
-        r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / (\d+) open \(\d+ bits\)\s*$"
-    ),
-    "movement_open_section_tail_bits": (
-        r"(?m)^\s*Movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
-    ),
-    # Every byte-wrapped movement stream and the bits after its envelope,
-    # which nothing reads; verify_build_corpus.py fails a replay whose bits are
-    # not 24 per stream.
-    "movement_envelope_trailers": (
-        r"(?m)^\s*Envelope trailers:\s+(\d+) streams / \d+ bits\s*$"
-    ),
-    "movement_envelope_trailer_bits": (
-        r"(?m)^\s*Envelope trailers:\s+\d+ streams / (\d+) bits\s*$"
-    ),
-    # Empty ActiveBlinds deltas whose trailing zero byte the strict walker
-    # was spared: a measured tolerance, legitimately nonzero on some builds.
-    "active_blinds_empty_trailers": (
-        r"(?m)^\s*ActiveBlinds trailers:\s+(\d+) empty deltas\s*$"
-    ),
-    # Section bytes the DemoFrame walk stepped over; the skip is length-
-    # prefixed, so a build that starts sending ExternalData or
-    # GameSpecificFrameData moves nothing else here. Anchored so this and the
-    # unanchored `cp_frames` can never read each other's line.
-    "frame_external_data_blobs": (
-        r"(?m)^\s*Frame skips:\s+(\d+) external blobs / \d+ external bytes"
-        r" / \d+ game-specific bytes\s*$"
-    ),
-    "frame_external_data_bytes": (
-        r"(?m)^\s*Frame skips:\s+\d+ external blobs / (\d+) external bytes"
-        r" / \d+ game-specific bytes\s*$"
-    ),
-    "frame_game_specific_bytes": (
-        r"(?m)^\s*Frame skips:\s+\d+ external blobs / \d+ external bytes"
-        r" / (\d+) game-specific bytes\s*$"
-    ),
-    # Frames whose NaN or infinite time was read as 0 ms.
-    "frame_non_finite_times": r"(?m)^\s*Frame times:\s+(\d+) non-finite\s*$",
-}
-PATTERNS = {k: re.compile(v) for k, v in COUNTERS.items()}
+#: The summary counters the baselines pin, main pass and `--checkpoints` pass.
+COUNTERS = sc.keys("P", checkpoint=False)
+CHECKPOINT_COUNTERS = sc.keys("P", checkpoint=True)
 #: The frame-walk tallies -- the three skip counts and the frames with a
 #: non-finite time -- as the manifest names them after its `frame_` /
 #: `checkpoint_frame_` prefixes.
@@ -191,90 +75,6 @@ FRAME_SKIP_KEYS = ("external_data_blobs", "external_data_bytes", "game_specific_
 #: the manifest's `sink` blocks as in COUNTERS (checkpoint: `cp_` + key).
 SINK_TALLY_KEYS = ("movement_envelope_trailers", "movement_envelope_trailer_bits",
                    "active_blinds_empty_trailers")
-
-# Only printed under `--checkpoints`, so they live apart from COUNTERS -- a
-# default run must not record them as None and then diff that against a
-# baseline taken with the flag.
-CHECKPOINT_COUNTERS = {
-    "cp_partial_rows": r"Checkpoint partial raw:\s+(\d+) rows",
-    "cp_partial_bits": r"Checkpoint partial raw:\s+\d+ rows / (\d+) bits",
-    "cp_chunks": r"Checkpoints:\s+(\d+)",
-    # Checkpoint bytes no reader consumed. Anchored: the free-text error lines
-    # printed before it (`Struct blob err:`, `Movement err:`) could quote it.
-    "cp_trailing_bytes": r"(?m)^\s*Trailing bytes:\s+(\d+)\s*$",
-    "cp_guid_entries": r"(?m)^\s*GUID entries:\s+(\d+)",
-    "cp_group_records": r"Group records:\s+(\d+)",
-    "cp_exported_fields": r"Exported fields:\s+(\d+)",
-    "cp_frames": r"Frames:\s+(\d+)",
-    "cp_frame_packets": r"Frame packets:\s+(\d+)",
-    "cp_field_rows": r"Checkpoint rows:\s+(\d+)",
-    "cp_actor_rows_written": r"Checkpoint actors:\s*(\d+) rows",
-    "cp_net_guid_rows_written": r"Checkpoint GUID rows:\s+(\d+)",
-    "cp_block_rows_written": r"Checkpoint blocks:\s*(\d+) rows",
-    "cp_guid_entry_rows_written": r"Checkpoint GUID entries:\s*(\d+) rows",
-    "cp_export_group_rows_written": r"Checkpoint export groups:\s*(\d+) rows",
-    "cp_export_field_rows_written": r"Checkpoint export fields:\s*(\d+) rows",
-    "cp_literal_paths": r"(?m)^\s*GUID paths:\s+(\d+) literals / \d+ indices / \d+ resolved\s*$",
-    "cp_indexed_paths": r"(?m)^\s*GUID paths:\s+\d+ literals / (\d+) indices / \d+ resolved\s*$",
-    "cp_resolved_path_indices": r"(?m)^\s*GUID paths:\s+\d+ literals / \d+ indices / (\d+) resolved\s*$",
-    # Deliberately a different label from the main block's "Struct blobs", so
-    # these regexes cannot match each other's line.
-    "cp_struct_blobs_decoded": r"Checkpoint blobs:\s+(\d+) decoded",
-    "cp_struct_blobs_failed": r"Checkpoint blobs:\s+\d+ decoded / (\d+) failed",
-    "cp_targeting_world_locations_decoded": r"(?m)^\s*Checkpoint targets:\s+(\d+) array children\s*$",
-    "cp_tracked_rewards_opaque_empty_variants": (
-        r"(?m)^\s*Checkpoint reward opaque:\s+(\d+) empty variants\s*$"
-    ),
-    "cp_cnc_rpcs_emitted": r"(?m)^\s*Checkpoint CNC:\s+(\d+) RPC rows\s*$",
-    "cp_cnc_bruteforce_payloads_attempted": (
-        r"(?m)^\s*Checkpoint CNC brute force:\s+(\d+) attempted / \d+ unwalked\s*$"
-    ),
-    "cp_cnc_bruteforce_payloads_unwalked": (
-        r"(?m)^\s*Checkpoint CNC brute force:\s+\d+ attempted / (\d+) unwalked\s*$"
-    ),
-    "cp_rep_layout_cnc_tails_decoded": (
-        r"(?m)^\s*Checkpoint tails:\s+(\d+) decoded / \d+ preserved\s*$"
-    ),
-    "cp_rep_layout_cnc_tails_preserved": (
-        r"(?m)^\s*Checkpoint tails:\s+\d+ decoded / (\d+) preserved\s*$"
-    ),
-    "cp_movement_sized_section_tails": (
-        r"(?m)^\s*Checkpoint movement tails:\s+(\d+) sized \(\d+ bits\) / \d+ open \(\d+ bits\)\s*$"
-    ),
-    "cp_movement_sized_section_tail_bits": (
-        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \((\d+) bits\) / \d+ open \(\d+ bits\)\s*$"
-    ),
-    "cp_movement_open_section_tails": (
-        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / (\d+) open \(\d+ bits\)\s*$"
-    ),
-    "cp_movement_open_section_tail_bits": (
-        r"(?m)^\s*Checkpoint movement tails:\s+\d+ sized \(\d+ bits\) / \d+ open \((\d+) bits\)\s*$"
-    ),
-    "cp_movement_envelope_trailers": (
-        r"(?m)^\s*Checkpoint envelope trailers:\s+(\d+) streams / \d+ bits\s*$"
-    ),
-    "cp_movement_envelope_trailer_bits": (
-        r"(?m)^\s*Checkpoint envelope trailers:\s+\d+ streams / (\d+) bits\s*$"
-    ),
-    "cp_active_blinds_empty_trailers": (
-        r"(?m)^\s*Checkpoint ActiveBlinds trailers:\s+(\d+) empty deltas\s*$"
-    ),
-    "cp_frame_external_data_blobs": (
-        r"(?m)^\s*Checkpoint frame skips:\s+(\d+) external blobs / \d+ external bytes"
-        r" / \d+ game-specific bytes\s*$"
-    ),
-    "cp_frame_external_data_bytes": (
-        r"(?m)^\s*Checkpoint frame skips:\s+\d+ external blobs / (\d+) external bytes"
-        r" / \d+ game-specific bytes\s*$"
-    ),
-    "cp_frame_game_specific_bytes": (
-        r"(?m)^\s*Checkpoint frame skips:\s+\d+ external blobs / \d+ external bytes"
-        r" / (\d+) game-specific bytes\s*$"
-    ),
-    "cp_frame_non_finite_times": (
-        r"(?m)^\s*Checkpoint frame times:\s+(\d+) non-finite\s*$"
-    ),
-}
 
 PARQUET_FILES = ("fields", "movement", "actors", "net_guids", "events", "partials")
 CHECKPOINT_PARQUET_FILES = (
@@ -682,16 +482,8 @@ def measure(exe: Path, replay: Path, out_dir: Path, checkpoints: bool = False) -
         tail = " | ".join(l for l in text.splitlines()[-5:] if l.strip())
         raise SystemExit(f"export failed (exit {r.returncode}): {tail[:400]}")
 
-    patterns = dict(PATTERNS)
-    files = list(PARQUET_FILES)
-    if checkpoints:
-        patterns.update({k: re.compile(v) for k, v in CHECKPOINT_COUNTERS.items()})
-        files.extend(CHECKPOINT_PARQUET_FILES)
-
-    counters = {}
-    for key, pat in patterns.items():
-        match = pat.search(text)
-        counters[key] = None if match is None else int(match.group(1))
+    counters = sc.read(text, COUNTERS + (CHECKPOINT_COUNTERS if checkpoints else ()))
+    files = PARQUET_FILES + (CHECKPOINT_PARQUET_FILES if checkpoints else ())
 
     parquet = {}
     for name in files:

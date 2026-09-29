@@ -26,6 +26,7 @@ from atomic_io import atomic_write_text, sha256_file
 import check_decode_errors_corpus as overlay
 import check_export_baseline as baseline
 from corpus_scan import find_replays
+import summary_counters
 import validate_type_evidence as evidence
 
 REPO = Path(__file__).resolve().parents[1]
@@ -162,19 +163,12 @@ def validation_counts(text, returncode):
 
 
 def check_export(text, directory):
-    counters, error = overlay.read_counters(text, 0, require_checkpoints=True)
-    if error:
-        raise ValueError(error)
-    if mismatch := overlay.reconcile(counters):
+    printed = summary_counters.read(text, summary_counters.WHERE)
+    missing = [key for key, value in printed.items() if value is None]
+    if missing:
+        raise ValueError(f"export omits counter {missing[0]}")
+    if mismatch := overlay.reconcile(printed):
         raise ValueError(mismatch)
-    patterns = dict(baseline.PATTERNS)
-    patterns.update({k: re.compile(v) for k, v in baseline.CHECKPOINT_COUNTERS.items()})
-    printed = {}
-    for key, pattern in patterns.items():
-        match = pattern.search(text)
-        if match is None:
-            raise ValueError(f"export omits counter {key}")
-        printed[key] = int(match[1])
     tables = {}
     for name in baseline.PARQUET_FILES + baseline.CHECKPOINT_PARQUET_FILES:
         path = directory / f"{name}.parquet"

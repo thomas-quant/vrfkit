@@ -384,10 +384,8 @@ class CheckExportTests(unittest.TestCase):
             directory = Path(temp)
             for name in audit.baseline.PARQUET_FILES + audit.baseline.CHECKPOINT_PARQUET_FILES:
                 pq.write_table(pa.table({"value": [1]}), directory / f"{name}.parquet")
-            stack.enter_context(patch.object(audit.overlay, "read_counters", return_value=({}, None)))
+            stack.enter_context(patch.object(audit.summary_counters, "read", return_value={}))
             stack.enter_context(patch.object(audit.overlay, "reconcile", return_value=None))
-            stack.enter_context(patch.dict(audit.baseline.PATTERNS, clear=True))
-            stack.enter_context(patch.dict(audit.baseline.CHECKPOINT_COUNTERS, clear=True))
             for name in ("cross_checks", "checkpoint_manifest_errors",
                          "reward_opaque_manifest_errors", "targeting_manifest_errors",
                          "sink_tally_manifest_errors", "frame_skip_manifest_errors",
