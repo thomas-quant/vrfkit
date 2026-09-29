@@ -148,7 +148,7 @@ def export_rows(parent):
     return rows + [{**parent, "handle": 1, "compatible_checksum": PATH_KEY[2]}]
 
 
-def run_main(rows, declared=True):
+def run_main(rows, declared=True, flags=("--compare-typed", "--require-routes")):
     """main() over one synthetic export: `(exit code, stdout)`."""
     with tempfile.TemporaryDirectory() as directory:
         export = Path(directory)
@@ -166,7 +166,7 @@ def run_main(rows, declared=True):
         }), export / "fields.parquet")
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = evidence.main([str(export), "--compare-typed", "--require-routes"])
+            code = evidence.main([str(export), *flags])
     return code, output.getvalue()
 
 
@@ -179,6 +179,7 @@ class MainTests(unittest.TestCase):
                       "typed_children={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 3}", out)
         self.assertIn("missing observed route", out)  # --require-routes: no ActiveBlinds row
         self.assertEqual(code, 1)
+        self.assertEqual(run_main(rows, flags=["--compare-typed"])[0], 0)
         self.assertNotIn("orphan", out)
         self.assertNotIn("declaration", out)
 
