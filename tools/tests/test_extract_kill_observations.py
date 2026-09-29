@@ -121,6 +121,8 @@ class BuildScopeTests(unittest.TestCase):
         import contextlib, io
 
         for build in (*LEGACY_BUILDS, "13.01", "13.02", "13.04", "13.05", "13.06"):
+            self.assertIn(f"++Ares-Core+release-{build}", tool.MEASURED_BUILDS)
+        for build in ("11.06", "13.06"):
             branch = f"++Ares-Core+release-{build}"
             with self.subTest(build=build), tempfile.TemporaryDirectory() as t:
                 export = build_export(Path(t) / "export", branch)

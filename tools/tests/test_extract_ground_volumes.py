@@ -12,12 +12,12 @@ import struct
 import tempfile
 import unittest
 from unittest.mock import patch
-import zlib
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tools import extract_ground_volumes as gv
+from tools.check_checksum_types import chain_checksum
 from tools.tests.wire_fixtures import BitWriter
 
 CNC_IDENTITY = ("FragmentInfo", 2225407835)
@@ -60,22 +60,12 @@ CELL = {"253": 7, "bIsActive": True, "Status": 1,
         "Ceiling": 346.0000305175781, "Floor": 99.99999237060547}
 
 
-def compatible_checksum(name, cpp_type, parent=0, static_index=0):
-    """Unreal's RepLayout compatible checksum, computed here from names; the
-    tool holds only the numbers the replays declare. CRC-32 over the
-    UTF-32LE lower-cased name, then the lower-cased C++ type, then the
-    little-endian 32-bit static array index, seeded with the parent's."""
-    crc = zlib.crc32(name.lower().encode("utf-32-le"), parent)
-    crc = zlib.crc32(cpp_type.lower().encode("utf-32-le"), crc)
-    return zlib.crc32(struct.pack("<I", static_index), crc)
-
-
 #: The item struct and its parents, as named in the 13.06 game executable's
 #: reflection data: FragmentInfo:FGroundVolumeFragmentArray -> Items:TArray ->
 #: Items:FGroundVolumeFragment. None of these levels (nor GridPos) is declared
 #: in any export of the corpus; only the members below are.
-ITEM_PARENT = compatible_checksum("Items", "FGroundVolumeFragment", compatible_checksum(
-    "Items", "TArray", compatible_checksum("FragmentInfo", "FGroundVolumeFragmentArray")))
+ITEM_CHAIN = [("FragmentInfo", "FGroundVolumeFragmentArray"), ("Items", "TArray"),
+              ("Items", "FGroundVolumeFragment")]
 #: Declared identity -> its path below FGroundVolumeFragment, one (name, C++
 #: type) step per struct or array level; an array element repeats the name.
 REPRODUCED = {
@@ -326,10 +316,7 @@ class ChecksumTests(unittest.TestCase):
 
     @staticmethod
     def path_checksum(steps):
-        crc = ITEM_PARENT
-        for name, cpp_type in steps:
-            crc = compatible_checksum(name, cpp_type, crc)
-        return crc
+        return chain_checksum(ITEM_CHAIN + list(steps))
 
     def test_declared_checksums_reproduce_from_the_struct_chain(self):
         # Every identity the tool decodes, except the width-only ones.
