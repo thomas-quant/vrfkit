@@ -889,6 +889,8 @@ mod tests {
     const KILL_PARENT: &str = "KillData";
     const KILL_CHECKSUM: u32 = 1_493_759_848;
     const MEASURED_BUILD: &str = "++Ares-Core+release-13.05";
+    const EFFECTS_GROUP: &str = "/Script/ShooterGame.EffectManagerComponent";
+    const IGNORE_GROUP: &str = "/Script/ShooterGame.FiniteSpeedMovementComponent";
     const BLINDS: (&str, &str, u32) = (
         "/Script/ShooterGame.BlindManagerComponent",
         "ActiveBlinds",
@@ -1005,24 +1007,6 @@ mod tests {
 
     fn export_array(
         identity: (&str, &str, u32),
-        leaf: (u32, &str),
-        bits: &[bool],
-        branch: Option<&str>,
-    ) -> (RecordBuffers, ExportStats) {
-        export_array_with_child_checksum(identity, (leaf.0, leaf.1, 0), bits, branch)
-    }
-
-    fn export_array_with_child_checksum(
-        identity: (&str, &str, u32),
-        leaf: (u32, &str, u32),
-        bits: &[bool],
-        branch: Option<&str>,
-    ) -> (RecordBuffers, ExportStats) {
-        export_array_with_declarations(identity, &[leaf], bits, branch)
-    }
-
-    fn export_array_with_declarations(
-        identity: (&str, &str, u32),
         leaves: &[(u32, &str, u32)],
         bits: &[bool],
         branch: Option<&str>,
@@ -1066,7 +1050,7 @@ mod tests {
         let bits = one_leaf(49, &[true]);
         let (records, stats) = export_array(
             (OWNER, OWNER_PARENT, OWNER_CHECKSUM),
-            (49, "bIsAfk"),
+            &[(49, "bIsAfk", 0)],
             &bits,
             Some(MEASURED_BUILD),
         );
@@ -1086,112 +1070,6 @@ mod tests {
         assert_eq!(parent.bit_count, bits.len() as u32);
         assert_eq!(stats.array.fields_emitted, 1);
         assert_eq!(stats.fields_emitted, 2);
-    }
-
-    #[test]
-    fn measured_array_rejects_unmeasured_build_and_wrong_identity() {
-        let bits = one_leaf(49, &[true]);
-        for (group, name, checksum, branch) in [
-            (OWNER, OWNER_PARENT, OWNER_CHECKSUM, None),
-            (
-                OWNER,
-                OWNER_PARENT,
-                OWNER_CHECKSUM,
-                Some("++Ares-Core+release-13.07"),
-            ),
-            (
-                OWNER,
-                OWNER_PARENT,
-                OWNER_CHECKSUM + 1,
-                Some(MEASURED_BUILD),
-            ),
-            (
-                "/Script/ShooterGame.Other",
-                OWNER_PARENT,
-                OWNER_CHECKSUM,
-                Some(MEASURED_BUILD),
-            ),
-            (
-                OWNER,
-                "DifferentArray",
-                OWNER_CHECKSUM,
-                Some(MEASURED_BUILD),
-            ),
-        ] {
-            let (records, stats) =
-                export_array((group, name, checksum), (49, "bIsAfk"), &bits, branch);
-            assert_eq!(
-                records.fields.len(),
-                1,
-                "{group}/{name}/{checksum}/{branch:?}"
-            );
-            assert_eq!(
-                records.fields[0].raw_bits.as_deref(),
-                Some(pack(&bits).as_slice())
-            );
-            assert_eq!(stats.array.fields_emitted, 0);
-        }
-    }
-
-    #[test]
-    fn measured_array_rejects_suffix_and_missing_terminator_transactionally() {
-        let valid = one_leaf(49, &[true]);
-        let mut suffix = valid.clone();
-        suffix.extend([false; 8]);
-        let truncated = valid[..valid.len() - 8].to_vec();
-        for bits in [suffix, truncated] {
-            let (records, stats) = export_array(
-                (OWNER, OWNER_PARENT, OWNER_CHECKSUM),
-                (49, "bIsAfk"),
-                &bits,
-                Some(MEASURED_BUILD),
-            );
-            assert_eq!(records.fields.len(), 1, "no partially accepted children");
-            assert_eq!(
-                records.fields[0].raw_bits.as_deref(),
-                Some(pack(&bits).as_slice())
-            );
-            assert!(
-                stats.array.unconsumed_root_bits > 0
-                    || stats.array.implicit_terminations > 0
-                    || stats.array.errors > 0
-            );
-        }
-    }
-
-    #[test]
-    fn measured_array_unknown_leaf_stays_raw() {
-        let bits = one_leaf(48, &[true, false, true]);
-        let (records, _) = export_array(
-            (OWNER, OWNER_PARENT, OWNER_CHECKSUM),
-            (48, "SubjectUniqueId"),
-            &bits,
-            Some(MEASURED_BUILD),
-        );
-        assert_eq!(records.fields.len(), 2);
-        let child = &records.fields[0];
-        assert_eq!(child.raw_bits.as_deref(), Some([5u8].as_slice()));
-        assert_eq!(values(child), (None, None, None, None));
-    }
-
-    #[test]
-    fn tracked_rewards_unverified_children_stay_raw() {
-        let bits = one_leaf(19, &[true]);
-        let (records, stats) = export_array(
-            (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-            (19, "AdditionalRawReward"),
-            &bits,
-            Some(MEASURED_BUILD),
-        );
-        assert_eq!(records.fields.len(), 2);
-        let child = &records.fields[0];
-        assert_eq!(
-            child.field_name.as_deref(),
-            Some("TrackedRewards[0].AdditionalRawReward")
-        );
-        assert_eq!(child.raw_bits.as_deref(), Some([1u8].as_slice()));
-        assert_eq!(values(child), (None, None, None, None));
-        assert_eq!(stats.tracked_rewards_opaque_empty_variants, 0);
     }
 
     #[test]
@@ -1225,9 +1103,9 @@ mod tests {
             ),
         ] {
             let bits = one_leaf(handle, &payload);
-            let (records, _) = export_array_with_child_checksum(
+            let (records, _) = export_array(
                 (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-                (handle, name, checksum),
+                &[(handle, name, checksum)],
                 &bits,
                 Some(MEASURED_BUILD),
             );
@@ -1242,9 +1120,9 @@ mod tests {
     fn tracked_rewards_refuses_wrong_child_identity_or_resolved_type() {
         let bits = one_leaf(30, &[false; 32]);
         for (name, checksum) in [("OtherName", 2_922_243_316), ("InstancesOfReward", 0)] {
-            let (records, _) = export_array_with_child_checksum(
+            let (records, _) = export_array(
                 (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-                (30, name, checksum),
+                &[(30, name, checksum)],
                 &bits,
                 Some(MEASURED_BUILD),
             );
@@ -1289,9 +1167,9 @@ mod tests {
     #[test]
     fn tracked_rewards_bad_typed_width_keeps_raw_leaf_and_counts_error() {
         let bits = one_leaf(30, &[false; 8]);
-        let (records, stats) = export_array_with_child_checksum(
+        let (records, stats) = export_array(
             (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-            (30, "InstancesOfReward", 2_922_243_316),
+            &[(30, "InstancesOfReward", 2_922_243_316)],
             &bits,
             Some(MEASURED_BUILD),
         );
@@ -1313,9 +1191,9 @@ mod tests {
             (empty[..empty.len() - 1].to_vec(), 1, None),
         ] {
             let bits = one_leaf(29, &payload);
-            let (records, stats) = export_array_with_child_checksum(
+            let (records, stats) = export_array(
                 (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-                (29, "LocalizedRewardName", 483_770_233),
+                &[(29, "LocalizedRewardName", 483_770_233)],
                 &bits,
                 Some(MEASURED_BUILD),
             );
@@ -1334,36 +1212,12 @@ mod tests {
     }
 
     #[test]
-    fn selected_v2_and_kill_data_are_exact_raw_child_routes() {
-        for (group, parent, checksum) in [
-            (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-            (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-        ] {
-            let bits = one_leaf(19, &[true, false, true]);
-            let (records, stats) = export_array(
-                (group, parent, checksum),
-                (19, "NestedRawMember"),
-                &bits,
-                Some(MEASURED_BUILD),
-            );
-            assert_eq!(records.fields.len(), 2, "{parent}");
-            assert_eq!(records.fields[0].raw_bits.as_deref(), Some([5].as_slice()));
-            assert_eq!(
-                values(&records.fields[0]),
-                (None, None, None, None),
-                "{parent}"
-            );
-            assert_eq!(stats.array.fields_emitted, 1);
-        }
-    }
-
-    #[test]
     fn selected_v2_types_only_the_six_qualified_object_net_guid_leaves() {
         let mut multi_byte = Vec::new();
         multi_byte.int_packed(128);
-        let (records, _) = export_array_with_child_checksum(
+        let (records, _) = export_array(
             (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-            (3, "EquippableDataAsset", 1_793_937_854),
+            &[(3, "EquippableDataAsset", 1_793_937_854)],
             &one_leaf(3, &multi_byte),
             Some(MEASURED_BUILD),
         );
@@ -1374,18 +1228,18 @@ mod tests {
         );
 
         let zero = vec![false; 8];
-        let (records, _) = export_array_with_child_checksum(
+        let (records, _) = export_array(
             (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-            (8, "EquippableCharmLevelDataAsset", 1_087_985_310),
+            &[(8, "EquippableCharmLevelDataAsset", 1_087_985_310)],
             &one_leaf(8, &zero),
             Some(MEASURED_BUILD),
         );
         assert_eq!(records.fields[0].value_i64, Some(0));
 
         for (name, checksum) in [("Other", 1_793_937_854), ("EquippableDataAsset", 0)] {
-            let (records, _) = export_array_with_child_checksum(
+            let (records, _) = export_array(
                 (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-                (3, name, checksum),
+                &[(3, name, checksum)],
                 &one_leaf(3, &multi_byte),
                 Some(MEASURED_BUILD),
             );
@@ -1397,9 +1251,9 @@ mod tests {
             (14, "SocketAsset", 3_666_994_016),
             (15, "AttachmentAsset", 856_446_005),
         ] {
-            let (records, _) = export_array_with_child_checksum(
+            let (records, _) = export_array(
                 (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-                (handle, name, checksum),
+                &[(handle, name, checksum)],
                 &one_leaf(handle, &multi_byte),
                 Some(MEASURED_BUILD),
             );
@@ -1425,9 +1279,9 @@ mod tests {
     #[test]
     fn selected_v2_bad_object_net_guid_windows_stay_raw_and_count_errors() {
         for payload in [unpack(&[1]), unpack(&[1, 1, 1, 1, 0x20])] {
-            let (records, stats) = export_array_with_child_checksum(
+            let (records, stats) = export_array(
                 (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-                (3, "EquippableDataAsset", 1_793_937_854),
+                &[(3, "EquippableDataAsset", 1_793_937_854)],
                 &one_leaf(3, &payload),
                 Some(MEASURED_BUILD),
             );
@@ -1521,9 +1375,9 @@ mod tests {
                 Some(false),
             ),
         ] {
-            let (records, _) = export_array_with_child_checksum(
+            let (records, _) = export_array(
                 (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-                (handle, name, checksum),
+                &[(handle, name, checksum)],
                 &one_leaf(handle, &payload),
                 Some(MEASURED_BUILD),
             );
@@ -1543,9 +1397,9 @@ mod tests {
             ("", false),
         ] {
             let payload = kill_weapon_theme_payload(value, utf16);
-            let (records, stats) = export_array_with_child_checksum(
+            let (records, stats) = export_array(
                 (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-                (5, "WeaponTheme", 1_839_952_321),
+                &[(5, "WeaponTheme", 1_839_952_321)],
                 &one_leaf(5, &payload),
                 Some(MEASURED_BUILD),
             );
@@ -1581,9 +1435,9 @@ mod tests {
             residual,
             invalid_utf8,
         ] {
-            let (records, stats) = export_array_with_child_checksum(
+            let (records, stats) = export_array(
                 (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-                (5, "WeaponTheme", 1_839_952_321),
+                &[(5, "WeaponTheme", 1_839_952_321)],
                 &one_leaf(5, &payload),
                 Some(MEASURED_BUILD),
             );
@@ -1603,9 +1457,9 @@ mod tests {
         for (name, checksum) in [("Other", 2_001_471_495), ("DamageTaken", 0)] {
             assert!(typed(kill, 10, name, checksum, None).is_none());
             let payload = unpack(&1.5f32.to_le_bytes());
-            let (records, _) = export_array_with_child_checksum(
+            let (records, _) = export_array(
                 (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-                (10, name, checksum),
+                &[(10, name, checksum)],
                 &one_leaf(10, &payload),
                 Some(MEASURED_BUILD),
             );
@@ -1616,9 +1470,9 @@ mod tests {
             );
         }
         let payload = kill_weapon_theme_payload("theme", false);
-        let (records, _) = export_array_with_child_checksum(
+        let (records, _) = export_array(
             (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-            (5, "Other", 1_839_952_321),
+            &[(5, "Other", 1_839_952_321)],
             &one_leaf(5, &payload),
             Some(MEASURED_BUILD),
         );
@@ -1637,7 +1491,7 @@ mod tests {
         let mut second = Vec::new();
         second.int_packed(9);
         let selected_nested = one_element(&[(14, first.clone()), (15, second.clone())]);
-        let (records, stats) = export_array_with_declarations(
+        let (records, stats) = export_array(
             (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
             &[
                 (13, "EquippableAttachments", 3_137_596_882),
@@ -1677,7 +1531,7 @@ mod tests {
         assert_eq!(stats.array.fields_emitted, 3);
 
         let kill_nested = one_element(&[(7, first.clone())]);
-        let (records, stats) = export_array_with_declarations(
+        let (records, stats) = export_array(
             (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
             &[
                 (6, "AssistingPlayers", 1_689_463_717),
@@ -1782,16 +1636,14 @@ mod tests {
             let mut bits = Vec::new();
             bits.int_packed(capacity);
             bits.int_packed(0);
-            let (_, control) =
-                export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
+            let (_, control) = export_array(identity, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(control.array.errors, 0);
             assert_eq!(
                 control.active_blinds_empty_trailers, 0,
                 "no trailer to spare"
             );
             bits.int_packed(0);
-            let (records, stats) =
-                export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
+            let (records, stats) = export_array(identity, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 0, "capacity {capacity}");
             assert_eq!(
                 stats.active_blinds_empty_trailers, 1,
@@ -1820,7 +1672,7 @@ mod tests {
             let mut payload = Vec::new();
             payload.int_packed(reference);
             let bits = one_leaf(11, &payload);
-            let (records, stats) = export_array_with_declarations(
+            let (records, stats) = export_array(
                 identity,
                 &[(11, "CausingActor", 2_370_661_694)],
                 &bits,
@@ -1844,25 +1696,20 @@ mod tests {
     #[test]
     fn active_blinds_invalid_trailers_and_references_still_fail() {
         let identity = BLINDS;
-        let mut empty = Vec::new();
-        empty.int_packed(1);
-        empty.int_packed(0);
-        for trailer in [vec![true; 8], unpack(&[2]), unpack(&[0, 0])] {
-            let mut bits = empty.clone();
-            bits.extend(trailer);
-            let (records, stats) =
-                export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
-            assert_eq!(stats.array.errors, 1);
-            assert_eq!(stats.active_blinds_empty_trailers, 0, "refused, not spared");
-            assert_eq!(records.fields.len(), 1);
-            assert_eq!(
-                records.fields[0].raw_bits.as_deref(),
-                Some(pack(&bits).as_slice())
-            );
-        }
+        // An empty delta with a two-byte zero trailer; the nonzero one-byte
+        // trailers are `active_blinds_empty_delta_rejects_every_nonzero_trailer_byte`.
+        let bits = unpack(&[2, 0, 0, 0]);
+        let (records, stats) = export_array(identity, &[], &bits, Some(MEASURED_BUILD));
+        assert_eq!(stats.array.errors, 1);
+        assert_eq!(stats.active_blinds_empty_trailers, 0, "refused, not spared");
+        assert_eq!(records.fields.len(), 1);
+        assert_eq!(
+            records.fields[0].raw_bits.as_deref(),
+            Some(pack(&bits).as_slice())
+        );
         for payload in [unpack(&[1]), unpack(&[0, 0]), vec![false; 7]] {
             let bits = one_leaf(11, &payload);
-            let (records, stats) = export_array_with_declarations(
+            let (records, stats) = export_array(
                 identity,
                 &[(11, "CausingActor", 2_370_661_694)],
                 &bits,
@@ -1877,7 +1724,7 @@ mod tests {
         }
         let mut populated = one_leaf(11, &unpack(&[0]));
         populated.int_packed(0);
-        let (_, stats) = export_array_with_declarations(
+        let (_, stats) = export_array(
             identity,
             &[(11, "CausingActor", 2_370_661_694)],
             &populated,
@@ -1895,45 +1742,12 @@ mod tests {
     }
 
     #[test]
-    fn active_blinds_null_reference_obeys_build_and_parent_identity_guards() {
-        let identity = BLINDS;
-        let declaration = [(11, "CausingActor", 2_370_661_694)];
-        let bits = one_leaf(11, &unpack(&[0]));
-        for branch in ["13.01", "13.02", "13.04", "13.05", "13.06"] {
-            let branch = format!("++Ares-Core+release-{branch}");
-            let (records, stats) =
-                export_array_with_declarations(identity, &declaration, &bits, Some(&branch));
-            assert_eq!(records.fields.len(), 2, "{branch}");
-            assert_eq!(records.fields[0].value_i64, Some(0));
-            assert_eq!(stats.array_leaf_decode_errors, 0);
-        }
-        for branch in [None, Some("++Ares-Core+release-12.10"), Some("unknown")] {
-            let (records, _) =
-                export_array_with_declarations(identity, &declaration, &bits, branch);
-            assert_eq!(records.fields.len(), 1, "{branch:?}");
-        }
-        for changed in [
-            ("/Script/ShooterGame.OtherComponent", identity.1, identity.2),
-            (identity.0, "OtherArray", identity.2),
-            (identity.0, identity.1, identity.2 + 1),
-        ] {
-            let (records, _) =
-                export_array_with_declarations(changed, &declaration, &bits, Some(MEASURED_BUILD));
-            assert_eq!(records.fields.len(), 1);
-            assert_eq!(
-                records.fields[0].raw_bits.as_deref(),
-                Some(pack(&bits).as_slice())
-            );
-        }
-    }
-
-    #[test]
     fn active_blinds_every_truncated_null_update_retains_only_raw_parent() {
         let identity = BLINDS;
         let bits = one_leaf(11, &unpack(&[0]));
         for length in 1..bits.len() {
             let truncated = &bits[..length];
-            let (records, stats) = export_array_with_declarations(
+            let (records, stats) = export_array(
                 identity,
                 &[(11, "CausingActor", 2_370_661_694)],
                 truncated,
@@ -1953,8 +1767,7 @@ mod tests {
     fn active_blinds_empty_delta_rejects_every_nonzero_trailer_byte() {
         for trailer in 1..=255u8 {
             let bits = unpack(&[2, 0, trailer]);
-            let (records, stats) =
-                export_array_with_declarations(BLINDS, &[], &bits, Some(MEASURED_BUILD));
+            let (records, stats) = export_array(BLINDS, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 1, "trailer {trailer}");
             assert_eq!(stats.active_blinds_empty_trailers, 0, "trailer {trailer}");
             assert_eq!(records.fields.len(), 1);
@@ -1977,7 +1790,7 @@ mod tests {
                 bits.int_packed(0);
             }
             bits.int_packed(0);
-            let (records, stats) = export_array_with_declarations(
+            let (records, stats) = export_array(
                 identity,
                 &[(11, "CausingActor", 2_370_661_694)],
                 &bits,
@@ -2002,8 +1815,7 @@ mod tests {
     #[test]
     fn active_blinds_changed_member_declaration_retains_only_raw_parent() {
         let bits = blind_element(8);
-        let (valid, clean) =
-            export_array_with_declarations(BLINDS, &BLIND_MEMBERS, &bits, Some(MEASURED_BUILD));
+        let (valid, clean) = export_array(BLINDS, &BLIND_MEMBERS, &bits, Some(MEASURED_BUILD));
         assert_eq!(valid.fields.len(), 10);
         assert_eq!(clean.array_leaf_decode_errors, 0);
         assert_eq!(valid.fields[0].value_i64, Some(7));
@@ -2011,8 +1823,7 @@ mod tests {
 
         let mut changed = BLIND_MEMBERS;
         changed[0].2 += 1;
-        let (refused, stats) =
-            export_array_with_declarations(BLINDS, &changed, &bits, Some(MEASURED_BUILD));
+        let (refused, stats) = export_array(BLINDS, &changed, &bits, Some(MEASURED_BUILD));
         assert_eq!(refused.fields.len(), 1);
         assert_eq!(refused.fields[0].field_name.as_deref(), Some(BLINDS.1));
         assert_eq!(
@@ -2026,7 +1837,7 @@ mod tests {
     /// negative ID, not an overflow a `UInt64` read would refuse.
     #[test]
     fn active_blinds_effect_id_is_signed() {
-        let (valid, stats) = export_array_with_declarations(
+        let (valid, stats) = export_array(
             BLINDS,
             &BLIND_MEMBERS,
             &blind_element(-2),
@@ -2075,7 +1886,7 @@ mod tests {
     #[test]
     fn malformed_nested_value_is_transactional_and_keeps_outer_raw() {
         let malformed = one_element(&[(7, unpack(&[2])), (7, unpack(&[1]))]);
-        let (records, stats) = export_array_with_declarations(
+        let (records, stats) = export_array(
             (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
             &[
                 (6, "AssistingPlayers", 1_689_463_717),
@@ -2097,7 +1908,7 @@ mod tests {
         );
 
         let valid = one_element(&[(14, unpack(&[2])), (15, unpack(&[4]))]);
-        let (records, stats) = export_array_with_declarations(
+        let (records, stats) = export_array(
             (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
             &[
                 (13, "EquippableAttachments", 3_137_596_882),
@@ -2120,89 +1931,11 @@ mod tests {
     }
 
     #[test]
-    fn nested_fixture_is_not_enabled_outside_the_exact_parent_gate() {
-        let nested = one_element(&[(7, unpack(&[2]))]);
-        for (group, checksum, branch) in [
-            (
-                "/Script/ShooterGame.Other",
-                KILL_CHECKSUM,
-                Some(MEASURED_BUILD),
-            ),
-            (KILL_GROUP, KILL_CHECKSUM + 1, Some(MEASURED_BUILD)),
-            (KILL_GROUP, KILL_CHECKSUM, None),
-        ] {
-            let (records, stats) = export_array_with_declarations(
-                (group, KILL_PARENT, checksum),
-                &[
-                    (6, "AssistingPlayers", 1_689_463_717),
-                    (7, "AssistingPlayers", 1_417_448_159),
-                ],
-                &one_leaf(6, &nested),
-                branch,
-            );
-            assert_eq!(records.fields.len(), 1, "{group}/{checksum}/{branch:?}");
-            assert_eq!(records.fields[0].field_name.as_deref(), Some(KILL_PARENT));
-            assert_eq!(stats.array.fields_emitted, 0);
-        }
-    }
-
-    #[test]
-    fn selected_v2_and_kill_data_refuse_wrong_identity_and_exact_residuals() {
-        for (group, parent, checksum) in [
-            (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-            (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-        ] {
-            let valid = one_leaf(19, &[true]);
-            for (actual_group, actual_checksum, branch, bits) in [
-                (
-                    "/Script/ShooterGame.Other",
-                    checksum,
-                    Some(MEASURED_BUILD),
-                    valid.clone(),
-                ),
-                (group, checksum + 1, Some(MEASURED_BUILD), valid.clone()),
-                (group, checksum, None, valid.clone()),
-                (group, checksum, Some(MEASURED_BUILD), {
-                    let mut suffix = valid.clone();
-                    suffix.extend([false; 8]);
-                    suffix
-                }),
-                (
-                    group,
-                    checksum,
-                    Some(MEASURED_BUILD),
-                    valid[..valid.len() - 8].to_vec(),
-                ),
-            ] {
-                let (records, stats) = export_array(
-                    (actual_group, parent, actual_checksum),
-                    (19, "NestedRawMember"),
-                    &bits,
-                    branch,
-                );
-                assert_eq!(
-                    records.fields.len(),
-                    1,
-                    "{parent}/{actual_group}/{actual_checksum}"
-                );
-                if actual_group == group && actual_checksum == checksum && branch.is_some() {
-                    assert!(
-                        stats.array.unconsumed_root_bits > 0
-                            || stats.array.errors > 0
-                            || stats.array.implicit_terminations > 0,
-                        "exact residual lost its diagnostic: {stats:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn tracked_rewards_literal_opaque_empty_variant_keeps_only_parent_raw() {
         let bits = unpack(&[0x02, 0x00, 0x00]);
         let (records, stats) = export_array(
             (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-            (49, "Rewards"),
+            &[(49, "Rewards", 0)],
             &bits,
             Some(MEASURED_BUILD),
         );
@@ -2219,51 +1952,6 @@ mod tests {
         assert_eq!(stats.array.fields_emitted, 0);
     }
 
-    #[test]
-    fn tracked_rewards_refuses_wrong_identity_and_any_other_trailer_shape() {
-        let literal = unpack(&[0x02, 0x00, 0x00]);
-        for (group, parent, checksum, branch, bits) in [
-            (
-                OWNER,
-                REWARDS_PARENT,
-                REWARDS_CHECKSUM + 1,
-                Some(MEASURED_BUILD),
-                literal.clone(),
-            ),
-            (
-                "/Script/ShooterGame.Other",
-                REWARDS_PARENT,
-                REWARDS_CHECKSUM,
-                Some(MEASURED_BUILD),
-                literal.clone(),
-            ),
-            (
-                OWNER,
-                "OtherRewards",
-                REWARDS_CHECKSUM,
-                Some(MEASURED_BUILD),
-                literal.clone(),
-            ),
-            (
-                OWNER,
-                REWARDS_PARENT,
-                REWARDS_CHECKSUM,
-                None,
-                literal.clone(),
-            ),
-        ] {
-            let (records, stats) =
-                export_array((group, parent, checksum), (49, "Rewards"), &bits, branch);
-            assert_eq!(
-                records.fields.len(),
-                1,
-                "{group}/{parent}/{checksum}/{branch:?}"
-            );
-            assert_eq!(stats.tracked_rewards_opaque_empty_variants, 0);
-            assert_eq!(stats.array.fields_emitted, 0);
-        }
-    }
-
     /// A different trailing byte, a nonempty extension, or no zero index
     /// terminator: none becomes an accepted optional trailer, and each keeps
     /// the exact decoder's diagnostic.
@@ -2276,7 +1964,7 @@ mod tests {
         ] {
             let (records, stats) = export_array(
                 (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-                (49, "Rewards"),
+                &[(49, "Rewards", 0)],
                 &bits,
                 Some(MEASURED_BUILD),
             );
@@ -2297,7 +1985,7 @@ mod tests {
         bits.extend(unpack(&[0]));
         let (records, stats) = export_array(
             (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-            (19, "Rewards"),
+            &[(19, "Rewards", 0)],
             &bits,
             Some(MEASURED_BUILD),
         );
@@ -2314,12 +2002,8 @@ mod tests {
             .collect();
         let bits = one_leaf(33, &payload);
         let (records, _) = export_array(
-            (
-                "/Script/ShooterGame.EffectManagerComponent",
-                "ServerActiveEffects",
-                3_301_618_856,
-            ),
-            (33, "StartTimeStamp"),
+            (EFFECTS_GROUP, "ServerActiveEffects", 3_301_618_856),
+            &[(33, "StartTimeStamp", 0)],
             &bits,
             Some(MEASURED_BUILD),
         );
@@ -2332,13 +2016,9 @@ mod tests {
         let mut payload = Vec::new();
         payload.int_packed(700);
         let bits = one_leaf(5, &payload);
-        let (records, _) = export_array_with_child_checksum(
-            (
-                "/Script/ShooterGame.FiniteSpeedMovementComponent",
-                "RequestedIgnoreActors",
-                1_063_739_204,
-            ),
-            (5, "RequestedIgnoreActors", 3_344_674_359),
+        let (records, _) = export_array(
+            (IGNORE_GROUP, "RequestedIgnoreActors", 1_063_739_204),
+            &[(5, "RequestedIgnoreActors", 3_344_674_359)],
             &bits,
             Some(MEASURED_BUILD),
         );
@@ -2360,7 +2040,7 @@ mod tests {
                 "AbilityCastsThisRound",
                 0,
             ),
-            (7, "CastTime_4_5AE288704801A9B74D6D159DFC2BD147"),
+            &[(7, "CastTime_4_5AE288704801A9B74D6D159DFC2BD147", 0)],
             &bits,
             None,
         );
@@ -2377,43 +2057,66 @@ mod tests {
                 "AbilityCastsThisRound",
                 0,
             ),
-            (7, "CastTime_4_5AE288704801A9B74D6D159DFC2BD147"),
+            &[(7, "CastTime_4_5AE288704801A9B74D6D159DFC2BD147", 0)],
             &bits,
             None,
         );
         assert_eq!(records.fields.len(), 1);
     }
 
-    #[test]
-    fn measured_routes_require_the_full_qualified_identity() {
-        assert_eq!(
-            measured_array_route(
-                "/Script/ShooterGame.FiniteSpeedMovementComponent",
-                "RequestedIgnoreActors",
-                Some(1_063_739_204)
+    /// A route's identity, child declaration and a one-leaf array it types.
+    type Case = (
+        (&'static str, &'static str, u32),
+        (u32, &'static str, u32),
+        Vec<bool>,
+    );
+
+    /// One typed case per flattened route. No wildcard: a new route does not
+    /// compile until it has one.
+    fn case_for(route: MeasuredArrayRoute) -> Option<Case> {
+        let mut reference = Vec::new();
+        reference.int_packed(5);
+        let case = match route {
+            MeasuredArrayRoute::KillData => (
+                (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
+                (3, "Victim", 3_990_035_472),
+                one_leaf(3, &reference),
             ),
-            Some(MeasuredArrayRoute::RequestedIgnoreActors)
-        );
-        assert_eq!(
-            measured_array_route(OWNER, REWARDS_PARENT, Some(REWARDS_CHECKSUM)),
-            Some(MeasuredArrayRoute::TrackedRewards)
-        );
-        assert_eq!(
-            measured_array_route(
-                "/Script/ShooterGame.FiniteSpeedMovementComponent",
-                "RequestedIgnoreActors",
-                Some(1)
+            MeasuredArrayRoute::SelectedV2 => (
+                (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
+                (3, "EquippableDataAsset", 1_793_937_854),
+                one_leaf(3, &reference),
             ),
-            None
-        );
-        assert_eq!(
-            measured_array_route(
-                "/Script/ShooterGame.Other",
-                "RequestedIgnoreActors",
-                Some(1_063_739_204)
+            MeasuredArrayRoute::TrackedRewards => (
+                (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
+                (30, "InstancesOfReward", 2_922_243_316),
+                one_leaf(30, &[false; 32]),
             ),
-            None
-        );
+            MeasuredArrayRoute::ActiveBlinds => (
+                BLINDS,
+                (11, "CausingActor", 2_370_661_694),
+                one_leaf(11, &unpack(&[0])),
+            ),
+            MeasuredArrayRoute::ServerActiveEffects => (
+                (EFFECTS_GROUP, "ServerActiveEffects", 3_301_618_856),
+                (33, "StartTimeStamp", 0),
+                one_leaf(33, &unpack(&1.5f32.to_le_bytes())),
+            ),
+            MeasuredArrayRoute::RequestedIgnoreActors => (
+                (IGNORE_GROUP, "RequestedIgnoreActors", 1_063_739_204),
+                (5, "RequestedIgnoreActors", 3_344_674_359),
+                one_leaf(5, &reference),
+            ),
+            MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation => (
+                (OWNER, OWNER_PARENT, OWNER_CHECKSUM),
+                (49, "bIsAfk", 0),
+                one_leaf(49, &[true]),
+            ),
+            // An RPC parameter, not a flattened property; its gate is
+            // `projectile_path_rpc_expands_only_on_admitting_branches`.
+            MeasuredArrayRoute::NetworkedProjectilePath => return None,
+        };
+        Some(case)
     }
 
     /// The gate is per route, not per build: a typed child (a leaf the 13.05
@@ -2426,63 +2129,6 @@ mod tests {
     /// identity pin below sees a swap inside one.
     #[test]
     fn legacy_branches_expand_only_their_admitted_routes() {
-        let mut reference = Vec::new();
-        reference.int_packed(5);
-        let float: Vec<bool> = (0..32)
-            .map(|bit| 1.5f32.to_bits() & (1 << bit) != 0)
-            .collect();
-        // No wildcard: a new route does not compile until it has a case.
-        let case_for = |route| {
-            let case = match route {
-                MeasuredArrayRoute::KillData => (
-                    (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
-                    (3, "Victim", 3_990_035_472),
-                    one_leaf(3, &reference),
-                ),
-                MeasuredArrayRoute::SelectedV2 => (
-                    (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
-                    (3, "EquippableDataAsset", 1_793_937_854),
-                    one_leaf(3, &reference),
-                ),
-                MeasuredArrayRoute::TrackedRewards => (
-                    (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-                    (30, "InstancesOfReward", 2_922_243_316),
-                    one_leaf(30, &[false; 32]),
-                ),
-                MeasuredArrayRoute::ActiveBlinds => (
-                    BLINDS,
-                    (11, "CausingActor", 2_370_661_694),
-                    one_leaf(11, &unpack(&[0])),
-                ),
-                MeasuredArrayRoute::ServerActiveEffects => (
-                    (
-                        "/Script/ShooterGame.EffectManagerComponent",
-                        "ServerActiveEffects",
-                        3_301_618_856,
-                    ),
-                    (33, "StartTimeStamp", 0),
-                    one_leaf(33, &float),
-                ),
-                MeasuredArrayRoute::RequestedIgnoreActors => (
-                    (
-                        "/Script/ShooterGame.FiniteSpeedMovementComponent",
-                        "RequestedIgnoreActors",
-                        1_063_739_204,
-                    ),
-                    (5, "RequestedIgnoreActors", 3_344_674_359),
-                    one_leaf(5, &reference),
-                ),
-                MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation => (
-                    (OWNER, OWNER_PARENT, OWNER_CHECKSUM),
-                    (49, "bIsAfk", 0),
-                    one_leaf(49, &[true]),
-                ),
-                // An RPC parameter, not a flattened property; its gate is
-                // `projectile_path_rpc_expands_only_on_admitting_branches`.
-                MeasuredArrayRoute::NetworkedProjectilePath => return None,
-            };
-            Some(case)
-        };
         // The identity pin: each case must map to its own route.
         for route in MeasuredArrayRoute::ALL {
             if let Some(((group, parent, checksum), _, _)) = case_for(route) {
@@ -2505,8 +2151,7 @@ mod tests {
                 let Some((identity, leaf, bits)) = case_for(route) else {
                     continue;
                 };
-                let (records, stats) =
-                    export_array_with_declarations(identity, &[leaf], &bits, branch);
+                let (records, stats) = export_array(identity, &[leaf], &bits, branch);
                 let at = format!("{branch:?} {route:?}");
                 let parent = records.fields.last().unwrap();
                 assert_eq!(parent.field_name.as_deref(), Some(identity.1), "{at}");
@@ -2533,6 +2178,81 @@ mod tests {
         // Not vacuous: each of the seven flattened routes expanded on some
         // branch, and the run with no branch kept every one of them raw.
         assert_eq!(expanded.len(), 7, "{expanded:?}");
+    }
+
+    /// Every flattened route keeps only its raw parent when the group, parent
+    /// or checksum differs, and when its exact window has 8 bits too many or
+    /// too few, which must also move a walker diagnostic.
+    #[test]
+    fn measured_routes_refuse_changed_identity_and_inexact_windows() {
+        for route in MeasuredArrayRoute::ALL {
+            let Some(((group, parent, checksum), leaf, valid)) = case_for(route) else {
+                continue;
+            };
+            let other_group = format!("{group}Other");
+            let mut extra = valid.clone();
+            extra.extend([false; 8]);
+            let cut = valid[..valid.len() - 8].to_vec();
+            for (identity, bits, inexact) in [
+                ((other_group.as_str(), parent, checksum), &valid, false),
+                ((group, "Other", checksum), &valid, false),
+                ((group, parent, checksum + 1), &valid, false),
+                ((group, parent, checksum), &extra, true),
+                ((group, parent, checksum), &cut, true),
+            ] {
+                let (records, stats) = export_array(identity, &[leaf], bits, Some(MEASURED_BUILD));
+                let at = format!("{route:?} {identity:?} {} bits", bits.len());
+                assert_eq!(records.fields.len(), 1, "{at}");
+                assert_eq!(
+                    records.fields[0].raw_bits.as_deref(),
+                    Some(pack(bits).as_slice()),
+                    "{at}"
+                );
+                assert_eq!(stats.tracked_rewards_opaque_empty_variants, 0, "{at}");
+                assert_eq!(stats.active_blinds_empty_trailers, 0, "{at}");
+                if inexact {
+                    assert!(
+                        stats.array.unconsumed_root_bits > 0
+                            || stats.array.errors > 0
+                            || stats.array.implicit_terminations > 0,
+                        "{at}: {stats:?}"
+                    );
+                } else {
+                    assert_eq!(stats.array.fields_emitted, 0, "{at}");
+                }
+            }
+        }
+    }
+
+    /// A leaf no rule types stays an exact raw child on every admitted route
+    /// (ActiveBlinds refuses the whole array instead), beside its raw parent.
+    #[test]
+    fn an_untyped_leaf_on_an_admitted_route_stays_raw() {
+        for route in MeasuredArrayRoute::ALL {
+            let Some((identity, _, _)) = case_for(route) else {
+                continue;
+            };
+            if route == MeasuredArrayRoute::ActiveBlinds {
+                continue;
+            }
+            let bits = one_leaf(19, &[true, false, true]);
+            let (records, stats) = export_array(
+                identity,
+                &[(19, "Unlisted", 0)],
+                &bits,
+                Some(MEASURED_BUILD),
+            );
+            assert_eq!(records.fields.len(), 2, "{route:?}");
+            let child = &records.fields[0];
+            assert_eq!(child.raw_bits.as_deref(), Some([5].as_slice()), "{route:?}");
+            assert_eq!(values(child), (None, None, None, None), "{route:?}");
+            assert_eq!(
+                records.fields[1].raw_bits.as_deref(),
+                Some(pack(&bits).as_slice())
+            );
+            assert_eq!(stats.array.fields_emitted, 1, "{route:?}");
+            assert_eq!(stats.tracked_rewards_opaque_empty_variants, 0);
+        }
     }
 
     #[test]
@@ -2594,13 +2314,9 @@ mod tests {
         // 0xff is an unterminated IntPacked value: its continuation bit is
         // set, but the exact leaf window ends before another packed byte.
         let bits = one_leaf(5, &[true; 8]);
-        let (records, stats) = export_array_with_child_checksum(
-            (
-                "/Script/ShooterGame.FiniteSpeedMovementComponent",
-                "RequestedIgnoreActors",
-                1_063_739_204,
-            ),
-            (5, "RequestedIgnoreActors", 3_344_674_359),
+        let (records, stats) = export_array(
+            (IGNORE_GROUP, "RequestedIgnoreActors", 1_063_739_204),
+            &[(5, "RequestedIgnoreActors", 3_344_674_359)],
             &bits,
             Some(MEASURED_BUILD),
         );
@@ -2614,18 +2330,6 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_array_leaf_failure_is_counted_while_its_raw_input_survives() {
-        let raw = [0x7a];
-        let mut failures = 0;
-
-        let decoded = decode_leaf_with_stats(FieldType::Int32, &raw, 8, &mut failures);
-
-        assert_eq!(decoded, (None, None, None, None));
-        assert_eq!(failures, 1);
-        assert_eq!(raw, [0x7a]);
-    }
-
-    #[test]
     fn measured_effect_vectors_are_typed_without_a_top_level_overlay() {
         let payload: Vec<bool> = [1.25f64, -0.0, -2.5]
             .iter()
@@ -2634,12 +2338,8 @@ mod tests {
         for (handle, name) in [(30, "Translation"), (31, "Scale3D")] {
             let bits = one_leaf(handle, &payload);
             let (records, _) = export_array(
-                (
-                    "/Script/ShooterGame.EffectManagerComponent",
-                    "ServerActiveEffects",
-                    3_301_618_856,
-                ),
-                (handle, name),
+                (EFFECTS_GROUP, "ServerActiveEffects", 3_301_618_856),
+                &[(handle, name, 0)],
                 &bits,
                 Some(MEASURED_BUILD),
             );
