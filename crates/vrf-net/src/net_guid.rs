@@ -46,86 +46,53 @@ mod tests {
     use super::*;
     use crate::test_bits::{BitWrite, pack};
 
-    #[derive(Default)]
-    struct VecSink(Vec<(u32, String, NetworkGuid)>);
+    type Paths = Vec<(u32, String, NetworkGuid)>;
 
-    impl GuidPathSink for VecSink {
+    impl GuidPathSink for Paths {
         fn register_path(&mut self, guid: u32, path: &str, outer: NetworkGuid) {
-            self.0.push((guid, path.to_owned(), outer));
+            self.push((guid, path.to_owned(), outer));
         }
     }
 
-    /// Build a minimal InternalLoadObject payload for a non-exporting read.
-    fn build_simple_guid(guid: u32) -> Vec<u8> {
-        let mut bits: Vec<bool> = Vec::new();
-        bits.int_packed(guid);
-        pack(&bits)
+    /// Read `bits` from depth 0: the result and every path registered.
+    fn load(bits: &[bool], is_exporting: bool) -> (Result<NetworkGuid>, Paths) {
+        let mut paths = Paths::new();
+        let data = pack(bits);
+        let result = internal_load_object(&mut BitReader::new(&data), is_exporting, 0, &mut paths);
+        (result, paths)
     }
 
-    /// Build an InternalLoadObject with path export.
-    fn build_export_guid(guid: u32, path: &str, outer_guid: u32) -> Vec<u8> {
-        let mut bits: Vec<bool> = Vec::new();
-        bits.int_packed(guid);
-        // export flags = HasPath (0x01)
-        bits.u8(0x01);
-        // outer guid (simple, no path)
-        bits.int_packed(outer_guid);
-        // FString: length (i32) + bytes + null
-        let path_bytes = format!("{}\0", path);
-        let len = path_bytes.len() as i32;
-        for b in len.to_le_bytes() {
-            bits.u8(b);
-        }
-        for b in path_bytes.bytes() {
-            bits.u8(b);
-        }
-        pack(&bits)
-    }
-
+    /// GUID 0 is no object even in an export, and outside one only the
+    /// default GUID (1) carries flags: each payload is its IntPacked byte.
     #[test]
-    fn zero_guid_is_invalid_and_consumed() {
-        let data = build_simple_guid(0);
-        let mut reader = BitReader::new(&data);
-        let mut sink = VecSink::default();
-        let guid = internal_load_object(&mut reader, false, 0, &mut sink).unwrap();
-        assert!(!guid.is_valid());
-        assert!(sink.0.is_empty());
-    }
-
-    #[test]
-    fn simple_guid_no_path() {
-        let data = build_simple_guid(42);
-        let mut reader = BitReader::new(&data);
-        let mut sink = VecSink::default();
-        let guid = internal_load_object(&mut reader, false, 0, &mut sink).unwrap();
-        assert_eq!(guid.0, 42);
-        assert!(sink.0.is_empty()); // No path since not default and not exporting
+    fn a_guid_without_flags_reads_nothing_more() {
+        for (guid, is_exporting) in [(0, true), (42, false)] {
+            let mut bits = Vec::new();
+            bits.int_packed(guid);
+            assert_eq!(load(&bits, is_exporting), (Ok(NetworkGuid(guid)), vec![]));
+        }
     }
 
     #[test]
     fn exporting_guid_with_path() {
-        let data = build_export_guid(18, "/Game/Test.Test_C", 0);
-        let mut reader = BitReader::new(&data);
-        let mut sink = VecSink::default();
-        let guid = internal_load_object(&mut reader, true, 0, &mut sink).unwrap();
-        assert_eq!(guid.0, 18);
-        assert_eq!(sink.0.len(), 1);
-        assert_eq!(sink.0[0].0, 18);
-        assert_eq!(sink.0[0].1, "/Game/Test.Test_C");
-        assert_eq!(sink.0[0].2, NetworkGuid(0));
+        let mut bits = Vec::new();
+        // Flags HasPath, then outer GUID 0 (no object) and the path.
+        bits.int_packed(18)
+            .u8(0x01)
+            .int_packed(0)
+            .fstring("/Game/Test.Test_C");
+        let registered = (18, "/Game/Test.Test_C".to_owned(), NetworkGuid(0));
+        assert_eq!(load(&bits, true), (Ok(NetworkGuid(18)), vec![registered]));
     }
 
     /// Sixteen nested HasPath GUIDs reach the limit before a 17th is read.
     #[test]
     fn nesting_to_the_depth_limit_is_an_error() {
-        let mut bits: Vec<bool> = Vec::new();
+        let mut bits = Vec::new();
         for _ in 0..16 {
             bits.int_packed(2).u8(0x01);
         }
-        let data = pack(&bits);
-        let mut sink = VecSink::default();
-        let result = internal_load_object(&mut BitReader::new(&data), true, 0, &mut sink);
-        assert_eq!(result, Err(NetError::GuidRecursionLimit { depth: 16 }));
-        assert!(sink.0.is_empty());
+        let limit = Err(NetError::GuidRecursionLimit { depth: 16 });
+        assert_eq!(load(&bits, true), (limit, vec![]));
     }
 }
