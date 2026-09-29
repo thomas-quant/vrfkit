@@ -127,9 +127,8 @@ def is_effect_class(class_path: str) -> bool:
     c = _keyword_text(class_path)
     if not any(k in c for k in EFFECT_KEYWORDS):
         return False
-    # "Ability_" leaves are the ability controllers, alive all match; the
-    # effect is the GameObject_/Projectile_/Patch_ actor they spawn. "Gun_"
-    # leaves are weapons (Chamber's ult gun, see EFFECT_KEYWORDS).
+    # `Ability_` leaves are controllers alive all match, not the actor they
+    # spawn; `Gun_` leaves are weapons.
     leaf = class_path.rsplit("/", 1)[-1].lower()
     if leaf.startswith(("ability_", "gun_")):
         return False
