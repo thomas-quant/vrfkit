@@ -338,18 +338,21 @@ class SpecificationFileTests(unittest.TestCase):
                        "checksum": 3087885251, "type": "ObjectNetGuid"}, specs)
         self.assertEqual([s for s in specs if ":" in s["group"]], [])
 
-    def test_allow_missing_lists_an_absent_identity_without_failing(self):
+    def test_allow_missing_lists_an_absent_identity_but_fails_when_none_is_observed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_int_export(root / "a")
-            spec = root / "spec.json"
+            spec, absent = root / "spec.json", root / "absent.json"
             spec.write_text(json.dumps([{"group": "g", "field": "f", "type": "Int32"},
                                         {"group": "g", "field": "absent", "type": "Int32"}]))
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                codes = (main([str(root), str(spec)]), main([str(root), str(spec), "--allow-missing"]))
-        self.assertEqual(codes, (1, 0))
+            absent.write_text(json.dumps([{"group": "other", "field": "x", "type": "Int32"}]))
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                codes = (main([str(root), str(spec)]), main([str(root), str(spec), "--allow-missing"]),
+                         main([str(root), str(absent), "--allow-missing"]))
+        self.assertEqual(codes, (1, 0, 1))
         self.assertEqual(output.getvalue().count('"g::absent"'), 2)
+        self.assertEqual(errors.getvalue(), "no specified identity was observed\n")
 
     def test_empty_specification_and_missing_root_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "empty"):

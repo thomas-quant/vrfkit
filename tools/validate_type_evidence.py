@@ -29,6 +29,7 @@ import hashlib
 import json
 import math
 import struct
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -617,7 +618,8 @@ def main(argv=None):
     parser.add_argument("--export-id", action="append", dest="export_ids")
     parser.add_argument("--compare-typed", action="store_true")
     parser.add_argument("--allow-missing", action="store_true",
-                        help="list specified identities with no row under `missing` without failing")
+                        help="list specified identities with no row under `missing` without failing; "
+                             "observing none still fails")
     args = parser.parse_args(argv)
     specifications = load_specifications(args.evidence)
     report = validate(args.export_root, specifications, args.export_ids, args.compare_typed)
@@ -632,8 +634,10 @@ def main(argv=None):
     if args.output:
         args.output.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
-    return 1 if ((report["missing"] and not args.allow_missing) or report["failure_count"]
-                 or report["typed_mismatch_count"]) else 0
+    if not report["fields"]:
+        print("no specified identity was observed", file=sys.stderr)
+    return 1 if ((report["missing"] and not args.allow_missing) or not report["fields"]
+                 or report["failure_count"] or report["typed_mismatch_count"]) else 0
 
 
 if __name__ == "__main__":
