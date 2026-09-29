@@ -83,7 +83,7 @@ pub fn internal_load_object(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::{pack, write_byte, write_int_packed};
+    use crate::test_bits::{BitWrite, pack};
 
     #[derive(Default)]
     struct VecSink(Vec<(u32, String, NetworkGuid)>);
@@ -97,26 +97,26 @@ mod tests {
     /// Build a minimal InternalLoadObject payload for a non-exporting read.
     fn build_simple_guid(guid: u32) -> Vec<u8> {
         let mut bits: Vec<bool> = Vec::new();
-        write_int_packed(&mut bits, guid);
+        bits.int_packed(guid);
         pack(&bits)
     }
 
     /// Build an InternalLoadObject with path export.
     fn build_export_guid(guid: u32, path: &str, outer_guid: u32) -> Vec<u8> {
         let mut bits: Vec<bool> = Vec::new();
-        write_int_packed(&mut bits, guid);
+        bits.int_packed(guid);
         // export flags = HasPath (0x01)
-        write_byte(&mut bits, 0x01);
+        bits.u8(0x01);
         // outer guid (simple, no path)
-        write_int_packed(&mut bits, outer_guid);
+        bits.int_packed(outer_guid);
         // FString: length (i32) + bytes + null
         let path_bytes = format!("{}\0", path);
         let len = path_bytes.len() as i32;
         for b in len.to_le_bytes() {
-            write_byte(&mut bits, b);
+            bits.u8(b);
         }
         for b in path_bytes.bytes() {
-            write_byte(&mut bits, b);
+            bits.u8(b);
         }
         pack(&bits)
     }

@@ -122,7 +122,7 @@ pub fn read_content_block_header(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::{pack, write_byte, write_int_packed};
+    use crate::test_bits::{BitWrite, pack};
 
     #[derive(Default)]
     struct NullSink;
@@ -147,7 +147,7 @@ mod tests {
         let mut bits = Vec::new();
         bits.push(false); // hasRepLayout
         bits.push(false); // isActor = false
-        write_int_packed(&mut bits, 50); // objectNetGuid
+        bits.int_packed(50); // objectNetGuid
         bits.push(true); // isStablyNamed
         let data = pack(&bits);
         let mut reader = BitReader::new(&data);
@@ -163,10 +163,10 @@ mod tests {
         let mut bits = Vec::new();
         bits.push(false); // hasRepLayout
         bits.push(false); // isActor
-        write_int_packed(&mut bits, 60); // objectNetGuid
+        bits.int_packed(60); // objectNetGuid
         bits.push(false); // isStablyNamed
         bits.push(true); // isDeleted
-        write_byte(&mut bits, 0x03); // deleteFlags
+        bits.u8(0x03); // deleteFlags
         let data = pack(&bits);
         let mut reader = BitReader::new(&data);
         let mut sink = NullSink;
@@ -180,11 +180,11 @@ mod tests {
     fn explicit_delete_zero_and_read_invalid_class_zero_stay_distinct() {
         let parse = |invalid_class: bool| {
             let mut bits = vec![false, false];
-            write_int_packed(&mut bits, 60);
+            bits.int_packed(60);
             bits.push(false);
             bits.push(!invalid_class);
             if invalid_class {
-                write_int_packed(&mut bits, 0);
+                bits.int_packed(0);
             } else {
                 bits.extend([false; 8]);
             }

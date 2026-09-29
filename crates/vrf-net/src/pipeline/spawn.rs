@@ -173,7 +173,7 @@ fn read_compressed_short_component(reader: &mut BitReader<'_>) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::{pack, write_byte, write_serialized_int};
+    use crate::test_bits::{BitWrite, pack};
 
     /// A clear leading bit yields the caller's default, which differs by
     /// vector (origin vs unit scale).
@@ -195,9 +195,9 @@ mod tests {
         // hasValue=1, isQuantized=1, info = 8 | (1 << 6) = 72 -> 8-bit
         // components with extra_info = 1, so each is divided by 10.
         let mut bits = vec![true, true];
-        write_serialized_int(&mut bits, 72, 128); // 7 value bits
+        bits.serialized_int(72, 128); // 7 value bits
         for byte in [0xFFu8, 0x01, 0x80] {
-            write_byte(&mut bits, byte);
+            bits.u8(byte);
         }
         let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
@@ -212,7 +212,7 @@ mod tests {
     fn rotation_short_skips_absent_components() {
         let mut bits = vec![true];
         for byte in 16384u16.to_le_bytes() {
-            write_byte(&mut bits, byte);
+            bits.u8(byte);
         }
         bits.push(false);
         bits.push(false);

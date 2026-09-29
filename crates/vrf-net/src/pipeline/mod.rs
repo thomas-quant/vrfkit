@@ -824,8 +824,7 @@ fn partial_payload_reason(cause: PartialDiscardCause) -> PartialPayloadReason {
 mod tests {
     use super::*;
     use crate::test_bits::{
-        BunchSpec, build_bunch_packet, build_packet, pack, write_bunch, write_byte,
-        write_int_packed, write_serialized_int,
+        BitWrite, BunchSpec, build_bunch_packet, build_packet, pack, write_bunch,
     };
 
     struct OwnedRejectedPartial {
@@ -1114,18 +1113,11 @@ mod tests {
 
     // --- bunch builders for the lifecycle tests below ---
 
-    /// Little-endian i32, matching `BitReader::read_i32`.
-    fn write_i32_bits(bits: &mut Vec<bool>, value: i32) {
-        for byte in value.to_le_bytes() {
-            write_byte(bits, byte);
-        }
-    }
-
     /// A single actor RepLayout content block with an empty body.
     fn write_empty_actor_block(bits: &mut Vec<bool>) {
         bits.push(true); // hasRepLayout
         bits.push(true); // isActor
-        write_int_packed(bits, 0); // contentBits = 0
+        bits.int_packed(0); // contentBits = 0
     }
 
     /// An out-of-range GUID count drops every path declaration in the bunch:
@@ -1134,7 +1126,7 @@ mod tests {
     fn a_package_map_export_with_an_impossible_guid_count_is_counted() {
         let mut payload: Vec<bool> = Vec::new();
         payload.push(false); // hasRepLayoutExport
-        write_i32_bits(&mut payload, crate::types::MAX_GUID_COUNT as i32 + 1);
+        payload.i32(crate::types::MAX_GUID_COUNT as i32 + 1);
         // The declarations that get dropped.
         payload.extend(std::iter::repeat_n(true, 24));
 
@@ -1173,7 +1165,7 @@ mod tests {
     fn a_negative_package_map_guid_count_is_counted() {
         let mut payload: Vec<bool> = Vec::new();
         payload.push(false); // hasRepLayoutExport
-        write_i32_bits(&mut payload, -1);
+        payload.i32(-1);
         payload.extend(std::iter::repeat_n(true, 16));
 
         let packet = build_bunch_packet(
@@ -1232,7 +1224,7 @@ mod tests {
 
         // Fragment 1: opens channel 2 for static actor GUID 3, byte-aligned.
         let mut first: Vec<bool> = Vec::new();
-        write_int_packed(&mut first, 3);
+        first.int_packed(3);
         write_bunch(
             &mut bits,
             &BunchSpec {
@@ -1279,7 +1271,7 @@ mod tests {
     #[test]
     fn a_rejected_partial_close_still_retires_the_channel() {
         let mut open_payload = Vec::new();
-        write_int_packed(&mut open_payload, 3);
+        open_payload.int_packed(3);
         write_empty_actor_block(&mut open_payload);
         let open = build_open_bunch_packet(2, &open_payload);
         let close = build_bunch_packet(
@@ -1311,7 +1303,7 @@ mod tests {
         let mut bits = Vec::new();
         for actor_guid in [3u32, 5] {
             let mut payload: Vec<bool> = Vec::new();
-            write_int_packed(&mut payload, actor_guid); // static (odd): no spawn block
+            payload.int_packed(actor_guid); // static (odd): no spawn block
             write_empty_actor_block(&mut payload);
             write_bunch(
                 &mut bits,
@@ -1349,7 +1341,7 @@ mod tests {
     fn a_failed_reopen_does_not_leave_the_previous_actor_live() {
         let mut bits = Vec::new();
         let mut first: Vec<bool> = Vec::new();
-        write_int_packed(&mut first, 3); // static actor: no spawn block
+        first.int_packed(3); // static actor: no spawn block
         write_empty_actor_block(&mut first);
         write_bunch(
             &mut bits,
@@ -1361,7 +1353,7 @@ mod tests {
             &first,
         );
         let mut failed: Vec<bool> = Vec::new();
-        write_int_packed(&mut failed, 4); // dynamic actor, spawn block missing
+        failed.int_packed(4); // dynamic actor, spawn block missing
         write_bunch(
             &mut bits,
             &BunchSpec {
@@ -1421,7 +1413,7 @@ mod tests {
     fn a_bunch_after_a_failed_first_open_is_counted_not_silent() {
         let mut bits = Vec::new();
         let mut failed: Vec<bool> = Vec::new();
-        write_int_packed(&mut failed, 4); // dynamic actor, spawn block missing
+        failed.int_packed(4); // dynamic actor, spawn block missing
         write_bunch(
             &mut bits,
             &BunchSpec {
@@ -1470,7 +1462,7 @@ mod tests {
     fn a_bunch_on_a_dormant_channel_after_a_failed_reopen_is_counted() {
         let mut bits = Vec::new();
         let mut first: Vec<bool> = Vec::new();
-        write_int_packed(&mut first, 3);
+        first.int_packed(3);
         write_empty_actor_block(&mut first);
         write_bunch(
             &mut bits,
@@ -1492,7 +1484,7 @@ mod tests {
             &[],
         );
         let mut failed: Vec<bool> = Vec::new();
-        write_int_packed(&mut failed, 4); // dynamic actor, spawn block missing
+        failed.int_packed(4); // dynamic actor, spawn block missing
         write_bunch(
             &mut bits,
             &BunchSpec {
@@ -1632,7 +1624,7 @@ mod tests {
     fn an_open_whose_package_map_read_fails_retires_the_live_actor() {
         let mut exports: Vec<bool> = Vec::new();
         exports.push(false); // hasRepLayoutExport
-        write_i32_bits(&mut exports, -1);
+        exports.i32(-1);
         exports.extend(open_and_empty_block()); // the open, never reached
         let reopen = build_bunch_packet(
             &BunchSpec {
@@ -1664,7 +1656,7 @@ mod tests {
     fn an_open_behind_clean_package_map_exports_retires_the_live_actor() {
         let mut exports: Vec<bool> = Vec::new();
         exports.push(false); // hasRepLayoutExport
-        write_i32_bits(&mut exports, 0); // no GUIDs: a clean, empty export list
+        exports.i32(0); // no GUIDs: a clean, empty export list
         exports.extend(open_and_empty_block()); // the open, never read
         let reopen = build_bunch_packet(
             &BunchSpec {
@@ -1782,7 +1774,7 @@ mod tests {
         // u16 count = 1, little-endian, then one IntPacked GUID.
         preamble.extend([true, false, false, false, false, false, false, false]);
         preamble.extend([false; 8]);
-        write_int_packed(&mut preamble, 6);
+        preamble.int_packed(6);
         let spec = BunchSpec {
             ch_index: 9,
             b_has_must_be_mapped_guids: true,
@@ -1822,7 +1814,7 @@ mod tests {
     fn reopening_a_closed_channel_is_not_counted_as_an_overwrite() {
         let mut bits = Vec::new();
         let mut payload: Vec<bool> = Vec::new();
-        write_int_packed(&mut payload, 3);
+        payload.int_packed(3);
         write_empty_actor_block(&mut payload);
         write_bunch(
             &mut bits,
@@ -1844,7 +1836,7 @@ mod tests {
             &[],
         );
         let mut payload: Vec<bool> = Vec::new();
-        write_int_packed(&mut payload, 5);
+        payload.int_packed(5);
         write_empty_actor_block(&mut payload);
         write_bunch(
             &mut bits,
@@ -1870,7 +1862,7 @@ mod tests {
     #[test]
     fn a_destroyed_channel_is_retired_before_later_reuse() {
         let mut open_payload = Vec::new();
-        write_int_packed(&mut open_payload, 3);
+        open_payload.int_packed(3);
         write_empty_actor_block(&mut open_payload);
         let open = build_open_bunch_packet(2, &open_payload);
         let close = build_bunch_packet(
@@ -1893,7 +1885,7 @@ mod tests {
         );
 
         let mut reopened_payload = Vec::new();
-        write_int_packed(&mut reopened_payload, 5);
+        reopened_payload.int_packed(5);
         write_empty_actor_block(&mut reopened_payload);
         let reopened = build_open_bunch_packet(2, &reopened_payload);
         reader.process_packet(&reopened, 2, &mut sink);
@@ -1913,7 +1905,7 @@ mod tests {
             reader.channels.insert(ch_index, ChannelSlot::default());
         }
         let mut payload = Vec::new();
-        write_int_packed(&mut payload, 3);
+        payload.int_packed(3);
         write_empty_actor_block(&mut payload);
         let payload_len = payload.len() as u64;
         let packet = build_open_bunch_packet(crate::types::MAX_ACTIVE_CHANNELS as u32, &payload);
@@ -1971,7 +1963,7 @@ mod tests {
     #[test]
     fn a_dynamic_open_without_its_spawn_block_is_a_failure_not_an_actor() {
         let mut payload: Vec<bool> = Vec::new();
-        write_int_packed(&mut payload, 2); // dynamic actor GUID, then nothing
+        payload.int_packed(2); // dynamic actor GUID, then nothing
 
         let packet = build_open_bunch_packet(2, &payload);
 
@@ -1991,7 +1983,7 @@ mod tests {
     #[test]
     fn a_static_open_with_no_payload_left_is_still_an_actor() {
         let mut payload: Vec<bool> = Vec::new();
-        write_int_packed(&mut payload, 3); // static (odd) actor GUID
+        payload.int_packed(3); // static (odd) actor GUID
 
         let packet = build_open_bunch_packet(2, &payload);
 
@@ -2010,7 +2002,7 @@ mod tests {
     #[test]
     fn an_unfinished_partial_bunch_is_reported_at_eof() {
         let mut payload: Vec<bool> = Vec::new();
-        write_int_packed(&mut payload, 3); // 8 bits, byte-aligned
+        payload.int_packed(3); // 8 bits, byte-aligned
 
         let packet = build_bunch_packet(
             &BunchSpec {
@@ -2238,7 +2230,7 @@ mod tests {
         // Through the framing loop, a block whose transform ran records no
         // event, whatever its inner stream does (here an unresolved payload).
         let mut bits = vec![false, true]; // ClassNetCache, isActor
-        write_int_packed(&mut bits, 7);
+        bits.int_packed(7);
         bits.extend([true, true, true, true, true, true, false]);
         let (stats, sink) = frame_bits(&bits);
         assert_eq!(stats.class_net_cache_blocks, 1);
@@ -2315,7 +2307,7 @@ mod tests {
     fn rep_layout_zero_terminator_hands_the_exact_tail_to_the_sink() {
         let mut decoded_bits = Vec::new();
         decoded_bits.push(false); // property checksum
-        write_int_packed(&mut decoded_bits, 0); // RepLayout terminator
+        decoded_bits.int_packed(0); // RepLayout terminator
         decoded_bits.extend((0..13).map(|index| index % 2 == 0));
 
         let sink = TestSink {
@@ -2343,7 +2335,7 @@ mod tests {
     #[test]
     fn a_wholly_preserved_rep_layout_tail_is_an_rpc_failure_not_field_loss() {
         let mut decoded_bits = vec![false]; // property checksum
-        write_int_packed(&mut decoded_bits, 0); // RepLayout terminator
+        decoded_bits.int_packed(0); // RepLayout terminator
         decoded_bits.extend((0..13).map(|index| index % 2 == 0));
         let sink = TestSink {
             rep_layout_tail_outcome: Some(RepLayoutTailOutcome::Preserved {
@@ -2369,8 +2361,8 @@ mod tests {
     fn rep_layout_overrun_ok_path_is_a_stream_failure() {
         let mut decoded_bits = Vec::new();
         decoded_bits.push(false); // property checksum
-        write_int_packed(&mut decoded_bits, 1); // handle 0
-        write_int_packed(&mut decoded_bits, 32); // overruns the remaining 8 bits
+        decoded_bits.int_packed(1); // handle 0
+        decoded_bits.int_packed(32); // overruns the remaining 8 bits
         decoded_bits.extend(std::iter::repeat_n(false, 8));
         assert_eq!(decoded_bits.len(), 25);
         let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
@@ -2406,8 +2398,8 @@ mod tests {
         // handle 0 that began at bit 1, after the checksum.
         let mut decoded_bits = Vec::new();
         decoded_bits.push(false); // property checksum
-        write_int_packed(&mut decoded_bits, 1); // handle 0
-        write_int_packed(&mut decoded_bits, 32); // overruns the remaining 8 bits
+        decoded_bits.int_packed(1); // handle 0
+        decoded_bits.int_packed(32); // overruns the remaining 8 bits
         decoded_bits.extend(std::iter::repeat_n(false, 8));
         let Run { sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
         assert_eq!(sink.stream_failures.len(), 1);
@@ -2426,7 +2418,7 @@ mod tests {
     fn rep_layout_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = vec![false]; // property checksum
         // 0x01: continuation set, payload bits all zero.
-        write_byte(&mut decoded_bits, 0x01);
+        decoded_bits.u8(0x01);
         assert_eq!(decoded_bits.len(), 9);
 
         let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
@@ -2445,9 +2437,9 @@ mod tests {
     #[test]
     fn rep_layout_read_error_keeps_an_already_emitted_prefix_counted() {
         let mut decoded_bits = vec![false]; // property checksum
-        write_int_packed(&mut decoded_bits, 1); // handle 0
-        write_int_packed(&mut decoded_bits, 0); // valid zero-bit payload
-        write_byte(&mut decoded_bits, 0x01);
+        decoded_bits.int_packed(1); // handle 0
+        decoded_bits.int_packed(0); // valid zero-bit payload
+        decoded_bits.u8(0x01);
         assert_eq!(decoded_bits.len(), 25);
         let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
@@ -2466,8 +2458,8 @@ mod tests {
     #[test]
     fn class_net_cache_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = Vec::new();
-        write_serialized_int(&mut decoded_bits, 0, 2); // one handle bit
-        write_byte(&mut decoded_bits, 0x01);
+        decoded_bits.serialized_int(0, 2); // one handle bit
+        decoded_bits.u8(0x01);
         assert_eq!(decoded_bits.len(), 9);
 
         let Run { stats, sink, .. } = decode_bits(&decoded_bits, Some(2), TestSink::default());
@@ -2490,10 +2482,10 @@ mod tests {
     #[test]
     fn class_net_cache_read_error_keeps_an_already_emitted_prefix_counted() {
         let mut decoded_bits = Vec::new();
-        write_serialized_int(&mut decoded_bits, 0, 2);
-        write_int_packed(&mut decoded_bits, 0); // valid zero-bit RPC
-        write_serialized_int(&mut decoded_bits, 0, 2);
-        write_byte(&mut decoded_bits, 0x01);
+        decoded_bits.serialized_int(0, 2);
+        decoded_bits.int_packed(0); // valid zero-bit RPC
+        decoded_bits.serialized_int(0, 2);
+        decoded_bits.u8(0x01);
         assert_eq!(decoded_bits.len(), 18);
         let Run { stats, sink, .. } = decode_bits(&decoded_bits, Some(2), TestSink::default());
 
@@ -2548,7 +2540,7 @@ mod tests {
     /// 12 bits, all read, and then the class GUID's first byte is not there.
     fn truncated_subobject_header() -> Vec<bool> {
         let mut bits = vec![true, false];
-        write_int_packed(&mut bits, 5);
+        bits.int_packed(5);
         bits.extend([false, false]);
         bits
     }
@@ -2632,7 +2624,7 @@ mod tests {
         //   chunk0: (999 & 0x7F) = 0x67, more=1 -> byte = (0x67 << 1) | 1 = 0xCF
         //   chunk1: (999 >> 7) = 7, more=0 -> byte = (7 << 1) | 0 = 0x0E
         for byte in [0xCF_u8, 0x0E] {
-            write_byte(&mut bits, byte);
+            bits.u8(byte);
         }
         // Add a few more padding bits so remaining > 0 but < 999
         bits.extend(std::iter::repeat_n(false, 8));
@@ -2713,10 +2705,10 @@ mod tests {
         use crate::stats::SkipReason;
 
         let mut open: Vec<bool> = Vec::new();
-        write_int_packed(&mut open, 2); // dynamic actor GUID
+        open.int_packed(2); // dynamic actor GUID
         write_minimal_spawn_data(&mut open, 9); // archetype 9, not a controller
         let mut overrun: Vec<bool> = vec![false, true]; // ClassNetCache, isActor
-        write_int_packed(&mut overrun, 999); // declares far more than follows
+        overrun.int_packed(999); // declares far more than follows
         overrun.extend([false; 8]);
 
         let (reader, _) = run_packets(&[
@@ -2777,8 +2769,8 @@ mod tests {
     /// Velocity matches the unconditional read; omitting it is the one-bit
     /// regression.
     fn write_minimal_spawn_data(bits: &mut Vec<bool>, archetype_guid: u32) {
-        write_int_packed(bits, archetype_guid); // archetype GUID
-        write_int_packed(bits, 0); // level GUID (0 -> not valid, returns early)
+        bits.int_packed(archetype_guid); // archetype GUID
+        bits.int_packed(0); // level GUID (0 -> not valid, returns early)
         bits.push(false); // location: hasValue = false
         bits.push(false); // rotation: hasComponent = false
         bits.push(false); // scale: hasValue = false
@@ -2797,7 +2789,7 @@ mod tests {
         let mut payload: Vec<bool> = Vec::new();
 
         // Actor GUID 2: dynamic (even, non-zero), so a spawn block follows.
-        write_int_packed(&mut payload, 2);
+        payload.int_packed(2);
         // Spawn data. Archetype GUID 9 is what the cache will resolve.
         write_minimal_spawn_data(&mut payload, 9);
         // Net-player-index byte (value 0), consumed only if path_for_guid
@@ -2806,7 +2798,7 @@ mod tests {
         // The actor's own RepLayout block.
         payload.push(true); // hasRepLayout
         payload.push(true); // isActor
-        write_int_packed(&mut payload, 0); // contentBits = 0
+        payload.int_packed(0); // contentBits = 0
 
         let packet = build_open_bunch_packet(2, &payload);
 
@@ -2843,11 +2835,11 @@ mod tests {
     #[test]
     fn legacy_controller_property_block_is_reached() {
         let mut payload = Vec::new();
-        write_int_packed(&mut payload, 2);
+        payload.int_packed(2);
         write_minimal_spawn_data(&mut payload, 9);
         payload.extend([false; 8]); // Net player index, observed before the header.
         payload.extend([true, true]); // Actor RepLayout block.
-        write_int_packed(&mut payload, 0);
+        payload.int_packed(0);
         let packet = build_open_bunch_packet(2, &payload);
 
         let mut sink = TestSink::default();
@@ -2868,12 +2860,12 @@ mod tests {
     #[test]
     fn non_controller_dynamic_actor_skips_net_player_index_byte() {
         let mut payload: Vec<bool> = Vec::new();
-        write_int_packed(&mut payload, 2); // actor GUID 2 (dynamic)
+        payload.int_packed(2); // actor GUID 2 (dynamic)
         write_minimal_spawn_data(&mut payload, 9); // archetype 9, no path in cache
         // No net-player-index byte: this actor is not a controller.
         payload.push(true); // hasRepLayout
         payload.push(true); // isActor
-        write_int_packed(&mut payload, 0); // contentBits = 0
+        payload.int_packed(0); // contentBits = 0
 
         let packet = build_open_bunch_packet(2, &payload);
 
@@ -2896,13 +2888,13 @@ mod tests {
     #[test]
     fn controller_byte_unconsumed_without_cache_path_misframes_header() {
         let mut payload: Vec<bool> = Vec::new();
-        write_int_packed(&mut payload, 2); // actor GUID 2
+        payload.int_packed(2); // actor GUID 2
         write_minimal_spawn_data(&mut payload, 9);
         // The byte IS on the wire (this is really a controller bunch)...
         payload.extend(std::iter::repeat_n(false, 8));
         payload.push(true); // hasRepLayout
         payload.push(true); // isActor
-        write_int_packed(&mut payload, 0); // contentBits = 0
+        payload.int_packed(0); // contentBits = 0
 
         let packet = build_open_bunch_packet(2, &payload);
 
@@ -2934,15 +2926,15 @@ mod tests {
     /// A static actor open (GUID 3) followed by an empty actor block.
     fn open_and_empty_block() -> Vec<bool> {
         let mut bits = Vec::new();
-        write_int_packed(&mut bits, 3);
+        bits.int_packed(3);
         write_empty_actor_block(&mut bits);
         bits
     }
 
-    /// The 8-bit payload `write_int_packed(3)` produces: the byte `6`.
+    /// GUID 3 as an IntPacked: the byte `6`.
     fn guid_three() -> Vec<bool> {
         let mut bits = Vec::new();
-        write_int_packed(&mut bits, 3);
+        bits.int_packed(3);
         bits
     }
 

@@ -359,7 +359,7 @@ mod tests {
     fn unreliable(ch_index: u32) -> BunchSpec {
         BunchSpec {
             ch_index,
-            b_reliable: false,
+            unreliable: true,
             ..Default::default()
         }
     }
@@ -562,7 +562,7 @@ mod tests {
         let mut bits = Vec::new();
         write_bunch(&mut bits, &fragment(2, true, false), &[]);
         let unreliable_final = BunchSpec {
-            b_reliable: false,
+            unreliable: true,
             ..fragment(2, false, true)
         };
         write_bunch(&mut bits, &unreliable_final, &[]);
@@ -582,7 +582,7 @@ mod tests {
         let mut bits = Vec::new();
         for (initial, last) in [(true, false), (false, true)] {
             let spec = BunchSpec {
-                b_reliable: false,
+                unreliable: true,
                 ..fragment(2, initial, last)
             };
             write_bunch(&mut bits, &spec, &[false; 8]);

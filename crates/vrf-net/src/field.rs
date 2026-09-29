@@ -254,7 +254,7 @@ fn abandon(reader: &mut BitReader<'_>, record_start: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::{pack, write_int_packed, write_serialized_int};
+    use crate::test_bits::{BitWrite, pack};
 
     /// A sink that records all fields/RPCs.
     #[derive(Default)]
@@ -276,11 +276,11 @@ mod tests {
     fn rep_layout_single_field() {
         let mut bits = Vec::new();
         bits.push(false); // checksum bit
-        write_int_packed(&mut bits, 1); // encodedHandle = 1 -> handle = 0
-        write_int_packed(&mut bits, 32); // 32 bits payload
+        bits.int_packed(1); // encodedHandle = 1 -> handle = 0
+        bits.int_packed(32); // 32 bits payload
         // 32 bits of payload data
         bits.extend(std::iter::repeat_n(true, 32));
-        write_int_packed(&mut bits, 0); // terminator
+        bits.int_packed(0); // terminator
 
         let data = pack(&bits);
         let mut reader = BitReader::new(&data);
@@ -296,14 +296,14 @@ mod tests {
         let mut bits = Vec::new();
         bits.push(true); // checksum bit
         // Field 1: handle=0, 8 bits
-        write_int_packed(&mut bits, 1);
-        write_int_packed(&mut bits, 8);
+        bits.int_packed(1);
+        bits.int_packed(8);
         bits.extend(std::iter::repeat_n(false, 8));
         // Field 2: handle=4, 16 bits
-        write_int_packed(&mut bits, 5);
-        write_int_packed(&mut bits, 16);
+        bits.int_packed(5);
+        bits.int_packed(16);
         bits.extend(std::iter::repeat_n(true, 16));
-        write_int_packed(&mut bits, 0); // terminator
+        bits.int_packed(0); // terminator
 
         let data = pack(&bits);
         let mut reader = BitReader::new(&data);
@@ -318,7 +318,7 @@ mod tests {
     fn rep_layout_empty_stream() {
         let mut bits = Vec::new();
         bits.push(false); // checksum
-        write_int_packed(&mut bits, 0); // immediate terminator
+        bits.int_packed(0); // immediate terminator
 
         let data = pack(&bits);
         let mut reader = BitReader::new(&data);
@@ -330,8 +330,8 @@ mod tests {
     #[test]
     fn class_net_cache_single_rpc() {
         let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 2, 10); // handle = 2, max = 10
-        write_int_packed(&mut bits, 16); // 16 bits payload
+        bits.serialized_int(2, 10); // handle = 2, max = 10
+        bits.int_packed(16); // 16 bits payload
         bits.extend(std::iter::repeat_n(false, 16));
 
         let data = pack(&bits);
@@ -350,8 +350,8 @@ mod tests {
         // function_count=1: a handle the server wrote with max=2 (one bit),
         // then IntPacked(0) (8 bits): 9 bits, bounded exactly.
         let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 0, 2); // handle=0, written with max=2 (1 bit)
-        write_int_packed(&mut bits, 0); // payload = 0 bits
+        bits.serialized_int(0, 2); // handle=0, written with max=2 (1 bit)
+        bits.int_packed(0); // payload = 0 bits
 
         let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
@@ -369,8 +369,8 @@ mod tests {
     #[test]
     fn class_net_cache_capacity_three_unchanged() {
         let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 1, 3); // handle=1, max=3
-        write_int_packed(&mut bits, 8); // 8 bits payload
+        bits.serialized_int(1, 3); // handle=1, max=3
+        bits.int_packed(8); // 8 bits payload
         bits.extend(std::iter::repeat_n(true, 8)); // 8 bits of data
 
         let data = pack(&bits);
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn class_net_cache_unresolved_group_still_fails() {
         let mut bits = Vec::new();
-        write_int_packed(&mut bits, 8);
+        bits.int_packed(8);
         bits.extend(std::iter::repeat_n(true, 8));
 
         let data = pack(&bits);
@@ -406,8 +406,8 @@ mod tests {
     fn rep_layout_overrun_returns_abandoned_bits() {
         let mut bits = Vec::new();
         bits.push(false); // checksum
-        write_int_packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
-        write_int_packed(&mut bits, 32); // payloadBits = 32 (overruns)
+        bits.int_packed(1); // encodedHandle = 1 -> handle 0
+        bits.int_packed(32); // payloadBits = 32 (overruns)
         bits.extend(std::iter::repeat_n(false, 8)); // only 8 bits of payload
 
         // Bound exactly, as framing binds it, so byte padding is not counted.
@@ -430,10 +430,10 @@ mod tests {
     fn rep_layout_clean_terminator_reports_zero_abandoned() {
         let mut bits = Vec::new();
         bits.push(false); // checksum
-        write_int_packed(&mut bits, 1); // handle 0
-        write_int_packed(&mut bits, 8); // 8 bits payload
+        bits.int_packed(1); // handle 0
+        bits.int_packed(8); // 8 bits payload
         bits.extend(std::iter::repeat_n(false, 8));
-        write_int_packed(&mut bits, 0); // terminator
+        bits.int_packed(0); // terminator
 
         let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
@@ -449,11 +449,11 @@ mod tests {
     fn walk_context_early_terminator_clears_previous_handle() {
         let mut bits = Vec::new();
         bits.push(false); // checksum
-        write_int_packed(&mut bits, 62); // encoded handle 62 -> handle 61
-        write_int_packed(&mut bits, 16);
+        bits.int_packed(62); // encoded handle 62 -> handle 61
+        bits.int_packed(16);
         bits.extend(std::iter::repeat_n(false, 16));
         let terminator_offset = bits.len() as u64;
-        write_int_packed(&mut bits, 0);
+        bits.int_packed(0);
         bits.extend(std::iter::repeat_n(true, 8));
 
         let data = pack(&bits);
@@ -477,10 +477,10 @@ mod tests {
     fn content_block_walk_leaves_a_valid_tail_positioned_after_the_terminator() {
         let mut bits = Vec::new();
         bits.push(false); // checksum
-        write_int_packed(&mut bits, 62); // handle 61
-        write_int_packed(&mut bits, 16);
+        bits.int_packed(62); // handle 61
+        bits.int_packed(16);
         bits.extend(std::iter::repeat_n(false, 16));
-        write_int_packed(&mut bits, 0);
+        bits.int_packed(0);
         let tail_offset = bits.len() as u64;
         bits.extend(std::iter::repeat_n(true, 13));
 
@@ -505,7 +505,7 @@ mod tests {
     fn rep_layout_terminator_before_window_end_returns_abandoned_bits() {
         let mut bits = Vec::new();
         bits.push(false); // checksum
-        write_int_packed(&mut bits, 0); // terminator, immediately
+        bits.int_packed(0); // terminator, immediately
         bits.extend(std::iter::repeat_n(false, 600)); // undeclared trailing bits
 
         let data = pack(&bits);
@@ -522,7 +522,7 @@ mod tests {
     fn class_net_cache_short_tail_returns_abandoned_bits() {
         // function_count = 2: a 1-bit handle, then 3 bits, fewer than 8.
         let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 0, 2); // handle = 0, 1 bit
+        bits.serialized_int(0, 2); // handle = 0, 1 bit
         bits.extend(std::iter::repeat_n(false, 3)); // 3 stray bits
 
         let data = pack(&bits);
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn class_net_cache_handle_only_block_is_not_a_clean_success() {
         let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 0, 2); // the whole block: one handle bit
+        bits.serialized_int(0, 2); // the whole block: one handle bit
         assert_eq!(bits.len(), 1);
 
         let data = pack(&bits);
