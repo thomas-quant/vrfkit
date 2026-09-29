@@ -10,6 +10,8 @@ description = "Unreal Engine replication: packets, bunches, and content-block fr
 [dependencies]
 vrf-bitio = { workspace = true }
 vrf-transform = { workspace = true }
+# Direct path: only a direct entry can turn the checkpoint default off.
+vrf-schema = { path = "../vrf-schema", default-features = false }
 thiserror = { workspace = true }
 
 [dev-dependencies]
