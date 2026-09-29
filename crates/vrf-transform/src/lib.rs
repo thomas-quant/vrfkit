@@ -41,8 +41,7 @@ pub const fn seed_for(bit_count: usize, actor_net_guid: u32) -> u32 {
     (bit_count as u32) ^ actor_net_guid
 }
 
-/// One build's payload transform. The driver is monomorphised per build, so
-/// the word loops carry no dispatch.
+/// One build's payload transform.
 pub trait SeededTransform {
     /// Replay branch string this transform decodes, e.g. `++Ares-Core+release-13.01`.
     const BRANCH: &'static str;
