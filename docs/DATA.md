@@ -473,38 +473,27 @@ though not strictly increasing, since many rows share a `time_ms`.
 
 ### Minimap projection
 
-The transform is not in the replay. It comes from **valorant-api.com**, which
-publishes `xMultiplier`, `yMultiplier`, `xScalarToAdd` and `yScalarToAdd` per
-map; join on `manifest.level_names_and_times[0].name`, which is that API's
-`mapUrl`. Those constants are an external source and are not reproduced here.
-
-**The axes cross.** What works is
+`tools/minimap.py` holds the projection and checks it against an export. The
+constants are not in the replay: valorant-api.com publishes `xMultiplier`,
+`yMultiplier`, `xScalarToAdd` and `yScalarToAdd` per map, keyed by `mapUrl` =
+`manifest.level_names_and_times[0].name`, and the user supplies that file.
+**The axes cross:**
 
     u = pos_y * xMultiplier + xScalarToAdd
     v = pos_x * yMultiplier + yScalarToAdd
 
-`pos_y` drives the horizontal axis and `pos_x` the vertical. Of the four
-sign/order variants only this one holds up: it puts 100.0000% of live positions
-inside [0,1]² on eleven of twelve maps, while feeding `pos_x` to `u` collapses
-to 0.9% on Haven and 3.1% on Fracture. Containment alone would not prove it --
-a small enough scale contains everything -- so note also that the bounding
-boxes fill roughly [0.01, 0.99], which a wrong scale would not.
+Over 12 maps on 69 replays (121,672,885 live rows, build 13.02) this puts
+100.0000% of live positions inside [0,1]² on eleven maps, with bounding boxes
+filling roughly [0.01, 0.99]; feeding `pos_x` to `u` collapses to 0.9% on Haven
+and 3.1% on Fracture. Abyss's symmetric constants cannot tell the two orders
+apart. Hidden actors park at `pos_x ≈ -50000, pos_z ≈ -49900`; filter on both
+x and z, since a fall passes through that z.
 
-Two things to handle first:
-
-- **Park slot.** Hidden actors are parked at `pos_x ≈ -50000, pos_z ≈ -49900`.
-  Filter on **both** x and z. Filtering on z alone misclassifies real falls.
-- **Abyss is the exception, and not a decode fault.** Two runs that fetched the
-  constants separately put it at 99.68% and 99.84%; the gap is unexplained and
-  neither is picked here, because the mechanism is what matters and both runs
-  found it. Of the out-of-range rows roughly six in seven are already below
-  z = -3000, and of the rest that sit near the floor, 99-100% have negative
-  `vel_z` (median around -1,600 cm/s, against 0 for in-range rows). The map has
-  no floor, so players leave the minimap while falling. Nothing to fix -- clamp
-  or drop by `vel_z`.
-
-Containment was measured over 12 maps on 69 replays, 121,672,885 live movement
-rows, on build 13.02.
+**Abyss reads 99.68-99.84%, and that is not a decode fault.** Of its
+out-of-range rows about six in seven are already below z = -3000, and 99-100%
+of the rest have negative `vel_z` (median about -1,600 cm/s, against 0 in
+range): the map has no floor, so players leave the minimap while falling. Clamp
+or drop by `vel_z`.
 
 ### `ReplicatedMovement.location` is world units, at a per-class level
 
