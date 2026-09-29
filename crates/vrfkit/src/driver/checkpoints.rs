@@ -271,11 +271,6 @@ fn process_chunk<W: Write + Send>(
             CheckpointReadError::Schema(error) => {
                 CliError::Usage(format!("checkpoint {}: {error}", cp.id))
             }
-            CheckpointReadError::Bit(error) => CliError::Usage(format!(
-                "checkpoint {}: {}",
-                cp.id,
-                vrf_schema::SchemaError::Bitio(error)
-            )),
             CheckpointReadError::Sink(error) => CliError::Export(error),
         })?;
     if declarations.guid_rows != u64::from(tables.guid_count)
@@ -342,7 +337,7 @@ fn process_chunk<W: Write + Send>(
     stats.chunks += 1;
     stats.guid_entries += u64::from(tables.guid_count);
     stats.literal_paths += u64::from(tables.literal_paths);
-    stats.indexed_paths += u64::from(tables.hardcoded_paths);
+    stats.indexed_paths += u64::from(tables.indexed_paths);
     stats.resolved_path_indices += u64::from(tables.resolved_path_indices);
     stats.group_records += u64::from(tables.group_count);
     stats.exported_fields += u64::from(tables.exported_fields);
