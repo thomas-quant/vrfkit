@@ -160,8 +160,7 @@ The 59 reference cases contain 56 full nine-member checkpoint snapshots and
 three six-member main-stream deltas. The Python evidence reader now accepts
 sparse ActiveBlinds updates; projectile path points still require all members.
 
-The [before/after evidence](../tools/fixtures/blind_array_regression.json)
-compares all 986 identical replay hashes of that corpus. It proves:
+A before/after export of all 986 identical replay hashes of that corpus showed:
 
 - **522 new typed children:** 18 main and 504 checkpoint, all independently
   matched in path, context, raw window and typed value; all 59 affected parents
