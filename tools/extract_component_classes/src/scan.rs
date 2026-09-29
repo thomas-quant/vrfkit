@@ -254,6 +254,18 @@ pub fn scan_package(
 /// non-public `ClassRef::Local` finds nothing here.
 pub type ClassTable = HashMap<(u64, u64), ClassExport>;
 
+/// Every `Resolved::class_kind` `resolve` returns, in summary order.
+pub const CLASS_KINDS: [&str; 8] = [
+    "script_import",
+    "script_import_unresolved",
+    "package_import",
+    "package_import_unresolved",
+    "export",
+    "export_unresolved",
+    "null",
+    "bad_index",
+];
+
 /// A candidate's resolved class; any part that cannot be resolved is `?`.
 #[derive(Debug, Clone)]
 pub struct Resolved {
