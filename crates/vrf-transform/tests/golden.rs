@@ -1,13 +1,18 @@
 //! Every registered transform against vectors this port did not produce:
-//! lifted from the reference fixture (`tools/extract_golden.py`) or captured
-//! from the original executables (`tools/capture_native_transforms.py`). A
-//! failure here invalidates everything downstream.
+//! extracted from the C# reference parser's test fixture or captured from the
+//! original executables (`tools/capture_native_transforms.py`). A failure here
+//! invalidates everything downstream.
 
 include!("data/golden_vectors.rs");
 include!("data/native_vectors.rs");
 
 use vrf_bitio::BitReader;
+use vrf_transform::sbox::{SBOX_8, SBOX_32, SBOX_64};
 use vrf_transform::{ALL_VERSIONS, TransformVersion, seed_for};
+
+/// Every staging boundary (64 -> 32 -> 8 -> tail) plus a multi-word payload
+/// with and without a partial tail.
+const BOUNDARIES: [usize; 11] = [0, 1, 7, 8, 31, 32, 63, 64, 65, 287, 288];
 
 /// `(branch, bits, seed, input hex, expected hex)`. The golden vectors share
 /// one payload and derive their seed from the bit count.
@@ -57,14 +62,13 @@ fn transforms_match_the_golden_and_native_vectors() {
 
 #[test]
 fn vectors_cover_the_staging_boundaries() {
-    // A vector at every staging boundary (64 -> 32 -> 8 -> tail), so no stage
-    // goes unchecked; a build with no vectors fails the first.
+    // A build with no vectors fails at the first boundary.
     for version in ALL_VERSIONS.iter().copied() {
         let bits: Vec<usize> = vectors()
             .filter(|v| v.0 == version.branch())
             .map(|v| v.1)
             .collect();
-        for required in [0usize, 1, 7, 8, 31, 32, 63, 64, 65] {
+        for required in BOUNDARIES {
             assert!(
                 bits.contains(&required),
                 "{} lacks a vector at {required} bits (have {bits:?})",
@@ -72,4 +76,25 @@ fn vectors_cover_the_staging_boundaries() {
             );
         }
     }
+}
+
+#[test]
+fn extracted_tables_are_intact() {
+    // A mistyped S-box byte duplicates a value.
+    for sbox in [&SBOX_8, &SBOX_32, &SBOX_64] {
+        let mut sorted = *sbox;
+        sorted.sort_unstable();
+        assert!(sorted.iter().copied().eq(0..=255), "{sbox:?}");
+    }
+    // The golden vectors are 8 builds x BOUNDARIES, each pair exactly once.
+    let mut pairs: Vec<(&str, usize)> = VECTORS.iter().map(|v| (v.0, v.1)).collect();
+    pairs.sort_unstable();
+    let mut builds: Vec<&str> = pairs.iter().map(|p| p.0).collect();
+    builds.dedup();
+    let expected: Vec<(&str, usize)> = builds
+        .iter()
+        .flat_map(|&b| BOUNDARIES.map(|bits| (b, bits)))
+        .collect();
+    assert_eq!(builds.len(), 8, "{builds:?}");
+    assert_eq!(pairs, expected);
 }

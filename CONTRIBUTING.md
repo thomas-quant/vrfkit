@@ -265,8 +265,6 @@ These corrupt downstream consumers silently — no test fails when they break.
 |---|---|
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` against one or more fresh exports |
 | `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` from reviewed exact group/name/checksum evidence |
-| `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` |
-| `crates/vrf-transform/tests/data/golden_vectors.rs` | `tools/extract_golden.py` |
 | `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` against pinned original executable readers |
 
 The overlay table `crates/vrf-decode/src/table.rs` and
@@ -284,15 +282,6 @@ declares. Run it before the additions land and the new entries are not donors
 yet -- the symptom is a field typed on the group you declared and still raw on
 its siblings, which is easy to read as the propagation not working. Re-export
 after rebuilding, then regenerate.
-
-The S-box and golden-vector generators need a C# source checkout:
-
-```bash
-python tools/extract_sboxes.py <path>/ValorantSeededTransformHelpers.cs \
-    crates/vrf-transform/src/sbox.rs
-python tools/extract_golden.py <path>/ValorantSeededTransformTests.cs \
-    crates/vrf-transform/tests/data/golden_vectors.rs
-```
 
 ## Type corrections are conservative
 

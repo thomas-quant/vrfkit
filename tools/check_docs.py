@@ -71,8 +71,6 @@ USAGE = REPO / "docs" / "USAGE.md"
 GENERATED_INVENTORY = {
     "crates/vrf-decode/src/checksum_table.rs": "tools/extract_checksum_types.py",
     "crates/vrf-decode/src/scoped_types.rs": "tools/generate_scoped_types.py",
-    "crates/vrf-transform/src/sbox.rs": "tools/extract_sboxes.py",
-    "crates/vrf-transform/tests/data/golden_vectors.rs": "tools/extract_golden.py",
     "crates/vrf-transform/tests/data/native_vectors.rs": "tools/capture_native_transforms.py",
 }
 GENERATED_INVENTORY_DOCS = (
@@ -98,10 +96,12 @@ def read(path: Path) -> str:
 def check_build_verification(readme: str, usage: str, registry: str, report: dict) -> list[str]:
     """Both public tables must use the same measured scope and acceptance rule."""
     problems = []
-    match = re.search(r"ALL_VERSIONS:.*?=\s*&\[(.*?)\];", registry, re.S)
+    # lib.rs's `transforms!` block; the `ALL_VERSIONS` literal is the test fixtures' form.
+    match = (re.search(r"^transforms! \{$(.*?)^\}$", registry, re.S | re.M)
+             or re.search(r"ALL_VERSIONS:.*?=\s*&\[(.*?)\];", registry, re.S))
     if not match:
         return ["cannot read supported transform registry"]
-    versions = {f"{v[:-2]}.{v[-2:]}" for v in re.findall(r"TransformVersion::V(\d+)", match[1])}
+    versions = {f"{a}.{b}" for a, b in re.findall(r"\bV(\d\d)(\d\d)\b", match[1])}
     if not versions:
         return ["supported transform registry is empty"]
     measured = {branch.removeprefix("++Ares-Core+release-"): row

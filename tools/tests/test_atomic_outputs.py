@@ -17,7 +17,6 @@ import bench_export  # noqa: E402
 import check_metrics_baseline  # noqa: E402
 import compare_with_csharp  # noqa: E402
 import extract_active_effects  # noqa: E402
-import extract_sboxes  # noqa: E402
 import extract_spike_carrier  # noqa: E402
 
 
@@ -109,27 +108,6 @@ class AtomicOutputTests(unittest.TestCase):
 
             self.assert_preserved_when_replace_fails(
                 baseline, update, previous='{"metrics": {"old": {}}}\n'
-            )
-
-    def test_sbox_generator_preserves_previous_file(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            source = root / "helpers.cs"
-            output = root / "sboxes.rs"
-            hex_table = bytes(range(256)).hex()
-            source.write_text(
-                "\n".join(
-                    f'{name} = Convert.FromHexString("{hex_table}");'
-                    for name in extract_sboxes.TABLES
-                ),
-                encoding="utf-8",
-            )
-
-            self.assert_preserved_when_replace_fails(
-                output,
-                lambda: extract_sboxes.main(
-                    ["extract_sboxes.py", str(source), str(output)]
-                ),
             )
 
     def test_comparison_report_preserves_previous_file(self):

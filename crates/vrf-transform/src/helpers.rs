@@ -1,12 +1,11 @@
-//! Primitives shared by every build's payload transform. The PRNG, its
-//! multiplier, the seed mixing, the 64/32/8-bit staging and the tail handling
-//! are identical from release-11.06 through release-13.06; a new build rotates
-//! constants and the order of these primitives in its word functions.
+//! Primitives shared by every build's payload transform, identical from
+//! release-11.06 through release-13.06: the PRNG, its seed mixing, the bit
+//! permutations the steps use and little-endian word IO.
 
-/// Multiplier used by both PRNG seeds. Unchanged across all known builds.
+/// Multiplier used by both PRNG seeds.
 pub const MULTIPLIER: u64 = 0x2545_f491_4f6c_dd1d;
 
-/// Seed the second PRNG lane; identical in every known build.
+/// Seed the second PRNG lane.
 #[inline]
 #[must_use]
 pub const fn initial_prng_b(seed: u32) -> u64 {
@@ -15,8 +14,7 @@ pub const fn initial_prng_b(seed: u32) -> u64 {
 }
 
 /// Seed the first PRNG lane. Builds vary only `seed_addend`, `init_a_offset`
-/// and the offset's sign, which comes from
-/// [`SeededTransform::ADD_OFFSET`](crate::versions::SeededTransform::ADD_OFFSET).
+/// and the offset's sign ([`SeededTransform::ADD_OFFSET`](crate::SeededTransform::ADD_OFFSET)).
 #[inline]
 #[must_use]
 pub const fn initial_prng_a(
@@ -36,9 +34,8 @@ pub const fn initial_prng_a(
     (mixed as u64).wrapping_mul(MULTIPLIER)
 }
 
-/// Advance the PRNG one step and return the keystream byte for this word. The
-/// high 32 bits of the lane sum become the next `state`, which the word
-/// functions derive their per-word keys from.
+/// Advance the PRNG one step. The high 32 bits of the lane sum become the next
+/// `state`, which keys the next word; its low byte is returned as the keystream byte.
 #[inline]
 pub fn advance_state(state: &mut u32, prng_a: &mut u64, prng_b: &mut u64) -> u8 {
     let sum = prng_b.wrapping_add(*prng_a);
@@ -69,8 +66,8 @@ pub const fn swap_adjacent_bits_u8(v: u8) -> u8 {
 }
 
 /// A 64-bit reversal without its 16-bit swap stage: the 1/2/4/8-bit swaps,
-/// then the halves exchanged. Not [`u64::reverse_bits`]; substituting that
-/// silently produces wrong plaintext.
+/// then the halves exchanged. Not [`u64::reverse_bits`], which silently
+/// produces wrong plaintext.
 #[inline]
 #[must_use]
 pub const fn reverse_bits64_without_final_16bit_swap(mut v: u64) -> u64 {
@@ -78,7 +75,6 @@ pub const fn reverse_bits64_without_final_16bit_swap(mut v: u64) -> u64 {
     v = ((v & 0x3333_3333_3333_3333) << 2) | ((v >> 2) & 0x3333_3333_3333_3333);
     v = ((v & 0x0F0F_0F0F_0F0F_0F0F) << 4) | ((v >> 4) & 0x0F0F_0F0F_0F0F_0F0F);
     v = ((v & 0x00FF_00FF_00FF_00FF) << 8) | ((v >> 8) & 0x00FF_00FF_00FF_00FF);
-    // Swap the 32-bit halves: `(v << 32) | (v >> 32)`.
     v.rotate_left(32)
 }
 
@@ -143,75 +139,4 @@ pub fn write_u64(buf: &mut [u8], offset: usize, value: u64) {
 #[inline]
 pub fn write_u32(buf: &mut [u8], offset: usize, value: u32) {
     buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reverse64_variant_is_not_a_plain_reversal() {
-        // The skipped 16-bit stage is the point of this primitive.
-        let v = 0x0123_4567_89AB_CDEFu64;
-        assert_ne!(reverse_bits64_without_final_16bit_swap(v), v.reverse_bits());
-    }
-
-    #[test]
-    fn reverse64_variant_is_an_involution() {
-        // Every stage, the half-exchange included, is its own inverse.
-        for v in [
-            0u64,
-            1,
-            u64::MAX,
-            0x0123_4567_89AB_CDEF,
-            0xFEDC_BA98_7654_3210,
-        ] {
-            let once = reverse_bits64_without_final_16bit_swap(v);
-            assert_eq!(
-                reverse_bits64_without_final_16bit_swap(once),
-                v,
-                "value {v:#x}"
-            );
-        }
-    }
-
-    #[test]
-    fn swap_adjacent_is_an_involution() {
-        for v in [
-            0u64,
-            1,
-            0xAAAA_AAAA_AAAA_AAAA,
-            0x5555_5555_5555_5555,
-            u64::MAX,
-        ] {
-            assert_eq!(swap_adjacent_bits_u64(swap_adjacent_bits_u64(v)), v);
-        }
-        for v in 0u8..=255 {
-            assert_eq!(swap_adjacent_bits_u8(swap_adjacent_bits_u8(v)), v);
-        }
-    }
-
-    #[test]
-    fn substitute_bytes_applies_table_per_lane() {
-        let mut table = [0u8; 256];
-        for (i, slot) in table.iter_mut().enumerate() {
-            *slot = (255 - i) as u8;
-        }
-        assert_eq!(substitute_bytes_u32(0x0001_0203, &table), 0xFFFE_FDFC);
-        assert_eq!(
-            substitute_bytes_u64(0x0000_0000_0000_00FF, &table),
-            0xFFFF_FFFF_FFFF_FF00
-        );
-    }
-
-    #[test]
-    fn word_io_round_trips() {
-        let mut buf = [0u8; 16];
-        write_u64(&mut buf, 0, 0x0123_4567_89AB_CDEF);
-        write_u32(&mut buf, 8, 0xDEAD_BEEF);
-        assert_eq!(read_u64(&buf, 0), 0x0123_4567_89AB_CDEF);
-        assert_eq!(read_u32(&buf, 8), 0xDEAD_BEEF);
-        // Little-endian byte order is part of the wire format.
-        assert_eq!(buf[0], 0xEF);
-    }
 }

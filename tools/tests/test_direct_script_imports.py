@@ -7,8 +7,6 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1]
 SCRIPTS = {
-    # This hand-written CLI rejects --help as missing positional input.
-    "extract_golden.py": 1,
     # These two use argparse and accept --help.
     "extract_match_observations.py": 0,
     "validate_metrics_corpus.py": 0,
