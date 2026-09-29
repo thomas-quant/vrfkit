@@ -320,9 +320,6 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
             .into());
         }
 
-        sink.on_export_group(group_ordinal, path_name_index, &path, declared)
-            .map_err(CheckpointReadError::Sink)?;
-
         // Exactly the two lookups `add_export_group` merges on: `by_path`
         // (aliases included) and `by_index`. The cache is fresh, so a hit
         // means this checkpoint declared the group twice; refuse it before an
@@ -336,6 +333,9 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
             }
             .into());
         }
+
+        sink.on_export_group(group_ordinal, path_name_index, &path, declared)
+            .map_err(CheckpointReadError::Sink)?;
 
         cache.add_export_group(NetFieldExportGroup::new(
             path.clone(),
@@ -905,7 +905,8 @@ mod tests {
 
     /// Within one checkpoint (a fresh cache), two paths at one index are a
     /// collision, not the re-export `add_export_group` merges; so is one path,
-    /// or an alias spelling of it, declared again at another index.
+    /// or an alias spelling of it, declared again at another index. The
+    /// rejected group never reaches the sink.
     #[test]
     fn two_groups_at_one_index_fail_before_returning_an_untrusted_cache() {
         let archive = build(
@@ -913,16 +914,19 @@ mod tests {
             &[("/Script/G.A", 7, 0, &[]), ("/Script/G.B", 7, 0, &[])],
             &[0u8; 8],
         );
-        let mut cache = NetGuidCache::new();
-        let err = read_checkpoint_tables(&archive, &mut cache).unwrap_err();
+        let mut sink = RecordingSink::default();
+        let err = read_checkpoint_tables_with_sink(&archive, &mut NetGuidCache::new(), &mut sink);
 
         assert!(matches!(
             err,
-            SchemaError::CheckpointGroupCollision {
-                path_name_index: 7,
-                ..
-            }
+            Err(CheckpointReadError::Schema(
+                SchemaError::CheckpointGroupCollision {
+                    path_name_index: 7,
+                    ..
+                }
+            ))
         ));
+        assert_eq!(sink.groups.len(), 1, "the rejected group reached the sink");
 
         for (first, second) in [
             ("/Script/G.A", "/Script/G.A"),
