@@ -5,10 +5,10 @@ replay format) and exports them to Parquet. A workspace of 10 crates plus a
 Python `tools/` validation suite. `#![forbid(unsafe_code)]` is in every crate;
 there is no `unsafe` block anywhere in the workspace. The only native FFI the
 parser depends on is Oodle decompression, and that lives entirely in the
-external `oozextract` crate. Edition 2024, MSRV 1.86, MIT.
+external `oozextract` crate. Edition 2024, MSRV 1.86, Apache-2.0.
 
 ![CI](https://github.com/yakisoba0728/vrfkit/actions/workflows/ci.yml/badge.svg)
-![license](https://img.shields.io/badge/license-MIT-blue.svg)
+![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)
 ![edition](https://img.shields.io/badge/edition-2024-orange.svg)
 ![builds](https://img.shields.io/badge/builds-11.06--13.06-green.svg)
@@ -668,7 +668,9 @@ golden vector's hex length must match its bit count.
 
 ## License
 
-MIT. Derivation and original authorship are in [`NOTICE.md`](NOTICE.md).
+Apache License 2.0; see [`LICENSE`](LICENSE). Releases up to and including
+v0.2.0 were published under the MIT License. Derivation and original
+authorship are in [`NOTICE.md`](NOTICE.md).
 
 This is an independent, community-developed tool. It is not affiliated with,
 endorsed by, sponsored by, or approved by Riot Games. VALORANT, Riot Games,
