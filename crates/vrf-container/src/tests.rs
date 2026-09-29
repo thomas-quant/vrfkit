@@ -1,5 +1,3 @@
-//! Unit and integration tests for the container parser.
-
 use super::*;
 use vrf_testkit::*;
 
@@ -171,8 +169,6 @@ fn header_valid_parses_all_fields() {
     assert_eq!(header.trailing_bytes, 0);
 }
 
-/// See `ReplayHeader::trailing_bytes`'s own doc for why a header extension is
-/// reported rather than skipped.
 #[test]
 fn header_trailing_bytes_are_reported_not_discarded() {
     let mut payload = header_payload();
@@ -285,7 +281,6 @@ fn chunk_iter_multiple_chunks() {
 
 #[test]
 fn chunk_iter_truncated_header_rejected() {
-    // Only 6 bytes -- not enough for the 8-byte chunk header
     let data = [0u8; 6];
     let mut iter = ChunkIterator::new(&data, 0);
     assert!(matches!(
@@ -299,11 +294,10 @@ fn chunk_iter_truncated_header_rejected() {
 
 #[test]
 fn chunk_iter_truncated_payload_rejected() {
-    // Chunk header says 100 bytes payload but only 2 are available
     let mut data = Vec::new();
     add_u32(&mut data, 1); // type
-    add_i32(&mut data, 100); // size = 100
-    data.extend_from_slice(&[0u8; 2]); // only 2 bytes
+    add_i32(&mut data, 100); // size
+    data.extend_from_slice(&[0u8; 2]);
     let mut iter = ChunkIterator::new(&data, 0);
     assert!(matches!(
         iter.next_chunk().unwrap_err(),

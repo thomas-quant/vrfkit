@@ -1,6 +1,5 @@
-//! The chunk stream after the replay info. Nothing here owns a payload: a
-//! [`RawChunk`] names a byte range in the caller's buffer, so a consumer can
-//! skip whole chunk kinds without materialising them.
+//! The chunk stream after the replay info. A [`RawChunk`] names a byte range in
+//! the caller's buffer, so a consumer can skip whole chunk kinds unread.
 
 use crate::error::ContainerError;
 use crate::io::le_u32;
@@ -17,7 +16,6 @@ pub enum ChunkType {
 }
 
 impl ChunkType {
-    /// Convert a raw u32 to the typed enum.
     #[must_use]
     pub const fn from_raw(raw: u32) -> Self {
         match raw {
@@ -29,7 +27,6 @@ impl ChunkType {
         }
     }
 
-    /// Convert back to the wire representation.
     #[must_use]
     pub const fn to_raw(self) -> u32 {
         match self {
@@ -46,17 +43,13 @@ impl ChunkType {
 #[derive(Debug, Clone)]
 pub struct RawChunk {
     pub chunk_type: ChunkType,
-    /// Declared payload size in bytes; zero for an empty chunk.
     pub size_in_bytes: i32,
     /// Offset of the payload in the input slice, past the 8-byte chunk header.
     pub data_offset: usize,
 }
 
-/// Lazy iterator over the chunk stream following the replay info.
-///
-/// Each [`next_chunk`](ChunkIterator::next_chunk) call yields one chunk's metadata
-/// and advances past its payload, which the caller reads through
-/// `RawChunk::data_offset` or skips.
+/// Lazy iterator over the chunk stream; the caller reads each payload through
+/// `RawChunk::data_offset` or skips it.
 pub struct ChunkIterator<'a> {
     data: &'a [u8],
     pos: usize,
@@ -69,17 +62,11 @@ impl<'a> ChunkIterator<'a> {
         Self { data, pos: offset }
     }
 
-    /// Current byte position in the underlying buffer.
     #[must_use]
     pub const fn position(&self) -> usize {
         self.pos
     }
 
-    /// Whether the iterator has reached the end of the buffer.
-    ///
-    /// No in-tree caller: every walk calls [`next_chunk`](Self::next_chunk),
-    /// which returns `Ok(None)` at the same point. Kept as public API for a
-    /// consumer that wants the test without advancing.
     #[must_use]
     pub const fn at_end(&self) -> bool {
         self.pos >= self.data.len()
@@ -110,8 +97,7 @@ impl<'a> ChunkIterator<'a> {
         let size_usize = size as usize;
         let data_offset = self.pos + 8;
 
-        // Compare against what is left: `data_offset + size_usize` can overflow
-        // `usize` on a 32-bit target.
+        // Against what is left: `data_offset + size_usize` can overflow a 32-bit `usize`.
         if size_usize > self.data.len() - data_offset {
             return Err(ContainerError::Truncated {
                 context: "chunk payload",

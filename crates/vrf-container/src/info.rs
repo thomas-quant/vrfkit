@@ -35,30 +35,21 @@ pub struct ReplayInfo {
     /// Network version as the info section declares it: unvalidated, and not
     /// the 19 the Header chunk pins. `02d4d478` carries 480767974 here.
     pub network_version: u32,
-    /// Build changelist as the info section declares it. It disagrees with
-    /// `ReplayHeader::replay_version.changelist` (`02d4d478`: 5090349 here,
-    /// 2152573997 there); `manifest.json`, and the valplay adapter through it,
-    /// report the header's.
+    /// Disagrees with the header's changelist (`02d4d478`: 5090349 vs
+    /// 2152573997), which `manifest.json` reports.
     pub changelist: u32,
     /// Human-readable name (trailing whitespace trimmed).
     pub friendly_name: String,
-    /// Whether the replay was recorded as a live session.
     pub is_live: bool,
-    /// Unreal `FDateTime` ticks: 100 ns units since 0001-01-01. Not a Windows
-    /// FILETIME: read as one, `02d4d478`'s 639205853799940000 dates the match
-    /// to 3626 instead of 2026-07-25. No timezone is on the wire, so the ticks
-    /// are exported raw as `timestamp_ticks`.
+    /// Unreal `FDateTime` ticks (100 ns since 0001-01-01), not a Windows FILETIME.
+    /// No timezone is on the wire, so they are exported raw as `timestamp_ticks`.
     pub timestamp: i64,
-    /// Whether chunk payloads are Oodle-compressed.
     pub compressed: bool,
-    /// Whether the replay is encrypted.
     pub encrypted: bool,
-    /// Encryption key bytes (empty if unencrypted).
     pub encryption_key: Vec<u8>,
 }
 
-/// Parse the replay info section from the start of the buffer, returning it and
-/// the byte offset where chunks begin.
+/// The replay info and the byte offset where chunks begin.
 pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), ContainerError> {
     let mut reader = BitReader::new(data);
 
@@ -96,9 +87,8 @@ pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), Cont
         seen_guids.push(guid);
 
         if guid == LOCAL_REPLAY_GUID {
-            // The one custom version pinned here. Other GUIDs are ignored, as
-            // Unreal readers do, so an engine bump that adds one does not make
-            // every replay unreadable (hence no `UnregisteredCustomVersion`).
+            // The only pin. Other GUIDs are ignored, as Unreal readers do, so an
+            // engine bump that adds one leaves every replay readable.
             if version != LOCAL_REPLAY_VERSION {
                 return Err(ContainerError::UnsupportedLocalReplayVersion { actual: version });
             }

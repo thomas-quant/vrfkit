@@ -1,9 +1,6 @@
-//! Event chunk parser.
-//!
-//! An Event chunk carries one entry from the server's own labelled game
-//! timeline -- a round start, a character death, a spike plant -- and is the
-//! only place in the file where the server names what happened. The payload's
-//! shape is documented on [`EventChunk`].
+//! Event chunk parser. An Event chunk is one entry of the server's own labelled
+//! timeline (a round start, a death, a plant); the payload's shape is on
+//! [`EventChunk`].
 //!
 //! # Wire layout
 //!
@@ -26,11 +23,8 @@ use crate::limits::MAX_FSTRING_BYTES;
 /// A parsed Event chunk: the six header fields plus its raw payload, borrowed
 /// from the chunk bytes. The payload is
 /// `[u32 group tag][N x u32 words][FString "EReplayEventGroup::<Name>"][f32 seconds]`
-/// but not self-describing: no count precedes the words, and `N` is 0 for the
-/// spike groups, 2 for CharacterDeath and 1 for the rest. A fixed `N`, tag and
-/// enum-name FString per group in [`KNOWN_EVENT_GROUPS`] consumed every payload
-/// exactly in the corpus sweep (docs/USAGE.md, "events.parquet"): evidence, not
-/// a format guarantee. So [`parse_event_payload`] takes `N` from the caller and
+/// with no word count: `N` per group ([`KNOWN_EVENT_GROUPS`]) is measured, not a
+/// format guarantee. So [`parse_event_payload`] takes `N` from the caller and
 /// requires exact consumption, and [`parse_known_event_payload`] also requires
 /// the measured tag and name.
 #[derive(Debug, Clone)]
@@ -50,16 +44,13 @@ pub struct EventChunk<'a> {
     pub size_in_bytes: i32,
     /// The payload bytes, exactly `size_in_bytes` of them.
     pub payload: &'a [u8],
-    /// Bytes after the payload that this layout does not account for, counted
-    /// so a format change is not dropped in silence. 0 in all 208,242 Event
-    /// chunks of 1,014 replays, 11.06-13.06 (`tests/corpus.rs` run per build
-    /// directory, 2026-09-28).
+    /// Bytes after the payload this layout does not account for; 0 in all
+    /// 208,242 Event chunks of 1,014 replays, 11.06-13.06.
     pub trailing_bytes: usize,
 }
 
-/// An Event payload's structural values (shape on [`EventChunk`]), named after
-/// their wire types rather than game meanings: only some groups have evidence
-/// for what each word means.
+/// An Event payload's values (shape on [`EventChunk`]), named by wire type: only
+/// some groups have evidence for what each word means.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventPayload {
     pub tag: u32,
@@ -69,13 +60,9 @@ pub struct EventPayload {
     pub seconds: f32,
 }
 
-/// One Event group whose payload layout the corpus established: its word
-/// count, group tag and public enum-name FString.
-///
-/// [`KNOWN_EVENT_GROUPS`] is the only list of these: the accessors below look
-/// into it, and `crates/vrfkit/tests/adapter_contract.rs` enumerates it against
-/// `tools/to_valplay_bundle.py`'s allowlists. A second, hand-kept list is how a
-/// new group once reached `events.parquet` while the adapter dropped its words.
+/// One Event group whose payload layout the corpus established. The only list
+/// is [`KNOWN_EVENT_GROUPS`], which `crates/vrfkit/tests/adapter_contract.rs`
+/// compares with `tools/to_valplay_bundle.py`'s allowlists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KnownEventGroup {
     /// The Event chunk's `group` string, exactly as the wire spells it.
@@ -84,12 +71,11 @@ pub struct KnownEventGroup {
     pub word_count: usize,
     /// The public enum-name FString the payload must carry.
     pub payload_name: &'static str,
-    /// The leading group tag, constant across the corpus sweep.
+    /// The leading group tag.
     pub payload_tag: u32,
 }
 
-/// Every Event group with a corpus-established payload layout; see
-/// [`KnownEventGroup`].
+/// Every Event group with a corpus-established payload layout.
 pub const KNOWN_EVENT_GROUPS: [KnownEventGroup; 7] = [
     KnownEventGroup {
         group: "characterDeath",
@@ -135,9 +121,8 @@ pub const KNOWN_EVENT_GROUPS: [KnownEventGroup; 7] = [
     },
 ];
 
-/// The [`KNOWN_EVENT_GROUPS`] entry whose group is exactly `group`. A `while`
-/// loop over bytes because the accessors are `const fn`, and on the MSRV (1.86)
-/// neither iterators nor `==` on `&str`/`&[u8]` can be called in a const context.
+/// A `while` loop over bytes because the accessors are `const fn`: on MSRV 1.86
+/// neither iterators nor `==` on `&str`/`&[u8]` are const.
 const fn known_event_group(group: &str) -> Option<KnownEventGroup> {
     let wanted = group.as_bytes();
     let mut index = 0;
@@ -175,9 +160,8 @@ pub const fn known_event_word_count(group: &str) -> Option<usize> {
     }
 }
 
-/// The public enum-name FString measured for a known Event group. Requiring
-/// this exact constant keeps a format change from turning an arbitrary payload
-/// string into a searchable column; the bytes remain in [`EventChunk::payload`].
+/// The public enum-name FString measured for a known Event group. Requiring it
+/// keeps an arbitrary payload string out of a searchable column.
 #[must_use]
 pub const fn known_event_payload_name(group: &str) -> Option<&'static str> {
     match known_event_group(group) {
@@ -186,9 +170,8 @@ pub const fn known_event_payload_name(group: &str) -> Option<&'static str> {
     }
 }
 
-/// The group tag measured for a known Event group, constant across the corpus
-/// sweep. Checking it beside the arity and enum name makes a future enum
-/// reorder fail closed instead of publishing a stale tag.
+/// The group tag measured for a known Event group, so an enum reorder fails
+/// closed instead of publishing a stale tag.
 #[must_use]
 pub const fn known_event_payload_tag(group: &str) -> Option<u32> {
     match known_event_group(group) {
@@ -197,11 +180,9 @@ pub const fn known_event_payload_tag(group: &str) -> Option<u32> {
     }
 }
 
-/// Bound for [`event_payload_seconds_matches_time`]. The largest
-/// `|seconds * 1000 - Time1|` was 0.999878 ms over the 109,126 payloads of
-/// 13.01, 13.02 and 13.04, and no build 11.06-13.06 exceeded it (208,242 Event
-/// chunks, 1,014 replays, `tests/corpus.rs` per build directory, 2026-09-28).
-/// 1.001 ms is that integer-quantisation interval plus float noise.
+/// Bound for [`event_payload_seconds_matches_time`]: the largest
+/// `|seconds * 1000 - Time1|` over 208,242 Event chunks (1,014 replays,
+/// 11.06-13.06) is 0.999878 ms, the integer-ms quantisation; 1.001 adds float noise.
 pub const EVENT_PAYLOAD_TIME_TOLERANCE_MS: f64 = 1.001;
 
 /// Whether the inner payload's seconds value agrees with the Event chunk's
@@ -215,12 +196,10 @@ pub fn event_payload_seconds_matches_time(time_ms: u32, seconds: f32) -> bool {
 
 /// Parse an Event chunk's inner payload with an established word count. `None`
 /// if the count runs past the payload, a primitive is malformed, or bytes are
-/// left over, so a build that changes a group's arity cannot yield plausible
-/// values read out of the FString. Callers keep the original payload.
+/// left over, so a changed arity cannot yield values read out of the FString.
 #[must_use]
 pub fn parse_event_payload(payload: &[u8], word_count: usize) -> Option<EventPayload> {
-    // tag + words + FString length + trailing f32. Checking the fixed minimum
-    // before allocating also bounds `word_count` by the input size.
+    // tag + words + FString length + f32, checked before allocating `words`.
     let fixed_bytes = 12usize.checked_add(word_count.checked_mul(4)?)?;
     if fixed_bytes > payload.len() {
         return None;
@@ -247,7 +226,7 @@ pub fn parse_event_payload(payload: &[u8], word_count: usize) -> Option<EventPay
 }
 
 /// Parse the payload of a measured Event group: arity, tag and enum-name
-/// FString must all match, else `None` and the caller keeps only the raw payload.
+/// FString must all match, else `None`.
 #[must_use]
 pub fn parse_known_event_payload(group: &str, payload: &[u8]) -> Option<EventPayload> {
     let known = known_event_group(group)?;
