@@ -187,8 +187,10 @@ pub fn walk_demo_frames(
         frame_count += 1;
         let _current_level_index = reader.read_i32()?;
         let time_seconds = reader.read_f32()?;
-        // The rule: a finite time is `seconds * 1000` in f64, rounded half
-        // away from zero (`f64::round`); a non-finite one is 0.
+        // The rule, which the consumer bundle format fixes
+        // (docs/archive/PROJECT_STATUS.md 7-B): a finite time is
+        // `seconds * 1000` in f64, rounded half away from zero
+        // (`f64::round`); a non-finite one is 0.
         // Truncating put every frame with a fractional ms >= 0.5 one ms early.
         // `is_finite` is explicit because `as u32` saturates +inf to u32::MAX
         // where the rule gives 0, and any bit pattern can arrive here.

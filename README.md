@@ -133,7 +133,8 @@ All branches are `++Ares-Core+release-<build>`. Adding a build is one
   actor → character), event `word0`/`word1` (killer/killed NetGUID, round
   index), ping/latency.
 - **Cross-validated** -- the server-written Event chunk independently confirms
-  the kill count, 132 of 132 in order.
+  the kill log: 132/132 in order on one 13.01 replay, 9,677/9,677 over 71
+  replays on 13.02.
 - **Reproducible** — Parquet output is byte-for-byte identical run to run.
 - **No `unsafe`** — `#![forbid(unsafe_code)]` in every crate; the only FFI is
   Oodle, isolated in an external crate.
@@ -359,7 +360,7 @@ row (`handle` = `u32::MAX`, full payload in `raw_bits`) and an explicit
 unresolved/raw diagnostic rather than pretending the properties were decoded.
 
 The overlay table (`crates/vrf-decode/src/table.rs`) -- 224 groups, 1,336
-entries, 96 handles -- was extracted mechanically from C# descriptors rather
+entries, 96 handles -- was extracted mechanically from descriptors rather
 than transcribed by hand, and `tools/apply_type_corrections.py --check` keeps
 every measured correction in it.
 
@@ -443,7 +444,7 @@ verified with `--check`).
 | Symptom | Actual | Evidence |
 |---|---|---|
 | Time-related `Float` field consumes more than 32 bits | Wire is `Double` (64-bit) | Every error is "32 bits consumed, 32 bits residual" |
-| `215`/`216` `Int32` field arrives in 3 bits | Variable-width actor bookkeeping | Every row is 3 bits wide and decodes to 3 or 1 |
+| `215`/`216` `Int32` field arrives in 3 bits | 3-bit actor bookkeeping, read as `EnumRemainingBits` | Every row is 3 bits wide and decodes to 3 or 1 |
 | SmokeScreen projectile `ReplicatedMovement` EOF | Rotation is `ByteComponents` | A short read runs off the end: 137 EOF failures on one 13.01 replay, all in this group |
 
 Byte-width handling was also corrected. A byte property inside an array stores
@@ -507,7 +508,8 @@ checkpoint blobs. A machine-local corpus can rotate; the reproducible oracle is
 build, eight builds) plus 1,264 native-machine-code vectors for the sixteen
 recovered 11.06--12.09 builds, with a full 48-sample main/checkpoint validation
 ([build support validation report](docs/LEGACY_BUILD_SUPPORT.md)). 13.06 was
-first validated on six real replays;
+first validated on six real replays
+([record](docs/archive/DESCRIPTOR_ADOPTION_VALIDATION.md#1306-replay-validation));
 the 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 38.
 
 The 768-byte S-box is shared across builds, which makes it usable as a

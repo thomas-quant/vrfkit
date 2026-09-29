@@ -14,10 +14,10 @@ This bounded search does not establish that no suitable dump exists elsewhere.
 
 ## Replay implementations and dumps checked
 
-The public replay implementation checked, and the default-branch trees of all
-nine of its public forks GitHub returned, have versioned transforms only from
-12.10 (12.10, 12.11, 13.00, 13.01, 13.02, 13.04, 13.05 and 13.06); none covers
-the seven target builds. Its published method locates the transformed reader
+The public replay implementation checked has versioned transforms only from
+12.10 (12.10, 12.11, 13.00, 13.01, 13.02, 13.04, 13.05 and 13.06), and the
+default-branch trees of all nine of its public forks GitHub returned have them
+only from 12.10 too; none covers the seven target builds. Its published method locates the transformed reader
 through `UActorChannel::ReadContentBlockHeader` in Ghidra; it does not supply
 an unpacker for encrypted executables.
 

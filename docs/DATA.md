@@ -622,10 +622,10 @@ What the evidence does **not** cover:
   nine pawn classes such as `Pawn_Killjoy_E_Turret_C` and 56 others. That is
   a pattern for whoever adds one of them, not a reason to skip measuring it.
 
-**New entries.** `table.rs` states whole units for every entry -- Unreal's own
-`FRepMovement` default and the level of 25 of the 26 classes above -- and
-`apply_type_corrections.py` pins SeekerNade to two decimals. A default is a
-prior, not a measurement, so `tests::overlay` lists every group given a
+**New entries.** Every `RepMovement` entry in `table.rs` is whole units --
+Unreal's own `FRepMovement` default and the level of 25 of the 26 classes
+above -- except SeekerNade, which `apply_type_corrections.py` pins to two
+decimals. A default is a prior, not a measurement, so `tests::overlay` lists every group given a
 `RepMovement` type -- by the table or by `scoped_types.rs` -- with its measured
 level, and fails on a group it does not list: a new class cannot ship on the
 default without somebody running the spawn join first. A `RepMovement` literal

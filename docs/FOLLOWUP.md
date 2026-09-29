@@ -260,10 +260,15 @@ comparison covers the rest.
   the replay does not reveal Blueprint-to-native class aliases by itself.
 - Type Raze's satchel, Paint Shells and rocket `ReplicatedMovement` if they
   are wanted. They were declined only because the reader read every location
-  at /100; the level is per class now
+  at /100 ([spawn join](archive/DESCRIPTOR_ADOPTION_VALIDATION.md#declined-projectile-replicatedmovement));
+  the level is per class now
   ([DATA.md](DATA.md#replicatedmovementlocation-is-world-units-at-a-per-class-level)),
   so each needs an entry with its measured level and a spawn-join line in
   `REP_MOVEMENT_LOCATION_EVIDENCE`.
+- Type `Clay_PC_C.FocusProjectiles` through a measured array route: 24,409 of
+  25,197 main payloads parse exactly and all 12,837 elements resolve to Raze
+  actors; the other 788 carry the empty-array zero trailer the route must admit
+  ([evidence](archive/DESCRIPTOR_ADOPTION_VALIDATION.md#deferred-focusprojectiles)).
 
 Considered on 2026-09-14 and deliberately not done, each with the reason:
 

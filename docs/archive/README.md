@@ -17,6 +17,7 @@ this is.
 | [`NEXT_STEPS_FINDINGS.md`](NEXT_STEPS_FINDINGS.md) | The 7-A weapon-resolution re-scoping | Implemented in commits 47849d2, b258dfd, 1f3afe4; PROJECT_STATUS.md section 5-L |
 | [`PROJECT_STATUS.md`](PROJECT_STATUS.md) | Nothing -- it is the work log itself, sections 1-36 | Superseded by [`../../README.md`](../../README.md), [`../DATA.md`](../DATA.md), [`../USAGE.md`](../USAGE.md) |
 | [`FTEXT_WIRE_LAYOUT.md`](FTEXT_WIRE_LAYOUT.md) | The 2026-09-08 `FText` wire-layout hypotheses | Validated on the replay corpus in [`../TEXT_HISTORY_EXPANSION.md`](../TEXT_HISTORY_EXPANSION.md) |
+| [`DESCRIPTOR_ADOPTION_VALIDATION.md`](DESCRIPTOR_ADOPTION_VALIDATION.md) | The 2026-09-23 to 09-28 descriptor candidates (13.06, reveals, Raze, Warden) | `tools/fixtures/scoped_type_evidence.json`, `tools/baselines/build_1306.json`, `tools/equippable_table.py`, [`../FOLLOWUP.md`](../FOLLOWUP.md) remaining work |
 | [`CORPUS_SWEEPS.md`](CORPUS_SWEEPS.md) | Nothing -- the dated corpus sweeps README and USAGE quoted until 2026-09-29 | Superseded by [`../BUILD_VERIFICATION.md`](../BUILD_VERIFICATION.md) |
 
 Brief #3 is worth reading for something other than history: the design

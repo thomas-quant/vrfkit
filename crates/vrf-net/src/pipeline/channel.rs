@@ -46,8 +46,9 @@ pub(super) fn is_player_controller_path(path: &str) -> bool {
 /// controller, which decides the net-player-index byte.
 ///
 /// Unreal writes that 1-byte player index between the spawn data and the first
-/// content block only for a dynamic PlayerController: an opened dynamic actor
-/// whose archetype, class or actor path names a PlayerController.
+/// content block only for a dynamic PlayerController. vrfkit recognises one as
+/// an opened dynamic actor whose archetype or actor path names a
+/// PlayerController.
 /// Paths come from the sink's cache (`GuidPathSink::path_for_guid` says why).
 /// A missed byte does not desync visibly: with the spawn-velocity bit in
 /// [`super::spawn`] the misframed header re-synchronises a few bits later

@@ -1310,9 +1310,9 @@ RETYPES = [
            _rep_movement("ShortComponents", "RoundWholeNumber"),
            _rep_movement("ByteComponents", "RoundWholeNumber")),
 
-    # Two-decimal location for Gekko's Wingman pawn; the table gives every
-    # RepMovement entry whole units, the level of the other 24 classes. Joined
-    # to its
+    # Two-decimal location for Gekko's Wingman pawn; uncorrected it is whole
+    # units like every other RepMovement entry, the level of the other 24
+    # classes. Joined to its
     # actors.parquet spawn (the first ReplicatedMovement row at the `open`
     # time_ms, same channel), the packed integer is 100x the coordinate on all
     # 932 actors in 1,018 replays over 15 builds (2026-09-28, 259ed10): median

@@ -1,7 +1,7 @@
 //! [`FieldType`] and raw bits in, [`DecodedValue`] or [`DecodeError`] out. The
 //! readers live in [`scalar`] (primitives) and [`geometry`] (vectors, rotators,
-//! transforms). `table.rs` is generated against `crate::decode::FieldType`, so
-//! this module keeps its path.
+//! transforms). `table.rs` names `crate::decode::FieldType` by path, so this
+//! module keeps its path.
 
 mod geometry;
 pub(crate) mod scalar;

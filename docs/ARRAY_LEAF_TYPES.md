@@ -6,7 +6,8 @@ no new rows and retains every raw payload and parent. Routes are limited to
 the measured 13.01, 13.02, 13.04, and 13.05 builds and require the exact parent
 identity plus each child's declared handle, name, and checksum.
 
-Since 2026-09-23 the parser also enables these measured routes on 13.06. For
+Since 2026-09-23 the parser also enables these measured routes on 13.06
+([validation](archive/DESCRIPTOR_ADOPTION_VALIDATION.md#1306-replay-validation)). For
 `KillData` that was checked on 2026-09-28: on all 38 13.06 exports of the
 common audit,
 [`extract_kill_observations.py`](KILL_OBSERVATIONS.md#measured-builds) matched
@@ -53,8 +54,8 @@ references; see [NESTED_ARRAY_REFERENCES.md](NESTED_ARRAY_REFERENCES.md).
 `SocketAsset` and `AttachmentAsset` are enabled only inside that verified
 nesting, not as unrelated direct children.
 
-No descriptor declares these two parent groups. This is measured wire
-interpretation, with explicit remaining semantic uncertainty. Repeated array
+The descriptors consulted declare neither parent group. This is measured
+wire interpretation, with explicit remaining semantic uncertainty. Repeated array
 updates and checkpoint snapshots are not independent kills or a deduplicated
 inventory ledger.
 

@@ -92,8 +92,8 @@ Consequences for how you work:
   `crates/vrfkit/src/sink/rpc.rs`.
 - **One name entry is dead by design.** `EquippablePickupProjectile_C`'s
   `MyEquippable` no longer matches: FName instance numbers are part of the name,
-  so the wire says `MyEquippable_0`. It resolves through the
-  `compatible_checksum` fallback instead.
+  so the wire says `MyEquippable_0`. It still resolves through the
+  `compatible_checksum` fallback, so no row depends on the entry.
 - **`actors.event` has three values, not two** — `open` / `close` / `dormant`.
   Dormancy is not destruction; only `close` is a despawn.
 - **MSRV 1.86 is not your local toolchain.** `let` chains have already broken a

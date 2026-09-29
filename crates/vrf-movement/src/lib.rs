@@ -136,7 +136,8 @@
 //! - Exactly 24 bits follow the envelope in every stream (3,753,771,600 bits in
 //!   all). The decoder skips them unread and tallies them per stream; what
 //!   they carry is not established.
-//! - Implemented but never seen: the direct form, a
+//! - Implemented after an independent parser's grammar but never seen: the
+//!   direct form, a
 //!   sized movement window, the updates array's trailing 8-bit IntPacked,
 //!   variant-0 moves, and the f32 and f64 QuantizedVector forms.
 //!

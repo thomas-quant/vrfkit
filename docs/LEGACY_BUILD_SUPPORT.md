@@ -386,8 +386,10 @@ was run against the original reader and failed on the same misplaced length.
 
 An identity transform on `sample-1` of every build failed all sixteen
 validations, at framing oracle rates of 0.711762%--3.804203%: neither
-plaintext passthrough nor accepting the branch is a decoding fix. No published
-transform covers these builds. A new transform needs independent expected-byte
+plaintext passthrough nor accepting the branch is a decoding fix. None of the
+published transforms checked in
+[`BUILD_RECOVERY_RESEARCH.md`](BUILD_RECOVERY_RESEARCH.md) covers these builds.
+A new transform needs independent expected-byte
 vectors and then validation and checkpoint-enabled export of every available
 sample: frame success alone is not evidence that typed values agree with the
 wire.

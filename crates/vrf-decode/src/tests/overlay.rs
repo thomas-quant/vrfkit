@@ -547,9 +547,8 @@ fn ping_latency_is_typed() {
 #[test]
 fn equippable_used_is_an_object_net_guid() {
     // The descriptor attaches a custom Equippable decoder that is exactly an
-    // IntPacked read, our ObjectNetGuid. The table types it from that
-    // decoder's name, and tools/apply_type_corrections.py EXPECTED only
-    // verifies it. Left Raw, the adapter guessed a fixed 16-bit LE integer
+    // IntPacked read, our ObjectNetGuid. The table carries that type, and
+    // tools/apply_type_corrections.py EXPECTED only verifies it. Left Raw, the adapter guessed a fixed 16-bit LE integer
     // that was never a valid NetGUID.
     for group in [DAMAGE_BASE, DAMAGE_POINT] {
         assert_eq!(
@@ -1940,8 +1939,9 @@ const REP_MOVEMENT_LOCATION_EVIDENCE: [(&str, VectorQuantization); 27] = {
 };
 
 /// Every `RepMovement` type the overlay can assign carries the measured level,
-/// and no unlisted group gets one. The level is not on the wire, so a table
-/// entry carries a default (`RoundWholeNumber`): a prior, not a measurement.
+/// and no unlisted group gets one. The level is not on the wire, so an
+/// unmeasured table entry is written with Unreal's default
+/// (`RoundWholeNumber`): a prior, not a measurement.
 /// A new class needs its spawn evidence here first.
 /// All three routes are held to the list: the table and the scoped types by
 /// group, checksum propagation by admitting no `RepMovement` at all.

@@ -587,8 +587,8 @@ fn decode_struct_fields(
 ///
 /// The format allows one IntPacked when exactly eight bits remain after the
 /// index terminator; discarding it unread would let any appended byte pass. Like
-/// `consume_trailing_terminator` in `effect/framing.rs` this declines, but
-/// tallies instead of rejecting (callers keep the leaves already emitted): `0`
+/// `consume_trailing_terminator` in `effect/framing.rs` this declines to
+/// swallow a nonzero trailer, but tallies instead of rejecting (callers keep the leaves already emitted): `0`
 /// is consumed silently; another value is left unread for the caller's residual
 /// tally (`unconsumed_root_bits`, or `unconsumed_nested_bits` in a nested
 /// window); a failed read is `errors` only. Over the 1,018-replay audit corpus
