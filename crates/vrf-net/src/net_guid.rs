@@ -57,10 +57,10 @@ pub fn internal_load_object(
     let flags = if guid.is_default() || is_exporting {
         ExportFlags(reader.read_u8()?)
     } else {
-        ExportFlags(0)
+        ExportFlags::NONE
     };
 
-    if !flags.has_path() {
+    if !flags.contains(ExportFlags::HAS_PATH) {
         return Ok(guid);
     }
 
@@ -69,7 +69,7 @@ pub fn internal_load_object(
     // Cap the FString at 4096 bytes to reject a corrupt length early.
     let path = reader.read_fstring(4096)?;
 
-    if flags.has_network_checksum() {
+    if flags.contains(ExportFlags::HAS_NETWORK_CHECKSUM) {
         let _checksum = reader.read_u32()?;
     }
 

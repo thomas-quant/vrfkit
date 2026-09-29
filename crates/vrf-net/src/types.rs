@@ -40,60 +40,7 @@ impl ChannelCloseReason {
     }
 }
 
-/// A network GUID as transmitted on the wire: `0` is no object, `1` the
-/// default object (its export flags are always read), odd values static
-/// (level-placed) actors and even non-zero values dynamic (spawned) ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct NetworkGuid(pub u32);
-
-impl NetworkGuid {
-    #[must_use]
-    #[inline]
-    pub const fn is_valid(self) -> bool {
-        self.0 != 0
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn is_default(self) -> bool {
-        self.0 == 1
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn is_dynamic(self) -> bool {
-        self.is_valid() && (self.0 & 1) == 0
-    }
-}
-
-/// Flags read after a net GUID when exporting path information.
-///
-/// ```text
-/// Bit layout: 1 byte (8 bits), only low 3 meaningful
-///   bit 0 -- HasPath
-///   bit 1 -- NoLoad
-///   bit 2 -- HasNetworkChecksum
-/// ```
-#[derive(Debug, Clone, Copy)]
-pub struct ExportFlags(pub u8);
-
-impl ExportFlags {
-    pub const HAS_PATH: u8 = 1 << 0;
-    pub const NO_LOAD: u8 = 1 << 1;
-    pub const HAS_NETWORK_CHECKSUM: u8 = 1 << 2;
-
-    #[must_use]
-    #[inline]
-    pub const fn has_path(self) -> bool {
-        self.0 & Self::HAS_PATH != 0
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn has_network_checksum(self) -> bool {
-        self.0 & Self::HAS_NETWORK_CHECKSUM != 0
-    }
-}
+pub use vrf_schema::{ExportFlags, NetworkGuid};
 
 /// 3D vector as decoded from the spawn data.
 #[derive(Debug, Clone, Copy, PartialEq)]
