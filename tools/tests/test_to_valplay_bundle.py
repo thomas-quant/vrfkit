@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -1189,14 +1190,63 @@ class PropertyKeyCollisionTallyTests(TallyTestCase):
             tally = self.tally_of(tmp, rows)
         self.assertEqual(tally["property_key_collisions"], 0)
 
-    def test_a_top_level_row_replacing_a_nested_value_is_counted(self):
+    def test_a_top_level_row_replacing_a_nested_value_is_a_shape_conflict(self):
         """'Foo' after 'Foo.Bar' is assigned directly, never by `_set_nested`."""
         rows = [self.row("Foo.Bar", 1, 2.0), self.row("Foo", 2, 1.0)]
         with tempfile.TemporaryDirectory() as tmp:
             tally = self.tally_of(tmp, rows)
             (event,) = self.events_of(tmp, "export_group_received")
         self.assertEqual(event["payload"], {"Foo": 1.0})
-        self.assertEqual(tally["property_key_collisions"], 1)
+        self.assertEqual(tally["payload_shape_conflicts"], 1)
+        self.assertEqual(tally["property_key_collisions"], 0)
+
+    def test_a_repeated_blob_is_a_key_collision_not_a_shape_conflict(self):
+        """Handles 23/24 of TrackedRewards[i].Rewards and 25/29 of A on
+        02d4d478: two raw blobs under one name, nested or not, are one value
+        overwriting another."""
+        rows = [self.row("TrackedRewards[0].Rewards", 23, b"\x01", "raw_bits", bit_count=8),
+                self.row("TrackedRewards[0].Rewards", 24, b"\x02", "raw_bits", bit_count=8),
+                self.row("A", 25, b"\x03", "raw_bits", bit_count=8),
+                self.row("A", 29, b"\x04", "raw_bits", bit_count=8)]
+        with tempfile.TemporaryDirectory() as tmp:
+            tally = self.tally_of(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        self.assertEqual(event["payload"], {
+            "TrackedRewards": [{"Index": 0, "Rewards": {"BitCount": 8, "Data": "Ag=="}}],
+            "A": {"BitCount": 8, "Data": "BA=="}})
+        self.assertEqual(tally["property_key_collisions"], 2)
+        self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_an_array_element_is_a_value_a_structure_or_a_filler(self):
+        """A value replacing a blob element collides, one replacing an element
+        with members is a shape conflict, one landing on a filler is neither."""
+        blob = self.row("Arr[0]", 1, b"\x01", "raw_bits", bit_count=8)
+        last = self.row("Arr[0]", 9, 3.0)
+        cases = (
+            ("blob", [blob, last], [3.0], 1, 0),
+            ("members", [self.row("Arr[0].X", 1, 1.0), last], [3.0], 0, 1),
+            ("filler", [self.row("Arr[1].X", 1, 1.0), last],
+             [3.0, {"Index": 1, "X": 1.0}], 0, 0),
+            ("members over a filler", [self.row("Arr[1]", 1, 5.0),
+                                       self.row("Arr[0].X", 2, 1.0), last],
+             [3.0, 5.0], 0, 1),
+        )
+        for label, rows, array, collisions, conflicts in cases:
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                tally = self.tally_of(tmp, rows)
+                (event,) = self.events_of(tmp, "export_group_received")
+                self.assertEqual(event["payload"], {"Arr": array})
+                self.assertEqual(tally["property_key_collisions"], collisions)
+                self.assertEqual(tally["payload_shape_conflicts"], conflicts)
+
+    def test_a_nested_leaf_replacing_members_is_a_shape_conflict(self):
+        rows = [self.row("Foo.Bar.Baz", 1, 1.0), self.row("Foo.Bar", 2, 2.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            tally = self.tally_of(tmp, rows)
+            (event,) = self.events_of(tmp, "export_group_received")
+        self.assertEqual(event["payload"], {"Foo": {"Bar": 2.0}})
+        self.assertEqual(tally["payload_shape_conflicts"], 1)
+        self.assertEqual(tally["property_key_collisions"], 0)
 
     def test_a_repeated_nested_leaf_is_counted(self):
         rows = [self.row("Foo.Bar", 1, 1.0), self.row("Foo.Bar", 2, 2.0),
@@ -1264,6 +1314,16 @@ class FlatPathTallyTests(unittest.TestCase):
         bundle._set_nested(payload, bundle._parse_field_path("Foo"), 1, tally)
         self.assertEqual(payload, {"Foo": 1})
         self.assertEqual(tally["payload_shape_conflicts"], 1)
+
+    def test_members_rebuilt_after_a_conflict_are_still_members(self):
+        """'Foo', 'Foo.Bar', 'Foo': both replacements restructure the key."""
+        tally = bundle._Tally()
+        payload = {}
+        for path, value in (("Foo", 1), ("Foo.Bar", 2), ("Foo", 3)):
+            bundle._set_nested(payload, bundle._parse_field_path(path), value, tally)
+        self.assertEqual(payload, {"Foo": 3})
+        self.assertEqual(tally["payload_shape_conflicts"], 2)
+        self.assertEqual(tally["property_key_collisions"], 0)
 
     def test_ordinary_nesting_is_not_counted(self):
         tally = bundle._Tally()
@@ -1681,11 +1741,29 @@ class SummaryReportingTests(TallyTestCase):
         rows = MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]
         with tempfile.TemporaryDirectory() as tmp:
             summary = self.convert_rows(tmp, rows)
-        lines = summary["tally"].lines()
-        self.assertTrue(any("unnamed_property_rows" in ln for ln in lines), lines)
-        self.assertTrue(any("missing_manifest" in ln for ln in lines), lines)
-        # Only the non-zero counters are printed.
-        self.assertEqual(len(lines), 2, lines)
+        counts = self.printed_counts(summary["tally"].lines())
+        self.assertEqual(list(counts), list(bundle._Tally.REASONS))
+        self.assertEqual(counts["unnamed_property_rows"], "1")
+        self.assertEqual(counts["missing_manifest"], "1")
+        self.assertEqual(counts["rpc_param_collisions"], "0")
+
+    def test_a_clean_conversion_prints_every_counter_as_zero(self):
+        """A line printed only when non-zero could not tell "nothing was lost"
+        from "this counter stopped running"."""
+        printed = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(printed):
+            summary = self.convert_rows(
+                tmp, MINIMAL_FIELD_ROWS, manifest_json='{"replay_version": "x"}')
+        self.assertEqual(summary["tally"].total, 0)
+        counts = self.printed_counts(printed.getvalue().splitlines())
+        self.assertEqual(list(counts), list(bundle._Tally.REASONS))
+        self.assertEqual(set(counts.values()), {"0"})
+
+    @staticmethod
+    def printed_counts(lines) -> dict:
+        """{counter: its count as printed} from the summary's loss lines."""
+        return dict(match.groups() for match in map(
+            re.compile(r"  (\w+): ([\d,]+) -- ").match, lines) if match)
 
 
 # ---------------------------------------------------------------------------
@@ -2050,6 +2128,15 @@ class UpstreamAccountingForwardingTests(SeamTestCase):
         self.assertNotIn("players", published)
         self.assertNotIn("11111111-2222-3333-4444-555555555555", raw)
 
+    def test_the_manifest_is_written_with_lf_line_endings(self):
+        """LF on every platform, like the extractors' receipts (not CRLF on
+        Windows), read from the published bundle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _, _ = self.build(tmp, manifest=self.full_manifest())
+            data = (out / "manifest.json").read_bytes()
+        self.assertIn(b"\n", data)
+        self.assertNotIn(b"\r\n", data)
+
     def test_the_manifest_key_set_is_pinned(self):
         """The bundle's shape is a contract, so it is spelled out once."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -2258,7 +2345,7 @@ class NonFiniteMovementTests(SeamTestCase):
         self.assertEqual(summary["tally"]["non_finite_movement_rows"], 3)
         self.assertEqual(
             published["adapter"]["losses"]["non_finite_movement_rows"], 3)
-        self.assertTrue(any("non_finite_movement_rows" in line
+        self.assertTrue(any(line.startswith("  non_finite_movement_rows: 3 -- ")
                             for line in summary["tally"].lines()))
 
     def test_a_row_is_counted_once_however_many_of_its_values_are_bad(self):
