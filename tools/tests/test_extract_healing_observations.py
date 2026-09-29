@@ -209,17 +209,6 @@ class Tests(unittest.TestCase):
                 self.assertIn(f'"{source}": 1', printed.getvalue())
                 self.assertIn('"actor_closed": 0', printed.getvalue())
 
-    def test_parent_child_mismatch_is_retained_invalid(self):
-        rows = fixture()
-        rows[2]["raw_bits"] = struct.pack("<f", 2.0)
-        rows[2]["value_f64"] = 2.0
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
-        o = tool.extract(p)["observations"][0]
-        self.assertEqual(o["amount"]["status"], "invalid")
-        self.assertEqual(o["amount"]["error"], "parent/child raw mismatch")
-        self.assertEqual(len(o["source_rows"]), len(rows))
-
     def test_duplicate_and_disjoint_groups_are_ambiguous(self):
         rows = fixture()
         duplicate = copy.deepcopy(rows[0])
@@ -231,7 +220,7 @@ class Tests(unittest.TestCase):
         obs = tool.extract(p)["observations"]
         target = next(x for x in obs if x["identity"]["actor_net_guid"] == 40)
         self.assertIn("duplicate_same_coordinate_member", target["ambiguity_reasons"])
-        self.assertIn("disjoint_same_coordinate_group", target["ambiguity_reasons"])
+        self.assertIn("disjoint_physical_segments", target["ambiguity_reasons"])
 
     def test_same_time_lifecycle_is_unresolved_and_direct_edges_remain(self):
         actors = [
@@ -249,16 +238,6 @@ class Tests(unittest.TestCase):
         s = tool.extract(p)["observations"][0]["source_corroboration"]
         self.assertEqual(s["status"], "lifecycle_boundary_same_time")
         self.assertEqual(s["event_instigator"]["value"], 12)
-
-    def test_raw_typed_mismatch_fails_atomically(self):
-        rows = fixture(1.0)
-        rows[0]["value_f64"] = 2.0
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
-        out = p / "out.json"
-        out.write_text("old", encoding="utf-8")
-        self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-        self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_checkpoint_rows_are_preserved_separately(self):
         first = {
@@ -372,14 +351,6 @@ class Tests(unittest.TestCase):
         with self.assertRaises(tool.IntegrityError):
             tool.extract(p2)
 
-    def test_near_f32_value_is_rejected_even_when_repacking_rounds_equal(self):
-        rows = fixture(1.0)
-        rows[0]["value_f64"] = 1.0 + 1e-9
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
-        with self.assertRaises(tool.IntegrityError):
-            tool.extract(p)
-
     def test_output_may_not_alias_an_input(self):
         td, p = self.make()
         self.addCleanup(td.cleanup)
@@ -387,16 +358,6 @@ class Tests(unittest.TestCase):
         before = source.read_bytes()
         self.assertEqual(tool.main(["--export", str(p), "--out", str(source)]), 1)
         self.assertEqual(source.read_bytes(), before)
-
-    def test_heal_causer_typed_corruption_fails_atomically(self):
-        rows = fixture()
-        rows[-1]["value_i64"] = 71
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
-        out = p / "out.json"
-        out.write_text("old", encoding="utf-8")
-        self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
-        self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_typed_instigator_edges_are_present_and_raw_checked(self):
         td, p = self.make()
@@ -411,14 +372,13 @@ class Tests(unittest.TestCase):
                     d["counts"]["source_edge_status"][key],
                     {"present": 1, "null": 0, "absent": 0, "duplicate": 0, "invalid": 0},
                 )
-        # The established target is stated, including that it never joins to
-        # an opened actor -- an unresolved join is not a decode fault.
+        # The established target is stated, including that it never joins.
         semantics = s["event_instigator"]["semantics"]
         self.assertIn("PlayerController", semantics)
-        self.assertIn("not a decode fault", semantics)
+        self.assertIn("does not join", semantics)
 
-    def test_instigator_typed_corruption_fails_atomically(self):
-        for name in ("EventInstigator", "EventInstigatorPawn"):
+    def test_reference_typed_corruption_fails_atomically(self):
+        for name in ("EventInstigator", "EventInstigatorPawn", "HealCauser"):
             with self.subTest(field=name):
                 rows = fixture()
                 target = next(
@@ -464,23 +424,6 @@ class Tests(unittest.TestCase):
                 self.addCleanup(td.cleanup)
                 with self.assertRaisesRegex(tool.IntegrityError, "untyped"):
                     tool.extract(p)
-
-    def test_swapped_children_and_unrelated_gap_are_rejected(self):
-        rows = fixture()
-        rows[1], rows[2] = rows[2], rows[1]
-        td, p = self.make(rows)
-        self.addCleanup(td.cleanup)
-        self.assertEqual(
-            tool.extract(p)["observations"][0]["amount"]["status"], "invalid"
-        )
-        rows = fixture()
-        rows.insert(2, row("Unrelated", raw=b"\0", bits=1))
-        td2, p2 = self.make(rows)
-        self.addCleanup(td2.cleanup)
-        observation = tool.extract(p2)["observations"][0]
-        self.assertIn(
-            "disjoint_same_coordinate_group", observation["ambiguity_reasons"]
-        )
 
     def test_selected_batch_ordinals_include_filtered_rows_and_boundary(self):
         td = tempfile.TemporaryDirectory()

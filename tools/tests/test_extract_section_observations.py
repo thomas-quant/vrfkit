@@ -187,6 +187,9 @@ class SectionObservationTests(unittest.TestCase):
             tool.f32(row("x", wire, 32, value_f64=0.0))
         with self.assertRaises(tool.InputError):
             tool.f32(row("x", wire, 32, value_f64=-0.0, value_i64=0))
+        # A typed value that rounds to the wire f32 is still not that value.
+        with self.assertRaises(tool.IntegrityError):
+            tool.f32(row("x", struct.pack("<f", 1.0), 32, value_f64=1.0 + 1e-9))
 
     def test_parentless_rpc_is_visible_not_missing_health(self):
         scalar = row("MulticastNotifyHeal.HealTaken", struct.pack("<f", 5.0), 32,
