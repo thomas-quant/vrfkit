@@ -35,8 +35,6 @@ use crate::stats::NetStats;
 use crate::types::MAX_ACTIVE_CHANNELS;
 use crate::types::NetworkGuid;
 
-use std::collections::HashMap;
-
 use framing::BunchContext;
 
 /// Per-channel actor state tracked during replication.
@@ -290,7 +288,7 @@ struct ChannelSlot {
 }
 
 /// Channel index -> channel row, looked up once or twice per bunch.
-type ChannelTable = HashMap<u32, ChannelSlot>;
+type ChannelTable = vrf_schema::FxHashMap<u32, ChannelSlot>;
 
 /// Bytes the scratch buffer starts at: above any block one bunch can carry
 /// (`MAX_PACKET_SIZE_BITS`, 2,048 bytes). A reassembled partial's larger
