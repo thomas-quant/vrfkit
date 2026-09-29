@@ -116,12 +116,6 @@ impl ChannelState {
         self.failures = Some(FailureAggregate::new(retain_payloads));
     }
 
-    /// Whether this pass asks the replication layer for failure details and
-    /// payload callbacks.
-    pub fn failure_aggregate_enabled(&self) -> bool {
-        self.failures.is_some()
-    }
-
     /// Take the failure aggregate out, leaving it empty: the checkpoint pass
     /// drains each chunk's channel state into the caller's totals.
     #[must_use]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 use vrf_bitio::BitReader;
 use vrf_decode::apply_overlay_with_checksum;
-use vrf_decode::cnc::decode_cnc_payload;
+use vrf_decode::cnc::{CncRpc, decode_cnc_payload};
 use vrf_export::{
     ActorRecord, CheckpointBlockRecord, MovementRecord, PartialRecord,
     UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME,
@@ -361,22 +361,15 @@ impl ExportSink<'_> {
             return;
         };
 
-        let total_len = u64::from(bit_count);
         for rpc in &rpcs {
-            // The walk validated that each payload fits; on a malformed tail the
-            // payload is dropped (the preservation row keeps the blob). A
-            // zero-bit RPC keeps an empty blob here, where `copy_raw_bits` gives
-            // null; none has been observed, and switching would change output.
-            let raw_bits =
-                BitReader::with_bit_len(payload, total_len)
-                    .ok()
-                    .and_then(|mut reader| {
-                        reader.skip_bits(rpc.payload_offset).ok()?;
-                        if rpc.payload_bits == 0 {
-                            return Some(SmallVec::new());
-                        }
-                        copy_raw_bits(reader, rpc.payload_bits)
-                    });
+            // A zero-bit RPC keeps an empty blob here, where `copy_raw_bits`
+            // gives null; none has been observed, and switching changes output.
+            let raw_bits = cnc_body(payload, bit_count, rpc).and_then(|body| {
+                if rpc.payload_bits == 0 {
+                    return Some(SmallVec::new());
+                }
+                copy_raw_bits(body, rpc.payload_bits)
+            });
 
             let field_name = self.channel_state.names.intern_fmt(|out| {
                 put(out, format_args!("_cnc_h{}", rpc.handle));
@@ -392,6 +385,13 @@ impl ExportSink<'_> {
             self.stats.cnc_rpcs_emitted += 1;
         }
     }
+}
+
+/// One walked CNC RPC's body: a reader over its `payload_bits` bits.
+fn cnc_body<'p>(payload: &'p [u8], bit_count: u32, rpc: &CncRpc) -> Option<BitReader<'p>> {
+    let mut reader = BitReader::with_bit_len(payload, u64::from(bit_count)).ok()?;
+    reader.skip_bits(rpc.payload_offset).ok()?;
+    reader.sub_reader(u64::from(rpc.payload_bits)).ok()
 }
 
 impl ReplicationSink for ExportSink<'_> {
@@ -569,36 +569,24 @@ impl ReplicationSink for ExportSink<'_> {
             // count: safe only with the direct pre-remap component identity
             // above and the strict checks below (one handle-1 RPC, exact end,
             // set body flag).
-            if let Some(rpcs) = decode_cnc_payload(&raw_tail, bit_count, ABILITIES_AND_BUFFS_FC) {
-                if let [rpc] = rpcs.as_slice() {
-                    let raw_body = (|| {
-                        if rpc.handle != 1 || rpc.payload_bits == 0 {
-                            return None;
-                        }
-                        let mut body =
-                            BitReader::with_bit_len(&raw_tail, u64::from(bit_count)).ok()?;
-                        body.skip_bits(rpc.payload_offset).ok()?;
-                        let body = body.sub_reader(u64::from(rpc.payload_bits)).ok()?;
-                        let mut flag = body.clone();
-                        if !flag.read_bit().ok()? {
-                            return None;
-                        }
-                        copy_raw_bits(body, rpc.payload_bits)
-                    })();
-                    if let Some(raw_body) = raw_body {
-                        let field_name = self.channel_state.names.intern(CHAINED_CNC_H1_FIELD_NAME);
-                        self.push_field(FieldValues {
-                            handle: rpc.handle,
-                            field_name: Some(field_name),
-                            bit_count: rpc.payload_bits,
-                            raw_bits: Some(raw_body),
-                            ..FieldValues::default()
-                        });
-                        self.stats.rpcs_emitted += 1;
-                        self.stats.cnc_rpcs_emitted += 1;
-                        self.stats.rep_layout_cnc_tails_decoded += 1;
-                        return RepLayoutTailOutcome::Decoded { rpc_count: 1 };
-                    }
+            let rpcs = decode_cnc_payload(&raw_tail, bit_count, ABILITIES_AND_BUFFS_FC);
+            if let Some([rpc]) = rpcs.as_deref() {
+                let body = cnc_body(&raw_tail, bit_count, rpc)
+                    .filter(|body| rpc.handle == 1 && body.clone().read_bit().is_ok_and(|bit| bit));
+                if let Some(raw_body) = body.and_then(|body| copy_raw_bits(body, rpc.payload_bits))
+                {
+                    let field_name = self.channel_state.names.intern(CHAINED_CNC_H1_FIELD_NAME);
+                    self.push_field(FieldValues {
+                        handle: rpc.handle,
+                        field_name: Some(field_name),
+                        bit_count: rpc.payload_bits,
+                        raw_bits: Some(raw_body),
+                        ..FieldValues::default()
+                    });
+                    self.stats.rpcs_emitted += 1;
+                    self.stats.cnc_rpcs_emitted += 1;
+                    self.stats.rep_layout_cnc_tails_decoded += 1;
+                    return RepLayoutTailOutcome::Decoded { rpc_count: 1 };
                 }
             }
         }
@@ -672,7 +660,7 @@ impl ReplicationSink for ExportSink<'_> {
     }
 
     fn wants_stream_failure_details(&self) -> bool {
-        self.channel_state.failure_aggregate_enabled()
+        self.channel_state.failures.is_some()
     }
 
     /// Attach the resolved group path to a stream failure: the only place both
