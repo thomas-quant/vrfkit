@@ -1,10 +1,9 @@
 //! Dynamic-actor spawn data: archetype, level, transform and velocity.
 //!
-//! Open-count on the reference replay: docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
-//!
 //! The block Unreal writes right after the actor GUID when a channel opens for
-//! a *dynamic* (even, non-zero GUID) actor: small and rare, but its bit width
-//! decides everything after it in the same bunch.
+//! a *dynamic* (even, non-zero GUID) actor: rare (open counts:
+//! docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478), but
+//! its bit width decides everything after it in the same bunch.
 
 use vrf_bitio::BitReader;
 
@@ -54,8 +53,7 @@ pub(super) fn read_dynamic_spawn_data(
         SPAWN_SCALE_FACTOR,
         UNIT_SCALE,
     )?);
-    // Velocity is read unconditionally;
-    // gating it cost one invisible bit (docs/archive/PROJECT_STATUS.md 17-A).
+    // Velocity is read unconditionally: gating it loses one bit, silently.
     state.spawn_velocity = Some(read_optional_quantized_vector(
         payload,
         SPAWN_SCALE_FACTOR,
@@ -81,11 +79,9 @@ pub(super) fn read_dynamic_spawn_data(
 ///   [else] -> 3 x f64
 /// ```
 ///
-/// A clear leading bit means "take the default", not "absent": (0,0,0) for
-/// location and velocity and (1,1,1) for scale in the spawn block. So
-/// this always yields a vector; only a static actor, which never enters the
-/// block, leaves the fields `None` -- unknown, not (0,0,0)
-/// (docs/archive/PROJECT_STATUS.md 13-A has the corpus counts).
+/// A clear leading bit means "take the default" (origin, or unit scale), not
+/// "absent": only a static actor, which has no spawn block, leaves the
+/// fields `None`.
 fn read_optional_quantized_vector(
     reader: &mut BitReader<'_>,
     scale_factor: i32,
@@ -173,7 +169,7 @@ fn read_compressed_short_component(reader: &mut BitReader<'_>) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::{pack, write_byte, write_serialized_int};
+    use crate::test_bits::{BitWrite, pack};
 
     /// A clear leading bit yields the caller's default, which differs by
     /// vector (origin vs unit scale).
@@ -195,9 +191,9 @@ mod tests {
         // hasValue=1, isQuantized=1, info = 8 | (1 << 6) = 72 -> 8-bit
         // components with extra_info = 1, so each is divided by 10.
         let mut bits = vec![true, true];
-        write_serialized_int(&mut bits, 72, 128); // 7 value bits
+        bits.serialized_int(72, 128); // 7 value bits
         for byte in [0xFFu8, 0x01, 0x80] {
-            write_byte(&mut bits, byte);
+            bits.u8(byte);
         }
         let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
@@ -212,7 +208,7 @@ mod tests {
     fn rotation_short_skips_absent_components() {
         let mut bits = vec![true];
         for byte in 16384u16.to_le_bytes() {
-            write_byte(&mut bits, byte);
+            bits.u8(byte);
         }
         bits.push(false);
         bits.push(false);

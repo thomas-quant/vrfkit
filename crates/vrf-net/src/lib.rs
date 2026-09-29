@@ -16,8 +16,10 @@
 //! handles), typed field decoding, and NetGuidCache storage (through
 //! [`net_guid::GuidPathSink`]).
 //!
-//! A malformed bunch is discarded and counted; it does not abort the replay,
-//! and no discard goes uncounted.
+//! A malformed bunch is discarded and counted; it does not abort the replay.
+//! Not every lost bit is tallied: a malformed packet's tail is counted only
+//! as a packet, a RepLayout-export bunch only as a bunch, and the payload
+//! after a cleanly read package-map export list not at all.
 //!
 //! # Features
 //!
@@ -43,57 +45,12 @@ pub use error::NetError;
 pub use pipeline::{PLAYER_CONTROLLER_LEAF, ReplicationReader, ReplicationSink};
 pub use stats::NetStats;
 
-/// Bit writers shared by this crate's unit tests, appending bits in the order
-/// the matching `BitReader` read consumes them (least significant first);
-/// `pack` and `build_packet` turn the result into bytes.
+/// Bunch builders shared by this crate's unit tests, over `vrf_testkit`'s
+/// LSB-first bit writer.
 #[cfg(test)]
 mod test_bits {
     use crate::types::{ChannelCloseReason, MAX_PACKET_SIZE_BITS};
-
-    /// Append `value` as an `IntPacked`: seven value bits per byte, above a
-    /// low bit that says whether another byte follows.
-    pub fn write_int_packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let mut next_byte = ((value & 0x7F) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                next_byte |= 1;
-            }
-            write_byte(bits, next_byte);
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    /// Append `value` as a `SerializedInt` bounded by `max_value`.
-    pub fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max_value: u32) {
-        let mut written_value = 0u32;
-        let mut mask = 1u32;
-        while written_value.saturating_add(mask) < max_value {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written_value |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    pub fn write_byte(bits: &mut Vec<bool>, byte: u8) {
-        bits.extend((0..8).map(|i| (byte & (1 << i)) != 0));
-    }
-
-    /// Pack bits into bytes, leaving the last byte's unused high bits zero.
-    pub fn pack(bits: &[bool]) -> Vec<u8> {
-        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
-        for (i, &bit) in bits.iter().enumerate() {
-            if bit {
-                bytes[i >> 3] |= 1 << (i & 7);
-            }
-        }
-        bytes
-    }
+    pub use vrf_testkit::{BitWrite, BitWriter, pack};
 
     /// Pack `bits` as one packet: the data, then the sentinel bit.
     pub fn build_packet(bits: &[bool]) -> Vec<u8> {
@@ -104,13 +61,14 @@ mod test_bits {
 
     /// The header flags one synthetic bunch varies. The default is a
     /// reliable bunch on channel 0 with every other flag clear.
+    #[derive(Default)]
     pub struct BunchSpec {
         pub ch_index: u32,
         pub b_open: bool,
         pub b_close: bool,
         /// Close reason Dormancy rather than Destroyed; used only with `b_close`.
         pub dormant: bool,
-        pub b_reliable: bool,
+        pub unreliable: bool,
         pub b_has_package_map_exports: bool,
         pub b_has_must_be_mapped_guids: bool,
         pub b_partial: bool,
@@ -118,63 +76,45 @@ mod test_bits {
         pub b_partial_final: bool,
     }
 
-    impl Default for BunchSpec {
-        fn default() -> Self {
-            Self {
-                ch_index: 0,
-                b_open: false,
-                b_close: false,
-                dormant: false,
-                b_reliable: true,
-                b_has_package_map_exports: false,
-                b_has_must_be_mapped_guids: false,
-                b_partial: false,
-                b_partial_initial: false,
-                b_partial_final: false,
-            }
-        }
-    }
-
     /// Append one bunch header declaring `payload_bit_count` bits, in
     /// `parse_bunch_header` order. The channel FName, hardcoded index 1, is
     /// written when the bunch is reliable or opens its channel.
-    pub fn write_bunch_header(bits: &mut Vec<bool>, spec: &BunchSpec, payload_bit_count: u32) {
+    pub fn write_bunch_header(bits: &mut BitWriter, spec: &BunchSpec, payload_bit_count: u32) {
         let b_control = spec.b_open || spec.b_close;
-        bits.push(b_control);
+        bits.bit(b_control);
         if b_control {
-            bits.push(spec.b_open);
-            bits.push(spec.b_close);
+            bits.bit(spec.b_open).bit(spec.b_close);
         }
         if spec.b_close {
-            write_serialized_int(bits, u32::from(spec.dormant), ChannelCloseReason::MAX);
+            bits.serialized_int(u32::from(spec.dormant), ChannelCloseReason::MAX);
         }
-        bits.push(false); // bIsReplicationPaused
-        bits.push(spec.b_reliable);
-        write_int_packed(bits, spec.ch_index);
-        bits.push(spec.b_has_package_map_exports);
-        bits.push(spec.b_has_must_be_mapped_guids);
-        bits.push(spec.b_partial);
-        bits.push(false); // VALORANT bit
+        // bIsReplicationPaused, bReliable, ChIndex, the two GUID-list flags,
+        // bPartial, the VALORANT bit.
+        bits.bit(false)
+            .bit(!spec.unreliable)
+            .int_packed(spec.ch_index)
+            .bit(spec.b_has_package_map_exports)
+            .bit(spec.b_has_must_be_mapped_guids)
+            .bit(spec.b_partial)
+            .bit(false);
         if spec.b_partial {
-            bits.push(spec.b_partial_initial);
-            bits.push(spec.b_partial_final);
+            bits.bit(spec.b_partial_initial).bit(spec.b_partial_final);
         }
-        if spec.b_reliable || spec.b_open {
-            bits.push(true); // channel FName: isHardcoded
-            write_int_packed(bits, 1); // FName index
+        if !spec.unreliable || spec.b_open {
+            bits.bit(true).int_packed(1);
         }
-        write_serialized_int(bits, payload_bit_count, MAX_PACKET_SIZE_BITS);
+        bits.serialized_int(payload_bit_count, MAX_PACKET_SIZE_BITS);
     }
 
     /// Append one bunch: its header, then `payload`.
-    pub fn write_bunch(bits: &mut Vec<bool>, spec: &BunchSpec, payload: &[bool]) {
+    pub fn write_bunch(bits: &mut BitWriter, spec: &BunchSpec, payload: &[bool]) {
         write_bunch_header(bits, spec, payload.len() as u32);
         bits.extend_from_slice(payload);
     }
 
     /// One bunch, one packet.
     pub fn build_bunch_packet(spec: &BunchSpec, payload: &[bool]) -> Vec<u8> {
-        let mut bits = Vec::new();
+        let mut bits = BitWriter::new();
         write_bunch(&mut bits, spec, payload);
         build_packet(&bits)
     }

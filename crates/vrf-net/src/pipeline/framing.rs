@@ -1,23 +1,16 @@
 //! Content-block framing: the per-block hot loop.
 //!
-//! Measured block/bunch/actor-open rates on the reference replay: docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
-//!
-//! Everything here runs per block, so anything that can be hoisted out or
-//! made conditional on a failure path belongs elsewhere. The loop reads a
-//! block header and its payload bit count, hands the header to the sink
-//! (which answers a function count for ClassNetCache blocks), then decodes
-//! the payload and walks its field or RPC stream.
+//! Everything here runs per block (rates:
+//! docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478), so
+//! work that can be hoisted out or made conditional on a failure path
+//! belongs elsewhere.
 //!
 //! # Failure policy
 //!
-//! Three depths fail and are counted separately:
-//!
-//! - the block header or its bit count does not read -- the rest of the bunch
-//!   is unframeable and is abandoned, charging [`abandoned_from`];
-//! - the declared bit count overruns the bunch -- likewise;
-//! - the payload decoded but its inner stream did not walk -- only that
-//!   block's bits are lost ([`decode_and_parse_rep_layout`]), and the sink is
-//!   told which class it was.
+//! - the block header or its bit count does not read, or the bit count
+//!   overruns the bunch: the rest of the bunch is abandoned ([`abort`]);
+//! - the payload decoded but its inner stream did not walk: only that block's
+//!   bits are lost ([`decode_and_walk`]), and the sink is told which class.
 
 use vrf_bitio::BitReader;
 use vrf_transform::TransformVersion;
@@ -25,58 +18,68 @@ use vrf_transform::TransformVersion;
 use crate::bunch::RawBunchHeader;
 use crate::content::{self, ContentBlockHeader};
 use crate::error::NetError;
-use crate::field;
+use crate::field::{self, RepLayoutRemainder};
 use crate::stats::NetStats;
 use crate::types::NetworkGuid;
+
+#[cfg(feature = "diagnostics")]
+use crate::stats::{BunchFlagSnapshot, ContentBlockHeaderSnapshot, DiagnosticEvent, SkipReason};
 
 use super::{
     RepLayoutTailOutcome, ReplicationSink, Stage, StreamFailure, StreamFailureCause, StreamKind,
 };
 
-/// Per-bunch context for diagnostic events, read only on a failure path. It
-/// borrows the header, so the flag snapshot is built only when an event is.
-/// Every field is diagnostics-only; see [`super::BunchIds`] for why they are
-/// threaded through a build without that feature.
+/// Per-bunch context. Only the channel (`header.ch_index`) and the actor are
+/// read on the success path; the rest feeds diagnostic events, which is why
+/// they are threaded through a build without that feature ([`super::BunchIds`]).
 #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(super) struct BunchContext<'a> {
     pub header: &'a RawBunchHeader,
     pub ids: super::BunchIds,
-    /// The channel's archetype as its open read it: `NetworkGuid(0)` for a
-    /// static actor, whose open carries no spawn block.
+    pub actor_net_guid: NetworkGuid,
+    /// `NetworkGuid(0)` for a static actor, whose open carries no spawn block.
     pub archetype_net_guid: NetworkGuid,
+}
+
+/// Why a block produced a diagnostic event, with what it had read by then.
+#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum Failure<'h> {
+    HeaderRead,
+    ContentBitsRead(&'h ContentBlockHeader),
+    /// The declared content bits overran the bunch.
+    Overrun(&'h ContentBlockHeader, u32),
+    /// The payload transform failed; framing cannot reach it on real input
+    /// (see `SkipReason::ParseFailure`).
+    Parse(&'h ContentBlockHeader, u32),
 }
 
 /// Walk a bunch payload as a sequence of content blocks.
 pub(super) fn frame_content_blocks(
     payload: &mut BitReader<'_>,
-    ch_index: u32,
-    actor_net_guid: NetworkGuid,
     stage: &mut Stage<'_>,
     sink: &mut dyn ReplicationSink,
     ctx: &BunchContext<'_>,
 ) {
+    let (ch_index, actor_net_guid) = (ctx.header.ch_index, ctx.actor_net_guid);
     let mut block_index: u32 = 0;
 
     while !payload.at_end() {
-        let consumed_before_header = payload.position();
+        let block_start = payload.position();
+        let abort_at = |payload: &mut BitReader<'_>, stats: &mut NetStats, consumed, failure| {
+            abort(
+                payload,
+                stats,
+                ctx,
+                block_index,
+                block_start,
+                consumed,
+                failure,
+            );
+        };
 
         let Ok(header) = content::read_content_block_header(payload, actor_net_guid, sink) else {
-            let remaining = payload.bits_remaining();
-            let abandoned = abandoned_from(payload, consumed_before_header);
-            stage.stats.skipped_bits += abandoned;
-            stage.stats.content_block_framing_failures += 1;
-            diagnostics::header_read_error(
-                stage.stats,
-                ctx,
-                ch_index,
-                actor_net_guid,
-                block_index,
-                consumed_before_header,
-                remaining,
-                abandoned,
-            );
-            payload.skip_remaining();
-            return;
+            return abort_at(payload, stage.stats, block_start, Failure::HeaderRead);
         };
 
         if header.is_deleted {
@@ -87,97 +90,151 @@ pub(super) fn frame_content_blocks(
             continue;
         }
 
-        let consumed_before_bits_read = payload.position();
+        let bits_start = payload.position();
         let Ok(content_bits) = payload.read_int_packed() else {
-            let remaining = payload.bits_remaining();
-            let abandoned = abandoned_from(payload, consumed_before_header);
-            stage.stats.skipped_bits += abandoned;
-            stage.stats.content_block_framing_failures += 1;
-            diagnostics::content_bits_read_error(
-                stage.stats,
-                ctx,
-                ch_index,
-                actor_net_guid,
-                block_index,
-                consumed_before_bits_read,
-                remaining,
-                abandoned,
-                &header,
-            );
-            payload.skip_remaining();
-            return;
+            let failure = Failure::ContentBitsRead(&header);
+            return abort_at(payload, stage.stats, bits_start, failure);
         };
-
         if u64::from(content_bits) > payload.bits_remaining() {
-            let remaining = payload.bits_remaining();
-            let abandoned = abandoned_from(payload, consumed_before_header);
-            stage.stats.malformed_content_blocks += 1;
-            stage.stats.skipped_bits += abandoned;
-            diagnostics::content_bits_overrun(
-                stage.stats,
-                ctx,
-                ch_index,
-                actor_net_guid,
-                block_index,
-                payload.position(),
-                remaining,
-                abandoned,
-                &header,
-                content_bits,
-            );
-            payload.skip_remaining();
-            return;
+            let consumed = payload.position();
+            let failure = Failure::Overrun(&header, content_bits);
+            return abort_at(payload, stage.stats, consumed, failure);
         }
 
         let function_count = sink.on_content_block(ch_index, actor_net_guid, &header);
-
         stage.stats.content_blocks += 1;
-        let this_block = block_index;
-        block_index += 1;
-
-        // Where this block's payload begins, for the event below.
-        let payload_start = payload.position();
-        let mut decoded = true;
         if header.has_rep_layout {
             stage.stats.rep_layout_blocks += 1;
-            if content_bits != 0 {
-                decoded = decode_and_parse_rep_layout(
-                    payload,
-                    content_bits as usize,
-                    actor_net_guid,
-                    stage,
-                    sink,
-                );
-            }
         } else {
             stage.stats.class_net_cache_blocks += 1;
-            if content_bits != 0 {
-                decoded = decode_and_parse_class_net_cache(
-                    payload,
-                    content_bits as usize,
-                    actor_net_guid,
-                    function_count,
-                    stage,
-                    sink,
-                );
-            }
         }
-        // Counted already; this adds the event. Unreachable here by
-        // construction -- see `SkipReason::ParseFailure`.
-        if !decoded {
-            diagnostics::parse_failure(
+        let payload_start = payload.position();
+        let function_count = (!header.has_rep_layout).then_some(function_count);
+        if content_bits != 0
+            && !decode_and_walk(
+                payload,
+                content_bits as usize,
+                actor_net_guid,
+                function_count,
+                stage,
+                sink,
+            )
+        {
+            // Counted already; this adds the event.
+            let remaining = payload.len_bits() - payload_start;
+            let failure = Failure::Parse(&header, content_bits);
+            let skipped = u64::from(content_bits);
+            record(
                 stage.stats,
                 ctx,
-                ch_index,
-                actor_net_guid,
-                this_block,
+                block_index,
                 payload_start,
-                payload.len_bits() - payload_start,
-                &header,
-                content_bits,
+                remaining,
+                skipped,
+                failure,
             );
         }
+        block_index += 1;
     }
+}
+
+/// Abandon the rest of the bunch after a framing failure in the block that
+/// began at `block_start`; `consumed` is the event's `consumed_bits`.
+///
+/// The charge runs from `block_start` to the window's end, never
+/// `bits_remaining()`: a read that expires at the end has consumed its bits
+/// and leaves 0 remaining, so it would charge nothing while a failure counter
+/// moved. Blocks that framed earlier keep their bits.
+fn abort(
+    payload: &mut BitReader<'_>,
+    stats: &mut NetStats,
+    ctx: &BunchContext<'_>,
+    block_index: u32,
+    block_start: u64,
+    consumed: u64,
+    failure: Failure<'_>,
+) {
+    let remaining = payload.bits_remaining();
+    let abandoned = payload.len_bits() - block_start;
+    stats.skipped_bits += abandoned;
+    if let Failure::Overrun(..) = failure {
+        stats.malformed_content_blocks += 1;
+    } else {
+        stats.content_block_framing_failures += 1;
+    }
+    record(
+        stats,
+        ctx,
+        block_index,
+        consumed,
+        remaining,
+        abandoned,
+        failure,
+    );
+    payload.skip_remaining();
+}
+
+/// Record one diagnostic event. Without the `diagnostics` feature the body is
+/// empty, so the loop reads the same in both builds and the call optimises away.
+#[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
+fn record(
+    stats: &mut NetStats,
+    ctx: &BunchContext<'_>,
+    block_index: u32,
+    consumed_bits: u64,
+    remaining_bits: u64,
+    bits_skipped: u64,
+    failure: Failure<'_>,
+) {
+    #[cfg(feature = "diagnostics")]
+    stats.record_diagnostic(|| {
+        let (reason, block, content_bits) = match failure {
+            Failure::HeaderRead => (SkipReason::HeaderReadError, None, None),
+            Failure::ContentBitsRead(block) => {
+                (SkipReason::ContentBitsReadError, Some(block), None)
+            }
+            Failure::Overrun(block, bits) => (
+                SkipReason::ContentBitsOverrun {
+                    declared_content_bits: bits,
+                    available_bits: remaining_bits,
+                },
+                Some(block),
+                Some(bits),
+            ),
+            Failure::Parse(block, bits) => (SkipReason::ParseFailure, Some(block), Some(bits)),
+        };
+        let h = ctx.header;
+        DiagnosticEvent {
+            reason,
+            packet_id: h.packet_id,
+            bunch_index_in_packet: ctx.ids.bunch_index_in_packet,
+            global_bunch_index: ctx.ids.global_bunch_index,
+            channel_bunch_index: ctx.ids.channel_bunch_index,
+            channel_index: h.ch_index,
+            actor_net_guid: ctx.actor_net_guid.0,
+            actor_path: None,
+            archetype_net_guid: ctx.archetype_net_guid.0,
+            class_path: None,
+            bunch_flags: BunchFlagSnapshot {
+                b_open: h.b_open,
+                b_close: h.b_close,
+                b_reliable: h.b_reliable,
+                b_partial: h.b_partial,
+                b_partial_initial: h.b_partial_initial,
+                b_partial_final: h.b_partial_final,
+                b_has_package_map_exports: h.b_has_package_map_exports,
+                b_has_must_be_mapped_guids: h.b_has_must_be_mapped_guids,
+                b_dormant: h.b_dormant,
+            },
+            payload_bit_count: h.payload_bit_count,
+            consumed_bits,
+            remaining_bits,
+            content_block_header: block.map(ContentBlockHeaderSnapshot::from),
+            content_bits,
+            block_index_in_bunch: block_index,
+            bits_skipped,
+        }
+    });
 }
 
 /// Decode a block payload into `stage.scratch` and return its byte length, or
@@ -207,455 +264,152 @@ fn decode_into_scratch(
     Some(byte_count)
 }
 
-/// Bits a framing abort charges to `skipped_bits`: from the failing block's
-/// first bit to the end of the bunch window (`payload` is that window).
+/// Decode one block payload and walk it: RepLayout when `function_count` is
+/// `None`, ClassNetCache with that count otherwise. Returns `false` only for
+/// a failed transform, already counted; the caller, holding the block's
+/// header and position, records its `ParseFailure` event.
 ///
-/// Never `bits_remaining()`: the header reader consumes its flags and GUIDs,
-/// and `read_int_packed` its chunks, before discovering the read runs off the
-/// end, so one that expires at the window's end leaves 0 remaining and would
-/// charge nothing while a failure counter moves; the overrun arm, too, read
-/// bits that framed nothing. Blocks that framed earlier keep their bits. The
-/// stream `Err` arms ([`decode_and_parse_rep_layout`]) and `abandon_bunch`
-/// follow the same rule one depth down and up.
-fn abandoned_from(payload: &BitReader<'_>, block_start: u64) -> u64 {
-    payload.len_bits() - block_start
-}
-
-/// Decode one RepLayout block payload and walk its field stream.
-///
-/// Returns `false` only when the payload transform failed: that is already
-/// counted, and the caller records its `ParseFailure` event, since only it
-/// holds the block's header and position. Every other outcome, a stream
-/// failure included, is reported here and returns `true`.
-///
-/// # A stream `Err` charges the whole block
-///
-/// This and its ClassNetCache twin charge `bit_count`, never
-/// `bits_remaining()`, which is 0 when the last `IntPacked` expires at the
-/// block end (see [`abandoned_from`]). The whole block is also what the
-/// transform and `with_bit_len` failure paths charge, and what
-/// [`NetStats::lost_content_blocks`] counts as lost; nothing downstream
-/// re-charges it. Records emitted before the failure are then counted in
-/// `fields` / `rpcs` *and* here: the doomed record's start is not returned on
-/// `Err`, and double-counting errs in the loud direction. The `Ok` arms
-/// report their own abandoned tail.
-pub(super) fn decode_and_parse_rep_layout(
+/// A stream `Err` charges the whole block, never `bits_remaining()` (see
+/// [`abort`]), as [`NetStats::lost_content_blocks`] counts it: records
+/// emitted before it are counted *and* charged, erring loud. An `Ok` walk
+/// charges only the tail it abandoned.
+pub(super) fn decode_and_walk(
     payload: &mut BitReader<'_>,
     bit_count: usize,
     actor_net_guid: NetworkGuid,
+    function_count: Option<u32>,
     stage: &mut Stage<'_>,
     sink: &mut dyn ReplicationSink,
 ) -> bool {
     let Some(byte_count) = decode_into_scratch(payload, bit_count, actor_net_guid, stage) else {
         return false;
     };
-
-    let Ok(mut field_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
-        // Never observed (the scratch is sized by the same bit count); told to
-        // the sink so its failure aggregate reconciles with the counter.
-        sink.on_stream_failure(StreamFailure {
-            kind: StreamKind::RepLayout,
-            actor_net_guid,
-            bit_count: bit_count as u32,
-            function_count: 0,
-            consumed_bits: 0,
-            remaining_bits: bit_count as u64,
-            cause: StreamFailureCause::WindowOpenFailed,
-            record_handle: None,
-            record_offset: None,
-            payload_preserved: false,
-        });
-        stage.stats.field_stream_failures += 1;
-        stage.stats.skipped_bits += bit_count as u64;
-        return true;
-    };
+    let block = &stage.scratch[..byte_count];
+    let mut reader = BitReader::with_bit_len(block, bit_count as u64)
+        .expect("scratch holds ceil(bit_count / 8) bytes");
     let detailed = sink.wants_stream_failure_details();
     let mut walk = field::WalkContext::default();
-    let context = if detailed { Some(&mut walk) } else { None };
-    let result = field::parse_rep_layout_content_block(&mut field_reader, sink, context);
-    let (record_handle, record_offset) = if detailed {
-        (walk.last_handle, Some(walk.record_offset))
-    } else {
-        (None, None)
-    };
-    match result {
-        field::WalkOutcome::Complete {
-            count,
-            remainder: field::RepLayoutRemainder::None,
-        } => {
+    let context = detailed.then_some(&mut walk);
+    let (kind, walked) = match function_count {
+        None => {
+            let (count, walked) = field::parse_rep_layout_content_block(&mut reader, sink, context);
             stage.stats.fields += u64::from(count);
-        }
-        field::WalkOutcome::Complete {
-            count,
-            remainder: field::RepLayoutRemainder::ClassNetCache(tail_bits),
-        } => {
-            stage.stats.fields += u64::from(count);
-            let tail_reader = field_reader.clone();
-            let outcome =
-                sink.on_rep_layout_tail(actor_net_guid, tail_bits as u32, tail_reader.clone());
-            let (cause, payload_preserved) = match outcome {
-                RepLayoutTailOutcome::Decoded { rpc_count } => {
-                    stage.stats.rpcs += u64::from(rpc_count);
-                    return true;
-                }
-                RepLayoutTailOutcome::Preserved { cause } => (cause, true),
-                RepLayoutTailOutcome::Unpreserved { cause } => (cause, false),
-            };
-            let failure = StreamFailure {
-                kind: StreamKind::Rpc,
-                actor_net_guid,
-                bit_count: tail_bits as u32,
-                function_count: 0,
-                consumed_bits: 0,
-                remaining_bits: tail_bits,
-                cause,
-                record_handle: None,
-                record_offset: None,
-                payload_preserved,
-            };
-            if detailed {
-                sink.on_rep_layout_tail_failure_payload(failure, tail_reader);
-            }
-            sink.on_stream_failure(failure);
-            stage.stats.rpc_stream_failures += 1;
-            stage.stats.skipped_bits += tail_bits;
-            if payload_preserved {
-                stage.stats.unresolved_rpc_payloads_preserved += 1;
-            }
-        }
-        field::WalkOutcome::Complete {
-            count,
-            remainder: field::RepLayoutRemainder::Malformed(abandoned_bits),
-        } => {
-            stage.stats.fields += u64::from(count);
-            let failure = StreamFailure {
-                kind: StreamKind::RepLayout,
-                actor_net_guid,
-                bit_count: bit_count as u32,
-                function_count: 0,
-                consumed_bits: (bit_count as u64).saturating_sub(abandoned_bits),
-                remaining_bits: abandoned_bits,
-                cause: StreamFailureCause::AbandonedTail,
-                record_handle,
-                record_offset,
-                payload_preserved: false,
-            };
-            sink.on_stream_failure(failure);
-            if detailed {
-                sink.on_stream_failure_payload(failure, &stage.scratch[..byte_count]);
-            }
-            stage.stats.field_stream_failures += 1;
-            stage.stats.skipped_bits += abandoned_bits;
-        }
-        field::WalkOutcome::Failed { count, .. } => {
-            stage.stats.fields += u64::from(count);
-            let remaining = field_reader.bits_remaining();
-            let failure = StreamFailure {
-                kind: StreamKind::RepLayout,
-                actor_net_guid,
-                bit_count: bit_count as u32,
-                function_count: 0,
-                consumed_bits: field_reader.position(),
-                remaining_bits: remaining,
-                cause: StreamFailureCause::ReadError,
-                record_handle,
-                record_offset,
-                payload_preserved: false,
-            };
-            sink.on_stream_failure(failure);
-            if detailed {
-                sink.on_stream_failure_payload(failure, &stage.scratch[..byte_count]);
-            }
-            stage.stats.field_stream_failures += 1;
-            // The whole block; see this function's doc.
-            stage.stats.skipped_bits += bit_count as u64;
-        }
-    }
-    true
-}
-
-/// Decode one ClassNetCache block payload and walk its RPC stream; returns
-/// and charges as [`decode_and_parse_rep_layout`] does.
-pub(super) fn decode_and_parse_class_net_cache(
-    payload: &mut BitReader<'_>,
-    bit_count: usize,
-    actor_net_guid: NetworkGuid,
-    function_count: u32,
-    stage: &mut Stage<'_>,
-    sink: &mut dyn ReplicationSink,
-) -> bool {
-    let Some(byte_count) = decode_into_scratch(payload, bit_count, actor_net_guid, stage) else {
-        return false;
-    };
-
-    let Ok(mut rpc_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
-        // Never observed; see the RepLayout twin.
-        sink.on_stream_failure(StreamFailure {
-            kind: StreamKind::Rpc,
-            actor_net_guid,
-            bit_count: bit_count as u32,
-            function_count,
-            consumed_bits: 0,
-            remaining_bits: bit_count as u64,
-            cause: StreamFailureCause::WindowOpenFailed,
-            record_handle: None,
-            record_offset: None,
-            payload_preserved: false,
-        });
-        stage.stats.rpc_stream_failures += 1;
-        stage.stats.skipped_bits += bit_count as u64;
-        return true;
-    };
-    let detailed = sink.wants_stream_failure_details();
-    let mut walk = field::WalkContext::default();
-    let context = if detailed { Some(&mut walk) } else { None };
-    let result =
-        field::parse_class_net_cache_content_block(&mut rpc_reader, function_count, sink, context);
-    let (record_handle, record_offset) = if detailed {
-        (walk.last_handle, Some(walk.record_offset))
-    } else {
-        (None, None)
-    };
-    match result {
-        field::WalkOutcome::Complete {
-            count,
-            remainder: abandoned_bits,
-        } => {
-            stage.stats.rpcs += u64::from(count);
-            if abandoned_bits != 0 {
-                let failure = StreamFailure {
-                    kind: StreamKind::Rpc,
+            if let Ok(RepLayoutRemainder::ClassNetCache(tail_bits)) = walked {
+                rep_layout_tail(
+                    reader,
+                    tail_bits,
                     actor_net_guid,
-                    bit_count: bit_count as u32,
-                    function_count,
-                    consumed_bits: (bit_count as u64).saturating_sub(abandoned_bits),
-                    remaining_bits: abandoned_bits,
-                    cause: StreamFailureCause::AbandonedTail,
-                    record_handle,
-                    record_offset,
-                    payload_preserved: false,
-                };
-                sink.on_stream_failure(failure);
-                if detailed {
-                    sink.on_stream_failure_payload(failure, &stage.scratch[..byte_count]);
-                }
-                stage.stats.rpc_stream_failures += 1;
+                    detailed,
+                    stage.stats,
+                    sink,
+                );
+                return true;
             }
-            stage.stats.skipped_bits += abandoned_bits;
+            (
+                StreamKind::RepLayout,
+                walked.map(RepLayoutRemainder::bit_count),
+            )
         }
-        field::WalkOutcome::Failed { count, error } => {
-            stage.stats.rpcs += u64::from(count);
-            let remaining = rpc_reader.bits_remaining();
-            let unresolved = matches!(error, NetError::UnresolvedFunctionCount);
-            let cause = if unresolved {
-                StreamFailureCause::UnresolvedFunctionCount
-            } else {
-                StreamFailureCause::ReadError
-            };
-            let failure = StreamFailure {
-                kind: StreamKind::Rpc,
-                actor_net_guid,
-                bit_count: bit_count as u32,
+        Some(function_count) => {
+            let (count, walked) = field::parse_class_net_cache_content_block(
+                &mut reader,
                 function_count,
-                consumed_bits: rpc_reader.position(),
-                remaining_bits: remaining,
-                cause,
-                record_handle,
-                record_offset,
-                payload_preserved: unresolved,
-            };
-            if unresolved {
-                sink.on_unresolved_class_net_cache_payload(failure, &stage.scratch[..byte_count]);
-                stage.stats.unresolved_rpc_payloads_preserved += 1;
-            } else if detailed {
-                sink.on_stream_failure_payload(failure, &stage.scratch[..byte_count]);
-            }
-            sink.on_stream_failure(failure);
-            stage.stats.rpc_stream_failures += 1;
-            // The whole block, as in `decode_and_parse_rep_layout`.
-            stage.stats.skipped_bits += bit_count as u64;
+                sink,
+                context,
+            );
+            stage.stats.rpcs += u64::from(count);
+            (StreamKind::Rpc, walked)
         }
+    };
+    let whole = bit_count as u64;
+    let (remaining, cause, charge) = match walked {
+        Ok(0) => return true,
+        Ok(abandoned) => (abandoned, StreamFailureCause::AbandonedTail, abandoned),
+        Err(NetError::UnresolvedFunctionCount) => (
+            reader.bits_remaining(),
+            StreamFailureCause::UnresolvedFunctionCount,
+            whole,
+        ),
+        Err(_) => (
+            reader.bits_remaining(),
+            StreamFailureCause::ReadError,
+            whole,
+        ),
+    };
+    let preserved = cause == StreamFailureCause::UnresolvedFunctionCount;
+    let failure = StreamFailure {
+        kind,
+        actor_net_guid,
+        bit_count: bit_count as u32,
+        function_count: function_count.unwrap_or(0),
+        consumed_bits: whole - remaining,
+        remaining_bits: remaining,
+        cause,
+        record_handle: walk.last_handle,
+        record_offset: detailed.then_some(walk.record_offset),
+        payload_preserved: preserved,
+    };
+    report(stage.stats, sink, failure, charge);
+    if preserved {
+        sink.on_unresolved_class_net_cache_payload(failure, block);
+    } else if detailed {
+        sink.on_stream_failure_payload(failure, block);
     }
     true
 }
 
-/// Diagnostic-event construction. Without the `diagnostics` feature each
-/// function keeps its signature and loses its one statement, so the loop above
-/// reads the same in both builds and the empty call optimises away.
-mod diagnostics {
-    use super::{BunchContext, ContentBlockHeader, NetStats, NetworkGuid};
-
-    #[cfg(feature = "diagnostics")]
-    use crate::stats::{
-        BunchFlagSnapshot, ContentBlockHeaderSnapshot, DiagnosticEvent, SkipReason,
+/// Hand the ClassNetCache tail after a RepLayout terminator to the sink, and
+/// report it as an RPC stream failure unless the sink decoded it.
+fn rep_layout_tail(
+    reader: BitReader<'_>,
+    tail_bits: u64,
+    actor_net_guid: NetworkGuid,
+    detailed: bool,
+    stats: &mut NetStats,
+    sink: &mut dyn ReplicationSink,
+) {
+    let (cause, payload_preserved) =
+        match sink.on_rep_layout_tail(actor_net_guid, tail_bits as u32, reader.clone()) {
+            RepLayoutTailOutcome::Decoded { rpc_count } => {
+                stats.rpcs += u64::from(rpc_count);
+                return;
+            }
+            RepLayoutTailOutcome::Preserved { cause } => (cause, true),
+            RepLayoutTailOutcome::Unpreserved { cause } => (cause, false),
+        };
+    let failure = StreamFailure {
+        kind: StreamKind::Rpc,
+        actor_net_guid,
+        bit_count: tail_bits as u32,
+        function_count: 0,
+        consumed_bits: 0,
+        remaining_bits: tail_bits,
+        cause,
+        record_handle: None,
+        record_offset: None,
+        payload_preserved,
     };
-
-    /// The header fields every event copies verbatim from the bunch context.
-    #[cfg(feature = "diagnostics")]
-    fn base(
-        ctx: &BunchContext<'_>,
-        ch_index: u32,
-        actor_net_guid: NetworkGuid,
-        block_index: u32,
-        consumed_bits: u64,
-        remaining_bits: u64,
-        bits_skipped: u64,
-    ) -> DiagnosticEvent {
-        let h = ctx.header;
-        DiagnosticEvent {
-            reason: SkipReason::HeaderReadError,
-            packet_id: h.packet_id,
-            bunch_index_in_packet: ctx.ids.bunch_index_in_packet,
-            global_bunch_index: ctx.ids.global_bunch_index,
-            channel_bunch_index: ctx.ids.channel_bunch_index,
-            channel_index: ch_index,
-            actor_net_guid: actor_net_guid.0,
-            actor_path: None,
-            archetype_net_guid: ctx.archetype_net_guid.0,
-            class_path: None,
-            bunch_flags: BunchFlagSnapshot {
-                b_open: h.b_open,
-                b_close: h.b_close,
-                b_reliable: h.b_reliable,
-                b_partial: h.b_partial,
-                b_partial_initial: h.b_partial_initial,
-                b_partial_final: h.b_partial_final,
-                b_has_package_map_exports: h.b_has_package_map_exports,
-                b_has_must_be_mapped_guids: h.b_has_must_be_mapped_guids,
-                b_dormant: h.b_dormant,
-            },
-            payload_bit_count: h.payload_bit_count,
-            consumed_bits,
-            remaining_bits,
-            content_block_header: None,
-            content_bits: None,
-            block_index_in_bunch: block_index,
-            bits_skipped,
-        }
+    report(stats, sink, failure, tail_bits);
+    if detailed {
+        sink.on_rep_layout_tail_failure_payload(failure, reader);
     }
+}
 
-    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn header_read_error(
-        stats: &mut NetStats,
-        ctx: &BunchContext<'_>,
-        ch_index: u32,
-        actor_net_guid: NetworkGuid,
-        block_index: u32,
-        consumed_bits: u64,
-        remaining_bits: u64,
-        bits_skipped: u64,
-    ) {
-        #[cfg(feature = "diagnostics")]
-        stats.record_diagnostic(|| {
-            base(
-                ctx,
-                ch_index,
-                actor_net_guid,
-                block_index,
-                consumed_bits,
-                remaining_bits,
-                bits_skipped,
-            )
-        });
+/// Tell the sink about a stream failure and move its counters; `charge` is
+/// what `skipped_bits` takes. Any payload callback comes after this.
+fn report(
+    stats: &mut NetStats,
+    sink: &mut dyn ReplicationSink,
+    failure: StreamFailure,
+    charge: u64,
+) {
+    sink.on_stream_failure(failure);
+    match failure.kind {
+        StreamKind::RepLayout => stats.field_stream_failures += 1,
+        StreamKind::Rpc => stats.rpc_stream_failures += 1,
     }
-
-    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn content_bits_read_error(
-        stats: &mut NetStats,
-        ctx: &BunchContext<'_>,
-        ch_index: u32,
-        actor_net_guid: NetworkGuid,
-        block_index: u32,
-        consumed_bits: u64,
-        remaining_bits: u64,
-        bits_skipped: u64,
-        header: &ContentBlockHeader,
-    ) {
-        #[cfg(feature = "diagnostics")]
-        stats.record_diagnostic(|| DiagnosticEvent {
-            reason: SkipReason::ContentBitsReadError,
-            content_block_header: Some(ContentBlockHeaderSnapshot::from(header)),
-            ..base(
-                ctx,
-                ch_index,
-                actor_net_guid,
-                block_index,
-                consumed_bits,
-                remaining_bits,
-                bits_skipped,
-            )
-        });
-    }
-
-    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn content_bits_overrun(
-        stats: &mut NetStats,
-        ctx: &BunchContext<'_>,
-        ch_index: u32,
-        actor_net_guid: NetworkGuid,
-        block_index: u32,
-        consumed_bits: u64,
-        remaining_bits: u64,
-        bits_skipped: u64,
-        header: &ContentBlockHeader,
-        content_bits: u32,
-    ) {
-        #[cfg(feature = "diagnostics")]
-        stats.record_diagnostic(|| DiagnosticEvent {
-            reason: SkipReason::ContentBitsOverrun {
-                declared_content_bits: content_bits,
-                available_bits: remaining_bits,
-            },
-            content_block_header: Some(ContentBlockHeaderSnapshot::from(header)),
-            content_bits: Some(content_bits),
-            ..base(
-                ctx,
-                ch_index,
-                actor_net_guid,
-                block_index,
-                consumed_bits,
-                remaining_bits,
-                bits_skipped,
-            )
-        });
-    }
-
-    /// A block that framed but whose payload transform failed. It charges the
-    /// block's `content_bits`, as `decode_into_scratch` did; `consumed_bits`
-    /// and `remaining_bits` are taken where the payload begins, as for an
-    /// overrun.
-    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn parse_failure(
-        stats: &mut NetStats,
-        ctx: &BunchContext<'_>,
-        ch_index: u32,
-        actor_net_guid: NetworkGuid,
-        block_index: u32,
-        consumed_bits: u64,
-        remaining_bits: u64,
-        header: &ContentBlockHeader,
-        content_bits: u32,
-    ) {
-        #[cfg(feature = "diagnostics")]
-        stats.record_diagnostic(|| DiagnosticEvent {
-            reason: SkipReason::ParseFailure,
-            content_block_header: Some(ContentBlockHeaderSnapshot::from(header)),
-            content_bits: Some(content_bits),
-            ..base(
-                ctx,
-                ch_index,
-                actor_net_guid,
-                block_index,
-                consumed_bits,
-                remaining_bits,
-                u64::from(content_bits),
-            )
-        });
-    }
+    stats.unresolved_rpc_payloads_preserved += u64::from(failure.payload_preserved);
+    stats.skipped_bits += charge;
 }
 
 #[cfg(all(test, feature = "diagnostics"))]
@@ -670,6 +424,7 @@ mod tests {
     fn a_parse_failure_event_names_the_block_it_skipped() {
         let bunch = RawBunchHeader {
             packet_id: 7,
+            ch_index: 5,
             b_reliable: true,
             payload_bit_count: 200,
             ..Default::default()
@@ -681,6 +436,7 @@ mod tests {
                 global_bunch_index: 11,
                 channel_bunch_index: 4,
             },
+            actor_net_guid: NetworkGuid(2),
             archetype_net_guid: NetworkGuid(9),
         };
         let block = ContentBlockHeader {
@@ -690,7 +446,7 @@ mod tests {
         };
         let mut stats = NetStats::default();
 
-        diagnostics::parse_failure(&mut stats, &ctx, 5, NetworkGuid(2), 3, 120, 80, &block, 33);
+        record(&mut stats, &ctx, 3, 120, 80, 33, Failure::Parse(&block, 33));
 
         assert_eq!(stats.diagnostics.len(), 1);
         assert_eq!(stats.diagnostics_dropped, 0);
