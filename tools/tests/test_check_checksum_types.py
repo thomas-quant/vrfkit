@@ -65,16 +65,19 @@ def ue_checksum(name, cpp_type, static_index=0, parent=0):
 
 
 # Declared checksums from real replays (11.06-13.06), with the parent chain
-# that reproduces them; the chains' provenance is in PARENT_CHAINS.
+# that reproduces them. Chains the overlay needs are in PARENT_CHAINS with
+# their source; the formula-only ones have theirs beside the constant.
 # (wire name, name hashed, C++ type, chain links, declared checksum)
 
 TRANSFORM = (("Transform", "FTransform"),)
 SPAWN_TRANSFORM = (("SpawnTransform", "FTransform"),)
 HANDLE = (("Handle", "FForceModuleHandle"),)
 CORRECT = (("AuthServerCorrectRepVariables", "FInventoryServerCorrectRepVariables"),)
+# 13.06 reflection: FBlindManagerState.ActiveBlinds (TArray<FActiveBlind>), FActiveBlind.BlindEffectID
 BLIND = (("AuthBlindManagerState", "FBlindManagerState"), ("ActiveBlinds", "TArray"),
          ("ActiveBlinds", "FActiveBlind"))
 BLIND_EFFECT = BLIND + (("BlindEffectID", "FEffectID"),)
+# 13.06 reflection: UGroundVolumeComponent.FragmentInfo.Items, FGroundVolumeFragment.GridPos
 FRAGMENT = (("FragmentInfo", "FGroundVolumeFragmentArray"), ("Items", "TArray"),
             ("Items", "FGroundVolumeFragment"))
 GRID = FRAGMENT + (("GridPos", "FIntPoint"),)
@@ -98,6 +101,7 @@ REPLAY_VECTORS = (
     ("NetTimestamp", "NetTimestamp", "float", (("TimeStamp", "FNetworkedMovementTimestamp"),), 259706372),
     ("StartTimeStamp", "StartTimeStamp", "float", ACTIVE_EFFECT, 3801979459),
     ("EffectID", "EffectID", "int64", ACTIVE_EFFECT + EFFECT_ID, 1129645208),
+    # 13.06 reflection: FActiveEffectInfo.Transform
     ("Translation", "Translation", "FVector", ACTIVE_EFFECT + TRANSFORM, 2319708401),
     ("LongestActiveBlindDuration", "LongestActiveBlindDuration", "float", BLIND[:1], 3668710569),
     ("BlindId", "BlindId", "uint32", BLIND, 2836858544),
