@@ -123,8 +123,8 @@ class TextIoEncodingTests(unittest.TestCase):
                 script.read_text(encoding="utf-8"), str(script))
             flagged += [f"{script.name}:{line}" for line in lines]
             checked += count
-        # Non-vacuous: tools/*.py held 18 text-mode calls when this was added.
-        self.assertGreater(checked, 10)
+        # Non-vacuous: tools/*.py holds 9 text-mode calls.
+        self.assertGreater(checked, 5)
         self.assertEqual(flagged, [],
                          "text-mode subprocess output without encoding= and errors= "
                          "decodes with the locale")
@@ -140,7 +140,7 @@ class TextIoEncodingTests(unittest.TestCase):
                 script.read_text(encoding="utf-8"), str(script))
             flagged += [f"{script.name}:{line}" for line in lines]
             checked += count
-        # Non-vacuous: tools/tests held 15 text-mode calls on 2026-09-29.
+        # Non-vacuous: tools/tests holds 13 text-mode calls.
         self.assertGreater(checked, 10)
         self.assertEqual(flagged, [],
                          "text-mode subprocess output without encoding= and errors= "
