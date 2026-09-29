@@ -29,12 +29,12 @@ import pyarrow.parquet as pq
 if __package__:
     from .equippable_table import EQUIPPABLE_BY_PATH
     from .extract_rounds import parquet_cli
-    from .player_identity import load_player_bodies
+    from .player_identity import COUNT_KEYS as IDENTITY_KEYS, load_player_bodies
     from .wire_bits import iter_selected, text
 else:
     from equippable_table import EQUIPPABLE_BY_PATH
     from extract_rounds import parquet_cli
-    from player_identity import load_player_bodies
+    from player_identity import COUNT_KEYS as IDENTITY_KEYS, load_player_bodies
     from wire_bits import iter_selected, text
 
 FUNCTIONS = ("MulticastNotifyDamage_Point", "MulticastNotifyDamage_Base")
@@ -67,7 +67,7 @@ COUNT_KEYS = (*FUNCTIONS, "repeated-parameter splits", "sentinels nulled",
               "untyped parameter rows", "unparsed vectors", "actor GUIDs with two classes",
               "weapon GUIDs without a class", "killing blows on a player body",
               "characterDeath events", "kill feed pairs", "killing blows without a death",
-              "deaths without a killing blow")
+              "deaths without a killing blow", *(f"player_identity {k}" for k in IDENTITY_KEYS))
 
 
 def actor_classes(export: Path, counts: Counter) -> dict:
@@ -109,6 +109,7 @@ def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
     counts, problems = Counter(dict.fromkeys(COUNT_KEYS, 0)), []
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     identity = load_player_bodies(export, manifest)
+    counts.update({f"player_identity {k}": v for k, v in identity.counts.items()})
     bodies = identity.subjects
     subject_of_state = {p.get("actor_net_guid"): p.get("subject") for p in manifest.get("players", [])}
     classes = actor_classes(export, counts)

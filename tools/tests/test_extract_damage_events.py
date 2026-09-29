@@ -105,12 +105,35 @@ class ExtractDamageEventsTests(unittest.TestCase):
         self.assertEqual(self.run_main()[0], 1)
         _, counts, _ = damage.build(self.write(kills, [(100 - damage.KILL_FEED_SLACK_MS, PAWN)]))
         self.assertEqual(counts["deaths without a killing blow"], 1)
+        _, counts, _ = damage.build(self.write(kills, [(118, PAWN)]))  # the death after the blow
+        self.assertEqual(counts["killing blows without a death"], 1)
 
     def test_a_pawn_two_players_claim_is_still_a_body_in_the_kill_feed(self):
         rows, counts, problems = damage.build(
             self.write(invocation(108, PAWN, killed=True), [(100, PAWN)], shared_pawn=True))
         self.assertIsNone(rows[0]["victim_subject"])
         self.assertEqual((counts["kill feed pairs"], problems), (1, []))
+        stdout = self.run_main()[1]
+        self.assertIn("  player_identity pawns_claimed_by_multiple_player_states: 1", stdout)
+        self.assertIn("  player_identity conflicting_subject_pawns: 1", stdout)
+
+    def test_odd_values_are_counted_and_guid_0_is_null(self):
+        def patch(rows, values):
+            return [(t, a, n, *values.get(n.partition(".")[2], v)) for t, a, n, *v in rows]
+        rows = patch(invocation(100, WALL), {"DamageDealt": (None,) * 4, "DamageOrigin": (None,) * 3 + ("bad",),
+                                             "EquippableUsed": (GUN + 1,) + (None,) * 3})
+        rows += patch(invocation(200, WALL), {"EquippableUsed": (0,) + (None,) * 3,
+                                              "DamagerPlayerState": (0,) + (None,) * 3})
+        self.write(rows, [])
+        pq.write_table(pa.table({"actor_net_guid": [WALL, WALL],
+                                 "class_path": ["/Game/X/Wall.Wall_C", "/Game/X/Door.Door_C"]}),
+                       self.export / "actors.parquet")
+        rows, counts, _ = damage.build(self.export)
+        odd = ("untyped parameter rows", "unparsed vectors", "actor GUIDs with two classes",
+               "weapon GUIDs without a class")
+        self.assertEqual([counts[key] for key in odd], [1, 1, 1, 1])
+        self.assertIsNone(rows[0]["victim_class_path"])
+        self.assertEqual((rows[1]["weapon_net_guid"], rows[1]["damager_player_state"]), (None, None))
 
     def test_the_cli_writes_the_table_and_prints_every_count(self):
         self.write(invocation(100, WALL), [])
