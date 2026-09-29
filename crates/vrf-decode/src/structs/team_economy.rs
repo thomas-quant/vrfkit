@@ -9,7 +9,7 @@ use super::{Result, StructBlobError};
 const CONTEXT: &str = "TeamEconomy";
 
 /// A single team economy update.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TeamEconomyUpdate {
     /// Zero-based team index (0 = first team, 1 = second team).
     pub index: u32,
@@ -57,9 +57,7 @@ fn decode_members<'a>(
         name_for,
         |index| TeamEconomyUpdate {
             index,
-            replication_id: None,
-            loadout_value: None,
-            average_loadout_value: None,
+            ..TeamEconomyUpdate::default()
         },
         // Each member owes its whole window; the IntPacked one, declared as
         // `241`, is reported as `ReplicationId`.

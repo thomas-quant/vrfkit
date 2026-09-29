@@ -8,12 +8,13 @@ use super::framing::{decode_elements, member_name};
 /// Names this blob in error messages.
 const CONTEXT: &str = "RoundInfos";
 
-/// A single player round-info entry (per-round economy for one player).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A single player round-info entry (per-round economy for one player); a
+/// `None` member was not sent in this update.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlayerRoundInfo {
     /// Zero-based index within the array (round index within this update).
     pub index: u32,
-    /// Round number. `None` if not present in this update.
+    /// Round number.
     pub round_number: Option<i32>,
     /// Money at the start of the round.
     pub start_of_round_money: Option<i32>,
@@ -26,9 +27,7 @@ pub struct PlayerRoundInfo {
 }
 
 /// Decode an `OwnerExclusivePlayerInfo.RoundInfos` blob (arguments in the
-/// module docs). Members go by declared name: these five kept their 40..=44
-/// handles through 13.02 by luck, not guarantee (docs/archive/PROJECT_STATUS.md
-/// 26-G).
+/// module docs).
 pub fn decode_round_infos(
     reader: &mut BitReader<'_>,
     declared: &[Option<&str>],
@@ -39,11 +38,7 @@ pub fn decode_round_infos(
         |handle| member_name(declared, handle, CONTEXT),
         |index| PlayerRoundInfo {
             index,
-            round_number: None,
-            start_of_round_money: None,
-            start_of_round_loadout_value: None,
-            end_of_round_money: None,
-            end_of_round_loadout_value: None,
+            ..PlayerRoundInfo::default()
         },
         |row, name, sub| {
             let slot = match name {
