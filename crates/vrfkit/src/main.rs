@@ -16,6 +16,7 @@ mod inspect;
 #[cfg(feature = "export")]
 mod manifest;
 mod oracle;
+mod pass;
 mod report;
 mod sink;
 

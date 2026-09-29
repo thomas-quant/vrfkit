@@ -4,44 +4,38 @@
 //! `ChannelState::stream_failures` window and the capped `NetStats`
 //! diagnostics log): right for reading one replay, useless for counting a
 //! population. `validate` walking checkpoints would move every counter its
-//! pinned baselines hold (see `oracle.rs`'s `checkpoint_scope_note`), and an
-//! `export` without writes would still be the export path, whose contract is
-//! writing the files. So `diag` drives the same sink over ReplayData and every
+//! pinned baselines hold, and an `export` without writes would still be the
+//! export path. So `diag` drives the same sink over ReplayData and every
 //! Checkpoint chunk, keeps the passes apart, writes no table, and emits one
 //! JSON document aggregating every stream failure ([`FailureAggregate`]) by
 //! kind, cause, group path, function count and handle. It prints no verdict
-//! and exits 0 for any readable replay: judging is `validate`'s job, and a
-//! second oracle would drift from the first.
+//! and exits 0 for any readable replay: judging is `validate`'s job.
 
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use vrf_container::{
-    ChunkIterator, ChunkType, decompress_checkpoint_with_trailing,
-    decompress_replay_data_with_trailing, parse_checkpoint_chunk, parse_preamble,
-};
+use vrf_container::{decompress_checkpoint_with_trailing, parse_checkpoint_chunk, parse_preamble};
 use vrf_decode::OverlayErrorReport;
-use vrf_frame::{FrameSkips, walk_demo_frames};
+use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
-use vrf_schema::{NetGuidCache, read_checkpoint_tables};
+use vrf_schema::read_checkpoint_tables;
 
-use crate::error::{CliError, replication_reader};
-use crate::sink::{ChannelState, ExportSink, FailureAggregate, RecordBuffers, SinkTotals};
+use crate::error::CliError;
+use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
+use crate::sink::{FailureAggregate, SinkTotals};
 
-/// The checkpoint pass's counters and per-chunk metadata, so the walk is
-/// auditable rather than a single printed number.
+/// The checkpoint pass's counters and per-chunk metadata.
 #[derive(Debug, Default)]
 struct DiagCheckpointStats {
     chunks: u64,
     frames: u64,
-    /// Section bytes the snapshot frames stepped over.
     frame_skips: FrameSkips,
-    /// Snapshot frames with a NaN or infinite time, read as 0 ms.
     non_finite_frame_times: u64,
     packets: u64,
-    /// As `driver::checkpoints::CheckpointStats::trailing_bytes`: framing
-    /// residual after each archive plus archive bytes the codec never read.
+    /// Framing residual after each archive plus archive bytes the codec never
+    /// read.
     trailing_bytes: u64,
     guid_entries: u64,
     group_records: u64,
@@ -53,8 +47,7 @@ struct DiagCheckpointStats {
     movement_rows_dropped: u64,
     net: NetStats,
     sink: SinkTotals,
-    /// Where `absorb` merges the per-field overlay breakdown; never printed,
-    /// as the JSON carries counters only.
+    /// Never printed: the JSON carries counters only.
     overlay_errors: OverlayErrorReport,
     failures: FailureAggregate,
 }
@@ -69,83 +62,45 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let data = fs::read(path)?;
     let file_size = data.len();
     let preamble = parse_preamble(&data)?;
-    let branch = preamble.header.replay_version.branch.clone();
-    let flags = preamble.header.flags;
-    let compressed = preamble.info.compressed;
-    let encrypted = preamble.info.encrypted;
+    let replay = Replay::new(&preamble);
+    let branch = replay.branch;
     eprintln!("branch: {branch}");
     eprintln!("diag: walking ReplayData and Checkpoint chunks, writing no table...");
 
-    let mut cache = NetGuidCache::new();
-    let mut repl_reader = replication_reader(&branch)?;
-
-    let mut total_packets: u32 = 0;
+    let mut main = Pass::new(&replay)?;
+    main.channels.enable_failure_aggregate(include_payloads);
     let mut replay_data_chunks: u64 = 0;
-    let mut replay_data_frames: u64 = 0;
-    let mut replay_data_frame_skips = FrameSkips::default();
-    let mut replay_data_non_finite_frame_times: u64 = 0;
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
     let mut sink_totals = SinkTotals::default();
     // Never printed, like `DiagCheckpointStats::overlay_errors`.
     let mut overlay_errors = OverlayErrorReport::default();
-    let mut channel_state = ChannelState::new();
-    channel_state.enable_failure_aggregate(include_payloads);
-    // Never drained: nothing is written, and `ExportSink::new` clears them.
-    let mut buffers = RecordBuffers::default();
-
     let mut cp_stats = DiagCheckpointStats {
         failures: FailureAggregate::new(include_payloads),
         ..DiagCheckpointStats::default()
     };
 
-    let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);
-    while let Some(chunk) = chunk_iter.next_chunk()? {
-        let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
-        match chunk.chunk_type {
-            ChunkType::Event => {
-                // Independent of replication, with no stream-failure signal.
-                event_chunks += 1;
+    for_each_chunk(&data, &replay, |chunk| {
+        match chunk {
+            // Independent of replication, with no stream-failure signal.
+            Chunk::Event(_) => event_chunks += 1,
+            Chunk::Checkpoint(payload) => {
+                process_checkpoint_chunk(payload, &replay, include_payloads, &mut cp_stats)?;
             }
-            ChunkType::Checkpoint => {
-                process_checkpoint_chunk(
-                    payload,
-                    &branch,
-                    flags,
-                    compressed,
-                    encrypted,
-                    include_payloads,
-                    &mut cp_stats,
-                )?;
-            }
-            ChunkType::ReplayData => {
-                let (decompressed, trailing) =
-                    decompress_replay_data_with_trailing(payload, compressed, encrypted)?;
-                replay_data_trailing_bytes += trailing as u64;
+            Chunk::ReplayData(frames, unread) => {
+                replay_data_trailing_bytes += unread as u64;
                 replay_data_chunks += 1;
-                let walk =
-                    walk_demo_frames(&decompressed, flags, &mut cache, |pkt, packet_cache| {
-                        let pkt_id = total_packets;
-                        total_packets += 1;
-                        let mut sink =
-                            ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-                        sink.enable_measured_array_routes(&branch);
-                        sink.time_ms = pkt.time_ms;
-                        sink.packet_id = pkt_id;
-                        repl_reader.process_packet(pkt.data, pkt_id as i32, &mut sink);
-                        sink_totals.absorb(&mut sink.stats, &mut overlay_errors);
-                    })?;
-                replay_data_frames += u64::from(walk.frames);
-                replay_data_frame_skips.absorb(walk.skipped);
-                replay_data_non_finite_frame_times += u64::from(walk.non_finite_times);
+                // Never drained: nothing is written, and each packet's sink clears them.
+                main.walk(&frames, &mut sink_totals, &mut overlay_errors, |_| Ok(()))?;
             }
-            ChunkType::Header | ChunkType::Unknown(_) => {}
+            Chunk::Other => {}
         }
-    }
+        Ok(())
+    })?;
 
-    repl_reader.finish();
-    let net_main = repl_reader.stats().clone();
-    let main_failures = channel_state.take_failure_aggregate();
+    main.finish();
+    let net_main = main.reader.stats().clone();
+    let main_failures = main.channels.take_failure_aggregate();
     let mut json = String::with_capacity(1 << 16);
     json.push_str("{\n");
     json.push_str("  \"schema_version\": 3,\n");
@@ -155,10 +110,10 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(",\n");
     json.push_str(&format!("  \"file_size\": {file_size},\n"));
     json.push_str("  \"branch\": ");
-    push_json_string(&mut json, &branch);
+    push_json_string(&mut json, branch);
     json.push_str(",\n");
     json.push_str("  \"build\": ");
-    push_json_string(&mut json, build_label(&branch));
+    push_json_string(&mut json, build_label(branch));
     json.push_str(",\n");
     json.push_str(
         "  \"options\": {\"write_tables\": false, \"walks_checkpoints\": true, \
@@ -169,14 +124,14 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str("  \"chunks\": {\"replay_data\": ");
     json.push_str(&replay_data_chunks.to_string());
     json.push_str(", \"replay_data_frames\": ");
-    json.push_str(&replay_data_frames.to_string());
+    json.push_str(&main.frames.to_string());
     json.push_str(", \"event\": ");
     json.push_str(&event_chunks.to_string());
     json.push_str(", \"replay_data_trailing_bytes\": ");
     json.push_str(&replay_data_trailing_bytes.to_string());
-    push_frame_skips(&mut json, "replay_data_", &replay_data_frame_skips);
+    push_frame_skips(&mut json, "replay_data_", &main.frame_skips);
     json.push_str(", \"replay_data_non_finite_frame_times\": ");
-    json.push_str(&replay_data_non_finite_frame_times.to_string());
+    json.push_str(&main.non_finite_frame_times.to_string());
     json.push_str("},\n");
 
     json.push_str("  \"net_main\": ");
@@ -261,33 +216,34 @@ fn canonicalize_destination(path: &str) -> Result<PathBuf, CliError> {
     match fs::canonicalize(path) {
         Ok(path) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let path = Path::new(path);
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            let name = path.file_name().ok_or_else(|| {
-                CliError::Usage("--json requires a file path, not a directory".to_string())
-            })?;
+            let (parent, name) = json_parent_and_name(Path::new(path))?;
             Ok(fs::canonicalize(parent)?.join(name))
         }
         Err(error) => Err(error.into()),
     }
 }
 
-/// Publish JSON through a new sibling file rather than opening the destination
-/// inode for truncation. This keeps the replay intact when a differently named
-/// hard link is supplied as `--json`; replacing that directory entry detaches
-/// the link instead of writing through it.
-fn write_json_file(path: &str, json: &str) -> Result<(), CliError> {
-    let path = Path::new(path);
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+/// The directory `--json` goes in (`.` for a bare name) and its file name.
+fn json_parent_and_name(path: &Path) -> Result<(&Path, &OsStr), CliError> {
     let name = path.file_name().ok_or_else(|| {
         CliError::Usage("--json requires a file path, not a directory".to_string())
     })?;
+    Ok((usable_parent(path), name))
+}
+
+/// `path`'s directory, `.` for a bare name.
+pub(crate) fn usable_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Publish JSON through a new sibling file rather than opening the destination
+/// for truncation, so a `--json` that is a hard link to the replay replaces the
+/// directory entry instead of writing through it.
+fn write_json_file(path: &str, json: &str) -> Result<(), CliError> {
+    let path = Path::new(path);
+    let (parent, name) = json_parent_and_name(path)?;
 
     let mut created = None;
     for attempt in 0..64u32 {
@@ -337,58 +293,45 @@ fn write_json_file(path: &str, json: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Walk one Checkpoint chunk as `driver::checkpoints::process_chunk` does,
-/// minus the writers: a fresh GUID cache, export map, reader and channel state
-/// per archive.
+/// Walk one Checkpoint chunk as `export --checkpoints` does, minus the
+/// writers: a fresh GUID cache, export map, reader and channel state per
+/// archive.
 fn process_checkpoint_chunk(
     payload: &[u8],
-    branch: &str,
-    flags: u32,
-    compressed: bool,
-    encrypted: bool,
+    replay: &Replay<'_>,
     include_payloads: bool,
     cp: &mut DiagCheckpointStats,
 ) -> Result<(), CliError> {
     let cp_chunk = parse_checkpoint_chunk(payload)?;
     let (plain, unread) =
-        decompress_checkpoint_with_trailing(cp_chunk.archive, compressed, encrypted)?;
+        decompress_checkpoint_with_trailing(cp_chunk.archive, replay.compressed, replay.encrypted)?;
     cp.trailing_bytes += (cp_chunk.trailing_bytes + unread) as u64;
 
-    let mut cache = NetGuidCache::new();
-    let tables = read_checkpoint_tables(&plain, &mut cache)
+    let mut pass = Pass::new(replay)?;
+    pass.channels.enable_failure_aggregate(include_payloads);
+    let tables = read_checkpoint_tables(&plain, &mut pass.cache)
         .map_err(|e| CliError::Usage(format!("checkpoint {}: {e}", cp_chunk.id)))?;
-
-    let frame = &plain[tables.frame_offset..];
-    let mut reader = replication_reader(branch)?;
-    let mut channels = ChannelState::new();
-    channels.enable_failure_aggregate(include_payloads);
-    let mut buffers = RecordBuffers::default();
-    let mut packet_count = 0u64;
-    let walk = walk_demo_frames(frame, flags, &mut cache, |pkt, packet_cache| {
-        {
-            let mut sink = ExportSink::new(packet_cache, &mut channels, &mut buffers);
-            sink.enable_measured_array_routes(branch);
-            sink.time_ms = pkt.time_ms;
-            sink.packet_id = packet_count as u32;
-            reader.process_packet(pkt.data, packet_count as i32, &mut sink);
-            cp.sink.absorb(&mut sink.stats, &mut cp.overlay_errors);
-        }
-        cp.field_rows_dropped += buffers.fields.len() as u64;
-        cp.actor_rows_dropped += buffers.actors.len() as u64;
-        cp.movement_rows_dropped += buffers.movement.len() as u64;
-        packet_count += 1;
-    })?;
-    reader.finish();
-    let mut chunk_net = reader.stats().clone();
-    cp.net.absorb(&mut chunk_net);
-    let mut chunk_failures = channels.take_failure_aggregate();
-    cp.failures.absorb(&mut chunk_failures);
+    pass.walk(
+        &plain[tables.frame_offset..],
+        &mut cp.sink,
+        &mut cp.overlay_errors,
+        |buffers| {
+            cp.field_rows_dropped += buffers.fields.len() as u64;
+            cp.actor_rows_dropped += buffers.actors.len() as u64;
+            cp.movement_rows_dropped += buffers.movement.len() as u64;
+            Ok(())
+        },
+    )?;
+    pass.finish();
+    cp.net.absorb(&mut pass.reader.stats().clone());
+    cp.failures
+        .absorb(&mut pass.channels.take_failure_aggregate());
 
     cp.chunks += 1;
-    cp.frames += u64::from(walk.frames);
-    cp.frame_skips.absorb(walk.skipped);
-    cp.non_finite_frame_times += u64::from(walk.non_finite_times);
-    cp.packets += packet_count;
+    cp.frames += u64::from(pass.frames);
+    cp.frame_skips.absorb(pass.frame_skips);
+    cp.non_finite_frame_times += pass.non_finite_frame_times;
+    cp.packets += u64::from(pass.packets);
     cp.guid_entries += u64::from(tables.guid_count);
     cp.group_records += u64::from(tables.group_count);
     cp.exported_fields += u64::from(tables.exported_fields);
