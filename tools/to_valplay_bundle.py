@@ -31,7 +31,6 @@ import struct as _struct
 import sys
 import tempfile
 import time
-from bisect import bisect_right
 from collections import Counter, defaultdict
 from functools import lru_cache
 from pathlib import Path, PureWindowsPath
@@ -621,9 +620,6 @@ class _BitReader:
     def tell(self) -> int:
         return self._pos
 
-    def read_bit(self) -> int:
-        return self.read_bits(1)
-
     def read_bits(self, n: int) -> int:
         """Read `n` bits LSB first from one slice (a per-bit loop made 2.8M
         calls on one replay's shot blobs), with that loop's contract: a short
@@ -801,25 +797,16 @@ def _build_tag_table(manifest: dict) -> dict:
     return {}
 
 
-def _decode_rotation_short(data: bytes, bit_count: int) -> dict:
-    """Decode a UE4 RotationShort from raw bits.
-
-    Wire format: for each of pitch/yaw/roll:
-      1 bit: is_non_zero
-      if non_zero: 16 bits LE unsigned -> degrees = value * 360 / 65536
-    """
+def _decode_rotation_short(data: bytes, bit_count: int):
+    """A UE4 RotationShort: per axis a non-zero bit, then 16 bits of
+    value * 360 / 65536 degrees. None on a short read, so the caller counts a
+    fabricated rotation instead of publishing the unread axes as 0."""
     r = _BitReader(data, bit_count)
-    result = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
-    for axis in ("pitch", "yaw", "roll"):
-        try:
-            is_non_zero = r.read_bit()
-            if is_non_zero:
-                val = r.read_bits(16)
-                degrees = val * 360.0 / 65536.0
-                result[axis] = degrees
-        except (EOFError, ValueError):
-            break
-    return result
+    try:
+        return {axis: r.read_bits(16) * 360.0 / 65536.0 if r.read_bits(1) else 0.0
+                for axis in ("pitch", "yaw", "roll")}
+    except EOFError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -847,13 +834,13 @@ class _EffectBlobs(NamedTuple):
 
 
 class _ShotContext(NamedTuple):
-    """Per-replay lookups every shot event needs. Without the two lookups an
-    event still comes out, with a null equippable and fire_mode "unknown", as
-    the reference emits a server-world effect."""
+    """Per-replay lookups every shot event needs; empty GUID tables give a
+    null equippable and fire_mode "unknown", as for a server-world effect."""
 
     tag_table: dict
-    equippable_lookup: object = None
-    fire_mode_lookup: object = None
+    guid_outer: dict = {}
+    guid_path: dict = {}
+    guid_class: dict = {}
 
 
 def _build_shot_event(
@@ -875,31 +862,17 @@ def _build_shot_event(
     objects = _decode_effect_blob(blobs.objects, _EFFECT_OBJECTS, tag_table, tally)
     vectors = _decode_effect_blob(blobs.vectors, _EFFECT_VECTORS, tag_table, tally)
 
-    location = scalar_params.get("Location")
-    rotation = scalar_params.get("Rotation")
-    # Location/Rotation arrive under their bare handles "248"/"249", the only
-    # spelling observed (typed on 2,647 of 2,647 shots on 02d4d478). A
-    # {BitCount, Data} blob there means the overlay failed to type it: the
-    # dict branches and _decode_rotation_short decode the wire. Keep them.
-    if location is None:
-        raw248 = scalar_params.get("248")
-        if isinstance(raw248, dict) and "Data" in raw248:
-            raw_bytes = base64.b64decode(raw248["Data"])
-            if len(raw_bytes) >= 24:
-                x = _struct.unpack_from('<d', raw_bytes, 0)[0]
-                y = _struct.unpack_from('<d', raw_bytes, 8)[0]
-                z = _struct.unpack_from('<d', raw_bytes, 16)[0]
-                location = _vec3(x, y, z)
-        elif raw248 is not None:
-            location = raw248
-    if rotation is None:
-        raw249 = scalar_params.get("249")
-        if isinstance(raw249, dict) and "Data" in raw249:
-            raw_bytes = base64.b64decode(raw249["Data"])
-            bit_count_rot = raw249.get("BitCount", len(raw_bytes) * 8)
-            rotation = _decode_rotation_short(raw_bytes, bit_count_rot)
-        elif raw249 is not None:
-            rotation = raw249
+    # Location and Rotation arrive under their bare handles "248"/"249"
+    # (typed on 2,647 of 2,647 shots on 02d4d478). A {BitCount, Data} blob
+    # there is a row the overlay did not type: decode the wire. Keep it.
+    location = scalar_params.get("248")
+    if isinstance(location, dict) and "Data" in location:
+        raw = base64.b64decode(location["Data"])
+        location = _vec3(*_struct.unpack_from("<3d", raw)) if len(raw) >= 24 else None
+    rotation = scalar_params.get("249")
+    if isinstance(rotation, dict) and "Data" in rotation:
+        raw = base64.b64decode(rotation["Data"])
+        rotation = _decode_rotation_short(raw, rotation.get("BitCount", len(raw) * 8))
     effect_id = scalar_params.get("EffectID")
     source_id = scalar_params.get("SourceID")
     start_time = scalar_params.get("StartMovementTime")
@@ -937,8 +910,9 @@ def _build_shot_event(
     # FiringState's outer is the gun; null, never guessed, when the chain does
     # not reach a known equippable.
     equippable = None
-    if ctx.equippable_lookup is not None and firing_state:
-        hit = ctx.equippable_lookup(firing_state)
+    if firing_state:
+        hit = _resolve_equippable(firing_state, ctx.guid_outer, ctx.guid_path,
+                                  ctx.guid_class)
         if hit is not None:
             owner_guid, name, category, class_path = hit
             equippable = {
@@ -949,10 +923,8 @@ def _build_shot_event(
             }
 
     # Fire mode comes from the same chain: the firing-state subobject's own name.
-    if ctx.fire_mode_lookup is not None:
-        fire_mode, fire_mode_evidence = ctx.fire_mode_lookup(firing_state, source_id)
-    else:
-        fire_mode, fire_mode_evidence = "unknown", None
+    fire_mode, fire_mode_evidence = _resolve_fire_mode(
+        firing_state, source_id, ctx.guid_outer, ctx.guid_path)
 
     # Only an int is an enum ordinal; anything else (the {BitCount, Data} blob
     # of an untyped field) passes through unchanged, like every shot param.
@@ -1282,13 +1254,12 @@ def _count_unbuilt_blobs(blob_state, tally) -> None:
     """Count the raw-sourced fields one event needed and did not get.
 
     `blob_state` maps each raw-sourced field the event touched (container row
-    or decoded member) to whether its blob was built, or is `None`. Counted
-    per event and field, so members arriving without their blob count once.
+    or decoded member) to whether its blob was built. Counted per event and
+    field, so members arriving without their blob count once.
     """
-    if blob_state:
-        unbuilt = sum(1 for built in blob_state.values() if not built)
-        if unbuilt:
-            tally.bump("raw_blobs_unavailable", unbuilt)
+    unbuilt = sum(1 for built in blob_state.values() if not built)
+    if unbuilt:
+        tally.bump("raw_blobs_unavailable", unbuilt)
 
 
 def _split_rpc_field(field_name: str):
@@ -1673,32 +1644,20 @@ _SERVER_TIMELINE_PAYLOAD_NAMES = {
 EVENT_PAYLOAD_TIME_TOLERANCE_MS = 1.001
 
 
-class _PacketTimeIndex:
-    """Order packet-less Event chunks among packet-ordered rows: an event time
-    maps to the largest packet id seen at or before it. The prefix maximum
-    stays monotone even when a bad frame gives a later packet an earlier time
-    (the regression counter reports that). Ordering only, never published."""
-
-    def __init__(self, cols: "_FieldColumns"):
-        max_packet_at_time = {}
-        for time_ms, packet_id in zip(cols.time_ms, cols.packet_id):
-            previous = max_packet_at_time.get(time_ms)
-            if previous is None or packet_id > previous:
-                max_packet_at_time[time_ms] = packet_id
-        self.times = sorted(max_packet_at_time)
-        self.prefix_max_packets = []
-        highest = 0
-        for time_ms in self.times:
-            highest = max(highest, max_packet_at_time[time_ms])
-            self.prefix_max_packets.append(highest)
-
-    def packet_at_or_before(self, time_ms: int) -> int:
-        index = bisect_right(self.times, time_ms) - 1
-        return self.prefix_max_packets[index] if index >= 0 else 0
+def _packets_at_or_before(cols: "_FieldColumns", times: list) -> list:
+    """Order packet-less Event chunks among packet-ordered rows: each time
+    maps to the largest packet id of a field row at or before it (0 before
+    the first), a prefix maximum that stays monotone when a bad frame gives a
+    later packet an earlier time. Ordering only, never published."""
+    row_times = numpy.asarray(cols.time_ms, dtype=numpy.int64)
+    order = numpy.argsort(row_times, kind="stable")
+    packets = numpy.asarray(cols.packet_id, dtype=numpy.int64)[order]
+    prefix = numpy.concatenate(([0], numpy.maximum.accumulate(packets)))
+    return prefix[numpy.searchsorted(row_times[order], times, side="right")].tolist()
 
 
 def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
-                                  verbose: bool) -> tuple[list, int | None]:
+                                  verbose: bool) -> tuple[list, int]:
     """Publish the Event-chunk timeline through a privacy-safe allowlist.
 
     events.parquet also holds a replay-scoped id, free-form metadata and raw
@@ -1716,13 +1675,13 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
     payload_tag = _nullable_numeric_to_pylist(table.column("payload_tag"))
     payload_name = table.column("payload_name").to_pylist()
     payload_seconds = _nullable_numeric_to_pylist(table.column("payload_seconds"))
-    packet_index = _PacketTimeIndex(cols)
+    packet_keys = _packets_at_or_before(cols, time1)
     events = []
 
     for (group, first_time, second_time, first_word, second_word, tag,
-         payload_enum_name, seconds) in zip(
+         payload_enum_name, seconds, packet_key) in zip(
         groups, time1, time2, word0, word1, payload_tag, payload_name,
-        payload_seconds
+        payload_seconds, packet_keys
     ):
         event = {
             "type": "server_timeline_event",
@@ -1752,7 +1711,7 @@ def _build_server_timeline_events(export_dir: Path, cols: "_FieldColumns",
             event["payload_tag"] = tag
             event["payload_name"] = payload_enum_name
             event["payload_seconds"] = _f32_shortest(seconds)
-        events.append((packet_index.packet_at_or_before(first_time), first_time, event))
+        events.append((packet_key, first_time, event))
 
     if verbose:
         print(f"  {len(events):,} server timeline events from events.parquet")
@@ -1847,8 +1806,7 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 indexed_names.update(_container_names(fn))
 
         payload = {}
-        # {RAW_BLOB_PREFERRED name: blob built?}, only once one is touched.
-        blob_state = None
+        blob_state = {}  # {RAW_BLOB_PREFERRED name: blob built?}
         for ri in row_indices:
             fn = col_fn[ri]
             if fn is None:
@@ -1866,8 +1824,6 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                     tally.bump("property_key_collisions")
                 # The RAW_BLOB_PREFERRED rule; `_get_value` ran above, so
                 # multi_typed_rows still sees the row.
-                if blob_state is None:
-                    blob_state = {}
                 raw = col_raw[ri]
                 if raw is not None:
                     blob = _raw_blob(raw, col_bits[ri])
@@ -1916,8 +1872,6 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
             elif parts[0][0] in RAW_BLOB_PREFERRED:
                 # A decoded member of a raw-blob field is not published (the
                 # blob carries it), so one whose event built no blob is a loss.
-                if blob_state is None:
-                    blob_state = {}
                 blob_state.setdefault(parts[0][0], False)
             else:
                 _set_nested(payload, parts, value, tally)
@@ -1973,8 +1927,7 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
         rpc_name = None
         payload = {}
         effect_blobs = {}  # shot array parameter -> _EffectBlob
-        # {raw-sourced parameter: blob built?}, only once one is touched.
-        blob_state = None
+        blob_state = {}  # {raw-sourced parameter: blob built?}
         for ri in row_indices:
             fn = col_fn[ri]
             if fn is None:
@@ -1983,6 +1936,10 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
             name, param = _split_rpc_field(fn)
             if rpc_name is None:
                 rpc_name = name
+            value, is_raw = _get_value(
+                col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
+                col_raw[ri], col_bits[ri], tally
+            )
             if param is None:
                 # The row is the function itself: usually a zero-parameter RPC,
                 # but 608 rows on 02d4d478 carry the whole parameter block as
@@ -1991,26 +1948,16 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                 # 2026-09-28), so "payload: null" means only "no parameters".
                 # Keyed under the function's name, a vrfkit-only convention:
                 # the reference emits none of these (its 241 unbound groups).
-                value, is_raw = _get_value(
-                    col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
-                    col_raw[ri], col_bits[ri], tally
-                )
                 if value is not None:
                     if name in payload:
                         tally.bump("rpc_param_collisions")
                     payload[name] = value
                 continue
-            value, is_raw = _get_value(
-                col_i64[ri], col_f64[ri], col_bool[ri], col_str[ri],
-                col_raw[ri], col_bits[ri], tally
-            )
             # The RAW_BLOB_PREFERRED rule for `_RAW_SOURCED_RPC_PARAMS`;
             # `_get_value` ran above, so multi_typed_rows still sees the row.
             sourced = _RAW_SOURCED_RPC_PARAMS.get(name)
             if sourced is not None:
                 if param in sourced:
-                    if blob_state is None:
-                        blob_state = {}
                     raw = col_raw[ri]
                     if raw is not None:
                         bits = col_bits[ri]
@@ -2028,8 +1975,6 @@ def _build_rpc_events(cols: _FieldColumns, rpc_groups: dict,
                     if member_of in sourced:
                         # A decoded member, dropped by `_normalize_rpc_param`
                         # because the blob carries it: the blob is expected.
-                        if blob_state is None:
-                            blob_state = {}
                         blob_state.setdefault(member_of, False)
             if value is None and not is_raw:
                 continue
@@ -2121,23 +2066,6 @@ _MOVEMENT_COLUMNS = ("time_ms", "packet_id", "character_net_guid",
                      "yaw", "pitch")
 
 
-def _join_movement_block(pieces) -> memoryview:
-    """Join one block's pieces (literal fragments and slot text arrays) row by
-    row and return the lines' bytes, back to back in the data buffer.
-
-    A NULL line is refused: `binary_join_element_wise` makes one for any null
-    input, and it adds no bytes, so the line would vanish while still counted
-    as written. `_write_movement` refuses null columns first; this is the
-    second line of defence.
-    """
-    lines = pc.binary_join_element_wise(*pieces, "")
-    if lines.null_count:
-        raise RuntimeError(
-            f"{lines.null_count:,} movement lines came out NULL; writing the "
-            "block would drop them while still counting them as written")
-    return _string_bytes(lines)
-
-
 def _string_bytes(arr) -> memoryview:
     """A pa.string() array's values as one span of bytes: the data buffer
     between its first and last offsets, not the whole buffer (a slice starts
@@ -2168,26 +2096,15 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     n_mv = len(mv_table)
 
     # Declared non-null, and load-bearing: `to_numpy` turns a uint32 column
-    # with a null into float64 NaN, so every line would carry `1000.0`-style
-    # times or `nan`. Refused, naming the column.
+    # with a null into float64 NaN (`1000.0`-style times, `nan`), and a null
+    # join input makes a NULL line that adds no bytes yet counts as written.
     for name in _MOVEMENT_COLUMNS:
         nulls = mv_table.column(name).null_count
         if nulls:
             raise ValueError(f"movement.parquet column {name!r} carries "
                              f"{nulls:,} nulls; the export declares it non-null")
-
-    # numpy arrays, as in _numeric_column_to_pylist; no nulls, so dtypes stay.
-    mv_time = mv_table.column('time_ms').to_numpy(zero_copy_only=False)
-    mv_pid = mv_table.column('packet_id').to_numpy(zero_copy_only=False)
-    mv_char = mv_table.column('character_net_guid').to_numpy(zero_copy_only=False)
-    mv_px = mv_table.column('pos_x').to_numpy(zero_copy_only=False)
-    mv_py = mv_table.column('pos_y').to_numpy(zero_copy_only=False)
-    mv_pz = mv_table.column('pos_z').to_numpy(zero_copy_only=False)
-    mv_yaw = mv_table.column('yaw').to_numpy(zero_copy_only=False)
-    mv_pitch = mv_table.column('pitch').to_numpy(zero_copy_only=False)
-    mv_vx = mv_table.column('vel_x').to_numpy(zero_copy_only=False)
-    mv_vy = mv_table.column('vel_y').to_numpy(zero_copy_only=False)
-    mv_vz = mv_table.column('vel_z').to_numpy(zero_copy_only=False)
+    mv = {name: mv_table.column(name).to_numpy(zero_copy_only=False)
+          for name in _MOVEMENT_COLUMNS}
 
     # Keep only the last sub-move per (packet_id, character). The decoder
     # emits every sub-move of a packet's move chain, all at one time_ms: 1,687
@@ -2209,7 +2126,8 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # Vectorised: the first index of each packed (packet << 32 | char) uint64
     # in the reversed array is its last in the original; np.sort restores row
     # order. Both keys are uint32, so the pack cannot collide.
-    key64 = (mv_pid.astype(numpy.uint64) << numpy.uint64(32)) | mv_char.astype(numpy.uint64)
+    key64 = ((mv["packet_id"].astype(numpy.uint64) << numpy.uint64(32))
+             | mv["character_net_guid"].astype(numpy.uint64))
     first_in_rev = numpy.unique(key64[::-1], return_index=True)[1]
     keep = numpy.sort((n_mv - 1) - first_in_rev)
     del key64, first_in_rev
@@ -2226,22 +2144,20 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # set across 11 exports.
     non_finite = numpy.zeros(len(keep), dtype=bool)
     float_texts = []
-    for column, shorten in ((mv_px, True), (mv_py, True), (mv_pz, True),
-                            (mv_vx, True), (mv_vy, True), (mv_vz, True),
-                            (mv_yaw, False), (mv_pitch, False)):
-        kept = column[keep]
+    for name in _MOVEMENT_COLUMNS[3:]:
+        kept = mv.pop(name)[keep]
         non_finite |= ~numpy.isfinite(kept)
-        float_texts.append(_json_scalar_column(kept, shorten=shorten))
+        float_texts.append(_json_scalar_column(kept, shorten=name[:4] in ("pos_", "vel_")))
         del kept
     non_finite_rows = int(numpy.count_nonzero(non_finite))
     movement_written = len(keep)
     # The uint32 time_ms and character_net_guid are nearly all distinct, so
     # not deduplicated: Arrow's integer-to-string cast writes the same digits
     # the JSON encoder gives an int.
-    int_slots = (pa.array(mv_time[keep]), pa.array(mv_char[keep]))
+    int_slots = (pa.array(mv["time_ms"][keep]), pa.array(mv["character_net_guid"][keep]))
     # Dropped now, to stay out of the write loop's peak.
-    del (mv_table, mv_time, mv_pid, mv_char, mv_px, mv_py, mv_pz,
-         mv_vx, mv_vy, mv_vz, mv_yaw, mv_pitch, keep, non_finite)
+    mv.clear()
+    del mv_table, keep, non_finite
 
     # Lines are assembled in Arrow one block at a time (per-slot texts
     # joined with _MOVEMENT_LINE's fragments; see _json_scalar_column), byte
@@ -2250,8 +2166,6 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
     # ending the text-mode file had: os.linesep, deliberately.
     fragments = [pa.scalar(text, type=pa.string()) for text in
                  _MOVEMENT_LINE.replace("\n", os.linesep).split("%s")]
-    if len(fragments) != 2 + len(float_texts) + 1:
-        raise RuntimeError("_MOVEMENT_LINE's slots no longer match the columns")
     with open(output_dir / "movement.ndjson", "wb") as f:
         for start in range(0, movement_written, _MOVEMENT_BLOCK_ROWS):
             length = min(_MOVEMENT_BLOCK_ROWS, movement_written - start)
@@ -2260,9 +2174,9 @@ def _write_movement(movement_path: Path, output_dir: Path, verbose: bool) -> tup
             slots += [texts.take(inverse.slice(start, length))
                       for texts, inverse in float_texts]
             pieces = [fragments[0]]
-            for slot, fragment in zip(slots, fragments[1:]):
+            for slot, fragment in zip(slots, fragments[1:], strict=True):
                 pieces += (slot, fragment)
-            f.write(_join_movement_block(pieces))
+            f.write(_string_bytes(pc.binary_join_element_wise(*pieces, "")))
 
     if verbose and movement_collapsed:
         print(f"  {movement_collapsed:,} intra-packet sub-moves collapsed "
@@ -2309,15 +2223,7 @@ def _convert_into(export_dir: Path, output_dir: Path, *, verbose: bool = False):
 
     events += _build_property_events(cols, prop_groups, tally)
 
-    def equippable_lookup(firing_state_guid):
-        return _resolve_equippable(firing_state_guid, guid_outer, guid_path, guid_class)
-
-    def fire_mode_lookup(firing_state_guid, source_id):
-        return _resolve_fire_mode(firing_state_guid, source_id, guid_outer, guid_path)
-
-    shot_ctx = _ShotContext(
-        _build_tag_table(manifest), equippable_lookup, fire_mode_lookup,
-    )
+    shot_ctx = _ShotContext(_build_tag_table(manifest), guid_outer, guid_path, guid_class)
     rpc_events, shot_count, resolved_weapon_count = _build_rpc_events(
         cols, rpc_groups, shot_ctx, tally
     )
@@ -2419,11 +2325,8 @@ def _validate_separate_trees(export_dir: Path, output_dir: Path) -> tuple[Path, 
     """Reject equal, nested, and aliased input/output trees before any write."""
     source = export_dir.resolve()
     destination = output_dir.resolve()
-    if (
-        source == destination
-        or source.is_relative_to(destination)
-        or destination.is_relative_to(source)
-    ):
+    # is_relative_to holds for equal paths too.
+    if source.is_relative_to(destination) or destination.is_relative_to(source):
         raise ValueError(
             f"export and output directories must not overlap: {source} / {destination}"
         )
@@ -2478,12 +2381,6 @@ def convert(export_dir: Path, output_dir: Path, *, verbose: bool = False):
     staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=parent))
     try:
         result = _convert_into(export_dir, staging, verbose=verbose)
-        manifest = json.loads((staging / "manifest.json").read_text(encoding="utf-8"))
-        if not isinstance(manifest, dict):
-            raise ValueError("generated manifest.json is not a JSON object")
-        for required in ("events.ndjson", "movement.ndjson"):
-            if not (staging / required).is_file():
-                raise ValueError(f"generated bundle is missing {required}")
         _publish_bundle(staging, output_dir)
     except BaseException:
         if staging.exists():

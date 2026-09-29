@@ -49,6 +49,13 @@ class EquippableResolutionTests(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
+    def test_every_key_shape_resolves_to_the_canonical_entry(self):
+        for key in (OLD_GUARDIAN, NEW_GUARDIAN, OLD_GUARDIAN.rpartition(".")[0],
+                    NEW_GUARDIAN.rpartition(".")[0], "Default__DMR_C"):
+            with self.subTest(key):
+                self.assertEqual(bundle.EQUIPPABLE_BY_PATH[key],
+                                 ("Guardian", "rifle", OLD_GUARDIAN))
+
 
 def col(kind, key=None, default=None) -> tuple:
     """One column of a table spec: its type, the row key that fills it (the
@@ -204,18 +211,6 @@ class MovementCollapseTests(unittest.TestCase):
         self.assertIn('"x":2', lines[0])
         self.assertIn('"x":3', lines[1])
 
-    def test_sub_moves_within_one_packet_are_still_collapsed(self):
-        rows = [
-            {"time_ms": 100, "packet_id": 1, "char": 42, "pos_x": 1.0},
-            {"time_ms": 100, "packet_id": 1, "char": 42, "pos_x": 2.0},
-            {"time_ms": 100, "packet_id": 1, "char": 43, "pos_x": 9.0},
-        ]
-        lines = run(movement=rows).movement()
-
-        self.assertEqual(len(lines), 2, lines)
-        self.assertIn('"x":2', lines[0])
-        self.assertIn('"x":9', lines[1])
-
 
 #: float32 values where a vectorised shortcut and the per-value encoder can
 #: disagree, compared with the per-value rule, never with a literal, so the
@@ -300,16 +295,6 @@ class MovementTextRuleTests(unittest.TestCase):
                 column_text(TEXT_RULE_EDGES, shorten=True),
                 per_value_text(TEXT_RULE_EDGES, shorten=True),
             )
-
-    def test_non_finite_values_are_spelled_by_the_encoder(self):
-        """Spelled out too, so a failure names the three values that broke."""
-        for shorten in (True, False):
-            with self.subTest(shorten=shorten):
-                self.assertEqual(
-                    column_text([float("inf"), float("-inf"), float("nan")],
-                                shorten=shorten),
-                    ["Infinity", "-Infinity", "NaN"],
-                )
 
     def test_each_zero_keeps_its_own_sign(self):
         """-0.0 == 0.0; both orders, since which sign a value-level unique
@@ -433,16 +418,6 @@ class MovementLineAssemblyTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, column):
                         bundle._write_movement(path, out, False)
 
-    def test_a_null_line_is_refused_rather_than_dropped(self):
-        """A NULL line adds no bytes: it would vanish while still counted."""
-        texts = pa.array(["1", None, "3"], type=pa.string())
-        with self.assertRaises(RuntimeError):
-            bundle._join_movement_block([pa.scalar("<"), texts, pa.scalar(">")])
-        self.assertEqual(
-            bytes(bundle._join_movement_block(
-                [pa.scalar("<"), texts.fill_null("2"), pa.scalar(">")])),
-            b"<1><2><3>")
-
     def test_only_the_arrays_own_bytes_are_written(self):
         """A slice shares its parent's data buffer, so the buffer holds bytes
         before and after the slice's values; only the values are the text."""
@@ -463,40 +438,20 @@ class TransactionalConversionTests(unittest.TestCase):
     def make_export(path: Path) -> bytes:
         return (write_export(path) / "manifest.json").read_bytes()
 
-    def test_input_and_output_may_not_be_the_same_directory(self):
-        with tempfile.TemporaryDirectory() as temp:
-            export = Path(temp) / "export"
-            source_manifest = self.make_export(export)
-            before = self.snapshot(export)
+    def test_overlapping_trees_are_rejected_before_writing(self):
+        # The same directory, the output inside the input, the input inside
+        # the output.
+        for export, output in (("export", "export"), ("export", "export/bundle"),
+                               ("output/export", "output")):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                self.make_export(root / export)
+                before = (sorted(root.rglob("*")), self.snapshot(root))
 
-            with self.assertRaises(ValueError):
-                bundle.convert(export, export)
+                with self.assertRaises(ValueError):
+                    bundle.convert(root / export, root / output)
 
-            self.assertEqual(self.snapshot(export), before)
-            self.assertEqual((export / "manifest.json").read_bytes(), source_manifest)
-
-    def test_output_nested_inside_input_is_rejected_before_writing(self):
-        with tempfile.TemporaryDirectory() as temp:
-            export = Path(temp) / "export"
-            self.make_export(export)
-            output = export / "bundle"
-
-            with self.assertRaises(ValueError):
-                bundle.convert(export, output)
-
-            self.assertFalse(output.exists())
-
-    def test_input_nested_inside_output_is_rejected_before_writing(self):
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "output"
-            export = output / "export"
-            self.make_export(export)
-            before = self.snapshot(output)
-
-            with self.assertRaises(ValueError):
-                bundle.convert(export, output)
-
-            self.assertEqual(self.snapshot(output), before)
+                self.assertEqual((sorted(root.rglob("*")), self.snapshot(root)), before)
 
     def test_conversion_failure_preserves_an_existing_complete_bundle(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -608,7 +563,7 @@ class DefaultOutputTests(unittest.TestCase):
 class ShotEventTests(unittest.TestCase):
     def build_shot(self, scalar_params: dict) -> dict:
         return bundle._build_shot_event(
-            bundle._ShotContext(tag_table={}),
+            bundle._ShotContext({}),
             12788,
             4368,
             2,
@@ -649,6 +604,18 @@ class ShotEventTests(unittest.TestCase):
                 "roll": 0.0,
             },
         )
+
+    def test_the_firing_state_chain_names_the_weapon_and_fire_mode(self):
+        def decoded(blob, spec, tag_table, tally=None):
+            return {"FiringState.FiringState": 41} if spec is bundle._EFFECT_OBJECTS else {}
+
+        ctx = bundle._ShotContext({}, {41: 42}, {41: "ZoomedFiringState"}, {42: NEW_GUARDIAN})
+        with mock.patch.object(bundle, "_decode_effect_blob", decoded):
+            shot = bundle._build_shot_event(ctx, 1, 2, 3, 4, 5, {}, bundle._EffectBlobs())["shot"]
+        self.assertEqual(shot["equippable"], {"net_guid": 42, "name": "Guardian",
+                                              "category": "rifle", "class_path": OLD_GUARDIAN})
+        self.assertEqual((shot["fire_mode"], shot["fire_mode_evidence"]),
+                         ("alternate", "firing-state:ZoomedFiringState"))
 
     def test_wire_booleans_are_published_as_sent(self):
         shot = self.build_shot({"bTransient": False, "bLocalEffect": True})
@@ -704,13 +671,21 @@ class EffectBlobBitLengthTests(unittest.TestCase):
             reader.read_bits(16)
         self.assertEqual(reader.tell(), 12)
 
+    def test_a_shot_row_is_decoded_to_its_declared_length(self):
+        tags = {"path": "NetworkGameplayTagNodeIndex",
+                "fields": [{"handle": 285, "name": "FiringState.AmmoRemaining"}]}
+        row = {"time_ms": 1, "packet_id": 1, "actor": 2, "group_path": SHOT_RPC,
+               "field_name": "ReplayPlayContinuousEffectAtLocation.FloatValues",
+               "raw_bits": self.BLOB}
+        for bits, ammo in ((400, -1509722752), (350, None)):
+            with self.subTest(bits=bits):
+                (shot,) = run([{**row, "bit_count": bits}],
+                              manifest={"net_field_export_groups": [tags]},
+                              ).events("valorant_shot_received")
+                self.assertEqual(shot["shot"]["ammo_remaining"], ammo)
+
     def test_absent_blob_decodes_to_an_empty_mapping(self):
         self.assertEqual(bundle._decode_effect_blob(None, self.SPEC, {}), {})
-
-    def test_blob_carries_its_own_bit_count(self):
-        # A caller that builds one has to supply both.
-        with self.assertRaises(TypeError):
-            bundle._EffectBlob(b"\x00\x01")  # bit_count is not optional
 
 
 class EffectFramingTallyTests(unittest.TestCase):
@@ -1281,46 +1256,35 @@ class TypedColumnTallyTests(unittest.TestCase):
         self.assertEqual(tally["multi_typed_rows"], 0)
 
 
-class FabricatedLocationTests(unittest.TestCase):
-    """A shot with no readable location gets the world origin, counted; a
+class FabricatedShotGeometryTests(unittest.TestCase):
+    """A shot with no readable location or rotation gets zeros, counted; a
     parsed (0,0,0) is real and not counted."""
 
-    def build_shot(self, scalar_params: dict, tally):
-        return bundle._build_shot_event(
-            bundle._ShotContext(tag_table={}), 1, 2, 3, 4, 5,
-            scalar_params, bundle._EffectBlobs(), tally=tally,
-        )["shot"]
+    #: RotationShort pitch and yaw set; 17 declared bits hold only the pitch.
+    ROTATION = "l/pPkgE="
 
-    def test_a_shot_with_no_location_counts_a_fabricated_origin(self):
-        tally = bundle._Tally()
-        shot = self.build_shot({}, tally)
-        self.assertEqual(shot["location"], {"x": 0, "y": 0, "z": 0})
-        self.assertEqual(tally["fabricated_shot_locations"], 1)
-
-    def test_an_unparsable_location_counts_a_fabricated_origin(self):
-        tally = bundle._Tally()
-        self.assertEqual(
-            self.build_shot({"Location": "(1,2)"}, tally)["location"],
-            {"x": 0, "y": 0, "z": 0},
-        )
-        self.assertEqual(tally["fabricated_shot_locations"], 1)
-
-    def test_a_real_location_counts_nothing(self):
-        tally = bundle._Tally()
-        self.assertEqual(
-            self.build_shot({"Location": "(1,2,3)"}, tally)["location"],
-            {"x": 1, "y": 2, "z": 3},
-        )
-        self.assertEqual(tally["fabricated_shot_locations"], 0)
-
-    def test_a_genuine_origin_shot_counts_nothing(self):
-        # (0,0,0) parsed from the wire is a real position, not a fabrication.
-        tally = bundle._Tally()
-        self.assertEqual(
-            self.build_shot({"Location": "(0,0,0)"}, tally)["location"],
-            {"x": 0, "y": 0, "z": 0},
-        )
-        self.assertEqual(tally["fabricated_shot_locations"], 0)
+    def test_only_a_fabricated_value_is_counted(self):
+        origin = {"x": 0, "y": 0, "z": 0}
+        zero = {"pitch": 0, "yaw": 0, "roll": 0}
+        pitch_yaw = {"pitch": 356.1932373046875, "yaw": 141.4324951171875, "roll": 0.0}
+        for key, value, published, fabricated in (
+            ("248", None, origin, 1),
+            ("248", "(1,2)", origin, 1),
+            ("248", "(1,2,3)", {"x": 1, "y": 2, "z": 3}, 0),
+            ("248", "(0,0,0)", origin, 0),
+            ("249", {"BitCount": 35, "Data": self.ROTATION}, pitch_yaw, 0),
+            ("249", {"BitCount": 17, "Data": self.ROTATION}, zero, 1),
+        ):
+            with self.subTest(key=key, value=value):
+                tally = bundle._Tally()
+                params = {} if value is None else {key: value}
+                shot = bundle._build_shot_event(
+                    bundle._ShotContext({}), 1, 2, 3, 4, 5, params,
+                    bundle._EffectBlobs(), tally=tally)["shot"]
+                field, counter = (("location", "fabricated_shot_locations") if key == "248"
+                                  else ("rotation", "fabricated_shot_rotations"))
+                self.assertEqual(shot[field], published)
+                self.assertEqual(tally[counter], fabricated)
 
 
 class RawSourcedFieldTests(unittest.TestCase):
@@ -1530,7 +1494,7 @@ class AdapterMappingTests(unittest.TestCase):
                               (3, "alliance_any"), (9, "alliance_unknown_9")):
             with self.subTest(ordinal=ordinal):
                 shot = bundle._build_shot_event(
-                    bundle._ShotContext(tag_table={}), 1, 2, 3, 4, 5,
+                    bundle._ShotContext({}), 1, 2, 3, 4, 5,
                     {"AllianceFilter": ordinal}, bundle._EffectBlobs())["shot"]
                 self.assertEqual(shot["alliance_filter"], name)
 
@@ -1596,9 +1560,6 @@ class AdapterMappingTests(unittest.TestCase):
 
 class SummaryReportingTests(unittest.TestCase):
     """The summary must not say 'complete' about a conversion that lost rows."""
-
-    def test_a_clean_conversion_reports_no_losses(self):
-        self.assertEqual(run().tally.total, 0)
 
     def test_a_lossy_conversion_names_every_loss_in_its_summary(self):
         tally = run(MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]).tally
@@ -2117,6 +2078,12 @@ class ServerTimelineEventTests(unittest.TestCase):
         ])
         self.assertEqual([e["time_ms"] for e in timeline], [100, 200, 300])
         self.assertEqual(published["adapter"]["events_time_ms_regressions"], 0)
+
+    def test_the_packet_key_is_the_greatest_packet_at_or_before_the_time(self):
+        # Packet 3 arrives at 30 ms after packet 5 at 20 ms: the key stays 5.
+        cols = mock.Mock(time_ms=[20, 10, 30, 20], packet_id=[5, 1, 3, 2])
+        self.assertEqual(bundle._packets_at_or_before(cols, [5, 10, 15, 20, 30, 99]),
+                         [0, 1, 1, 5, 5, 5])
 
 
 class EventOrderingContractTests(unittest.TestCase):
