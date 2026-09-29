@@ -109,11 +109,6 @@ than complete retention of every payload in the input VRF.
 
 ## Analysis and maintenance tools
 
-- `summarize_value_coverage.py` can audit an explicit semantic-evidence catalog.
-  Reviewed claims require an exact field identity, evidence, and enforceable
-  export/build applicability. Null-safe unions prevent duplicate counting;
-  catalog hashes and full claim definitions identify the basis. No catalog
-  means no semantic-coverage claim.
 - `extract_ability_lifecycle.py` emits ability-path actor candidates, observed
   lifecycle events and explicit Owner/Instigator evidence. Player references
   remain separate from proof of casts. Conflicts, same-packet reuse ambiguity,

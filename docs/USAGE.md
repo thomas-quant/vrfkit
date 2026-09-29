@@ -1089,28 +1089,6 @@ reported by the number of exports containing them. Malformed inputs produce
 `complete: false` and a nonzero exit, rather than an apparently complete total.
 This measures value presence, not semantic understanding or block preservation.
 
-`--semantic-evidence <catalog.json>` additionally reports rows selected by an
-opt-in, reviewed evidence catalog. It is a bounded audit count, never a
-semantic-coverage percentage: only `reviewed` claims with exact criteria are
-counted; `unknown` and `unsupported` claims remain explicit and uncounted. A
-catalog has `schema_version: 1`, a versioned `sources` list, and `claims`.
-Every source needs an `id`, `version`, and non-empty `scope` (record build,
-replay count, and commands there when known). Every claim names its source,
-table, evidence status, and non-empty exact-match `criteria`; reviewed claims
-also require a semantic label, review date, evidence note, exact `group_path`
-and `field_name`, and enforceable `applicability`. Applicability must name
-explicit export-directory IDs and/or replay builds; build applicability is
-checked from each export's `manifest.json`. Build strings must match
-`replay_build` exactly (for example,
-`++Ares-Core+release-13.05`). If both export IDs and builds are supplied, both
-restrictions must match. Source scope documents the evidence
-sample; claim applicability limits where that evidence may be counted. The
-report includes the catalog SHA-256 and full source/claim definitions. A
-duplicate claim/source ID, non-finite number, missing applicability, or a
-criteria field absent from an export makes the report incomplete and returns
-nonzero. Typed values and field names alone do not qualify a row for reviewed
-semantic evidence.
-
 | Script | What it does |
 |---|---|
 | `extract_ability_stats.py` | Validates a build-scoped Statistic/FText dictionary from exact cast/effect array slots, with main and checkpoint observations separate. Dictionaries exist for the measured builds 13.01, 13.02, 13.04, 13.05 and 13.06; any other build's mappings are `unknown_build`. Unknown IDs, changed names, missing partners and conflicts remain visible and return a nonzero exit. Counts are snapshots, not casts. |
@@ -1154,12 +1132,6 @@ entry or exit is uncertain. Round resets and unknown state paths break intervals
 observed interval through the same non-null weapon outer GUID. Boundary-packet
 ordering is unresolved and excluded. These are supporting observations, not
 completed reloads, shots, or a purchase ledger.
-
-The reviewed semantic catalog accepts schema 1 exact field names and schema 2
-literal indexed paths, such as
-`Rounds[].Reports[].Interactions[].ParticipantSubject`. The latter requires an
-exact group and build/export applicability; it does not accept arbitrary regex
-or suffix matches. See [the measured evidence](SEMANTIC_CONTEXT_EXPANSION.md).
 
 Repeat `--export` for the stat dictionary when comparing builds. The observed
 13.01, 13.02 and 13.04 dictionaries contain 31 IDs each; 13.05 adds ID 27,

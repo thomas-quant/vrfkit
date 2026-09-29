@@ -97,14 +97,9 @@ before assigning a new implementation to a high-frequency raw row.
 
 ## Semantic and event evidence
 
-The initial `semantic_evidence.json` reviews only Subject and SpawnedCharacter,
-separately for main and checkpoint rows. Across the preceding 714 exports,
-111,268 Subject values matched independently stored replay-header loadouts;
-103,891 nonzero character references matched movement actor identities. The
-catalog covers 215,726 rows and is intentionally incomplete. Its percentage
-is a catalog lower bound, not a new overall semantic-understanding score.
-The complete before/after comparison establishes that these values and their
-source tables are unchanged in this batch.
+Across 714 exports, 111,268 Subject values matched independently stored
+replay-header loadouts and 103,891 nonzero character references matched
+movement actor identities.
 
 An additional audit examined 2,196,424 magazine decreases against a
 weapon-scoped continuous-effect RPC within 300 ms. It found 10,703 unique
