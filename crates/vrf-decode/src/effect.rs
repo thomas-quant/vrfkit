@@ -6,11 +6,12 @@
 //!
 //! # Where this runs
 //!
-//! vrfkit's `sink/rpc.rs` calls [`decode_effect_blob_json`] for a parameter
-//! with one of those names when the overlay produced no value, and puts the
-//! JSON into `value_str` **in addition to** `raw_bits`. Like the type overlay
-//! it is additive: a failure leaves `value_str` null, keeps the bits and
-//! counts. `tools/to_valplay_bundle.py` reads its shot inputs from the raw
+//! vrfkit calls [`decode_effect_blob_json`] for an RPC parameter with one of
+//! those names the overlay left untyped (`sink/rpc.rs`) and for
+//! `ServerActiveEffects`' `FloatValues` / `ObjectValues` members
+//! (`sink/blobs.rs`), and puts the JSON into `value_str` **in addition to**
+//! `raw_bits`. Like the type overlay it is additive: a failure leaves
+//! `value_str` null, keeps the bits and counts. `tools/to_valplay_bundle.py` reads its shot inputs from the raw
 //! bits, so the JSON changes nothing it consumes.
 //!
 //! Where that Python port can return partial elements on malformed input, this

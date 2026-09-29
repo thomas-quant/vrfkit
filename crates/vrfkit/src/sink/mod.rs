@@ -147,9 +147,10 @@ pub struct ExportStats {
     /// (`active_blind_array_bits`); the parent row keeps the byte, and no other
     /// number moves if a build makes such trailers common.
     pub active_blinds_empty_trailers: u64,
-    /// EffectContainer blobs turned into a `value_str` JSON array: the
-    /// decoder's only success signal, as the overlay buckets are filled first.
-    /// Failures land in `overlay.decoded_err`.
+    /// EffectContainer RPC parameters turned into a `value_str` JSON array:
+    /// the decoder's only success signal there, as the overlay buckets are
+    /// filled first. Failures land in `overlay.decoded_err`; the
+    /// `ServerActiveEffects` members it types are array leaves, not counted here.
     pub effect_blobs_decoded: u64,
 
     /// Struct-blob (`RoundResults`, `TeamEconomy`, `RoundInfos`) parent rows
