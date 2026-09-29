@@ -237,38 +237,24 @@ with 100.
 
 ### `CastTime` is not measured from `roundStarted`
 
-Its zero is the barrier drop -- the *end* of the buy phase -- while
-`events.roundStarted` fires when the round begins, at the buy phase's start.
-Joining a cast on `roundStarted + CastTime` therefore lands 30 seconds **early**,
-or 45 on the first round of each half.
+Its zero is the barrier drop: the round's `ClientBuyPhaseEnd` (`MulticastSetPhase`
+4), which `tools/extract_rounds.py` writes as `buy_end_ms`. `events.roundStarted`
+fires at the buy phase's start instead. The absolute time is
 
-Measured on 10,460 casts over 20 replays, the residual
-`(cast row's time_ms - roundStarted) / 1000 - CastTime` is, for the first
-fourteen rounds:
+    buy_end_ms + CastTime
 
-| round | n | median residual |
-|---|---|---|
-| 1 | 394 | **44.99 s** |
-| 2-12 | 6,247 | **29.88-29.91 s** |
-| 13 | 347 | **44.89 s** |
-| 14 | 364 | **29.89 s** |
+On 13.01 the residual `(cast row's time_ms - buy_end_ms) / 1000 - CastTime` has
+median -0.000 s over 420 first sends (13.05: -0.002 s over 106; 13.06: 0.000 s
+over 406), with `buy_end_ms` and the raw `ClientBuyPhaseEnd` rows picking the
+same epoch for every cast row. Against `roundStarted` the same casts read
+29.89 s, and 10,460 casts over 20 replays read 44.99 s on the first round of
+each half and 29.88-29.91 s otherwise: the 45/30 s buy phases. Do not hardcode
+them; the public fixtures' buy phases last 0.1-15.5 s.
 
-Those are the buy-phase lengths the game uses -- 45 s on the first round of each
-half, 30 s otherwise -- so this is confirmed against a constant the replay does
-not carry, not fitted to the data. The correct absolute time is
-
-    roundStarted + buyPhaseLength(round) + CastTime
-
-Overtime follows the same rule: on the full 71 replays round 25 -- the first of
-overtime -- reads 44.88 s, so the 45 s buy phase applies there too.
-
-The median is the statistic to use here, not the mean. `AbilityCastsThisRound`
-is a replicated array that accumulates over the round, so a cast is re-sent on
-every later replication and its `time_ms` drifts upward; the residual is exact
-only on the first send. The share landing within 29-31 s therefore depends on
-how much re-replication the sample carries -- 60.1% on the 20-replay set above,
-57.4% over all 71 -- and the rest of the mass is that tail, not disagreement
-about the epoch.
+Use the median of first sends, not the mean. `AbilityCastsThisRound` is a
+replicated array that accumulates over the round, so a cast is re-sent on every
+later replication and its `time_ms` drifts upward (median 0.066 s over all 579
+cast rows on 13.01; 299 of the 420 first sends land within 0.5 s).
 
 ### Status effects, and where they actually live
 
@@ -487,38 +473,28 @@ though not strictly increasing, since many rows share a `time_ms`.
 
 ### Minimap projection
 
-The transform is not in the replay. It comes from **valorant-api.com**, which
-publishes `xMultiplier`, `yMultiplier`, `xScalarToAdd` and `yScalarToAdd` per
-map; join on `manifest.level_names_and_times[0].name`, which is that API's
-`mapUrl`. Those constants are an external source and are not reproduced here.
-
-**The axes cross.** What works is
+`tools/minimap.py` holds the projection and checks it against an export. The
+constants are not in the replay: valorant-api.com publishes `xMultiplier`,
+`yMultiplier`, `xScalarToAdd` and `yScalarToAdd` per map, keyed by `mapUrl` =
+`manifest.level_names_and_times[0].name`, and the user supplies that file.
+**The axes cross:**
 
     u = pos_y * xMultiplier + xScalarToAdd
     v = pos_x * yMultiplier + yScalarToAdd
 
-`pos_y` drives the horizontal axis and `pos_x` the vertical. Of the four
-sign/order variants only this one holds up: it puts 100.0000% of live positions
-inside [0,1]² on eleven of twelve maps, while feeding `pos_x` to `u` collapses
-to 0.9% on Haven and 3.1% on Fracture. Containment alone would not prove it --
-a small enough scale contains everything -- so note also that the bounding
-boxes fill roughly [0.01, 0.99], which a wrong scale would not.
+Over 12 maps on 69 replays (121,672,885 live rows, build 13.02) this puts
+100.0000% of live positions inside [0,1]² on eleven maps, with bounding boxes
+filling roughly [0.01, 0.99] (containment alone proves nothing: a small enough
+scale contains everything); feeding `pos_x` to `u` collapses to 0.9% on Haven
+and 3.1% on Fracture. Abyss's symmetric constants cannot tell the two orders
+apart. Hidden actors park at `pos_x ≈ -50000, pos_z ≈ -49900`; filter on both
+x and z, since a fall passes through that z.
 
-Two things to handle first:
-
-- **Park slot.** Hidden actors are parked at `pos_x ≈ -50000, pos_z ≈ -49900`.
-  Filter on **both** x and z. Filtering on z alone misclassifies real falls.
-- **Abyss is the exception, and not a decode fault.** Two runs that fetched the
-  constants separately put it at 99.68% and 99.84%; the gap is unexplained and
-  neither is picked here, because the mechanism is what matters and both runs
-  found it. Of the out-of-range rows roughly six in seven are already below
-  z = -3000, and of the rest that sit near the floor, 99-100% have negative
-  `vel_z` (median around -1,600 cm/s, against 0 for in-range rows). The map has
-  no floor, so players leave the minimap while falling. Nothing to fix -- clamp
-  or drop by `vel_z`.
-
-Containment was measured over 12 maps on 69 replays, 121,672,885 live movement
-rows, on build 13.02.
+**Abyss reads 99.68-99.84%, and that is not a decode fault.** Of its
+out-of-range rows about six in seven are already below z = -3000, and 99-100%
+of the rest have negative `vel_z` (median about -1,600 cm/s, against 0 in
+range): the map has no floor, so players leave the minimap while falling. Clamp
+or drop by `vel_z`.
 
 ### `ReplicatedMovement.location` is world units, at a per-class level
 
