@@ -1,23 +1,14 @@
 """Equippable class path -> display name and category.
 
-Weapon display names are not on the wire; the Rust crates emit class_path
-only, and this adapter table does the labelling. The names are a fixed
-reference set, not the game's. Against the installed 13.06 game's display
-names (string tables read statically, 2026-09-28) 21 of the 25 match, "Spike"
-and "Tour de Force" differ only in case ("SPIKE", "Tour De Force"),
-Equippable_Unarmed has no equippable data asset, and CompactPistol_C is
-"Bandit" (key CompactPistol_DisplayName), not "Compact Pistol".
+Display names are not on the wire, and these are a fixed reference set, not
+the game's (13.06 calls CompactPistol_C "Bandit"). Do not rename an entry:
+to_valplay_bundle.py publishes it as shot.equippable.name and valplay prices
+weapons by that literal (it leaves "Compact Pistol" unpriced and "Bandit" at
+an unverified 600), so a rename is valplay's decision, made with the price.
 
-Do not rename an entry here. tools/to_valplay_bundle.py emits the name as
-shot.equippable.name and valplay prices weapons by it: it leaves "Compact
-Pistol" unpriced on purpose and lists "Bandit" at an unverified 600, which a
-rename would silently apply, and its tests pin the literal strings, not this
-table. A rename is valplay's decision, made with the price.
-
-Keys cover the three path shapes that appear in replay data: the full
-'Package.Class_C' path, the package path alone, and the 'Default__Class_C'
-archetype form. Measured, exact path aliases cover known game asset renames
-without case-folding keys.
+Keys: the 'Package.Class_C' path, the package alone and the
+'Default__Class_C' archetype, plus exact measured aliases for asset renames
+(no case folding).
 """
 
 # fmt: off
@@ -56,20 +47,13 @@ EQUIPPABLE_PATH_ALIASES = {
 
 
 def _build_lookup():
-    """Known path shapes -> (name, category, canonical source path)."""
+    """Every key shape -> (name, category, canonical source path)."""
     out = {}
     for class_path, name, category in EQUIPPABLE_DEFINITIONS:
-        value = (name, category, class_path)
-        out[class_path] = value
-        if '.' in class_path:
-            package, _, class_name = class_path.rpartition('.')
-            out[package] = value
-            out['Default__' + class_name] = value
-        for alias in EQUIPPABLE_PATH_ALIASES.get(class_path, ()):
-            out[alias] = value
-            if '.' in alias:
-                package, _, _ = alias.rpartition('.')
-                out[package] = value
+        for path in (class_path, *EQUIPPABLE_PATH_ALIASES.get(class_path, ())):
+            package, _, class_name = path.rpartition('.')
+            out.update(dict.fromkeys((path, package, 'Default__' + class_name),
+                                     (name, category, class_path)))
     return out
 
 

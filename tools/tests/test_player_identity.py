@@ -57,6 +57,12 @@ class PlayerBodiesTests(unittest.TestCase):
         self.assertEqual([value for _, _, value in bodies.history[256]], [1510, 0, 45530])
         self.assertNotIn(0, bodies.subjects)
 
+    def test_history_follows_packet_order_not_time(self):
+        """A non-finite frame exports time 0; packet order is the wire's."""
+        bodies = self.bodies([spawned(256, 1510, 100, 1), spawned(256, 45530, 0, 2)])
+        self.assertEqual([value for _, _, value in bodies.history[256]], [1510, 45530])
+        self.assertEqual(bodies.counts["manifest_history_disagreements"], 0)
+
     def test_the_final_provenance_string_is_the_one_records_already_carry(self):
         """Records the manifest join labelled must come out byte-identical."""
         self.assertEqual(identity.FINAL_PROVENANCE,
@@ -106,9 +112,8 @@ class PlayerBodiesTests(unittest.TestCase):
         self.assertEqual(bodies.conflicts, {20})
 
     def test_a_player_without_a_character_contributes_no_pawn_at_all(self):
-        """The spike tool's old `{character_net_guid: subject}` held a None key
-        for such a player, so an owner with no Instigator (`.get()` -> None)
-        tested as a carrier. The 11-player exports carry one of these."""
+        """A None key would make an owner with no Instigator (`.get()` -> None)
+        test as a carrier; the 11-player exports carry such a player."""
         manifest = {"players": MANIFEST["players"] + [
             {"actor_net_guid": 300, "subject": "coach", "character_net_guid": None}]}
         bodies = self.bodies(RECONNECT, manifest)
