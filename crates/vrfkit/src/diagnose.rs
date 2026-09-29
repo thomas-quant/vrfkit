@@ -354,8 +354,8 @@ fn push_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
-/// `{`, one `"key": value` member per line, then `  }` -- the shape both
-/// counter objects share.
+/// `{`, one `"key": value` member per line, then `  }` -- the shape every flat
+/// counter object in the diag JSON shares.
 fn push_members(out: &mut String, members: &[(&str, u64)]) {
     out.push_str("{\n");
     for (i, (name, value)) in members.iter().enumerate() {

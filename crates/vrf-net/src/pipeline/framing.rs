@@ -121,8 +121,8 @@ pub(super) fn frame_content_blocks(
     }
 }
 
-/// Where an event happened: the bunch, the block index within it, and the
-/// event's `consumed_bits`.
+/// Where an event happened: the bunch, the block index within it, and a bit
+/// position -- `block_start` in `abort`, the event's `consumed_bits` in `record`.
 type At<'c, 'h> = (&'c BunchContext<'h>, u32, u64);
 
 /// Abandon the rest of the bunch after a framing failure in the block that
