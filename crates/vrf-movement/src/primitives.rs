@@ -1,12 +1,6 @@
-//! The numeric primitives a move record is built from.
-//!
-//! # These are format, not style
-//!
-//! Validated against an independent parser to **zero** error on yaw, pitch and
-//! velocity and at most 0.0005 on position (a 50,000-row join on 13.01). Every
-//! constant, width and rounding step here is wire layout, as are the move header, FixedVector and
-//! timestamp [`crate::moves`] reads. Rewriting the arithmetic, even into a
-//! form that looks equivalent, changes decoded output: do not restyle it.
+//! The numeric primitives of a move record. Zero error on yaw, pitch and
+//! velocity and at most 0.0005 on position against an independent parser: every
+//! constant, width and rounding step is wire layout, so do not restyle it.
 
 use vrf_bitio::BitReader;
 
@@ -52,13 +46,10 @@ pub(crate) fn read_signed_quantized_components(
     reader: &mut BitReader<'_>,
     component_bits: u32,
 ) -> Result<(i64, i64, i64), MovementError> {
-    // 63, the widest `info & 63` allows, is readable. A bound of 62 once made
-    // it return (0, 0, 0) without consuming its 189 bits: a fake origin, no
-    // error, and every later field read from the wrong offset.
-    // A real assert, not `debug_assert!`: `[profile.release]` has no debug
-    // assertions, and above 64 this is an out-of-range shift. A panic, not an
-    // error, as in `copy_bits_to`: the only caller masks the width and handles
-    // 0, so any other value is a bug at the call site, not malformed input.
+    // 63, the widest `info & 63` allows, must read its 189 bits. A real assert
+    // (release has no debug assertions; above 64 the shift is out of range), and
+    // a panic, not an error: the only caller masks the width and handles 0, so
+    // any other value is a call-site bug.
     assert!(
         (1..=63).contains(&component_bits),
         "component_bits must be 1..=63, got {component_bits}"

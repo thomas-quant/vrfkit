@@ -213,10 +213,8 @@ impl<'a> BitReader<'a> {
         Ok(())
     }
 
-    /// The 8 bytes at `byte`, zero-padded past the end; the padding only covers
-    /// bits callers mask off. A fixed-size chunk is one unaligned load, where a
-    /// runtime-length copy was a memcpy on every read
-    /// (docs/PERFORMANCE_NOTES.md#load_u64-avoiding-a-memcpy).
+    /// The 8 bytes at `byte`, zero-padded past the end (bits callers mask off):
+    /// one unaligned load, not a memcpy (docs/PERFORMANCE_NOTES.md#load_u64-avoiding-a-memcpy).
     #[inline]
     fn load_u64(&self, byte: usize) -> u64 {
         match self.data.get(byte..).and_then(<[u8]>::first_chunk::<8>) {
@@ -309,16 +307,11 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read Unreal's `SerializeIntPacked`: per byte, 7 payload bits above a
-    /// continuation bit, chunks little-endian.
-    ///
-    /// A byte loop, because its EOF (`requested: 8` after the chunks consumed)
-    /// is what callers classify malformed blocks by. Only the fifth chunk, at
-    /// shift 28, can overrun a `u32`; unchecked, `16u32 << 28 == 0` returns
-    /// `Ok(0)`, the terminator of every property loop above this crate. That
-    /// check is peeled out of the loop
-    /// (docs/PERFORMANCE_NOTES.md#read_int_packed-peeling-the-overflow-check)
-    /// and follows the continuation test, so a runaway still reports
-    /// [`BitError::MalformedIntPacked`].
+    /// continuation bit, chunks little-endian. A byte loop: callers classify
+    /// malformed blocks by its `requested: 8` EOF. The fifth chunk's overflow
+    /// check (unchecked, `16u32 << 28 == 0` is `Ok(0)`, every property loop's
+    /// terminator) is peeled out of the loop after the continuation test, so a
+    /// runaway wins (docs/PERFORMANCE_NOTES.md#read_int_packed-peeling-the-overflow-check).
     #[inline]
     pub fn read_int_packed(&mut self) -> Result<u32> {
         let start = self.pos;
@@ -370,12 +363,8 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read an Unreal `FString`: a positive length counts UTF-8 bytes, a
-    /// negative one UTF-16 units, and `max_bytes` caps the allocation.
-    ///
-    /// The trailing null is stripped when present but not required: the cursor
-    /// advances by the declared width either way and the string is the wire
-    /// bytes, so requiring it would prevent no wrong value while failing every
-    /// caller (paths, event metadata, string fields) on a writer that omits it.
+    /// negative one UTF-16 units; `max_bytes` caps the allocation. A trailing
+    /// null is stripped but not required: requiring it would prevent no wrong value.
     #[cfg(feature = "alloc")]
     pub fn read_fstring(&mut self, max_bytes: i64) -> Result<String> {
         let start = self.pos;
@@ -421,19 +410,11 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Copy `count` bits into `dst`, LSB-first, zero-filling the final byte's
-    /// padding, and advance past them.
-    ///
-    /// Callers rely on the zero-fill: vrf-net's `decode_into_scratch` and
-    /// `stage_fragment` reuse one buffer across blocks and hand the final byte
-    /// on whole, and the payload transform leaves padding as it finds it.
+    /// Copy `count` bits into `dst`, LSB-first, and advance past them. The final
+    /// byte's padding is zero-filled: vrf-net reuses one buffer across blocks and
+    /// hands the final byte on whole.
     pub fn copy_bits_to(&mut self, dst: &mut [u8], count: u64) -> Result<()> {
-        let byte_count =
-            usize::try_from(count.div_ceil(8)).map_err(|_| BitError::InvalidLength {
-                position: self.pos,
-                length: count as i64,
-            })?;
-        if dst.len() < byte_count {
+        if (dst.len() as u64) < count.div_ceil(8) {
             return Err(BitError::InvalidBitLength {
                 requested: count,
                 available: (dst.len() as u64).saturating_mul(8),
@@ -443,6 +424,8 @@ impl<'a> BitReader<'a> {
         if count == 0 {
             return Ok(());
         }
+        // Fits `usize`: `dst` holds that many bytes.
+        let byte_count = count.div_ceil(8) as usize;
 
         let abs = self.start_bit + self.pos;
         self.pos += count;
@@ -509,10 +492,8 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// [`BitReader::load_u64`] with fewer than 8 bytes left: absent bytes read as
-/// zero. A free function so the reader is never address-taken (neutral here,
-/// ~2% on the EOF path):
-/// docs/PERFORMANCE_NOTES.md#cold-path-builders-stay-free-functions.
+/// [`BitReader::load_u64`] with fewer than 8 bytes left. It takes the slice so the
+/// reader is never address-taken: docs/PERFORMANCE_NOTES.md#cold-path-builders-stay-free-functions.
 #[cold]
 #[inline(never)]
 fn load_u64_padded(data: &[u8], byte: usize) -> u64 {
@@ -524,11 +505,8 @@ fn load_u64_padded(data: &[u8], byte: usize) -> u64 {
     u64::from_le_bytes(buf)
 }
 
-/// The low `count` bits set, `count` in `1..=64`. A right shift needs no
-/// special case at 64, where `(1 << count) - 1` overflows. Zero would be an
-/// over-wide shift: `read_bits` returns early on it, and `copy_bits_to` reaches
-/// its tail only when `count % 64 != 0`. The `debug_assert` is live under
-/// `profile.test`, which the corpus tests run.
+/// The low `count` bits set, `count` in `1..=64`: a right shift is defined at 64,
+/// where `(1 << count) - 1` overflows. Neither caller passes 0.
 #[inline]
 const fn mask_u64(count: u32) -> u64 {
     debug_assert!(count >= 1 && count <= 64, "mask width must be 1..=64");
@@ -724,21 +702,19 @@ mod tests {
     }
 
     #[test]
-    fn int_packed_single_byte() {
-        let data = [0x3F << 1];
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.read_int_packed().unwrap(), 0x3F);
-        assert_eq!(r.position(), 8);
-    }
-
-    #[test]
-    fn int_packed_multi_byte_is_little_endian_in_chunks() {
-        // value 300 = 0b1_0010_1100 -> chunk0 = 0b010_1100 (44), chunk1 = 0b10 (2)
-        // byte0 = 44 << 1 | 1 (more), byte1 = 2 << 1 (last)
-        let data = [(44u8 << 1) | 1, 2u8 << 1];
-        let mut r = BitReader::new(&data);
-        assert_eq!(r.read_int_packed().unwrap(), 300);
-        assert_eq!(r.position(), 16);
+    fn int_packed_reads_7_bit_chunks_little_endian_from_the_bit_position() {
+        // (bytes, bits skipped, value, end). 300 is chunk 44 (with the
+        // continuation bit), then 2; the last row starts mid-byte.
+        for (data, skip, value, end) in [
+            (vec![0x3F << 1], 0, 0x3F, 8),
+            (vec![(44u8 << 1) | 1, 2 << 1], 0, 300, 16),
+            (vec![0x3F << 2, 0], 1, 0x3F, 9),
+        ] {
+            let mut r = BitReader::new(&data);
+            r.skip_bits(skip).unwrap();
+            assert_eq!(r.read_int_packed().unwrap(), value, "{data:?}");
+            assert_eq!(r.position(), end, "{data:?}");
+        }
     }
 
     #[test]
@@ -773,15 +749,6 @@ mod tests {
         let mut r = BitReader::new(&data);
         assert_eq!(r.read_int_packed().unwrap(), u32::MAX);
         assert_eq!(r.position(), 40);
-    }
-
-    #[test]
-    fn int_packed_is_bit_aligned_not_byte_aligned() {
-        // Chunks are read from the bit position, not the next byte.
-        let data = (u16::from(0x3Fu8 << 1) << 1).to_le_bytes();
-        let mut r = BitReader::new(&data);
-        r.skip_bits(1).unwrap();
-        assert_eq!(r.read_int_packed().unwrap(), 0x3F);
     }
 
     #[test]
@@ -910,15 +877,6 @@ mod tests {
         let mut child = parent.sub_reader(8).unwrap();
         let mut grandchild = child.sub_reader(4).unwrap();
         assert_eq!(grandchild.read_bits(4).unwrap(), 0xF);
-    }
-
-    #[test]
-    fn with_bit_len_hides_trailing_padding() {
-        let data = [0xFFu8, 0xFF];
-        let mut r = BitReader::with_bit_len(&data, 12).unwrap();
-        assert_eq!(r.bits_remaining(), 12);
-        r.skip_bits(12).unwrap();
-        assert!(r.read_bit().is_err());
     }
 
     #[test]

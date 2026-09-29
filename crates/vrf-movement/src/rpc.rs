@@ -1,8 +1,6 @@
-//! The RPC framing layers: batch -> updates array -> one update -> the
-//! component data stream that holds the movement section (diagrams in the
-//! crate docs). The batch and each update are property-style loops; a handle
-//! this crate does not decode is skipped by its declared length, so an unknown
-//! future field passes without desynchronising the ones around it.
+//! The RPC framing layers: batch -> updates array -> one update -> component
+//! data stream (diagrams in the crate docs). A handle not decoded here is
+//! skipped by its declared length, so an unknown field desynchronises nothing.
 
 use vrf_bitio::BitReader;
 
@@ -25,17 +23,14 @@ pub fn decode_movement_rpc(
     reader: &mut BitReader<'_>,
     mut emit: impl FnMut(MovementMove),
 ) -> Result<RpcDecodeResult, MovementError> {
-    let end_bit = reader.len_bits();
     let mut result = RpcDecodeResult::default();
-
-    // First bit: consumed but value ignored.
-    // If no bits remain, the payload is empty.
-    if reader.bits_remaining() == 0 {
+    // The discarded first bit; without it the payload is empty.
+    if reader.at_end() {
         return Ok(result);
     }
     let _ = reader.read_bit()?;
 
-    while reader.position() < end_bit {
+    while !reader.at_end() {
         let encoded_handle = reader.read_int_packed()?;
         if encoded_handle == 0 {
             break;
@@ -52,56 +47,44 @@ pub fn decode_movement_rpc(
         decode_updates_array(&mut sub, &mut result, &mut emit)?;
     }
 
-    // A 0 handle before `end_bit` leaves the rest unread. A drift can make the
+    // A 0 handle before the end leaves the rest unread. A drift can make the
     // very first read return 0, which uncounted is exactly an empty RPC.
-    if reader.position() < end_bit {
+    if !reader.at_end() {
         result.error_count += 1;
     }
 
     Ok(result)
 }
 
-/// Decode the RemoteCharacterUpdates array.
 fn decode_updates_array(
     reader: &mut BitReader<'_>,
     result: &mut RpcDecodeResult,
     emit: &mut impl FnMut(MovementMove),
 ) -> Result<(), MovementError> {
-    let end_bit = reader.len_bits();
     let update_count = reader.read_int_packed()?;
-
     if update_count > MAX_REMOTE_CHARACTER_UPDATES {
         return Err(MovementError::TooManyUpdates(update_count));
     }
-
     result.update_count = update_count;
 
-    while reader.position() < end_bit {
+    while !reader.at_end() {
         let encoded_index = reader.read_int_packed()?;
         if encoded_index == 0 {
-            // Exactly 8 bits left: a trailing IntPacked (never seen).
-            // Nothing depends on its value, but one that does not parse means
-            // the grammar drifted, so the failure is counted.
-            if end_bit.saturating_sub(reader.position()) == 8 && reader.read_int_packed().is_err() {
+            // Only a trailing 8-bit IntPacked may follow (never seen); any
+            // other remainder is lost updates or a drifted cursor.
+            if (reader.bits_remaining() == 8 && reader.read_int_packed().is_err())
+                || !reader.at_end()
+            {
                 result.error_count += 1;
             }
             break;
         }
 
-        let index = encoded_index - 1;
-        if index >= update_count {
-            // An update the array never declared: the rest of the window goes,
-            // and is counted.
+        // An index (`encoded_index - 1`) past the declared count, or a failed
+        // framing read (a handle, a length, or a field longer than the window),
+        // after which the next index cannot be located: the rest is lost, counted.
+        if encoded_index > update_count || decode_single_update(reader, result, emit).is_err() {
             result.error_count += 1;
-            reader.skip_remaining();
-            break;
-        }
-
-        if decode_single_update(reader, result, emit).is_err() {
-            result.error_count += 1;
-            // Only a framing read (a handle or a payload length) fails out of
-            // an update, and after one the next index cannot be located.
-            reader.skip_remaining();
             break;
         }
     }
@@ -109,16 +92,13 @@ fn decode_updates_array(
     Ok(())
 }
 
-/// Decode one RemoteCharacterUpdate.
 fn decode_single_update(
     reader: &mut BitReader<'_>,
     result: &mut RpcDecodeResult,
     emit: &mut impl FnMut(MovementMove),
 ) -> Result<(), MovementError> {
-    let end_bit = reader.len_bits();
     let mut shooter_guid: Option<u32> = None;
-
-    while reader.position() < end_bit {
+    while !reader.at_end() {
         let encoded_handle = reader.read_int_packed()?;
         if encoded_handle == 0 {
             break;
@@ -126,24 +106,15 @@ fn decode_single_update(
         let handle = encoded_handle - 1;
         let payload_bits = reader.read_int_packed()?;
 
-        if u64::from(payload_bits) > reader.bits_remaining() {
-            // Longer than the rest of the updates window: the framing no
-            // longer describes the payload, and every update queued behind
-            // this one goes with the window.
-            result.error_count += 1;
-            reader.skip_remaining();
-            break;
-        }
-
         match handle {
             SHOOTER_CHARACTER_NET_GUID_HANDLE => {
                 let mut sub = reader.sub_reader(u64::from(payload_bits))?;
-                if payload_bits >= 32 {
+                if payload_bits == 32 {
                     shooter_guid = Some(sub.read_u32()?);
                 } else {
-                    // Too narrow for its u32. The field is consumed, so the
-                    // framing survives, but the update has no character to
-                    // attribute moves to: a loss, not "no moves".
+                    // Not a u32. The field is consumed, so the framing
+                    // survives, but the update has no character to attribute
+                    // moves to: a loss, not "no moves".
                     result.error_count += 1;
                 }
             }
@@ -157,7 +128,7 @@ fn decode_single_update(
                         result.error_count += 1;
                     }
                 } else {
-                    // No GUID: handle 2 was undersized (counted above) or has
+                    // No GUID: handle 2 was not 32 bits (counted above) or has
                     // not arrived, and a single pass cannot rewind to it, so
                     // the moves are dropped. An update hitting both adds two.
                     result.error_count += 1;
@@ -172,11 +143,9 @@ fn decode_single_update(
     Ok(())
 }
 
-/// Decode a ComponentDataStream: a u16 envelope byte count, else the u16 is
-/// movementBitCount. The u16 is a byte count iff it is non-zero and the
-/// envelope fits, and that choice is final: an inner failure never rolls back
-/// to the other reading. Every measured stream is wrapped (crate docs,
-/// "Measured on real replays").
+/// The leading u16 is an envelope byte count iff it is non-zero and the
+/// envelope fits, else movementBitCount. The choice is final: an inner failure
+/// never rolls back to the other reading.
 fn decode_component_data_stream(
     reader: &mut BitReader<'_>,
     shooter_guid: u32,
@@ -196,13 +165,11 @@ fn decode_component_data_stream(
         let bit_count = read_u16_checked(&mut inner)?;
         parse_movement_with_bit_count(&mut inner, bit_count, shooter_guid, result, emit)
     } else {
-        // Not byte-wrapped: first_u16 is the movementBitCount.
         parse_movement_with_bit_count(reader, first_u16, shooter_guid, result, emit)
     }
 }
 
-/// Read a u16, failing with `TruncatedComponentHeader` when fewer than 16 bits
-/// remain, rather than silently yielding nothing.
+/// Read a u16, failing with `TruncatedComponentHeader` rather than a bare Eof.
 fn read_u16_checked(reader: &mut BitReader<'_>) -> Result<u16, MovementError> {
     if reader.bits_remaining() < 16 {
         return Err(MovementError::TruncatedComponentHeader {
@@ -241,10 +208,5 @@ fn parse_movement_with_bit_count(
             result.sized_section_tail_bits += tail_bits;
         }
     }
-
-    if !uses_all_remaining {
-        reader.skip_remaining();
-    }
-
     Ok(())
 }
