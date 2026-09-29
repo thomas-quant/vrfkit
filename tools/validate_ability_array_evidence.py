@@ -13,7 +13,6 @@ from collections import Counter
 import json
 import math
 from pathlib import Path
-import struct
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -60,13 +59,8 @@ DECLARATIONS = {
 def member_value(handle: int, data: bytes, width: int, path_point: bool):
     """`(column, value)` of one member window, read independently."""
     bits = Bits(data, width)
-
-    def floats(size, count):
-        return tuple(struct.unpack("<f" if size == 32 else "<d", bits.bits(size).to_bytes(size // 8, "little"))[0]
-                     for _ in range(count))
-
     if path_point:
-        result = ("value_f64", floats(32, 1)[0]) if handle == 1 else ("value_str", floats(64, 3))
+        result = ("value_f64", bits.ieee(32)) if handle == 1 else ("value_str", tuple(bits.ieee(64) for _ in range(3)))
     elif handle in (3, 4):
         result = ("value_i64", bits.bits(width))
     elif handle == 5:
@@ -74,7 +68,7 @@ def member_value(handle: int, data: bytes, width: int, path_point: bool):
     elif handle in (6, 7):
         result = ("value_bool", bits.bit())
     elif handle in (8, 9):
-        result = ("value_f64", floats(32, 1)[0])
+        result = ("value_f64", bits.ieee(32))
     else:
         result = ("value_i64", bits.int_packed())
     if bits.remaining():
