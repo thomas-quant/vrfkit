@@ -2,13 +2,10 @@
 //! reads it; it feeds no verdict, summary counter or table row.
 //!
 //! [`ChannelState::push_stream_failure`](super::ChannelState::push_stream_failure)
-//! keeps the first `MAX_STREAM_FAILURE_RECORDS` (32) lines for a human; all 714
-//! corpus replays saturate it with failures from the match's opening seconds,
-//! a biased sample no reweighting turns into a population figure. This counts
-//! every failure, one cell per (kind, cause,
-//! group path, function count, handle, consumed bits, preservation state):
-//! totals exact, cells and payload samples capped so malformed input cannot
-//! grow memory without bound.
+//! keeps 32 lines, which every corpus replay fills from the match's opening
+//! seconds: a biased sample. This counts every failure, one cell per (kind,
+//! cause, group path, function count, handle, consumed bits, preservation):
+//! totals exact, cells and payload samples capped against malformed input.
 //!
 //! Invariants, per pass:
 //!
@@ -16,13 +13,10 @@
 //!    site that bumps either also calls [`FailureAggregate::note_failure`]
 //!    (`framing.rs` in `vrf-net`, `stream.rs` here), so a mismatch is a wiring
 //!    bug, not sampling noise.
-//! 2. `preserved_unresolved` -- a historical name: failures whose whole stream
-//!    reached a raw preservation row, unresolved ClassNetCache blocks and
-//!    unparsed post-RepLayout tails alike -- is a subset of `total_failures`,
-//!    reconciles with `unresolved_rpc_payloads_preserved` and is never loss:
-//!    `real_loss() == total_failures - preserved_unresolved`, comparable with
-//!    `field_stream_failures + max(0, rpc_stream_failures -
-//!    unresolved_rpc_payloads_preserved)`.
+//! 2. `preserved_unresolved` (every failure whose whole stream reached a raw
+//!    preservation row, post-RepLayout tails included) is a subset of
+//!    `total_failures`, reconciles with `unresolved_rpc_payloads_preserved` and
+//!    is never loss: `real_loss() == total_failures - preserved_unresolved`.
 
 use std::sync::Arc;
 
@@ -38,8 +32,7 @@ pub const MAX_SAMPLES_PER_CELL: usize = 3;
 pub const MAX_FAILURE_CELLS: usize = 4096;
 
 /// Longest payload a sample keeps, in bytes: far above the unresolved payloads
-/// worth reading (the AbilitiesAndBuffs GAS state-sync stream, the
-/// brute-forceable ClassNetCache blocks), so it only stops one huge block.
+/// worth reading, so it only stops one huge block.
 pub const MAX_SAMPLE_PAYLOAD_BYTES: usize = 96;
 
 /// Payloads longer than this are not retained at all rather than truncated to
@@ -183,8 +176,7 @@ impl FailureAggregate {
         if cell.samples.len() >= MAX_SAMPLES_PER_CELL {
             return;
         }
-        // Too big to represent honestly with a prefix; record the event's
-        // shape without a payload instead.
+        // Too big for an honest prefix: the event's shape without a payload.
         let oversized = payload.len() as u64 > MAX_SAMPLE_PAYLOAD_BLOCK_BITS / 8;
         let take = payload.len().min(MAX_SAMPLE_PAYLOAD_BYTES);
         cell.samples.push(FailureSample {

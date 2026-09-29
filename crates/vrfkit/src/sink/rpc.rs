@@ -69,7 +69,6 @@ impl ExportSink<'_> {
         let param_group_path = self.find_rpc_param_group_path(func_name);
         let mut rpc_reader = reader;
 
-        // Property checksum bit (1 bit) -- always present for FunctionParameters.
         if rpc_reader.read_bit().is_err() {
             return false;
         }
@@ -86,7 +85,6 @@ impl ExportSink<'_> {
                 break;
             }
 
-            // FunctionParameters grammar: if exactly 1 bit remains, skip it.
             if rpc_reader.bits_remaining() == 1 {
                 let _ = rpc_reader.read_bit();
                 break;
@@ -326,9 +324,8 @@ impl ExportSink<'_> {
     /// Emit one row per member of a life-change array element; additive, the
     /// caller pushes the parent row either way. The rows carry `rpc_handle`, not
     /// the member's own handle: `tools/to_valplay_bundle.py` groups a call's
-    /// parameters by `(packet, actor, group, handle)`, and two child rows
-    /// injected under their struct handles measured as two bundle events where
-    /// the RPC handle gave one.
+    /// parameters by `(packet, actor, group, handle)`, so member handles would
+    /// split one call into several events.
     fn emit_life_change_array(
         &mut self,
         schema: &'static ArrayFieldSchema,

@@ -109,12 +109,8 @@ impl ExportSink<'_> {
 
     /// The current group's name and `compatible_checksum` for `handle`, from one
     /// schema walk (the checksum feeds the overlay's last-resort lookup; asking
-    /// separately would double the hottest loop's cost). Interned: 429,637
-    /// property rows and 342,735 RPC rows on the reference replay each cloned
-    /// the group's `String` name before.
+    /// separately would double the hottest loop's cost). The name is interned.
     fn resolve_field_name_and_checksum(&mut self, handle: u32) -> (Option<Arc<str>>, Option<u32>) {
-        // Destructured: borrowing `cache` and pooling into `channel_state` are
-        // disjoint field borrows.
         let Self {
             cache,
             channel_state,
@@ -194,10 +190,9 @@ impl FieldSink for ExportSink<'_> {
             let fallback_reader = reader.clone();
             let failed = self.decode_movement_rpc(reader);
             // A clean batch is movement.parquet row for row; a failed or partial
-            // one cannot reproduce its input, so the whole payload is kept here.
-            // Bits a section leaves unread in a "clean" batch reach no row: they
-            // are only tallied (`movement_*_section_tail*`) until measurement
-            // says whether they are loss (`RpcDecodeResult::sized_section_tails`).
+            // one cannot reproduce its input, so the whole payload is kept. Bits
+            // a section leaves unread in a clean batch are only tallied
+            // (`movement_*_section_tail*`).
             self.push_field(FieldValues {
                 handle,
                 field_name,
@@ -238,19 +233,13 @@ impl FieldSink for ExportSink<'_> {
 const BOMB_PLAYER_STATE: &str = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C";
 
 /// The ClassNetCache function count for `AbilitiesAndBuffsComponent`, whose
-/// `_ClassNetCache` group no VALORANT replay declares.
-///
-/// Brute-forced over fc 2-256 against 9,274 payloads of a reference replay: 34
-/// is the minimum that walks every payload cleanly (9,274/9,274), each one RPC
-/// at handle 1, and every fc in 34-65 gives handle 1 the same 6-bit width and
-/// so the same walk. One constant for all payloads, not a per-payload search:
-/// simple payloads also walk under smaller fc values, with garbage handles. A
-/// clean outer walk proves neither the width nor the undeclared group; the
-/// stronger evidence is the inner FastArray custom-delta framing, validated on
-/// 2,882,152 inner windows over 714 accepted exports (the separate
-/// `extract_fastarray_observations.py` recovers replication keys, item IDs and
-/// field boundaries). An update can fail or accidentally fit this walk, so
-/// consumers must keep the raw parent and validate the inner structure.
+/// `_ClassNetCache` group no VALORANT replay declares: the minimum fc that walks
+/// all 9,274 payloads of a reference replay as one handle-1 RPC (every fc in
+/// 34-65 gives handle 1 the same 6-bit width). One constant, not a per-payload
+/// search: smaller fc values also walk simple payloads, with garbage handles.
+/// A clean walk proves neither the width nor the group (the inner FastArray
+/// framing is the stronger evidence: `tools/extract_fastarray_observations.py`),
+/// so consumers keep the raw parent and validate the inner structure.
 const ABILITIES_AND_BUFFS_FC: u32 = 34;
 
 impl ExportSink<'_> {
@@ -306,9 +295,7 @@ impl ExportSink<'_> {
         character: Option<i64>,
     ) {
         // Through `canonical_group`: Swiftplay replicates these fields under
-        // `Swiftplay_EoRCredits_PlayerState_C`, and the raw path left
-        // `manifest.players` empty on 4 of 64 demo replays whose `Subject` was
-        // present on all ten actors.
+        // `Swiftplay_EoRCredits_PlayerState_C`.
         if vrf_decode::canonical_group(&self.current_group_path) != BOMB_PLAYER_STATE {
             return;
         }
@@ -327,8 +314,7 @@ impl ExportSink<'_> {
                 }
             }
             // Last *non-zero* write wins: a disconnect replicates it again as
-            // 0, which is not a NetGUID, and last-write-wins lost the real GUID
-            // for 9 players across 5 of 69 demos.
+            // 0, which is not a NetGUID.
             "SpawnedCharacter" => {
                 if let Some(c) = character.filter(|c| *c != 0) {
                     entry.character_net_guid = Some(c as u32);
@@ -454,12 +440,9 @@ impl ReplicationSink for ExportSink<'_> {
             );
         }
 
-        // A static actor has no archetype, so no class_path: it has no spawn
-        // block, and its class and archetype paths stay null. Its GUID path is
-        // the level's instance name, not a class: as a fallback it put
-        // `Ascent_C_0`, `AresWorldSettings` and the like on 27 opens of
-        // 02d4d478, each
-        // byte-identical to net_guids.parquet's `path` for the same GUID.
+        // A static actor has no archetype, so its class and archetype paths
+        // stay null: its GUID path is the level's instance name
+        // (`Ascent_C_0`), not a class.
         let (class_path, archetype_path) = self.actor_paths(Some(state.archetype_net_guid));
 
         let (spawn_x, spawn_y, spawn_z) = match state.spawn_location {
@@ -499,9 +482,7 @@ impl ReplicationSink for ExportSink<'_> {
 
         // `ChannelCloseReason::Dormancy` (vrf-net's `b_dormant`) stops
         // replication of a live actor; every other reason is the actor going
-        // away. As "close", a settling persistent effect read as a despawn and
-        // its wake-up as a second spawn. Both still emit a row; only the label
-        // differs.
+        // away. Both emit a row; only the label differs.
         let event = if dormant { "dormant" } else { "close" };
 
         self.records.actors.push(ActorRecord {
@@ -534,10 +515,8 @@ impl ReplicationSink for ExportSink<'_> {
         self.current_actor_guid = actor_net_guid.0;
         // An actor block carries no subobject GUID; a subobject block's GUID
         // tells a character's inventory slots apart (merged, a player seems to
-        // hold one item). A GUID of 0 stays `Some(0)`: it is read
-        // unconditionally and branched on by validity, while downstream `None`
-        // means "actor block", the adapter substitutes the actor GUID, and the
-        // block collapses onto the actor -- the merge cf97ecf undid.
+        // hold one item). A GUID of 0 stays `Some(0)`: downstream `None` means
+        // "actor block", and the block would collapse onto the actor.
         self.current_object_guid = if header.is_actor {
             None
         } else {
@@ -665,13 +644,10 @@ impl ReplicationSink for ExportSink<'_> {
 
     /// Attach the resolved group path to a stream failure: the only place both
     /// the bit offsets and the class to investigate are known. `function_count`
-    /// 0 names an unresolved group, a wrong non-zero count can still pick the
-    /// wrong handle width, and 1 and 2 both read at the parser's minimum of 2,
-    /// so this diagnostic cannot tell them apart. With diagnostics on, the
+    /// 0 names an unresolved group; 1 and 2 both read at the parser's minimum
+    /// of 2, so this line cannot tell them apart. With diagnostics on, the
     /// failure also goes to the bounded
-    /// [`FailureAggregate`](super::failure_stats::FailureAggregate) for per-group
-    /// population counts; `failure.payload_preserved` says whether the stream
-    /// reached a whole-payload raw row.
+    /// [`FailureAggregate`](super::failure_stats::FailureAggregate).
     fn on_stream_failure(&mut self, failure: StreamFailure) {
         let line = format!(
             "{:?} actor={} bits={} function_count={} consumed={} skipped={} group={}",
@@ -1685,10 +1661,9 @@ mod tests {
     }
 
     /// An unresolved payload for a group OTHER than AbilitiesAndBuffsComponent
-    /// produces no CNC rows: the brute force is gated. The payload is the one
-    /// `unresolved_abilities_and_buffs_emits_cnc_rpc_row` proves walks under
-    /// fc=34, not `[0xFF; 8]`, which `decode_cnc_payload` refuses by itself --
-    /// with that, deleting the group-path guard would leave this test green.
+    /// produces no CNC rows: the brute force is gated. The payload walks under
+    /// fc=34 (`unresolved_abilities_and_buffs_emits_cnc_rpc_row`), so only the
+    /// group-path guard can stop it.
     #[test]
     fn unresolved_payload_for_other_group_emits_no_cnc_rows() {
         let bits = one_h1_cnc_tail(&[true; 32]);
@@ -1740,9 +1715,8 @@ mod tests {
 
     /// Deleted and live blocks are both content blocks, as in vrf-net's
     /// `NetStats::content_blocks`, which `tools/verify_build_corpus.py` checks
-    /// `sink_content_blocks` against. Pinned here because a replay without
-    /// deleted blocks (the 13.06 one first measured has none) cannot notice
-    /// `on_deleted_block` forgetting its count.
+    /// `sink_content_blocks` against: a replay without deleted blocks cannot
+    /// notice `on_deleted_block` forgetting its count.
     #[test]
     fn deleted_and_live_blocks_both_advance_the_sink_block_tally() {
         let mut rig = Rig::default();
@@ -1825,29 +1799,28 @@ mod tests {
         const SWIFT: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
         const SPAWNED: &str = "SpawnedCharacter";
         const POSSESSED: &str = "PossessedCharacter";
-        let cases: [(&str, &[(&str, i64)], Option<u32>); 6] = [
-            (BOMB_PLAYER_STATE, &[(SPAWNED, 576)], Some(576)),
-            (SWIFT, &[(SPAWNED, 576)], Some(576)),
+        for (path, writes, want) in [
+            (BOMB_PLAYER_STATE, vec![(SPAWNED, 576)], Some(576)),
+            (SWIFT, vec![(SPAWNED, 576)], Some(576)),
             (
                 BOMB_PLAYER_STATE,
-                &[(SPAWNED, 1368), (SPAWNED, 0)],
+                vec![(SPAWNED, 1368), (SPAWNED, 0)],
                 Some(1368),
             ),
-            (BOMB_PLAYER_STATE, &[(SPAWNED, 0)], None),
-            (BOMB_PLAYER_STATE, &[(POSSESSED, 412)], None),
+            (BOMB_PLAYER_STATE, vec![(SPAWNED, 0)], None),
+            (BOMB_PLAYER_STATE, vec![(POSSESSED, 412)], None),
             (
                 BOMB_PLAYER_STATE,
-                &[(SPAWNED, 20), (POSSESSED, 412), (POSSESSED, 20)],
+                vec![(SPAWNED, 20), (POSSESSED, 412), (POSSESSED, 20)],
                 Some(20),
             ),
-        ];
-        for (path, writes, want) in cases {
+        ] {
             let mut rig = Rig::default();
             let mut sink = rig.sink();
             sink.current_group_path = Arc::from(path);
             sink.current_actor_guid = 42;
             sink.record_player_identity(Some("Subject"), Some("uuid-here"), None);
-            for &(name, guid) in writes {
+            for &(name, guid) in &writes {
                 sink.record_player_identity(Some(name), None, Some(guid));
             }
             let entry = &sink.channel_state.players[&42];
