@@ -271,12 +271,8 @@ impl PartialBunchAccumulator {
             }
         }
         if let Some(state) = self.fragments.get_mut(&ch_index) {
-            if !append_bits(
-                &mut state.buffer,
-                state.bit_count,
-                payload_data,
-                payload_bit_count,
-            ) {
+            debug_assert!(state.bit_count % 8 == 0, "appending after a final");
+            if !append_bytes(&mut state.buffer, payload_data, payload_bit_count) {
                 let cause = PartialDiscardCause::Resource(PartialResourceLimit::Allocation);
                 return refuse(self, header, displaced, cause);
             }
@@ -459,43 +455,18 @@ impl Default for PartialBunchAccumulator {
     }
 }
 
-/// Append `src_bit_count` bits from `src` at bit offset `dst_bit_offset` in `dst`.
-fn append_bits(dst: &mut Vec<u8>, dst_bit_offset: usize, src: &[u8], src_bit_count: usize) -> bool {
-    let Some(new_total) = dst_bit_offset.checked_add(src_bit_count) else {
-        return false;
-    };
-    let new_byte_count = new_total.div_ceil(8);
-    if new_byte_count > dst.len()
-        && dst
-            .try_reserve_exact(new_byte_count.saturating_sub(dst.len()))
-            .is_err()
-    {
+/// Append `bit_count` bits of `src` to `dst`, which ends on a byte boundary
+/// (only a final fragment is unaligned, and nothing follows it), clearing the
+/// last byte's unused high bits. `false` when the reservation fails.
+fn append_bytes(dst: &mut Vec<u8>, src: &[u8], bit_count: usize) -> bool {
+    let byte_count = bit_count.div_ceil(8);
+    if dst.try_reserve_exact(byte_count).is_err() {
         return false;
     }
-
-    if dst_bit_offset % 8 == 0 {
-        // Every `add_fragment` append lands here (it refuses unaligned
-        // non-final fragments; nothing follows a final): copy whole bytes and
-        // clear the last one's unused high bits, as the bit loop leaves them.
-        dst.resize(dst_bit_offset / 8, 0);
-        dst.extend_from_slice(&src[..src_bit_count.div_ceil(8)]);
-        let tail_bits = src_bit_count % 8;
-        if tail_bits != 0 {
-            let last = dst.len() - 1;
-            dst[last] &= (1 << tail_bits) - 1;
-        }
-        return true;
-    }
-
-    dst.resize(new_byte_count, 0);
-
-    for i in 0..src_bit_count {
-        let src_bit = (src[i >> 3] >> (i & 7)) & 1;
-        let dest_bit = dst_bit_offset + i;
-        if src_bit != 0 {
-            dst[dest_bit >> 3] |= 1 << (dest_bit & 7);
-        }
-        // dst is already zeroed from resize, so no need to clear bits.
+    dst.extend_from_slice(&src[..byte_count]);
+    if bit_count % 8 != 0 {
+        let last = dst.len() - 1;
+        dst[last] &= (1 << (bit_count % 8)) - 1;
     }
     true
 }
@@ -505,21 +476,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn append_bits_byte_aligned() {
+    fn append_bytes_keeps_only_the_declared_bits() {
         let mut dst = vec![0xAA];
-        assert!(append_bits(&mut dst, 8, &[0x55], 8));
-        assert_eq!(dst, vec![0xAA, 0x55]);
-        // A partial last byte keeps only its own bits.
-        assert!(append_bits(&mut dst, 16, &[0xFF], 5));
+        assert!(append_bytes(&mut dst, &[0x55], 8));
+        assert!(append_bytes(&mut dst, &[0xFF], 5));
         assert_eq!(dst, vec![0xAA, 0x55, 0x1F]);
-    }
-
-    #[test]
-    fn append_bits_unaligned() {
-        let mut dst = vec![0x0F]; // bits 0..3 = 1, bits 4..7 = 0
-        assert!(append_bits(&mut dst, 4, &[0x03], 4)); // add 4 bits: 1100 -> 0x03 reversed
-        // dst should be: low nibble 0x0F, high nibble 0x30 = 0x3F
-        assert_eq!(dst[0], 0x3F);
     }
 
     /// The three counters `add_fragment` moves, threaded through every call.

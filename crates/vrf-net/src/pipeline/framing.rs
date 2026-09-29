@@ -233,7 +233,7 @@ fn abandoned_from(payload: &BitReader<'_>, block_start: u64) -> u64 {
 /// This and its ClassNetCache twin charge `bit_count`, never
 /// `bits_remaining()`, which is 0 when the last `IntPacked` expires at the
 /// block end (see [`abandoned_from`]). The whole block is also what the
-/// transform and `with_bit_len` failure paths charge, and what
+/// transform failure path charges, and what
 /// [`NetStats::lost_content_blocks`] counts as lost; nothing downstream
 /// re-charges it. Records emitted before the failure are then counted in
 /// `fields` / `rpcs` *and* here: the doomed record's start is not returned on
@@ -250,25 +250,8 @@ pub(super) fn decode_and_parse_rep_layout(
         return false;
     };
 
-    let Ok(mut field_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
-        // Never observed (the scratch is sized by the same bit count); told to
-        // the sink so its failure aggregate reconciles with the counter.
-        sink.on_stream_failure(StreamFailure {
-            kind: StreamKind::RepLayout,
-            actor_net_guid,
-            bit_count: bit_count as u32,
-            function_count: 0,
-            consumed_bits: 0,
-            remaining_bits: bit_count as u64,
-            cause: StreamFailureCause::WindowOpenFailed,
-            record_handle: None,
-            record_offset: None,
-            payload_preserved: false,
-        });
-        stage.stats.field_stream_failures += 1;
-        stage.stats.skipped_bits += bit_count as u64;
-        return true;
-    };
+    let mut field_reader = BitReader::with_bit_len(&stage.scratch[..byte_count], bit_count as u64)
+        .expect("scratch holds ceil(bit_count / 8) bytes");
     let detailed = sink.wants_stream_failure_details();
     let mut walk = field::WalkContext::default();
     let context = if detailed { Some(&mut walk) } else { None };
@@ -388,24 +371,8 @@ pub(super) fn decode_and_parse_class_net_cache(
         return false;
     };
 
-    let Ok(mut rpc_reader) = BitReader::with_bit_len(stage.scratch, bit_count as u64) else {
-        // Never observed; see the RepLayout twin.
-        sink.on_stream_failure(StreamFailure {
-            kind: StreamKind::Rpc,
-            actor_net_guid,
-            bit_count: bit_count as u32,
-            function_count,
-            consumed_bits: 0,
-            remaining_bits: bit_count as u64,
-            cause: StreamFailureCause::WindowOpenFailed,
-            record_handle: None,
-            record_offset: None,
-            payload_preserved: false,
-        });
-        stage.stats.rpc_stream_failures += 1;
-        stage.stats.skipped_bits += bit_count as u64;
-        return true;
-    };
+    let mut rpc_reader = BitReader::with_bit_len(&stage.scratch[..byte_count], bit_count as u64)
+        .expect("scratch holds ceil(bit_count / 8) bytes");
     let detailed = sink.wants_stream_failure_details();
     let mut walk = field::WalkContext::default();
     let context = if detailed { Some(&mut walk) } else { None };

@@ -98,9 +98,8 @@ pub enum StreamFailureCause {
     /// strict ClassNetCache shape was not verified: uncertainty, not a failed
     /// read or a missing count.
     UnverifiedRepLayoutTail,
-    /// The decoded payload could not be opened as a bit window. Never observed
-    /// (the scratch is sized by the same bit count); named so a future trigger
-    /// is countable on its own.
+    /// Never constructed: the decoded window always opens, its scratch holding
+    /// `ceil(bit_count / 8)` bytes.
     WindowOpenFailed,
 }
 
@@ -231,10 +230,9 @@ pub trait ReplicationSink: GuidPathSink + FieldSink {
     fn on_stream_failure(&mut self, _failure: StreamFailure) {}
 
     /// The decoded payload of a block whose inner stream could not be walked,
-    /// after [`Self::on_stream_failure`] whenever the decoded bytes exist --
-    /// not for a window that failed to open, nor for unresolved ClassNetCache
-    /// blocks ([`Self::on_unresolved_class_net_cache_payload`]). Diagnostics
-    /// only; default no-op.
+    /// only when [`Self::wants_stream_failure_details`], and not for unresolved
+    /// ClassNetCache blocks ([`Self::on_unresolved_class_net_cache_payload`]).
+    /// Diagnostics only; default no-op.
     fn on_stream_failure_payload(&mut self, _failure: StreamFailure, _payload: &[u8]) {}
 
     /// Preserve one whole decoded ClassNetCache payload whose function table
