@@ -25,13 +25,12 @@ use std::fs;
 use std::time::Instant;
 
 use vrf_container::parse_preamble;
-use vrf_decode::OverlayErrorReport;
 use vrf_net::stats::{DiagnosticEvent, NetStats, SkipReason};
 
 use crate::error::CliError;
 use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
 use crate::report;
-use crate::sink::SinkTotals;
+use crate::sink::ExportStats;
 
 /// What a validation run concluded, and the exit code it earns.
 ///
@@ -110,8 +109,8 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     eprintln!("validating RepLayout grammar on framed ReplayData content blocks...");
 
     let mut pass = Pass::new(&replay)?;
-    // Folded per packet as every pass does, never printed.
-    let (mut sink, mut errors) = (SinkTotals::default(), OverlayErrorReport::default());
+    // Counted as every pass does, never printed.
+    let mut sink = ExportStats::default();
     // Counted, not merely skipped: see `checkpoint_scope_note`.
     let mut checkpoint_chunks: u64 = 0;
     let mut replay_data_trailing_bytes = 0u64;
@@ -121,7 +120,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
             Chunk::ReplayData(frames, unread) => {
                 replay_data_trailing_bytes += unread as u64;
                 // Never drained: each packet's sink clears them.
-                pass.walk(&frames, &mut sink, &mut errors, |_| Ok(()))?;
+                pass.walk(&frames, &mut sink, |_| Ok(()))?;
             }
             Chunk::Event(_) | Chunk::Other => {}
         }

@@ -1,5 +1,5 @@
-//! Hand-rolled JSON for manifest.json: no serde, and one String, which is fine
-//! because the export groups run to a few hundred entries.
+//! Hand-rolled JSON for manifest.json: no serde; one member per line, joined
+//! by [`Object`] and [`array`].
 //!
 //! The header's game-specific data entries are JSON documents themselves (on
 //! 02d4d478 entry 1 is a 219,304-character match roster). They are emitted as
@@ -7,8 +7,8 @@
 //! number formatting, key order or duplicate keys; a consumer recovers the
 //! object with one nested parse.
 
+use std::fmt::Display;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 use vrf_container::Preamble;
@@ -20,7 +20,7 @@ use vrf_schema::NetGuidCache;
 use crate::driver::RunTotals;
 use crate::driver::checkpoints::CheckpointStats;
 use crate::error::CliError;
-use crate::sink::SinkTotals;
+use crate::sink::{ExportStats, PlayerIdentity};
 
 /// Every run-level value needed to judge whether the published tables are
 /// complete and how much typed decoding fell back to preserved raw data.
@@ -37,7 +37,7 @@ pub fn write_manifest(
     file_size: usize,
     preamble: &Preamble,
     cache: &NetGuidCache,
-    players: &[(u32, Option<String>, Option<u32>)],
+    players: &[(u32, &PlayerIdentity)],
     quality: &ManifestQuality<'_>,
 ) -> Result<(), CliError> {
     let stats = quality.net;
@@ -45,672 +45,333 @@ pub fn write_manifest(
     let ver = &header.replay_version;
     let info = &preamble.info;
 
-    // The game-specific data blob dominates the document size; reserve for it
-    // up front rather than growing a quarter-megabyte String by doubling.
-    let gsd_bytes: usize = header.game_specific_data.iter().map(String::len).sum();
-    let mut out = String::with_capacity(64 * 1024 + gsd_bytes * 2);
-    out.push_str("{\n");
-
+    let mut doc = Object::new(0);
     // The first six keys are read by tools/to_valplay_bundle.py; keep their
     // names and types stable.
-    wkvs(
-        &mut out,
-        &[
-            ("source_file", json_str(source_file)),
-            ("source_size_bytes", file_size.to_string()),
-            ("replay_build", json_str(&ver.branch)),
-            (
-                "replay_version",
-                json_str(&format!("{}.{}.{}", ver.major, ver.minor, ver.patch)),
+    doc.add("source_file", json_str(source_file))
+        .add("source_size_bytes", file_size)
+        .add("replay_build", json_str(&ver.branch))
+        .add(
+            "replay_version",
+            json_str(&format!("{}.{}.{}", ver.major, ver.minor, ver.patch)),
+        )
+        .add("replay_changelist", ver.changelist)
+        .add("duration_ms", info.length_in_ms)
+        .add("elapsed_ms", quality.run.elapsed.as_millis())
+        .add("friendly_name", json_str(&info.friendly_name))
+        .add("is_live", info.is_live)
+        .add("compressed", info.compressed)
+        .add("encrypted", info.encrypted)
+        // Unreal FDateTime ticks (100 ns since 0001-01-01, not FILETIME's
+        // 1601), raw: the wire records no timezone.
+        .add("timestamp_ticks", info.timestamp)
+        // The info section's unvalidated copy (480767974 on 02d4d478); the
+        // header's validated network_version (19 there) is not emitted.
+        .add("info_network_version", info.network_version)
+        .add("network_checksum", header.network_checksum)
+        .add(
+            "game_network_protocol_version",
+            header.game_network_protocol_version,
+        )
+        // Four u32 words in serialisation order; a canonical GUID string
+        // would impose a byte order nothing here can confirm.
+        .add(
+            "guid",
+            format!(
+                "[{}, {}, {}, {}]",
+                header.guid[0], header.guid[1], header.guid[2], header.guid[3]
             ),
-            ("replay_changelist", ver.changelist.to_string()),
-            ("duration_ms", info.length_in_ms.to_string()),
-            ("elapsed_ms", quality.run.elapsed.as_millis().to_string()),
-            ("friendly_name", json_str(&info.friendly_name)),
-            ("is_live", json_bool(info.is_live).to_owned()),
-            ("compressed", json_bool(info.compressed).to_owned()),
-            ("encrypted", json_bool(info.encrypted).to_owned()),
-            // Unreal FDateTime ticks (100 ns since 0001-01-01, not FILETIME's
-            // 1601: read as FILETIME the reference replay dates to 3626).
-            // Raw, because the wire records no timezone.
-            ("timestamp_ticks", info.timestamp.to_string()),
-            // The info section's copy, which nothing validates (480767974 on
-            // 02d4d478). The header's validated network_version (19 there) is
-            // not emitted; `game_network_protocol_version` is another field.
-            ("info_network_version", info.network_version.to_string()),
-            ("network_checksum", header.network_checksum.to_string()),
-            (
-                "game_network_protocol_version",
-                header.game_network_protocol_version.to_string(),
-            ),
-            // Four u32 words in serialisation order; a canonical GUID string
-            // would impose a byte order nothing here can confirm.
-            (
-                "guid",
-                format!(
-                    "[{}, {}, {}, {}]",
-                    header.guid[0], header.guid[1], header.guid[2], header.guid[3]
-                ),
-            ),
-            ("ue4_version", header.ue4_version.to_string()),
-            ("ue5_version", header.ue5_version.to_string()),
-            (
-                "package_version_license",
-                header.package_version_license.to_string(),
-            ),
-            ("flags", header.flags.to_string()),
-            ("platform", json_str(&header.platform)),
-            ("build_config", header.build_config.to_string()),
-            ("build_target_type", header.build_target_type.to_string()),
-            // Expected zero; see `ReplayHeader::trailing_bytes`.
-            ("header_trailing_bytes", header.trailing_bytes.to_string()),
-            ("min_record_hz", json_f32(header.min_record_hz)),
-            ("max_record_hz", json_f32(header.max_record_hz)),
-            ("frame_limit_in_ms", json_f32(header.frame_limit_in_ms)),
-            (
-                "checkpoint_limit_in_ms",
-                json_f32(header.checkpoint_limit_in_ms),
-            ),
-        ],
-        1,
-    );
-
-    let levels: Vec<String> = header
-        .level_names_and_times
-        .iter()
+        )
+        .add("ue4_version", header.ue4_version)
+        .add("ue5_version", header.ue5_version)
+        .add("package_version_license", header.package_version_license)
+        .add("flags", header.flags)
+        .add("platform", json_str(&header.platform))
+        .add("build_config", header.build_config)
+        .add("build_target_type", header.build_target_type)
+        // Expected zero; see `ReplayHeader::trailing_bytes`.
+        .add("header_trailing_bytes", header.trailing_bytes)
+        .add("min_record_hz", json_f32(header.min_record_hz))
+        .add("max_record_hz", json_f32(header.max_record_hz))
+        .add("frame_limit_in_ms", json_f32(header.frame_limit_in_ms))
+        .add(
+            "checkpoint_limit_in_ms",
+            json_f32(header.checkpoint_limit_in_ms),
+        );
+    let levels = (header.level_names_and_times.iter())
         .map(|(name, time)| format!("{{ \"name\": {}, \"time_ms\": {time} }}", json_str(name)))
         .collect();
-    wkv_array(&mut out, "level_names_and_times", &levels, 1);
-
+    doc.add("level_names_and_times", array(1, levels));
     // After the scalars, so the readable metadata precedes the large blob.
-    let gsd: Vec<String> = header
+    let gsd = header
         .game_specific_data
         .iter()
         .map(|s| json_str(s))
         .collect();
-    wkv_array(&mut out, "game_specific_data", &gsd, 1);
+    doc.add("game_specific_data", array(1, gsd));
 
-    out.push_str("  \"stats\": {\n");
-    wkvs(
-        &mut out,
-        &[
-            ("packet_count", quality.run.total_packets.to_string()),
-            ("bunch_count", stats.bunches.to_string()),
-            (
-                "malformed_packet_count",
-                stats.malformed_packets.to_string(),
-            ),
-            ("partial_error_count", stats.partial_errors.to_string()),
-            ("partial_fragments", stats.partial_fragments.to_string()),
-        ],
-        2,
-    );
-    wkvl(
-        &mut out,
-        "partial_completed",
-        &stats.partial_completed.to_string(),
-        2,
-    );
-    out.push_str("  },\n");
-
-    out.push_str("  \"counts\": {\n");
-    wkvs(
-        &mut out,
-        &[
-            ("content_blocks", stats.content_blocks.to_string()),
-            ("rep_layout_blocks", stats.rep_layout_blocks.to_string()),
-            (
-                "class_net_cache_blocks",
-                stats.class_net_cache_blocks.to_string(),
-            ),
-            ("deleted_blocks", stats.deleted_blocks.to_string()),
-            ("fields", stats.fields.to_string()),
-            ("rpcs", stats.rpcs.to_string()),
-            ("actor_opens", stats.actor_opens.to_string()),
-            ("actor_closes", stats.actor_closes.to_string()),
-            ("exported_guids", stats.exported_guids.to_string()),
-            ("skipped_bits", stats.skipped_bits.to_string()),
-        ],
-        2,
-    );
-    wkvl(
-        &mut out,
-        "malformed_content_blocks",
-        &stats.malformed_content_blocks.to_string(),
-        2,
-    );
-    out.push_str("  },\n");
-
+    let mut summary = Object::new(1);
+    summary
+        .add("packet_count", quality.run.total_packets)
+        .add("bunch_count", stats.bunches)
+        .add("malformed_packet_count", stats.malformed_packets)
+        .add("partial_error_count", stats.partial_errors)
+        .add("partial_fragments", stats.partial_fragments)
+        .add("partial_completed", stats.partial_completed);
+    doc.add("stats", summary.render());
+    let mut counts = Object::new(1);
+    counts
+        .add("content_blocks", stats.content_blocks)
+        .add("rep_layout_blocks", stats.rep_layout_blocks)
+        .add("class_net_cache_blocks", stats.class_net_cache_blocks)
+        .add("deleted_blocks", stats.deleted_blocks)
+        .add("fields", stats.fields)
+        .add("rpcs", stats.rpcs)
+        .add("actor_opens", stats.actor_opens)
+        .add("actor_closes", stats.actor_closes)
+        .add("exported_guids", stats.exported_guids)
+        .add("skipped_bits", stats.skipped_bits)
+        .add("malformed_content_blocks", stats.malformed_content_blocks);
+    doc.add("counts", counts.render());
     // Every loss and fallback counter, checkpoint pass included; `stats` and
     // `counts` above stay unchanged for the readers they already have.
-    out.push_str(&quality_json(quality));
-    out.push_str(",\n");
+    doc.add("quality", quality_json(quality));
 
     // Each BombPlayerState actor's account `subject` and `SpawnedCharacter`
     // (== movement.character_net_guid): the join from actor-keyed tables to
     // playerLoadouts identities, even when two players share an agent.
-    out.push_str("  \"players\": [");
-    if players.is_empty() {
-        out.push_str("],\n");
-    } else {
-        out.push('\n');
-        for (i, (guid, subject, character)) in players.iter().enumerate() {
-            out.push_str("    { ");
-            out.push_str(&format!(
-                "\"actor_net_guid\": {guid}, \"subject\": {}, \"character_net_guid\": {}",
-                json_opt(subject, |s| json_str(s)),
-                json_opt(character, u32::to_string),
-            ));
-            out.push_str(" }");
-            if i + 1 < players.len() {
-                out.push(',');
-            }
-            out.push('\n');
-        }
-        out.push_str("  ],\n");
-    }
+    let players = (players.iter())
+        .map(|(guid, id)| {
+            format!(
+                "{{ \"actor_net_guid\": {guid}, \"subject\": {}, \"character_net_guid\": {} }}",
+                json_option(id.subject.as_deref()),
+                id.character_net_guid
+                    .map_or_else(|| "null".to_owned(), |guid| guid.to_string())
+            )
+        })
+        .collect();
+    doc.add("players", array(1, players));
+    // Net-field exports the cache could not place (an out-of-range handle).
+    // Expected zero.
+    doc.add("dropped_field_exports", cache.dropped_field_exports());
+    let groups = (cache.groups().iter())
+        .map(|group| {
+            let fields = (group.populated_fields())
+                .map(|field| {
+                    format!(
+                        "{{ \"handle\": {}, \"name\": {}, \"compatible_checksum\": {} }}",
+                        field.handle,
+                        json_str(&field.name),
+                        field.compatible_checksum
+                    )
+                })
+                .collect();
+            let mut object = Object::new(2);
+            object
+                .add("path", json_str(&group.path))
+                .add("path_name_index", group.path_name_index)
+                .add("fields", array(3, fields));
+            object.render()
+        })
+        .collect();
+    doc.add("net_field_export_groups", array(1, groups));
 
-    // Net-field exports the cache could not place: an out-of-range handle (an
-    // unknown group cannot reach this call site). Expected zero.
-    wkv(
-        &mut out,
-        "dropped_field_exports",
-        &cache.dropped_field_exports().to_string(),
-        1,
-    );
-
-    out.push_str("  \"net_field_export_groups\": [\n");
-    let groups = cache.groups();
-    for (gi, group) in groups.iter().enumerate() {
-        out.push_str("    {\n");
-        wkv(&mut out, "path", &json_str(&group.path), 3);
-        wkv(
-            &mut out,
-            "path_name_index",
-            &group.path_name_index.to_string(),
-            3,
-        );
-        out.push_str("      \"fields\": [");
-        let populated: Vec<_> = group.populated_fields().collect();
-        if populated.is_empty() {
-            out.push(']');
-        } else {
-            out.push('\n');
-            for (fi, field) in populated.iter().enumerate() {
-                out.push_str("        { ");
-                out.push_str(&format!(
-                    "\"handle\": {}, \"name\": {}, \"compatible_checksum\": {}",
-                    field.handle,
-                    json_str(&field.name),
-                    field.compatible_checksum
-                ));
-                out.push_str(" }");
-                if fi + 1 < populated.len() {
-                    out.push(',');
-                }
-                out.push('\n');
-            }
-            out.push_str("      ]");
-        }
-        out.push('\n');
-        out.push_str("    }");
-        if gi + 1 < groups.len() {
-            out.push(',');
-        }
-        out.push('\n');
-    }
-    out.push_str("  ]\n");
-    out.push_str("}\n");
-
-    let mut file = fs::File::create(path)?;
-    file.write_all(out.as_bytes())?;
+    fs::write(path, doc.render() + "\n")?;
     Ok(())
 }
 
 fn quality_json(quality: &ManifestQuality<'_>) -> String {
-    let mut out = String::with_capacity(8 * 1024);
-    out.push_str("  \"quality\": {\n");
-    // `content_blocks_lost` first: the verdict on whether anything is missing
-    // from the tables, from the function `validate` prints, zero included.
-    // Everything after it is evidence.
-    let q = quality;
-    let run = q.run;
-    wkvs(
-        &mut out,
-        &[
-            (
-                "content_blocks_lost",
-                q.net.lost_content_blocks().to_string(),
-            ),
-            ("chunks_processed", run.chunks_processed.to_string()),
-            ("export_groups", run.export_groups.to_string()),
-            ("movement_rows", run.movement_rows.to_string()),
-            ("net_guid_rows", run.net_guid_rows.to_string()),
-            ("event_rows", run.event_rows.to_string()),
-            ("partial_rows", run.partial_rows.to_string()),
-            ("partial_bits", run.partial_bits.to_string()),
-            ("event_trailing_bytes", run.event_trailing_bytes.to_string()),
-            (
-                "replay_data_trailing_bytes",
-                run.replay_data_trailing_bytes.to_string(),
-            ),
-        ],
-        2,
-    );
-    write_frame_skips(&mut out, "frame_", &run.frame_skips, 2);
-    wkv(
-        &mut out,
-        "frame_non_finite_times",
-        &run.non_finite_frame_times.to_string(),
-        2,
-    );
-    wkvs(
-        &mut out,
-        &[
-            (
-                "event_layout_mismatches",
-                run.event_layout_mismatches.to_string(),
-            ),
-            (
-                "event_first_layout_mismatch",
-                json_option(run.event_first_layout_mismatch.as_deref()),
-            ),
-            (
-                "event_payloads_decoded",
-                run.event_payloads_decoded.to_string(),
-            ),
-            (
-                "event_payload_unknown_groups",
-                run.event_payload_unknown_groups.to_string(),
-            ),
-            (
-                "overlay_error_buckets",
-                q.error_report.bucket_count().to_string(),
-            ),
-            (
-                "overlay_errors_reported",
-                q.error_report.total_errors().to_string(),
-            ),
-            (
-                "checkpoints_enabled",
-                json_bool(q.checkpoints.is_some()).to_owned(),
-            ),
-        ],
-        2,
-    );
-    write_net_quality(&mut out, "net", quality.net, 2, true);
-    write_sink_quality(&mut out, "sink", &run.sink, 2, true);
-
-    match quality.checkpoints {
-        Some(checkpoints) => {
-            out.push_str("    \"checkpoints\": {\n");
-            let cp = checkpoints;
-            wkvs(
-                &mut out,
-                &[
-                    (
-                        "checkpoint_path_resolution_mode",
-                        json_str("preceding_literal_zero_based"),
-                    ),
-                    ("checkpoint_literal_paths", cp.literal_paths.to_string()),
-                    ("checkpoint_indexed_paths", cp.indexed_paths.to_string()),
-                    (
-                        "checkpoint_resolved_path_indices",
-                        cp.resolved_path_indices.to_string(),
-                    ),
-                    ("checkpoint_chunks", cp.chunks.to_string()),
-                    // The summary's `Trailing bytes:`; its ReplayData twin is
-                    // `replay_data_trailing_bytes` above.
-                    ("checkpoint_trailing_bytes", cp.trailing_bytes.to_string()),
-                    ("checkpoint_guid_entries", cp.guid_entries.to_string()),
-                    ("checkpoint_group_records", cp.group_records.to_string()),
-                    ("checkpoint_exported_fields", cp.exported_fields.to_string()),
-                    ("checkpoint_frames", cp.frames.to_string()),
-                ],
-                3,
-            );
-            write_frame_skips(&mut out, "checkpoint_frame_", &cp.frame_skips, 3);
-            wkv(
-                &mut out,
-                "checkpoint_frame_non_finite_times",
-                &cp.non_finite_frame_times.to_string(),
-                3,
-            );
-            wkvs(
-                &mut out,
-                &[
-                    ("checkpoint_packets", cp.packets.to_string()),
-                    ("checkpoint_field_rows", cp.field_rows.to_string()),
-                    (
-                        "checkpoint_actor_rows_written",
-                        cp.actor_rows_written.to_string(),
-                    ),
-                    (
-                        "checkpoint_net_guid_rows_written",
-                        cp.net_guid_rows_written.to_string(),
-                    ),
-                    (
-                        "checkpoint_block_rows_written",
-                        cp.block_rows_written.to_string(),
-                    ),
-                    (
-                        "checkpoint_guid_entry_rows_written",
-                        cp.guid_entry_rows_written.to_string(),
-                    ),
-                    (
-                        "checkpoint_export_group_rows_written",
-                        cp.export_group_rows_written.to_string(),
-                    ),
-                    (
-                        "checkpoint_export_field_rows_written",
-                        cp.export_field_rows_written.to_string(),
-                    ),
-                    ("checkpoint_partial_rows", cp.partial_rows.to_string()),
-                    ("checkpoint_partial_bits", cp.partial_bits.to_string()),
-                    (
-                        "checkpoint_actor_rows_dropped",
-                        cp.actor_rows_dropped.to_string(),
-                    ),
-                    (
-                        "checkpoint_movement_rows_dropped",
-                        cp.movement_rows_dropped.to_string(),
-                    ),
-                ],
-                3,
-            );
-            write_net_quality(&mut out, "net", &checkpoints.net, 3, true);
-            write_sink_quality(&mut out, "sink", &checkpoints.sink, 3, false);
-            out.push_str("    }\n");
-        }
-        None => wkvl(&mut out, "checkpoints", "null", 2),
-    }
-    out.push_str("  }");
-    out
+    let run = quality.run;
+    let mut out = Object::new(1);
+    // First: the verdict on whether anything is missing from the tables, from
+    // the function `validate` prints. Everything after it is evidence.
+    out.add("content_blocks_lost", quality.net.lost_content_blocks())
+        .add("chunks_processed", run.chunks_processed)
+        .add("export_groups", run.export_groups)
+        .add("movement_rows", run.movement_rows)
+        .add("net_guid_rows", run.net_guid_rows)
+        .add("event_rows", run.event_rows)
+        .add("partial_rows", run.partial_rows)
+        .add("partial_bits", run.partial_bits)
+        .add("event_trailing_bytes", run.event_trailing_bytes)
+        .add("replay_data_trailing_bytes", run.replay_data_trailing_bytes);
+    add_frame_skips(&mut out, "frame_", &run.frame_skips);
+    out.add("frame_non_finite_times", run.non_finite_frame_times)
+        .add("event_layout_mismatches", run.event_layout_mismatches)
+        .add(
+            "event_first_layout_mismatch",
+            json_option(run.event_first_layout_mismatch.as_deref()),
+        )
+        .add("event_payloads_decoded", run.event_payloads_decoded)
+        .add(
+            "event_payload_unknown_groups",
+            run.event_payload_unknown_groups,
+        )
+        .add("overlay_error_buckets", quality.error_report.bucket_count())
+        .add(
+            "overlay_errors_reported",
+            quality.error_report.total_errors(),
+        )
+        .add("checkpoints_enabled", quality.checkpoints.is_some())
+        .add("net", net_json(2, quality.net))
+        .add("sink", sink_json(2, &run.sink));
+    let checkpoints = quality
+        .checkpoints
+        .map_or_else(|| "null".to_owned(), checkpoints_json);
+    out.add("checkpoints", checkpoints);
+    out.render()
 }
 
-/// The three [`FrameSkips`] tallies as `<prefix>external_data_blobs`,
-/// `<prefix>external_data_bytes` and `<prefix>game_specific_bytes`.
-fn write_frame_skips(out: &mut String, prefix: &str, skips: &FrameSkips, indent: usize) {
-    for (key, value) in [
-        ("external_data_blobs", skips.external_data_blobs),
-        ("external_data_bytes", skips.external_data_bytes),
-        ("game_specific_bytes", skips.game_specific_bytes),
-    ] {
-        wkv(out, &format!("{prefix}{key}"), &value.to_string(), indent);
-    }
+fn checkpoints_json(cp: &CheckpointStats) -> String {
+    let mut out = Object::new(2);
+    out.add(
+        "checkpoint_path_resolution_mode",
+        json_str("preceding_literal_zero_based"),
+    )
+    .add("checkpoint_literal_paths", cp.literal_paths)
+    .add("checkpoint_indexed_paths", cp.indexed_paths)
+    .add("checkpoint_resolved_path_indices", cp.resolved_path_indices)
+    .add("checkpoint_chunks", cp.chunks)
+    // The summary's `Trailing bytes:`; its ReplayData twin is
+    // `replay_data_trailing_bytes`.
+    .add("checkpoint_trailing_bytes", cp.trailing_bytes)
+    .add("checkpoint_guid_entries", cp.guid_entries)
+    .add("checkpoint_group_records", cp.group_records)
+    .add("checkpoint_exported_fields", cp.exported_fields)
+    .add("checkpoint_frames", cp.frames);
+    add_frame_skips(&mut out, "checkpoint_frame_", &cp.frame_skips);
+    out.add(
+        "checkpoint_frame_non_finite_times",
+        cp.non_finite_frame_times,
+    )
+    .add("checkpoint_packets", cp.packets)
+    .add("checkpoint_field_rows", cp.field_rows)
+    .add("checkpoint_actor_rows_written", cp.actor_rows_written)
+    .add("checkpoint_net_guid_rows_written", cp.net_guid_rows_written)
+    .add("checkpoint_block_rows_written", cp.block_rows_written)
+    .add(
+        "checkpoint_guid_entry_rows_written",
+        cp.guid_entry_rows_written,
+    )
+    .add(
+        "checkpoint_export_group_rows_written",
+        cp.export_group_rows_written,
+    )
+    .add(
+        "checkpoint_export_field_rows_written",
+        cp.export_field_rows_written,
+    )
+    .add("checkpoint_partial_rows", cp.partial_rows)
+    .add("checkpoint_partial_bits", cp.partial_bits)
+    .add("checkpoint_actor_rows_dropped", cp.actor_rows_dropped)
+    .add("checkpoint_movement_rows_dropped", cp.movement_rows_dropped)
+    .add("net", net_json(3, &cp.net))
+    .add("sink", sink_json(3, &cp.sink));
+    out.render()
 }
 
-fn write_net_quality(
-    out: &mut String,
-    key: &str,
-    stats: &NetStats,
-    indent: usize,
-    trailing_comma: bool,
-) {
-    push_indent(out, indent);
-    out.push_str(&format!("\"{key}\": {{\n"));
-    let inner = indent + 1;
-    for (key, value) in [
-        ("packets", stats.packets),
-        ("malformed_packets", stats.malformed_packets),
-        ("bunches", stats.bunches),
-        ("partial_errors", stats.partial_errors),
-        ("partial_fragments", stats.partial_fragments),
-        ("partial_completed", stats.partial_completed),
-        ("unfinished_partials", stats.unfinished_partials),
-        ("unfinished_partial_bits", stats.unfinished_partial_bits),
-        ("bunch_header_failures", stats.bunch_header_failures),
-        ("content_blocks", stats.content_blocks),
-        ("rep_layout_blocks", stats.rep_layout_blocks),
-        ("class_net_cache_blocks", stats.class_net_cache_blocks),
-        ("deleted_blocks", stats.deleted_blocks),
-        ("fields", stats.fields),
-        ("rpcs", stats.rpcs),
-        ("skipped_bits", stats.skipped_bits),
-        (
-            "content_block_framing_failures",
-            stats.content_block_framing_failures,
-        ),
-        ("malformed_content_blocks", stats.malformed_content_blocks),
-        ("transform_failures", stats.transform_failures),
-        ("field_stream_failures", stats.field_stream_failures),
-        ("rpc_stream_failures", stats.rpc_stream_failures),
-        (
-            "unresolved_rpc_payloads_preserved",
-            stats.unresolved_rpc_payloads_preserved,
-        ),
-        ("actor_opens", stats.actor_opens),
-        ("actor_closes", stats.actor_closes),
-        (
-            "channel_reopens_while_open",
-            stats.channel_reopens_while_open,
-        ),
-        ("actor_opens_missing_spawn", stats.actor_opens_missing_spawn),
-        ("failed_reopens_while_open", stats.failed_reopens_while_open),
-        (
-            "bunches_on_unopened_channel",
-            stats.bunches_on_unopened_channel,
-        ),
-        ("unopened_channel_bits", stats.unopened_channel_bits),
-        (
-            "channel_state_limit_failures",
-            stats.channel_state_limit_failures,
-        ),
-        (
-            "partial_resource_limit_failures",
-            stats.partial_resource_limit_failures,
-        ),
-        ("package_map_exports", stats.package_map_exports),
-        ("rep_layout_export_bunches", stats.rep_layout_export_bunches),
-        ("exported_guids", stats.exported_guids),
-        ("must_be_mapped_guids", stats.must_be_mapped_guids),
-        ("diagnostics_retained", stats.diagnostics.len() as u64),
-    ] {
-        wkv(out, key, &value.to_string(), inner);
-    }
-    wkvl(
-        out,
-        "diagnostics_dropped",
-        &stats.diagnostics_dropped.to_string(),
-        inner,
+/// The three [`FrameSkips`] tallies, each key after `prefix`.
+fn add_frame_skips(out: &mut Object, prefix: &str, skips: &FrameSkips) {
+    out.add(
+        format_args!("{prefix}external_data_blobs"),
+        skips.external_data_blobs,
+    )
+    .add(
+        format_args!("{prefix}external_data_bytes"),
+        skips.external_data_bytes,
+    )
+    .add(
+        format_args!("{prefix}game_specific_bytes"),
+        skips.game_specific_bytes,
     );
-    close_object(out, indent, trailing_comma);
 }
 
-fn write_sink_quality(
-    out: &mut String,
-    key: &str,
-    sink: &SinkTotals,
-    indent: usize,
-    trailing_comma: bool,
-) {
-    push_indent(out, indent);
-    out.push_str(&format!("\"{key}\": {{\n"));
-    let inner = indent + 1;
-    for (key, value) in [
-        // Each must equal the `net` block's `rpcs` / `actor_opens` /
-        // `actor_closes` / `content_blocks` (tools/verify_build_corpus.py);
-        // prefixed because `net` beside it uses those names for another source.
-        ("sink_rpcs_emitted", sink.rpcs_emitted),
-        ("sink_actor_opens", sink.actor_opens),
-        ("sink_actor_closes", sink.actor_closes),
-        ("sink_content_blocks", sink.content_blocks),
-        ("overlay_decoded_ok", sink.overlay.decoded_ok),
-        ("overlay_decoded_err", sink.overlay.decoded_err),
-        ("overlay_raw_or_skip", sink.overlay.raw_or_skip),
-        ("overlay_not_in_table", sink.overlay.not_in_table),
-        ("overlay_no_field_name", sink.overlay.no_field_name),
-        (
-            "overlay_handle_conflicts_refused",
-            sink.overlay.handle_conflicts_refused,
-        ),
-        ("effect_blobs_decoded", sink.effect_blobs_decoded),
-        ("struct_blobs_decoded", sink.struct_blobs_decoded),
-        ("struct_blobs_failed", sink.struct_blobs_failed),
-        (
-            "multi_contents_items_emitted",
-            sink.multi_contents_items_emitted,
-        ),
-        ("movement_rpc_errors", sink.movement_rpc_errors),
-        (
-            "movement_sized_section_tails",
-            sink.movement_sized_section_tails,
-        ),
-        (
-            "movement_sized_section_tail_bits",
-            sink.movement_sized_section_tail_bits,
-        ),
-        (
-            "movement_open_section_tails",
-            sink.movement_open_section_tails,
-        ),
-        (
-            "movement_open_section_tail_bits",
-            sink.movement_open_section_tail_bits,
-        ),
-        (
-            "movement_envelope_trailers",
-            sink.movement_envelope_trailers,
-        ),
-        (
-            "movement_envelope_trailer_bits",
-            sink.movement_envelope_trailer_bits,
-        ),
-        ("array_elements_decoded", sink.array.elements_decoded),
-        ("array_fields_emitted", sink.array.fields_emitted),
-        ("array_truncations", sink.array.truncations),
-        ("array_errors", sink.array.errors),
-        (
-            "array_unconsumed_nested_bits",
-            sink.array.unconsumed_nested_bits,
-        ),
-        (
-            "array_unconsumed_root_bits",
-            sink.array.unconsumed_root_bits,
-        ),
-        (
-            "array_implicit_terminations",
-            sink.array.implicit_terminations,
-        ),
-        ("array_leaf_decode_errors", sink.array_leaf_decode_errors),
-        (
-            "targeting_world_locations_decoded",
-            sink.targeting_world_locations_decoded,
-        ),
-        (
-            "tracked_rewards_opaque_empty_variants",
-            sink.tracked_rewards_opaque_empty_variants,
-        ),
-        (
-            "active_blinds_empty_trailers",
-            sink.active_blinds_empty_trailers,
-        ),
-        ("truncated_rpcs", sink.truncated_rpcs),
-        ("rpc_suffix_bits_dropped", sink.rpc_suffix_bits_dropped),
-        ("cnc_rpcs_emitted", sink.cnc_rpcs_emitted),
-        (
-            "cnc_bruteforce_payloads_attempted",
-            sink.cnc_bruteforce_payloads_attempted,
-        ),
-        (
-            "cnc_bruteforce_payloads_unwalked",
-            sink.cnc_bruteforce_payloads_unwalked,
-        ),
-        (
-            "rep_layout_cnc_tails_decoded",
-            sink.rep_layout_cnc_tails_decoded,
-        ),
-        (
-            "rep_layout_cnc_tails_preserved",
-            sink.rep_layout_cnc_tails_preserved,
-        ),
-    ] {
-        wkv(out, key, &value.to_string(), inner);
+fn net_json(level: usize, stats: &NetStats) -> String {
+    let mut out = Object::new(level);
+    for (key, value) in stats.counters() {
+        out.add(key, value);
     }
-    wkv(
-        out,
+    out.add("diagnostics_retained", stats.diagnostics.len());
+    out.render()
+}
+
+/// A sink counter's manifest key: `sink_` on the four that must equal the
+/// `net` block's same-named counter (tools/verify_build_corpus.py), so the
+/// two sources stay apart.
+fn sink_key(name: &str) -> String {
+    let paired = [
+        "rpcs_emitted",
+        "actor_opens",
+        "actor_closes",
+        "content_blocks",
+    ];
+    let prefix = if paired.contains(&name) { "sink_" } else { "" };
+    format!("{prefix}{name}")
+}
+
+fn sink_json(level: usize, sink: &ExportStats) -> String {
+    let mut out = Object::new(level);
+    for (key, value) in sink.counters() {
+        out.add(sink_key(key), value);
+    }
+    out.add(
         "struct_blob_first_error",
-        &json_option(sink.struct_blob_first_error.as_deref()),
-        inner,
-    );
-    wkvl(
-        out,
+        json_option(sink.struct_blob_first_error.as_deref()),
+    )
+    .add(
         "movement_first_error",
-        &json_option(sink.movement_first_error.as_deref()),
-        inner,
+        json_option(sink.movement_first_error.as_deref()),
     );
-    close_object(out, indent, trailing_comma);
+    out.render()
 }
 
-fn close_object(out: &mut String, indent: usize, trailing_comma: bool) {
-    push_indent(out, indent);
-    out.push('}');
-    if trailing_comma {
-        out.push(',');
+/// A JSON object whose members are rendered as they are added, one per line
+/// at `level + 1` (two spaces a level); `"key": value`, the separator the
+/// integration tests search for.
+struct Object {
+    level: usize,
+    members: Vec<String>,
+}
+
+impl Object {
+    fn new(level: usize) -> Self {
+        Self {
+            level,
+            members: Vec::new(),
+        }
     }
-    out.push('\n');
+
+    /// `value` must already be JSON: numbers and bools print as themselves.
+    fn add(&mut self, key: impl Display, value: impl Display) -> &mut Self {
+        let indent = "  ".repeat(self.level + 1);
+        self.members.push(format!("{indent}\"{key}\": {value}"));
+        self
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "{{\n{}\n{}}}",
+            self.members.join(",\n"),
+            "  ".repeat(self.level)
+        )
+    }
+}
+
+/// A JSON array of already-rendered items, one per line; `[]` when empty.
+fn array(level: usize, items: Vec<String>) -> String {
+    if items.is_empty() {
+        return "[]".to_owned();
+    }
+    let indent = "  ".repeat(level + 1);
+    let items: Vec<String> = items
+        .into_iter()
+        .map(|item| indent.clone() + &item)
+        .collect();
+    format!("[\n{}\n{}]", items.join(",\n"), "  ".repeat(level))
 }
 
 fn json_option(value: Option<&str>) -> String {
-    value.map(json_str).unwrap_or_else(|| "null".to_string())
-}
-
-fn push_indent(out: &mut String, indent: usize) {
-    for _ in 0..indent {
-        out.push_str("  ");
-    }
-}
-
-fn wkv(out: &mut String, key: &str, value: &str, indent: usize) {
-    push_indent(out, indent);
-    out.push_str(&format!("\"{key}\": {value},\n"));
-}
-
-fn wkvs(out: &mut String, members: &[(&str, String)], indent: usize) {
-    for (key, value) in members {
-        wkv(out, key, value, indent);
-    }
-}
-
-/// [`wkv`] without the trailing comma, for the last member of an object.
-fn wkvl(out: &mut String, key: &str, value: &str, indent: usize) {
-    push_indent(out, indent);
-    out.push_str(&format!("\"{key}\": {value}\n"));
-}
-
-/// An array of already-rendered JSON values, one per line. Always followed by
-/// a comma, so it must not end its object; add a comma-less variant before
-/// moving an array there, rather than dropping the comma by hand.
-fn wkv_array(out: &mut String, key: &str, values: &[String], indent: usize) {
-    push_indent(out, indent);
-    out.push_str(&format!("\"{key}\": ["));
-    if values.is_empty() {
-        out.push_str("],\n");
-        return;
-    }
-    out.push('\n');
-    for (i, value) in values.iter().enumerate() {
-        push_indent(out, indent + 1);
-        out.push_str(value);
-        if i + 1 < values.len() {
-            out.push(',');
-        }
-        out.push('\n');
-    }
-    push_indent(out, indent);
-    out.push_str("],\n");
-}
-
-fn json_bool(b: bool) -> &'static str {
-    if b { "true" } else { "false" }
-}
-
-/// `present(v)` for `Some(v)`, JSON `null` for `None`.
-fn json_opt<T>(value: &Option<T>, present: impl FnOnce(&T) -> String) -> String {
-    match value {
-        Some(v) => present(v),
-        None => String::from("null"),
-    }
+    value.map_or_else(|| "null".to_owned(), json_str)
 }
 
 /// JSON number for an `f32`, or `null` when it is not finite: Rust prints
@@ -748,437 +409,153 @@ fn json_str(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use crate::driver::checkpoints::CheckpointStats;
-    use crate::sink::SinkTotals;
-    use vrf_decode::OverlayErrorReport;
-    use vrf_net::stats::NetStats;
+    use vrf_decode::{DecodeErrorKind, FieldType};
 
+    /// Every scalar member of `quality`, both passes included, against the
+    /// values the test put in: each counter of both passes' `NetStats` and
+    /// `ExportStats` (named by their own lists) and each `RunTotals` and
+    /// `CheckpointStats` field (named here) gets a distinct number, so a key
+    /// that is missing, duplicated, misspelled or wired to another field or
+    /// pass changes the multiset.
     #[test]
-    fn quality_json_names_every_load_bearing_counter() {
-        // Every NetStats scalar and bounded-diagnostic size, and every
-        // SinkTotals/OverlayStats/ArrayDecodeStats counter: once at the top
-        // level and once in `checkpoints`.
-        const NET_AND_SINK_KEYS: &[&str] = &[
-            "packets",
-            "malformed_packets",
-            "bunches",
-            "partial_errors",
-            "partial_fragments",
-            "partial_completed",
-            "unfinished_partials",
-            "unfinished_partial_bits",
-            "bunch_header_failures",
-            "content_blocks",
-            "rep_layout_blocks",
-            "class_net_cache_blocks",
-            "deleted_blocks",
-            "fields",
-            "rpcs",
-            "skipped_bits",
-            "content_block_framing_failures",
-            "malformed_content_blocks",
-            "transform_failures",
-            "field_stream_failures",
-            "rpc_stream_failures",
-            "unresolved_rpc_payloads_preserved",
-            "actor_opens",
-            "actor_closes",
-            "channel_reopens_while_open",
-            "actor_opens_missing_spawn",
-            "failed_reopens_while_open",
-            "bunches_on_unopened_channel",
-            "unopened_channel_bits",
-            "channel_state_limit_failures",
-            "partial_resource_limit_failures",
-            "package_map_exports",
-            "rep_layout_export_bunches",
-            "exported_guids",
-            "must_be_mapped_guids",
-            "diagnostics_retained",
-            "diagnostics_dropped",
-            "sink_rpcs_emitted",
-            "sink_actor_opens",
-            "sink_actor_closes",
-            "sink_content_blocks",
-            "overlay_decoded_ok",
-            "overlay_decoded_err",
-            "overlay_raw_or_skip",
-            "overlay_not_in_table",
-            "overlay_no_field_name",
-            "overlay_handle_conflicts_refused",
-            "effect_blobs_decoded",
-            "struct_blobs_decoded",
-            "struct_blobs_failed",
-            "struct_blob_first_error",
-            "multi_contents_items_emitted",
-            "movement_rpc_errors",
-            "movement_first_error",
-            "movement_sized_section_tails",
-            "movement_sized_section_tail_bits",
-            "movement_open_section_tails",
-            "movement_open_section_tail_bits",
-            "movement_envelope_trailers",
-            "movement_envelope_trailer_bits",
-            "array_elements_decoded",
-            "array_fields_emitted",
-            "array_truncations",
-            "array_errors",
-            "array_unconsumed_nested_bits",
-            "array_unconsumed_root_bits",
-            "array_implicit_terminations",
-            "array_leaf_decode_errors",
-            "tracked_rewards_opaque_empty_variants",
-            "active_blinds_empty_trailers",
-            "truncated_rpcs",
-            "rpc_suffix_bits_dropped",
-            "cnc_rpcs_emitted",
-            "cnc_bruteforce_payloads_attempted",
-            "cnc_bruteforce_payloads_unwalked",
-            "rep_layout_cnc_tails_decoded",
-            "rep_layout_cnc_tails_preserved",
-        ];
-        // The overlay error report, run-level completeness and
-        // checkpoint-only accounting: once each.
-        const RUN_KEYS: &[&str] = &[
-            "overlay_error_buckets",
-            "overlay_errors_reported",
-            "content_blocks_lost",
-            "chunks_processed",
-            "export_groups",
-            "movement_rows",
-            "net_guid_rows",
-            "event_rows",
-            "event_trailing_bytes",
-            "replay_data_trailing_bytes",
-            "frame_external_data_blobs",
-            "frame_external_data_bytes",
-            "frame_game_specific_bytes",
-            "frame_non_finite_times",
-            "event_layout_mismatches",
-            "event_first_layout_mismatch",
-            "event_payloads_decoded",
-            "event_payload_unknown_groups",
-            "checkpoint_chunks",
-            "checkpoint_trailing_bytes",
-            "checkpoint_path_resolution_mode",
-            "checkpoint_literal_paths",
-            "checkpoint_indexed_paths",
-            "checkpoint_resolved_path_indices",
-            "checkpoint_guid_entries",
-            "checkpoint_group_records",
-            "checkpoint_exported_fields",
-            "checkpoint_frames",
-            "checkpoint_frame_external_data_blobs",
-            "checkpoint_frame_external_data_bytes",
-            "checkpoint_frame_game_specific_bytes",
-            "checkpoint_frame_non_finite_times",
-            "checkpoint_packets",
-            "checkpoint_field_rows",
-            "checkpoint_actor_rows_written",
-            "checkpoint_net_guid_rows_written",
-            "checkpoint_block_rows_written",
-            "checkpoint_guid_entry_rows_written",
-            "checkpoint_export_group_rows_written",
-            "checkpoint_export_field_rows_written",
-            "checkpoint_actor_rows_dropped",
-            "checkpoint_movement_rows_dropped",
-        ];
-        let net = NetStats::default();
-        let checkpoints = CheckpointStats::default();
-        let errors = OverlayErrorReport::default();
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals::default(),
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-
-        for (keys, expected) in [(NET_AND_SINK_KEYS, 2), (RUN_KEYS, 1)] {
-            for key in keys {
-                let needle = format!("\"{key}\":");
-                assert_eq!(
-                    json.matches(&needle).count(),
-                    expected,
-                    "quality manifest omitted or duplicated {key}: {json}"
-                );
+    fn quality_json_publishes_every_member_once_with_its_own_value() {
+        let mut expected: Vec<(String, String)> = Vec::new();
+        let mut last = 1000u64;
+        let mut next = |key: &str| {
+            last += 1;
+            if !key.is_empty() {
+                expected.push((key.to_owned(), last.to_string()));
+            }
+            last
+        };
+        let (mut net, mut cp_net) = (NetStats::default(), NetStats::default());
+        let (mut sink, mut cp_sink) = (ExportStats::default(), ExportStats::default());
+        for stats in [&mut net, &mut cp_net] {
+            for (name, value) in stats.counters_mut() {
+                *value = next(name);
             }
         }
-    }
-
-    #[test]
-    fn tail_and_guid_path_counters_publish_measured_values() {
-        let net = NetStats::default();
-        let sink = SinkTotals {
-            rep_layout_cnc_tails_decoded: 2,
-            rep_layout_cnc_tails_preserved: 3,
-            ..SinkTotals::default()
+        let paired = [
+            "rpcs_emitted",
+            "actor_opens",
+            "actor_closes",
+            "content_blocks",
+        ];
+        for stats in [&mut sink, &mut cp_sink] {
+            for (name, value) in stats.counters_mut() {
+                let prefix = if paired.contains(&name) { "sink_" } else { "" };
+                *value = next(&format!("{prefix}{name}"));
+            }
+        }
+        let mut run = RunTotals {
+            chunks_processed: next("chunks_processed") as u32,
+            // Not in `quality`: printed by the summary only.
+            frames: next("") as u32,
+            frame_skips: FrameSkips::default(),
+            non_finite_frame_times: next("frame_non_finite_times"),
+            total_packets: next("") as u32,
+            export_groups: next("export_groups") as usize,
+            movement_rows: next("movement_rows"),
+            net_guid_rows: next("net_guid_rows") as usize,
+            event_rows: next("event_rows"),
+            partial_rows: next("partial_rows"),
+            partial_bits: next("partial_bits"),
+            event_trailing_bytes: next("event_trailing_bytes"),
+            replay_data_trailing_bytes: next("replay_data_trailing_bytes"),
+            elapsed: Duration::ZERO,
+            event_layout_mismatches: next("event_layout_mismatches"),
+            event_first_layout_mismatch: Some("event".to_owned()),
+            event_payloads_decoded: next("event_payloads_decoded"),
+            event_payload_unknown_groups: next("event_payload_unknown_groups"),
+            sink: ExportStats::default(),
+            stale_checkpoint_note: None,
         };
-        let mut checkpoints = CheckpointStats::default();
-        checkpoints.sink.rep_layout_cnc_tails_decoded = 5;
-        checkpoints.sink.rep_layout_cnc_tails_preserved = 7;
-        checkpoints.literal_paths = 17;
-        checkpoints.indexed_paths = 11;
-        checkpoints.resolved_path_indices = 11;
-        let errors = OverlayErrorReport::default();
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                sink,
-                ..RunTotals::default()
-            },
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-
-        for expected in [
-            "\"rep_layout_cnc_tails_decoded\": 2",
-            "\"rep_layout_cnc_tails_preserved\": 3",
-            "\"rep_layout_cnc_tails_decoded\": 5",
-            "\"rep_layout_cnc_tails_preserved\": 7",
-            "\"checkpoint_path_resolution_mode\": \"preceding_literal_zero_based\"",
-            "\"checkpoint_literal_paths\": 17",
-            "\"checkpoint_indexed_paths\": 11",
-            "\"checkpoint_resolved_path_indices\": 11",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
-    }
-
-    #[test]
-    fn movement_section_tails_publish_measured_values() {
-        let net = NetStats::default();
-        let sink = SinkTotals {
-            movement_sized_section_tails: 41,
-            movement_sized_section_tail_bits: 42,
-            movement_open_section_tails: 43,
-            movement_open_section_tail_bits: 44,
-            ..SinkTotals::default()
+        run.frame_skips.external_data_blobs = next("frame_external_data_blobs");
+        run.frame_skips.external_data_bytes = next("frame_external_data_bytes");
+        run.frame_skips.game_specific_bytes = next("frame_game_specific_bytes");
+        let mut cp = CheckpointStats {
+            chunks: next("checkpoint_chunks"),
+            trailing_bytes: next("checkpoint_trailing_bytes"),
+            guid_entries: next("checkpoint_guid_entries"),
+            literal_paths: next("checkpoint_literal_paths"),
+            indexed_paths: next("checkpoint_indexed_paths"),
+            resolved_path_indices: next("checkpoint_resolved_path_indices"),
+            group_records: next("checkpoint_group_records"),
+            exported_fields: next("checkpoint_exported_fields"),
+            frames: next("checkpoint_frames"),
+            frame_skips: FrameSkips::default(),
+            non_finite_frame_times: next("checkpoint_frame_non_finite_times"),
+            packets: next("checkpoint_packets"),
+            field_rows: next("checkpoint_field_rows"),
+            actor_rows_written: next("checkpoint_actor_rows_written"),
+            net_guid_rows_written: next("checkpoint_net_guid_rows_written"),
+            block_rows_written: next("checkpoint_block_rows_written"),
+            guid_entry_rows_written: next("checkpoint_guid_entry_rows_written"),
+            export_group_rows_written: next("checkpoint_export_group_rows_written"),
+            export_field_rows_written: next("checkpoint_export_field_rows_written"),
+            partial_rows: next("checkpoint_partial_rows"),
+            partial_bits: next("checkpoint_partial_bits"),
+            actor_rows_dropped: next("checkpoint_actor_rows_dropped"),
+            movement_rows_dropped: next("checkpoint_movement_rows_dropped"),
+            sink: ExportStats::default(),
+            net: NetStats::default(),
         };
-        let mut checkpoints = CheckpointStats::default();
-        checkpoints.sink.movement_sized_section_tails = 51;
-        checkpoints.sink.movement_sized_section_tail_bits = 52;
-        checkpoints.sink.movement_open_section_tails = 53;
-        checkpoints.sink.movement_open_section_tail_bits = 54;
-        let errors = OverlayErrorReport::default();
+        cp.frame_skips.external_data_blobs = next("checkpoint_frame_external_data_blobs");
+        cp.frame_skips.external_data_bytes = next("checkpoint_frame_external_data_bytes");
+        cp.frame_skips.game_specific_bytes = next("checkpoint_frame_game_specific_bytes");
+        sink.struct_blob_first_error = Some("blob".to_owned());
+        cp_sink.movement_first_error = Some("movement".to_owned());
+        (run.sink, cp.sink, cp.net) = (sink, cp_sink, cp_net);
+        let mut errors = OverlayErrorReport::default();
+        for field in ["A", "B", "B"] {
+            errors.record("/Group", field, FieldType::Int32, 32, DecodeErrorKind::Eof);
+        }
+        for (key, value) in [
+            ("content_blocks_lost", net.lost_content_blocks().to_string()),
+            ("overlay_error_buckets", "2".to_owned()),
+            ("overlay_errors_reported", "3".to_owned()),
+            ("checkpoints_enabled", "true".to_owned()),
+            ("event_first_layout_mismatch", "\"event\"".to_owned()),
+            (
+                "checkpoint_path_resolution_mode",
+                "\"preceding_literal_zero_based\"".to_owned(),
+            ),
+            ("diagnostics_retained", "0".to_owned()),
+            ("diagnostics_retained", "0".to_owned()),
+            ("struct_blob_first_error", "\"blob\"".to_owned()),
+            ("struct_blob_first_error", "null".to_owned()),
+            ("movement_first_error", "null".to_owned()),
+            ("movement_first_error", "\"movement\"".to_owned()),
+        ] {
+            expected.push((key.to_owned(), value));
+        }
+
         let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                sink,
-                ..RunTotals::default()
-            },
+            run: &run,
             net: &net,
             error_report: &errors,
-            checkpoints: Some(&checkpoints),
+            checkpoints: Some(&cp),
         });
-        for expected in [
-            "\"movement_sized_section_tails\": 41",
-            "\"movement_sized_section_tail_bits\": 42",
-            "\"movement_open_section_tails\": 43",
-            "\"movement_open_section_tail_bits\": 44",
-            "\"movement_sized_section_tails\": 51",
-            "\"movement_sized_section_tail_bits\": 52",
-            "\"movement_open_section_tails\": 53",
-            "\"movement_open_section_tail_bits\": 54",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
+        let mut published: Vec<(String, String)> = (json.lines())
+            .filter_map(|line| line.trim().split_once("\": "))
+            .filter(|(_, value)| !value.starts_with(['{', '[']))
+            .map(|(key, value)| (key[1..].to_owned(), value.trim_end_matches(',').to_owned()))
+            .collect();
+        published.sort();
+        expected.sort();
+        assert_eq!(published, expected);
     }
 
-    #[test]
-    fn movement_envelope_trailers_publish_measured_values() {
-        let net = NetStats::default();
-        let sink = SinkTotals {
-            movement_envelope_trailers: 61,
-            movement_envelope_trailer_bits: 62,
-            ..SinkTotals::default()
-        };
-        let mut checkpoints = CheckpointStats::default();
-        checkpoints.sink.movement_envelope_trailers = 71;
-        checkpoints.sink.movement_envelope_trailer_bits = 72;
-        let errors = OverlayErrorReport::default();
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                sink,
-                ..RunTotals::default()
-            },
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-        for expected in [
-            "\"movement_envelope_trailers\": 61",
-            "\"movement_envelope_trailer_bits\": 62",
-            "\"movement_envelope_trailers\": 71",
-            "\"movement_envelope_trailer_bits\": 72",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
-    }
-
-    #[test]
-    fn active_blinds_empty_trailers_publish_measured_values() {
-        let net = NetStats::default();
-        let sink = SinkTotals {
-            active_blinds_empty_trailers: 81,
-            ..SinkTotals::default()
-        };
-        let mut checkpoints = CheckpointStats::default();
-        checkpoints.sink.active_blinds_empty_trailers = 91;
-        let errors = OverlayErrorReport::default();
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                sink,
-                ..RunTotals::default()
-            },
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-        for expected in [
-            "\"active_blinds_empty_trailers\": 81",
-            "\"active_blinds_empty_trailers\": 91",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
-    }
-
-    #[test]
-    fn sink_event_tallies_publish_measured_values() {
-        let net = NetStats::default();
-        let sink = SinkTotals {
-            rpcs_emitted: 21,
-            actor_opens: 22,
-            actor_closes: 23,
-            content_blocks: 24,
-            ..SinkTotals::default()
-        };
-        let mut checkpoints = CheckpointStats::default();
-        checkpoints.sink.rpcs_emitted = 31;
-        checkpoints.sink.actor_opens = 32;
-        checkpoints.sink.actor_closes = 33;
-        checkpoints.sink.content_blocks = 34;
-        let errors = OverlayErrorReport::default();
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                sink,
-                ..RunTotals::default()
-            },
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-        for expected in [
-            "\"sink_rpcs_emitted\": 21",
-            "\"sink_actor_opens\": 22",
-            "\"sink_actor_closes\": 23",
-            "\"sink_content_blocks\": 24",
-            "\"sink_rpcs_emitted\": 31",
-            "\"sink_actor_opens\": 32",
-            "\"sink_actor_closes\": 33",
-            "\"sink_content_blocks\": 34",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
-    }
-
-    #[test]
-    fn cnc_bruteforce_counters_publish_measured_values() {
-        let net = NetStats::default();
-        let sink = SinkTotals {
-            cnc_bruteforce_payloads_attempted: 11,
-            cnc_bruteforce_payloads_unwalked: 2,
-            ..SinkTotals::default()
-        };
-        let mut checkpoints = CheckpointStats::default();
-        checkpoints.sink.cnc_bruteforce_payloads_attempted = 13;
-        checkpoints.sink.cnc_bruteforce_payloads_unwalked = 3;
-        let errors = OverlayErrorReport::default();
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                sink,
-                ..RunTotals::default()
-            },
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-        for expected in [
-            "\"cnc_bruteforce_payloads_attempted\": 11",
-            "\"cnc_bruteforce_payloads_unwalked\": 2",
-            "\"cnc_bruteforce_payloads_attempted\": 13",
-            "\"cnc_bruteforce_payloads_unwalked\": 3",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
-    }
-
-    /// Six distinct numbers, so a key wired to the wrong field or pass shows.
-    #[test]
-    fn frame_skips_publish_measured_values_for_both_passes() {
-        let net = NetStats::default();
-        let errors = OverlayErrorReport::default();
-        let mut main = FrameSkips::default();
-        main.external_data_blobs = 2;
-        main.external_data_bytes = 3;
-        main.game_specific_bytes = 5;
-        let mut checkpoints = CheckpointStats::default();
-        checkpoints.frame_skips.external_data_blobs = 7;
-        checkpoints.frame_skips.external_data_bytes = 11;
-        checkpoints.frame_skips.game_specific_bytes = 13;
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                frame_skips: main,
-                ..RunTotals::default()
-            },
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-
-        for expected in [
-            "\"frame_external_data_blobs\": 2",
-            "\"frame_external_data_bytes\": 3",
-            "\"frame_game_specific_bytes\": 5",
-            "\"checkpoint_frame_external_data_blobs\": 7",
-            "\"checkpoint_frame_external_data_bytes\": 11",
-            "\"checkpoint_frame_game_specific_bytes\": 13",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
-    }
-
-    /// Distinct per pass, so a key wired to the other pass shows.
-    #[test]
-    fn non_finite_frame_times_publish_measured_values_for_both_passes() {
-        let net = NetStats::default();
-        let errors = OverlayErrorReport::default();
-        let checkpoints = CheckpointStats {
-            non_finite_frame_times: 19,
-            ..CheckpointStats::default()
-        };
-        let json = quality_json(&ManifestQuality {
-            run: &RunTotals {
-                non_finite_frame_times: 17,
-                ..RunTotals::default()
-            },
-            net: &net,
-            error_report: &errors,
-            checkpoints: Some(&checkpoints),
-        });
-        for expected in [
-            "\"frame_non_finite_times\": 17",
-            "\"checkpoint_frame_non_finite_times\": 19",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
-    }
-
-    /// The number a consumer reads before any coverage claim, so it is checked
-    /// against `NetStats::lost_content_blocks` with all four failure depths
-    /// non-zero and unequal: a constant zero would read as nothing lost.
+    /// The number a consumer reads before any coverage claim, checked with all
+    /// five failure depths non-zero and unequal: a constant would read as
+    /// nothing lost.
     #[test]
     fn content_blocks_lost_publishes_the_measured_number() {
         let net = NetStats {
+            content_block_framing_failures: 8,
             malformed_content_blocks: 1,
             transform_failures: 2,
             field_stream_failures: 4,
@@ -1186,19 +563,14 @@ mod tests {
             unresolved_rpc_payloads_preserved: 92,
             ..NetStats::default()
         };
-        assert_eq!(net.lost_content_blocks(), 15);
-
-        let errors = OverlayErrorReport::default();
         let json = quality_json(&ManifestQuality {
             run: &RunTotals::default(),
             net: &net,
-            error_report: &errors,
+            error_report: &OverlayErrorReport::default(),
             checkpoints: None,
         });
-        assert!(
-            json.contains("\"content_blocks_lost\": 15"),
-            "quality did not publish the measured loss: {json}"
-        );
+        assert!(json.contains("\"content_blocks_lost\": 23,"), "{json}");
+        assert!(json.contains("\"checkpoints\": null\n"), "{json}");
     }
 
     #[test]
@@ -1238,14 +610,14 @@ mod tests {
     }
 
     #[test]
-    fn wkv_array_renders_empty_and_populated_forms() {
-        let mut out = String::new();
-        wkv_array(&mut out, "empty", &[], 1);
-        assert_eq!(out, "  \"empty\": [],\n");
-
-        let mut out = String::new();
-        let values = vec!["1".to_string(), "2".to_string()];
-        wkv_array(&mut out, "pair", &values, 1);
-        assert_eq!(out, "  \"pair\": [\n    1,\n    2\n  ],\n");
+    fn objects_and_arrays_render_one_member_per_line() {
+        let mut object = Object::new(1);
+        object
+            .add("empty", array(2, Vec::new()))
+            .add("pair", array(2, vec!["1".into(), "2".into()]));
+        assert_eq!(
+            object.render(),
+            "{\n    \"empty\": [],\n    \"pair\": [\n      1,\n      2\n    ]\n  }"
+        );
     }
 }

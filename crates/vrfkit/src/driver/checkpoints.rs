@@ -10,7 +10,6 @@
 use std::io::Write;
 
 use vrf_container::{ChunkType, decompress_checkpoint_with_trailing, parse_checkpoint_chunk};
-use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     CheckpointActorRecord, CheckpointActorWriter, CheckpointBlockWriter,
     CheckpointExportFieldRecord, CheckpointExportFieldWriter, CheckpointExportGroupRecord,
@@ -26,7 +25,7 @@ use super::net_guid_rows;
 use super::writers::WriterThread;
 use crate::error::CliError;
 use crate::pass::{Pass, Replay};
-use crate::sink::SinkTotals;
+use crate::sink::ExportStats;
 
 /// Counters for the optional checkpoint pass, kept together so the summary
 /// cannot report one and quietly omit another.
@@ -62,7 +61,7 @@ pub(crate) struct CheckpointStats {
     pub movement_rows_dropped: u64,
     /// Apart from the main pass's baseline-pinned totals, which mixing would
     /// move by a flag-dependent amount.
-    pub sink: SinkTotals,
+    pub sink: ExportStats,
     /// Replication/framing counters from every finalized checkpoint reader.
     pub net: NetStats,
 }
@@ -216,9 +215,6 @@ impl<W: Write + Send> CheckpointTableSink for DeclarationWriter<'_, W> {
 #[derive(Default)]
 pub(super) struct CheckpointPass {
     pub stats: CheckpointStats,
-    /// Merged into the main pass's report: the summary's breakdown is the only
-    /// place a checkpoint-only decode error surfaces.
-    pub errors: OverlayErrorReport,
     /// Labelled with their checkpoint, for the main thread's
     /// `partials.parquet` writer, which counts them.
     pub partials: Vec<PartialRecord>,
@@ -248,11 +244,7 @@ fn process_chunk<W: Write + Send>(
     writers: &mut CheckpointWriters<W>,
     out: &mut CheckpointPass,
 ) -> Result<(), CliError> {
-    let CheckpointPass {
-        stats,
-        errors,
-        partials,
-    } = out;
+    let CheckpointPass { stats, partials } = out;
     let cp = parse_checkpoint_chunk(payload)?;
     let (plain, unread) =
         decompress_checkpoint_with_trailing(cp.archive, replay.compressed, replay.encrypted)?;
@@ -303,33 +295,28 @@ fn process_chunk<W: Write + Send>(
     pass.block_scope = Some((checkpoint.clone(), stats.field_rows, 0));
     let mut field_records = Vec::new();
     let first_partial = partials.len();
-    pass.walk(
-        &plain[tables.frame_offset..],
-        &mut stats.sink,
-        errors,
-        |buffers| {
-            stats.block_rows_written += buffers.checkpoint_blocks.len() as u64;
-            writers
-                .blocks
-                .push_batch(buffers.checkpoint_blocks.drain(..))?;
-            stats.field_rows += buffers.fields.len() as u64;
-            field_records.extend(buffers.fields.drain(..).map(|field| CheckpointFieldRecord {
+    pass.walk(&plain[tables.frame_offset..], &mut stats.sink, |buffers| {
+        stats.block_rows_written += buffers.checkpoint_blocks.len() as u64;
+        writers
+            .blocks
+            .push_batch(buffers.checkpoint_blocks.drain(..))?;
+        stats.field_rows += buffers.fields.len() as u64;
+        field_records.extend(buffers.fields.drain(..).map(|field| CheckpointFieldRecord {
+            checkpoint: checkpoint.clone(),
+            field,
+        }));
+        writers.fields.append(&mut field_records)?;
+        stats.actor_rows_written += buffers.actors.len() as u64;
+        writers
+            .actors
+            .push_batch(buffers.actors.drain(..).map(|actor| CheckpointActorRecord {
                 checkpoint: checkpoint.clone(),
-                field,
-            }));
-            writers.fields.append(&mut field_records)?;
-            stats.actor_rows_written += buffers.actors.len() as u64;
-            writers
-                .actors
-                .push_batch(buffers.actors.drain(..).map(|actor| CheckpointActorRecord {
-                    checkpoint: checkpoint.clone(),
-                    actor,
-                }))?;
-            stats.movement_rows_dropped += buffers.movement.len() as u64;
-            partials.append(&mut buffers.partials);
-            Ok(())
-        },
-    )?;
+                actor,
+            }))?;
+        stats.movement_rows_dropped += buffers.movement.len() as u64;
+        partials.append(&mut buffers.partials);
+        Ok(())
+    })?;
     pass.finish();
     partials.append(&mut pass.buffers.partials);
     for record in &mut partials[first_partial..] {
@@ -367,16 +354,12 @@ fn process_chunk<W: Write + Send>(
 }
 
 #[cfg(test)]
-#[path = "../../tests/common/replay.rs"]
-mod replay_fixtures;
-
-#[cfg(test)]
 mod tests {
     use vrf_container::parse_preamble;
     use vrf_testkit::{Info, chunk, header_payload, replay_info};
 
-    use super::replay_fixtures::*;
     use super::*;
+    use crate::pass::replay_fixtures::*;
 
     /// The main thread writes these rows as they come back, so each must
     /// already name its own snapshot; no measured replay has one.

@@ -18,7 +18,7 @@ use vrf_net::stats::NetStats;
 use super::checkpoints::CheckpointStats;
 use super::{CHECKPOINT_TABLES, MAIN_TABLES};
 use crate::report;
-use crate::sink::SinkTotals;
+use crate::sink::ExportStats;
 
 /// Everything the run counted that is not in [`NetStats`]. The manifest reads
 /// the same struct, so it and this summary cannot report different values.
@@ -62,7 +62,7 @@ pub(crate) struct RunTotals {
     /// Event groups outside the measured public vocabulary. Their raw payload
     /// remains preserved and no structural columns are populated.
     pub event_payload_unknown_groups: u64,
-    pub sink: SinkTotals,
+    pub sink: ExportStats,
     /// [`stale_checkpoint_note`] of the destination before publication.
     pub stale_checkpoint_note: Option<String>,
 }

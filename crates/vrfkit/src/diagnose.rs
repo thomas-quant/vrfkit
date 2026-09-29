@@ -17,14 +17,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use vrf_container::{decompress_checkpoint_with_trailing, parse_checkpoint_chunk, parse_preamble};
-use vrf_decode::OverlayErrorReport;
 use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
 use vrf_schema::read_checkpoint_tables;
 
 use crate::error::CliError;
 use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
-use crate::sink::{FailureAggregate, SinkTotals};
+use crate::sink::{ExportStats, FailureAggregate};
 
 /// The checkpoint pass's counters and per-chunk metadata.
 #[derive(Debug, Default)]
@@ -46,9 +45,7 @@ struct DiagCheckpointStats {
     actor_rows_dropped: u64,
     movement_rows_dropped: u64,
     net: NetStats,
-    sink: SinkTotals,
-    /// Never printed: the JSON carries counters only.
-    overlay_errors: OverlayErrorReport,
+    sink: ExportStats,
     failures: FailureAggregate,
 }
 
@@ -72,9 +69,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let mut replay_data_chunks: u64 = 0;
     let mut event_chunks: u64 = 0;
     let mut replay_data_trailing_bytes: u64 = 0;
-    let mut sink_totals = SinkTotals::default();
-    // Never printed, like `DiagCheckpointStats::overlay_errors`.
-    let mut overlay_errors = OverlayErrorReport::default();
+    let mut sink_main = ExportStats::default();
     let mut cp_stats = DiagCheckpointStats {
         failures: FailureAggregate::new(include_payloads),
         ..DiagCheckpointStats::default()
@@ -91,7 +86,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                 replay_data_trailing_bytes += unread as u64;
                 replay_data_chunks += 1;
                 // Never drained: nothing is written, and each packet's sink clears them.
-                main.walk(&frames, &mut sink_totals, &mut overlay_errors, |_| Ok(()))?;
+                main.walk(&frames, &mut sink_main, |_| Ok(()))?;
             }
             Chunk::Other => {}
         }
@@ -135,10 +130,10 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str("},\n");
 
     json.push_str("  \"net_main\": ");
-    push_net_stats(&mut json, &net_main);
+    push_members(&mut json, &net_members(&net_main));
     json.push_str(",\n");
     json.push_str("  \"sink_main\": ");
-    push_sink_totals(&mut json, &sink_totals);
+    push_members(&mut json, &sink_main.counters());
     json.push_str(",\n");
     json.push_str("  \"checkpoint_meta\": {\"chunks\": ");
     json.push_str(&cp_stats.chunks.to_string());
@@ -165,10 +160,10 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     json.push_str(&cp_stats.movement_rows_dropped.to_string());
     json.push_str("},\n");
     json.push_str("  \"net_checkpoint\": ");
-    push_net_stats(&mut json, &cp_stats.net);
+    push_members(&mut json, &net_members(&cp_stats.net));
     json.push_str(",\n");
     json.push_str("  \"sink_checkpoint\": ");
-    push_sink_totals(&mut json, &cp_stats.sink);
+    push_members(&mut json, &cp_stats.sink.counters());
     json.push_str(",\n");
 
     json.push_str("  \"failures\": {\n");
@@ -311,17 +306,12 @@ fn process_checkpoint_chunk(
     pass.channels.enable_failure_aggregate(include_payloads);
     let tables = read_checkpoint_tables(&plain, &mut pass.cache)
         .map_err(|e| CliError::Usage(format!("checkpoint {}: {e}", cp_chunk.id)))?;
-    pass.walk(
-        &plain[tables.frame_offset..],
-        &mut cp.sink,
-        &mut cp.overlay_errors,
-        |buffers| {
-            cp.field_rows_dropped += buffers.fields.len() as u64;
-            cp.actor_rows_dropped += buffers.actors.len() as u64;
-            cp.movement_rows_dropped += buffers.movement.len() as u64;
-            Ok(())
-        },
-    )?;
+    pass.walk(&plain[tables.frame_offset..], &mut cp.sink, |buffers| {
+        cp.field_rows_dropped += buffers.fields.len() as u64;
+        cp.actor_rows_dropped += buffers.actors.len() as u64;
+        cp.movement_rows_dropped += buffers.movement.len() as u64;
+        Ok(())
+    })?;
     pass.finish();
     cp.net.absorb(&mut pass.reader.stats().clone());
     cp.failures
@@ -395,179 +385,22 @@ fn push_members(out: &mut String, members: &[(&str, u64)]) {
     out.push_str("  }");
 }
 
-fn push_net_stats(out: &mut String, s: &NetStats) {
-    push_members(
-        out,
-        &[
-            ("packets", s.packets),
-            ("malformed_packets", s.malformed_packets),
-            ("bunches", s.bunches),
-            ("partial_errors", s.partial_errors),
-            ("partial_bunches", s.partial_bunches),
-            ("partial_missing_initial", s.partial_missing_initial),
-            (
-                "partial_missing_initial_final",
-                s.partial_missing_initial_final,
-            ),
-            (
-                "partial_missing_initial_reliable",
-                s.partial_missing_initial_reliable,
-            ),
-            (
-                "partial_missing_initial_bits",
-                s.partial_missing_initial_bits,
-            ),
-            ("partial_overlapping_initial", s.partial_overlapping_initial),
-            (
-                "partial_mismatched_continuation",
-                s.partial_mismatched_continuation,
-            ),
-            ("partial_non_byte_aligned", s.partial_non_byte_aligned),
-            ("partial_channel_close", s.partial_channel_close),
-            (
-                "partial_unclassified_errors",
-                s.partial_unclassified_errors(),
-            ),
-            (
-                "partial_overclassified_errors",
-                s.partial_overclassified_errors(),
-            ),
-            ("partial_fragments", s.partial_fragments),
-            ("partial_completed", s.partial_completed),
-            ("unfinished_partials", s.unfinished_partials),
-            ("unfinished_partial_bits", s.unfinished_partial_bits),
-            ("bunch_header_failures", s.bunch_header_failures),
-            ("content_blocks", s.content_blocks),
-            ("rep_layout_blocks", s.rep_layout_blocks),
-            ("class_net_cache_blocks", s.class_net_cache_blocks),
-            ("deleted_blocks", s.deleted_blocks),
-            ("fields", s.fields),
-            ("rpcs", s.rpcs),
-            ("skipped_bits", s.skipped_bits),
-            (
-                "content_block_framing_failures",
-                s.content_block_framing_failures,
-            ),
-            ("malformed_content_blocks", s.malformed_content_blocks),
-            ("transform_failures", s.transform_failures),
-            ("field_stream_failures", s.field_stream_failures),
-            ("rpc_stream_failures", s.rpc_stream_failures),
-            (
-                "unresolved_rpc_payloads_preserved",
-                s.unresolved_rpc_payloads_preserved,
-            ),
-            ("actor_opens", s.actor_opens),
-            ("actor_closes", s.actor_closes),
-            ("channel_reopens_while_open", s.channel_reopens_while_open),
-            ("actor_opens_missing_spawn", s.actor_opens_missing_spawn),
-            ("failed_reopens_while_open", s.failed_reopens_while_open),
-            ("bunches_on_unopened_channel", s.bunches_on_unopened_channel),
-            ("unopened_channel_bits", s.unopened_channel_bits),
-            (
-                "channel_state_limit_failures",
-                s.channel_state_limit_failures,
-            ),
-            (
-                "partial_resource_limit_failures",
-                s.partial_resource_limit_failures,
-            ),
-            ("package_map_exports", s.package_map_exports),
-            ("rep_layout_export_bunches", s.rep_layout_export_bunches),
-            ("exported_guids", s.exported_guids),
-            ("must_be_mapped_guids", s.must_be_mapped_guids),
-            ("content_blocks_lost", s.lost_content_blocks()),
-        ],
-    );
-}
-
-fn push_sink_totals(out: &mut String, s: &SinkTotals) {
-    push_members(
-        out,
-        &[
-            ("fields_emitted", s.fields_emitted),
-            ("rpcs_emitted", s.rpcs_emitted),
-            ("actor_opens", s.actor_opens),
-            ("actor_closes", s.actor_closes),
-            ("content_blocks", s.content_blocks),
-            ("overlay_decoded_ok", s.overlay.decoded_ok),
-            ("overlay_decoded_err", s.overlay.decoded_err),
-            ("overlay_raw_or_skip", s.overlay.raw_or_skip),
-            ("overlay_not_in_table", s.overlay.not_in_table),
-            ("overlay_no_field_name", s.overlay.no_field_name),
-            (
-                "overlay_handle_conflicts_refused",
-                s.overlay.handle_conflicts_refused,
-            ),
-            ("effect_blobs_decoded", s.effect_blobs_decoded),
-            ("struct_blobs_decoded", s.struct_blobs_decoded),
-            ("struct_blobs_failed", s.struct_blobs_failed),
-            (
-                "multi_contents_items_emitted",
-                s.multi_contents_items_emitted,
-            ),
-            ("movement_rpc_errors", s.movement_rpc_errors),
-            (
-                "movement_sized_section_tails",
-                s.movement_sized_section_tails,
-            ),
-            (
-                "movement_sized_section_tail_bits",
-                s.movement_sized_section_tail_bits,
-            ),
-            ("movement_open_section_tails", s.movement_open_section_tails),
-            (
-                "movement_open_section_tail_bits",
-                s.movement_open_section_tail_bits,
-            ),
-            ("movement_envelope_trailers", s.movement_envelope_trailers),
-            (
-                "movement_envelope_trailer_bits",
-                s.movement_envelope_trailer_bits,
-            ),
-            ("array_elements_decoded", s.array.elements_decoded),
-            ("array_fields_emitted", s.array.fields_emitted),
-            ("array_truncations", s.array.truncations),
-            ("array_errors", s.array.errors),
-            (
-                "array_unconsumed_nested_bits",
-                s.array.unconsumed_nested_bits,
-            ),
-            ("array_implicit_terminations", s.array.implicit_terminations),
-            ("array_unconsumed_root_bits", s.array.unconsumed_root_bits),
-            ("array_leaf_decode_errors", s.array_leaf_decode_errors),
-            (
-                "targeting_world_locations_decoded",
-                s.targeting_world_locations_decoded,
-            ),
-            (
-                "tracked_rewards_opaque_empty_variants",
-                s.tracked_rewards_opaque_empty_variants,
-            ),
-            (
-                "active_blinds_empty_trailers",
-                s.active_blinds_empty_trailers,
-            ),
-            ("truncated_rpcs", s.truncated_rpcs),
-            ("rpc_suffix_bits_dropped", s.rpc_suffix_bits_dropped),
-            ("cnc_rpcs_emitted", s.cnc_rpcs_emitted),
-            (
-                "cnc_bruteforce_payloads_attempted",
-                s.cnc_bruteforce_payloads_attempted,
-            ),
-            (
-                "cnc_bruteforce_payloads_unwalked",
-                s.cnc_bruteforce_payloads_unwalked,
-            ),
-            (
-                "rep_layout_cnc_tails_decoded",
-                s.rep_layout_cnc_tails_decoded,
-            ),
-            (
-                "rep_layout_cnc_tails_preserved",
-                s.rep_layout_cnc_tails_preserved,
-            ),
-        ],
-    );
+/// Every counter, then the three `NetStats` derives: the partial-cause
+/// residuals and `content_blocks_lost`.
+fn net_members(s: &NetStats) -> Vec<(&'static str, u64)> {
+    let mut members = s.counters();
+    members.extend([
+        (
+            "partial_unclassified_errors",
+            s.partial_unclassified_errors(),
+        ),
+        (
+            "partial_overclassified_errors",
+            s.partial_overclassified_errors(),
+        ),
+        ("content_blocks_lost", s.lost_content_blocks()),
+    ]);
+    members
 }
 
 fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
@@ -663,12 +496,33 @@ fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameSkips, build_label, json_number_or_null, push_frame_skips, push_json_string,
-        push_net_stats, push_sink_totals, reject_input_output_alias, write_json_file,
+        FrameSkips, NetStats, build_label, json_number_or_null, net_members, push_frame_skips,
+        push_json_string, reject_input_output_alias, write_json_file,
     };
-    use crate::sink::SinkTotals;
-    use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
-    use vrf_net::stats::NetStats;
+
+    /// Each counter under its own name with its own value, then the three
+    /// derives, computed from the same stats.
+    #[test]
+    fn net_members_are_every_counter_then_the_derives() {
+        let mut stats = NetStats::default();
+        for (i, (_, value)) in stats.counters_mut().into_iter().enumerate() {
+            *value = 3 * i as u64 + 1;
+        }
+        let mut expected = stats.counters();
+        expected.extend([
+            (
+                "partial_unclassified_errors",
+                stats.partial_unclassified_errors(),
+            ),
+            (
+                "partial_overclassified_errors",
+                stats.partial_overclassified_errors(),
+            ),
+            ("content_blocks_lost", stats.lost_content_blocks()),
+        ]);
+        assert_eq!(net_members(&stats), expected);
+        assert_eq!(expected.len(), 48);
+    }
 
     #[test]
     fn frame_skips_json_carries_every_tally_under_its_prefix() {
@@ -684,26 +538,6 @@ mod tests {
              \"replay_data_external_data_bytes\": 9, \
              \"replay_data_game_specific_bytes\": 0}"
         );
-    }
-
-    /// Distinct values, so a key wired to the wrong field shows.
-    #[test]
-    fn net_stats_json_carries_the_channel_guard_counters() {
-        let stats = NetStats {
-            failed_reopens_while_open: 3,
-            bunches_on_unopened_channel: 5,
-            unopened_channel_bits: 7,
-            ..NetStats::default()
-        };
-        let mut json = String::new();
-        push_net_stats(&mut json, &stats);
-        for expected in [
-            "\"failed_reopens_while_open\": 3",
-            "\"bunches_on_unopened_channel\": 5",
-            "\"unopened_channel_bits\": 7",
-        ] {
-            assert!(json.contains(expected), "missing {expected}: {json}");
-        }
     }
 
     #[test]
@@ -765,88 +599,5 @@ mod tests {
         assert_eq!(std::fs::read(&source).unwrap(), b"original replay bytes");
         assert_eq!(std::fs::read(&output).unwrap(), b"{\"ok\":true}\n");
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A counter missing from the hand-written key list is absent, not 0. The
-    /// literal has no `..`, so a new counter stops this compiling until it takes
-    /// the next `next()` value, which a printer that omits it then lacks; the
-    /// expected set is counted from the literal, so no second number drifts.
-    #[test]
-    fn push_sink_totals_prints_every_sink_counter_exactly_once() {
-        let last = std::cell::Cell::new(0u64);
-        let next = || {
-            last.set(last.get() + 1);
-            last.get()
-        };
-        let totals = SinkTotals {
-            fields_emitted: next(),
-            rpcs_emitted: next(),
-            actor_opens: next(),
-            actor_closes: next(),
-            content_blocks: next(),
-            overlay: OverlayStats {
-                decoded_ok: next(),
-                decoded_err: next(),
-                raw_or_skip: next(),
-                not_in_table: next(),
-                no_field_name: next(),
-                handle_conflicts_refused: next(),
-                error_report: OverlayErrorReport::default(),
-            },
-            effect_blobs_decoded: next(),
-            struct_blobs_decoded: next(),
-            struct_blobs_failed: next(),
-            // Text, not a counter: the diag JSON carries counters only.
-            struct_blob_first_error: None,
-            multi_contents_items_emitted: next(),
-            movement_rpc_errors: next(),
-            movement_first_error: None,
-            movement_sized_section_tails: next(),
-            movement_sized_section_tail_bits: next(),
-            movement_open_section_tails: next(),
-            movement_open_section_tail_bits: next(),
-            movement_envelope_trailers: next(),
-            movement_envelope_trailer_bits: next(),
-            array: ArrayDecodeStats {
-                elements_decoded: next(),
-                fields_emitted: next(),
-                truncations: next(),
-                errors: next(),
-                unconsumed_nested_bits: next(),
-                unconsumed_root_bits: next(),
-                implicit_terminations: next(),
-            },
-            tracked_rewards_opaque_empty_variants: next(),
-            active_blinds_empty_trailers: next(),
-            array_leaf_decode_errors: next(),
-            targeting_world_locations_decoded: next(),
-            truncated_rpcs: next(),
-            rpc_suffix_bits_dropped: next(),
-            cnc_rpcs_emitted: next(),
-            cnc_bruteforce_payloads_attempted: next(),
-            cnc_bruteforce_payloads_unwalked: next(),
-            rep_layout_cnc_tails_decoded: next(),
-            rep_layout_cnc_tails_preserved: next(),
-        };
-        let assigned = last.get();
-
-        let mut json = String::new();
-        push_sink_totals(&mut json, &totals);
-        let mut printed: Vec<u64> = json
-            .lines()
-            .filter_map(|line| line.split_once("\": "))
-            .map(|(_, value)| {
-                value
-                    .trim_end_matches(',')
-                    .parse()
-                    .unwrap_or_else(|_| panic!("non-numeric counter {value:?} in {json}"))
-            })
-            .collect();
-        printed.sort_unstable();
-        assert_eq!(
-            printed,
-            (1..=assigned).collect::<Vec<_>>(),
-            "diag sink JSON must print each of the {assigned} counters once: {json}"
-        );
     }
 }
