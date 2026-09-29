@@ -1,8 +1,8 @@
 """Extract conservative healing observations from one vrfkit export.
 
 The MulticastNotifyHeal amount and sections come from the section parser
-(extract_section_observations.parse_group); this adds the declaration gate,
-the heal source and recipient corroboration and the summaries."""
+(extract_section_observations.parse_group); this adds the declaration and
+heal-name gates, the heal source and recipient corroboration and the summaries."""
 
 from __future__ import annotations
 import collections, json, re
