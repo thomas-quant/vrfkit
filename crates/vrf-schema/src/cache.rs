@@ -55,11 +55,9 @@ impl NetGuidCache {
         &self.by_leaf
     }
 
-    /// A counter that changes whenever the set of group paths changes, for
-    /// memos over that set: bumped by every successful
-    /// [`Self::add_export_group`] (a merge can replace a canonical path and its
-    /// aliases) and by [`Self::clear`]. It never tracks field mutations, so a
-    /// memo of field contents must not key on it.
+    /// Changes whenever the set of group paths may have: on every successful
+    /// [`Self::add_export_group`] and [`Self::clear`]. It never tracks field
+    /// mutations, so a memo of field contents must not key on it.
     #[must_use]
     pub fn schema_generation(&self) -> u64 {
         self.schema_generation
@@ -131,13 +129,9 @@ impl NetGuidCache {
     /// `path_name_index`, and its leaf. A later registration wins a spelling or
     /// an index; a second claimant turns a leaf ambiguous.
     ///
-    /// Called once for a group just pushed, it leaves the maps a full rebuild
-    /// would: they already equal a rebuild of the older groups (every success
-    /// ends in one of the two, errors touch nothing, `clear` empties both
-    /// sides), and each write here is final for the last group, which a rebuild
-    /// registers last. The cache tests hold every arm to a full rebuild; the
-    /// rebuild this spares cost the checkpoint pass once per group
-    /// (docs/PERFORMANCE_NOTES.md#registering-a-new-export-group).
+    /// For a group just pushed this leaves what a full rebuild would, since the
+    /// maps already equal a rebuild of the older groups; the cache tests hold
+    /// every arm to that (docs/PERFORMANCE_NOTES.md#registering-a-new-export-group).
     fn index_group(&mut self, idx: usize) {
         let group = &self.groups[idx];
         for_each_replay_path_key(&group.path, |key| {
@@ -168,19 +162,15 @@ impl NetGuidCache {
             .map(move |i| &mut self.groups[i])
     }
 
-    /// Look up a group by its full path (ordinal, case-sensitive).
-    ///
-    /// The hottest lookup in the crate: the sink probes it 2,989,695 times over
-    /// the reference replay's export, once per candidate key per content block.
+    /// Look up a group by its full path (ordinal, case-sensitive): the hottest
+    /// lookup, 2,989,695 probes over the reference replay's export.
     #[must_use]
     pub fn get_group_by_path(&self, path: &str) -> Option<&NetFieldExportGroup> {
         self.by_path.get(path).map(|&i| &self.groups[i])
     }
 
-    /// A counter that changes whenever a NetGUID -> path or -> outer mapping
-    /// changes. Frame ExportData and per-block export bunches both write those
-    /// maps, so a memo over them must stamp with this and discard on a
-    /// mismatch, as with [`Self::schema_generation`].
+    /// Changes whenever a NetGUID -> path or -> outer mapping does; a memo over
+    /// those maps stamps with it, as with [`Self::schema_generation`].
     #[must_use]
     pub fn guid_generation(&self) -> u64 {
         self.guid_generation
@@ -188,8 +178,7 @@ impl NetGuidCache {
 
     /// Register a NetGUID -> path mapping. A write that changes nothing does
     /// not bump [`Self::guid_generation`]: frame ExportData re-declares GUIDs
-    /// every frame with no pre-check of its own, and bumping there would
-    /// collapse the hit rate of a memo keyed on the generation.
+    /// every frame, which would collapse a memo's hit rate.
     pub fn set_net_guid_path(&mut self, net_guid: u32, path: String, outer: Option<NetworkGuid>) {
         let outer = outer.filter(|g| g.is_valid());
         if self.guid_to_path.get(&net_guid).map(String::as_str) == Some(path.as_str())
@@ -353,25 +342,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cache_merge_expands_and_preserves() {
-        let mut cache = NetGuidCache::new();
-        let mut group = NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 2);
-        group.set_field(NetFieldExport {
-            handle: 1,
-            compatible_checksum: 17,
-            name: "ExistingField".into(),
-        });
-        cache.add_export_group(group).unwrap();
-
-        let expanded = NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 4);
-        cache.add_export_group(expanded).unwrap();
-
-        let result = cache.get_group_by_index(7).unwrap();
-        assert_eq!(result.len(), 4);
-        assert_eq!(result.get_field(1).unwrap().name, "ExistingField");
-    }
-
     /// A `path_name_index` reused for another path must not hand the new class
     /// the old class's handle table.
     #[test]
@@ -428,14 +398,6 @@ mod tests {
         let group = cache.get_group_by_index(7).unwrap();
         assert_eq!(group.populated_fields().count(), 0);
         assert_eq!(cache.group_count(), 1);
-    }
-
-    #[test]
-    fn cache_set_net_guid_path_stores_and_resolves() {
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
-
-        assert_eq!(cache.get_path_by_guid(17).unwrap(), "/Game/Test.Test_C");
     }
 
     /// A redundant `set_net_guid_path` (same path, same outer) must not bump

@@ -8,32 +8,30 @@
 //!
 //! A name binds only when exactly one group claims it; a leaf two groups claim
 //! is recorded as `AMBIGUOUS_LEAF` and binds nothing. Guessing would hand
-//! `ReadSerializedInt` the wrong field capacity, which consumes the wrong bits
-//! and yields plausible garbage. Each resolver tries candidate leaves in
-//! priority order and the first claimed at all decides: an ambiguous one ends
-//! the search, since the next candidate would name another class.
+//! `BitReader::read_serialized_int` the wrong field capacity, which consumes
+//! the wrong bits and yields plausible garbage. Each resolver tries candidate
+//! leaves in priority order and the first claimed at all decides: an ambiguous
+//! one ends the search, since the next candidate would name another class.
 
 use crate::cache::NetGuidCache;
 use crate::export::NetFieldExportGroup;
 use crate::hash::FxHashMap;
 
-/// Whether a name is a qualified path rather than a bare leaf. One byte pass,
-/// because `unique_leaf_match` alone is entered 174,485 times on the reference
-/// replay; byte-wise is safe because UTF-8 never encodes an ASCII byte inside a
-/// multi-byte sequence.
+/// Whether a name is a qualified path rather than a bare leaf: one byte pass
+/// (`unique_leaf_match` alone makes 174,485 calls on the reference replay), safe
+/// because UTF-8 never encodes an ASCII byte inside a multi-byte sequence.
 #[inline]
 pub(crate) fn has_path_separator(name: &str) -> bool {
     name.bytes().any(|b| matches!(b, b'/' | b'.' | b':'))
 }
 
-/// Longest `stem + suffix` candidate built on the stack. The reference
-/// replay's longest leaf is 61 bytes, and the longest suffix appended is 23.
+/// Longest `stem + suffix` built on the stack; the reference replay's longest
+/// leaf is 61 bytes and the longest suffix 23.
 const JOIN_STACK_CAP: usize = 128;
 
 /// Call `f` with `a` and `b` concatenated, without allocating when the result
-/// fits in [`JOIN_STACK_CAP`] bytes. A `String` per probe cost 149,035 mallocs
-/// in `unique_leaf_match` (calls that miss the exact leaf) plus 17,318 in
-/// `resolve_cnc_for_instance_name`'s stems on the reference replay.
+/// fits in [`JOIN_STACK_CAP`] bytes: a `String` per probe is 166,353 mallocs on
+/// the reference replay.
 #[inline]
 fn with_joined<R>(a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
     let total = a.len() + b.len();
@@ -41,8 +39,7 @@ fn with_joined<R>(a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
         let mut buf = [0u8; JOIN_STACK_CAP];
         buf[..a.len()].copy_from_slice(a.as_bytes());
         buf[a.len()..total].copy_from_slice(b.as_bytes());
-        // Two `&str` always join to valid UTF-8; falling through on `Err`
-        // instead of unwrapping keeps this panic-free.
+        // Always valid UTF-8; falling through on `Err` keeps this panic-free.
         if let Ok(joined) = core::str::from_utf8(&buf[..total]) {
             return f(joined);
         }
@@ -58,7 +55,7 @@ fn with_joined<R>(a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
 pub(crate) fn register_leaf(by_leaf: &mut FxHashMap<String, usize>, path: &str, idx: usize) {
     let leaf = match path.rfind('.') {
         Some(dot_pos) => &path[dot_pos + 1..],
-        None => return, // No dot separator -> not a qualified path, skip.
+        None => return, // not a qualified path
     };
     if leaf.is_empty() {
         return;
@@ -97,7 +94,7 @@ impl NetGuidCache {
     /// `stem_C_ClassNetCache`. Last come trailing digits trimmed
     /// (`WindowShieldA1` -> `WindowShieldA`), then one trailing uppercase
     /// letter (-> `WindowShield`), so the longer stem goes first. The capacity
-    /// is the matched group's declared `NetFieldExportsLength`, never guessed.
+    /// is the matched group's [`NetFieldExportGroup::len`], never guessed.
     #[must_use]
     pub fn resolve_cnc_for_instance_name(&self, bare_name: &str) -> Option<&NetFieldExportGroup> {
         if has_path_separator(bare_name) {
@@ -158,25 +155,13 @@ impl NetGuidCache {
     /// The first claim among a stem's three `_ClassNetCache` candidates, in this
     /// order, which decides a stem declared under more than one convention.
     fn try_cnc_leaf_candidates(&self, stem: &str) -> Option<Option<&NetFieldExportGroup>> {
-        for suffix in [
+        [
             "_ClassNetCache",
             "Component_ClassNetCache",
             "_C_ClassNetCache",
-        ] {
-            if let Some(claim) = with_joined(stem, suffix, |k| self.lookup_cnc_leaf(k)) {
-                return Some(claim);
-            }
-        }
-        None
-    }
-
-    /// [`Self::leaf_claim`], keeping only a claim on a `_ClassNetCache` group.
-    /// Every caller passes a leaf ending in that suffix, so the filter cannot
-    /// fail today; it guards a future caller. An ambiguous claim passes it.
-    fn lookup_cnc_leaf(&self, leaf: &str) -> Option<Option<&NetFieldExportGroup>> {
-        self.leaf_claim(leaf).filter(|claim| {
-            claim.is_none_or(|group| group.path.ends_with(crate::path::CLASS_NET_CACHE_SUFFIX))
-        })
+        ]
+        .into_iter()
+        .find_map(|suffix| with_joined(stem, suffix, |k| self.leaf_claim(k)))
     }
 }
 

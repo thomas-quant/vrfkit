@@ -32,7 +32,6 @@ pub struct ExportFlags(pub u8);
 impl ExportFlags {
     pub const NONE: Self = Self(0);
     pub const HAS_PATH: Self = Self(1 << 0);
-    #[allow(dead_code)]
     pub const NO_LOAD: Self = Self(1 << 1);
     pub const HAS_NETWORK_CHECKSUM: Self = Self(1 << 2);
 
