@@ -16,8 +16,9 @@
 //!
 //! Where that Python port can return partial elements on malformed input, this
 //! decoder rejects the whole array (underfilled member windows, missing or
-//! nonzero terminators, residual bits). On real blobs the two agree: 91,827
-//! shot arrays from 13.01-13.05 matched in structure, tag and bit pattern.
+//! nonzero terminators, repeated or descending element indices, residual bits).
+//! On real blobs the two agree: 91,827 shot arrays from 13.01-13.05 matched in
+//! structure, tag and bit pattern.
 //!
 //! # Wire layout (corpus-validated)
 //!

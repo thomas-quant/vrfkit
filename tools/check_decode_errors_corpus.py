@@ -58,11 +58,13 @@ CHECKPOINT_FAILURES = tuple("cp_" + key for key in FAILURES)
 #: decoders and movement decoder are additive like the struct blobs: stopped,
 #: they move nothing else. Minimum per replay over the 1,018-export audit:
 #: 4,654 decoded rows, 16 struct blobs, 32 array elements, 182 array fields and
-#: 3,001 movement rows, so a one-replay corpus passes. A corpus total cannot
-#: catch a walker stopped on one build. The per-route child counts print but
-#: gate nothing: routes are admitted per build (four on the 12.10-13.00
-#: fixtures, three on 11.06), so a one-build corpus can total 0 on a route;
-#: check_export_baseline.py pins each on the reference replay.
+#: 3,001 movement rows; RPC parameter walks, not in that audit: 441 (the 12.11
+#: public fixture, lowest of 25 replays of 11.06-13.06). So a one-replay corpus
+#: passes. A corpus total cannot catch a walker stopped on one build. The
+#: per-route child counts print but gate nothing: routes are admitted per build
+#: (four on the 12.10-13.00 fixtures, three on 11.06), so a one-build corpus
+#: can total 0 on a route; check_export_baseline.py pins each on the reference
+#: replay.
 MUST_MOVE = (
     ("overlay_decoded_ok", ("overlay_decode_errors",)),
     ("struct_blobs_decoded", ("struct_blobs_failed",)),

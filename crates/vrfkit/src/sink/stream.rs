@@ -367,12 +367,12 @@ impl ExportSink<'_> {
     }
 }
 
-/// One walked CNC RPC's body: a reader over its `payload_bits` bits.
 /// Three optional spawn components from one optional vector: all or none.
 fn transpose(v: Option<[f32; 3]>) -> [Option<f32>; 3] {
     v.map_or([None; 3], |v| v.map(Some))
 }
 
+/// One walked CNC RPC's body: a reader over its `payload_bits` bits.
 fn cnc_body<'p>(payload: &'p [u8], bit_count: u32, rpc: &CncRpc) -> Option<BitReader<'p>> {
     let mut reader = BitReader::with_bit_len(payload, u64::from(bit_count)).ok()?;
     reader.skip_bits(rpc.payload_offset).ok()?;
