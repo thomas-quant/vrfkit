@@ -585,127 +585,33 @@ mod tests {
         );
     }
 
-    /// A component whose bare name is not its group's leaf (`InventoryComponent`
-    /// vs `AresInventory`) reaches the group through the table.
+    /// Every RepLayout pair reaches its target from a RepLayout block and stays
+    /// bare on a ClassNetCache block (fails if the remap stops asking the block
+    /// kind). Only the four effect entries remap a ClassNetCache block: another
+    /// would bind that leaf's RPC stream to `<target>_ClassNetCache`, the
+    /// AbilitySystem mis-parse. The row count pins deletions, which
+    /// `tools/check_component_remaps.py` only reports.
     #[test]
-    fn a_blueprint_component_name_reaches_its_native_parent_group() {
-        assert_eq!(
-            actor_group_path_for(
-                &["/Script/ShooterGame.AresInventory"],
-                100,
-                "InventoryComponent",
-                true,
-            ),
-            "/Script/ShooterGame.AresInventory",
-        );
-    }
-
-    /// The pairs read from the cooked game, in all their shapes (one class under
-    /// many names, two instances of one class, another module, an engine class,
-    /// `/Game/` Blueprint classes, names with spaces), every 13.06 addition
-    /// listed. Each reaches its group from a RepLayout block and stays bare on a
-    /// ClassNetCache block, which fails if the remap stops asking the block kind;
-    /// the table check below fails on any ClassNetCache pair beyond the four
-    /// effect entries, which would bind that leaf's RPC stream to
-    /// `<target>_ClassNetCache` -- the AbilitySystem mis-parse.
-    #[test]
-    fn component_names_read_from_the_game_reach_their_native_groups() {
-        const ESM: &str = "/Script/ShooterGame.EquippableStateMachineComponent";
-        for (leaf, native) in [
-            ("ZoomStateMachine", ESM),
-            ("Gun_StateMachine", ESM),
-            ("MagazineAmmo", "/Script/ShooterGame.AmmoComponent"),
-            ("ReserveAmmo", "/Script/ShooterGame.AmmoComponent"),
-            (
-                "CalloutRegionTracker",
-                "/Script/ShooterGame.CalloutRegionTrackingComponent",
-            ),
-            (
-                "VisionComponent",
-                "/Script/ShooterGame.ShooterCharacterVisionComponent",
-            ),
-            (
-                "PMAimToolingPointsTarget",
-                "/Script/InputTooling.AimToolingPointsTargetComponent",
-            ),
-            // Added from the 13.06 containers by tools/extract_component_classes.
-            ("Resume_StateMachine", ESM),
-            ("Sprint_StateMachine", ESM),
-            ("Slide_StateMachine", ESM),
-            ("ProjectileStateMachine", ESM),
-            ("EquipStateMachine", ESM),
-            ("PrimaryTriggerActionStateMachine", ESM),
-            ("EquippableStateMachine_Activate", ESM),
-            ("LaserStateMachine", ESM),
-            ("SelfResStateMachine", ESM),
-            ("Ability State Machine (EquippableStateMachine)", ESM),
-            ("TimerStateMachine", ESM),
-            ("CloakStateMachine", ESM),
-            ("SpontaneousEquip_StateMachine", ESM),
-            ("EquippableStateMachine_Dart", ESM),
-            ("EquippableStateMachine_Attack", ESM),
-            ("EquippableStateMachine_PickUpOnCooldown", ESM),
-            ("SwapCameras_StateMachine", ESM),
-            (
-                "ShieldDamageSection",
-                "/Script/ShooterGame.ChildDamageSectionComponent",
-            ),
-            (
-                "OverhealDamageSection",
-                "/Script/ShooterGame.ChildDamageSectionComponent",
-            ),
-            (
-                "PreventDeathDamageSection",
-                "/Script/ShooterGame.AttachedDamageSectionComponent",
-            ),
-            ("Usable_PickUp", "/Script/ShooterGame.UsableComponent"),
-            (
-                "StealthComp",
-                "/Script/ShooterGame.SimpleVisualTimelineStealthComp",
-            ),
-            (
-                "StealthV1AddedForAISight",
-                "/Script/ShooterGame.StealthComponent",
-            ),
-            (
-                "Collision Static Mesh",
-                "/Script/Engine.StaticMeshComponent",
-            ),
-            (
-                "PMAimToolingTarget",
-                "/Script/InputTooling.AimToolingSkeletalTargetComponent",
-            ),
-            (
-                "Comp_Ability_CooldownComponent1",
-                "/Game/Characters/Components/Comp_Ability_CooldownComponent.Comp_Ability_CooldownComponent_C",
-            ),
-            (
-                "DamageSection_Vampire_Q_BloodArmor",
-                "/Game/Characters/Vampire/S0/Ability_Q/DamageSection_Vampire_Q_Heal_BloodArmor.DamageSection_Vampire_Q_Heal_BloodArmor_C",
-            ),
-            (
-                "ChooseTeleportSpot_StateComponent",
-                "/Game/Characters/States/ChooseMapLocationOnNavMesh_StateComponent.ChooseMapLocationOnNavMesh_StateComponent_C",
-            ),
-            (
-                "AttachedDamageSection",
-                "/Game/Gear/BasicArmorAttachedDamageSection.BasicArmorAttachedDamageSection_C",
-            ),
-        ] {
+    fn every_rep_layout_remap_reaches_its_group_and_only_from_rep_layout() {
+        let mut rep_layout = 0;
+        for (leaf, target, kind) in KNOWN_SUBOBJECT_CLASS_PATHS {
+            if *kind != GroupKind::RepLayout {
+                continue;
+            }
+            rep_layout += 1;
+            assert_eq!(actor_group_path_for(&[target], 100, leaf, true), *target);
             assert_eq!(
-                actor_group_path_for(&[native], 100, leaf, true),
-                native,
-                "{leaf}",
-            );
-            assert_eq!(
-                actor_group_path_for(&[native], 100, leaf, false),
-                leaf,
+                actor_group_path_for(&[target], 100, leaf, false),
+                *leaf,
                 "{leaf}: a ClassNetCache block is not handed the RepLayout group",
             );
+            assert_eq!(
+                resolve_known_subobject_class_path(leaf, GroupKind::ClassNetCache),
+                None,
+                "{leaf} is RepLayout-only",
+            );
         }
-
-        // The table itself, through the resolver's lookup, so it also fails if
-        // that lookup stops filtering by kind.
+        assert_eq!(rep_layout, 49);
         let class_net_cache: Vec<&str> = KNOWN_SUBOBJECT_CLASS_PATHS
             .iter()
             .filter(|(_, _, kind)| *kind == GroupKind::ClassNetCache)
@@ -719,30 +625,7 @@ mod tests {
                 "LocationalEffectManager",
                 "DamageHandlerComponent",
             ],
-            "only these pairs remap a ClassNetCache block",
         );
-        for (leaf, _, kind) in KNOWN_SUBOBJECT_CLASS_PATHS {
-            if *kind == GroupKind::RepLayout {
-                assert_eq!(
-                    resolve_known_subobject_class_path(leaf, GroupKind::ClassNetCache),
-                    None,
-                    "{leaf} is RepLayout-only",
-                );
-            }
-        }
-    }
-
-    /// Both attribute-set instances reach the native group (wire evidence on
-    /// the table entry).
-    #[test]
-    fn the_second_attribute_set_reaches_the_same_native_group() {
-        for leaf in ["AresAttributeSet_1", "AresAttributeSet_2"] {
-            assert_eq!(
-                actor_group_path_for(&["/Script/ShooterGame.AresAttributeSet"], 100, leaf, true),
-                "/Script/ShooterGame.AresAttributeSet",
-                "{leaf}",
-            );
-        }
     }
 
     /// A component the table does not list keeps its bare path rather than
@@ -793,10 +676,9 @@ mod tests {
         );
     }
 
-    /// A static actor on a recycled channel is not decoded under the previous
-    /// actor's archetype; see [`ChannelArchetype`].
-    #[test]
-    fn a_reused_channel_does_not_inherit_the_previous_actors_archetype() {
+    /// A cache declaring `Smoke_C`, whose archetype (GUID 8) names its class
+    /// through its outer (GUID 9).
+    fn smoke_rig() -> Rig {
         let mut rig = Rig::default();
         rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(
@@ -804,7 +686,6 @@ mod tests {
                 1,
                 4,
             ));
-        // GUID 8 is the dynamic actor's archetype; its outer names the class.
         rig.cache.set_net_guid_path(
             8,
             "Default__Smoke_C".to_owned(),
@@ -812,13 +693,20 @@ mod tests {
         );
         rig.cache
             .set_net_guid_path(9, "/Game/Effects/Smoke".to_owned(), None);
+        rig
+    }
+
+    /// A static actor on a recycled channel is not decoded under the previous
+    /// actor's archetype; see [`ChannelArchetype`].
+    #[test]
+    fn a_reused_channel_does_not_inherit_the_previous_actors_archetype() {
+        let mut rig = smoke_rig();
         // GUID 77 is a static actor that opens later on the same channel and
         // brings no archetype with it.
         rig.cache
             .set_net_guid_path(77, "SomeStaticProp".to_owned(), None);
 
         let mut sink = rig.sink();
-
         let header = actor_block(true);
 
         // The dynamic actor opens on channel 5 and resolves to its class.
@@ -843,23 +731,9 @@ mod tests {
     /// archetype keeps its class.
     #[test]
     fn the_same_actor_reopening_without_an_archetype_keeps_its_class() {
-        let mut rig = Rig::default();
-        rig.cache
-            .add_export_group(vrf_schema::NetFieldExportGroup::new(
-                "/Game/Effects/Smoke.Smoke_C".to_owned(),
-                1,
-                4,
-            ));
-        rig.cache.set_net_guid_path(
-            8,
-            "Default__Smoke_C".to_owned(),
-            Some(vrf_schema::NetworkGuid(9)),
-        );
-        rig.cache
-            .set_net_guid_path(9, "/Game/Effects/Smoke".to_owned(), None);
+        let mut rig = smoke_rig();
 
         let mut sink = rig.sink();
-
         let header = actor_block(true);
 
         sink.on_actor_open(&channel_open(5, 42, 8));
@@ -873,72 +747,37 @@ mod tests {
         );
     }
 
-    /// The memo does not answer for a block whose inputs moved: a
-    /// `register_path` between two resolutions of one key moves only
-    /// `NetGuidCache::guid_generation`, and without that stamp in
-    /// `BlockPathMemo::get` the second returns the first's answer.
+    /// The memo never answers for a block whose inputs moved: a GUID path
+    /// declared through `register_path`, or written by frame-level ExportData
+    /// straight into the cache between two sinks, moves only
+    /// `NetGuidCache::guid_generation`.
     #[test]
     fn a_guid_path_registration_invalidates_the_memo() {
         use vrf_net::net_guid::GuidPathSink;
 
-        let mut rig = Rig::default();
-        rig.cache
-            .add_export_group(vrf_schema::NetFieldExportGroup::new(
-                "/Script/ShooterGame.AresWorldSettings".to_owned(),
-                1,
-                4,
-            ));
-
-        let header = actor_block(true);
-
-        // First pass: GUID 42 has no path at all, so the block falls through to
-        // the unknown marker.
-        {
+        for through_sink in [true, false] {
+            let mut rig = Rig::default();
+            rig.cache
+                .add_export_group(vrf_schema::NetFieldExportGroup::new(
+                    "/Script/ShooterGame.AresWorldSettings".to_owned(),
+                    1,
+                    4,
+                ));
+            let header = actor_block(true);
             let mut sink = rig.sink();
             sink.on_content_block(3, NetworkGuid(42), &header);
             assert_eq!(&*sink.current_group_path, "<unknown:42>");
-        }
-        // Second pass: the same block, after the wire declared the GUID's path.
-        {
-            let mut sink = rig.sink();
-            sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
-            sink.on_content_block(3, NetworkGuid(42), &header);
-            assert_eq!(
-                &*sink.current_group_path, "/Script/ShooterGame.AresWorldSettings",
-                "the memo answered with a resolution its inputs had invalidated"
-            );
-        }
-    }
-
-    /// The same for a GUID write that bypasses `register_path`: frame-level
-    /// ExportData writes the cache between one packet's sink and the next, and
-    /// `guid_generation` is the only stamp that moves.
-    #[test]
-    fn a_frame_level_guid_registration_invalidates_the_memo() {
-        let mut rig = Rig::default();
-        rig.cache
-            .add_export_group(vrf_schema::NetFieldExportGroup::new(
-                "/Script/ShooterGame.AresWorldSettings".to_owned(),
-                1,
-                4,
-            ));
-
-        let header = actor_block(true);
-
-        {
-            let mut sink = rig.sink();
-            sink.on_content_block(3, NetworkGuid(42), &header);
-            assert_eq!(&*sink.current_group_path, "<unknown:42>");
-        }
-        // The frame-level write: straight into the rig.cache, with no sink alive.
-        rig.cache
-            .set_net_guid_path(42, "AresWorldSettings".to_owned(), None);
-        {
+            if through_sink {
+                sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
+            } else {
+                rig.cache
+                    .set_net_guid_path(42, "AresWorldSettings".to_owned(), None);
+            }
             let mut sink = rig.sink();
             sink.on_content_block(3, NetworkGuid(42), &header);
             assert_eq!(
                 &*sink.current_group_path, "/Script/ShooterGame.AresWorldSettings",
-                "the memo answered with a resolution a frame-level GUID write had invalidated"
+                "through the sink: {through_sink}"
             );
         }
     }
@@ -952,7 +791,6 @@ mod tests {
 
         let mut rig = Rig::default();
         let mut sink = rig.sink();
-
         let header = actor_block(true);
 
         sink.register_path(42, "AresWorldSettings", NetworkGuid(7));
@@ -966,7 +804,7 @@ mod tests {
         );
 
         // A different outer is a real change (the `outer_net_guid` column and a
-        // resolution input): an invalid outer removes the one the rig.cache held.
+        // resolution input): an invalid outer removes the one the cache held.
         sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
         sink.on_content_block(3, NetworkGuid(42), &header);
         assert!(
