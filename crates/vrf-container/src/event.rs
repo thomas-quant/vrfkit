@@ -273,13 +273,13 @@ pub fn parse_event_chunk(payload: &[u8]) -> Result<EventChunk<'_>, ContainerErro
     let time2 = read_u32(&mut reader, "event time2")?;
     let size_in_bytes = read_i32(&mut reader, "event payload size")?;
 
-    if size_in_bytes < 0 {
-        return Err(ContainerError::InvalidEventPayloadSize {
-            size: size_in_bytes,
-        });
-    }
-    let (body, trailing_bytes) =
-        declared_body(payload, &reader, size_in_bytes as usize, "event payload")?;
+    let (body, trailing_bytes) = declared_body(
+        payload,
+        &reader,
+        size_in_bytes,
+        |size| ContainerError::InvalidEventPayloadSize { size },
+        "event payload",
+    )?;
 
     Ok(EventChunk {
         id,

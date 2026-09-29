@@ -68,14 +68,17 @@ pub(crate) fn read_guid(reader: &mut BitReader<'_>) -> Result<[u32; 4], Containe
 }
 
 /// The `size`-byte body after the header `reader` has read from `payload`,
-/// and the count of bytes after it that the layout does not account for.
+/// and the count of bytes after it that the layout does not account for. A
+/// negative `size` is `negative(size)`.
 #[cfg(any(feature = "event", feature = "checkpoint"))]
 pub(crate) fn declared_body<'a>(
     payload: &'a [u8],
     reader: &BitReader<'_>,
-    size: usize,
+    size: i32,
+    negative: fn(i32) -> ContainerError,
     context: &'static str,
 ) -> Result<(&'a [u8], usize), ContainerError> {
+    let size = usize::try_from(size).map_err(|_| negative(size))?;
     // Byte-granular reads that all returned Ok leave the reader on a byte
     // boundary inside `payload`: BitReader::need never advances past it.
     let header_end = (reader.position() / 8) as usize;

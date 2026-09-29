@@ -65,15 +65,11 @@ pub fn parse_checkpoint_chunk(payload: &[u8]) -> Result<CheckpointChunk<'_>, Con
     let time2 = read_u32(&mut reader, "checkpoint time2")?;
     let size_in_bytes = read_i32(&mut reader, "checkpoint archive size")?;
 
-    if size_in_bytes < 0 {
-        return Err(ContainerError::InvalidCheckpointArchiveSize {
-            size: size_in_bytes,
-        });
-    }
     let (archive, trailing_bytes) = declared_body(
         payload,
         &reader,
-        size_in_bytes as usize,
+        size_in_bytes,
+        |size| ContainerError::InvalidCheckpointArchiveSize { size },
         "checkpoint archive",
     )?;
 

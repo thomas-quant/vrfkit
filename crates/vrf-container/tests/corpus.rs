@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use vrf_container::{
     ChunkIterator, ChunkType, KNOWN_EVENT_GROUPS, decompress_replay_data_with_trailing,
-    event_payload_seconds_matches_time, parse_event_chunk, parse_event_payload, parse_preamble,
+    event_payload_seconds_matches_time, parse_event_chunk, parse_known_event_payload,
+    parse_preamble,
 };
 
 /// What one file contributed to the tally.
@@ -96,36 +97,20 @@ fn scan_file(data: &[u8]) -> FileReport {
                 report.unknown_event_groups += 1;
                 continue;
             };
-            let group = known.group;
-            let Some(parsed) = parse_event_payload(event.payload, known.word_count) else {
-                problems.push(format!(
-                    "known event group {group} no longer fits its {}-word layout",
-                    known.word_count
-                ));
-                continue;
-            };
-            if parsed.name != known.payload_name {
-                // Do not include the unconstrained wire string in diagnostics.
-                problems.push(format!(
-                    "known event group {group} no longer carries its public enum-name constant"
-                ));
-                continue;
+            // The driver's check for events.parquet: arity, tag, name and time.
+            match parse_known_event_payload(known.group, event.payload)
+                .filter(|parsed| event_payload_seconds_matches_time(event.time1, parsed.seconds))
+            {
+                Some(parsed) => {
+                    report.known_events += 1;
+                    let delta = (f64::from(parsed.seconds) * 1000.0 - f64::from(event.time1)).abs();
+                    report.max_event_time_delta_ms = report.max_event_time_delta_ms.max(delta);
+                }
+                None => problems.push(format!(
+                    "known event group {} no longer fits its measured layout",
+                    known.group
+                )),
             }
-            if parsed.tag != known.payload_tag {
-                problems.push(format!(
-                    "known event group {group} no longer carries its stable tag"
-                ));
-                continue;
-            }
-            if !event_payload_seconds_matches_time(event.time1, parsed.seconds) {
-                problems.push(format!(
-                    "known event group {group} payload seconds no longer agrees with Time1"
-                ));
-                continue;
-            }
-            report.known_events += 1;
-            let delta = (f64::from(parsed.seconds) * 1000.0 - f64::from(event.time1)).abs();
-            report.max_event_time_delta_ms = report.max_event_time_delta_ms.max(delta);
             continue;
         }
 
@@ -379,7 +364,7 @@ fn each_defect_is_reported() {
         ),
         (
             fixture::with_round_start_tag(99),
-            "known event group roundStarted no longer carries its stable tag",
+            "known event group roundStarted no longer fits its measured layout",
         ),
         (stray_bytes, "chunk:"),
         (unknown_type, "unknown chunk type 4"),

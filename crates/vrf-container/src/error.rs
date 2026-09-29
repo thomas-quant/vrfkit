@@ -1,5 +1,6 @@
-//! Error types for the `.vrf` container parser: every failure is a typed variant
-//! naming the field and the byte counts involved -- no panics, no silent zeros.
+//! Error types for the `.vrf` container parser: typed variants, no panics, no
+//! silent zeros. `BitIo` and `OodleDecompression` carry only the lower layer's
+//! message; every other short read names its field and byte counts.
 
 use thiserror::Error;
 use vrf_bitio::BitError;

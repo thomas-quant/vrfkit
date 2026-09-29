@@ -60,14 +60,6 @@ pub struct ReplayInfo {
 /// Parse the replay info section from the start of the buffer, returning it and
 /// the byte offset where chunks begin.
 pub(crate) fn parse_replay_info(data: &[u8]) -> Result<(ReplayInfo, usize), ContainerError> {
-    if data.is_empty() {
-        return Err(ContainerError::Truncated {
-            context: "replay info",
-            needed: 4,
-            available: 0,
-        });
-    }
-
     let mut reader = BitReader::new(data);
 
     let magic = read_u32(&mut reader, "file magic")?;
