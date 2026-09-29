@@ -25,9 +25,7 @@ use vrf_container::{
 };
 use vrf_decode::OverlayErrorReport;
 use vrf_export::{
-    ActorWriter, CheckpointActorWriter, CheckpointBlockWriter, CheckpointExportFieldWriter,
-    CheckpointExportGroupWriter, CheckpointFieldWriter, CheckpointGuidEntryWriter,
-    CheckpointNetGuidWriter, EventRecord, EventWriter, FieldWriter, MovementWriter, NetGuidRecord,
+    ActorWriter, EventRecord, EventWriter, FieldWriter, MovementWriter, NetGuidRecord,
     NetGuidWriter, PartialRecord, PartialWriter,
 };
 use vrf_schema::NetGuidCache;
@@ -91,30 +89,9 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     // worth of encoding.
     let mut event_writer = EventWriter::new(create("events.parquet")?)?;
     let mut partial_writer = PartialWriter::new(create("partials.parquet")?)?;
-    let checkpoint_writers = if with_checkpoints {
-        Some(checkpoints::CheckpointWriters {
-            // The one checkpoint table large enough to take off the decode
-            // thread, for the reason `writers` gives for fields and movement.
-            fields: WriterThread::spawn_table(
-                "checkpoint_fields",
-                CheckpointFieldWriter::new(create("checkpoint_fields.parquet")?)?,
-            ),
-            actors: CheckpointActorWriter::new(create("checkpoint_actors.parquet")?)?,
-            net_guids: CheckpointNetGuidWriter::new(create("checkpoint_net_guids.parquet")?)?,
-            blocks: CheckpointBlockWriter::new(create("checkpoint_blocks.parquet")?)?,
-            guid_entries: CheckpointGuidEntryWriter::new(create(
-                "checkpoint_guid_entries.parquet",
-            )?)?,
-            export_groups: CheckpointExportGroupWriter::new(create(
-                "checkpoint_export_groups.parquet",
-            )?)?,
-            export_fields: CheckpointExportFieldWriter::new(create(
-                "checkpoint_export_fields.parquet",
-            )?)?,
-        })
-    } else {
-        None
-    };
+    let checkpoint_writers = with_checkpoints
+        .then(|| checkpoints::CheckpointWriters::new(create))
+        .transpose()?;
 
     let mut fields =
         WriterThread::spawn_table("fields", FieldWriter::new(create("fields.parquet")?)?);
@@ -145,7 +122,6 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
                         push_partials(
                             &mut partial_writer,
                             buffers.partials.drain(..),
-                            "main",
                             &mut totals.partial_rows,
                             &mut totals.partial_bits,
                         )
@@ -173,7 +149,6 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     push_partials(
         &mut partial_writer,
         pass.buffers.partials.drain(..),
-        "main",
         &mut totals.partial_rows,
         &mut totals.partial_bits,
     )?;
@@ -184,7 +159,6 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         push_partials(
             &mut partial_writer,
             cp.partials.drain(..),
-            "checkpoint",
             &mut cp.stats.partial_rows,
             &mut cp.stats.partial_bits,
         )?;
@@ -318,19 +292,21 @@ fn write_event<W: Write + Send>(
     Ok(())
 }
 
-/// Write `records` stamped with the pass that produced them, counting each
-/// into `rows` and `bits` as it reaches the writer.
+/// Write `records`, counting each into `rows` and `bits` as it reaches the
+/// writer. The checkpoint pass labels its own rows; the rest are the main
+/// pass's.
 fn push_partials<W: Write + Send>(
     writer: &mut PartialWriter<W>,
     records: impl IntoIterator<Item = PartialRecord>,
-    source: &'static str,
     rows: &mut u64,
     bits: &mut u64,
 ) -> Result<(), CliError> {
     writer.push_batch(records.into_iter().map(|mut record| {
         *rows += 1;
         *bits += record.bit_count;
-        record.source = source;
+        if record.checkpoint_id.is_none() {
+            record.source = "main";
+        }
         record
     }))?;
     Ok(())

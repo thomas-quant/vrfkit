@@ -8,24 +8,6 @@ mod common;
 
 use common::*;
 
-/// A packet whose one reliable bunch opens a partial reassembly on channel 2
-/// and never finishes it: 8 payload bits at end of stream.
-fn unfinished_partial_packet() -> Vec<u8> {
-    let mut payload = BitWriter::new();
-    payload.int_packed(3);
-    let mut bits = BitWriter::new();
-    bits.extend_bits(&[true, true, false, false, true]) // control, open, close, paused, reliable
-        .int_packed(2) // channel index
-        .extend_bits(&[false, false, true, false]) // exports, must be mapped, partial, Valorant
-        .extend_bits(&[true, false]) // partial initial, partial final
-        .bit(true) // hardcoded channel name
-        .int_packed(1)
-        .serialized_int(payload.len() as u32, 2 * 1024 * 8)
-        .extend_bits(&payload)
-        .bit(true); // end-of-packet marker
-    pack(&bits)
-}
-
 /// The only unfinished bunch is in a checkpoint frame, so `partials.parquet`
 /// holds a row with `--checkpoints` and none without, and the summary counts
 /// the row the file received.

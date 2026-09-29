@@ -14,9 +14,9 @@ use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     CheckpointActorRecord, CheckpointActorWriter, CheckpointBlockWriter,
     CheckpointExportFieldRecord, CheckpointExportFieldWriter, CheckpointExportGroupRecord,
-    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointGuidEntryRecord,
-    CheckpointGuidEntryWriter, CheckpointIdentity, CheckpointNetGuidRecord,
-    CheckpointNetGuidWriter, PartialRecord,
+    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointFieldWriter,
+    CheckpointGuidEntryRecord, CheckpointGuidEntryWriter, CheckpointIdentity,
+    CheckpointNetGuidRecord, CheckpointNetGuidWriter, PartialRecord,
 };
 use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
@@ -87,7 +87,31 @@ pub(super) struct CheckpointWriters<W: Write + Send> {
     pub export_fields: CheckpointExportFieldWriter<W>,
 }
 
-impl<W: Write + Send> CheckpointWriters<W> {
+impl<W: Write + Send + 'static> CheckpointWriters<W> {
+    /// Every checkpoint table's writer, over `create(file name)`.
+    pub fn new(mut create: impl FnMut(&str) -> Result<W, CliError>) -> Result<Self, CliError> {
+        Ok(Self {
+            // The one checkpoint table large enough to take off the decode
+            // thread, for the reason `writers` gives for fields and movement.
+            fields: WriterThread::spawn_table(
+                "checkpoint_fields",
+                CheckpointFieldWriter::new(create("checkpoint_fields.parquet")?)?,
+            ),
+            actors: CheckpointActorWriter::new(create("checkpoint_actors.parquet")?)?,
+            net_guids: CheckpointNetGuidWriter::new(create("checkpoint_net_guids.parquet")?)?,
+            blocks: CheckpointBlockWriter::new(create("checkpoint_blocks.parquet")?)?,
+            guid_entries: CheckpointGuidEntryWriter::new(create(
+                "checkpoint_guid_entries.parquet",
+            )?)?,
+            export_groups: CheckpointExportGroupWriter::new(create(
+                "checkpoint_export_groups.parquet",
+            )?)?,
+            export_fields: CheckpointExportFieldWriter::new(create(
+                "checkpoint_export_fields.parquet",
+            )?)?,
+        })
+    }
+
     pub fn finish(self) -> Result<(), CliError> {
         self.fields.finish()?;
         self.actors.finish()?;
@@ -195,13 +219,14 @@ pub(super) struct CheckpointPass {
     /// Merged into the main pass's report: the summary's breakdown is the only
     /// place a checkpoint-only decode error surfaces.
     pub errors: OverlayErrorReport,
-    /// For the main thread's `partials.parquet` writer, which counts them.
+    /// Labelled with their checkpoint, for the main thread's
+    /// `partials.parquet` writer, which counts them.
     pub partials: Vec<PartialRecord>,
 }
 
 /// Decode every Checkpoint chunk in file order into `writers`, then close
 /// them.
-pub(super) fn run<W: Write + Send>(
+pub(super) fn run<W: Write + Send + 'static>(
     data: &[u8],
     replay: &Replay<'_>,
     mut writers: CheckpointWriters<W>,
@@ -308,6 +333,7 @@ fn process_chunk<W: Write + Send>(
     pass.finish();
     partials.append(&mut pass.buffers.partials);
     for record in &mut partials[first_partial..] {
+        record.source = "checkpoint";
         record.checkpoint_id = Some(cp.id.clone());
     }
     let chunk_actor_rows = stats.actor_rows_written - actor_rows_before;
@@ -341,8 +367,42 @@ fn process_chunk<W: Write + Send>(
 }
 
 #[cfg(test)]
+#[path = "../../tests/common/replay.rs"]
+mod replay_fixtures;
+
+#[cfg(test)]
 mod tests {
+    use vrf_container::parse_preamble;
+    use vrf_testkit::{Info, chunk, header_payload, replay_info};
+
+    use super::replay_fixtures::*;
     use super::*;
+
+    /// The main thread writes these rows as they come back, so each must
+    /// already name its own snapshot; no measured replay has one.
+    #[test]
+    fn partial_rows_come_back_labelled_with_their_own_checkpoint() {
+        let packet = unfinished_partial_packet();
+        let snapshot = checkpoint_tables(&frame(1.5, &[], 0, &[&packet]));
+        let mut data = replay_info(&Info::default());
+        data.extend(chunk(0, &header_payload()));
+        for index in 0..2 {
+            data.extend(chunk(2, &checkpoint(index, &snapshot, 0)));
+        }
+        let preamble = parse_preamble(&data).unwrap();
+        let writers = CheckpointWriters::new(|_| Ok(Vec::new())).unwrap();
+        let out = run(&data, &Replay::new(&preamble), writers).unwrap();
+        let labels: Vec<_> = (out.partials.iter())
+            .map(|row| (row.source, row.checkpoint_id.as_deref()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("checkpoint", Some("checkpoint0")),
+                ("checkpoint", Some("checkpoint1"))
+            ]
+        );
+    }
 
     /// Per chunk, so one chunk's surplus cannot cancel another's loss.
     #[test]
