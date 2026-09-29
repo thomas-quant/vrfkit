@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,6 +22,13 @@ import tempfile
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+
+if __package__:
+    from .atomic_io import sha256_file as sha
+    from .wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
+else:
+    from atomic_io import sha256_file as sha
+    from wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
 
 SCHEMA_VERSION = 2
 #: Every route's rows carry handle 1. A selected row with another handle is
@@ -86,43 +92,9 @@ COLUMNS = ["time_ms", "packet_id", "channel_index", "actor_net_guid",
            "compatible_checksum", "bit_count", "raw_bits"]
 
 
-class WireError(ValueError):
-    """A numeric structure cannot be established for this window."""
-
-
-class Bits:
-    def __init__(self, raw: bytes, bit_count: int):
-        if not isinstance(raw, bytes) or type(bit_count) is not int or bit_count < 0 or len(raw) != (bit_count + 7) // 8:
-            raise WireError("invalid_window")
-        self.raw, self.end, self.pos = raw, bit_count, 0
-
-    def read(self, width: int) -> int:
-        if width < 0 or width > 32 or self.pos + width > self.end:
-            raise WireError("truncated_scalar")
-        start, shift = divmod(self.pos, 8)
-        value = int.from_bytes(self.raw[start:(self.pos + width + 7) // 8], "little")
-        self.pos += width
-        return (value >> shift) & ((1 << width) - 1)
-
-    def i32(self) -> int:
-        value = self.read(32)
-        return value if value < (1 << 31) else value - (1 << 32)
-
-    def packed(self) -> int:
-        value = 0
-        for index in range(5):
-            byte = self.read(8)
-            if index == 4 and byte >> 1 > 15:
-                raise WireError("packed_overflow")
-            value |= (byte >> 1) << (7 * index)
-            if not byte & 1:
-                return value
-        raise WireError("packed_unterminated")
-
-    def skip(self, width: int) -> None:
-        if self.pos + width > self.end:
-            raise WireError("field_overrun")
-        self.pos += width
+class Bits(_Bits):
+    TRUNCATED = "truncated_scalar"
+    OVERRUN = "field_overrun"
 
 
 def decode(raw: bytes, bit_count: int) -> dict:
@@ -132,15 +104,7 @@ def decode(raw: bytes, bit_count: int) -> dict:
     need no monotonicity: a delta can span updates missing from this stream.
     """
     reader = Bits(raw, bit_count)
-    if reader.read(1) != 1:
-        raise WireError("unsupported_support_bit")
-    array_key, base_key, deletes, changed = [reader.i32() for _ in range(4)]
-    if min(deletes, changed) < 0:
-        raise WireError("negative_count")
-    # Every changed item needs an i32 ID and at least an 8-bit terminator.
-    if deletes * 32 + changed * 40 > reader.end - reader.pos:
-        raise WireError("count_bounds")
-    deleted_ids = [reader.i32() for _ in range(deletes)]
+    array_key, base_key, deleted_ids, changed = fastarray_header(reader)
     entries = []
     for _ in range(changed):
         item_id = reader.i32()
@@ -152,20 +116,15 @@ def decode(raw: bytes, bit_count: int) -> dict:
             width = reader.packed()
             fields.append({"handle": encoded - 1, "bit_offset": reader.pos,
                            "bit_count": width})
-            reader.skip(width)
+            reader.take(width)
         entries.append({"item_id": item_id, "fields": fields})
     if reader.pos != reader.end:
         raise WireError("unconsumed_suffix")
     return {"supports_delta_struct_serialization": True,
             "array_replication_key": array_key, "base_replication_key": base_key,
-            "num_deletes": deletes, "num_changed": changed,
+            "num_deletes": len(deleted_ids), "num_changed": changed,
             "deleted_item_ids": deleted_ids, "changed_items": entries,
             "consumed_bits": reader.pos}
-
-
-def sha(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def route_mask(groups: pa.Array, names: pa.Array) -> pa.Array:
@@ -180,14 +139,7 @@ def route_mask(groups: pa.Array, names: pa.Array) -> pa.Array:
 
 def selected_rows(path: Path, checkpoint: bool):
     columns = [*COLUMNS, *(["checkpoint_index", "checkpoint_id"] if checkpoint else [])]
-    ordinal = 0
-    for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=65536, use_threads=False):
-        groups = pc.cast(batch.column("group_path"), pa.string())
-        names = pc.cast(batch.column("field_name"), pa.string())
-        positions = pc.indices_nonzero(route_mask(groups, names))
-        for index, row in zip(positions.to_pylist(), batch.take(positions).to_pylist()):
-            yield ordinal + index, row
-        ordinal += batch.num_rows
+    return iter_selected(path, columns, lambda b: route_mask(text(b, "group_path"), text(b, "field_name")))
 
 
 def unselected_route_name_rows(path: Path) -> int:

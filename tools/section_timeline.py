@@ -14,14 +14,15 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 
 if __package__:
     from . import extract_section_observations
     from .atomic_io import aliases, atomic_write_text, sha256_file as sha
+    from .wire_bits import iter_selected, text
 else:
     import extract_section_observations
     from atomic_io import aliases, atomic_write_text, sha256_file as sha
+    from wire_bits import iter_selected, text
 
 RESET = "MulticastSectionLifeChange"
 SIGNS = {"MulticastNotifyDamage_Base": 1, "MulticastNotifyDamage_Point": 1,
@@ -31,8 +32,8 @@ REMOVED_STRICT_REASONS = {"same_time_tie", "prior_tie_censor", "lifecycle_unreso
                           "prior_lifecycle_unresolved", "actor_channel_instance_changed"}
 INPUT_NAMES = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet",
                "net_guids.parquet", "actors.parquet")
-SOURCE_NAMES = ("section_timeline.py", "extract_section_observations.py",
-                "extract_kill_observations.py", "atomic_io.py")
+SOURCE_NAMES = ("section_timeline.py", "extract_section_observations.py", "wire_bits.py",
+                "atomic_io.py")
 
 
 def _traces(rows):
@@ -332,16 +333,11 @@ def build(raw, actor_rows):
 
 def actor_rows(path):
     """(physical row ordinal, row) for each open/close row of actors.parquet."""
-    ordinal = 0
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=65536, columns=[
-            "time_ms", "packet_id", "channel_index", "actor_net_guid", "event", "class_path"],
-            use_threads=False):
-        events = pc.cast(batch.column("event"), pa.string())
-        indices = pc.indices_nonzero(pc.is_in(events, value_set=pa.array(["open", "close"])))
-        for offset, row in zip(indices.to_pylist(), batch.take(indices).to_pylist()):
-            row["_ordinal"] = ordinal + offset
-            yield ordinal + offset, row
-        ordinal += batch.num_rows
+    columns = ["time_ms", "packet_id", "channel_index", "actor_net_guid", "event", "class_path"]
+    for ordinal, row in iter_selected(path, columns, lambda b: pc.is_in(
+            text(b, "event"), value_set=pa.array(["open", "close"]))):
+        row["_ordinal"] = ordinal
+        yield ordinal, row
 
 
 def extract(export):

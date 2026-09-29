@@ -20,17 +20,18 @@ import pyarrow.parquet as pq
 if __package__:
     from . import extract_kill_observations as observation_extractor
     from .atomic_io import atomic_write_text, sha256_file as file_sha
-    from .extract_kill_observations import InputError, exact_ref
+    from .wire_bits import InputError, exact_ref, iter_selected, text
 else:
     import extract_kill_observations as observation_extractor
     from atomic_io import atomic_write_text, sha256_file as file_sha
-    from extract_kill_observations import InputError, exact_ref
+    from wire_bits import InputError, exact_ref, iter_selected, text
 
 #: Matched lags measure 5-41 ms on the 714-export corpus, and a 100 ms cap
 #: changed no match (docs/KILL_LEDGER.md, "Validation scope").
 MAX_REPLICATION_LAG_MS = 50
 #: This file and the modules it runs, hashed as provenance and refused as --out.
-SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')
+SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','wire_bits.py',
+                'atomic_io.py')
 DEATH_NAME = 'EReplayEventGroup::CharacterDeath'
 IDENTITY_STATUSES = (
     'resolved', 'absent_reference', 'null_reference', 'lifecycle_time_regression',
@@ -224,16 +225,8 @@ def player_state_rows(path):
     """Preserve physical field ordinals while selecting top-level properties."""
     columns = ['actor_net_guid','object_net_guid','group_path','field_name','time_ms','packet_id',
                'value_i64','value_f64','value_bool','value_str','raw_bits','bit_count']
-    offset = 0
-    result = []
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=65536,columns=columns,use_threads=False):
-        selected = pc.fill_null(pc.and_(pc.equal(pc.cast(batch['field_name'],pa.string()),'PlayerState'),
-                                        pc.is_null(batch['object_net_guid'])),False)
-        indices = pc.indices_nonzero(selected)
-        rows = batch.take(indices).to_pylist()
-        result.extend((offset+index,row) for index,row in zip(indices.to_pylist(),rows))
-        offset += batch.num_rows
-    return result
+    return list(iter_selected(path, columns, lambda b: pc.and_(
+        pc.equal(text(b, 'field_name'), 'PlayerState'), pc.is_null(b['object_net_guid']))))
 
 
 def extract(export, observations_path=None):

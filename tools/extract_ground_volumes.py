@@ -35,7 +35,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from dataclasses import dataclass
-import hashlib
 import json
 import math
 import os
@@ -48,6 +47,13 @@ import tempfile
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+
+if __package__:
+    from .atomic_io import sha256_file as sha
+    from .wire_bits import Bits, WireError, fastarray_header, iter_selected, text
+else:
+    from atomic_io import sha256_file as sha
+    from wire_bits import Bits, WireError, fastarray_header, iter_selected, text
 
 #: 2: items gained `status_name`, the receipt `declarations.resolved_names`.
 SCHEMA_VERSION = 2
@@ -176,70 +182,6 @@ COUNTERS = (
     "owner_class_resolved", "owner_class_missing", "owner_class_ambiguous",
     "object_outer_is_actor", "object_outer_not_actor", "object_guid_unresolved",
 )
-
-
-class WireError(ValueError):
-    """This window cannot be decoded exactly with the declared schema."""
-
-
-class Bits:
-    """LSB-first reader over a window, bounded to [pos, end)."""
-
-    __slots__ = ("raw", "pos", "end")
-
-    def __init__(self, raw: bytes, bit_count: int):
-        if (not isinstance(raw, bytes) or type(bit_count) is not int or bit_count < 0
-                or len(raw) != (bit_count + 7) // 8):
-            raise WireError("invalid_window")
-        self.raw, self.pos, self.end = raw, 0, bit_count
-
-    def remaining(self) -> int:
-        return self.end - self.pos
-
-    def take(self, width: int) -> "Bits":
-        """A reader over exactly the next `width` bits, which this one skips."""
-        if width < 0 or width > self.remaining():
-            raise WireError("payload_overrun")
-        sub = Bits.__new__(Bits)
-        sub.raw, sub.pos, sub.end = self.raw, self.pos, self.pos + width
-        self.pos += width
-        return sub
-
-    def read(self, width: int) -> int:
-        if width < 0 or width > 64 or width > self.remaining():
-            raise WireError("truncated")
-        start, shift = divmod(self.pos, 8)
-        value = int.from_bytes(self.raw[start:(self.pos + width + 7) // 8], "little")
-        self.pos += width
-        return (value >> shift) & ((1 << width) - 1)
-
-    def i32(self) -> int:
-        value = self.read(32)
-        return value - (1 << 32) if value >= 1 << 31 else value
-
-    def packed(self) -> int:
-        """Unreal SerializeIntPacked: 7 value bits and a continue bit per byte."""
-        value = 0
-        for index in range(5):
-            byte = self.read(8)
-            if index == 4 and byte >> 1 > 15:
-                raise WireError("packed_overflow")
-            value |= (byte >> 1) << (7 * index)
-            if not byte & 1:
-                return value
-        raise WireError("packed_unterminated")
-
-    def serialize_int(self, value_max: int) -> int:
-        """Unreal FBitReader::SerializeInt: bits LSB first while
-        value + mask < value_max, so the width depends on the bits read."""
-        if value_max < 2:
-            raise WireError("serialize_int_max")
-        value, mask = 0, 1
-        while value + mask < value_max:
-            if self.read(1):
-                value |= mask
-            mask <<= 1
-        return value
 
 
 @dataclass(frozen=True)
@@ -375,15 +317,7 @@ def decode_window(raw: bytes, bit_count: int, schema: ReplaySchema) -> tuple[lis
         width = bits.packed()
         offset = bits.pos
         body = bits.take(width)
-        if body.read(1) != 1:
-            raise WireError("unsupported_support_bit")
-        array_key, base_key, deletes, changed = [body.i32() for _ in range(4)]
-        if min(deletes, changed) < 0:
-            raise WireError("negative_count")
-        # A deleted ID is 32 bits; a changed item at least 32 + 8.
-        if deletes * 32 + changed * 40 > body.remaining():
-            raise WireError("count_bounds")
-        deleted = [body.i32() for _ in range(deletes)]
+        array_key, base_key, deleted, changed = fastarray_header(body)
         entry_index = len(entries)
         for item_index in range(changed):
             item_id = body.i32()
@@ -450,24 +384,12 @@ def load_schema(export_dir: Path, manifest: dict) -> ReplaySchema:
                         next(iter(slots)) if len(slots) == 1 else None, error)
 
 
-def sha(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
 def selected_rows(path: Path, checkpoint: bool):
     """(physical row ordinal, row) for every row on a route, any handle."""
     columns = [*COLUMNS, *(["checkpoint_index", "checkpoint_id"] if checkpoint else [])]
-    ordinal = 0
-    for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=65536, use_threads=False):
-        groups = pc.cast(batch.column("group_path"), pa.string())
-        names = pc.cast(batch.column("field_name"), pa.string())
-        mask = pc.and_(pc.is_in(groups, value_set=pa.array(list(ROUTE_BY_GROUP))),
-                       pc.is_in(names, value_set=pa.array(list(WINDOW_KINDS))))
-        positions = pc.indices_nonzero(pc.fill_null(mask, False))
-        for index, row in zip(positions.to_pylist(), batch.take(positions).to_pylist()):
-            yield ordinal + index, row
-        ordinal += batch.num_rows
+    return iter_selected(path, columns, lambda b: pc.and_(
+        pc.is_in(text(b, "group_path"), value_set=pa.array(list(ROUTE_BY_GROUP))),
+        pc.is_in(text(b, "field_name"), value_set=pa.array(list(WINDOW_KINDS)))))
 
 
 def owner_classes(export_dir: Path) -> dict:

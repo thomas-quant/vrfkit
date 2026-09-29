@@ -10,16 +10,15 @@ from __future__ import annotations
 import argparse, collections, json, math, re, struct, sys
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from .extract_kill_observations import InputError, exact_ref, parse_array
+    from .wire_bits import InputError, exact_ref, iter_selected, parse_array, text
 else:
     from atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from extract_kill_observations import InputError, exact_ref, parse_array
+    from wire_bits import InputError, exact_ref, iter_selected, parse_array, text
 
 SCHEMA_VERSION = 1
 OUTER_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
@@ -45,7 +44,7 @@ FIELDS = ["time_ms", "packet_id", "channel_index", "actor_net_guid", "object_net
 CP_FIELDS = ["checkpoint_index", "checkpoint_id", *FIELDS]
 HEALTH_SECTION_PATH = "HealthDamageSection"
 INPUT_NAMES = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "net_guids.parquet")
-HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py")
+HELPER_NAMES = ("wire_bits.py", "atomic_io.py")
 
 
 class IntegrityError(InputError):
@@ -95,18 +94,9 @@ def route_name(field):
 
 
 def selected_rows(path, columns):
-    """Arrow-filter route rows before materializing Python dictionaries."""
-    base = 0
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=65536, columns=columns, use_threads=False):
-        names = pc.cast(batch.column(batch.schema.get_field_index("field_name")), pa.string())
-        mask = None
-        for route in ROUTES:
-            item = pc.starts_with(names, pattern=route + ".")
-            mask = item if mask is None else pc.or_(mask, item)
-        indices = pc.indices_nonzero(pc.fill_null(mask, False))
-        for offset, row in zip(indices.to_pylist(), batch.take(indices).to_pylist()):
-            yield base + offset, row
-        base += batch.num_rows
+    """Rows whose field name is `<route>.` for any route."""
+    pattern = "^(?:" + "|".join(ROUTES) + r")\."
+    return iter_selected(path, columns, lambda b: pc.match_substring_regex(text(b, "field_name"), pattern))
 
 
 def declarations(manifest):

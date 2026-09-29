@@ -7,14 +7,15 @@ members remain null and all three serialized clocks remain independent.
 from __future__ import annotations
 import argparse, hashlib, json, math, struct, sys
 from pathlib import Path
-import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import atomic_write_text, sha256_file as sha
+    from .wire_bits import InputError, exact_ref, iter_selected, parse_array, text, weapon_theme
 else:
-    from atomic_io import atomic_write_text
+    from atomic_io import atomic_write_text, sha256_file as sha
+    from wire_bits import InputError, exact_ref, iter_selected, parse_array, text, weapon_theme
 
 SCHEMA_VERSION = 1
 GROUP = "/Script/ShooterGame.PlayerMatchStatsComponent"
@@ -76,127 +77,6 @@ MEMBERS = {
 }
 #: Raw members a complete (non-partial) element update carries.
 REQUIRED = {DECL[handle][0] for handle in MEMBERS}
-MAX_ELEMENTS = 4096
-MAX_FIELDS = 128
-
-
-class InputError(ValueError):
-    pass
-
-
-def sha(path):
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for x in iter(lambda: f.read(1 << 20), b""):
-            h.update(x)
-    return h.hexdigest()
-
-
-def packed(raw, pos, end):
-    value = 0
-    for i in range(5):
-        if pos + 8 > end:
-            raise InputError("truncated IntPacked")
-        byte = sum(
-            ((raw[(pos + j) // 8] >> ((pos + j) % 8)) & 1) << j for j in range(8)
-        )
-        pos += 8
-        payload = byte >> 1
-        if i == 4 and payload > 15:
-            raise InputError("IntPacked exceeds u32")
-        value |= payload << (7 * i)
-        if not byte & 1:
-            return value, pos
-    raise InputError("unterminated IntPacked")
-
-
-def slice_bits(raw, pos, width, end):
-    if width <= 0 or pos + width > end:
-        raise InputError("invalid leaf width")
-    out = bytearray((width + 7) // 8)
-    for i in range(width):
-        out[i // 8] |= ((raw[(pos + i) // 8] >> ((pos + i) % 8)) & 1) << (i % 8)
-    return bytes(out), pos + width
-
-
-def parse_array(raw, bit_count, allowed=None):
-    if (
-        raw is None
-        or type(bit_count) is not int
-        or bit_count <= 0
-        or len(raw) != (bit_count + 7) // 8
-    ):
-        raise InputError("invalid raw array window")
-    pos = 0
-    capacity, pos = packed(raw, pos, bit_count)
-    if capacity > MAX_ELEMENTS:
-        raise InputError("array capacity exceeds limit")
-    leaves = []
-    elements = 0
-    seen_indices = set()
-    while True:
-        encoded, pos = packed(raw, pos, bit_count)
-        if encoded == 0:
-            if pos != bit_count:
-                raise InputError("array has residual root bits")
-            return capacity, elements, leaves
-        index = encoded - 1
-        if index >= capacity or elements >= MAX_ELEMENTS or index in seen_indices:
-            raise InputError("array index is duplicate or exceeds bound")
-        seen_indices.add(index)
-        elements += 1
-        fields = 0
-        seen_handles = set()
-        while True:
-            encoded_handle, pos = packed(raw, pos, bit_count)
-            if encoded_handle == 0:
-                break
-            if fields >= MAX_FIELDS:
-                raise InputError("array field count exceeds limit")
-            handle = encoded_handle - 1
-            if handle in seen_handles:
-                raise InputError(f"duplicate array handle {handle}")
-            seen_handles.add(handle)
-            if allowed is not None and handle not in allowed:
-                raise InputError(f"unexpected nested handle {handle}")
-            width, pos = packed(raw, pos, bit_count)
-            payload, pos = slice_bits(raw, pos, width, bit_count)
-            leaves.append((index, handle, width, payload))
-            fields += 1
-
-
-def exact_ref(raw, width):
-    value, pos = packed(raw, 0, width)
-    if pos != width:
-        raise InputError("ObjectNetGuid did not consume its leaf")
-    return value
-
-
-def unsigned_bits(raw, pos, width):
-    return sum(
-        ((raw[(pos + i) // 8] >> ((pos + i) % 8)) & 1) << i for i in range(width)
-    )
-
-
-def weapon_theme(raw, width):
-    if width < 33 or unsigned_bits(raw, 0, 1) != 1:
-        raise InputError("WeaponTheme framing differs")
-    encoded = unsigned_bits(raw, 1, 32)
-    length = encoded - (1 << 32) if encoded & (1 << 31) else encoded
-    units = abs(length)
-    unit_bits = 16 if length < 0 else 8
-    if units * (unit_bits // 8) > 64 * 1024 or 33 + units * unit_bits != width:
-        raise InputError("WeaponTheme length/framing differs")
-    if units == 0:
-        return ""
-    payload, _ = slice_bits(raw, 33, units * unit_bits, width)
-    if length < 0:
-        if payload[-2:] != b"\0\0":
-            raise InputError("WeaponTheme lacks UTF-16 terminator")
-        return payload[:-2].decode("utf-16-le")
-    if payload[-1:] != b"\0":
-        raise InputError("WeaponTheme lacks byte terminator")
-    return payload[:-1].decode("utf-8")
 
 
 def declarations(export):
@@ -288,22 +168,9 @@ def scoped_refs(export, table):
 
 
 def selected(path):
-    offset = 0
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=65536, use_threads=False):
-        mask = pc.and_(
-            pc.equal(pc.cast(batch["group_path"], pa.string()), GROUP),
-            pc.match_substring_regex(
-                pc.cast(batch["field_name"], pa.string()),
-                r"^KillData(?:\[[0-9]+\](?:\..*)?)?$",
-            ),
-        )
-        indices = pc.indices_nonzero(pc.fill_null(mask, False)).to_pylist()
-        if indices:
-            for i, row in zip(
-                indices, batch.take(pa.array(indices, type=pa.int64())).to_pylist()
-            ):
-                yield offset + i, row
-        offset += batch.num_rows
+    return iter_selected(path, None, lambda batch: pc.and_(
+        pc.equal(text(batch, "group_path"), GROUP),
+        pc.match_substring_regex(text(batch, "field_name"), r"^KillData(?:\[[0-9]+\](?:\..*)?)?$")))
 
 
 #: Typed column of each directly decoded member; handle 6 (the assistant
@@ -317,43 +184,48 @@ def value(row, handle):
     return row[COLUMN[handle]] if handle in COLUMN else None
 
 
-def validate_direct(row, handle, raw, width):
-    expected_column = COLUMN.get(handle)
-    populated = {name for name in PRIMITIVE if row[name] is not None}
-    if populated != ({expected_column} if expected_column else set()):
-        raise InputError(f"KillData handle {handle} populated wrong typed columns")
-    actual_value = value(row, handle)
-    expected_type = PRIMITIVE.get(expected_column)
-    if expected_type is not None and type(actual_value) is not expected_type:
-        raise InputError(f"KillData handle {handle} populated the wrong primitive type")
+def decode_direct(handle, raw, width):
+    """The value a directly decoded KillData leaf's raw bits encode."""
     if handle in (3, 4, 9):
-        expected = exact_ref(raw, width)
-    elif handle in (10, 12, 13):
+        return exact_ref(raw, width)
+    if handle in (10, 12, 13):
         if width != 32:
             raise InputError(f"KillData handle {handle} float width differs")
-        expected = float(struct.unpack("<f", raw)[0])
-        if not math.isfinite(expected):
+        value = float(struct.unpack("<f", raw)[0])
+        if not math.isfinite(value):
             raise InputError(f"KillData handle {handle} is non-finite")
-    elif handle == 11:
+        return value
+    if handle == 11:
         if width != 8:
             raise InputError("DamageRegion byte width differs")
-        expected = raw[0]
-    elif handle == 14:
+        return raw[0]
+    if handle == 14:
         if width != 32:
             raise InputError("RoundNumber Int32 width differs")
-        expected = int.from_bytes(raw, "little", signed=True)
-    elif handle == 15:
+        return int.from_bytes(raw, "little", signed=True)
+    if handle == 15:
         if width != 1:
             raise InputError("finisher bool width differs")
-        expected = bool(raw[0] & 1)
-    elif handle == 5:
-        expected = weapon_theme(raw, width)
-    else:
+        return bool(raw[0] & 1)
+    if handle == 5:
+        return weapon_theme(raw, width)
+    raise InputError(f"KillData handle {handle} has no direct value")
+
+
+def validate_direct(row, handle, raw, width):
+    column = COLUMN.get(handle)
+    if {name for name in PRIMITIVE if row[name] is not None} != ({column} if column else set()):
+        raise InputError(f"KillData handle {handle} populated wrong typed columns")
+    if column is None:
         return
-    if handle in (10, 12, 13):
-        matches = struct.pack("<d", actual_value) == struct.pack("<d", expected)
+    actual = row[column]
+    if type(actual) is not PRIMITIVE[column]:
+        raise InputError(f"KillData handle {handle} populated the wrong primitive type")
+    expected = decode_direct(handle, raw, width)
+    if column == "value_f64":
+        matches = struct.pack("<d", actual) == struct.pack("<d", expected)
     else:
-        matches = actual_value == expected
+        matches = actual == expected
     if not matches:
         raise InputError(f"KillData handle {handle} typed value differs from raw")
 

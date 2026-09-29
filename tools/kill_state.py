@@ -10,6 +10,12 @@ import struct
 from collections import Counter
 from typing import Any
 
+if __package__:
+    from .extract_kill_observations import decode_direct
+    from .wire_bits import InputError, exact_ref, parse_array
+else:
+    from extract_kill_observations import decode_direct
+    from wire_bits import InputError, exact_ref, parse_array
 
 SCHEMA_VERSION = 1
 DOCUMENT_KIND = "vrfkit_killdata_observation_export"
@@ -148,96 +154,6 @@ def _validate_raw_members(raw_members: Any, path: str) -> dict[str, Any]:
     return raw_members
 
 
-def _packed(raw: bytes, position: int, end: int) -> tuple[int, int]:
-    value = 0
-    for index in range(5):
-        _require(position + 8 <= end, "raw member has truncated IntPacked")
-        byte = sum(((raw[(position + bit) // 8] >> ((position + bit) % 8)) & 1) << bit for bit in range(8))
-        position += 8
-        payload = byte >> 1
-        _require(index != 4 or payload <= 15, "raw member IntPacked exceeds u32")
-        value |= payload << (7 * index)
-        if not byte & 1:
-            return value, position
-    raise KillStateError("raw member has unterminated IntPacked")
-
-
-def _unsigned_bits(raw: bytes, position: int, width: int) -> int:
-    return sum(((raw[(position + bit) // 8] >> ((position + bit) % 8)) & 1) << bit for bit in range(width))
-
-
-def _slice_bits(raw: bytes, position: int, width: int, end: int) -> tuple[bytes, int]:
-    _require(width > 0 and position + width <= end, "invalid nested leaf width")
-    output = bytearray((width + 7) // 8)
-    for bit in range(width):
-        output[bit // 8] |= ((raw[(position + bit) // 8] >> ((position + bit) % 8)) & 1) << (bit % 8)
-    return bytes(output), position + width
-
-
-def _assistant_leaves(raw: bytes, bit_count: int) -> list[tuple[int, int, bytes]]:
-    position = 0
-    capacity, position = _packed(raw, position, bit_count)
-    _require(capacity <= 4096, "AssistingPlayers capacity exceeds limit")
-    leaves: list[tuple[int, int, bytes]] = []
-    seen_indices: set[int] = set()
-    while True:
-        encoded_index, position = _packed(raw, position, bit_count)
-        if encoded_index == 0:
-            _require(position == bit_count, "AssistingPlayers has residual root bits")
-            return leaves
-        element_index = encoded_index - 1
-        _require(element_index < capacity and element_index not in seen_indices, "AssistingPlayers index is duplicate or exceeds bound")
-        seen_indices.add(element_index)
-        seen_handle = False
-        while True:
-            encoded_handle, position = _packed(raw, position, bit_count)
-            if encoded_handle == 0:
-                break
-            handle = encoded_handle - 1
-            _require(handle == 7 and not seen_handle, "AssistingPlayers nested handle differs")
-            seen_handle = True
-            width, position = _packed(raw, position, bit_count)
-            payload, position = _slice_bits(raw, position, width, bit_count)
-            leaves.append((element_index, width, payload))
-
-
-def _decode_direct(raw_name: str, raw: bytes, width: int) -> Any:
-    if raw_name in ("Victim", "KillingEquippableClass", "DamageType"):
-        value, position = _packed(raw, 0, width)
-        _require(position == width, f"{raw_name} reference did not consume its leaf")
-        return value
-    if raw_name in ("DamageTaken", "GameTimeElapsed", "RoundTimestamp"):
-        _require(width == 32, f"{raw_name} float width differs")
-        value = float(struct.unpack("<f", raw)[0])
-        _require(math.isfinite(value), f"{raw_name} is non-finite")
-        return value
-    if raw_name == "DamageRegion":
-        _require(width == 8, "DamageRegion byte width differs")
-        return raw[0]
-    if raw_name == "RoundNumber":
-        _require(width == 32, "RoundNumber Int32 width differs")
-        return int.from_bytes(raw, "little", signed=True)
-    if raw_name == "bDidKillTriggerFinisher":
-        _require(width == 1, "finisher bool width differs")
-        return bool(raw[0] & 1)
-    if raw_name == "WeaponTheme":
-        _require(width >= 33 and _unsigned_bits(raw, 0, 1) == 1, "WeaponTheme framing differs")
-        encoded = _unsigned_bits(raw, 1, 32)
-        length = encoded - (1 << 32) if encoded & (1 << 31) else encoded
-        units = abs(length)
-        unit_bits = 16 if length < 0 else 8
-        _require(units * (unit_bits // 8) <= 64 * 1024 and 33 + units * unit_bits == width, "WeaponTheme length/framing differs")
-        payload = bytes(_unsigned_bits(raw, 33 + 8 * index, 8) for index in range(units * (unit_bits // 8)))
-        if not units:
-            return ""
-        if length < 0:
-            _require(payload[-2:] == b"\0\0", "WeaponTheme lacks UTF-16 terminator")
-            return payload[:-2].decode("utf-16-le")
-        _require(payload[-1:] == b"\0", "WeaponTheme lacks byte terminator")
-        return payload[:-1].decode("utf-8")
-    raise KillStateError(f"unsupported direct raw member {raw_name}")
-
-
 def _validate_member_consistency(members: dict[str, Any], raw_members: dict[str, Any], path: str) -> None:
     for member_name in _MEMBER_FIELDS:
         _require(member_name in members, f"{path}.{member_name} is required by the producer schema")
@@ -262,7 +178,7 @@ def _validate_member_consistency(members: dict[str, Any], raw_members: dict[str,
         if raw_name == "AssistingPlayers":
             _require(type(members[member_name]) is list, f"{path}.{member_name} must be an array when present")
             container_raw = bytes.fromhex(record["raw_bits_hex"])
-            leaves = _assistant_leaves(container_raw, record["bit_count"])
+            leaves = [(i, w, p) for i, _, w, p in parse_array(container_raw, record["bit_count"], {7})[2]]
             _require(len(members[member_name]) == len(leaves), f"{path}.{member_name} length differs from raw")
             for index, assistant in enumerate(members[member_name]):
                 _require(type(assistant) is dict, f"{path}.{member_name}[{index}] must be an object")
@@ -276,11 +192,10 @@ def _validate_member_consistency(members: dict[str, Any], raw_members: dict[str,
                 assistant_width = _require_int(assistant.get("bit_count"), f"{path}.{member_name}[{index}].bit_count", minimum=1)
                 leaf_index, leaf_width, leaf_raw = leaves[index]
                 _require((element_index, assistant_width, assistant_hex) == (leaf_index, leaf_width, leaf_raw.hex()), f"{path}.{member_name}[{index}] differs from nested raw")
-                decoded_ref, consumed = _packed(leaf_raw, 0, leaf_width)
-                _require(consumed == leaf_width and ref == decoded_ref, f"{path}.{member_name}[{index}].ref differs from nested raw")
+                _require(ref == exact_ref(leaf_raw, leaf_width), f"{path}.{member_name}[{index}].ref differs from nested raw")
             continue
         raw = bytes.fromhex(record["raw_bits_hex"])
-        expected = _decode_direct(raw_name, raw, record["bit_count"])
+        expected = decode_direct(_EXPECTED_HANDLES[raw_name], raw, record["bit_count"])
         actual = members[member_name]
         _require(_typed_token(actual) == _typed_token(expected), f"{path}.{member_name} differs from raw")
 
@@ -328,7 +243,10 @@ def _validate_observation(observation: Any, index: int) -> dict[str, Any]:
         _require(member_name in members, f"{path}.members lacks {member_name} for {raw_name}")
     computed_complete = set(raw_members) >= _REQUIRED_RAW
     _require(observation["members_complete"] == computed_complete, f"{path}.members_complete disagrees with required raw handles")
-    _validate_member_consistency(members, raw_members, f"{path}.members")
+    try:
+        _validate_member_consistency(members, raw_members, f"{path}.members")
+    except InputError as exc:
+        raise KillStateError(f"{path}.members: {exc}") from exc
     if not computed_complete:
         _require(set(raw_members) == {"bDidKillTriggerFinisher"}, f"{path} has unsupported partial member set")
     return observation

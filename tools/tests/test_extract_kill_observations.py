@@ -55,6 +55,8 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(tool.parse_array(raw, width)[2][0][:3], (0, 15, 1))
         with self.assertRaises(tool.InputError):
             tool.parse_array(raw, width - 1)
+        with self.assertRaisesRegex(tool.InputError, "residual"):
+            tool.parse_array(raw + b"\0", width + 8)
 
     def test_nested_unexpected_handle_and_nonexact_ref(self):
         raw, width = array([(0, [(8, 8, b"\0")])])

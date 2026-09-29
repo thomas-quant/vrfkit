@@ -14,13 +14,13 @@ import pyarrow.parquet as pq
 if __package__:
     from . import extract_section_observations as sections
     from .atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from .extract_kill_observations import InputError
     from .player_identity import load_player_bodies
+    from .wire_bits import InputError, iter_selected, text
 else:
     import extract_section_observations as sections
     from atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from extract_kill_observations import InputError
     from player_identity import load_player_bodies
+    from wire_bits import InputError, iter_selected, text
 IntegrityError = sections.IntegrityError
 SCHEMA_VERSION = 1
 ROUTE = "MulticastNotifyHeal"
@@ -69,28 +69,18 @@ INPUT_NAMES = (
     "actors.parquet",
     "net_guids.parquet",
 )
-HELPER_NAMES = ("extract_section_observations.py", "extract_kill_observations.py",
-                "atomic_io.py", "player_identity.py")
+HELPER_NAMES = ("extract_section_observations.py", "wire_bits.py", "atomic_io.py",
+                "player_identity.py")
 
 
 def iter_selected_fields(path, include_references, columns=FIELD_COLS):
-    base = 0
-    for batch in pq.ParquetFile(path).iter_batches(
-        batch_size=65536, columns=columns, use_threads=False
-    ):
-        names = pc.cast(
-            batch.column(batch.schema.get_field_index("field_name")), pa.string()
-        )
-        mask = pc.starts_with(names, pattern="MulticastNotifyHeal.")
-        if include_references:
-            mask = pc.or_(
-                mask, pc.is_in(names, value_set=pa.array(["Owner", "Instigator"]))
-            )
-        indices = pc.indices_nonzero(pc.fill_null(mask, False))
-        rows = batch.take(indices).to_pylist()
-        for index, row in zip(indices.to_pylist(), rows):
-            yield base + index, row
-        base += batch.num_rows
+    def mask(batch):
+        names = text(batch, "field_name")
+        heal = pc.starts_with(names, pattern="MulticastNotifyHeal.")
+        if not include_references:
+            return heal
+        return pc.or_(heal, pc.is_in(names, value_set=pa.array(["Owner", "Instigator"])))
+    return iter_selected(path, columns, mask)
 
 
 def typed_ref(r):
