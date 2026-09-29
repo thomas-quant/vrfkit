@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -27,10 +28,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_file
+    from .atomic_io import atomic_write_file, refuse_input_path
     from .wire_bits import iter_selected, text
 else:
-    from atomic_io import atomic_write_file
+    from atomic_io import atomic_write_file, refuse_input_path
     from wire_bits import iter_selected, text
 
 # Case-insensitive class-path substrings, broad on purpose. Three false matches
@@ -268,6 +269,15 @@ def main(argv=None) -> int:
                     help="output active_effects.parquet path")
     ap.add_argument("--tracks", type=Path, help="also write actor_tracks.parquet here")
     args = ap.parse_args(argv)
+    outputs = [args.out, *([args.tracks] if args.tracks else [])]
+    # Only the inputs: a previous output inside the export directory is replaced.
+    inputs = [args.export / name for name in ("actors.parquet", "fields.parquet", "manifest.json")]
+    try:
+        for i, out in enumerate(outputs):
+            refuse_input_path(out, inputs + outputs[:i])
+    except ValueError as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
 
     rows, tally = build_with_tally(args.export)
     cols = {name: [r[name] for r in rows] for name in SCHEMA.names}

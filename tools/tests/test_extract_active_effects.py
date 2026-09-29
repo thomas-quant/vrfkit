@@ -182,6 +182,16 @@ class TracksTests(unittest.TestCase):
         self.assertEqual(pq.read_table(out / "tracks.parquet").num_rows, 3)
         self.assertIn("untyped rows, kept with null coordinates: 1", stdout.getvalue())
 
+    def test_an_output_naming_an_export_table_or_the_other_output_is_refused(self):
+        inputs = {path: path.read_bytes() for path in self.export.iterdir()}
+        for out, tracks in (("effects.parquet", self.export / "fields.parquet"),
+                            (self.export / "actors.parquet", "tracks.parquet"), ("same", "same")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = effects.main(["--export", str(self.export), "--out", str(Path(self._tmp.name, out)),
+                                     "--tracks", str(Path(self._tmp.name, tracks))])
+            self.assertEqual(code, 1)
+        self.assertEqual({path: path.read_bytes() for path in self.export.iterdir()}, inputs)
+
 
 if __name__ == "__main__":
     unittest.main()
