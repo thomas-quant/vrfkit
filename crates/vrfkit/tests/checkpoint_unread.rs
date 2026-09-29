@@ -1,12 +1,12 @@
 //! Checkpoint archive bytes the Oodle codec never read, followed to the export
-//! summary and the diag JSON.
+//! summary and manifest and to the diag JSON.
 //!
 //! `decompress_checkpoint_with_trailing` returns them, and they are 0 in every
 //! corpus checkpoint archive (vrf-container's census), so no corpus guard can
 //! see a call site that drops the count. This builds a compressed replay whose
 //! archives are single uncompressed Kraken blocks -- the shape vrf-container's
 //! `archive_with_unread_input` test uses -- with bytes left after each block,
-//! and requires both outputs to report them with the framing residual after
+//! and requires every output to report them with the framing residual after
 //! the archive, and apart from the ReplayData archive's own unread bytes,
 //! which `ReplayData unread` already counts.
 
@@ -205,6 +205,17 @@ fn export_counts_checkpoint_bytes_the_codec_never_read() {
     assert_eq!(
         line_value(&run.stderr, "ReplayData unread:"),
         format!("{REPLAY_DATA_UNREAD} bytes")
+    );
+
+    let manifest =
+        std::fs::read_to_string(out.join("manifest.json")).expect("export wrote a manifest");
+    assert_eq!(
+        json_u64(&manifest, "checkpoint_trailing_bytes"),
+        CHECKPOINT_TOTAL
+    );
+    assert_eq!(
+        json_u64(&manifest, "replay_data_trailing_bytes"),
+        REPLAY_DATA_UNREAD
     );
     std::fs::remove_dir_all(dir).ok();
 }
