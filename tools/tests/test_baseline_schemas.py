@@ -79,6 +79,17 @@ class BaselineSchemaTests(unittest.TestCase):
         self.assertTrue(any("export" in p for p in problems), problems)
         self.assertTrue(any("replay" in p for p in problems), problems)
 
+    def test_bench_accepts_the_checkpoint_slot_and_no_other_key(self):
+        """Key sets are compared for equality, not as a subset."""
+        base = {"export": 1.0, "replay": "m.vrf"}
+        bench = Path("bench.json")
+        self.assertEqual(schemas.validate_bench_baseline(
+            bench, dict(base, export_checkpoints=2.0)), [])
+        problems = schemas.validate_bench_baseline(bench, dict(base, export_checkpoints=0.0))
+        self.assertIn("export_checkpoints must be a positive finite float", " ".join(problems))
+        problems = schemas.validate_bench_baseline(bench, dict(base, export_debug=2.0))
+        self.assertIn("export_debug", " ".join(problems))
+
     def test_metrics_reject_wrong_replay_and_negative_or_wrong_typed_values(self):
         metrics = json.loads(
             (schemas.BASELINES / "metrics_builds.json").read_text(encoding="utf-8")

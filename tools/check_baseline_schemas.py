@@ -54,18 +54,17 @@ def _nonnegative_int(value) -> bool:
 
 
 def validate_bench_baseline(path: Path, data: dict) -> list[str]:
+    """`export` and `replay`, and optionally `export_checkpoints`; nothing else."""
     problems: list[str] = []
-    _keys(path, data, {"export", "replay"}, problems)
+    timings = {"export"} | ({"export_checkpoints"} & set(data))
+    _keys(path, data, {"replay"} | timings, problems)
     replay = data.get("replay")
     if not isinstance(replay, str) or not replay.endswith(".vrf"):
         problems.append(f"{path.name}: replay must name a .vrf file")
-    elapsed = data.get("export")
-    if (
-        not isinstance(elapsed, float)
-        or not math.isfinite(elapsed)
-        or elapsed <= 0
-    ):
-        problems.append(f"{path.name}: export must be a positive finite float")
+    for key in sorted(timings):
+        elapsed = data.get(key)
+        if not isinstance(elapsed, float) or not math.isfinite(elapsed) or elapsed <= 0:
+            problems.append(f"{path.name}: {key} must be a positive finite float")
     return problems
 
 
