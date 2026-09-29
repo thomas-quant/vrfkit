@@ -516,14 +516,15 @@ mod tests {
     use super::*;
     use crate::test_bits::BitWriter;
 
-    /// Handle 4 at depth 0 is a sub-array, `Reports`, with no further nesting.
+    /// Handle 4 at depth 0 is a sub-array, `Reports`, with no further nesting;
+    /// handle 3 is a leaf the schema names `RoundNumber`.
     static INNER: ArrayFieldSchema = ArrayFieldSchema {
         sub_arrays: &[],
         field_names: &[],
     };
     static OUTER: ArrayFieldSchema = ArrayFieldSchema {
         sub_arrays: &[(4, &INNER)],
-        field_names: &[(4, "Reports")],
+        field_names: &[(3, "RoundNumber"), (4, "Reports")],
     };
 
     /// One element carrying one field per `(handle, payload width)`, each
@@ -609,10 +610,7 @@ mod tests {
         assert_eq!(fields[0].bit_count, 16);
     }
 
-    /// The replay's declaration outranks the hardcoded schema on a leaf.
-    ///
-    /// Handle 3 is the live case: `COMBAT_ROUNDS_SCHEMA` calls it `RoundNumber`
-    /// and every replay declares it `RoundNum`.
+    /// The replay's declaration outranks the schema on a leaf.
     #[test]
     fn a_declared_leaf_name_beats_the_schema_name() {
         let (data, bit_count) = one_element_with_handles(&[(3, 32)]).finish();
@@ -620,13 +618,7 @@ mod tests {
         declared[3] = Some("RoundNum");
 
         let mut stats = ArrayDecodeStats::default();
-        let fields = decode_struct_array(
-            &data,
-            bit_count,
-            Some(&COMBAT_ROUNDS_SCHEMA),
-            &declared,
-            &mut stats,
-        );
+        let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &declared, &mut stats);
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].path, "[0].RoundNum");
@@ -640,13 +632,7 @@ mod tests {
         declared[7] = Some("StateRemainingTime");
 
         let mut stats = ArrayDecodeStats::default();
-        let fields = decode_struct_array(
-            &data,
-            bit_count,
-            Some(&COMBAT_ROUNDS_SCHEMA),
-            &declared,
-            &mut stats,
-        );
+        let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &declared, &mut stats);
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].path, "[0].StateRemainingTime");
@@ -659,13 +645,7 @@ mod tests {
         let (data, bit_count) = one_element_with_handles(&[(3, 32), (7, 32)]).finish();
 
         let mut stats = ArrayDecodeStats::default();
-        let fields = decode_struct_array(
-            &data,
-            bit_count,
-            Some(&COMBAT_ROUNDS_SCHEMA),
-            &[],
-            &mut stats,
-        );
+        let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &[], &mut stats);
 
         assert_eq!(fields.len(), 2);
         // Schema names handle 3; nothing names handle 7.
@@ -682,13 +662,7 @@ mod tests {
         let declared: Vec<Option<&str>> = vec![None, None, None, Some("RoundNum")];
 
         let mut stats = ArrayDecodeStats::default();
-        let fields = decode_struct_array(
-            &data,
-            bit_count,
-            Some(&COMBAT_ROUNDS_SCHEMA),
-            &declared,
-            &mut stats,
-        );
+        let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &declared, &mut stats);
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].path, "[0]._h7");
@@ -709,13 +683,7 @@ mod tests {
         declared[5] = Some("RoundNumber");
 
         let mut stats = ArrayDecodeStats::default();
-        let fields = decode_struct_array(
-            &data,
-            bit_count,
-            Some(&COMBAT_ROUNDS_SCHEMA),
-            &declared,
-            &mut stats,
-        );
+        let fields = decode_struct_array(&data, bit_count, Some(&OUTER), &declared, &mut stats);
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].path, "[0].Reports[0].RoundNumber");
