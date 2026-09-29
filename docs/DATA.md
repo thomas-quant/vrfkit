@@ -832,12 +832,11 @@ Remaining work and its evidence requirements are tracked in
 a coverage gap, none a value addressed inside a payload
 ([recipe](USAGE.md#fieldsparquet)).
 
-1. **The next unnamed single handle** — `HANDLE_ADDITIONS` in
-   `tools/apply_type_corrections.py` is currently empty: its one entry named
-   `MagazineAmmo` handle 2 by hand, and the cooked game showed that group is an
-   `AmmoComponent`, which the replay declares properly. The mechanism stays
-   because the next bare handle will not necessarily have a native group to
-   borrow from. Pin any new one in `crates/vrf-decode/src/tests/overlay.rs`.
+1. **The next unnamed single handle** — one sorted line in `OVERLAY_HANDLE_TABLE`
+   (`crates/vrf-decode/src/table.rs`) naming a field an `OVERLAY_TABLE` entry
+   types, pinned in `crates/vrf-decode/src/tests/overlay.rs`. Check the cooked
+   game first: the one handle ever named by hand, `MagazineAmmo` 2, was an
+   `AmmoComponent` the replay declares properly.
 2. **AbilitiesAndBuffs inner payload** — structurally decoded (`flag + u32`
    stream in `crates/vrf-decode/src/cnc.rs`), per-word meaning unknown.
    **Checked against the shipped game, not assumed:** the script object map has

@@ -716,7 +716,7 @@ needs it.
 ### Generators
 
 **Never hand-edit the output.** The overlay table
-`crates/vrf-decode/src/table.rs` (1,336 + 96 handles) and `equippable_table.py`
+`crates/vrf-decode/src/table.rs` (1,118 + 96 handles) and `equippable_table.py`
 are not generated: they are maintained in the repository.
 
 | Script | Produces |
@@ -724,16 +724,14 @@ are not generated: they are maintained in the repository.
 | `apply_type_corrections.py` | Applies verified corrections/additions to `table.rs` and recomputes its two-line count header |
 | `extract_checksum_types.py` | `crates/vrf-decode/src/checksum_table.rs` -- `compatible_checksum` -> `FieldType`, learned from the fields the overlay table already declares. Needs an export directory, since checksums come from the replay. Checksums whose donors disagree are dropped, which is the safety property. Repeat `--export` to widen the basis; the run **merges** into the committed table rather than replacing it, because a checksum this basis did not happen to see is still correct. `--check` asks whether the two agree *where they overlap* -- not whether they are byte-identical, which a content-addressed table cannot be across different sets of replays. A committed type changes only on purpose: when a correction retypes a checksum's donors, the merge refuses the disagreement until `--retype CHECKSUM` names it (write mode only, and only for a real disagreement). |
 
-Run `apply_type_corrections.py` -> `cargo fmt`. The corrections key on each
-entry's own group, field and type, so they rewrite the one-line form and the
-rustfmt form alike; the script **re-verifies the final state after applying**
-rather than trusting its apply count, and fails if the two disagree.
+Run `apply_type_corrections.py`. Each pin sets its entry's type, inserting an
+absent exact key; a glob pin must match at least one entry. `--check` fails when
+applying would change `table.rs` at all -- a type, a missing entry, the order or
+the declared length -- and prints the difference.
 
 ```bash
-python tools/apply_type_corrections.py           # apply, then verify (219 corrections)
-cargo +1.86.0 fmt -p vrf-decode
-
-python tools/apply_type_corrections.py --check   # verify only
+python tools/apply_type_corrections.py           # apply (219 corrections)
+python tools/apply_type_corrections.py --check   # fail unless applying changes nothing
 ```
 
 CI runs the `--check` line.

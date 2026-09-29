@@ -15,7 +15,7 @@ class ScopedTypeGenerationTests(unittest.TestCase):
         entries = gen.load(gen.EVIDENCE)
         # 943211507 is the 32-bit B -- the second player-state GUID word, not
         # the byte-shaped B fields. It may only ever be UInt32, and only on the
-        # two player-state groups (it was excluded outright until 2026-09-28).
+        # two player-state groups.
         wide_b = sorted((e["group"].rsplit(".", 1)[-1], e["field"], e["type"])
                         for e in entries if e["checksum"] == 943211507)
         self.assertEqual(wide_b, [("BombPlayerState_C", "B", "UInt32"),
@@ -43,24 +43,32 @@ class ScopedTypeGenerationTests(unittest.TestCase):
             path.write_text(gen.render(gen.load(gen.EVIDENCE)).replace("FieldType::Byte", "FieldType::Float", 1))
             self.assertEqual(gen.main(["--output", str(path), "--check"]), 1)
 
+    def test_the_fixture_keeps_its_own_layout(self):
+        """A plain re-dump (one build per line) fails --check; a write restores
+        the committed layout without changing the parsed document."""
+        document = json.loads(gen.EVIDENCE.read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(gen.dump_evidence(document)), document)
+        with tempfile.TemporaryDirectory() as temp:
+            evidence, output = Path(temp) / "evidence.json", Path(temp) / "scoped.rs"
+            evidence.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+            output.write_text(gen.render(gen.load(gen.EVIDENCE)), encoding="utf-8")
+            args = ["--evidence", str(evidence), "--output", str(output)]
+            self.assertEqual(gen.main([*args, "--check"]), 1)
+            self.assertEqual(gen.main(args), 0)
+            self.assertEqual(evidence.read_text(encoding="utf-8"),
+                             gen.EVIDENCE.read_text(encoding="utf-8"))
+            self.assertEqual(gen.main([*args, "--check"]), 0)
 
     def test_every_type_name_is_a_live_field_type_variant(self):
-        decode_rs = (gen.ROOT / "crates/vrf-decode/src/decode.rs").read_text(encoding="utf-8")
-        enum = decode_rs.split("pub enum FieldType {", 1)[1].split("\n}", 1)[0]
-        variants = {line.strip().split(" ")[0].rstrip(",{")
-                    for line in enum.splitlines()
-                    if line.strip() and not line.strip().startswith(("//", "///", "}"))
-                    and line.startswith("    ") and not line.startswith("        ")}
-        for name, expression in gen.TYPES.items():
+        from check_checksum_types import DECODE_RS, parse_field_type_variants
+        variants = parse_field_type_variants(DECODE_RS.read_text(encoding="utf-8"))
+        for name, (expression,) in gen.TYPES.items():
             with self.subTest(name=name):
-                head = expression[0]
-                self.assertTrue(head.startswith("FieldType::"))
-                self.assertIn(head.removeprefix("FieldType::").split(" ")[0], variants)
+                self.assertTrue(expression.startswith("FieldType::"))
+                self.assertIn(expression.removeprefix("FieldType::").split(" ")[0], variants)
 
     def test_every_type_name_has_an_independent_decoder(self):
-        # The module docs require it before an entry may use a type, and
-        # nothing checked it: VectorDouble had scoped entries and no reader in
-        # validate_type_evidence.py until 2026-09-28.
+        # The module docs require it before an entry may use a type.
         import validate_type_evidence
         missing = sorted(set(gen.TYPES) - set(validate_type_evidence.TYPED_COLUMNS))
         self.assertEqual(missing, [])
@@ -71,20 +79,18 @@ class ScopedTypeGenerationTests(unittest.TestCase):
                 "location_quantization": "RoundWholeNumber"}
         byte = gen.render([{**base, "type": "RepMovementByte"}])
         self.assertIn("use crate::types::{RotatorQuantization, VectorQuantization};", byte)
-        self.assertIn("        FieldType::RepMovement {\n"
-                      "            rotation: RotatorQuantization::ByteComponents,\n"
-                      "            location: VectorQuantization::RoundWholeNumber,\n"
-                      "        },\n", byte)
+        self.assertIn(', 2749104612, FieldType::RepMovement { rotation: RotatorQuantization::'
+                      'ByteComponents, location: VectorQuantization::RoundWholeNumber }),\n', byte)
         short = gen.render([{**base, "type": "RepMovementShort",
                              "location_quantization": "RoundTwoDecimals"}])
         self.assertIn("RotatorQuantization::ShortComponents", short)
-        self.assertIn("location: VectorQuantization::RoundTwoDecimals,", short)
+        self.assertIn("location: VectorQuantization::RoundTwoDecimals }", short)
         plain = gen.render([{"group": "/G.G_C", "field": "Scale", "checksum": 2749104612,
                              "observed_builds": ["b"], "evidence": "e",
                              "type": "VectorNetQuantize100"}])
         self.assertNotIn("RotatorQuantization", plain)
         self.assertNotIn("VectorQuantization", plain)
-        self.assertIn("        FieldType::VectorNetQuantize { scale: 100 },\n", plain)
+        self.assertIn(", 2749104612, FieldType::VectorNetQuantize { scale: 100 }),\n", plain)
 
     def test_quantization_is_part_of_the_scoped_identity_type(self):
         # One group may not carry both quantizations for one checksum: the
@@ -120,7 +126,7 @@ class ScopedTypeGenerationTests(unittest.TestCase):
                         gen.load(path)
             path.write_text(json.dumps({"schema_version": 1, "entries": [
                 {**base, "location_quantization": "RoundOneDecimal"}]}))
-            self.assertIn("location: VectorQuantization::RoundOneDecimal,",
+            self.assertIn("location: VectorQuantization::RoundOneDecimal }",
                           gen.render(gen.load(path)))
 
 
