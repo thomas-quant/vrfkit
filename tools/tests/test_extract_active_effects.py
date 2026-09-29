@@ -166,11 +166,11 @@ class TracksTests(unittest.TestCase):
 
     def test_movement_and_wall_points_flatten_and_untyped_rows_stay(self):
         rows, untyped = effects.tracks(self.export)
-        self.assertEqual([(r["source"], r["class_name"], r["x"], r["y"], r["z"], r["vz"], r["yaw"])
-                          for r in rows], [
-            ("ReplicatedMovement", "Projectile_Wushu_4_Smoke_C", -339, 954, 515, -29, 310.78125),
-            ("ReplicatedMovement", "Projectile_Wushu_4_Smoke_C", None, None, None, None, None),
-            ("MulticastAddSmokeScreenPoint", "Wall_Manager_C", 1.5, -2.0, 3.0, None, None)])
+        keys = ("source", "class_name", "x", "y", "z", "vx", "vy", "vz", "yaw")
+        self.assertEqual([tuple(r[k] for k in keys) for r in rows], [
+            ("ReplicatedMovement", "Projectile_Wushu_4_Smoke_C", -339, 954, 515, 643, -766, -29, 310.78125),
+            ("ReplicatedMovement", "Projectile_Wushu_4_Smoke_C", *[None] * 7),
+            ("MulticastAddSmokeScreenPoint", "Wall_Manager_C", 1.5, -2.0, 3.0, *[None] * 4)])
         self.assertEqual(untyped, {"Projectile_Wushu_4_Smoke_C": 1})
 
     def test_the_cli_writes_the_tracks_and_prints_the_untyped_count(self):
