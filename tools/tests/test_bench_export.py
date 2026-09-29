@@ -8,6 +8,7 @@ regression pointed the other way.
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -76,13 +77,21 @@ class MainTests(unittest.TestCase):
         return json.loads(self.baseline.read_text(encoding="utf-8"))
 
     def test_each_mode_records_its_own_slot_beside_the_other(self):
+        """`export_checkpoints` is recorded only beside an `export` slot for the
+        same replay: bench.json without `export` fails check_baseline_schemas."""
+        cp_update = ["--checkpoints", "--update"]
+        code, output = self.run_bench(self.replay("m.vrf"), cp_update)  # no bench.json
+        self.assertEqual((code, self.baseline.exists()), (2, False), output)
         self.assertEqual(self.run_bench(self.replay("m.vrf"), ["--update"])[0], 0)
         self.assertEqual(self.read(), {"export": 1.0, "replay": "m.vrf"})
         self.assertEqual(schemas.validate_bench_baseline(self.baseline, self.read()), [])
-        self.run_bench(self.replay("m.vrf"), ["--checkpoints", "--update"], seconds=2.5)
-        self.assertEqual(self.read(), {"export": 1.0, "export_checkpoints": 2.5,
-                                       "replay": "m.vrf"})
+        self.run_bench(self.replay("m.vrf"), cp_update, seconds=2.5)
+        both = {"export": 1.0, "export_checkpoints": 2.5, "replay": "m.vrf"}
+        self.assertEqual(self.read(), both)
         self.assertEqual(schemas.validate_bench_baseline(self.baseline, self.read()), [])
+        code, output = self.run_bench(self.replay("new.vrf"), cp_update)  # another replay
+        self.assertEqual((code, self.read()), (2, both), output)
+        self.assertIn("--update without --checkpoints", output)
 
     def test_a_timing_is_never_kept_beside_another_replay_or_an_unknown_key(self):
         """A timing next to a replay it did not time is a plausible number
@@ -105,9 +114,17 @@ class MainTests(unittest.TestCase):
             with self.subTest(extra=extra, seconds=seconds):
                 got, output = self.run_bench(self.replay("m.vrf"), extra, seconds)
                 self.assertEqual(got, code, output)
-        got, output = self.run_bench(self.replay("other.vrf"))
-        self.assertEqual(got, 0, output)
-        self.assertIn("SKIP:", output)
+
+    def test_a_missing_replay_or_slot_skips_unless_the_corpus_is_required(self):
+        self.baseline.write_text(json.dumps({"export": 1.0, "replay": "m.vrf"}),
+                                 encoding="utf-8")
+        for replay in (self.root / "absent.vrf", self.replay("other.vrf")):
+            for required, code, text in (("", 0, "SKIP:"), ("1", 2, "REQUIRED INPUT MISSING")):
+                with self.subTest(replay=replay.name, required=required), \
+                        mock.patch.dict(os.environ, {"VRFKIT_REQUIRE_CORPUS": required}):
+                    got, output = self.run_bench(replay)
+                    self.assertEqual(got, code, output)
+                    self.assertIn(text, output)
 
     def test_a_missing_binary_or_no_samples_is_a_usage_error_not_a_skip(self):
         """A typo'd --exe must not read as a benchmark that passed, nor zero

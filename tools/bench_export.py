@@ -94,13 +94,18 @@ def main() -> int:
         return sc.missing_input(f"no replay at {args.replay}", False)
 
     key = TIMINGS[args.checkpoints]
+    stored = sc.load_baseline(args.baseline)
+    same_replay = stored.get("replay") == args.replay.name
+    if args.update and args.checkpoints and not (same_replay and "export" in stored):
+        # check_baseline_schemas rejects a bench.json without `export`.
+        print(f"record the export slot for {args.replay.name} first (--update without "
+              f"--checkpoints)", file=sys.stderr)
+        return 2
     samples = time_export(args.exe, args.replay, args.repeats, args.checkpoints)
     seconds = statistics.median(samples)
     print(f"{key}: median {seconds:.3f}s over {args.repeats} runs "
           f"(min {min(samples):.3f}, max {max(samples):.3f})")
 
-    stored = sc.load_baseline(args.baseline)
-    same_replay = stored.get("replay") == args.replay.name
     if args.update:
         # The other slot is kept only beside the replay it timed; nothing else is.
         data = {k: v for k, v in stored.items() if k in TIMINGS} if same_replay else {}
