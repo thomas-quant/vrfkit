@@ -116,8 +116,7 @@ def unpack_stub(data):
                 and not s.PointerToRawData and not s.Characteristics & 0x80]
     if len(sections) != 7:
         raise ValueError("expected seven compressed stub sections")
-    # The descriptor layout was independently checked against the original
-    # unpacking code; the table is found by its exact destination-RVA sequence.
+    # The LZMA section table is found by its exact destination-RVA sequence.
     pattern = b"".join(b"...." + re.escape(struct.pack("<I", s.VirtualAddress))
                        for s in sections)
     matches = list(re.finditer(pattern, data, re.DOTALL))
@@ -164,9 +163,8 @@ def bulk_decode(data, source):
     nonce = bytes(rol8(x, (i + 1) % 8) ^ x ^ rol8(x, (7 - i) % 8)
                   for i, x in enumerate(header))
     stream = bulk_block(key, nonce, 0)
-    # The counter enters only state word 8, which is added after the rounds.
-    # All other 60 output bytes are constant for this key/nonce. Boundary
-    # vectors and complete native-loader output independently check this.
+    # The counter enters only state word 8, added after the rounds: the other
+    # 60 output bytes are constant for this key/nonce (native_bulk_vectors.json).
     initial_word = int.from_bytes(bytes([stream[34], stream[32], stream[35], stream[33]]), "little")
     blocks = np.frombuffer(data, dtype=np.uint8).reshape(-1, 64)
     result = np.bitwise_xor(blocks, np.frombuffer(stream, dtype=np.uint8))

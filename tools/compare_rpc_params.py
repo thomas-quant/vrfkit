@@ -1,19 +1,12 @@
 """Compare RPC parameter values between our Rust Parquet and the C# NDJSON export.
 
-Validates, for key RPC functions:
-  - MulticastNotifyKilledEnemy: KillerCharacter, KilledCharacter, MultikillLevel
-  - MulticastNotifyDamage_Point: DamageDealt, DamageTaken, RegionalDamage, bDamageKilledTarget
-  - MulticastEndRound: NewRoundNumber
-
-Two checks, and a run passes only if both do:
+For the parameters in `RPCS_TO_CHECK`, a run passes only if both checks do:
 
   - per parameter, the multiset of values -- the table this prints; and
   - per record, its identity (packet, actor, subobject, channel, function)
-    together with every value above, as a multiset of records.
-
-The first alone cannot tell a missing record from one the other side has at
-another packet with the same values; the record check can, and it is what an
-expected difference (below) is keyed on.
+    together with every value above, as a multiset of records. Only this one
+    tells a missing record from one the other side has at another packet with
+    the same values, and an expected difference is keyed on it.
 
 The C# side is the C# reference parser's `export` of the 13.01 reference
 replay, kept machine-local because it carries per-player values; docs/USAGE.md
@@ -37,10 +30,8 @@ Usage:
     python tools/compare_rpc_params.py [--reference EVENTS] [--ours PARQUET]
 """
 
-import argparse
 import collections
 import json
-import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,14 +40,14 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-#: The rpc_received lines for the functions below, from the C# reference
-#: parser's export of replay 02d4d478. The whole events.ndjson works too; other
-#: lines are skipped. The export's manifest.json must stay beside it: it is
-#: where the replay's SHA-256 comes from.
-DEFAULT_REFERENCE = (r"%LOCALAPPDATA%\vrfkit\csharp-reference"
-                     r"\02d4d478-1dfb-4412-9a77-29ca29105a9d\rpc_params.ndjson")
-#: vrfkit's export of the same replay.
-DEFAULT_OURS = "out/nested/fields.parquet"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from compare_combat_report import (  # noqa: E402
+    REFERENCE_DIR, missing_input, parse_args, verdict)
+from to_valplay_bundle import REGIONAL_DAMAGE_MAP as REGIONAL_DAMAGE_NAMES  # noqa: E402
+
+#: The export's rpc_received lines for `RPCS_TO_CHECK` (the whole events.ndjson
+#: works too); its manifest.json must stay beside it, for the replay's SHA-256.
+DEFAULT_REFERENCE = REFERENCE_DIR + r"\rpc_params.ndjson"
 
 # (param_name, value_type) per function, value_type being how the C# JSON
 # stores it; 'enum_byte' is a C# string that vrfkit stores as i64.
@@ -77,23 +68,11 @@ RPCS_TO_CHECK = {
     ],
 }
 
-# Mapping from C# EAresRegionalDamage enum strings to byte values.
-# Derived from the C# enum declaration and confirmed against wire data.
-REGIONAL_DAMAGE_MAP = {
-    "regional_damage__normal": 0,
-    "regional_damage__headshot": 1,
-    "regional_damage__legshot": 2,
-    "regional_damage__utility": 3,
-    "regional_damage__armor": 4,
-    "regional_damage__invalid": 5,
-}
+#: C# EAresRegionalDamage names -> the byte vrfkit stores (the adapter's table).
+REGIONAL_DAMAGE_MAP = {name: n for n, name in REGIONAL_DAMAGE_NAMES.items()}
 
-# C# payload names that differ from the replay's export field names.
-CS_FIELD_ALIASES = {
-    "MulticastNotifyDamage_Point": {
-        "DamageKilledTarget": "bDamageKilledTarget",
-    },
-}
+#: Parameters the C# payload names differently from the replay.
+CS_FIELD_ALIASES = {"bDamageKilledTarget": "DamageKilledTarget"}
 
 #: The vrfkit value column each C# value type is read from.
 RUST_VALUE_COLUMN = {
@@ -123,10 +102,8 @@ def norm(v, vtype):
     if vtype == "bool":
         return 1 if v else 0
     if vtype == "enum_byte":
-        # If the value is a string (C# side), map to int via known enum table.
-        if isinstance(v, str):
-            return REGIONAL_DAMAGE_MAP.get(v, v)
-        return int(v)
+        # An unknown C# name stays a str, so it differs rather than guesses.
+        return REGIONAL_DAMAGE_MAP.get(v, v) if isinstance(v, str) else int(v)
     return str(v)
 
 
@@ -174,15 +151,9 @@ EXPECTED_DIFFERENCES = (
         values=(("DamageDealt", 29.45), ("DamageTaken", 20.0),
                 ("RegionalDamage", 0), ("bDamageKilledTarget", 1)),
         reason=(
-            "the killing blow on the DamageableComponent of Gekko's Dizzy "
-            "projectile. The component is stably named 'Damageable', so its "
-            "content block carries no class NetGUID, and the C# "
-            "ContentBlockPathResolver resolves such a subobject only through "
-            "its four-name KnownSubobjectClassPaths table, which lacks "
-            "'Damageable'. The block is skipped undecoded, and the C# "
-            "export omits undecoded groups, so nothing for the packet reaches "
-            "the reference. Adding that one name to the C# table makes it emit "
-            "this record with the same 35 parameter values"),
+            "the killing blow on the 'Damageable' component of Gekko's Dizzy: "
+            "its block names no class NetGUID and the C# subobject table lacks "
+            "'Damageable', so the reference skips the block undecoded"),
     ),
 )
 
@@ -212,15 +183,11 @@ def load_cs_records(path):
             payload = rec.get("payload", {})
             if not payload:
                 continue
-            func_aliases = CS_FIELD_ALIASES.get(func, {})
             params = {}
             for pname, vtype in RPCS_TO_CHECK[func]:
                 val = payload.get(pname)
                 if val is None:
-                    for cs_name, our_name in func_aliases.items():
-                        if our_name == pname:
-                            val = payload.get(cs_name)
-                            break
+                    val = payload.get(CS_FIELD_ALIASES.get(pname))
                 if val is not None:
                     params[pname] = norm(val, vtype)
             key = record_key(rec.get("packet_id"), rec.get("actor_net_guid"),
@@ -241,8 +208,7 @@ def load_rust_records(path):
     vtypes = {func: dict(params) for func, params in RPCS_TO_CHECK.items()}
     wanted = [f"{func}.{param}" for func, params in vtypes.items() for param in params]
     t = pq.read_table(str(path), columns=columns)
-    # Only the compared parameter rows, in file order: the grouping below reads
-    # nothing else, and a million-row table need not become Python objects.
+    # Only the compared parameter rows, in file order, become Python objects.
     names = t.column("field_name").cast(pa.string())
     t = t.filter(pc.fill_null(pc.is_in(names, value_set=pa.array(wanted)), False))
     cols = {name: t.column(name).to_pylist() for name in columns}
@@ -250,19 +216,14 @@ def load_rust_records(path):
     records = []
     current_key, current = None, None
     for i, field_name in enumerate(cols["field_name"]):
-        if not field_name or "." not in field_name:
-            continue
         func, param = field_name.split(".", 1)
-        vtype = vtypes.get(func, {}).get(param)
-        if vtype is None:
-            continue
+        vtype = vtypes[func][param]
         key = record_key(cols["packet_id"][i], cols["actor_net_guid"][i],
                          cols["object_net_guid"][i], cols["channel_index"][i], func)
         if key != current_key or param in current:
             current_key, current = key, {}
             records.append((key, current))
-        val = cols[RUST_VALUE_COLUMN.get(vtype, "value_str")][i]
-        current[param] = norm(val, vtype)
+        current[param] = norm(cols[RUST_VALUE_COLUMN[vtype]][i], vtype)
     return records
 
 
@@ -334,49 +295,18 @@ def reference_replay_sha256(reference):
 
 
 def compare(cs, rust, rpcs=None):
-    """`(printable rows, everything matched, how many were compared)`.
-
-    Emptiness is tested before equality, because two empty Counters are
-    equal. An empty pair leaves `all_match` True (it is no disagreement) but
-    is not counted as compared.
-    """
+    """`(printable rows, everything matched, how many were compared)`."""
     rows, all_match, checked = [], True, 0
     for func_name, params in (rpcs or RPCS_TO_CHECK).items():
         for pname, _vtype in params:
-            key = (func_name, pname)
-            cs_vals = cs.get(key, collections.Counter())
-            rust_vals = rust.get(key, collections.Counter())
-
-            cs_total = sum(cs_vals.values())
-            rust_total = sum(rust_vals.values())
-
-            if not cs_vals and not rust_vals:
-                verdict = "both empty -- nothing compared"
-            elif cs_vals == rust_vals:
-                verdict = "MATCH"
-                checked += 1
-            else:
-                extra_rust = sum((rust_vals - cs_vals).values())
-                extra_cs = sum((cs_vals - rust_vals).values())
-                verdict = f"DIFFER (+{extra_rust} rust / +{extra_cs} C#)"
-                all_match = False
-                checked += 1
-
-            rows.append(f"{func_name:<35} {pname:<25} {cs_total:>5} "
-                        f"{rust_total:>5}  {verdict}")
+            cs_vals = cs.get((func_name, pname), collections.Counter())
+            rust_vals = rust.get((func_name, pname), collections.Counter())
+            text, matched, compared = verdict(cs_vals, rust_vals)
+            all_match &= matched
+            checked += compared
+            rows.append(f"{func_name:<35} {pname:<25} {sum(cs_vals.values()):>5} "
+                        f"{sum(rust_vals.values()):>5}  {text}")
     return rows, all_match, checked
-
-
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--reference", default=DEFAULT_REFERENCE,
-                        help="C# export events.ndjson, or its rpc_received lines; "
-                             "the export's manifest.json must be beside it "
-                             "(default: %(default)s)")
-    parser.add_argument("--ours", default=DEFAULT_OURS,
-                        help="vrfkit fields.parquet of the same replay "
-                             "(default: %(default)s)")
-    return parser.parse_args(argv)
 
 
 def print_records(label, differing):
@@ -398,23 +328,17 @@ def main(argv=None, *, cs_records=None, rust_records=None, rpcs=None,
     `rust_records` and `replay_sha256` stand in for the files, for tests.
     """
     if cs_records is None or rust_records is None:
-        args = parse_args(argv)
-        reference = Path(os.path.expandvars(args.reference))
-        if cs_records is None and not reference.is_file():
-            print(f"C# reference not found at {reference}; produce it with the "
-                  f"commands in docs/USAGE.md section 6, or pass --reference",
-                  file=sys.stderr)
-            return 2
-        if rust_records is None and not Path(args.ours).is_file():
-            print(f"vrfkit fields.parquet not found at {args.ours}; export the "
-                  f"same replay, or pass --ours", file=sys.stderr)
+        reference, parquet = parse_args(
+            argv, __doc__, DEFAULT_REFERENCE,
+            "rpc_received lines; the export's manifest.json must be beside it")
+        if missing_input(reference if cs_records is None else None,
+                         parquet if rust_records is None else None):
             return 2
         print(f"C# source: {reference}")
-        print(f"Rust source: {args.ours}")
+        print(f"Rust source: {parquet}")
         replay_sha256, source = reference_replay_sha256(reference)
         cs_records = load_cs_records(reference) if cs_records is None else cs_records
-        rust_records = (load_rust_records(args.ours) if rust_records is None
-                        else rust_records)
+        rust_records = load_rust_records(parquet) if rust_records is None else rust_records
     else:
         source = "given by the caller" if replay_sha256 else "not given"
 
@@ -447,8 +371,7 @@ def main(argv=None, *, cs_records=None, rust_records=None, rpcs=None,
 
     print(f"{'Function':<35} {'Param':<25} {'C#':>5} {'Rust':>5}  Verdict")
     print("-" * 100)
-    for row in rows:
-        print(row)
+    print("\n".join(rows))
 
     print()
     rust_only, cs_only = record_differences(cs_records, rust_kept)

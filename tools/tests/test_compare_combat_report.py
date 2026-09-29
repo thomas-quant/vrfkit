@@ -23,20 +23,20 @@ def counters(pairs):
 class CompareTests(unittest.TestCase):
     def test_identical_multisets_match(self):
         both = [(SHAPE, {35: 2, 40: 1})]
-        _rows, ok = guard.compare(counters(both), counters(both), {SHAPE})
+        _rows, ok, _ = guard.compare(counters(both), counters(both), {SHAPE})
         self.assertTrue(ok)
 
     def test_a_differing_count_does_not_match(self):
-        _rows, ok = guard.compare(counters([(SHAPE, {35: 2})]),
+        _rows, ok, _ = guard.compare(counters([(SHAPE, {35: 2})]),
                                   counters([(SHAPE, {35: 1})]), {SHAPE})
         self.assertFalse(ok)
 
     def test_a_shape_absent_on_both_sides_still_matches(self):
-        _rows, ok = guard.compare(counters([]), counters([]), {SHAPE})
+        _rows, ok, _ = guard.compare(counters([]), counters([]), {SHAPE})
         self.assertTrue(ok)
 
     def test_a_shape_present_on_one_side_only_does_not_match(self):
-        _rows, ok = guard.compare(counters([(SHAPE, {35: 1})]), counters([]),
+        _rows, ok, _ = guard.compare(counters([(SHAPE, {35: 1})]), counters([]),
                                   {SHAPE})
         self.assertFalse(ok)
 
@@ -47,20 +47,17 @@ class VacuousMatchTests(unittest.TestCase):
     reached before the equality test."""
 
     def test_nothing_to_compare_is_counted_as_nothing_compared(self):
-        self.assertEqual(guard.compared_shapes(counters([]), counters([]),
-                                               {SHAPE}), 0)
+        self.assertEqual(guard.compare(counters([]), counters([]), {SHAPE})[2], 0)
 
     def test_a_shape_on_either_side_counts_as_compared(self):
-        self.assertEqual(guard.compared_shapes(counters([(SHAPE, {35: 1})]),
-                                               counters([]), {SHAPE}), 1)
-        self.assertEqual(guard.compared_shapes(counters([]),
-                                               counters([(SHAPE, {35: 1})]),
-                                               {SHAPE}), 1)
+        one = counters([(SHAPE, {35: 1})])
+        self.assertEqual(guard.compare(one, counters([]), {SHAPE})[2], 1)
+        self.assertEqual(guard.compare(counters([]), one, {SHAPE})[2], 1)
 
-    def test_the_absent_on_both_sides_verdict_is_reachable_again(self):
-        rows, _ok = guard.compare(counters([]), counters([]), {SHAPE})
+    def test_the_absent_on_both_sides_verdict_comes_before_equality(self):
+        rows, _ok, _checked = guard.compare(counters([]), counters([]), {SHAPE})
         self.assertIn("absent both sides", " ".join(rows))
-        self.assertNotIn("IDENTICAL", " ".join(rows))
+        self.assertNotIn("MATCH", " ".join(rows))
 
 
 class ExitCodeTests(unittest.TestCase):

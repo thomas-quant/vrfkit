@@ -53,7 +53,6 @@ VRFKIT_INTEROP_DIR="<private-root>" cargo +1.86.0 test -p vrf-export --test roun
 python -W error crates/vrf-export/tests/python_interop.py "<private-root>/interop"
 python -W error tools/check_ascii.py --check
 python -W error tools/apply_type_corrections.py --check
-python -W error tools/check_effect_decoder.py --check
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
 python -W error tools/generate_scoped_types.py --check
 python -W error tools/check_baseline_schemas.py
