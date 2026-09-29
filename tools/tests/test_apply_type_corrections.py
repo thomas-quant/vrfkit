@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -167,6 +168,23 @@ class MainTests(unittest.TestCase):
                     self.assertIn("matches no entry", err)
                     self.assert_unchanged(source)
                 self.assertIn(needle, self.run_main(source, "--check")[2])
+
+    def test_one_entry_pinned_two_ways_fails_both_modes(self):
+        """The pawn ADDITIONS also sit under the `/Game/Characters/*` Float
+        glob: one retyped to Double must fail, not let the last pin win,
+        whichever of the two types the file holds."""
+        key = ("/Game/Characters/Killjoy/S0/Ability_E/Pawn_Killjoy_E_Turret."
+               "Pawn_Killjoy_E_Turret_C", "ReplayLastTransformUpdateTimeStamp")
+        retyped = [pin for pin in atc.EXPECTED if pin[:2] != key] + [(*key, "FieldType::Double")]
+        with mock.patch.object(atc, "EXPECTED", retyped):
+            for ftype in ("FieldType::Float", "FieldType::Double"):
+                source = whole_table({key: ftype})
+                for args in (("--check",), ()):
+                    with self.subTest(ftype=ftype, args=args):
+                        code, _out, err = self.run_main(source, *args)
+                        self.assertEqual(code, 1)
+                        self.assertIn("pinned as FieldType::Float and as FieldType::Double", err)
+                        self.assert_unchanged(source)
 
     def test_the_layout_is_enforced(self):
         """Only one entry per line parses, and each key once; an unsorted table
