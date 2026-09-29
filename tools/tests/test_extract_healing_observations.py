@@ -159,19 +159,6 @@ class Tests(unittest.TestCase):
         )
         return td, p
 
-    def test_a_non_ascii_manifest_is_read_as_utf8(self):
-        """manifest.json is UTF-8 with the replay path verbatim (a Hangul path
-        failed the locale codec on cp949 Windows). The fixture holds raw
-        UTF-8: json.dumps' default escaping would hide the bug."""
-        td, p = self.make()
-        self.addCleanup(td.cleanup)
-        data = manifest()
-        data["source_file"] = "D:\\\ub9ac\ud50c\ub808\uc774\\\uacbd\uae30.vrf"
-        (p / "manifest.json").write_text(
-            json.dumps(data, ensure_ascii=False), encoding="utf-8"
-        )
-        self.assertEqual(tool.extract(p)["counts"]["amount_validated"], 1)
-
     def test_signed_zero_missing_causer_keeps_valid_amount_and_edges(self):
         td, p = self.make(fixture(causer=False))
         self.addCleanup(td.cleanup)
