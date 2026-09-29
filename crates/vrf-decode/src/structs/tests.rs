@@ -283,6 +283,28 @@ fn round_infos_rejects_one_more_than_max_fields() {
     );
 }
 
+/// Each shared framing failure keeps its name and fields (cap 128).
+#[test]
+fn framing_failures_reach_the_caller_as_their_own_variant() {
+    for (packed, expected) in [
+        (&[129][..], "ArrayCountTooLarge { count: 129, max: 128 }"),
+        (&[1, 4], "IndexOutOfBounds { index: 3, count: 1 }"),
+        (
+            &[1, 1, 41, 32],
+            "PayloadTooLarge { bits: 32, remaining: 0 }",
+        ),
+    ] {
+        let mut bits = BitWriter::new();
+        for &v in packed {
+            bits.int_packed(v);
+        }
+        let (data, bit_len) = bits.finish();
+        let mut r = BitReader::with_bit_len(&data, u64::from(bit_len)).unwrap();
+        let err = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap_err();
+        assert_eq!(format!("{err:?}"), expected);
+    }
+}
+
 // -- Unknown enum values --------------------------------------------------
 
 /// One element carrying a single member at `handle`, whose payload window is

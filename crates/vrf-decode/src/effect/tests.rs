@@ -398,3 +398,25 @@ fn a_non_zero_trailing_terminator_is_rejected() {
         "expected NonZeroTerminator, got {err:?}"
     );
 }
+
+/// Each shared framing failure keeps its name and fields (cap 256).
+#[test]
+fn framing_failures_reach_the_caller_as_their_own_variant() {
+    use vrf_testkit::{BitWrite, BitWriter};
+    for (packed, expected) in [
+        (&[257][..], "ArrayCountTooLarge { count: 257, max: 256 }"),
+        (&[1, 4], "IndexOutOfBounds { index: 3, count: 1 }"),
+        (
+            &[1, 1, 41, 32],
+            "PayloadTooLarge { bits: 32, remaining: 0 }",
+        ),
+    ] {
+        let mut bits = BitWriter::new();
+        for &v in packed {
+            bits.int_packed(v);
+        }
+        let (data, bit_len) = bits.finish();
+        let err = decode_effect_blob_json(EffectArrayKind::Float, &data, bit_len).unwrap_err();
+        assert_eq!(format!("{err:?}"), expected);
+    }
+}
