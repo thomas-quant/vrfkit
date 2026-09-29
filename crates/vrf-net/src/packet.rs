@@ -439,15 +439,17 @@ mod tests {
 
     #[test]
     fn multiple_bunches_parsed() {
+        // A 17-bit first payload: the next header starts off a byte boundary.
         let mut bits = Vec::new();
-        write_bunch(&mut bits, &unreliable(0), &[]);
+        write_bunch(&mut bits, &unreliable(0), &[false; 17]);
         write_bunch(&mut bits, &unreliable(1), &[]);
         let packet = build_packet(&bits);
 
         let mut reader = RawPacketReader::new();
         let mut indices = Vec::new();
-        reader.read_packet(&packet, 3, |h, _| indices.push(h.ch_index));
+        let result = reader.read_packet(&packet, 3, |h, _| indices.push(h.ch_index));
         assert_eq!(indices, vec![0, 1]);
+        assert!(!result.is_malformed);
     }
 
     #[test]
@@ -673,15 +675,5 @@ mod tests {
         let result = reader.read_packet(&packet, 0, |_, _| count += 1);
         assert!(result.is_malformed);
         assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn payload_bits_consumed_stream_stays_aligned() {
-        let packet = build_bunch_packet(&unreliable(0), &[false; 17]);
-
-        let mut reader = RawPacketReader::new();
-        let mut count = 0;
-        reader.read_packet(&packet, 0, |_, _| count += 1);
-        assert_eq!(count, 1);
     }
 }

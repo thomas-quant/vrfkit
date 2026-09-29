@@ -956,6 +956,92 @@ mod tests {
         }
     }
 
+    fn reader() -> ReplicationReader {
+        ReplicationReader::new("++Ares-Core+release-13.01").unwrap()
+    }
+
+    /// Process `packets` in order, packet ids from 0, on a fresh 13.01 reader.
+    fn run_packets(packets: &[Vec<u8>]) -> (ReplicationReader, TestSink) {
+        let (mut reader, mut sink) = (reader(), TestSink::default());
+        for (packet_id, packet) in packets.iter().enumerate() {
+            reader.process_packet(packet, packet_id as i32, &mut sink);
+        }
+        (reader, sink)
+    }
+
+    /// An IntPacked GUID. GUID 3, a static actor, is the byte 6.
+    fn guid(value: u32) -> Vec<bool> {
+        let mut bits = Vec::new();
+        bits.int_packed(value);
+        bits
+    }
+
+    /// An actor RepLayout block with an empty body: hasRepLayout, isActor,
+    /// contentBits 0 -- 10 bits.
+    fn empty_actor_block() -> Vec<bool> {
+        let mut bits = vec![true, true];
+        bits.int_packed(0);
+        bits
+    }
+
+    /// A static (odd) actor's open, which has no spawn block, then an empty
+    /// actor block.
+    fn static_actor(actor: u32) -> Vec<bool> {
+        let mut bits = guid(actor);
+        bits.extend(empty_actor_block());
+        bits
+    }
+
+    /// One reliable, non-partial bunch that opens `ch_index` around `payload`.
+    fn build_open_bunch_packet(ch_index: u32, payload: &[bool]) -> Vec<u8> {
+        let spec = BunchSpec {
+            ch_index,
+            b_open: true,
+            ..Default::default()
+        };
+        build_bunch_packet(&spec, payload)
+    }
+
+    /// Channel 2 opens for static actor `actor`.
+    fn open_on_two(actor: u32) -> Vec<u8> {
+        build_open_bunch_packet(2, &static_actor(actor))
+    }
+
+    /// A payload-less close of channel 2, destroying or dormant.
+    fn close_on_two(dormant: bool) -> Vec<u8> {
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_close: true,
+            dormant,
+            ..Default::default()
+        };
+        build_bunch_packet(&spec, &[])
+    }
+
+    /// A non-open bunch on channel 2 carrying one empty 10-bit actor block.
+    fn later_block_on_two() -> Vec<u8> {
+        let spec = BunchSpec {
+            ch_index: 2,
+            ..Default::default()
+        };
+        build_bunch_packet(&spec, &empty_actor_block())
+    }
+
+    /// A reliable partial fragment on channel 2.
+    fn partial_packet(open: bool, initial: bool, last: bool, payload: &[bool]) -> Vec<u8> {
+        build_bunch_packet(
+            &BunchSpec {
+                ch_index: 2,
+                b_open: open,
+                b_partial: true,
+                b_partial_initial: initial,
+                b_partial_final: last,
+                ..Default::default()
+            },
+            payload,
+        )
+    }
+
     /// The reused staging buffer only grows: a short fragment after a long one
     /// must not read the long one's bytes back.
     #[test]
@@ -983,66 +1069,63 @@ mod tests {
         );
     }
 
-    /// A partial bunch split across two fragments must reassemble and then
-    /// frame exactly as an unsplit one would: the one place a bunch payload is
-    /// copied rather than viewed. The reference replay takes this path too
-    /// (131 fragments, 56 completed on 02d4d478, `validate` at 061155a), but
-    /// only as totals; this pins the exact result.
+    /// An unaligned window is realigned to bit zero of the staging buffer, the
+    /// only reason the copy exists.
+    #[test]
+    fn fragment_staging_realigns_an_offset_window() {
+        let packet = [0b1111_0000u8, 0b0000_1111];
+        let mut reader = BitReader::new(&packet);
+        reader.skip_bits(4).unwrap();
+        let window = reader.sub_reader(8).unwrap();
+
+        let mut buffer = Vec::new();
+        assert_eq!(stage_fragment(window, &mut buffer), &[0b1111_1111]);
+    }
+
+    /// A partial bunch split across two fragments reassembles and frames
+    /// exactly as an unsplit one would, and applies the close flag its final
+    /// fragment carried (see `process_bunch`).
     #[test]
     fn split_bunch_reassembles_and_frames() {
-        // Fragment 1 opens channel 2 as a reliable partial initial; its payload
-        // is IntPacked(3), a static (odd) actor GUID, so no spawn block.
-        let mut bits = Vec::new();
-        let initial = BunchSpec {
-            ch_index: 2,
-            b_open: true,
-            b_partial: true,
-            b_partial_initial: true,
-            ..Default::default()
-        };
-        write_bunch(&mut bits, &initial, &guid_three());
+        for b_close in [false, true] {
+            let last = BunchSpec {
+                ch_index: 2,
+                b_close,
+                b_partial: true,
+                b_partial_final: true,
+                ..Default::default()
+            };
+            let (reader, sink) = run_packets(&[
+                partial_packet(true, true, false, &guid(3)),
+                build_bunch_packet(&last, &empty_actor_block()),
+            ]);
 
-        // Fragment 2: the partial final, one actor block with a zero-bit body.
-        let mut block = Vec::new();
-        write_empty_actor_block(&mut block);
-        let last = BunchSpec {
-            ch_index: 2,
-            b_partial: true,
-            b_partial_final: true,
-            ..Default::default()
-        };
-        write_bunch(&mut bits, &last, &block);
-
-        let packet = build_packet(&bits);
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        let stats = reader.stats();
-        assert_eq!(stats.bunches, 2);
-        assert_eq!(stats.partial_fragments, 2);
-        assert_eq!(stats.partial_bunches, 2);
-        assert_eq!(stats.partial_completed, 1);
-        assert_eq!(stats.partial_errors, 0);
-        assert_eq!(stats.actor_opens, 1, "the open is read from fragment 1");
-        assert_eq!(
-            stats.content_blocks, 1,
-            "the block header spans neither fragment but sits after the join"
-        );
-        assert_eq!(stats.rep_layout_blocks, 1);
-        assert_eq!(stats.skipped_bits, 0, "nothing may be abandoned");
-        assert_eq!(sink.opens, vec![2]);
-        // A clean pass records and drops no diagnostic event -- asserted after
-        // a real reassembly and framing pass, not on a default `NetStats`.
-        #[cfg(feature = "diagnostics")]
-        {
-            assert!(
-                stats.diagnostics.is_empty(),
-                "a clean pass recorded diagnostic events: {:?}",
-                stats.diagnostics
+            let stats = reader.stats();
+            assert_eq!(stats.bunches, 2);
+            assert_eq!(stats.partial_fragments, 2);
+            assert_eq!(stats.partial_bunches, 2);
+            assert_eq!(stats.partial_completed, 1);
+            assert_eq!(stats.partial_errors, 0);
+            assert_eq!(stats.actor_opens, 1, "the open is read from fragment 1");
+            assert_eq!(
+                stats.content_blocks, 1,
+                "the block header spans neither fragment but sits after the join"
             );
-            assert_eq!(stats.diagnostics_dropped, 0);
+            assert_eq!(stats.rep_layout_blocks, 1);
+            assert_eq!(stats.skipped_bits, 0, "nothing may be abandoned");
+            assert_eq!(sink.opens, vec![2]);
+            assert_eq!(stats.actor_closes, u64::from(b_close));
+            assert_eq!(sink.closes, if b_close { vec![2] } else { vec![] });
+            // A clean pass records and drops no diagnostic event.
+            #[cfg(feature = "diagnostics")]
+            {
+                assert!(
+                    stats.diagnostics.is_empty(),
+                    "a clean pass recorded diagnostic events: {:?}",
+                    stats.diagnostics
+                );
+                assert_eq!(stats.diagnostics_dropped, 0);
+            }
         }
     }
 
@@ -1050,245 +1133,88 @@ mod tests {
     /// accumulator: the packet reader's tracker sees it too but is advisory.
     #[test]
     fn a_partial_final_without_an_initial_is_counted_once() {
-        // Reliable partial final on channel 2, no initial anywhere; its
-        // payload, actor GUID 3, is never reached.
-        let packet = partial_packet(false, false, true, &guid_three());
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        // Its payload, actor GUID 3, is never reached.
+        let (reader, sink) = run_packets(&[partial_packet(false, false, true, &guid(3))]);
 
+        let stats = reader.stats();
+        assert_eq!(stats.partial_errors, 1, "counted once, not twice");
+        assert_eq!(stats.partial_bunches, 1);
+        assert_eq!(stats.partial_missing_initial, 1);
+        assert_eq!(stats.partial_missing_initial_final, 1);
+        assert_eq!(stats.partial_missing_initial_reliable, 1);
+        assert_eq!(stats.partial_missing_initial_bits, 8);
+        assert_eq!(stats.partial_overlapping_initial, 0);
+        assert_eq!(stats.partial_mismatched_continuation, 0);
+        assert_eq!(stats.partial_non_byte_aligned, 0);
         assert_eq!(
-            reader.stats().partial_errors,
-            1,
-            "one missing-initial error, counted once (not twice)"
+            rejected_rows(&sink),
+            vec![("current_fragment", PartialPayloadReason::MissingInitial, 8)]
         );
-        assert_eq!(reader.stats().partial_bunches, 1);
-        assert_eq!(reader.stats().partial_missing_initial, 1);
-        assert_eq!(reader.stats().partial_missing_initial_final, 1);
-        assert_eq!(reader.stats().partial_missing_initial_reliable, 1);
-        assert_eq!(reader.stats().partial_missing_initial_bits, 8);
-        assert_eq!(reader.stats().partial_overlapping_initial, 0);
-        assert_eq!(reader.stats().partial_mismatched_continuation, 0);
-        assert_eq!(reader.stats().partial_non_byte_aligned, 0);
-        assert_eq!(sink.rejected_partials.len(), 1);
         let rejected = &sink.rejected_partials[0];
-        assert_eq!(
-            (rejected.kind, rejected.reason, rejected.bit_count),
-            ("current_fragment", PartialPayloadReason::MissingInitial, 8)
-        );
         assert_eq!(rejected.payload, &[6]);
         assert_eq!(rejected.header.ch_index, 2);
         assert_eq!(rejected.rejection_packet_id, Some(0));
-        assert_eq!(
-            reader.stats().skipped_bits,
-            8,
-            "the rejected fragment payload must remain in loss accounting"
-        );
-    }
-
-    /// A bunch whose header stage fails is counted and abandoned: a truncated
-    /// must-be-mapped list must not leave the reader to parse on as garbage.
-    #[test]
-    fn a_truncated_bunch_header_failure_is_counted_not_silent() {
-        // A 16-bit payload: must-be-mapped count 1 (u16 LE) and no GUID bits,
-        // so the GUID read hits the end.
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_has_must_be_mapped_guids: true,
-                ..Default::default()
-            },
-            &must_be_mapped_count_without_its_guid(),
-        );
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        assert_eq!(
-            reader.stats().bunch_header_failures,
-            1,
-            "truncated must-be-mapped list counted, not silently dropped"
-        );
-    }
-
-    // --- bunch builders for the lifecycle tests below ---
-
-    /// A single actor RepLayout content block with an empty body.
-    fn write_empty_actor_block(bits: &mut Vec<bool>) {
-        bits.push(true); // hasRepLayout
-        bits.push(true); // isActor
-        bits.int_packed(0); // contentBits = 0
+        assert_eq!(stats.skipped_bits, 8, "the rejected payload stays in loss");
     }
 
     /// An out-of-range GUID count drops every path declaration in the bunch:
     /// a header failure with its bits tallied, not an export processed.
     #[test]
     fn a_package_map_export_with_an_impossible_guid_count_is_counted() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.push(false); // hasRepLayoutExport
+        let mut payload = vec![false]; // hasRepLayoutExport
         payload.i32(crate::types::MAX_GUID_COUNT as i32 + 1);
-        // The declarations that get dropped.
-        payload.extend(std::iter::repeat_n(true, 24));
+        payload.repeat(true, 24); // the declarations that get dropped
 
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_has_package_map_exports: true,
-                ..Default::default()
-            },
-            &payload,
-        );
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_has_package_map_exports: true,
+            ..Default::default()
+        };
+        let (reader, _) = run_packets(&[build_bunch_packet(&spec, &payload)]);
 
         let stats = reader.stats();
-        assert_eq!(
-            stats.package_map_exports, 0,
-            "a bunch whose declarations were all dropped is not an export processed"
-        );
+        assert_eq!(stats.package_map_exports, 0, "nothing was exported");
         assert_eq!(stats.bunch_header_failures, 1);
         assert_eq!(stats.exported_guids, 0);
         assert_eq!(
             stats.skipped_bits, 57,
-            "the whole abandoned payload is tallied, not just the unread tail: \
-             the bits the failing stage had already consumed declared exports \
-             that were dropped (package_map_exports and exported_guids are both \
-             0 above), so they are lost too"
+            "the whole payload: the bits already read declared dropped exports"
         );
-    }
-
-    /// A negative count is the same failure: the range test's `as u32` would
-    /// read -1 as 4,294,967,295, so the sign is tested on its own.
-    #[test]
-    fn a_negative_package_map_guid_count_is_counted() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.push(false); // hasRepLayoutExport
-        payload.i32(-1);
-        payload.extend(std::iter::repeat_n(true, 16));
-
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_has_package_map_exports: true,
-                ..Default::default()
-            },
-            &payload,
-        );
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        assert_eq!(reader.stats().bunch_header_failures, 1);
-        assert_eq!(reader.stats().package_map_exports, 0);
-        assert_eq!(reader.stats().skipped_bits, 49);
     }
 
     /// A RepLayout-export bunch is skipped whole, a deliberate limitation,
     /// counted on its own line rather than in `skipped_bits`.
     #[test]
     fn a_rep_layout_export_bunch_is_counted_separately() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.push(true); // hasRepLayoutExport -> unsupported, skipped
-        payload.extend(std::iter::repeat_n(true, 32));
+        let mut payload = vec![true]; // hasRepLayoutExport: unsupported, skipped
+        payload.repeat(true, 32);
 
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_has_package_map_exports: true,
-                ..Default::default()
-            },
-            &payload,
-        );
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_has_package_map_exports: true,
+            ..Default::default()
+        };
+        let (reader, _) = run_packets(&[build_bunch_packet(&spec, &payload)]);
 
         let stats = reader.stats();
         assert_eq!(stats.rep_layout_export_bunches, 1);
         assert_eq!(
             stats.bunch_header_failures, 0,
-            "not a failure, a limitation"
+            "a limitation, not a failure"
         );
         assert_eq!(stats.skipped_bits, 0, "no content block was involved");
     }
 
-    /// A reassembled partial bunch applies the close flag its final fragment
-    /// carried (see `process_bunch`).
-    #[test]
-    fn a_reassembled_partial_bunch_applies_its_close_flag() {
-        let mut bits = Vec::new();
-
-        // Fragment 1: opens channel 2 for static actor GUID 3, byte-aligned.
-        let mut first: Vec<bool> = Vec::new();
-        first.int_packed(3);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                b_partial: true,
-                b_partial_initial: true,
-                ..Default::default()
-            },
-            &first,
-        );
-
-        // Fragment 2: the final, carrying the close flag and the actor block.
-        let mut last: Vec<bool> = Vec::new();
-        write_empty_actor_block(&mut last);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_close: true,
-                b_partial: true,
-                b_partial_final: true,
-                ..Default::default()
-            },
-            &last,
-        );
-
-        let packet = build_packet(&bits);
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        let stats = reader.stats();
-        assert_eq!(stats.partial_completed, 1);
-        assert_eq!(stats.actor_opens, 1);
-        assert_eq!(stats.content_blocks, 1, "the payload is still framed");
-        assert_eq!(
-            stats.actor_closes, 1,
-            "the final fragment closed the channel"
-        );
-        assert_eq!(sink.closes, vec![2], "the close row must be emitted");
-    }
-
     #[test]
     fn a_rejected_partial_close_still_retires_the_channel() {
-        let mut open_payload = Vec::new();
-        open_payload.int_packed(3);
-        write_empty_actor_block(&mut open_payload);
-        let open = build_open_bunch_packet(2, &open_payload);
-        let close = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_close: true,
-                b_partial: true,
-                b_partial_final: true,
-                ..Default::default()
-            },
-            &[true; 8],
-        );
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&open, 0, &mut sink);
-        reader.process_packet(&close, 1, &mut sink);
+        let close = BunchSpec {
+            ch_index: 2,
+            b_close: true,
+            b_partial: true,
+            b_partial_final: true,
+            ..Default::default()
+        };
+        let (reader, _) = run_packets(&[open_on_two(3), build_bunch_packet(&close, &[true; 8])]);
 
         assert_eq!(reader.stats().partial_errors, 1);
         assert_eq!(reader.stats().skipped_bits, 8);
@@ -1300,110 +1226,12 @@ mod tests {
     /// says; nothing else moves, so the replacement is counted.
     #[test]
     fn opening_an_already_open_channel_is_counted() {
-        let mut bits = Vec::new();
-        for actor_guid in [3u32, 5] {
-            let mut payload: Vec<bool> = Vec::new();
-            payload.int_packed(actor_guid); // static (odd): no spawn block
-            write_empty_actor_block(&mut payload);
-            write_bunch(
-                &mut bits,
-                &BunchSpec {
-                    ch_index: 2,
-                    b_open: true,
-                    ..Default::default()
-                },
-                &payload,
-            );
-        }
-
-        let packet = build_packet(&bits);
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        let (reader, _) = run_packets(&[open_on_two(3), open_on_two(5)]);
 
         let stats = reader.stats();
         assert_eq!(stats.actor_opens, 2);
-        assert_eq!(
-            stats.actor_closes, 0,
-            "no close is fabricated for the first actor"
-        );
-        assert_eq!(
-            stats.channel_reopens_while_open, 1,
-            "the overwrite of a live channel must be counted"
-        );
-    }
-
-    /// A failed open must not leave the previous actor live. Channel 2 opens
-    /// static actor 3; a reopen for dynamic actor 4 stops before its spawn
-    /// block. The next bunch must not be framed as actor 3's (the stale-schema
-    /// shape CLAUDE.md lists).
-    #[test]
-    fn a_failed_reopen_does_not_leave_the_previous_actor_live() {
-        let mut bits = Vec::new();
-        let mut first: Vec<bool> = Vec::new();
-        first.int_packed(3); // static actor: no spawn block
-        write_empty_actor_block(&mut first);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &first,
-        );
-        let mut failed: Vec<bool> = Vec::new();
-        failed.int_packed(4); // dynamic actor, spawn block missing
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &failed,
-        );
-        let mut later: Vec<bool> = Vec::new();
-        write_empty_actor_block(&mut later);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                ..Default::default()
-            },
-            &later,
-        );
-
-        let packet = build_packet(&bits);
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        let stats = reader.stats();
-        assert_eq!(stats.bunch_header_failures, 1, "the failed open itself");
-        assert_eq!(stats.actor_opens, 1);
-        assert_eq!(
-            stats.content_blocks, 1,
-            "the bunch after the failed open has no actor to be framed under"
-        );
-        assert_eq!(
-            sink.content_blocks.len(),
-            1,
-            "nothing may reach the sink under actor 3's schema"
-        );
-        assert_eq!(
-            stats.actor_closes, 0,
-            "no close is fabricated for the displaced actor"
-        );
-        assert_eq!(stats.failed_reopens_while_open, 1);
-        assert_eq!(
-            (
-                stats.bunches_on_unopened_channel,
-                stats.unopened_channel_bits
-            ),
-            (1, 10),
-            "the dropped bunch is counted, with its whole 10-bit block"
-        );
+        assert_eq!(stats.actor_closes, 0, "no close is fabricated");
+        assert_eq!(stats.channel_reopens_while_open, 1);
     }
 
     /// A failed first open retires nothing, but the next bunch on the channel
@@ -1411,46 +1239,19 @@ mod tests {
     /// header failure's, the later 10 are counted apart from `skipped_bits`.
     #[test]
     fn a_bunch_after_a_failed_first_open_is_counted_not_silent() {
-        let mut bits = Vec::new();
-        let mut failed: Vec<bool> = Vec::new();
-        failed.int_packed(4); // dynamic actor, spawn block missing
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 7,
-                b_open: true,
-                ..Default::default()
-            },
-            &failed,
-        );
-        let mut later: Vec<bool> = Vec::new();
-        write_empty_actor_block(&mut later);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 7,
-                ..Default::default()
-            },
-            &later,
-        );
-
-        let packet = build_packet(&bits);
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        // Dynamic actor 4 whose spawn block is missing.
+        let failed = build_open_bunch_packet(2, &guid(4));
+        let (reader, sink) = run_packets(&[failed, later_block_on_two()]);
 
         let stats = reader.stats();
         assert_eq!(stats.bunch_header_failures, 1);
         assert_eq!(
             stats.failed_reopens_while_open, 0,
-            "there was no live actor to retire"
+            "no live actor to retire"
         );
         assert_eq!(stats.bunches_on_unopened_channel, 1);
         assert_eq!(stats.unopened_channel_bits, 10);
-        assert_eq!(
-            stats.skipped_bits, 8,
-            "only the failed open's own window; the dropped bunch has its own tally"
-        );
+        assert_eq!(stats.skipped_bits, 8, "only the failed open's own window");
         assert_eq!(stats.content_blocks, 0);
         assert!(sink.content_blocks.is_empty());
     }
@@ -1460,63 +1261,17 @@ mod tests {
     /// actor.
     #[test]
     fn a_bunch_on_a_dormant_channel_after_a_failed_reopen_is_counted() {
-        let mut bits = Vec::new();
-        let mut first: Vec<bool> = Vec::new();
-        first.int_packed(3);
-        write_empty_actor_block(&mut first);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &first,
-        );
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_close: true,
-                dormant: true,
-                ..Default::default()
-            },
-            &[],
-        );
-        let mut failed: Vec<bool> = Vec::new();
-        failed.int_packed(4); // dynamic actor, spawn block missing
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &failed,
-        );
-        let mut later: Vec<bool> = Vec::new();
-        write_empty_actor_block(&mut later);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                ..Default::default()
-            },
-            &later,
-        );
-
-        let packet = build_packet(&bits);
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        let (reader, _) = run_packets(&[
+            open_on_two(3),
+            close_on_two(true),
+            build_open_bunch_packet(2, &guid(4)),
+            later_block_on_two(),
+        ]);
 
         let stats = reader.stats();
         assert_eq!(stats.actor_closes, 1, "the dormant close");
         assert_eq!(stats.bunch_header_failures, 1, "the failed reopen");
-        assert_eq!(
-            stats.failed_reopens_while_open, 0,
-            "a dormant channel holds no live actor"
-        );
+        assert_eq!(stats.failed_reopens_while_open, 0, "nothing live to retire");
         assert_eq!(stats.content_blocks, 1, "only the first open's block");
         assert_eq!(
             (
@@ -1530,33 +1285,14 @@ mod tests {
     // --- open bunches stopped before their open, on a live channel ---
     //
     // Each probe opens channel 2 for static actor 3, sends an open bunch that
-    // stops before its own open is read, then a non-open bunch with an empty
-    // block. (The open itself failing is
-    // a_failed_reopen_does_not_leave_the_previous_actor_live.)
-
-    /// Channel 2 opens for static actor 3, whose empty block frames.
-    fn open_actor_three_on_channel_two() -> Vec<u8> {
-        build_open_bunch_packet(2, &open_and_empty_block())
-    }
-
-    /// A non-open bunch on channel 2 carrying one empty 10-bit actor block.
-    fn later_block_on_channel_two() -> Vec<u8> {
-        let mut later: Vec<bool> = Vec::new();
-        write_empty_actor_block(&mut later);
-        build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                ..Default::default()
-            },
-            &later,
-        )
-    }
+    // stops short of its open, then a non-open bunch with an empty block. The
+    // later bunch must not be framed under actor 3's schema.
 
     /// A must-be-mapped list that declares one GUID (u16 1, little-endian) and
-    /// ends there; anything after it would satisfy the GUID read.
+    /// ends there.
     fn must_be_mapped_count_without_its_guid() -> Vec<bool> {
-        let mut bits = vec![true, false, false, false, false, false, false, false];
-        bits.extend([false; 8]);
+        let mut bits = Vec::new();
+        bits.u16(1);
         bits
     }
 
@@ -1566,23 +1302,10 @@ mod tests {
         let stats = reader.stats();
         assert_eq!(stats.actor_opens, 1, "only actor 3's open completed");
         assert_eq!(stats.channel_reopens_while_open, 0, "no reopen succeeded");
-        assert_eq!(
-            stats.failed_reopens_while_open, 1,
-            "the displaced actor must be retired and counted"
-        );
-        assert_eq!(
-            stats.content_blocks, 1,
-            "only actor 3's own block; the later bunch has no actor to be framed under"
-        );
-        assert_eq!(
-            sink.content_blocks.len(),
-            1,
-            "nothing may reach the sink under actor 3's schema"
-        );
-        assert_eq!(
-            stats.actor_closes, 0,
-            "no close is fabricated for the displaced actor"
-        );
+        assert_eq!(stats.failed_reopens_while_open, 1, "actor 3 retired");
+        assert_eq!(stats.content_blocks, 1, "only actor 3's own block");
+        assert_eq!(sink.content_blocks.len(), 1);
+        assert_eq!(stats.actor_closes, 0, "no close is fabricated");
         assert_eq!(
             (
                 stats.bunches_on_unopened_channel,
@@ -1593,116 +1316,92 @@ mod tests {
         );
     }
 
+    /// Run a probe: actor 3's open, `reopen`, then the later block.
+    fn probe(reopen: Vec<u8>) -> ReplicationReader {
+        let (reader, sink) = run_packets(&[open_on_two(3), reopen, later_block_on_two()]);
+        assert_actor_three_retired(&reader, &sink);
+        reader
+    }
+
+    /// The open itself fails: dynamic actor 4 stops before its spawn block.
+    #[test]
+    fn a_failed_reopen_does_not_leave_the_previous_actor_live() {
+        let reader = probe(build_open_bunch_packet(2, &guid(4)));
+        assert_eq!(reader.stats().bunch_header_failures, 1);
+    }
+
     /// An open bunch whose must-be-mapped list fails to read is abandoned
     /// before its open is reached.
     #[test]
     fn an_open_whose_must_be_mapped_read_fails_retires_the_live_actor() {
-        let reopen = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                b_has_must_be_mapped_guids: true,
-                ..Default::default()
-            },
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_open: true,
+            b_has_must_be_mapped_guids: true,
+            ..Default::default()
+        };
+        let reader = probe(build_bunch_packet(
+            &spec,
             &must_be_mapped_count_without_its_guid(),
-        );
-        let (reader, sink) = run_packets(&[
-            open_actor_three_on_channel_two(),
-            reopen,
-            later_block_on_channel_two(),
-        ]);
-
-        let stats = reader.stats();
-        assert_eq!(stats.bunch_header_failures, 1, "the must-be-mapped read");
-        assert_eq!(stats.skipped_bits, 16, "the abandoned window");
-        assert_actor_three_retired(&reader, &sink);
+        ));
+        assert_eq!(reader.stats().bunch_header_failures, 1);
+        assert_eq!(reader.stats().skipped_bits, 16, "the abandoned window");
     }
 
     /// An open bunch whose package-map exports fail to read -- a negative GUID
     /// count -- is abandoned before its open is reached.
     #[test]
     fn an_open_whose_package_map_read_fails_retires_the_live_actor() {
-        let mut exports: Vec<bool> = Vec::new();
-        exports.push(false); // hasRepLayoutExport
-        exports.i32(-1);
-        exports.extend(open_and_empty_block()); // the open, never reached
-        let reopen = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                b_has_package_map_exports: true,
-                ..Default::default()
-            },
-            &exports,
-        );
-        let (reader, sink) = run_packets(&[
-            open_actor_three_on_channel_two(),
-            reopen,
-            later_block_on_channel_two(),
-        ]);
+        let mut exports = vec![false]; // hasRepLayoutExport
+        exports.i32(-1).extend_bits(&static_actor(3)); // the open, never reached
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_open: true,
+            b_has_package_map_exports: true,
+            ..Default::default()
+        };
+        let reader = probe(build_bunch_packet(&spec, &exports));
 
         let stats = reader.stats();
-        assert_eq!(stats.bunch_header_failures, 1, "the package-map read");
+        assert_eq!(stats.bunch_header_failures, 1);
         assert_eq!(stats.package_map_exports, 0);
         assert_eq!(stats.skipped_bits, 51, "the abandoned window: 1 + 32 + 18");
-        assert_actor_three_retired(&reader, &sink);
     }
 
     /// Clean exports do not save the open: nothing after an export list is
-    /// read. No header failure is counted, `failed_reopens_while_open` alone
-    /// says an open was lost, and the unread bits are not tallied
-    /// (docs/FOLLOWUP.md), so `skipped_bits` is not asserted.
+    /// read. No header failure is counted and the unread bits are not tallied
+    /// (docs/FOLLOWUP.md); `failed_reopens_while_open` alone says an open was
+    /// lost.
     #[test]
     fn an_open_behind_clean_package_map_exports_retires_the_live_actor() {
-        let mut exports: Vec<bool> = Vec::new();
-        exports.push(false); // hasRepLayoutExport
-        exports.i32(0); // no GUIDs: a clean, empty export list
-        exports.extend(open_and_empty_block()); // the open, never read
-        let reopen = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                b_has_package_map_exports: true,
-                ..Default::default()
-            },
-            &exports,
-        );
-        let (reader, sink) = run_packets(&[
-            open_actor_three_on_channel_two(),
-            reopen,
-            later_block_on_channel_two(),
-        ]);
+        let mut exports = vec![false]; // hasRepLayoutExport
+        exports.i32(0).extend_bits(&static_actor(3)); // no GUIDs; the open, never read
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_open: true,
+            b_has_package_map_exports: true,
+            ..Default::default()
+        };
+        let reader = probe(build_bunch_packet(&spec, &exports));
 
-        let stats = reader.stats();
-        assert_eq!(stats.package_map_exports, 1, "the exports read cleanly");
-        assert_eq!(stats.bunch_header_failures, 0, "nothing failed to read");
-        assert_actor_three_retired(&reader, &sink);
+        assert_eq!(reader.stats().package_map_exports, 1);
+        assert_eq!(reader.stats().bunch_header_failures, 0);
     }
 
     /// An open bunch refused at the channel-state limit never reaches the
     /// header stages at all.
     #[test]
     fn an_open_refused_at_the_channel_limit_retires_the_live_actor() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&open_actor_three_on_channel_two(), 0, &mut sink);
-
-        // A packet reader with no room for reliable-sequence state refuses the
-        // reopen while the pipeline still holds actor 3: a refusal on a live slot.
+        let (mut reader, mut sink) = run_packets(&[open_on_two(3)]);
+        // No room for reliable-sequence state refuses the reopen while the
+        // pipeline still holds actor 3; restored for the later bunch.
         reader.packet_reader = RawPacketReader::with_max_channels(0);
-        let reopen = build_open_bunch_packet(2, &open_and_empty_block());
-        reader.process_packet(&reopen, 1, &mut sink);
-        // Restored, so the later bunch reaches the channel guard rather than
-        // being refused too.
+        reader.process_packet(&open_on_two(3), 1, &mut sink);
         reader.packet_reader = RawPacketReader::new();
-        reader.process_packet(&later_block_on_channel_two(), 2, &mut sink);
+        reader.process_packet(&later_block_on_two(), 2, &mut sink);
 
-        let stats = reader.stats();
-        assert_eq!(stats.channel_state_limit_failures, 1);
-        assert_eq!(
-            stats.bunch_header_failures, 1,
-            "the refused bunch is abandoned"
-        );
+        assert_eq!(reader.stats().channel_state_limit_failures, 1);
+        assert_eq!(reader.stats().bunch_header_failures, 1, "abandoned");
         assert_actor_three_retired(&reader, &sink);
     }
 
@@ -1710,57 +1409,40 @@ mod tests {
     /// carried its own actor's close, not actor 3's, so actor 3 gets no close.
     #[test]
     fn an_open_and_close_refused_at_the_channel_limit_closes_nothing_it_did_not_open() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&open_actor_three_on_channel_two(), 0, &mut sink);
+        let (mut reader, mut sink) = run_packets(&[open_on_two(3)]);
         reader.packet_reader = RawPacketReader::with_max_channels(0);
-        let reopen = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                b_close: true,
-                ..Default::default()
-            },
-            &open_and_empty_block(),
-        );
-        reader.process_packet(&reopen, 1, &mut sink);
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_open: true,
+            b_close: true,
+            ..Default::default()
+        };
+        reader.process_packet(&build_bunch_packet(&spec, &static_actor(3)), 1, &mut sink);
 
         let stats = reader.stats();
         assert_eq!(stats.channel_state_limit_failures, 1);
         assert_eq!(stats.failed_reopens_while_open, 1);
         assert_eq!(stats.actor_closes, 0, "actor 3 was never closed");
         assert!(sink.closes.is_empty(), "no close row for actor 3");
-        assert!(
-            reader.channels.is_empty(),
-            "the destroyed channel is still retired"
-        );
+        assert!(reader.channels.is_empty(), "the channel is still retired");
     }
 
     /// Only an open bunch displaces an actor: a non-open bunch whose header
     /// stage fails is abandoned, and actor 3 stays live. Pins the `b_open` gate.
     #[test]
     fn a_header_failure_without_an_open_leaves_the_live_actor_open() {
-        let failed = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_has_must_be_mapped_guids: true,
-                ..Default::default()
-            },
-            &must_be_mapped_count_without_its_guid(),
-        );
-        let (reader, sink) = run_packets(&[
-            open_actor_three_on_channel_two(),
-            failed,
-            later_block_on_channel_two(),
-        ]);
+        let spec = BunchSpec {
+            ch_index: 2,
+            b_has_must_be_mapped_guids: true,
+            ..Default::default()
+        };
+        let failed = build_bunch_packet(&spec, &must_be_mapped_count_without_its_guid());
+        let (reader, sink) = run_packets(&[open_on_two(3), failed, later_block_on_two()]);
 
         let stats = reader.stats();
-        assert_eq!(stats.bunch_header_failures, 1);
+        assert_eq!(stats.bunch_header_failures, 1, "the truncated list counts");
         assert_eq!(stats.failed_reopens_while_open, 0, "nothing was reopened");
-        assert_eq!(
-            stats.content_blocks, 2,
-            "the later bunch is still actor 3's"
-        );
+        assert_eq!(stats.content_blocks, 2, "the later bunch is actor 3's");
         assert_eq!(sink.content_blocks.len(), 2);
         assert_eq!(stats.bunches_on_unopened_channel, 0);
     }
@@ -1770,11 +1452,8 @@ mod tests {
     /// list is read and counted before the guard either way.
     #[test]
     fn a_bunch_on_a_never_opened_channel_counts_only_what_it_drops() {
-        let mut preamble: Vec<bool> = Vec::new();
-        // u16 count = 1, little-endian, then one IntPacked GUID.
-        preamble.extend([true, false, false, false, false, false, false, false]);
-        preamble.extend([false; 8]);
-        preamble.int_packed(6);
+        let mut preamble = Vec::new();
+        preamble.u16(1).int_packed(6); // one must-be-mapped GUID
         let spec = BunchSpec {
             ch_index: 9,
             b_has_must_be_mapped_guids: true,
@@ -1784,13 +1463,9 @@ mod tests {
         let mut bits = Vec::new();
         write_bunch(&mut bits, &spec, &preamble);
         let mut with_block = preamble.clone();
-        write_empty_actor_block(&mut with_block);
+        with_block.extend(empty_actor_block());
         write_bunch(&mut bits, &spec, &with_block);
-
-        let packet = build_packet(&bits);
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        let (reader, _) = run_packets(&[build_packet(&bits)]);
 
         let stats = reader.stats();
         assert_eq!(stats.bunches, 2);
@@ -1808,89 +1483,21 @@ mod tests {
         assert_eq!(stats.content_blocks, 0);
     }
 
-    /// A channel that was closed and is opened again is the ordinary case and
-    /// must NOT be counted as an overwrite.
-    #[test]
-    fn reopening_a_closed_channel_is_not_counted_as_an_overwrite() {
-        let mut bits = Vec::new();
-        let mut payload: Vec<bool> = Vec::new();
-        payload.int_packed(3);
-        write_empty_actor_block(&mut payload);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
-        // Close with an empty payload.
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_close: true,
-                ..Default::default()
-            },
-            &[],
-        );
-        let mut payload: Vec<bool> = Vec::new();
-        payload.int_packed(5);
-        write_empty_actor_block(&mut payload);
-        write_bunch(
-            &mut bits,
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                ..Default::default()
-            },
-            &payload,
-        );
-
-        let packet = build_packet(&bits);
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        let stats = reader.stats();
-        assert_eq!(stats.actor_opens, 2);
-        assert_eq!(stats.actor_closes, 1);
-        assert_eq!(stats.channel_reopens_while_open, 0);
-    }
-
+    /// A destroyed channel's row is retired, so channels do not accumulate,
+    /// and reopening it is the ordinary case, not an overwrite.
     #[test]
     fn a_destroyed_channel_is_retired_before_later_reuse() {
-        let mut open_payload = Vec::new();
-        open_payload.int_packed(3);
-        write_empty_actor_block(&mut open_payload);
-        let open = build_open_bunch_packet(2, &open_payload);
-        let close = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_close: true,
-                ..Default::default()
-            },
-            &[],
-        );
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&open, 0, &mut sink);
-        assert_eq!(reader.channels.len(), 1);
-        reader.process_packet(&close, 1, &mut sink);
+        let (mut reader, mut sink) = run_packets(&[open_on_two(3), close_on_two(false)]);
         assert!(
             reader.channels.is_empty(),
             "destroyed channels must not accumulate"
         );
 
-        let mut reopened_payload = Vec::new();
-        reopened_payload.int_packed(5);
-        write_empty_actor_block(&mut reopened_payload);
-        let reopened = build_open_bunch_packet(2, &reopened_payload);
-        reader.process_packet(&reopened, 2, &mut sink);
-        assert_eq!(reader.stats().actor_opens, 2);
-        assert_eq!(reader.stats().channel_reopens_while_open, 0);
+        reader.process_packet(&open_on_two(5), 2, &mut sink);
+        let stats = reader.stats();
+        assert_eq!(stats.actor_opens, 2);
+        assert_eq!(stats.actor_closes, 1);
+        assert_eq!(stats.channel_reopens_while_open, 0);
         assert_eq!(
             reader.channels.len(),
             1,
@@ -1898,58 +1505,41 @@ mod tests {
         );
     }
 
+    /// At the active-channel budget no bunch, open or not, adds a channel: it
+    /// is refused, abandoned and counted.
     #[test]
-    fn an_open_beyond_the_active_channel_budget_fails_closed() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        for ch_index in 0..crate::types::MAX_ACTIVE_CHANNELS as u32 {
-            reader.channels.insert(ch_index, ChannelSlot::default());
-        }
-        let mut payload = Vec::new();
-        payload.int_packed(3);
-        write_empty_actor_block(&mut payload);
-        let payload_len = payload.len() as u64;
-        let packet = build_open_bunch_packet(crate::types::MAX_ACTIVE_CHANNELS as u32, &payload);
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        assert_eq!(reader.channels.len(), crate::types::MAX_ACTIVE_CHANNELS);
-        assert_eq!(reader.stats().channel_state_limit_failures, 1);
-        assert_eq!(reader.stats().actor_opens, 0);
-        assert_eq!(reader.stats().bunch_header_failures, 1);
-        assert_eq!(reader.stats().skipped_bits, payload_len);
-    }
-
-    #[test]
-    fn a_non_open_bunch_cannot_grow_the_channel_table_past_its_budget() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        for ch_index in 0..crate::types::MAX_ACTIVE_CHANNELS as u32 {
-            reader.channels.insert(ch_index, ChannelSlot::default());
-        }
-        let payload = vec![true, false, true, false, true];
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: crate::types::MAX_ACTIVE_CHANNELS as u32,
+    fn a_bunch_beyond_the_active_channel_budget_fails_closed() {
+        let max = crate::types::MAX_ACTIVE_CHANNELS;
+        for b_open in [true, false] {
+            let mut reader = reader();
+            for ch_index in 0..max as u32 {
+                reader.channels.insert(ch_index, ChannelSlot::default());
+            }
+            let payload = static_actor(3);
+            let spec = BunchSpec {
+                ch_index: max as u32,
+                b_open,
                 ..Default::default()
-            },
-            &payload,
-        );
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+            };
+            let packet = build_bunch_packet(&spec, &payload);
+            reader.process_packet(&packet, 0, &mut TestSink::default());
 
-        assert_eq!(reader.channels.len(), crate::types::MAX_ACTIVE_CHANNELS);
-        assert_eq!(reader.stats().channel_state_limit_failures, 1);
-        assert_eq!(reader.stats().bunch_header_failures, 1);
-        assert_eq!(reader.stats().skipped_bits, payload.len() as u64);
+            let stats = reader.stats();
+            assert_eq!(reader.channels.len(), max);
+            assert_eq!(stats.channel_state_limit_failures, 1);
+            assert_eq!(stats.actor_opens, 0);
+            assert_eq!(stats.bunch_header_failures, 1);
+            assert_eq!(stats.skipped_bits, payload.len() as u64);
+        }
     }
 
     #[test]
     fn raw_reliable_state_refusal_is_abandoned_and_counted_once() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut reader = reader();
         reader.packet_reader = RawPacketReader::with_max_channels(0);
         let payload = vec![true, false, true, false, true];
         let packet = build_bunch_packet(&BunchSpec::default(), &payload);
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        reader.process_packet(&packet, 0, &mut TestSink::default());
 
         assert!(reader.channels.is_empty());
         assert_eq!(reader.stats().channel_state_limit_failures, 1);
@@ -1962,14 +1552,7 @@ mod tests {
     /// transform.
     #[test]
     fn a_dynamic_open_without_its_spawn_block_is_a_failure_not_an_actor() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.int_packed(2); // dynamic actor GUID, then nothing
-
-        let packet = build_open_bunch_packet(2, &payload);
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        let (reader, sink) = run_packets(&[build_open_bunch_packet(2, &guid(2))]);
 
         let stats = reader.stats();
         assert_eq!(stats.actor_opens, 0, "no actor may be invented");
@@ -1982,14 +1565,7 @@ mod tests {
     /// GUID.
     #[test]
     fn a_static_open_with_no_payload_left_is_still_an_actor() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.int_packed(3); // static (odd) actor GUID
-
-        let packet = build_open_bunch_packet(2, &payload);
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+        let (reader, sink) = run_packets(&[build_open_bunch_packet(2, &guid(3))]);
 
         assert_eq!(reader.stats().actor_opens, 1);
         assert_eq!(reader.stats().actor_opens_missing_spawn, 0);
@@ -1997,27 +1573,11 @@ mod tests {
         assert_eq!(sink.opens, vec![2]);
     }
 
-    /// A partial whose continuation never arrives is loss that only `finish`
-    /// can name: nothing was out of sequence.
+    /// A partial whose continuation never arrives is loss only `finish` can
+    /// name, not a sequence error; a second `finish` counts nothing again.
     #[test]
-    fn an_unfinished_partial_bunch_is_reported_at_eof() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.int_packed(3); // 8 bits, byte-aligned
-
-        let packet = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: true,
-                b_partial: true,
-                b_partial_initial: true,
-                ..Default::default()
-            },
-            &payload,
-        );
-
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&packet, 0, &mut sink);
+    fn finish_counts_an_unfinished_partial_once() {
+        let (mut reader, _) = run_packets(&[partial_packet(true, true, false, &guid(3))]);
         assert_eq!(
             reader.stats().partial_errors,
             0,
@@ -2025,39 +1585,14 @@ mod tests {
         );
 
         reader.finish();
+        reader.finish();
 
         let stats = reader.stats();
-        assert_eq!(stats.unfinished_partials, 1);
-        assert_eq!(stats.unfinished_partial_bits, 8);
+        assert_eq!(
+            (stats.unfinished_partials, stats.unfinished_partial_bits),
+            (1, 8)
+        );
         assert_eq!(stats.partial_errors, 0, "still not a sequence error");
-    }
-
-    /// `finish` after a clean reassembly counts nothing, and a second call
-    /// counts nothing either -- the drained state must not be counted twice.
-    #[test]
-    fn finish_is_idempotent_and_silent_on_a_clean_stream() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&[0x01], 0, &mut sink);
-
-        reader.finish();
-        reader.finish();
-
-        assert_eq!(reader.stats().unfinished_partials, 0);
-        assert_eq!(reader.stats().unfinished_partial_bits, 0);
-    }
-
-    /// An unaligned window is realigned to bit zero of the staging buffer, the
-    /// only reason the copy exists.
-    #[test]
-    fn fragment_staging_realigns_an_offset_window() {
-        let packet = [0b1111_0000u8, 0b0000_1111];
-        let mut reader = BitReader::new(&packet);
-        reader.skip_bits(4).unwrap();
-        let window = reader.sub_reader(8).unwrap();
-
-        let mut buffer = Vec::new();
-        assert_eq!(stage_fragment(window, &mut buffer), &[0b1111_1111]);
     }
 
     #[test]
@@ -2068,9 +1603,7 @@ mod tests {
 
     #[test]
     fn empty_packet_is_no_op() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&[], 0, &mut sink);
+        let (reader, _) = run_packets(&[vec![]]);
         assert_eq!(reader.stats().packets, 1);
         assert_eq!(reader.stats().bunches, 0);
         assert_eq!(reader.stats().malformed_packets, 0);
@@ -2078,9 +1611,7 @@ mod tests {
 
     #[test]
     fn malformed_packet_counted() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        reader.process_packet(&[0x00, 0x00], 0, &mut sink);
+        let (reader, _) = run_packets(&[vec![0x00, 0x00]]);
         assert_eq!(reader.stats().malformed_packets, 1);
     }
 
@@ -2153,8 +1684,40 @@ mod tests {
         )
     }
 
+    /// Invert the short V13.01 byte transform for a test payload: below 32
+    /// bits it works byte by byte, so each byte's one preimage can be searched
+    /// for without duplicating the production transform.
+    fn wire_for_short_decoded(decoded: &[u8], bit_count: usize, actor: u32) -> Vec<u8> {
+        assert!(bit_count < 32);
+        let byte_count = bit_count.div_ceil(8);
+        let mut wire = vec![0u8; byte_count];
+        for offset in 0..byte_count {
+            let mask = if offset + 1 == byte_count && bit_count % 8 != 0 {
+                0xff >> (8 - bit_count % 8)
+            } else {
+                0xff
+            };
+            wire[offset] = (0u8..=u8::MAX)
+                .find(|&candidate| {
+                    let mut trial = wire.clone();
+                    trial[offset] = candidate;
+                    TransformVersion::V1301
+                        .apply(
+                            &mut trial,
+                            bit_count,
+                            vrf_transform::seed_for(bit_count, actor),
+                        )
+                        .unwrap();
+                    trial[offset] & mask == decoded[offset] & mask
+                })
+                .expect("the transform is bijective");
+        }
+        wire
+    }
+
     /// The unresolved callback receives the exact decoded block, not the wire
-    /// bytes or the reusable scratch tail.
+    /// bytes or the reusable scratch tail, and the failure names the arm: the
+    /// walk never began, so offset 0 and no handle.
     #[test]
     fn unresolved_class_net_cache_exposes_the_decoded_whole_payload() {
         let Run {
@@ -2166,16 +1729,22 @@ mod tests {
 
         assert_eq!(position, 7);
         assert_eq!(sink.unresolved_payloads.len(), 1);
-        let (failure, decoded) = &sink.unresolved_payloads[0];
-        assert_eq!(failure.kind, StreamKind::Rpc);
-        assert_eq!(failure.actor_net_guid, NetworkGuid(2));
-        assert_eq!(failure.bit_count, 7);
-        assert_eq!(failure.function_count, 0);
-        assert_eq!(failure.consumed_bits, 0);
-        assert_eq!(failure.remaining_bits, 7);
+        let (preserved, decoded) = &sink.unresolved_payloads[0];
+        assert_eq!(preserved.kind, StreamKind::Rpc);
+        assert_eq!(preserved.actor_net_guid, NetworkGuid(2));
+        assert_eq!(preserved.bit_count, 7);
+        assert_eq!(preserved.function_count, 0);
+        assert_eq!(preserved.consumed_bits, 0);
+        assert_eq!(preserved.remaining_bits, 7);
         assert_eq!(decoded, &[0x66]);
         assert_eq!(decoded[0] >> 7, 0, "high padding bit must stay zero");
         assert_eq!(sink.failures_before_payload, [1], "failure, then payload");
+        let failure = &sink.stream_failures[0];
+        assert_eq!(failure.cause, StreamFailureCause::UnresolvedFunctionCount);
+        assert_eq!(
+            (failure.record_handle, failure.record_offset),
+            (None, Some(0))
+        );
         assert_eq!(stats.rpcs, 0);
         assert_eq!(stats.rpc_stream_failures, 1);
         assert_eq!(stats.unresolved_rpc_payloads_preserved, 1);
@@ -2245,7 +1814,7 @@ mod tests {
     /// A ClassNetCache walk that returns `Ok` but abandons bits is a stream
     /// failure with those bits in `skipped_bits`. With `function_count` 2 the
     /// golden 0x66 gives one handle bit, then 6 bits -- fewer than the 8 a
-    /// payload length needs.
+    /// payload length needs -- abandoned together: 7.
     #[test]
     fn class_net_cache_overrun_ok_path_is_a_stream_failure() {
         let Run {
@@ -2259,54 +1828,17 @@ mod tests {
         assert_eq!(stats.rpc_stream_failures, 1);
         assert_eq!(stats.unresolved_rpc_payloads_preserved, 0);
         assert_eq!(stats.rpcs, 0);
-        // The 6 abandoned bits must be counted, not silently dropped.
-        assert!(
-            stats.skipped_bits >= 6,
-            "abandoned mid-block bits must land in skipped_bits, got {}",
-            stats.skipped_bits
-        );
+        assert_eq!(stats.skipped_bits, 7, "the handle bit and the 6 after it");
         assert_eq!(sink.stream_failures.len(), 1);
         assert_eq!(sink.stream_failures[0].kind, StreamKind::Rpc);
         assert_eq!(sink.stream_failures[0].remaining_bits, 7);
-    }
-
-    /// Invert the short V13.01 byte transform for a test payload: below 32
-    /// bits it works byte by byte, so each byte's one preimage can be searched
-    /// for without duplicating the production transform.
-    fn wire_for_short_decoded(decoded: &[u8], bit_count: usize, actor: u32) -> Vec<u8> {
-        assert!(bit_count < 32);
-        let byte_count = bit_count.div_ceil(8);
-        let mut wire = vec![0u8; byte_count];
-        for offset in 0..byte_count {
-            let mask = if offset + 1 == byte_count && bit_count % 8 != 0 {
-                0xff >> (8 - bit_count % 8)
-            } else {
-                0xff
-            };
-            wire[offset] = (0u8..=u8::MAX)
-                .find(|&candidate| {
-                    let mut trial = wire.clone();
-                    trial[offset] = candidate;
-                    TransformVersion::V1301
-                        .apply(
-                            &mut trial,
-                            bit_count,
-                            vrf_transform::seed_for(bit_count, actor),
-                        )
-                        .unwrap();
-                    trial[offset] & mask == decoded[offset] & mask
-                })
-                .expect("the transform is bijective");
-        }
-        wire
     }
 
     /// A zero handle closes only the RepLayout prefix. Bits after it belong to
     /// the chained ClassNetCache stream and must reach the sink exactly.
     #[test]
     fn rep_layout_zero_terminator_hands_the_exact_tail_to_the_sink() {
-        let mut decoded_bits = Vec::new();
-        decoded_bits.push(false); // property checksum
+        let mut decoded_bits = vec![false]; // property checksum
         decoded_bits.int_packed(0); // RepLayout terminator
         decoded_bits.extend((0..13).map(|index| index % 2 == 0));
 
@@ -2357,67 +1889,42 @@ mod tests {
         assert_eq!(sink.failures_before_payload, [1], "failure, then payload");
     }
 
+    /// A RepLayout `Ok` walk that abandoned a tail, in the record for handle 0
+    /// that began at bit 1, after the checksum.
     #[test]
     fn rep_layout_overrun_ok_path_is_a_stream_failure() {
-        let mut decoded_bits = Vec::new();
-        decoded_bits.push(false); // property checksum
+        let mut decoded_bits = vec![false]; // property checksum
         decoded_bits.int_packed(1); // handle 0
         decoded_bits.int_packed(32); // overruns the remaining 8 bits
-        decoded_bits.extend(std::iter::repeat_n(false, 8));
+        decoded_bits.repeat(false, 8);
         assert_eq!(decoded_bits.len(), 25);
         let Run { stats, sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
 
         assert_eq!(stats.field_stream_failures, 1);
         assert_eq!(stats.skipped_bits, 24);
         assert_eq!(sink.stream_failures.len(), 1);
-        assert_eq!(sink.stream_failures[0].kind, StreamKind::RepLayout);
-        assert_eq!(sink.stream_failures[0].consumed_bits, 1);
-        assert_eq!(sink.stream_failures[0].remaining_bits, 24);
+        let failure = &sink.stream_failures[0];
+        assert_eq!(failure.kind, StreamKind::RepLayout);
+        assert_eq!(failure.consumed_bits, 1);
+        assert_eq!(failure.remaining_bits, 24);
+        assert_eq!(failure.cause, StreamFailureCause::AbandonedTail);
+        assert_eq!(
+            (failure.record_handle, failure.record_offset),
+            (Some(0), Some(1))
+        );
         assert!(
             sink.rep_layout_tails.is_empty(),
             "a declared-length overrun is malformed RepLayout, not a chained tail"
         );
     }
 
-    /// `cause` names the arm that produced each failure, and the record the
-    /// walk stopped in: the per-group aggregate keyed on it separates
-    /// preserved-unresolved blocks from real loss.
-    #[test]
-    fn stream_failures_carry_their_cause_and_failing_record() {
-        // Arm 1: an unresolved group (function_count 0). The walk never
-        // begins: offset 0, no handle, and the payload preserved.
-        let Run { sink, .. } = decode_golden(7, Some(0));
-        assert_eq!(sink.stream_failures.len(), 1);
-        let failure = &sink.stream_failures[0];
-        assert_eq!(failure.cause, StreamFailureCause::UnresolvedFunctionCount);
-        assert_eq!(failure.record_handle, None);
-        assert_eq!(failure.record_offset, Some(0));
-        assert_eq!(sink.unresolved_payloads.len(), 1, "payload preserved");
-
-        // Arm 2: a RepLayout Ok walk that abandoned a tail, in the record for
-        // handle 0 that began at bit 1, after the checksum.
-        let mut decoded_bits = Vec::new();
-        decoded_bits.push(false); // property checksum
-        decoded_bits.int_packed(1); // handle 0
-        decoded_bits.int_packed(32); // overruns the remaining 8 bits
-        decoded_bits.extend(std::iter::repeat_n(false, 8));
-        let Run { sink, .. } = decode_bits(&decoded_bits, None, TestSink::default());
-        assert_eq!(sink.stream_failures.len(), 1);
-        let failure = &sink.stream_failures[0];
-        assert_eq!(failure.cause, StreamFailureCause::AbandonedTail);
-        assert_eq!(failure.record_handle, Some(0));
-        assert_eq!(failure.record_offset, Some(1));
-    }
-
-    /// The `Err` arm charges the whole block (see
-    /// `decode_and_walk`), not the reader's remainder. Nine decoded
-    /// bits: the checksum, then 0x01 -- an `IntPacked` chunk promising another
-    /// the block lacks -- so the handle read fails with the window consumed and
-    /// `bits_remaining() == 0`.
+    /// The `Err` arm charges the whole block, not the reader's remainder. Nine
+    /// decoded bits: the checksum, then 0x01 -- an `IntPacked` chunk promising
+    /// another the block lacks -- so the handle read fails with the window
+    /// consumed and `bits_remaining() == 0`.
     #[test]
     fn rep_layout_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = vec![false]; // property checksum
-        // 0x01: continuation set, payload bits all zero.
         decoded_bits.u8(0x01);
         assert_eq!(decoded_bits.len(), 9);
 
@@ -2428,10 +1935,7 @@ mod tests {
         assert_eq!(sink.stream_failures.len(), 1);
         assert_eq!(sink.stream_failures[0].remaining_bits, 0);
         assert_eq!(sink.stream_failures[0].consumed_bits, 9);
-        assert_eq!(
-            stats.skipped_bits, 9,
-            "a stream failure with no bits behind it is the defect this pins"
-        );
+        assert_eq!(stats.skipped_bits, 9, "a failure with no bits behind it");
     }
 
     #[test]
@@ -2458,8 +1962,7 @@ mod tests {
     #[test]
     fn class_net_cache_err_at_the_exact_block_end_still_charges_the_block() {
         let mut decoded_bits = Vec::new();
-        decoded_bits.serialized_int(0, 2); // one handle bit
-        decoded_bits.u8(0x01);
+        decoded_bits.serialized_int(0, 2).u8(0x01); // one handle bit, then 0x01
         assert_eq!(decoded_bits.len(), 9);
 
         let Run { stats, sink, .. } = decode_bits(&decoded_bits, Some(2), TestSink::default());
@@ -2468,15 +1971,12 @@ mod tests {
         assert_eq!(stats.rpcs, 0, "no RPC was emitted");
         assert_eq!(
             stats.unresolved_rpc_payloads_preserved, 0,
-            "this is a walked stream that failed, not an unresolved group"
+            "a walked stream that failed, not an unresolved group"
         );
         assert_eq!(sink.stream_failures.len(), 1);
         assert_eq!(sink.stream_failures[0].remaining_bits, 0);
         assert_eq!(sink.failures_before_payload, [1], "failure, then payload");
-        assert_eq!(
-            stats.skipped_bits, 9,
-            "a stream failure with no bits behind it is the defect this pins"
-        );
+        assert_eq!(stats.skipped_bits, 9, "a failure with no bits behind it");
     }
 
     #[test]
@@ -2498,34 +1998,34 @@ mod tests {
     }
 
     /// Frame `bits` as one whole bunch payload, straight through
-    /// `frame_content_blocks`, on channel 5 for static actor 42.
+    /// `frame_content_blocks`: packet 42, a reliable open of channel 5 for
+    /// static actor 42, bunch ids 3 / 100 / 7.
     fn frame_bits(bits: &[bool]) -> (NetStats, TestSink) {
         let data = pack(bits);
         let mut payload = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
+        let (mut stats, mut sink, mut scratch) = (NetStats::default(), TestSink::default(), vec![]);
         let header = RawBunchHeader {
+            packet_id: 42,
             ch_index: 5,
-            payload_bit_count: bits.len() as i32,
+            b_open: true,
+            b_reliable: true,
             ..Default::default()
         };
         let ctx = BunchContext {
             header: &header,
             ids: BunchIds {
-                bunch_index_in_packet: 0,
-                global_bunch_index: 0,
-                channel_bunch_index: 1,
+                bunch_index_in_packet: 3,
+                global_bunch_index: 100,
+                channel_bunch_index: 7,
             },
             actor_net_guid: NetworkGuid(42),
             archetype_net_guid: NetworkGuid(0),
         };
         let mut stage = Stage {
             stats: &mut stats,
-            channels: &mut channels,
-            transform: reader.transform,
-            scratch: &mut reader.scratch,
+            channels: &mut ChannelTable::default(),
+            transform: TransformVersion::V1301,
+            scratch: &mut scratch,
         };
         framing::frame_content_blocks(&mut payload, &mut stage, &mut sink, &ctx);
         assert!(
@@ -2570,7 +2070,7 @@ mod tests {
     #[test]
     fn a_truncated_content_bits_field_charges_the_bits_it_consumed() {
         let mut bits = vec![true, true]; // hasRepLayout, isActor
-        bits.extend([true, false, false, false, false, false, false, false]); // 0x01: more follows
+        bits.u8(0x01); // content_bits: more follows
 
         let (stats, _) = frame_bits(&bits);
 
@@ -2591,8 +2091,7 @@ mod tests {
     /// framed before it keeps its bits out of the loss.
     #[test]
     fn a_framing_abort_does_not_recharge_blocks_that_framed() {
-        let mut bits = Vec::new();
-        write_empty_actor_block(&mut bits); // 10 bits, frames cleanly
+        let mut bits = empty_actor_block(); // 10 bits, frames cleanly
         bits.extend(truncated_subobject_header()); // 12 bits, fails
 
         let (stats, sink) = frame_bits(&bits);
@@ -2603,71 +2102,23 @@ mod tests {
         assert_eq!(stats.skipped_bits, 12, "22 bits, of which 10 framed");
     }
 
-    /// A content-block overrun produces a `DiagnosticEvent` with full context:
-    /// the path the resolved "malformed 1 / skipped 695" residue took (see the
-    /// oracle's module doc). It charges from the block's first bit: 2 + 16 + 8
-    /// = 26 bits, while 8 remained after the read.
+    /// A content-block overrun is a `DiagnosticEvent` with full context,
+    /// charged from the block's first bit: 2 + 16 + 8 = 26 bits, while 8
+    /// remained after the read.
     #[cfg(feature = "diagnostics")]
     #[test]
     fn content_bits_overrun_emits_diagnostic() {
         use crate::stats::SkipReason;
 
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-
-        // A 2-bit header (has_rep_layout=0, is_actor=1), content_bits =
-        // IntPacked(999) in 16 bits, then 8 bits: 999 overruns what is left.
-        let mut bits: Vec<bool> = Vec::new();
-        bits.push(false);
-        bits.push(true);
-        // IntPacked(999): 999 = 0x3E7
-        //   chunk0: (999 & 0x7F) = 0x67, more=1 -> byte = (0x67 << 1) | 1 = 0xCF
-        //   chunk1: (999 >> 7) = 7, more=0 -> byte = (7 << 1) | 0 = 0x0E
-        for byte in [0xCF_u8, 0x0E] {
-            bits.u8(byte);
-        }
-        // Add a few more padding bits so remaining > 0 but < 999
-        bits.extend(std::iter::repeat_n(false, 8));
-
-        let data = pack(&bits);
-
-        let mut payload_reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-        let mut stats = NetStats::default();
-        let mut channels = ChannelTable::default();
-        let header = RawBunchHeader {
-            packet_id: 42,
-            ch_index: 5,
-            b_open: true,
-            b_reliable: true,
-            payload_bit_count: bits.len() as i32,
-            ..Default::default()
-        };
-        let ctx = BunchContext {
-            header: &header,
-            ids: BunchIds {
-                bunch_index_in_packet: 3,
-                global_bunch_index: 100,
-                channel_bunch_index: 7,
-            },
-            actor_net_guid: NetworkGuid(42),
-            archetype_net_guid: NetworkGuid(0),
-        };
-        let mut stage = Stage {
-            stats: &mut stats,
-            channels: &mut channels,
-            transform: reader.transform,
-            scratch: &mut reader.scratch,
-        };
-
-        framing::frame_content_blocks(&mut payload_reader, &mut stage, &mut sink, &ctx);
+        // hasRepLayout 0, isActor 1, content_bits IntPacked(999) in 16 bits,
+        // then 8 bits: 999 overruns what is left.
+        let mut bits = vec![false, true];
+        bits.int_packed(999).repeat(false, 8);
+        let (stats, _) = frame_bits(&bits);
 
         assert_eq!(stats.malformed_content_blocks, 1);
-        assert_eq!(
-            stats.skipped_bits, 26,
-            "the block's header and content_bits were read and framed nothing"
-        );
+        assert_eq!(stats.skipped_bits, 26);
         assert_eq!(stats.diagnostics.len(), 1);
-
         let ev = &stats.diagnostics[0];
         assert_eq!(ev.packet_id, 42);
         assert_eq!(ev.bunch_index_in_packet, 3);
@@ -2676,25 +2127,19 @@ mod tests {
         assert_eq!(ev.channel_index, 5);
         assert_eq!(ev.actor_net_guid, 42);
         assert_eq!(ev.block_index_in_bunch, 0);
-        assert!(ev.content_bits.is_some());
-        assert_eq!(ev.content_bits.unwrap(), 999);
-        // 8 bits remained; the loss is the whole block from its first bit.
-        assert_eq!(ev.remaining_bits, 8);
-        assert_eq!(ev.bits_skipped, 26);
+        assert_eq!(ev.content_bits, Some(999));
+        assert_eq!((ev.remaining_bits, ev.bits_skipped), (8, 26));
         assert!(
             ev.bunch_flags.b_open && ev.bunch_flags.b_reliable && !ev.bunch_flags.b_partial,
             "flags are snapshotted from the bunch header on the failure path"
         );
-        match &ev.reason {
+        assert!(matches!(
+            ev.reason,
             SkipReason::ContentBitsOverrun {
-                declared_content_bits,
-                available_bits,
-            } => {
-                assert_eq!(*declared_content_bits, 999);
-                assert_eq!(*available_bits, 8);
+                declared_content_bits: 999,
+                available_bits: 8
             }
-            _ => panic!("expected ContentBitsOverrun"),
-        }
+        ));
     }
 
     /// A diagnostic event names the archetype its channel's open read (9
@@ -2704,22 +2149,18 @@ mod tests {
     fn a_diagnostic_event_carries_the_channel_archetype() {
         use crate::stats::SkipReason;
 
-        let mut open: Vec<bool> = Vec::new();
-        open.int_packed(2); // dynamic actor GUID
+        let mut open = guid(2); // dynamic actor GUID
         write_minimal_spawn_data(&mut open, 9); // archetype 9, not a controller
-        let mut overrun: Vec<bool> = vec![false, true]; // ClassNetCache, isActor
-        overrun.int_packed(999); // declares far more than follows
-        overrun.extend([false; 8]);
+        let mut overrun = vec![false, true]; // ClassNetCache, isActor
+        overrun.int_packed(999).repeat(false, 8); // declares far more than follows
+        let spec = BunchSpec {
+            ch_index: 2,
+            ..Default::default()
+        };
 
         let (reader, _) = run_packets(&[
             build_open_bunch_packet(2, &open),
-            build_bunch_packet(
-                &BunchSpec {
-                    ch_index: 2,
-                    ..Default::default()
-                },
-                &overrun,
-            ),
+            build_bunch_packet(&spec, &overrun),
         ]);
 
         let state = reader.channels[&2]
@@ -2750,108 +2191,65 @@ mod tests {
         assert!(ev.actor_path.is_none() && ev.class_path.is_none());
     }
 
-    // --- controller property-block regression tests
-    // (docs/archive/PROJECT_STATUS.md 17-A) ---
-
-    /// One reliable, non-partial bunch that opens `ch_index` around
-    /// `payload_bits`, as a packet ready for `process_packet`.
-    fn build_open_bunch_packet(ch_index: u32, payload_bits: &[bool]) -> Vec<u8> {
-        let spec = BunchSpec {
-            ch_index,
-            b_open: true,
-            ..Default::default()
-        };
-        build_bunch_packet(&spec, payload_bits)
-    }
+    // --- the controller's net-player-index byte ---
 
     /// Write a dynamic actor's spawn block: archetype, level, and the four
     /// optional transforms (location, rotation, scale, velocity) all absent.
-    /// Velocity matches the unconditional read; omitting it is the one-bit
-    /// regression.
+    /// Velocity is read unconditionally; omitting it shifts every later bit.
     fn write_minimal_spawn_data(bits: &mut Vec<bool>, archetype_guid: u32) {
-        bits.int_packed(archetype_guid); // archetype GUID
-        bits.int_packed(0); // level GUID (0 -> not valid, returns early)
-        bits.push(false); // location: hasValue = false
-        bits.push(false); // rotation: hasComponent = false
-        bits.push(false); // scale: hasValue = false
-        bits.push(false); // velocity: hasValue = false (unconditional read)
+        bits.int_packed(archetype_guid);
+        bits.int_packed(0); // level GUID 0: not valid, returns early
+        bits.extend([false; 4]); // location, rotation, scale, velocity absent
     }
 
-    /// The controller's opening bunch carries nine bits between the spawn
-    /// block and the first content-block header: the velocity bit (read
-    /// unconditionally) and the net-player-index byte (consumed because the
-    /// path cache resolves the archetype). Missing either misframes the header
-    /// and the property block (`PlayerState`, `SpawnLocation`) is never walked
-    /// (docs/archive/PROJECT_STATUS.md 17-A). Either half alone destroyed seven
-    /// real subobject rows in the original experiment, so both fire together.
+    /// A controller's opening bunch carries the net-player-index byte between
+    /// the spawn block and the first content-block header, consumed only when
+    /// the path cache resolves the archetype to the controller
+    /// (BaseReplayController, or BaseJanusController on 12.01-12.06).
+    /// Without the path the byte shifts the header, and the property block
+    /// (`PlayerState`, `SpawnLocation`) is never walked as the actor's.
     #[test]
     fn controller_property_block_is_reached() {
-        let mut payload: Vec<bool> = Vec::new();
-
-        // Actor GUID 2: dynamic (even, non-zero), so a spawn block follows.
-        payload.int_packed(2);
-        // Spawn data. Archetype GUID 9 is what the cache will resolve.
+        let mut payload = guid(2); // dynamic: a spawn block follows
         write_minimal_spawn_data(&mut payload, 9);
-        // Net-player-index byte (value 0), consumed only if path_for_guid
-        // answers.
-        payload.extend(std::iter::repeat_n(false, 8));
-        // The actor's own RepLayout block.
-        payload.push(true); // hasRepLayout
-        payload.push(true); // isActor
-        payload.int_packed(0); // contentBits = 0
-
+        payload.repeat(false, 8); // the net-player-index byte
+        payload.extend(empty_actor_block());
         let packet = build_open_bunch_packet(2, &payload);
 
-        let mut sink = TestSink::default();
-        // The cache knows the archetype path from exports that arrived before
-        // this bunch, which a set of `register_path` calls would miss.
-        sink.guid_paths
-            .insert(9, "Default__BaseReplayController_C".to_string());
+        for (branch, archetype_path, reached) in [
+            ("13.01", Some("Default__BaseReplayController_C"), true),
+            ("12.01", Some("Default__BaseJanusController_C"), true),
+            ("13.01", None, false),
+        ] {
+            let mut sink = TestSink::default();
+            // The path arrived with exports before this bunch.
+            sink.guid_paths
+                .extend(archetype_path.map(|path| (9, path.to_owned())));
+            let mut reader =
+                ReplicationReader::new(&format!("++Ares-Core+release-{branch}")).unwrap();
+            reader.process_packet(&packet, 0, &mut sink);
 
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        let stats = reader.stats();
-        assert_eq!(stats.actor_opens, 1);
-        assert_eq!(stats.skipped_bits, 0, "nothing may be abandoned");
-        assert_eq!(
-            sink.content_blocks.len(),
-            1,
-            "exactly one content block -- the property block"
-        );
-        let block = &sink.content_blocks[0];
-        assert!(
-            block.has_rep_layout,
-            "the block must be RepLayout (the property group), not ClassNetCache"
-        );
-        assert!(
-            block.is_actor,
-            "the block must describe the actor itself, not a subobject"
-        );
-    }
-
-    /// The 12.01--12.06 controller, BaseJanusController, has its player-index
-    /// byte consumed too, like BaseReplayController from 12.07 on.
-    #[test]
-    fn legacy_controller_property_block_is_reached() {
-        let mut payload = Vec::new();
-        payload.int_packed(2);
-        write_minimal_spawn_data(&mut payload, 9);
-        payload.extend([false; 8]); // Net player index, observed before the header.
-        payload.extend([true, true]); // Actor RepLayout block.
-        payload.int_packed(0);
-        let packet = build_open_bunch_packet(2, &payload);
-
-        let mut sink = TestSink::default();
-        sink.guid_paths
-            .insert(9, "Default__BaseJanusController_C".to_string());
-        let mut reader = ReplicationReader::new("++Ares-Core+release-12.01").unwrap();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        assert_eq!(reader.stats().skipped_bits, 0);
-        assert_eq!(sink.content_blocks.len(), 1);
-        assert!(sink.content_blocks[0].has_rep_layout);
-        assert!(sink.content_blocks[0].is_actor);
+            let actor_blocks = sink
+                .content_blocks
+                .iter()
+                .filter(|block| block.is_actor && block.has_rep_layout)
+                .count();
+            assert_eq!(reader.stats().actor_opens, 1, "{branch} {archetype_path:?}");
+            if reached {
+                assert_eq!(
+                    reader.stats().skipped_bits,
+                    0,
+                    "{branch}: nothing abandoned"
+                );
+                assert_eq!(
+                    (sink.content_blocks.len(), actor_blocks),
+                    (1, 1),
+                    "{branch}: exactly the property block"
+                );
+            } else {
+                assert_eq!(actor_blocks, 0, "without the path the header misframes");
+            }
+        }
     }
 
     /// A non-controller dynamic actor has no net-player-index byte: the header
@@ -2859,20 +2257,10 @@ mod tests {
     /// eat its first eight bits.
     #[test]
     fn non_controller_dynamic_actor_skips_net_player_index_byte() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.int_packed(2); // actor GUID 2 (dynamic)
-        write_minimal_spawn_data(&mut payload, 9); // archetype 9, no path in cache
-        // No net-player-index byte: this actor is not a controller.
-        payload.push(true); // hasRepLayout
-        payload.push(true); // isActor
-        payload.int_packed(0); // contentBits = 0
-
-        let packet = build_open_bunch_packet(2, &payload);
-
-        let mut sink = TestSink::default();
-        // Empty guid_paths: no GUID resolves, so no channel is a controller.
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        reader.process_packet(&packet, 0, &mut sink);
+        let mut payload = guid(2);
+        write_minimal_spawn_data(&mut payload, 9); // no path in the cache
+        payload.extend(empty_actor_block());
+        let (reader, sink) = run_packets(&[build_open_bunch_packet(2, &payload)]);
 
         assert_eq!(reader.stats().actor_opens, 1);
         assert_eq!(reader.stats().skipped_bits, 0);
@@ -2881,85 +2269,12 @@ mod tests {
         assert!(sink.content_blocks[0].is_actor);
     }
 
-    /// With the byte on the wire but no cache path, the byte is not consumed
-    /// and the first header misframes, the 17-A failure: the block
-    /// re-synchronises and goes down the ClassNetCache path instead of being
-    /// lost. Same payload as the controller test; the cache is the difference.
-    #[test]
-    fn controller_byte_unconsumed_without_cache_path_misframes_header() {
-        let mut payload: Vec<bool> = Vec::new();
-        payload.int_packed(2); // actor GUID 2
-        write_minimal_spawn_data(&mut payload, 9);
-        // The byte IS on the wire (this is really a controller bunch)...
-        payload.extend(std::iter::repeat_n(false, 8));
-        payload.push(true); // hasRepLayout
-        payload.push(true); // isActor
-        payload.int_packed(0); // contentBits = 0
-
-        let packet = build_open_bunch_packet(2, &payload);
-
-        let mut sink = TestSink::default();
-        // ...but the cache does not know the archetype path.
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        reader.process_packet(&packet, 0, &mut sink);
-
-        // So the block that lands is not the actor's property block.
-        let actor_blocks: Vec<_> = sink
-            .content_blocks
-            .iter()
-            .filter(|b| b.is_actor && b.has_rep_layout)
-            .collect();
-        assert!(
-            actor_blocks.is_empty(),
-            "without the cache path the byte shifts the header, so no block is the actor's RepLayout"
-        );
-    }
-
     // --- partial reassembly has exactly one authority ---
     //
-    // The packet reader keeps its own partial tracker. Were its
-    // `has_partial_error` to reach the accumulator or the rejected-row
-    // condition, any disagreement between the two would change what is
-    // reassembled and preserved with `partial_errors` at 0. Each test below
-    // is one such disagreement.
-
-    /// A static actor open (GUID 3) followed by an empty actor block.
-    fn open_and_empty_block() -> Vec<bool> {
-        let mut bits = Vec::new();
-        bits.int_packed(3);
-        write_empty_actor_block(&mut bits);
-        bits
-    }
-
-    /// GUID 3 as an IntPacked: the byte `6`.
-    fn guid_three() -> Vec<bool> {
-        let mut bits = Vec::new();
-        bits.int_packed(3);
-        bits
-    }
-
-    fn partial_packet(open: bool, initial: bool, last: bool, payload: &[bool]) -> Vec<u8> {
-        build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_open: open,
-                b_partial: true,
-                b_partial_initial: initial,
-                b_partial_final: last,
-                ..Default::default()
-            },
-            payload,
-        )
-    }
-
-    fn run_packets(packets: &[Vec<u8>]) -> (ReplicationReader, TestSink) {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
-        let mut sink = TestSink::default();
-        for (packet_id, packet) in packets.iter().enumerate() {
-            reader.process_packet(packet, packet_id as i32, &mut sink);
-        }
-        (reader, sink)
-    }
+    // The packet reader keeps an advisory partial tracker. Were its verdicts
+    // to reach the accumulator or the rejected-row condition, a disagreement
+    // would change what is reassembled and preserved with `partial_errors` at
+    // 0. Each test below is one such disagreement.
 
     fn rejected_rows(sink: &TestSink) -> Vec<(&'static str, PartialPayloadReason, usize)> {
         sink.rejected_partials
@@ -2979,26 +2294,12 @@ mod tests {
     /// and frames exactly as the same payloads sent unfragmented.
     #[test]
     fn an_initial_final_partial_is_a_whole_bunch_every_time() {
-        let mut second = Vec::new();
-        write_empty_actor_block(&mut second);
         let (reader, sink) = run_packets(&[
-            partial_packet(true, true, true, &open_and_empty_block()),
-            partial_packet(false, true, true, &second),
+            partial_packet(true, true, true, &static_actor(3)),
+            partial_packet(false, true, true, &empty_actor_block()),
         ]);
-
         // The same two payloads sent unfragmented are the reference.
-        let plain = |open: bool, payload: &[bool]| {
-            build_bunch_packet(
-                &BunchSpec {
-                    ch_index: 2,
-                    b_open: open,
-                    ..Default::default()
-                },
-                payload,
-            )
-        };
-        let (reference, reference_sink) =
-            run_packets(&[plain(true, &open_and_empty_block()), plain(false, &second)]);
+        let (reference, reference_sink) = run_packets(&[open_on_two(3), later_block_on_two()]);
         assert_eq!(
             reference_sink.content_blocks.len(),
             2,
@@ -3022,88 +2323,53 @@ mod tests {
     }
 
     /// An unaligned continuation is rejected by the accumulator alone (the
-    /// packet reader keeps its assembly): a whole bunch after it is still
-    /// processed, and the rejected bits preserved exactly once.
+    /// packet reader keeps its assembly). What follows -- a whole bunch, or an
+    /// initial and final -- is still reassembled, and never also a rejected
+    /// row: every rejected bit is preserved exactly once.
     #[test]
-    fn a_whole_bunch_after_an_unaligned_fragment_is_still_processed() {
-        let (reader, sink) = run_packets(&[
-            partial_packet(true, true, false, &guid_three()),
-            partial_packet(false, false, false, &[true; 5]),
-            partial_packet(true, true, true, &open_and_empty_block()),
-        ]);
+    fn what_follows_an_unaligned_fragment_is_still_processed() {
+        let whole = vec![partial_packet(true, true, true, &static_actor(3))];
+        let split = vec![
+            partial_packet(true, true, false, &guid(3)),
+            partial_packet(false, false, true, &empty_actor_block()),
+        ];
+        for tail in [whole, split] {
+            let mut packets = vec![
+                partial_packet(true, true, false, &guid(3)),
+                partial_packet(false, false, false, &[true; 5]),
+            ];
+            packets.extend(tail);
+            let (reader, sink) = run_packets(&packets);
 
-        let stats = reader.stats();
-        assert_eq!(stats.actor_opens, 1, "the whole bunch opens its actor");
-        assert_eq!(sink.content_blocks.len(), 1);
-        assert_eq!(stats.partial_completed, 1);
-        assert_eq!(
-            stats.partial_errors, 1,
-            "only the unaligned continuation is an error"
-        );
-        assert_eq!(stats.partial_non_byte_aligned, 1);
-        assert_eq!(stats.partial_overlapping_initial, 0);
-        assert_eq!(
-            rejected_rows(&sink),
-            vec![
-                (
-                    "accumulated_payload",
-                    PartialPayloadReason::NonByteAlignedFragment,
-                    8
-                ),
-                (
-                    "current_fragment",
-                    PartialPayloadReason::NonByteAlignedFragment,
-                    5
-                ),
-            ]
-        );
-        assert_eq!(
-            sink.rejected_partials[0].payload,
-            vec![6],
-            "the displaced initial keeps its bytes"
-        );
-        assert_eq!(
-            rejected_bits(&sink),
-            stats.skipped_bits,
-            "every rejected bit is preserved once"
-        );
-    }
-
-    /// The initial that restarts a channel after an unaligned rejection is
-    /// reassembled, and must not also be a rejected row: its bits would be in
-    /// both the decoded stream and the preservation table.
-    #[test]
-    fn a_reassembled_fragment_is_never_also_a_rejected_row() {
-        let mut block = Vec::new();
-        write_empty_actor_block(&mut block);
-        let (reader, sink) = run_packets(&[
-            partial_packet(true, true, false, &guid_three()),
-            partial_packet(false, false, false, &[true; 5]),
-            partial_packet(true, true, false, &guid_three()),
-            partial_packet(false, false, true, &block),
-        ]);
-
-        let stats = reader.stats();
-        assert_eq!(stats.partial_completed, 1);
-        assert_eq!(stats.actor_opens, 1);
-        assert_eq!(sink.content_blocks.len(), 1);
-        assert_eq!(stats.partial_overlapping_initial, 0);
-        assert_eq!(
-            rejected_rows(&sink),
-            vec![
-                (
-                    "accumulated_payload",
-                    PartialPayloadReason::NonByteAlignedFragment,
-                    8
-                ),
-                (
-                    "current_fragment",
-                    PartialPayloadReason::NonByteAlignedFragment,
-                    5
-                ),
-            ]
-        );
-        assert_eq!(rejected_bits(&sink), stats.skipped_bits);
+            let stats = reader.stats();
+            assert_eq!(stats.actor_opens, 1, "the bunch after it opens its actor");
+            assert_eq!(sink.content_blocks.len(), 1);
+            assert_eq!(stats.partial_completed, 1);
+            assert_eq!(stats.partial_errors, 1, "only the unaligned continuation");
+            assert_eq!(stats.partial_non_byte_aligned, 1);
+            assert_eq!(stats.partial_overlapping_initial, 0);
+            assert_eq!(
+                rejected_rows(&sink),
+                vec![
+                    (
+                        "accumulated_payload",
+                        PartialPayloadReason::NonByteAlignedFragment,
+                        8
+                    ),
+                    (
+                        "current_fragment",
+                        PartialPayloadReason::NonByteAlignedFragment,
+                        5
+                    ),
+                ]
+            );
+            assert_eq!(
+                sink.rejected_partials[0].payload,
+                vec![6],
+                "the displaced initial keeps its bytes"
+            );
+            assert_eq!(rejected_bits(&sink), stats.skipped_bits);
+        }
     }
 
     /// A zero-bit final that overlaps an assembly is an error, not a
@@ -3111,7 +2377,7 @@ mod tests {
     #[test]
     fn a_zero_bit_overlapping_final_is_not_a_completion() {
         let (reader, sink) = run_packets(&[
-            partial_packet(true, true, false, &guid_three()),
+            partial_packet(true, true, false, &guid(3)),
             partial_packet(false, true, true, &[]),
         ]);
 
@@ -3163,7 +2429,7 @@ mod tests {
         // Over a buffered assembly, the assembly it replaced is still a row,
         // under the cause that displaced it; only the empty one is not.
         let (reader, sink) = run_packets(&[
-            partial_packet(true, true, false, &guid_three()),
+            partial_packet(true, true, false, &guid(3)),
             partial_packet(false, true, false, &[true; 5]),
         ]);
         assert_eq!(
@@ -3185,20 +2451,15 @@ mod tests {
         assert_eq!(rejected_bits(&sink), reader.stats().skipped_bits);
     }
 
-    // --- the preservation hand-off itself ---
+    // --- the preservation hand-off: pipeline -> `on_rejected_partial` ---
     //
-    // The accumulator's tests cover what it displaces, not the step after:
-    // pipeline -> `on_rejected_partial`. Five simultaneous mutations of that
-    // step (rows not written, payloads emptied, three reasons relabelled,
-    // end-of-stream counters zeroed) once left every workspace test green;
-    // each test below pins one hand-off by its bytes, reason and counters.
+    // Each test pins one hand-off by its bytes, reason and counters.
 
     /// `finish_with_sink` is what the driver calls, not `finish`. It must count
     /// the unfinished assembly and hand the sink its exact bytes, once.
     #[test]
     fn finish_with_sink_preserves_an_unfinished_assembly_exactly() {
-        let (mut reader, mut sink) =
-            run_packets(&[partial_packet(true, true, false, &guid_three())]);
+        let (mut reader, mut sink) = run_packets(&[partial_packet(true, true, false, &guid(3))]);
         reader.finish_with_sink(&mut sink);
 
         let stats = reader.stats();
@@ -3231,21 +2492,14 @@ mod tests {
     /// returns before `process_bunch`, where the others are counted.
     #[test]
     fn a_partial_refused_for_channel_state_keeps_that_reason() {
-        let mut reader = ReplicationReader::new("++Ares-Core+release-13.01").unwrap();
+        let mut reader = reader();
         reader.packet_reader = RawPacketReader::with_max_channels(0);
         let mut sink = TestSink::default();
-        reader.process_packet(
-            &partial_packet(false, true, false, &guid_three()),
-            0,
-            &mut sink,
-        );
+        let packet = partial_packet(false, true, false, &guid(3));
+        reader.process_packet(&packet, 0, &mut sink);
 
         assert_eq!(reader.stats().channel_state_limit_failures, 1);
-        assert_eq!(
-            reader.stats().partial_bunches,
-            1,
-            "a partial refused at the channel-state guard was still attempted"
-        );
+        assert_eq!(reader.stats().partial_bunches, 1, "still attempted");
         assert_eq!(
             rejected_rows(&sink),
             vec![(
@@ -3262,16 +2516,10 @@ mod tests {
     /// bytes under `ChannelClosed`, charged to the closing packet.
     #[test]
     fn closing_a_channel_mid_partial_preserves_the_buffered_payload() {
-        let close = build_bunch_packet(
-            &BunchSpec {
-                ch_index: 2,
-                b_close: true,
-                ..Default::default()
-            },
-            &[],
-        );
-        let (reader, sink) =
-            run_packets(&[partial_packet(true, true, false, &guid_three()), close]);
+        let (reader, sink) = run_packets(&[
+            partial_packet(true, true, false, &guid(3)),
+            close_on_two(false),
+        ]);
 
         let stats = reader.stats();
         assert_eq!(stats.partial_channel_close, 1);

@@ -753,49 +753,44 @@ mod tests {
         assert_eq!(c.errs, 1);
     }
 
+    /// An overlapping initial that is also refused on its own (unaligned, or
+    /// over the buffered-bits budget) keeps both causes and counts two
+    /// errors; only the replaced 8-bit assembly is a displaced payload, not
+    /// the empty one started for the refused initial.
     #[test]
-    fn overlapping_unaligned_initial_reports_both_errors() {
-        let mut acc = PartialBunchAccumulator::new();
-        let mut c = Counters::default();
-        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
-        let result = c.add(&mut acc, initial(1, 0, false), &[0x07], 3);
-        assert!(result.overlapping_initial);
-        assert_eq!(
-            result.error_kind,
-            Some(PartialSequenceKind::NonByteAlignedFragment)
-        );
-        // Both causes stand, two errors counted. The one displaced payload is
-        // the 8-bit assembly replaced; the empty one started is not a payload.
-        assert_eq!(result.displaced.len(), 1);
-        assert_eq!(
-            result.displaced[0].1,
-            PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
-        );
-        assert_eq!(result.displaced[0].0.bit_count, 8);
-        assert_eq!(result.discarded_bits, 11, "8 replaced + 3 current");
-        assert_eq!(c.errs, 2);
-    }
-
-    #[test]
-    fn overlapping_initial_over_resource_limit_retains_both_causes() {
-        let mut acc = PartialBunchAccumulator::with_limits(2, 12);
-        let mut c = Counters::default();
-        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
-        let result = c.add(&mut acc, initial(1, 0, false), &[0xBB, 0xCC], 16);
-        assert!(result.overlapping_initial);
-        assert_eq!(
-            result.resource_limit,
-            Some(PartialResourceLimit::BufferedBits)
-        );
-        // Both causes stand, two errors counted; only the replaced 8-bit
-        // assembly is a displaced payload.
-        assert_eq!(result.displaced.len(), 1);
-        assert_eq!(
-            result.displaced[0].1,
-            PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
-        );
-        assert_eq!(result.displaced[0].0.bit_count, 8);
-        assert_eq!(result.discarded_bits, 24, "8 replaced + 16 current");
-        assert_eq!(c.errs, 2);
+    fn an_overlapping_initial_refused_on_its_own_keeps_both_causes() {
+        let unaligned = Some(PartialSequenceKind::NonByteAlignedFragment);
+        let over_budget = Some(PartialResourceLimit::BufferedBits);
+        for (mut acc, data, bits, error_kind, resource_limit) in [
+            (
+                PartialBunchAccumulator::new(),
+                &[0x07][..],
+                3,
+                unaligned,
+                None,
+            ),
+            (
+                PartialBunchAccumulator::with_limits(2, 12),
+                &[0xBB, 0xCC][..],
+                16,
+                None,
+                over_budget,
+            ),
+        ] {
+            let mut c = Counters::default();
+            c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
+            let result = c.add(&mut acc, initial(1, 0, false), data, bits);
+            assert!(result.overlapping_initial);
+            assert_eq!(result.error_kind, error_kind);
+            assert_eq!(result.resource_limit, resource_limit);
+            assert_eq!(result.displaced.len(), 1);
+            assert_eq!(
+                result.displaced[0].1,
+                PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
+            );
+            assert_eq!(result.displaced[0].0.bit_count, 8);
+            assert_eq!(result.discarded_bits, 8 + bits, "replaced + current");
+            assert_eq!(c.errs, 2);
+        }
     }
 }
