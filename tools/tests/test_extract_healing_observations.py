@@ -298,6 +298,29 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(tool.InputError, "optional heal parameter"):
             tool.extract(p)
 
+    def test_a_declared_unknown_parameter_is_a_schema_error(self):
+        td, p = self.make(fixture() + [row("MulticastNotifyHeal.HealSource", 12345, b"\0", 1)])
+        self.addCleanup(td.cleanup)
+        data = manifest()
+        data["net_field_export_groups"][1]["fields"].append(
+            {"handle": 6, "name": "HealSource", "compatible_checksum": 12345})
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+        o = tool.extract(p)["observations"][0]
+        self.assertEqual(o["amount"]["status"], "invalid")
+        self.assertIn("foreign_or_invalid_schema", o["ambiguity_reasons"])
+        self.assertEqual(o["schema_errors"], [{"source_row": 9, "error": "unknown heal parameter row"}])
+
+    def test_another_routes_declarations_do_not_gate_healing(self):
+        td, p = self.make()
+        self.addCleanup(td.cleanup)
+        data = manifest()
+        field = {"handle": 0, "name": "DamageTaken", "compatible_checksum": 373546733}
+        data["net_field_export_groups"].append({
+            "path": "/Script/ShooterGame.DamageableComponent:MulticastNotifyDamage_Point",
+            "fields": [field, field]})
+        (p / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(tool.extract(p)["counts"]["amount_validated"], 1)
+
     def test_foreign_schema_is_preserved_but_not_validated(self):
         rows = fixture()
         rows[0]["group_path"] = "/Script/Foreign"

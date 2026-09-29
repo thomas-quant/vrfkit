@@ -199,6 +199,10 @@ def amount_of(group):
 
 def parse_observation(key, items, guid_paths, actors, refs, players, segments, declared):
     group = sections.parse_group(ROUTE, key, items, guid_paths, segments, declared)
+    # The section parser keeps a declared extra parameter raw; here it is a changed schema.
+    reported = {e["source_row"] for e in group["schema_errors"]}
+    group["schema_errors"] += [{"source_row": o, "error": "unknown heal parameter row"} for o, r in items
+                               if o not in reported and r["field_name"] not in TOP and not RX.match(r["field_name"] or "")]
     by = collections.defaultdict(list)
     for ordinal, r in items:
         by[r["field_name"]].append((ordinal, r))
@@ -212,6 +216,8 @@ def parse_observation(key, items, guid_paths, actors, refs, players, segments, d
                                                  "scalar_delta_relation_mismatch"}
     if amount["status"] != "validated":
         reasons.add("amount_invalid")
+    if group["schema_errors"]:
+        reasons.add("foreign_or_invalid_schema")
     event = key[:2]
     causer = top["MulticastNotifyHeal.HealCauser"]
     source = {
@@ -334,7 +340,7 @@ def extract(export):
     before = {p.name: sha(p) for p in inputs}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     declared = declarations(manifest)
-    section_declarations = sections.declarations(manifest)
+    section_declarations = sections.declarations(manifest, (ROUTE,))
     bodies = load_player_bodies(export, manifest)
     players = bodies.subjects
     paths = load_net_guids(export, "path")

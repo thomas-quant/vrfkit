@@ -98,7 +98,7 @@ def selected_rows(path, columns):
     return iter_selected(path, columns, lambda b: pc.match_substring_regex(text(b, "field_name"), pattern))
 
 
-def declarations(manifest):
+def declarations(manifest, routes=ROUTES):
     groups = collections.defaultdict(list)
     for group in manifest.get("net_field_export_groups", []): groups[group.get("path")].append(group)
     if len(groups[OUTER_GROUP]) != 1: raise InputError("outer declaration missing or duplicate")
@@ -108,9 +108,10 @@ def declarations(manifest):
         if h in outer: raise InputError("duplicate outer declaration handle")
         outer[h] = (x.get("name"), x.get("compatible_checksum"))
     result = {}
-    for route, (handle, crc, parent, parent_handle, scalar, scalar_handle, members, relation) in ROUTES.items():
+    for route in routes:
         # A route, or its parameter group, can be absent from an export: an
         # error only if a selected row claims it or a different outer entry.
+        handle = ROUTES[route][0]
         outer_entry = outer.get(handle)
         path = "/Script/ShooterGame.DamageableComponent:" + route
         if len(groups[path]) > 1: raise InputError("duplicate route declaration group: " + route)
