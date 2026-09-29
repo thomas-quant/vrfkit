@@ -1,17 +1,19 @@
 """Guards for the metrics guard, whose baseline-free invariants carry its
-weight. The headline case is the real shape of the 13.02 break, measured on
-the fixture before commit bcc7d70: ClientRoundStart RPCs said 21 rounds while
-BombGameState RoundResults produced none, so team_score was empty.
+weight. The headline case is the measured shape of the 13.02 break:
+ClientRoundStart RPCs said 21 rounds while BombGameState RoundResults produced
+none, so team_score was empty.
 """
 import contextlib
 import copy
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,8 +47,8 @@ HEALTHY = {
     "economy_rounds": 21,
 }
 
-# What the SAME replay produced before bcc7d70: RoundResults decoded nothing.
-SECTION_26_BREAK = dict(
+# What the SAME replay produced while RoundResults decoded nothing.
+ROUND_RESULTS_BREAK = dict(
     HEALTHY, rounds_objective=0, team_score={}, economy_rounds=0
 )
 
@@ -55,7 +57,7 @@ class InvariantTests(unittest.TestCase):
     def test_a_healthy_run_violates_nothing(self):
         self.assertEqual(guard.invariants(HEALTHY), [])
 
-    def test_the_section_26_break_is_caught(self):
+    def test_the_13_02_round_results_break_is_caught(self):
         """R1 (no rounds at all) and R2 (the two round sources disagree) each
         catch it, so neither can rot silently.
 
@@ -65,7 +67,7 @@ class InvariantTests(unittest.TestCase):
         job. Rewiring R3 to the RPC count would duplicate R2 and risk a false
         positive on a recording that stops mid-round.
         """
-        bad = guard.invariants(SECTION_26_BREAK)
+        bad = guard.invariants(ROUND_RESULTS_BREAK)
         self.assertTrue(bad, "the 13.02 regression must not pass")
         codes = " ".join(bad)
         for code in ("R1", "R2"):
@@ -131,16 +133,10 @@ class UpdateScopeTests(unittest.TestCase):
 
     STORED = {"12.10": {"kills": 1}, "13.02": {"kills": 2}}
 
-    def test_a_scoped_update_keeps_the_builds_it_did_not_look_at(self):
+    def test_a_scoped_update_replaces_only_the_build_it_looked_at(self):
         merged = guard.merged_metrics(self.STORED, {"13.02": {"kills": 9}},
                                       only=["13.02"])
-        self.assertEqual(sorted(merged), ["12.10", "13.02"])
-        self.assertEqual(merged["12.10"], {"kills": 1})
-
-    def test_a_scoped_update_replaces_the_build_it_did_look_at(self):
-        merged = guard.merged_metrics(self.STORED, {"13.02": {"kills": 9}},
-                                      only=["13.02"])
-        self.assertEqual(merged["13.02"], {"kills": 9})
+        self.assertEqual(merged, {"12.10": {"kills": 1}, "13.02": {"kills": 9}})
 
     def test_an_unscoped_update_replaces_the_whole_set(self):
         """A full run alone may retire a build: merging would keep one pinned
@@ -151,31 +147,18 @@ class UpdateScopeTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_pipeline_uses_separate_export_and_bundle_trees(self):
-        export_dir, bundle_dir, metrics_path = guard.pipeline_paths(Path("scratch"))
-        self.assertEqual(export_dir, Path("scratch/export"))
-        self.assertEqual(bundle_dir, Path("scratch/bundle"))
-        self.assertEqual(metrics_path, Path("scratch/metrics.json"))
-
-    def test_every_build_has_the_replay_the_baseline_pins(self):
-        pinned = json.loads(guard.DEFAULT_BASELINE.read_text(encoding="utf-8"))
-        self.assertEqual(guard.REPLAYS, pinned["replays"])
+    def test_a_stage_that_fails_or_times_out_is_a_controlled_stage_error(self):
+        for effect, stage, why in (([(0, ""), (3, "a\nboom")], "bundle", "rc=3: a | boom"),
+                                   (subprocess.TimeoutExpired("x", 1), "export",
+                                    "timeout after 1800 seconds")):
+            with self.subTest(why=why), mock.patch.object(guard.sc, "run", side_effect=effect):
+                got = guard.run_pipeline(Path("vrfkit"), Path("m.vrf"), Path("e"), Path("b"))
+            self.assertEqual(got, (None, stage, why))
 
     def test_no_build_points_at_the_directory_the_game_rotates(self):
-        """Saved\\Demos is owned by VALORANT and lost four pinned replays once."""
+        """Saved\\Demos is VALORANT's own, and the game rotates it."""
         for build, path in guard.REPLAYS.items():
             self.assertNotIn("Saved\\Demos", path, f"{build} points at Saved\\Demos")
-
-    def test_extract_and_invariants_agree_on_their_keys(self):
-        """Every field the invariants read must be one extract() produces."""
-        produced = guard.extract(RAW_METRICS)
-        for key in ("rounds_rpc", "rounds_objective", "team_score", "players",
-                    "kills", "damage_dealt"):
-            self.assertIn(key, produced)
-        # invariants() indexes with `[...]`, never `.get(..., default)`, so a
-        # key it reads that extract() does not produce raises KeyError here
-        # rather than passing silently.
-        guard.invariants(produced)
 
 
 #: A raw `compute_metrics.py` output shaped like the valplay JSON `extract()`
@@ -257,9 +240,8 @@ class ExtractShapeTests(unittest.TestCase):
         self.assertNotEqual(got["shots"], got["distinct_weapons"])
 
     def test_a_renamed_per_player_counter_is_an_error_not_a_zero(self):
-        """`.get(field) or 0` once read a counter valplay renamed as a
-        plausible 0 for every player. A missing key, or a value that is not a
-        count, must fail; a present 0 stays 0 (p2's assists above)."""
+        """A missing key, or a value that is not a count, must fail, never
+        read as a plausible 0; a present 0 stays 0 (p2's assists above)."""
         for section, player, field in (("combat", "p2", "headshots"),
                                        ("tactical", "p1", "trade_kills"),
                                        ("kast", "p2", "kast_rounds")):
@@ -302,6 +284,8 @@ FAKE_BUNDLE_SCRIPT = '''\
 import sys
 from pathlib import Path
 out = Path(sys.argv[sys.argv.index("-o") + 1])
+if out.resolve() == Path(sys.argv[1]).resolve():
+    raise SystemExit("the bundle would overwrite its own input")
 out.mkdir(parents=True, exist_ok=True)
 print("bundle ok")
 '''

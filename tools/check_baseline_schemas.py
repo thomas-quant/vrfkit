@@ -54,18 +54,17 @@ def _nonnegative_int(value) -> bool:
 
 
 def validate_bench_baseline(path: Path, data: dict) -> list[str]:
+    """`export` and `replay`, and optionally `export_checkpoints`; nothing else."""
     problems: list[str] = []
-    _keys(path, data, {"export", "replay"}, problems)
+    timings = {"export"} | ({"export_checkpoints"} & set(data))
+    _keys(path, data, {"replay"} | timings, problems)
     replay = data.get("replay")
     if not isinstance(replay, str) or not replay.endswith(".vrf"):
         problems.append(f"{path.name}: replay must name a .vrf file")
-    elapsed = data.get("export")
-    if (
-        not isinstance(elapsed, float)
-        or not math.isfinite(elapsed)
-        or elapsed <= 0
-    ):
-        problems.append(f"{path.name}: export must be a positive finite float")
+    for key in sorted(timings):
+        elapsed = data.get(key)
+        if not isinstance(elapsed, float) or not math.isfinite(elapsed) or elapsed <= 0:
+            problems.append(f"{path.name}: {key} must be a positive finite float")
     return problems
 
 
@@ -238,9 +237,7 @@ def validate_repository(root: Path = BASELINES) -> list[str]:
         if export.get("counters", {}).get(key) != checkpoint.get("counters", {}).get(key):
             problems.append(f"export/checkpoint counter {key} disagrees")
     for name in MAIN_PARQUET:
-        # This additive table contains both streams when --checkpoints is on.
-        # Each baseline pins its complete file independently. Unlike the five
-        # original main-only tables, whole-file equality across flags is false.
+        # partials.parquet holds both streams under --checkpoints.
         if name == "partials":
             continue
         if export.get("parquet", {}).get(name) != checkpoint.get("parquet", {}).get(name):
@@ -252,7 +249,6 @@ def validate_repository(root: Path = BASELINES) -> list[str]:
 
     metrics = loaded["metrics_builds.json"]
     replays = metrics.get("replays") if isinstance(metrics.get("replays"), dict) else {}
-    values = metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {}
 
     for build, filename in CORPUS_BASELINES.items():
         corpus = loaded[filename]

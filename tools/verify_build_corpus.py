@@ -20,12 +20,12 @@ from pathlib import Path
 import re
 import subprocess
 
-import pyarrow.parquet as pq
 
 from atomic_io import atomic_write_text, sha256_file
 import check_decode_errors_corpus as overlay
 import check_export_baseline as baseline
 from corpus_scan import find_replays
+import summary_counters
 import validate_type_evidence as evidence
 
 REPO = Path(__file__).resolve().parents[1]
@@ -44,31 +44,23 @@ SINK_ZERO = (
     "array_truncations", "array_errors", "array_unconsumed_nested_bits",
     "array_unconsumed_root_bits", "array_implicit_terminations",
     "array_leaf_decode_errors", "truncated_rpcs",
-    # The three below were zero in both passes of all 1,018 unique corpus
-    # replays (24 builds) when added on 2026-09-28. The brute force rests on
-    # one empirical constant (fc=34), so a payload it cannot walk means a
-    # build changed. A movement-section tail is a tally in the exporter, not
-    # an error (see RpcDecodeResult::sized_section_tails), but no measured
-    # build has produced one: a nonzero count is a new shape to look at, the
-    # same footing array_implicit_terminations has here.
+    # Zero in both passes of all 1,018 corpus replays (24 builds): the brute
+    # force rests on one empirical constant (fc=34), and a movement-section
+    # tail is a tally no measured build produces, so nonzero is a new shape.
     "cnc_bruteforce_payloads_unwalked",
     "movement_sized_section_tails", "movement_open_section_tails",
 )
-#: Each sink event tally the manifest publishes, and the NetStats counter it
-#: must equal. vrf-net calls the sink right beside its own increment for each
-#: of these events, so the two are one count taken twice; a difference means
-#: the sink's bookkeeping (a missing or extra `+= 1`) is broken. The sink's
-#: `fields_emitted` has no pair: it counts emitted rows, not framed properties.
+#: Each sink event tally and the NetStats counter it must equal: vrf-net calls
+#: the sink beside its own increment, so a difference is broken bookkeeping.
+#: `fields_emitted` has no pair: it counts rows, not framed properties.
 SINK_NET_EQUAL = (
     ("sink_rpcs_emitted", "rpcs"),
     ("sink_actor_opens", "actor_opens"),
     ("sink_actor_closes", "actor_closes"),
     ("sink_content_blocks", "content_blocks"),
 )
-#: Bits after each byte-wrapped movement envelope: 24 in every one of the
-#: 156,407,150 streams of the 80-replay sample in vrf-movement's crate docs
-#: (11.06-13.06). Unread by the decoder, so this shape is all that says the
-#: trailer still is what was measured.
+#: Unread bits after each byte-wrapped movement envelope: 24 in all
+#: 156,407,150 streams of vrf-movement's 80-replay sample (11.06-13.06).
 ENVELOPE_TRAILER_BITS = 24
 
 
@@ -124,6 +116,9 @@ def manifest_counts(manifest):
         if bits != ENVELOPE_TRAILER_BITS * streams:
             failures.append(f"{prefix}_movement_envelope_trailer_bits={bits} != "
                             f"{ENVELOPE_TRAILER_BITS} x {prefix}_movement_envelope_trailers={streams}")
+        # Main only: no checkpoint RPC reaches the movement decoder.
+        if prefix == "main" and not streams:
+            failures.append("main_movement_envelope_trailers=0: no movement stream decoded")
         lost = counts[f"{prefix}_rpc_stream_failures"] - counts[f"{prefix}_unresolved_rpc_payloads_preserved"]
         counts[f"{prefix}_rpc_loss"] = lost
         if lost != 0:
@@ -135,8 +130,7 @@ def manifest_counts(manifest):
     cp = quality["checkpoints"]
     counts["checkpoint_chunks"] = require_count(cp, "checkpoint_chunks")
     # The checkpoint twin of replay_data_trailing_bytes: 0 in all 19,166
-    # checkpoint archives of 1,014 replays, 11.06-13.06 (vrf-container census,
-    # 2026-09-28).
+    # checkpoint archives of 1,014 replays, 11.06-13.06.
     counts["checkpoint_trailing_bytes"] = require_count(cp, "checkpoint_trailing_bytes")
     if counts["checkpoint_trailing_bytes"]:
         failures.append(f"checkpoint_trailing_bytes={counts['checkpoint_trailing_bytes']}")
@@ -159,36 +153,18 @@ def validation_counts(text, returncode):
 
 
 def check_export(text, directory):
-    counters, error = overlay.read_counters(text, 0, require_checkpoints=True)
-    if error:
-        raise ValueError(error)
-    if mismatch := overlay.reconcile(counters):
+    printed = summary_counters.read(text, summary_counters.WHERE)
+    missing = [key for key, value in printed.items() if value is None]
+    if missing:
+        raise ValueError(f"export omits counter {missing[0]}")
+    if mismatch := overlay.reconcile(printed):
         raise ValueError(mismatch)
-    patterns = dict(baseline.PATTERNS)
-    patterns.update({k: re.compile(v) for k, v in baseline.CHECKPOINT_COUNTERS.items()})
-    printed = {}
-    for key, pattern in patterns.items():
-        match = pattern.search(text)
-        if match is None:
-            raise ValueError(f"export omits counter {key}")
-        printed[key] = int(match[1])
-    tables = {}
-    for name in baseline.PARQUET_FILES + baseline.CHECKPOINT_PARQUET_FILES:
-        path = directory / f"{name}.parquet"
-        tables[name] = {"rows": pq.ParquetFile(path).metadata.num_rows,
-                        "bytes": path.stat().st_size}
-    errors = baseline.cross_checks(printed, tables)
-    errors += baseline.checkpoint_manifest_errors(directory, printed)
-    errors += baseline.reward_opaque_manifest_errors(directory, printed, True)
-    errors += baseline.targeting_manifest_errors(directory, printed, True)
-    errors += baseline.sink_tally_manifest_errors(directory, printed, True)
-    errors += baseline.frame_skip_manifest_errors(directory, printed, True)
-    errors += baseline.checkpoint_trailing_manifest_errors(directory, printed, True)
-    guid_counts, guid_errors = baseline.checkpoint_guid_crosscheck(directory)
-    if guid_errors:
-        errors += guid_errors + [baseline.format_guid_crosscheck(guid_counts)]
+    tables = baseline.parquet_shape(
+        directory, baseline.PARQUET_FILES + baseline.CHECKPOINT_PARQUET_FILES)
+    errors, guid_counts = baseline.export_errors(directory, printed, True)
+    errors = baseline.cross_checks(printed, tables) + errors
     if errors:
-        raise ValueError("; ".join(errors))
+        raise ValueError("; ".join(errors + [baseline.format_guid_crosscheck(guid_counts)]))
     return tables, guid_counts
 
 
@@ -199,20 +175,15 @@ def audit_one(entry, exe, work, specifications):
     result = {"sha256": digest, "bytes": replay.stat().st_size,
               "branch": None, "failures": [], "counts": {}}
     try:
-        run = subprocess.run([str(exe), "validate", str(replay)], capture_output=True,
-                             text=True, encoding="utf-8", errors="replace", timeout=1800)
-        text = run.stdout + run.stderr
+        code, text = summary_counters.vrfkit(exe, "validate", replay, timeout=1800)
         (directory / "validate.log").write_text(text, encoding="utf-8")
-        branch, counts = validation_counts(text, run.returncode)
+        branch, counts = validation_counts(text, code)
         result.update(branch=branch, counts=counts)
         export = directory / "export"
-        run = subprocess.run([str(exe), "export", str(replay), "--out", str(export),
-                              "--checkpoints"], capture_output=True, text=True,
-                             encoding="utf-8", errors="replace", timeout=1800)
-        text = run.stdout + run.stderr
+        code, text = summary_counters.vrfkit(exe, "export", replay, export, True, timeout=1800)
         (directory / "export.log").write_text(text, encoding="utf-8")
-        if run.returncode:
-            raise ValueError(f"export exit {run.returncode}")
+        if code:
+            raise ValueError(f"export exit {code}")
         manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
         if manifest["replay_build"] != branch:
             raise ValueError("validate/export branches disagree")

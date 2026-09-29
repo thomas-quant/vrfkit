@@ -97,7 +97,7 @@ print("Branch: ++Ares-Core+release-13.01")
 print("Total content blocks: 100")
 if "missingmalformed" not in name:
     print("Malformed framing:  0")
-print("Skipped bits:  0")
+print("Skipped bits:  " + {"a": "12", "b": "3671"}.get(name.partition("skips")[0], "0"))
 print("Fields emitted: 50")
 print("RPCs emitted: 10")
 print("ORACLE PASS RATE: 100.000000%")
@@ -137,6 +137,16 @@ class MainWiringTests(unittest.TestCase):
         code, output = self.run_main()
         self.assertEqual(code, 0, output)
         self.assertIn("OK:", output)
+        self.assertRegex(output, r"(?m)^replays that skip bits: 0$")
+
+    def test_each_replay_that_skips_bits_is_listed_most_first(self):
+        for name in ("askips.vrf", "bskips.vrf", "c.vrf"):
+            self.make_replay(name)
+        code, output = self.run_main()
+        self.assertEqual(code, 0, output)
+        self.assertRegex(output, r"(?m)^replays that skip bits: 2\n +3,671 bits  malformed=0  "
+                                 r"rate=100\.000000%  bskips\.vrf\n +12 bits  malformed=0  "
+                                 r"rate=100\.000000%  askips\.vrf$")
 
     def test_an_oracle_that_could_not_validate_a_replay_fails_the_run(self):
         self.make_replay("badexit.vrf")
