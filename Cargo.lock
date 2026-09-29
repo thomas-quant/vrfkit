@@ -951,11 +951,11 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vrf-bitio"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "vrf-container"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "oozextract",
  "thiserror",
@@ -964,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "vrf-decode"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "thiserror",
  "vrf-bitio",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "vrf-export"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "vrf-frame"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "thiserror",
  "vrf-bitio",
@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "vrf-movement"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "thiserror",
  "vrf-bitio",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "vrf-net"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "thiserror",
  "vrf-bitio",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "vrf-schema"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "thiserror",
  "vrf-bitio",
@@ -1017,14 +1017,14 @@ dependencies = [
 
 [[package]]
 name = "vrf-transform"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "vrf-bitio",
 ]
 
 [[package]]
 name = "vrfkit"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "smallvec",
  "thiserror",
