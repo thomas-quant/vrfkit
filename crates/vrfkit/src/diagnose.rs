@@ -225,14 +225,17 @@ fn canonicalize_destination(path: &str) -> Result<PathBuf, CliError> {
 
 /// The directory `--json` goes in (`.` for a bare name) and its file name.
 fn json_parent_and_name(path: &Path) -> Result<(&Path, &OsStr), CliError> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     let name = path.file_name().ok_or_else(|| {
         CliError::Usage("--json requires a file path, not a directory".to_string())
     })?;
-    Ok((parent, name))
+    Ok((usable_parent(path), name))
+}
+
+/// `path`'s directory, `.` for a bare name.
+pub(crate) fn usable_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// Publish JSON through a new sibling file rather than opening the destination
