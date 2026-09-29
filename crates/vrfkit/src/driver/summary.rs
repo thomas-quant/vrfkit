@@ -25,6 +25,8 @@ use crate::sink::ExportStats;
 #[derive(Default)]
 pub(crate) struct RunTotals {
     pub chunks_processed: u32,
+    /// Chunks of a type no reader knows, skipped whole.
+    pub unknown_chunks: u64,
     /// DemoFrames walked in the ReplayData stream. Packets are counted inside
     /// the frame callback, so a frame that ends before its packet loop moves
     /// only this. Printed as `ReplayData frames:`, not `Frames:`, which the
@@ -80,6 +82,7 @@ pub(super) fn print(
     eprintln!();
     eprintln!("=== Export complete ===");
     eprintln!("  Chunks:           {}", totals.chunks_processed);
+    eprintln!("  Unknown chunks:   {}", totals.unknown_chunks);
     eprintln!("  ReplayData frames: {}", totals.frames);
     eprintln!(
         "  Frame skips:      {}",

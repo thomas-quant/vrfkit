@@ -75,7 +75,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
         ..DiagCheckpointStats::default()
     };
 
-    for_each_chunk(&data, &replay, |chunk| {
+    let unknown_chunks = for_each_chunk(&data, &replay, |chunk| {
         match chunk {
             // Independent of replication, with no stream-failure signal.
             Chunk::Event(_) => event_chunks += 1,
@@ -88,7 +88,6 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
                 // Never drained: nothing is written, and each packet's sink clears them.
                 main.walk(&frames, &mut sink_main, |_| Ok(()))?;
             }
-            Chunk::Other => {}
         }
         Ok(())
     })?;
@@ -112,6 +111,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
         ("replay_data", replay_data_chunks),
         ("replay_data_frames", u64::from(main.frames)),
         ("event", event_chunks),
+        ("unknown", unknown_chunks),
         ("replay_data_trailing_bytes", replay_data_trailing_bytes),
         (
             "replay_data_external_data_blobs",

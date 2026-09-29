@@ -187,6 +187,7 @@ fn quality_json(quality: &ManifestQuality<'_>) -> String {
     // the function `validate` prints. Everything after it is evidence.
     out.add("content_blocks_lost", quality.net.lost_content_blocks())
         .add("chunks_processed", run.chunks_processed)
+        .add("unknown_chunks", run.unknown_chunks)
         .add("export_groups", run.export_groups)
         .add("movement_rows", run.movement_rows)
         .add("net_guid_rows", run.net_guid_rows)
@@ -452,6 +453,7 @@ mod tests {
         }
         let mut run = RunTotals {
             chunks_processed: next("chunks_processed") as u32,
+            unknown_chunks: next("unknown_chunks"),
             // Not in `quality`: printed by the summary only.
             frames: next("") as u32,
             frame_skips: FrameSkips::default(),

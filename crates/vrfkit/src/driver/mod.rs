@@ -126,7 +126,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
                     })?;
                     totals.chunks_processed += 1;
                 }
-                Chunk::Checkpoint(_) | Chunk::Other => {}
+                Chunk::Checkpoint(_) => {}
             }
             Ok(())
         });
@@ -136,7 +136,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         });
         (main, checkpoints.transpose())
     });
-    main?;
+    totals.unknown_chunks = main?;
     let mut checkpoints = checkpoints?;
 
     // Joined before the elapsed time is taken and any file size is read, so

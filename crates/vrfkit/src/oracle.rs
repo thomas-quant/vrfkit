@@ -114,7 +114,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     // Counted, not merely skipped: see `checkpoint_scope_note`.
     let mut checkpoint_chunks: u64 = 0;
     let mut replay_data_trailing_bytes = 0u64;
-    for_each_chunk(&data, &replay, |chunk| {
+    let unknown_chunks = for_each_chunk(&data, &replay, |chunk| {
         match chunk {
             Chunk::Checkpoint(_) => checkpoint_chunks += 1,
             Chunk::ReplayData(frames, unread) => {
@@ -122,7 +122,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
                 // Never drained: each packet's sink clears them.
                 pass.walk(&frames, &mut sink, |_| Ok(()))?;
             }
-            Chunk::Event(_) | Chunk::Other => {}
+            Chunk::Event(_) => {}
         }
         Ok(())
     })?;
@@ -158,7 +158,16 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         "    Unopened channel:   {} bunches / {} bits",
         stats.bunches_on_unopened_channel, stats.unopened_channel_bits
     );
+    // Not verdict terms: a package-map export bunch's content is never read.
+    println!(
+        "    Package map exports: {} ({} with RepLayout export)",
+        stats.package_map_exports, stats.rep_layout_export_bunches
+    );
     println!("    Malformed framing:  {malformed}");
+    println!(
+        "    Content framing fails: {}",
+        stats.content_block_framing_failures
+    );
     println!("    Transform failed:   {}", stats.transform_failures);
     println!("    Field stream failed:{}", stats.field_stream_failures);
     println!("    RPC payload lost:   {rpc_payloads_lost}");
@@ -182,6 +191,7 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         replay_data_trailing_bytes
     );
     println!("  ReplayData frames:    {}", pass.frames);
+    println!("  Unknown chunks:       {unknown_chunks}");
     println!(
         "  Frame skips:          {}",
         report::frame_skips(&pass.frame_skips)
@@ -209,9 +219,6 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         println!("  No content blocks found - cannot validate.");
     } else {
         println!("{}", pass_rate_line(total_with_content, failed));
-        if stats.skipped_bits > 0 {
-            println!("  (skipped_bits counter: {} bits)", stats.skipped_bits);
-        }
     }
 
     // The counters above say how many payload-stage failures; these say which.
