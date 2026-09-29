@@ -871,11 +871,11 @@ fn decode_array_leaf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::test_fixtures::{bits_from_bytes, bytes, packed};
     use crate::sink::{ChannelState, ExportStats, MeasuredArrayRoutes, RecordBuffers};
     use std::sync::Arc;
     use vrf_export::FieldRecord;
     use vrf_net::field::FieldSink;
+    use vrf_testkit::{BitWrite, pack, unpack};
 
     const OWNER: &str = "/Script/ShooterGame.OwnerExclusivePlayerInfo";
     const OWNER_PARENT: &str = "AllPlayersObfuscatedPlayerInformation";
@@ -939,47 +939,47 @@ mod tests {
     fn one_leaf(handle: u32, payload: &[bool]) -> Vec<bool> {
         let mut bits = Vec::new();
         for value in [1, 1, handle + 1, payload.len() as u32] {
-            packed(&mut bits, value);
+            bits.int_packed(value);
         }
         bits.extend_from_slice(payload);
-        packed(&mut bits, 0);
-        packed(&mut bits, 0);
+        bits.int_packed(0);
+        bits.int_packed(0);
         bits
     }
 
     fn one_element(fields: &[(u32, Vec<bool>)]) -> Vec<bool> {
         let mut bits = Vec::new();
-        packed(&mut bits, 1);
-        packed(&mut bits, 1);
+        bits.int_packed(1);
+        bits.int_packed(1);
         for (handle, payload) in fields {
-            packed(&mut bits, handle + 1);
-            packed(&mut bits, payload.len() as u32);
+            bits.int_packed(handle + 1);
+            bits.int_packed(payload.len() as u32);
             bits.extend_from_slice(payload);
         }
-        packed(&mut bits, 0);
-        packed(&mut bits, 0);
+        bits.int_packed(0);
+        bits.int_packed(0);
         bits
     }
 
     /// One ActiveBlinds element with every member at its measured width.
     fn blind_element(effect_id: i64) -> Vec<bool> {
         let mut source_id = vec![false];
-        source_id.extend(bits_from_bytes(&(29i32).to_le_bytes()));
-        source_id.extend(bits_from_bytes(b"DedicatedServerWorldSourceID\0"));
-        source_id.extend(bits_from_bytes(&0i32.to_le_bytes()));
+        source_id.extend(unpack(&(29i32).to_le_bytes()));
+        source_id.extend(unpack(b"DedicatedServerWorldSourceID\0"));
+        source_id.extend(unpack(&0i32.to_le_bytes()));
         assert_eq!(source_id.len(), 297);
         let mut blind_config = Vec::new();
-        packed(&mut blind_config, 256);
+        blind_config.int_packed(256);
         let mut causing_actor = Vec::new();
-        packed(&mut causing_actor, 257);
+        causing_actor.int_packed(257);
         one_element(&[
-            (3, bits_from_bytes(&7u32.to_le_bytes())),
-            (4, bits_from_bytes(&effect_id.to_le_bytes())),
+            (3, unpack(&7u32.to_le_bytes())),
+            (4, unpack(&effect_id.to_le_bytes())),
             (5, source_id),
             (6, vec![true]),
             (7, vec![false]),
-            (8, bits_from_bytes(&1.5f32.to_le_bytes())),
-            (9, bits_from_bytes(&10.0f32.to_le_bytes())),
+            (8, unpack(&1.5f32.to_le_bytes())),
+            (9, unpack(&10.0f32.to_le_bytes())),
             (10, blind_config),
             (11, causing_actor),
         ])
@@ -998,8 +998,8 @@ mod tests {
             body.push(0);
             (body.len() as i32, body)
         };
-        bits.extend(bits_from_bytes(&length.to_le_bytes()));
-        bits.extend(bits_from_bytes(&body));
+        bits.extend(unpack(&length.to_le_bytes()));
+        bits.extend(unpack(&body));
         bits
     }
 
@@ -1051,7 +1051,7 @@ mod tests {
         if let Some(branch) = branch {
             sink.enable_measured_array_routes(branch);
         }
-        let raw = bytes(bits);
+        let raw = pack(bits);
         sink.on_field(
             0,
             bits.len() as u32,
@@ -1082,7 +1082,7 @@ mod tests {
         assert_eq!(child.compatible_checksum, None);
         let parent = &records.fields[1];
         assert_eq!(parent.field_name.as_deref(), Some(OWNER_PARENT));
-        assert_eq!(parent.raw_bits.as_deref(), Some(bytes(&bits).as_slice()));
+        assert_eq!(parent.raw_bits.as_deref(), Some(pack(&bits).as_slice()));
         assert_eq!(parent.bit_count, bits.len() as u32);
         assert_eq!(stats.array.fields_emitted, 1);
         assert_eq!(stats.fields_emitted, 2);
@@ -1127,7 +1127,7 @@ mod tests {
             );
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
             assert_eq!(stats.array.fields_emitted, 0);
         }
@@ -1149,7 +1149,7 @@ mod tests {
             assert_eq!(records.fields.len(), 1, "no partially accepted children");
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
             assert!(
                 stats.array.unconsumed_root_bits > 0
@@ -1234,7 +1234,7 @@ mod tests {
             let child = &records.fields[0];
             assert_eq!(child.value_i64, want_i64, "{name}");
             assert_eq!(child.value_str.as_deref(), want_str, "{name}");
-            assert_eq!(child.raw_bits.as_deref(), Some(bytes(&payload).as_slice()));
+            assert_eq!(child.raw_bits.as_deref(), Some(pack(&payload).as_slice()));
         }
     }
 
@@ -1303,7 +1303,7 @@ mod tests {
 
     #[test]
     fn localized_reward_text_keeps_raw_on_success_and_failure() {
-        let empty = bits_from_bytes(&[0, 0, 0, 0, 255, 0, 0, 0, 0]);
+        let empty = unpack(&[0, 0, 0, 0, 255, 0, 0, 0, 0]);
         for (payload, errors, expected) in [
             (
                 empty.clone(),
@@ -1322,13 +1322,13 @@ mod tests {
             assert_eq!(records.fields.len(), 2);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&payload).as_slice())
+                Some(pack(&payload).as_slice())
             );
             assert_eq!(values(&records.fields[0]), (None, None, None, expected));
             assert_eq!(stats.array_leaf_decode_errors, errors);
             assert_eq!(
                 records.fields[1].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
         }
     }
@@ -1360,7 +1360,7 @@ mod tests {
     #[test]
     fn selected_v2_types_only_the_six_qualified_object_net_guid_leaves() {
         let mut multi_byte = Vec::new();
-        packed(&mut multi_byte, 128);
+        multi_byte.int_packed(128);
         let (records, _) = export_array_with_child_checksum(
             (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
             (3, "EquippableDataAsset", 1_793_937_854),
@@ -1424,7 +1424,7 @@ mod tests {
 
     #[test]
     fn selected_v2_bad_object_net_guid_windows_stay_raw_and_count_errors() {
-        for payload in [bits_from_bytes(&[1]), bits_from_bytes(&[1, 1, 1, 1, 0x20])] {
+        for payload in [unpack(&[1]), unpack(&[1, 1, 1, 1, 0x20])] {
             let (records, stats) = export_array_with_child_checksum(
                 (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
                 (3, "EquippableDataAsset", 1_793_937_854),
@@ -1435,7 +1435,7 @@ mod tests {
             assert_eq!(stats.array_leaf_decode_errors, 1);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&payload).as_slice())
+                Some(pack(&payload).as_slice())
             );
         }
     }
@@ -1443,9 +1443,9 @@ mod tests {
     #[test]
     fn kill_data_types_only_qualified_primitive_leaves() {
         let mut object = Vec::new();
-        packed(&mut object, 128);
-        let float = bits_from_bytes(&(-1.5f32).to_le_bytes());
-        let int = bits_from_bytes(&(-2i32).to_le_bytes());
+        object.int_packed(128);
+        let float = unpack(&(-1.5f32).to_le_bytes());
+        let int = unpack(&(-2i32).to_le_bytes());
         for (handle, name, checksum, payload, vi, vf, vb) in [
             (
                 3,
@@ -1531,7 +1531,7 @@ mod tests {
             assert_eq!(child.value_i64, vi, "{name}");
             assert_eq!(child.value_f64, vf, "{name}");
             assert_eq!(child.value_bool, vb, "{name}");
-            assert_eq!(child.raw_bits.as_deref(), Some(bytes(&payload).as_slice()));
+            assert_eq!(child.raw_bits.as_deref(), Some(pack(&payload).as_slice()));
         }
     }
 
@@ -1552,7 +1552,7 @@ mod tests {
             assert_eq!(records.fields[0].value_str.as_deref(), Some(value));
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&payload).as_slice())
+                Some(pack(&payload).as_slice())
             );
             assert_eq!(stats.array_leaf_decode_errors, 0);
         }
@@ -1572,8 +1572,8 @@ mod tests {
         let mut residual = kill_weapon_theme_payload("x", false);
         residual.push(false);
         let mut invalid_utf8 = vec![true];
-        invalid_utf8.extend(bits_from_bytes(&2i32.to_le_bytes()));
-        invalid_utf8.extend(bits_from_bytes(&[0xff, 0]));
+        invalid_utf8.extend(unpack(&2i32.to_le_bytes()));
+        invalid_utf8.extend(unpack(&[0xff, 0]));
         for payload in [
             bad_flag,
             bad_terminator,
@@ -1590,7 +1590,7 @@ mod tests {
             assert_eq!(records.fields[0].value_str, None);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&payload).as_slice())
+                Some(pack(&payload).as_slice())
             );
             assert_eq!(stats.array_leaf_decode_errors, 1);
         }
@@ -1602,7 +1602,7 @@ mod tests {
         assert!(typed(kill, 10, "DamageTaken", 2_001_471_495, None).is_some());
         for (name, checksum) in [("Other", 2_001_471_495), ("DamageTaken", 0)] {
             assert!(typed(kill, 10, name, checksum, None).is_none());
-            let payload = bits_from_bytes(&1.5f32.to_le_bytes());
+            let payload = unpack(&1.5f32.to_le_bytes());
             let (records, _) = export_array_with_child_checksum(
                 (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
                 (10, name, checksum),
@@ -1612,7 +1612,7 @@ mod tests {
             assert_eq!(records.fields[0].value_f64, None);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&payload).as_slice())
+                Some(pack(&payload).as_slice())
             );
         }
         let payload = kill_weapon_theme_payload("theme", false);
@@ -1633,9 +1633,9 @@ mod tests {
     #[test]
     fn measured_nested_arrays_emit_after_their_preserved_raw_containers() {
         let mut first = Vec::new();
-        packed(&mut first, 128);
+        first.int_packed(128);
         let mut second = Vec::new();
-        packed(&mut second, 9);
+        second.int_packed(9);
         let selected_nested = one_element(&[(14, first.clone()), (15, second.clone())]);
         let (records, stats) = export_array_with_declarations(
             (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
@@ -1654,7 +1654,7 @@ mod tests {
         );
         assert_eq!(
             records.fields[0].raw_bits.as_deref(),
-            Some(bytes(&selected_nested).as_slice())
+            Some(pack(&selected_nested).as_slice())
         );
         assert_eq!(
             records.fields[1].field_name.as_deref(),
@@ -1663,7 +1663,7 @@ mod tests {
         assert_eq!(records.fields[1].value_i64, Some(128));
         assert_eq!(
             records.fields[1].raw_bits.as_deref(),
-            Some(bytes(&first).as_slice())
+            Some(pack(&first).as_slice())
         );
         assert_eq!(
             records.fields[2].field_name.as_deref(),
@@ -1702,34 +1702,34 @@ mod tests {
 
     #[test]
     fn nested_array_preflight_requires_bounds_nonzero_windows_and_terminators() {
-        let valid = one_element(&[(7, bits_from_bytes(&[2]))]);
+        let valid = one_element(&[(7, unpack(&[2]))]);
         assert!(strict_nested_array_preflight(
-            &bytes(&valid),
+            &pack(&valid),
             valid.len() as u32,
             &[7]
         ));
         assert!(!strict_nested_array_preflight(&[], 0, &[7]));
         assert!(!strict_nested_array_preflight(
-            &bytes(&valid[..valid.len() - 8]),
+            &pack(&valid[..valid.len() - 8]),
             (valid.len() - 8) as u32,
             &[7]
         ));
         let mut suffix = valid.clone();
         suffix.extend([false; 8]);
         assert!(!strict_nested_array_preflight(
-            &bytes(&suffix),
+            &pack(&suffix),
             suffix.len() as u32,
             &[7]
         ));
         let zero_width = one_element(&[(7, Vec::new())]);
         assert!(!strict_nested_array_preflight(
-            &bytes(&zero_width),
+            &pack(&zero_width),
             zero_width.len() as u32,
             &[7]
         ));
-        let unexpected = one_element(&[(8, bits_from_bytes(&[2]))]);
+        let unexpected = one_element(&[(8, unpack(&[2]))]);
         assert!(!strict_nested_array_preflight(
-            &bytes(&unexpected),
+            &pack(&unexpected),
             unexpected.len() as u32,
             &[7]
         ));
@@ -1737,37 +1737,37 @@ mod tests {
         // route must reject one even when all three expected members follow.
         let path_with_unknown_zero = one_element(&[
             (4, Vec::new()),
-            (1, bits_from_bytes(&[0; 4])),
-            (2, bits_from_bytes(&[0; 24])),
-            (3, bits_from_bytes(&[0; 24])),
+            (1, unpack(&[0; 4])),
+            (2, unpack(&[0; 24])),
+            (3, unpack(&[0; 24])),
         ]);
         assert!(!strict_nested_array_preflight(
-            &bytes(&path_with_unknown_zero),
+            &pack(&path_with_unknown_zero),
             path_with_unknown_zero.len() as u32,
             &[1, 2, 3]
         ));
         let mut capacity_limit = Vec::new();
-        packed(&mut capacity_limit, vrf_decode::MAX_ELEMENTS + 1);
-        packed(&mut capacity_limit, 0);
+        capacity_limit.int_packed(vrf_decode::MAX_ELEMENTS + 1);
+        capacity_limit.int_packed(0);
         assert!(!strict_nested_array_preflight(
-            &bytes(&capacity_limit),
+            &pack(&capacity_limit),
             capacity_limit.len() as u32,
             &[7]
         ));
         let mut index_range = Vec::new();
-        packed(&mut index_range, 1);
-        packed(&mut index_range, 2);
+        index_range.int_packed(1);
+        index_range.int_packed(2);
         assert!(!strict_nested_array_preflight(
-            &bytes(&index_range),
+            &pack(&index_range),
             index_range.len() as u32,
             &[7]
         ));
         let fields = (0..=vrf_decode::MAX_FIELDS_PER_ELEMENT)
-            .map(|_| (7, bits_from_bytes(&[0])))
+            .map(|_| (7, unpack(&[0])))
             .collect::<Vec<_>>();
         let field_limit = one_element(&fields);
         assert!(!strict_nested_array_preflight(
-            &bytes(&field_limit),
+            &pack(&field_limit),
             field_limit.len() as u32,
             &[7]
         ));
@@ -1780,8 +1780,8 @@ mod tests {
         // one (56 cases) or two (one case), no changed elements, zero trailer.
         for capacity in [1, 2] {
             let mut bits = Vec::new();
-            packed(&mut bits, capacity);
-            packed(&mut bits, 0);
+            bits.int_packed(capacity);
+            bits.int_packed(0);
             let (_, control) =
                 export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(control.array.errors, 0);
@@ -1789,7 +1789,7 @@ mod tests {
                 control.active_blinds_empty_trailers, 0,
                 "no trailer to spare"
             );
-            packed(&mut bits, 0);
+            bits.int_packed(0);
             let (records, stats) =
                 export_array_with_declarations(identity, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 0, "capacity {capacity}");
@@ -1806,7 +1806,7 @@ mod tests {
             );
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
         }
     }
@@ -1818,7 +1818,7 @@ mod tests {
         // Keep the positive reference as a control through the same sink.
         for reference in [257, 0] {
             let mut payload = Vec::new();
-            packed(&mut payload, reference);
+            payload.int_packed(reference);
             let bits = one_leaf(11, &payload);
             let (records, stats) = export_array_with_declarations(
                 identity,
@@ -1832,11 +1832,11 @@ mod tests {
             assert_eq!(records.fields[0].value_i64, Some(i64::from(reference)));
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&payload).as_slice())
+                Some(pack(&payload).as_slice())
             );
             assert_eq!(
                 records.fields[1].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
         }
     }
@@ -1845,13 +1845,9 @@ mod tests {
     fn active_blinds_invalid_trailers_and_references_still_fail() {
         let identity = BLINDS;
         let mut empty = Vec::new();
-        packed(&mut empty, 1);
-        packed(&mut empty, 0);
-        for trailer in [
-            vec![true; 8],
-            bits_from_bytes(&[2]),
-            bits_from_bytes(&[0, 0]),
-        ] {
+        empty.int_packed(1);
+        empty.int_packed(0);
+        for trailer in [vec![true; 8], unpack(&[2]), unpack(&[0, 0])] {
             let mut bits = empty.clone();
             bits.extend(trailer);
             let (records, stats) =
@@ -1861,14 +1857,10 @@ mod tests {
             assert_eq!(records.fields.len(), 1);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
         }
-        for payload in [
-            bits_from_bytes(&[1]),
-            bits_from_bytes(&[0, 0]),
-            vec![false; 7],
-        ] {
+        for payload in [unpack(&[1]), unpack(&[0, 0]), vec![false; 7]] {
             let bits = one_leaf(11, &payload);
             let (records, stats) = export_array_with_declarations(
                 identity,
@@ -1880,11 +1872,11 @@ mod tests {
             assert!(records.fields.iter().all(|row| row.value_i64.is_none()));
             assert_eq!(
                 records.fields.last().unwrap().raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
         }
-        let mut populated = one_leaf(11, &bits_from_bytes(&[0]));
-        packed(&mut populated, 0);
+        let mut populated = one_leaf(11, &unpack(&[0]));
+        populated.int_packed(0);
         let (_, stats) = export_array_with_declarations(
             identity,
             &[(11, "CausingActor", 2_370_661_694)],
@@ -1906,7 +1898,7 @@ mod tests {
     fn active_blinds_null_reference_obeys_build_and_parent_identity_guards() {
         let identity = BLINDS;
         let declaration = [(11, "CausingActor", 2_370_661_694)];
-        let bits = one_leaf(11, &bits_from_bytes(&[0]));
+        let bits = one_leaf(11, &unpack(&[0]));
         for branch in ["13.01", "13.02", "13.04", "13.05", "13.06"] {
             let branch = format!("++Ares-Core+release-{branch}");
             let (records, stats) =
@@ -1930,7 +1922,7 @@ mod tests {
             assert_eq!(records.fields.len(), 1);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
         }
     }
@@ -1938,7 +1930,7 @@ mod tests {
     #[test]
     fn active_blinds_every_truncated_null_update_retains_only_raw_parent() {
         let identity = BLINDS;
-        let bits = one_leaf(11, &bits_from_bytes(&[0]));
+        let bits = one_leaf(11, &unpack(&[0]));
         for length in 1..bits.len() {
             let truncated = &bits[..length];
             let (records, stats) = export_array_with_declarations(
@@ -1952,7 +1944,7 @@ mod tests {
             assert_eq!(records.fields[0].bit_count, length as u32);
             assert_eq!(
                 records.fields[0].raw_bits.as_deref(),
-                Some(bytes(truncated).as_slice())
+                Some(pack(truncated).as_slice())
             );
         }
     }
@@ -1960,7 +1952,7 @@ mod tests {
     #[test]
     fn active_blinds_empty_delta_rejects_every_nonzero_trailer_byte() {
         for trailer in 1..=255u8 {
-            let bits = bits_from_bytes(&[2, 0, trailer]);
+            let bits = unpack(&[2, 0, trailer]);
             let (records, stats) =
                 export_array_with_declarations(BLINDS, &[], &bits, Some(MEASURED_BUILD));
             assert_eq!(stats.array.errors, 1, "trailer {trailer}");
@@ -1974,17 +1966,17 @@ mod tests {
         let identity = BLINDS;
         for reference in [0, 1, 127, 128, 16_383, 16_384, 2_097_151] {
             let mut bits = Vec::new();
-            packed(&mut bits, 3);
+            bits.int_packed(3);
             for index in [0, 2] {
-                packed(&mut bits, index + 1);
-                packed(&mut bits, 12);
+                bits.int_packed(index + 1);
+                bits.int_packed(12);
                 let mut payload = Vec::new();
-                packed(&mut payload, reference);
-                packed(&mut bits, payload.len() as u32);
+                payload.int_packed(reference);
+                bits.int_packed(payload.len() as u32);
                 bits.extend(payload);
-                packed(&mut bits, 0);
+                bits.int_packed(0);
             }
-            packed(&mut bits, 0);
+            bits.int_packed(0);
             let (records, stats) = export_array_with_declarations(
                 identity,
                 &[(11, "CausingActor", 2_370_661_694)],
@@ -2002,7 +1994,7 @@ mod tests {
             }
             assert_eq!(
                 records.fields[2].raw_bits.as_deref(),
-                Some(bytes(&bits).as_slice())
+                Some(pack(&bits).as_slice())
             );
         }
     }
@@ -2025,7 +2017,7 @@ mod tests {
         assert_eq!(refused.fields[0].field_name.as_deref(), Some(BLINDS.1));
         assert_eq!(
             refused.fields[0].raw_bits.as_deref(),
-            Some(bytes(&bits).as_slice())
+            Some(pack(&bits).as_slice())
         );
         assert_eq!(stats.array_leaf_decode_errors, 1);
     }
@@ -2082,7 +2074,7 @@ mod tests {
 
     #[test]
     fn malformed_nested_value_is_transactional_and_keeps_outer_raw() {
-        let malformed = one_element(&[(7, bits_from_bytes(&[2])), (7, bits_from_bytes(&[1]))]);
+        let malformed = one_element(&[(7, unpack(&[2])), (7, unpack(&[1]))]);
         let (records, stats) = export_array_with_declarations(
             (KILL_GROUP, KILL_PARENT, KILL_CHECKSUM),
             &[
@@ -2095,7 +2087,7 @@ mod tests {
         assert_eq!(records.fields.len(), 2);
         assert_eq!(
             records.fields[0].raw_bits.as_deref(),
-            Some(bytes(&malformed).as_slice())
+            Some(pack(&malformed).as_slice())
         );
         assert_eq!(records.fields[1].field_name.as_deref(), Some(KILL_PARENT));
         assert_eq!(stats.array_leaf_decode_errors, 1);
@@ -2104,7 +2096,7 @@ mod tests {
             "walker count includes attempted leaves, while no row prefix leaks"
         );
 
-        let valid = one_element(&[(14, bits_from_bytes(&[2])), (15, bits_from_bytes(&[4]))]);
+        let valid = one_element(&[(14, unpack(&[2])), (15, unpack(&[4]))]);
         let (records, stats) = export_array_with_declarations(
             (SELECTED_GROUP, SELECTED_PARENT, SELECTED_CHECKSUM),
             &[
@@ -2122,14 +2114,14 @@ mod tests {
         );
         assert_eq!(
             records.fields[0].raw_bits.as_deref(),
-            Some(bytes(&valid).as_slice())
+            Some(pack(&valid).as_slice())
         );
         assert_eq!(stats.array_leaf_decode_errors, 1);
     }
 
     #[test]
     fn nested_fixture_is_not_enabled_outside_the_exact_parent_gate() {
-        let nested = one_element(&[(7, bits_from_bytes(&[2]))]);
+        let nested = one_element(&[(7, unpack(&[2]))]);
         for (group, checksum, branch) in [
             (
                 "/Script/ShooterGame.Other",
@@ -2207,7 +2199,7 @@ mod tests {
 
     #[test]
     fn tracked_rewards_literal_opaque_empty_variant_keeps_only_parent_raw() {
-        let bits = bits_from_bytes(&[0x02, 0x00, 0x00]);
+        let bits = unpack(&[0x02, 0x00, 0x00]);
         let (records, stats) = export_array(
             (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
             (49, "Rewards"),
@@ -2229,7 +2221,7 @@ mod tests {
 
     #[test]
     fn tracked_rewards_refuses_wrong_identity_and_any_other_trailer_shape() {
-        let literal = bits_from_bytes(&[0x02, 0x00, 0x00]);
+        let literal = unpack(&[0x02, 0x00, 0x00]);
         for (group, parent, checksum, branch, bits) in [
             (
                 OWNER,
@@ -2278,9 +2270,9 @@ mod tests {
     #[test]
     fn tracked_rewards_residual_variants_keep_exact_diagnostics() {
         for bits in [
-            bits_from_bytes(&[0x02, 0x00, 0x01]),
-            bits_from_bytes(&[0x02, 0x00, 0x00, 0x00]),
-            bits_from_bytes(&[0x02]),
+            unpack(&[0x02, 0x00, 0x01]),
+            unpack(&[0x02, 0x00, 0x00, 0x00]),
+            unpack(&[0x02]),
         ] {
             let (records, stats) = export_array(
                 (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
@@ -2302,7 +2294,7 @@ mod tests {
         // empty variant. Walking a child does not authorize emitting it when
         // the enclosing array retains unexplained bits.
         let mut bits = one_leaf(19, &[false; 32]);
-        bits.extend(bits_from_bytes(&[0]));
+        bits.extend(unpack(&[0]));
         let (records, stats) = export_array(
             (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
             (19, "Rewards"),
@@ -2338,7 +2330,7 @@ mod tests {
         );
 
         let mut payload = Vec::new();
-        packed(&mut payload, 700);
+        payload.int_packed(700);
         let bits = one_leaf(5, &payload);
         let (records, _) = export_array_with_child_checksum(
             (
@@ -2352,7 +2344,7 @@ mod tests {
         );
         assert_eq!(records.fields.len(), 2);
         let child = &records.fields[0];
-        assert_eq!(child.raw_bits.as_deref(), Some(bytes(&payload).as_slice()));
+        assert_eq!(child.raw_bits.as_deref(), Some(pack(&payload).as_slice()));
         assert_eq!(values(child), (Some(700), None, None, None));
     }
 
@@ -2435,7 +2427,7 @@ mod tests {
     #[test]
     fn legacy_branches_expand_only_their_admitted_routes() {
         let mut reference = Vec::new();
-        packed(&mut reference, 5);
+        reference.int_packed(5);
         let float: Vec<bool> = (0..32)
             .map(|bit| 1.5f32.to_bits() & (1 << bit) != 0)
             .collect();
@@ -2460,7 +2452,7 @@ mod tests {
                 MeasuredArrayRoute::ActiveBlinds => (
                     BLINDS,
                     (11, "CausingActor", 2_370_661_694),
-                    one_leaf(11, &bits_from_bytes(&[0])),
+                    one_leaf(11, &unpack(&[0])),
                 ),
                 MeasuredArrayRoute::ServerActiveEffects => (
                     (
@@ -2518,7 +2510,7 @@ mod tests {
                 let at = format!("{branch:?} {route:?}");
                 let parent = records.fields.last().unwrap();
                 assert_eq!(parent.field_name.as_deref(), Some(identity.1), "{at}");
-                assert_eq!(parent.raw_bits.as_deref(), Some(bytes(&bits).as_slice()));
+                assert_eq!(parent.raw_bits.as_deref(), Some(pack(&bits).as_slice()));
                 assert_eq!(stats.array_leaf_decode_errors, 0, "{at}");
                 if admitted.admits(route) {
                     if !expanded.contains(&route) {
@@ -2617,7 +2609,7 @@ mod tests {
         assert_eq!(child.raw_bits.as_deref(), Some([0xff].as_slice()));
         assert_eq!(values(child), (None, None, None, None));
         let parent = &records.fields[1];
-        assert_eq!(parent.raw_bits.as_deref(), Some(bytes(&bits).as_slice()));
+        assert_eq!(parent.raw_bits.as_deref(), Some(pack(&bits).as_slice()));
         assert_eq!(stats.array_leaf_decode_errors, 1);
     }
 

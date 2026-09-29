@@ -647,34 +647,6 @@ mod test_fixtures {
     use vrf_net::pipeline::ActorChannelState;
     use vrf_net::types::NetworkGuid;
 
-    /// Append `value` as Unreal's `IntPacked`, LSB-first.
-    pub(super) fn packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let byte = ((value & 127) << 1) | u32::from(value > 127);
-            bits.extend((0..8).map(|bit| byte & (1 << bit) != 0));
-            value >>= 7;
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    /// Pack an LSB-first bit list into bytes.
-    pub(super) fn bytes(bits: &[bool]) -> Vec<u8> {
-        let mut raw = vec![0; bits.len().div_ceil(8)];
-        for (index, bit) in bits.iter().enumerate() {
-            raw[index / 8] |= u8::from(*bit) << (index % 8);
-        }
-        raw
-    }
-
-    /// Unpack bytes into an LSB-first bit list.
-    pub(super) fn bits_from_bytes(raw: &[u8]) -> Vec<bool> {
-        raw.iter()
-            .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0))
-            .collect()
-    }
-
     /// An `ActorChannelState` for one channel open.
     pub(super) fn channel_open(
         channel_index: u32,
