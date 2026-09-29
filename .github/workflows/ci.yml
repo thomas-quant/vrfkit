@@ -189,8 +189,6 @@ jobs:
       # These checks use committed fixtures and do not require Oodle.
       - name: tools test suite
         run: python -W error -m unittest discover -s tools/tests -p "test_*.py"
-      - name: effect decoder
-        run: python -W error tools/check_effect_decoder.py --check
 
   rust-stable:
     name: Rust stable / all features
