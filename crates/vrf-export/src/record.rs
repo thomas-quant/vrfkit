@@ -2,11 +2,9 @@
 //! types, so they compile with `parquet` off and a consumer such as `vrfkit
 //! validate` gets records without arrow, parquet or zstd in its build.
 //!
-//! The two name columns are `Arc<str>`, interned once by the producer and
-//! cloned per row: 475 distinct `group_path` values and a few thousand field
-//! names cover a whole replay, so a row costs a refcount, not an allocation.
-//! The dictionary builders are fed `&str` either way, so the bytes on disk are
-//! unchanged. Counts: docs/PERFORMANCE_NOTES.md#name-interning.
+//! The two name columns are `Arc<str>`, interned by the producer: 475 distinct
+//! `group_path` values cover a replay, so a row costs a refcount, not an
+//! allocation (docs/PERFORMANCE_NOTES.md#name-interning).
 
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -39,22 +37,15 @@ pub struct FieldRecord {
     /// `None` when the field name is unknown (unmapped export index).
     /// Interned when present: see the module docs.
     pub field_name: Option<Arc<str>>,
-    /// The `compatible_checksum` the replay declares for this handle. Unreal
-    /// hashes the property's *type* into it with its name, so it is a
-    /// build-stable address (equal on every build compared when this column
-    /// was added, 12.10 to 13.02) and the overlay's last-resort type lookup.
-    /// **`None` means the replay declares none**: only rows resolved through
-    /// a `NetFieldExportGroup` carry one, and array leaves and struct blobs
-    /// are addressed inside a payload, not by a declared handle.
-    /// docs/USAGE.md "fields.parquet" has the three-bucket breakdown and the
-    /// Phoenix smoke-wall case behind it.
+    /// The `compatible_checksum` the replay declares for this handle: Unreal
+    /// hashes the property's name and *type* into it, so it is a build-stable
+    /// address and the overlay's last-resort type lookup. **`None` means the
+    /// replay declares none**: only rows resolved through a
+    /// `NetFieldExportGroup` carry one, not array leaves or struct blobs.
     pub compatible_checksum: Option<u32>,
     pub bit_count: u32,
-    /// Raw bit payload; `None` for zero-bit fields. `SmallVec` derefs to
-    /// `&[u8]`, so Arrow sees the same bytes whether or not it spilled. Not
-    /// interned (payloads, not names: one pool entry per row) and not an arena,
-    /// which would have to cross the channel to the writer thread with the
-    /// rows. Allocation counts and the memory bound:
+    /// Raw bit payload; `None` for zero-bit fields. Inline up to 16 bytes, not
+    /// interned or arena-held:
     /// docs/PERFORMANCE_NOTES.md#raw_bits-smallvec-and-the-rejected-arena.
     pub raw_bits: Option<SmallVec<[u8; 16]>>,
     pub value_i64: Option<i64>,
@@ -65,10 +56,7 @@ pub struct FieldRecord {
 
 /// A single movement sample ready for export: one decoded move, nothing
 /// merged. Every field is set; a variant-0 move carries no velocity and gets
-/// 0.0 (no variant-0 move in the 157,457,629 measured, `vrf_movement` crate
-/// docs). Field order is `movement_schema()`'s, the three trailing columns
-/// appended rather than interleaved. Why there is no `mode_flags`:
-/// docs/USAGE.md "movement.parquet".
+/// 0.0 (none in the 157,457,629 measured, `vrf_movement` crate docs).
 #[derive(Debug, Clone, Copy)]
 pub struct MovementRecord {
     pub time_ms: u32,
@@ -85,16 +73,15 @@ pub struct MovementRecord {
     /// Server-assigned tick decoded from the move header.
     pub timestamp: u32,
     /// Move-header byte at bits [9..17], 0 on every corpus row and exported
-    /// anyway (docs/USAGE.md "movement.parquet"). Posture is `bCrouchHeld` on
-    /// the character actor, or the ~19 cm step in `pos_z`.
+    /// anyway. Posture is `bCrouchHeld` on the character actor, or the ~19 cm
+    /// step in `pos_z`.
     pub movement_state: u8,
-    /// 0 = variant 0, 1 = variant 1 (docs/USAGE.md "movement.parquet").
+    /// 0 = variant 0, 1 = variant 1.
     pub move_type: u8,
 }
 
-/// A single actor lifecycle record ready for export. The path columns stay
-/// `Option<String>`: ~3,800 rows a match, so interning would save under a
-/// tenth of a megabyte for a pool threaded through two more call sites.
+/// A single actor lifecycle record ready for export. The paths are not
+/// interned: ~3,800 rows a match, under 0.1 MB to save.
 #[derive(Debug, Clone)]
 pub struct ActorRecord {
     pub time_ms: u32,
@@ -205,9 +192,8 @@ pub struct CheckpointBlockRecord {
     pub actor_net_guid: u32,
     pub object_net_guid: Option<u32>,
     pub class_net_guid: Option<u32>,
-    /// Effective outer from the parsed header. Present for every recognized
-    /// block; `Some(0)` preserves the invalid-GUID sentinel. The nullable type
-    /// leaves room for a future header form that carries no effective outer.
+    /// Effective outer from the parsed header: set for every recognized block,
+    /// nullable for a header form without one. `Some(0)` is the invalid GUID.
     pub outer_net_guid: Option<u32>,
     pub has_rep_layout: bool,
     pub is_actor: bool,
@@ -237,13 +223,13 @@ pub struct EventRecord {
     pub id: String,
     /// Event group, e.g. `characterDeath`.
     pub group: String,
-    /// Free-form metadata. Empty is a real value, not a missing one.
+    /// Free-form metadata; empty is a value, not a missing one.
     pub metadata: String,
     /// First timestamp in milliseconds.
     pub time1: u32,
     /// Second timestamp in milliseconds.
     pub time2: u32,
-    /// Declared payload size from the chunk header.
+    /// Declared payload size from the chunk header (SizeInBytes).
     pub payload_size: i32,
     /// The payload verbatim. Undecoded on purpose.
     pub raw_payload: Vec<u8>,

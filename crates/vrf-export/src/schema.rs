@@ -104,9 +104,8 @@ macro_rules! column {
     };
 }
 
-/// Declare each schema's `Arc` twin, which `ArrowWriter` takes. Hand-written,
-/// a mismatched pair would compile (all return `Arc<Schema>`) and write the
-/// wrong column types; here a pairing is one line. Names stay greppable.
+/// Each schema's `Arc` twin, which `ArrowWriter` takes: one line a pairing, so
+/// a mismatched pair (all return `Arc<Schema>`) is visible.
 macro_rules! schema_refs {
     ($($ref_fn:ident => $schema_fn:ident),+ $(,)?) => {
         $(
@@ -256,11 +255,8 @@ columns! {
 columns! {
     /// Schema for the `fields` table (long format). An unresolved ClassNetCache
     /// block is one explicitly marked row, not split into fabricated fields.
-    ///
-    /// The address columns come first, so predicate pushdown on actor or group
-    /// uses row-group statistics without reading values; the sparse value
-    /// columns, at most one non-null per row, end it. What each null means: the
-    /// [`crate::record::FieldRecord`] field docs.
+    /// Address columns first, for predicate pushdown; the sparse value columns,
+    /// at most one non-null per row, last. Nulls: [`crate::record::FieldRecord`].
     pub fn fields_schema;
     #[cfg(any(feature = "fields", feature = "checkpoint-context"))]
     FieldRecord {
@@ -369,7 +365,7 @@ columns! {
         metadata: str,
         time1: u32,
         time2: u32,
-        // The wire's SizeInBytes: `raw_payload`'s length, readable from statistics.
+        // `raw_payload`'s length, readable from statistics.
         payload_size: i32,
         raw_payload: bytes,
         word0?: u32,

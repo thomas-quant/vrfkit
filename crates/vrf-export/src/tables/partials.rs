@@ -12,9 +12,7 @@ pub type PartialWriter<W> = TableWriter<PartialsTable, W>;
 impl Table for PartialsTable {
     type Row = PartialRecord;
     const DEFAULT_ROW_GROUP_SIZE: usize = 131_072;
-    // NOT measured: all 45 replays of the `Table::DICTIONARY_COLUMNS` sample
-    // wrote zero partial rows. The strings are listed by rule; every other
-    // column, raw_bits included, is PLAIN unmeasured. Re-measure once rows appear.
+    // Unmeasured: no sample replay wrote a partial row. Strings by rule only.
     const DICTIONARY_COLUMNS: &'static [&'static str] =
         &["source", "checkpoint_id", "payload_kind", "reason"];
     const MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
