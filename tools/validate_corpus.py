@@ -1,20 +1,12 @@
-"""Run the grammar oracle across an entire replay corpus and summarise.
+"""Run the grammar oracle across a replay corpus and summarise.
 
-A single replay proving out says the decoder works on that replay. Robustness is a
-different claim: no file may crash, and every file must land at essentially the
-same oracle pass rate. A file that drops to a low rate would mean either a build
-we mis-detected or a stream shape we have never seen.
+No file may crash, and every file must land at essentially the same oracle
+pass rate: a file that drops means a mis-detected build or an unseen stream
+shape. Lists every replay that still skips bits, most first.
 
-Replays are independent, so they run one subprocess each, several at a time.
-Set VRFKIT_JOBS to override the worker count (default: cores - 2, capped at
-16). This changes no number -- each subprocess owns its own output and shares
-nothing. Parallelising *inside* a replay was measured and closed, because
-content blocks are order-dependent (docs/archive/PROJECT_STATUS.md 7-F).
-
-Corpus discovery is shared with `check_decode_errors_corpus.py` through
-`corpus_scan.py` -- read that module's docstring for why the default does not
-recurse into subdirectories and why the excluded count always prints. Pass
-`--recursive` to walk subdirectories too.
+One vrfkit process per replay, VRFKIT_JOBS at a time (default cores - 2, at
+most 16); within a replay content blocks are order-dependent. Discovery is
+corpus_scan.py's: top level unless `--recursive`.
 
 Usage:
     python tools/validate_corpus.py <vrfkit.exe> <dir-with-vrf-files> [limit]
@@ -39,8 +31,6 @@ import summary_counters as sc
 PATTERNS = {
     "branch": re.compile(r"Branch:\s+(\S+)"),
     "blocks": re.compile(r"Total content blocks:\s+(\d+)"),
-    # The oracle's real label: a pattern that never matched once kept the
-    # corpus malformed figure a vacuous 0.
     "malformed": re.compile(r"Malformed framing:\s+(\d+)"),
     "skipped": re.compile(r"Skipped bits:\s+(\d+)"),
     "rate": re.compile(r"ORACLE PASS RATE:\s+([\d.]+)%"),
@@ -60,13 +50,9 @@ def parse_oracle_output(output: str):
 
 
 def problems(failures, missing) -> list[str]:
-    """Everything that makes this sweep a failure rather than a measurement: a
-    replay the oracle could not validate, or a counter it stopped printing,
-    which must fail rather than read as 0 and leave the totals summed over a
-    subset. The pass rates stay informational: no threshold can be defended
-    without the corpus in hand, and `check_corpus_baseline.py` pins each
-    replay's rate, catching a rate that MOVED.
-    """
+    """What makes this sweep a failure: a replay the oracle could not
+    validate, or a counter it stopped printing (never read as 0). Pass rates
+    are not gated; check_corpus_baseline.py pins each replay's."""
     out = [f"{name}: {why}" for name, why in failures]
     out += [f"the oracle did not print '{key}' on {count} replay(s), so the "
             f"corpus total for it is summed over the rest"
@@ -109,7 +95,6 @@ def main(argv: list[str]) -> int:
     jobs = max(1, min(int(os.environ.get("VRFKIT_JOBS", "0")) or (os.cpu_count() or 2) - 2, 16))
 
     scan = corpus_scan.discover(root, args.recursive)
-    # Unconditional, `excluded=0` included -- see corpus_scan.py.
     print(corpus_scan.scope_line(scan, args.redact_identifiers))
     files = scan.files
     if args.limit is not None:
@@ -125,6 +110,7 @@ def main(argv: list[str]) -> int:
     failures: list[tuple[str, str]] = []
     branches: collections.Counter[str] = collections.Counter()
     rates: list[tuple[float, str]] = []
+    skipping: list[tuple[int, object, float, str]] = []
     totals = collections.Counter()
     missing: collections.Counter[str] = collections.Counter()
     started = time.time()
@@ -146,13 +132,17 @@ def main(argv: list[str]) -> int:
                 continue
             ok += 1
             branches[got["branch"].group(1)] += 1
-            rates.append((float(got["rate"].group(1)), label))
+            rate = float(got["rate"].group(1))
+            rates.append((rate, label))
+            values = {}
             for key in ("blocks", "malformed", "skipped", "fields", "rpcs"):
                 if got[key]:
-                    totals[key] += int(got[key].group(1))
+                    values[key] = int(got[key].group(1))
+                    totals[key] += values[key]
                 else:
-                    # Absent, never 0: `problems` fails the run on it.
-                    missing[key] += 1
+                    missing[key] += 1  # never 0: `problems` fails the run on it
+            if values.get("skipped"):
+                skipping.append((values["skipped"], values.get("malformed", "?"), rate, label))
             if i % 25 == 0 or i == len(files):
                 print(f"  [{i}/{len(files)}] ok={ok} failed={len(failures)}")
 
@@ -186,6 +176,9 @@ def main(argv: list[str]) -> int:
     print("\ncorpus totals:")
     for key in ("blocks", "fields", "rpcs", "malformed", "skipped"):
         print(f"  {key:<10} {totals[key]:>14,}")
+    print(f"\nreplays that skip bits: {len(skipping)}")
+    for skipped, malformed, rate, label in sorted(skipping, key=lambda item: -item[0]):
+        print(f"  {skipped:>12,} bits  malformed={malformed}  rate={rate:.6f}%  {label}")
 
     found = problems(failures, missing)
     if found:
