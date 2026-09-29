@@ -10,7 +10,7 @@ use crate::bunch::{RawBunchHeader, continues};
 use crate::error::{PartialSequenceKind, Result};
 use crate::types::{ChannelCloseReason, MAX_ACTIVE_CHANNELS, MAX_PACKET_SIZE_BITS};
 
-use std::collections::HashMap;
+use vrf_schema::FxHashMap;
 
 /// Result of reading one packet.
 ///
@@ -50,8 +50,8 @@ struct PartialState {
 /// partial authority. It stays because `read_packet` is public; without it
 /// that count would be a permanent 0.
 pub struct RawPacketReader {
-    partial_bunches: HashMap<u32, PartialState>,
-    in_reliable_sequence: HashMap<u32, i32>,
+    partial_bunches: FxHashMap<u32, PartialState>,
+    in_reliable_sequence: FxHashMap<u32, i32>,
     max_channels: usize,
 }
 
@@ -64,8 +64,8 @@ impl RawPacketReader {
 
     pub(crate) fn with_max_channels(max_channels: usize) -> Self {
         Self {
-            partial_bunches: HashMap::new(),
-            in_reliable_sequence: HashMap::new(),
+            partial_bunches: FxHashMap::default(),
+            in_reliable_sequence: FxHashMap::default(),
             max_channels,
         }
     }

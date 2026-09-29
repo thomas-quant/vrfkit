@@ -6,17 +6,19 @@
 //!
 //! # Where this runs
 //!
-//! vrfkit's `sink/rpc.rs` calls [`decode_effect_blob_json`] for a parameter
-//! with one of those names when the overlay produced no value, and puts the
-//! JSON into `value_str` **in addition to** `raw_bits`. Like the type overlay
-//! it is additive: a failure leaves `value_str` null, keeps the bits and
-//! counts. `tools/to_valplay_bundle.py` reads its shot inputs from the raw
-//! bits, so the JSON changes nothing it consumes.
+//! vrfkit calls [`decode_effect_blob_json`] for an RPC parameter with one of
+//! those names the overlay left untyped (`sink/rpc.rs`) and for
+//! `ServerActiveEffects`' `FloatValues` / `ObjectValues` members
+//! (`sink/blobs.rs`), and puts the JSON into `value_str` **in addition to**
+//! `raw_bits`. Like the type overlay it is additive: a failure leaves
+//! `value_str` null, keeps the bits and counts. `tools/to_valplay_bundle.py`
+//! reads its shot inputs from the raw bits, which the JSON leaves untouched.
 //!
 //! Where that Python port can return partial elements on malformed input, this
 //! decoder rejects the whole array (underfilled member windows, missing or
-//! nonzero terminators, residual bits). On real blobs the two agree: 91,827
-//! shot arrays from 13.01-13.05 matched in structure, tag and bit pattern.
+//! nonzero terminators, repeated or descending element indices, residual bits).
+//! On real blobs the two agree: 91,827 shot arrays from 13.01-13.05 matched in
+//! structure, tag and bit pattern.
 //!
 //! # Wire layout (corpus-validated)
 //!
@@ -68,6 +70,10 @@ pub enum EffectBlobError {
     ArrayCountTooLarge { count: u32, max: u32 },
     #[error("element index {index} >= declared count {count}")]
     IndexOutOfBounds { index: u32, count: u32 },
+    /// A repeat would overwrite the earlier element; all 61,709 arrays on
+    /// `02d4d478` ascend.
+    #[error("element index {index} does not follow {previous}")]
+    NonAscendingIndex { index: u32, previous: u32 },
     #[error("field payload {bits} bits exceeds remaining {remaining}")]
     PayloadTooLarge { bits: u32, remaining: u64 },
     /// A guard against endless field loops.

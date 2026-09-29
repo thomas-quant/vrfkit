@@ -399,6 +399,23 @@ fn a_non_zero_trailing_terminator_is_rejected() {
     );
 }
 
+/// Element indices must ascend: a repeated index would overwrite the earlier
+/// element, and a descending one is no order the writer produces.
+#[test]
+fn an_element_index_that_does_not_ascend_is_rejected() {
+    // Count 2, then two float elements (tag 284, values 1.0 and 5.0) at the
+    // given wire indices, then the array terminator.
+    for (first, second) in [("02", "02"), ("04", "02")] {
+        let hex = format!("04 {first}102039041240 0000803f 00 {second}102039041240 0000a040 00 00");
+        let err = decode_effect_blob_json(EffectArrayKind::Float, &decode_hex(&hex), 208)
+            .expect_err("a non-ascending index must not decode");
+        assert!(
+            matches!(err, EffectBlobError::NonAscendingIndex { .. }),
+            "{first}/{second}: got {err:?}"
+        );
+    }
+}
+
 /// Each shared framing failure keeps its name and fields (cap 256).
 #[test]
 fn framing_failures_reach_the_caller_as_their_own_variant() {

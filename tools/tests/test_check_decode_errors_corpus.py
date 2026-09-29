@@ -17,14 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_decode_errors_corpus as guard  # noqa: E402
 
 #: The main-pass sink lines, failure counters at zero. Values from a real 13.02
-#: `--checkpoints` export log, except the CNC, tail and trailer lines.
+#: `--checkpoints` export log, except the CNC, tail, trailer, route and walk lines.
 CLEAN_SINK = """
 Movement rows:     2407298
 Movement errors:   0
 Array decode:      25052 elements / 96076 fields / 0 errors / 0 truncations
 Array residual:    0 root bits / 0 nested bits / 0 implicit ends
 Array leaf errs:   0
+Route children:    41 player info / 12 rewards / 30 selected / 55 kills / 380 active effects / 21 ignore actors / 9 blinds / 144 projectile path
 Truncated RPCs:    0
+RPC param walks:   338107
 CNC brute force:   454 attempted / 0 unwalked
 Movement tails:    0 sized (0 bits) / 0 open (0 bits)
 Envelope trailers: 2380000 streams / 57120000 bits
@@ -53,6 +55,8 @@ CLEAN_WITH_CHECKPOINTS = LIVE_EXPORT + """
   Checkpoint fails: 0 array / 0 truncated RPC / 0 movement
   Checkpoint array: 44652 elements / 364594 fields / 0 truncations / 0 root bits / 0 nested bits / 0 implicit ends
   Checkpoint leaf:  0 typed decode errors
+  Checkpoint route children: 40 player info / 10 rewards / 30 selected / 0 kills / 99 active effects / 0 ignore actors / 0 blinds / 0 projectile path
+  Checkpoint RPC walks: 0
   Checkpoint reward opaque: 7 empty variants
   Checkpoint movement: 0 failures
   Checkpoint movement tails: 0 sized (0 bits) / 0 open (0 bits)
@@ -94,7 +98,8 @@ class ReadCountersTests(unittest.TestCase):
 #: Corpus totals from a working run: every work counter moved.
 WORKING_TOTALS = {"overlay_decoded_ok": 129000, "struct_blobs_decoded": 63,
                   "array_elements_decoded": 25052, "array_fields_emitted": 96076,
-                  "movement_rows": 2407298, "cp_overlay_decoded_ok": 500,
+                  "movement_rows": 2407298, "rpc_param_walks": 338107,
+                  "cp_overlay_decoded_ok": 500,
                   "cp_struct_blobs_decoded": 8, "cp_array_elements_decoded": 44652,
                   "cp_array_fields_emitted": 364594}
 
@@ -105,6 +110,7 @@ WORK_CASES = (
     (False, "array_elements_decoded", "Array decode elements", "Array residual root bits"),
     (False, "array_fields_emitted", "Array decode fields", "Array leaf errs"),
     (False, "movement_rows", "Movement rows", "Movement errors"),
+    (False, "rpc_param_walks", "RPC param walks", "Truncated RPCs"),
     (True, "cp_overlay_decoded_ok", "Checkpoint Overlay decoded", "Checkpoint Overlay errors"),
     (True, "cp_struct_blobs_decoded", "Checkpoint blobs decoded", "Checkpoint blobs failed"),
     (True, "cp_array_elements_decoded", "Checkpoint array elements", "Checkpoint fails array"),
@@ -236,7 +242,9 @@ Movement errors:   0
 Array decode:      10 elements / 40 fields / 0 errors / 0 truncations
 Array residual:    0 root bits / 0 nested bits / 0 implicit ends
 Array leaf errs:   0
+Route children:    1 player info / 1 rewards / 1 selected / 1 kills / 1 active effects / 1 ignore actors / 1 blinds / 1 projectile path
 Truncated RPCs:    0
+RPC param walks:   20
 CNC brute force:   4 attempted / 0 unwalked
 Movement tails:    0 sized (0 bits) / 0 open (0 bits)
 Envelope trailers: 5 streams / 120 bits
@@ -251,6 +259,8 @@ CHECKPOINTS = """
   Checkpoint fails: 0 array / 0 truncated RPC / 0 movement
   Checkpoint array: 30 elements / 90 fields / 0 truncations / 0 root bits / 0 nested bits / 0 implicit ends
   Checkpoint leaf:  0 typed decode errors
+  Checkpoint route children: 0 player info / 0 rewards / 0 selected / 0 kills / 0 active effects / 0 ignore actors / 0 blinds / 0 projectile path
+  Checkpoint RPC walks: 0
   Checkpoint reward opaque: 0 empty variants
   Checkpoint movement tails: 0 sized (0 bits) / 0 open (0 bits)
   Checkpoint envelope trailers: 0 streams / 0 bits
@@ -297,6 +307,8 @@ if "cpnoarray" in name:
     emit(checkpoints=CHECKPOINTS.replace("30 elements / 90 fields", "0 elements / 0 fields"))
 if "noarray" in name:
     emit(sink=SINK.replace("10 elements / 40 fields", "0 elements / 0 fields"))
+if "nowalk" in name:
+    emit(sink=SINK.replace("RPC param walks:   20", "RPC param walks:   0"))
 emit()
 '''.replace("import sys\n", "import re\nimport sys\n", 1)
 
@@ -336,7 +348,9 @@ class MainWiringTests(unittest.TestCase):
             "Decode errors: 0", "Movement rows: 100", "Movement errors: 0",
             "Array decode: 10 elements / 40 fields / 0 errors / 0 truncations",
             "Array residual: 0 root bits / 0 nested bits / 0 implicit ends",
-            "Array leaf errs: 0", "Truncated RPCs: 0",
+            "Array leaf errs: 0", "Truncated RPCs: 0", "RPC param walks: 20",
+            "Route children: 1 player info / 1 rewards / 1 selected / 1 kills / "
+            "1 active effects / 1 ignore actors / 1 blinds / 1 projectile path",
             "CNC brute force: 4 attempted / 0 unwalked",
             "Movement tails: 0 sized (0 bits) / 0 open (0 bits)",
             "Envelope trailers: 5 streams / 120 bits", "ActiveBlinds trailers: 2 empty deltas",
@@ -353,8 +367,7 @@ class MainWiringTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertRegex(output, rf"(?m)^  {re.escape(line)}$")
         self.assertRegex(
-            output, r"(?m)^  unbacked gates: Truncated RPCs \(summary\.rs prints no count of "
-                    r"RPC parameter walks\); CNC brute force unwalked \(.+\); "
+            output, r"(?m)^  unbacked gates: CNC brute force unwalked \(.+\); "
                     r"Movement tails sized \(.+\)$")
         self.assertRegex(
             output, r"(?m)^  checkpoint unbacked gates: Checkpoint fails movement \(.+\); "
@@ -363,9 +376,9 @@ class MainWiringTests(unittest.TestCase):
                     r"force unwalked \(.+\)$")
         ok = [line for line in output.splitlines() if line.startswith("OK:")]
         self.assertEqual(len(ok), 1, output)
-        self.assertIn("10 backed by work that moved (Decoded OK 90, Struct blobs decoded 5, "
-                      "Array decode elements 10, Array decode fields 40, Movement rows 100), "
-                      "3 with no work counter (Truncated RPCs, CNC brute force unwalked, "
+        self.assertIn("11 backed by work that moved (Decoded OK 90, Struct blobs decoded 5, "
+                      "Array decode elements 10, Array decode fields 40, Movement rows 100, "
+                      "RPC param walks 20), 2 with no work counter (CNC brute force unwalked, "
                       "Movement tails sized)", ok[0])
         self.assertIn("8 backed by work that moved (Checkpoint Overlay decoded 500, "
                       "Checkpoint blobs decoded 8, Checkpoint array elements 30, Checkpoint "
@@ -393,6 +406,7 @@ class MainWiringTests(unittest.TestCase):
         for name, extra, dead in (
                 ("nothingran.vrf", (), "Decoded OK totalled 0"),
                 ("noarray.vrf", (), "Array decode elements totalled 0"),
+                ("nowalk.vrf", (), "RPC param walks totalled 0"),
                 ("cpnoarray.vrf", ("--checkpoints",), "Checkpoint array elements totalled 0")):
             with self.subTest(name):
                 code, output = self.run_main(name, extra_args=extra)

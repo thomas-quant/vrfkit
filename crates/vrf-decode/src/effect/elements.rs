@@ -88,6 +88,7 @@ fn decode_elements<V: EffectValue>(
     let mut elements = vec![absent; count as usize];
     // Terminators are required, not inferred; see `MissingTerminator`.
     let mut array_terminated = false;
+    let mut previous: Option<u32> = None;
 
     while !reader.at_end() {
         let Some(index) = read_element_index(reader, count)? else {
@@ -95,6 +96,10 @@ fn decode_elements<V: EffectValue>(
             array_terminated = true;
             break;
         };
+        if let Some(previous) = previous.filter(|&p| index <= p) {
+            return Err(EffectBlobError::NonAscendingIndex { index, previous });
+        }
+        previous = Some(index);
 
         let elem = &mut elements[index as usize];
         let mut field_count = 0u32;

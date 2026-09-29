@@ -192,14 +192,14 @@ Parquet files plus a manifest when checkpoints are included:
 
 | File | Rows | Bytes |
 |---|---|---|
-| `fields.parquet` | 1,296,660 | 12,691,368 |
+| `fields.parquet` | 1,296,660 | 12,691,843 |
 | `movement.parquet` | 1,844,147 | 19,984,802 |
-| `actors.parquet` | 3,827 | 68,243 |
+| `actors.parquet` | 3,827 | 76,830 |
 | `net_guids.parquet` | 16,167 | 114,423 |
 | `events.parquet` | 195 | 12,455 |
 | `partials.parquet` | 0 | 2,505 |
-| `checkpoint_fields.parquet` | 352,089 | 1,190,437 |
-| `checkpoint_actors.parquet` | 3,014 | 24,345 |
+| `checkpoint_fields.parquet` | 352,089 | 1,193,006 |
+| `checkpoint_actors.parquet` | 3,014 | 25,848 |
 | `checkpoint_net_guids.parquet` | 74,270 | 175,916 |
 | `checkpoint_blocks.parquet` | 22,247 | 112,649 |
 | `checkpoint_guid_entries.parquet` | 74,270 | 219,662 |

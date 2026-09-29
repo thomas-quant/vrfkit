@@ -17,10 +17,13 @@
 //!    preservation row, post-RepLayout tails included) is a subset of
 //!    `total_failures`, reconciles with `unresolved_rpc_payloads_preserved` and
 //!    is never loss: `real_loss() == total_failures - preserved_unresolved`.
+//!
+//! `diag` prints both as `reconciled` ([`FailureAggregate::reconciles`]).
 
 use std::sync::Arc;
 
 use vrf_net::pipeline::{StreamFailure, StreamFailureCause, StreamKind};
+use vrf_net::stats::NetStats;
 use vrf_schema::FxHashMap;
 
 /// Detailed failure records retained per cell. Counts continue after sample
@@ -230,6 +233,12 @@ impl FailureAggregate {
         self.total_failures - self.preserved_unresolved
     }
 
+    /// Whether both invariants hold against the same pass's `NetStats`.
+    pub fn reconciles(&self, net: &NetStats) -> bool {
+        self.total_failures == net.field_stream_failures + net.rpc_stream_failures
+            && self.preserved_unresolved == net.unresolved_rpc_payloads_preserved
+    }
+
     /// Failures counted exactly but omitted from keyed cells after the cap.
     pub fn overflow(&self) -> &FailureCell {
         &self.overflow
@@ -299,6 +308,29 @@ mod tests {
         assert_eq!(cells[0].0.cause, StreamFailureCause::AbandonedTail);
         assert_eq!(cells[1].0.kind, StreamKind::Rpc);
         assert_eq!(cells[1].0.cause, StreamFailureCause::ReadError);
+    }
+
+    /// Both invariants against the pass's `NetStats`: a failure framing
+    /// counted but the aggregate missed, or a preservation it did not see,
+    /// is a wiring bug and reads `false`.
+    #[test]
+    fn reconciles_checks_both_invariants_against_net_stats() {
+        let mut agg = FailureAggregate::default();
+        let mut rpc = failure(StreamKind::Rpc, StreamFailureCause::ReadError, 0);
+        rpc.payload_preserved = true;
+        let field = failure(StreamKind::RepLayout, StreamFailureCause::ReadError, 9);
+        agg.note_failure(&field, "A".into());
+        agg.note_failure(&rpc, "B".into());
+        let net = |field, rpc, preserved| NetStats {
+            field_stream_failures: field,
+            rpc_stream_failures: rpc,
+            unresolved_rpc_payloads_preserved: preserved,
+            ..NetStats::default()
+        };
+        assert!(agg.reconciles(&net(1, 1, 1)));
+        for wrong in [net(1, 2, 1), net(0, 1, 1), net(1, 1, 0)] {
+            assert!(!agg.reconciles(&wrong));
+        }
     }
 
     /// Absorb adds counts and moves samples up to the cap, so a checkpoint

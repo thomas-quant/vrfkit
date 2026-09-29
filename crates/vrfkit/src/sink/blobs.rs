@@ -11,8 +11,8 @@
 use smallvec::SmallVec;
 use vrf_bitio::BitReader;
 use vrf_decode::{
-    ABILITY_CASTS_SCHEMA, ArrayDecodeStats, COMBAT_ROUNDS_SCHEMA, FieldType, FlattenedField,
-    structs,
+    ABILITY_CASTS_SCHEMA, ArrayDecodeStats, COMBAT_ROUNDS_SCHEMA, EffectArrayKind, FieldType,
+    FlattenedField, structs,
 };
 use vrf_schema::NetGuidCache;
 
@@ -35,8 +35,8 @@ enum Leaf {
     Field(FieldType),
     /// KillData `WeaponTheme`: an FString that must carry its null terminator.
     WeaponTheme,
-    /// TrackedRewards `LocalizedRewardName`: the full FText reader.
-    LocalizedText,
+    /// An `FEffectData*` array, as the RPC parameters of the same name.
+    Effect(EffectArrayKind),
     /// A raw container whose own array is typed by [`NESTED_RULES`].
     Nested,
 }
@@ -69,15 +69,16 @@ type LeafRule = (
 /// 714 replays), not the values' meaning or units.
 #[rustfmt::skip]
 const LEAF_RULES: &[LeafRule] = {
-    use FieldType::{Bool, Byte, EnumByte, FName, Float, Int32, Int64, ObjectNetGuid, UInt32, VectorDouble};
-    use Leaf::{Field, LocalizedText, Nested, WeaponTheme};
+    use FieldType::{Bool, Byte, EnumByte, FName, FTextTree, Float, Int32, Int64, ObjectNetGuid, UInt32, VectorDouble};
+    use EffectArrayKind::{Float as Floats, Object as Objects};
+    use Leaf::{Effect, Field, Nested, WeaponTheme};
     use MeasuredArrayRoute::*;
     use Overlay::*;
     &[
         (AllPlayersObfuscatedPlayerInformation, 49, None, None, Field(Bool), SameType, &[]),
         (AllPlayersObfuscatedPlayerInformation, 50, None, None, Field(EnumByte), SameType, &[]),
         (TrackedRewards, 28, Some("RewardName"), Some(1_337_472_711), Field(FName), SameType, &[]),
-        (TrackedRewards, 29, Some("LocalizedRewardName"), Some(483_770_233), LocalizedText, RawEntry, &[]),
+        (TrackedRewards, 29, Some("LocalizedRewardName"), Some(483_770_233), Field(FTextTree), RawEntry, &[]),
         (TrackedRewards, 30, Some("InstancesOfReward"), Some(2_922_243_316), Field(Int32), SameType, &[]),
         (TrackedRewards, 31, Some("RewardGrantStrategy"), Some(3_589_631_714), Field(EnumByte), SameType, &[]),
         (TrackedRewards, 32, Some("Source"), Some(1_118_571_008), Field(EnumByte), SameType, &[]),
@@ -104,6 +105,8 @@ const LEAF_RULES: &[LeafRule] = {
         (ServerActiveEffects, 6, None, None, Field(Bool), SameType, &[]),
         (ServerActiveEffects, 7, None, None, Field(ObjectNetGuid), SameType, &[]),
         (ServerActiveEffects, 8, None, None, Field(ObjectNetGuid), SameType, &[]),
+        (ServerActiveEffects, 9, Some("FloatValues"), Some(3_597_032_544), Effect(Floats), NoEntry, &[]),
+        (ServerActiveEffects, 17, Some("ObjectValues"), Some(865_691_585), Effect(Objects), NoEntry, &[]),
         // No top-level overlay; the exact 192-bit windows decode on every measured build.
         (ServerActiveEffects, 30, Some("Translation"), None, Field(VectorDouble), NoneOrSame, &[]),
         (ServerActiveEffects, 31, Some("Scale3D"), None, Field(VectorDouble), NoneOrSame, &[]),
@@ -320,9 +323,7 @@ fn decode_leaf(leaf: Leaf, raw: &[u8], bit_count: u32, failures: &mut u64) -> De
         }
         Leaf::Nested => return (None, None, None, None),
         Leaf::WeaponTheme => kill_weapon_theme(raw, bit_count),
-        Leaf::LocalizedText => vrf_decode::decode_ftext_tree(raw, bit_count)
-            .ok()
-            .map(|value| value.to_json()),
+        Leaf::Effect(kind) => vrf_decode::decode_effect_blob_json(kind, raw, bit_count).ok(),
     };
     if text.is_none() {
         *failures = failures.saturating_add(1);
@@ -577,6 +578,7 @@ impl ExportSink<'_> {
             return;
         }
 
+        let rows_before = self.stats.fields_emitted;
         for (f, (leaf, nested)) in flattened.iter().zip(leaves) {
             let errors = &mut self.stats.array_leaf_decode_errors;
             let columns = match leaf {
@@ -601,6 +603,9 @@ impl ExportSink<'_> {
                 let name: [&str; 3] = [parent, &f.path, &member.path];
                 self.push_child(handle, &name, bits, &member.raw_bits, columns);
             }
+        }
+        if let Some(route) = route {
+            *self.stats.route_children(route) += self.stats.fields_emitted - rows_before;
         }
     }
 
@@ -831,18 +836,13 @@ pub(super) fn decode_leaf_with_stats(
     bit_count: u32,
     failures: &mut u64,
 ) -> DecodedColumns {
-    use vrf_decode::{DecodedValue, decode_field};
-
-    match decode_field(field_type, raw, bit_count) {
-        Ok(DecodedValue::I64(v)) => (Some(v), None, None, None),
-        Ok(DecodedValue::F64(v)) => (None, Some(v), None, None),
-        Ok(DecodedValue::Bool(v)) => (None, None, Some(v), None),
-        Ok(DecodedValue::Str(v)) => (None, None, None, Some(v)),
-        Err(_) => {
+    vrf_decode::decode_field(field_type, raw, bit_count).map_or_else(
+        |_| {
             *failures = failures.saturating_add(1);
-            (None, None, None, None)
-        }
-    }
+            DecodedColumns::default()
+        },
+        vrf_decode::DecodedValue::into_columns,
+    )
 }
 
 /// A handle -> type map derived from the CombatRoundReports descriptors: the
@@ -1150,7 +1150,7 @@ mod tests {
                 483_770_233,
                 Some(FieldType::Raw)
             ),
-            Some(Leaf::LocalizedText)
+            Some(Leaf::Field(FieldType::FTextTree))
         );
         for (handle, name, checksum, resolved) in [
             (29, "Other", 483_770_233, FieldType::Raw),
@@ -2159,6 +2159,22 @@ mod tests {
                 };
                 let (records, stats) = export_array(identity, &[leaf], &bits, branch);
                 let at = format!("{branch:?} {route:?}");
+                // One child, counted on its own route alone. The fields are read
+                // directly, in `ALL` order: `route_children` would read back any
+                // swap of its own arms as consistent.
+                let counted = [
+                    stats.route_children_player_information,
+                    stats.route_children_tracked_rewards,
+                    stats.route_children_selected_v2,
+                    stats.route_children_kill_data,
+                    stats.route_children_server_active_effects,
+                    stats.route_children_requested_ignore_actors,
+                    stats.route_children_active_blinds,
+                    stats.route_children_projectile_path,
+                ];
+                let want = MeasuredArrayRoute::ALL
+                    .map(|r| u64::from(r == route && admitted.admits(route)));
+                assert_eq!(counted, want, "{at}");
                 let parent = records.fields.last().unwrap();
                 assert_eq!(parent.field_name.as_deref(), Some(identity.1), "{at}");
                 assert_eq!(parent.raw_bits.as_deref(), Some(pack(&bits).as_slice()));
@@ -2333,6 +2349,46 @@ mod tests {
         let parent = &records.fields[1];
         assert_eq!(parent.raw_bits.as_deref(), Some(pack(&bits).as_slice()));
         assert_eq!(stats.array_leaf_decode_errors, 1);
+    }
+
+    /// `FloatValues` (9) and `ObjectValues` (17) are effect arrays: the effect
+    /// decoder's JSON, only under the declared name and checksum, and a blob
+    /// it refuses counts as a leaf error.
+    #[test]
+    fn measured_effect_value_arrays_render_as_effect_json() {
+        let float = unpack(&[
+            2, 2, 0x10, 0x20, 0x39, 4, 0x12, 0x40, 0, 0, 0x80, 0x3f, 0, 0,
+        ]);
+        let object = unpack(&[2, 2, 0x20, 0x20, 0x37, 4, 0x22, 0x20, 0x1d, 0x30, 0, 0]);
+        let identity = (EFFECTS_GROUP, "ServerActiveEffects", 3_301_618_856);
+        for (handle, name, checksum, payload, want, errors) in [
+            (
+                9,
+                "FloatValues",
+                3_597_032_544,
+                &float,
+                Some("[{\"tag\":284,\"value\":1}]"),
+                0,
+            ),
+            (
+                17,
+                "ObjectValues",
+                865_691_585,
+                &object,
+                Some("[{\"tag\":283,\"value\":3086}]"),
+                0,
+            ),
+            (9, "FloatValues", 0, &float, None, 0),
+            (17, "ObjectValues", 865_691_585, &float, None, 1),
+        ] {
+            let bits = one_leaf(handle, payload);
+            let leaves = [(handle, name, checksum)];
+            let (records, stats) = export_array(identity, &leaves, &bits, Some(MEASURED_BUILD));
+            let child = &records.fields[0];
+            assert_eq!(child.value_str.as_deref(), want, "{name} {checksum}");
+            assert_eq!(child.raw_bits.as_deref(), Some(pack(payload).as_slice()));
+            assert_eq!(stats.array_leaf_decode_errors, errors, "{name} {checksum}");
+        }
     }
 
     #[test]

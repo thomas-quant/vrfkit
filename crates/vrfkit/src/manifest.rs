@@ -137,23 +137,15 @@ pub fn write_manifest(
     // `counts` above stay unchanged for the readers they already have.
     doc.add("quality", quality_json(quality));
 
-    // Each BombPlayerState actor's account `subject` and `SpawnedCharacter`
-    // (== movement.character_net_guid): the join from actor-keyed tables to
-    // playerLoadouts identities, even when two players share an agent.
     let players = (players.iter())
-        .map(|(guid, id)| {
-            format!(
-                "{{ \"actor_net_guid\": {guid}, \"subject\": {}, \"character_net_guid\": {} }}",
-                json_option(id.subject.as_deref()),
-                id.character_net_guid
-                    .map_or_else(|| "null".to_owned(), |guid| guid.to_string())
-            )
-        })
+        .map(|&(guid, id)| player_json(guid, id))
         .collect();
     doc.add("players", array(1, players));
-    // Net-field exports the cache could not place (an out-of-range handle).
-    // Expected zero.
-    doc.add("dropped_field_exports", cache.dropped_field_exports());
+    // Net-field exports the cache could not place (an out-of-range handle), and
+    // declarations that renamed what later rows mean. Expected zero.
+    doc.add("dropped_field_exports", cache.dropped_field_exports())
+        .add("replaced_export_groups", cache.replaced_export_groups())
+        .add("renamed_field_exports", cache.renamed_field_exports());
     let groups = (cache.groups().iter())
         .map(|group| {
             let fields = (group.populated_fields())
@@ -178,6 +170,22 @@ pub fn write_manifest(
 
     fs::write(path, doc.render() + "\n")?;
     Ok(())
+}
+
+/// One BombPlayerState actor's account `subject` and `SpawnedCharacter`
+/// (== movement.character_net_guid): the join from actor-keyed tables to
+/// playerLoadouts identities, even when two players share an agent. The last
+/// body is `character_net_guid`; `character_net_guids` keeps the pawns a
+/// reconnect replaced.
+fn player_json(guid: u32, id: &PlayerIdentity) -> String {
+    let bodies: Vec<String> = id.character_net_guids.iter().map(u32::to_string).collect();
+    format!(
+        "{{ \"actor_net_guid\": {guid}, \"subject\": {}, \"character_net_guid\": {}, \
+         \"character_net_guids\": [{}] }}",
+        json_option(id.subject.as_deref()),
+        bodies.last().map_or("null", String::as_str),
+        bodies.join(", "),
+    )
 }
 
 fn quality_json(quality: &ManifestQuality<'_>) -> String {
@@ -573,6 +581,24 @@ mod tests {
         });
         assert!(json.contains("\"content_blocks_lost\": 23,"), "{json}");
         assert!(json.contains("\"checkpoints\": null\n"), "{json}");
+    }
+
+    #[test]
+    fn a_player_lists_every_body_and_names_the_last() {
+        let mut id = PlayerIdentity {
+            subject: Some("uuid".to_owned()),
+            character_net_guids: vec![1510, 45530],
+        };
+        assert_eq!(
+            player_json(9, &id),
+            "{ \"actor_net_guid\": 9, \"subject\": \"uuid\", \"character_net_guid\": 45530, \
+             \"character_net_guids\": [1510, 45530] }"
+        );
+        id.character_net_guids.clear();
+        assert!(
+            player_json(9, &id)
+                .ends_with("\"character_net_guid\": null, \"character_net_guids\": [] }")
+        );
     }
 
     #[test]

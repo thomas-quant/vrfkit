@@ -52,7 +52,7 @@ pub struct RawBunchHeader {
 /// concatenated and the stitched payload is handed back for framing. Every
 /// non-final fragment must be byte-aligned.
 pub struct PartialBunchAccumulator {
-    fragments: std::collections::HashMap<u32, AccumulatorState>,
+    fragments: vrf_schema::FxHashMap<u32, AccumulatorState>,
     total_buffered_bits: usize,
     max_active: usize,
     max_buffered_bits: usize,
@@ -118,7 +118,7 @@ impl PartialBunchAccumulator {
 
     fn with_limits(max_active: usize, max_buffered_bits: usize) -> Self {
         Self {
-            fragments: std::collections::HashMap::new(),
+            fragments: vrf_schema::FxHashMap::default(),
             total_buffered_bits: 0,
             max_active,
             max_buffered_bits,

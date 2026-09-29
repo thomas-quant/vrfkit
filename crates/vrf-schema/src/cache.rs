@@ -38,6 +38,10 @@ pub struct NetGuidCache {
     guid_generation: u64,
     /// See [`Self::dropped_field_exports`].
     dropped_field_exports: u64,
+    /// See [`Self::replaced_export_groups`].
+    replaced_export_groups: u64,
+    /// See [`Self::renamed_field_exports`].
+    renamed_field_exports: u64,
 }
 
 impl NetGuidCache {
@@ -96,6 +100,7 @@ impl NetGuidCache {
             // because merging would let the old class's slots name handles the
             // new class never declared.
             self.groups[idx] = group;
+            self.replaced_export_groups += 1;
             // The old class's spellings and leaf claim go with it.
             self.rebuild_group_indexes();
             idx
@@ -176,17 +181,23 @@ impl NetGuidCache {
         self.guid_generation
     }
 
-    /// Register a NetGUID -> path mapping. A write that changes nothing does
-    /// not bump [`Self::guid_generation`]: frame ExportData re-declares GUIDs
-    /// every frame, which would collapse a memo's hit rate.
-    pub fn set_net_guid_path(&mut self, net_guid: u32, path: String, outer: Option<NetworkGuid>) {
+    /// Register a NetGUID -> path mapping; an invalid outer removes the old
+    /// one. A write that changes nothing neither allocates nor bumps
+    /// [`Self::guid_generation`]: frame ExportData re-declares GUIDs every
+    /// frame, which would collapse a memo's hit rate.
+    pub fn set_net_guid_path(
+        &mut self,
+        net_guid: u32,
+        path: impl AsRef<str> + Into<String>,
+        outer: Option<NetworkGuid>,
+    ) {
         let outer = outer.filter(|g| g.is_valid());
-        if self.guid_to_path.get(&net_guid).map(String::as_str) == Some(path.as_str())
+        if self.guid_to_path.get(&net_guid).map(String::as_str) == Some(path.as_ref())
             && self.guid_to_outer.get(&net_guid).copied() == outer
         {
             return;
         }
-        self.guid_to_path.insert(net_guid, path);
+        self.guid_to_path.insert(net_guid, path.into());
         match outer {
             Some(g) => {
                 self.guid_to_outer.insert(net_guid, g);
@@ -242,14 +253,11 @@ impl NetGuidCache {
     /// Set a field on the group at `path_name_index`. `false`, counted in
     /// [`Self::dropped_field_exports`], when the group or the handle is absent.
     pub fn set_field_on_group(&mut self, path_name_index: u32, field: NetFieldExport) -> bool {
-        let placed = if let Some(group) = self.get_group_by_index_mut(path_name_index) {
-            group.set_field(field)
-        } else {
-            false
-        };
-        if !placed {
-            self.dropped_field_exports += 1;
-        }
+        let group = (self.by_index.get(&path_name_index)).map(|&i| &mut self.groups[i]);
+        let old = group.as_ref().and_then(|g| g.get_field(field.handle));
+        self.renamed_field_exports += u64::from(old.is_some_and(|old| old.name != field.name));
+        let placed = group.is_some_and(|g| g.set_field(field));
+        self.dropped_field_exports += u64::from(!placed);
         placed
     }
 
@@ -261,8 +269,21 @@ impl NetGuidCache {
         self.dropped_field_exports
     }
 
-    /// Remove all groups and GUID mappings (not the `dropped_field_exports`
-    /// tally) and bump both generations. For tests or replay-boundary resets.
+    /// Groups whose `path_name_index` a new path took over, replacing them
+    /// with no rows moved: later rows carry the new class's names.
+    #[must_use]
+    pub fn replaced_export_groups(&self) -> u64 {
+        self.replaced_export_groups
+    }
+
+    /// Field exports that overwrote a populated handle with another name.
+    #[must_use]
+    pub fn renamed_field_exports(&self) -> u64 {
+        self.renamed_field_exports
+    }
+
+    /// Remove all groups and GUID mappings (not the three tallies) and bump
+    /// both generations. For tests or replay-boundary resets.
     pub fn clear(&mut self) {
         self.schema_generation = self.schema_generation.wrapping_add(1);
         self.guid_generation = self.guid_generation.wrapping_add(1);
@@ -359,9 +380,15 @@ mod tests {
             },
         );
 
+        // A re-declaration of the same path merges: not a replacement.
+        cache
+            .add_export_group(NetFieldExportGroup::new("/Script/G.Old".into(), 7, 2))
+            .unwrap();
+        assert_eq!(cache.replaced_export_groups(), 0);
         cache
             .add_export_group(NetFieldExportGroup::new("/Script/G.New".into(), 7, 2))
             .unwrap();
+        assert_eq!(cache.replaced_export_groups(), 1);
 
         let group = cache.get_group_by_index(7).unwrap();
         assert_eq!(group.path, "/Script/G.New");
@@ -370,6 +397,27 @@ mod tests {
             "handle 0 must not carry the old class's field after the index was reused: {:?}",
             group.get_field(0)
         );
+    }
+
+    /// A handle re-exported under another name is counted; the same name
+    /// again, or a first export at a new handle, is not.
+    #[test]
+    fn a_renamed_field_export_is_counted() {
+        let mut cache = NetGuidCache::new();
+        cache
+            .add_export_group(NetFieldExportGroup::new("/Script/G.A".into(), 7, 2))
+            .unwrap();
+        for (handle, name, renamed) in [(0, "A", 0), (0, "A", 0), (1, "B", 0), (0, "C", 1)] {
+            let field = NetFieldExport {
+                handle,
+                compatible_checksum: 0,
+                name: name.into(),
+            };
+            assert!(cache.set_field_on_group(7, field));
+            assert_eq!(cache.renamed_field_exports(), renamed, "{handle} {name}");
+        }
+        let group = cache.get_group_by_index(7).unwrap();
+        assert_eq!(group.get_field(0).unwrap().name, "C");
     }
 
     /// An unknown `path_name_index` refuses the field and counts the drop.
@@ -405,13 +453,13 @@ mod tests {
     #[test]
     fn a_redundant_set_net_guid_path_call_does_not_bump_guid_generation() {
         let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Test_C", None);
         let after_first = cache.guid_generation();
 
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Test_C", None);
         assert_eq!(cache.guid_generation(), after_first, "no change, no bump");
 
-        cache.set_net_guid_path(17, "/Game/Test.Other_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Other_C", None);
         assert_ne!(
             cache.guid_generation(),
             after_first,
@@ -423,8 +471,8 @@ mod tests {
     fn cache_outer_guid_chain() {
         let mut cache = NetGuidCache::new();
         let outer = NetworkGuid(11);
-        cache.set_net_guid_path(17, "Default__Test_C".into(), Some(outer));
-        cache.set_net_guid_path(11, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "Default__Test_C", Some(outer));
+        cache.set_net_guid_path(11, "/Game/Test.Test_C", None);
 
         assert_eq!(cache.get_outer_guid(17).unwrap(), outer);
         assert_eq!(cache.get_outer_path(17).unwrap(), "/Game/Test.Test_C");
@@ -433,8 +481,8 @@ mod tests {
     #[test]
     fn cache_net_guid_entries_yields_guid_path_and_outer() {
         let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(11, "/Game/Test.Test_C".into(), None);
-        cache.set_net_guid_path(17, "FiringState".into(), Some(NetworkGuid(11)));
+        cache.set_net_guid_path(11, "/Game/Test.Test_C", None);
+        cache.set_net_guid_path(17, "FiringState", Some(NetworkGuid(11)));
 
         let mut entries = cache.net_guid_entries();
         entries.sort_by_key(|e| e.net_guid);
@@ -454,7 +502,7 @@ mod tests {
         cache
             .add_export_group(NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 2))
             .unwrap();
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Test_C", None);
 
         cache.clear();
 

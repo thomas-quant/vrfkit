@@ -72,6 +72,7 @@ impl ExportSink<'_> {
         if rpc_reader.read_bit().is_err() {
             return false;
         }
+        self.stats.rpc_param_walks += 1;
 
         let mut emitted_any = false;
         // Set only on the three malformed-read breaks below, never on the
@@ -148,26 +149,19 @@ impl ExportSink<'_> {
             // is no wire-declared name, and passed as one it would trip
             // `resolve_in_group`'s conflict guard against its own placeholder,
             // refusing the handle fallback that guard exists to allow.
-            let (value_i64, value_f64, value_bool, mut value_str) =
-                match apply_overlay_with_checksum(
-                    &TABLE,
-                    overlay_group,
-                    group_state,
-                    param_name,
-                    param_handle,
-                    param_checksum,
-                    raw_bits.as_deref(),
-                    payload_bits,
-                    &mut self.stats.overlay,
-                ) {
-                    Some(result) => (
-                        result.value_i64,
-                        result.value_f64,
-                        result.value_bool,
-                        result.value_str,
-                    ),
-                    None => (None, None, None, None),
-                };
+            let (value_i64, value_f64, value_bool, mut value_str) = apply_overlay_with_checksum(
+                &TABLE,
+                overlay_group,
+                group_state,
+                param_name,
+                param_handle,
+                param_checksum,
+                raw_bits.as_deref(),
+                payload_bits,
+                &mut self.stats.overlay,
+            )
+            .map(|result| result.into_columns())
+            .unwrap_or_default();
 
             // Additive pass: an EffectContainer array the overlay left untyped
             // becomes a JSON `value_str`, `raw_bits` kept. A declared type that
@@ -264,7 +258,7 @@ impl ExportSink<'_> {
             // the route is scoped to the observed parent identity.
             if let (true, Some(raw)) = (projectile_path_array, raw_bits.as_deref()) {
                 if super::blobs::strict_nested_array_preflight(raw, payload_bits, &[1, 2, 3]) {
-                    self.emit_exact_array_leaves(
+                    self.stats.route_children_projectile_path += self.emit_exact_array_leaves(
                         &full_field_name,
                         rpc_handle,
                         (raw, payload_bits),
@@ -587,6 +581,7 @@ fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
         // overlay string or byte array too, not a reader running out.
         EffectBlobError::PayloadTooLarge { .. }
         | EffectBlobError::IndexOutOfBounds { .. }
+        | EffectBlobError::NonAscendingIndex { .. }
         | EffectBlobError::TooManyFields { .. }
         | EffectBlobError::BitLengthExceedsBuffer { .. }
         | EffectBlobError::UnexpectedPayloadWidth { .. }
@@ -629,6 +624,7 @@ mod tests {
             BitIo,
             ArrayCountTooLarge,
             IndexOutOfBounds,
+            NonAscendingIndex,
             PayloadTooLarge,
             TooManyFields,
             BitLengthExceedsBuffer,
@@ -700,6 +696,13 @@ mod tests {
             ),
             (
                 EffectBlobError::IndexOutOfBounds { index: 2, count: 2 },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::NonAscendingIndex {
+                    index: 0,
+                    previous: 0,
+                },
                 "Malformed",
             ),
             (
