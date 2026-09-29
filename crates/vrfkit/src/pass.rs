@@ -153,7 +153,9 @@ impl<'a> Pass<'a> {
 
     /// Read every packet in `frames` through a fresh sink, fold its counters
     /// into `sink` and `errors`, then hand its rows to `drain`. The first
-    /// `drain` error ends the walk (the frame callback cannot return it).
+    /// `drain` error is parked and later packets are skipped (the frame
+    /// callback cannot return it); a frame error from the rest of the walk
+    /// takes precedence.
     pub fn walk(
         &mut self,
         frames: &[u8],

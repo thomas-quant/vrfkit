@@ -6,10 +6,12 @@
 //! `validate`, and `diag`'s two passes. The values are 0 on every replay
 //! measured, so no corpus guard sees a cut line. This runs the real binary on
 //! an uncompressed replay whose frames carry both sections, two chunks per
-//! pass, with every value distinct per pass and tally and from the chunk
-//! count: each output must report its own pass's totals, not zeros, the other
-//! pass's or its last chunk's. With no packets, `validate` ends in exit 2 (no
-//! content blocks), asserted so a crash (exit 1) cannot pass for it.
+//! pass. The two passes differ on every value, and each pass's frame count
+//! differs from its chunk count, so a swapped pass or a per-chunk frame count
+//! cannot match by accident: each output must report its own pass's totals,
+//! not zeros, the other pass's or its last chunk's. With no packets,
+//! `validate` ends in exit 2 (no content blocks), asserted so a crash (exit 1)
+//! cannot pass for it.
 
 mod common;
 
