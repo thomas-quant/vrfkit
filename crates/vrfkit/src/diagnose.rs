@@ -97,75 +97,67 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let net_main = main.reader.stats().clone();
     let main_failures = main.channels.take_failure_aggregate();
     let mut json = String::with_capacity(1 << 16);
-    json.push_str("{\n");
-    json.push_str("  \"schema_version\": 3,\n");
-    json.push_str("  \"tool\": \"vrfkit diag\",\n");
-    json.push_str("  \"file\": ");
+    json.push_str("{\n  \"schema_version\": 3,\n  \"tool\": \"vrfkit diag\",\n  \"file\": ");
     push_json_string(&mut json, path);
-    json.push_str(",\n");
-    json.push_str(&format!("  \"file_size\": {file_size},\n"));
-    json.push_str("  \"branch\": ");
+    json.push_str(&format!(",\n  \"file_size\": {file_size},\n  \"branch\": "));
     push_json_string(&mut json, branch);
-    json.push_str(",\n");
-    json.push_str("  \"build\": ");
+    json.push_str(",\n  \"build\": ");
     push_json_string(&mut json, build_label(branch));
-    json.push_str(",\n");
-    json.push_str(
-        "  \"options\": {\"write_tables\": false, \"walks_checkpoints\": true, \
-         \"include_payloads\": ",
-    );
-    json.push_str(if include_payloads { "true" } else { "false" });
-    json.push_str("},\n");
-    json.push_str("  \"chunks\": {\"replay_data\": ");
-    json.push_str(&replay_data_chunks.to_string());
-    json.push_str(", \"replay_data_frames\": ");
-    json.push_str(&main.frames.to_string());
-    json.push_str(", \"event\": ");
-    json.push_str(&event_chunks.to_string());
-    json.push_str(", \"replay_data_trailing_bytes\": ");
-    json.push_str(&replay_data_trailing_bytes.to_string());
-    push_frame_skips(&mut json, "replay_data_", &main.frame_skips);
-    json.push_str(", \"replay_data_non_finite_frame_times\": ");
-    json.push_str(&main.non_finite_frame_times.to_string());
-    json.push_str("},\n");
-
-    json.push_str("  \"net_main\": ");
-    push_members(&mut json, &net_members(&net_main));
-    json.push_str(",\n");
-    json.push_str("  \"sink_main\": ");
-    push_members(&mut json, &sink_main.counters());
-    json.push_str(",\n");
-    json.push_str("  \"checkpoint_meta\": {\"chunks\": ");
-    json.push_str(&cp_stats.chunks.to_string());
-    json.push_str(", \"frames\": ");
-    json.push_str(&cp_stats.frames.to_string());
-    json.push_str(", \"packets\": ");
-    json.push_str(&cp_stats.packets.to_string());
-    json.push_str(", \"trailing_bytes\": ");
-    json.push_str(&cp_stats.trailing_bytes.to_string());
-    push_frame_skips(&mut json, "", &cp_stats.frame_skips);
-    json.push_str(", \"non_finite_frame_times\": ");
-    json.push_str(&cp_stats.non_finite_frame_times.to_string());
-    json.push_str(", \"guid_entries\": ");
-    json.push_str(&cp_stats.guid_entries.to_string());
-    json.push_str(", \"group_records\": ");
-    json.push_str(&cp_stats.group_records.to_string());
-    json.push_str(", \"exported_fields\": ");
-    json.push_str(&cp_stats.exported_fields.to_string());
-    json.push_str(", \"field_rows_dropped\": ");
-    json.push_str(&cp_stats.field_rows_dropped.to_string());
-    json.push_str(", \"actor_rows_dropped\": ");
-    json.push_str(&cp_stats.actor_rows_dropped.to_string());
-    json.push_str(", \"movement_rows_dropped\": ");
-    json.push_str(&cp_stats.movement_rows_dropped.to_string());
-    json.push_str("},\n");
-    json.push_str("  \"net_checkpoint\": ");
-    push_members(&mut json, &net_members(&cp_stats.net));
-    json.push_str(",\n");
-    json.push_str("  \"sink_checkpoint\": ");
-    push_members(&mut json, &cp_stats.sink.counters());
-    json.push_str(",\n");
-
+    json.push_str(&format!(
+        ",\n  \"options\": {{\"write_tables\": false, \"walks_checkpoints\": true, \
+         \"include_payloads\": {include_payloads}}},\n"
+    ));
+    let (main_skips, cp_skips) = (&main.frame_skips, &cp_stats.frame_skips);
+    let chunks = vec![
+        ("replay_data", replay_data_chunks),
+        ("replay_data_frames", u64::from(main.frames)),
+        ("event", event_chunks),
+        ("replay_data_trailing_bytes", replay_data_trailing_bytes),
+        (
+            "replay_data_external_data_blobs",
+            main_skips.external_data_blobs,
+        ),
+        (
+            "replay_data_external_data_bytes",
+            main_skips.external_data_bytes,
+        ),
+        (
+            "replay_data_game_specific_bytes",
+            main_skips.game_specific_bytes,
+        ),
+        (
+            "replay_data_non_finite_frame_times",
+            main.non_finite_frame_times,
+        ),
+    ];
+    let checkpoint_meta = vec![
+        ("chunks", cp_stats.chunks),
+        ("frames", cp_stats.frames),
+        ("packets", cp_stats.packets),
+        ("trailing_bytes", cp_stats.trailing_bytes),
+        ("external_data_blobs", cp_skips.external_data_blobs),
+        ("external_data_bytes", cp_skips.external_data_bytes),
+        ("game_specific_bytes", cp_skips.game_specific_bytes),
+        ("non_finite_frame_times", cp_stats.non_finite_frame_times),
+        ("guid_entries", cp_stats.guid_entries),
+        ("group_records", cp_stats.group_records),
+        ("exported_fields", cp_stats.exported_fields),
+        ("field_rows_dropped", cp_stats.field_rows_dropped),
+        ("actor_rows_dropped", cp_stats.actor_rows_dropped),
+        ("movement_rows_dropped", cp_stats.movement_rows_dropped),
+    ];
+    for (name, members) in [
+        ("chunks", chunks),
+        ("net_main", net_members(&net_main)),
+        ("sink_main", sink_main.counters()),
+        ("checkpoint_meta", checkpoint_meta),
+        ("net_checkpoint", net_members(&cp_stats.net)),
+        ("sink_checkpoint", cp_stats.sink.counters()),
+    ] {
+        json.push_str(&format!("  \"{name}\": "));
+        push_members(&mut json, &members);
+        json.push_str(",\n");
+    }
     json.push_str("  \"failures\": {\n");
     json.push_str("    \"main\": ");
     push_failure_aggregate(&mut json, &main_failures);
@@ -362,18 +354,6 @@ fn push_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
-/// Append the three [`FrameSkips`] tallies as `, "<prefix>external_data_blobs": N`
-/// and so on, inside an object the caller has already opened.
-fn push_frame_skips(out: &mut String, prefix: &str, skips: &FrameSkips) {
-    for (key, value) in [
-        ("external_data_blobs", skips.external_data_blobs),
-        ("external_data_bytes", skips.external_data_bytes),
-        ("game_specific_bytes", skips.game_specific_bytes),
-    ] {
-        out.push_str(&format!(", \"{prefix}{key}\": {value}"));
-    }
-}
-
 /// `{`, one `"key": value` member per line, then `  }` -- the shape both
 /// counter objects share.
 fn push_members(out: &mut String, members: &[(&str, u64)]) {
@@ -496,8 +476,8 @@ fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameSkips, NetStats, build_label, json_number_or_null, net_members, push_frame_skips,
-        push_json_string, reject_input_output_alias, write_json_file,
+        NetStats, build_label, json_number_or_null, net_members, push_json_string,
+        reject_input_output_alias, write_json_file,
     };
 
     /// Each counter under its own name with its own value, then the three
@@ -522,22 +502,6 @@ mod tests {
         ]);
         assert_eq!(net_members(&stats), expected);
         assert_eq!(expected.len(), 48);
-    }
-
-    #[test]
-    fn frame_skips_json_carries_every_tally_under_its_prefix() {
-        let mut skips = FrameSkips::default();
-        skips.external_data_blobs = 2;
-        skips.external_data_bytes = 9;
-        let mut json = String::from("{\"first\": 1");
-        push_frame_skips(&mut json, "replay_data_", &skips);
-        json.push('}');
-        assert_eq!(
-            json,
-            "{\"first\": 1, \"replay_data_external_data_blobs\": 2, \
-             \"replay_data_external_data_bytes\": 9, \
-             \"replay_data_game_specific_bytes\": 0}"
-        );
     }
 
     #[test]
