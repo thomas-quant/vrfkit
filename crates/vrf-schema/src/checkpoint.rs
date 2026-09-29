@@ -148,9 +148,6 @@ pub struct CheckpointTables {
     pub literal_paths: u32,
     /// Wire indices resolved through preceding literal paths.
     pub resolved_path_indices: u32,
-    /// Always zero on success: a collision returns
-    /// [`SchemaError::CheckpointGroupCollision`] before frame decode.
-    pub group_collisions: u32,
 }
 
 /// Interpretation of checkpoint GUID path indices.
@@ -403,7 +400,6 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         hardcoded_paths,
         literal_paths: literal_count,
         resolved_path_indices,
-        group_collisions: 0,
     })
 }
 
@@ -950,8 +946,7 @@ mod tests {
         }
     }
 
-    /// Two groups at different indices are the ordinary case and must not be
-    /// counted.
+    /// The control for the collision test: two groups at different indices.
     #[test]
     fn two_groups_at_different_indices_are_not_a_collision() {
         let archive = build(
@@ -962,7 +957,6 @@ mod tests {
         let mut cache = NetGuidCache::new();
         let t = read_checkpoint_tables(&archive, &mut cache).unwrap();
         assert_eq!(t.group_count, 2);
-        assert_eq!(t.group_collisions, 0);
         assert_eq!(cache.group_count(), 2);
     }
 
