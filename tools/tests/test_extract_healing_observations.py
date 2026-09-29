@@ -207,6 +207,13 @@ class Tests(unittest.TestCase):
         target = next(x for x in obs if x["identity"]["actor_net_guid"] == 40)
         self.assertIn("duplicate_same_coordinate_member", target["ambiguity_reasons"])
         self.assertIn("disjoint_physical_segments", target["ambiguity_reasons"])
+        rows = fixture()
+        rows.insert(6, row("Unrelated", raw=b"\0", bits=1))
+        td2, p2 = self.make(rows)
+        self.addCleanup(td2.cleanup)
+        d = tool.extract(p2)
+        self.assertIn("disjoint_physical_segments", d["observations"][0]["ambiguity_reasons"])
+        self.assertEqual(d["summaries"]["validated_observations"], 0)
 
     def test_same_time_lifecycle_is_unresolved_and_direct_edges_remain(self):
         actors = [
@@ -224,6 +231,16 @@ class Tests(unittest.TestCase):
         s = tool.extract(p)["observations"][0]["source_corroboration"]
         self.assertEqual(s["status"], "lifecycle_boundary_same_time")
         self.assertEqual(s["event_instigator"]["value"], 12)
+
+    def test_raw_typed_mismatch_fails_atomically(self):
+        rows = fixture(1.0)
+        rows[0]["value_f64"] = 2.0
+        td, p = self.make(rows)
+        self.addCleanup(td.cleanup)
+        out = p / "out.json"
+        out.write_text("old", encoding="utf-8")
+        self.assertEqual(tool.main(["--export", str(p), "--out", str(out)]), 1)
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
     def test_checkpoint_rows_are_preserved_separately(self):
         first = {

@@ -165,6 +165,12 @@ class SectionObservationTests(unittest.TestCase):
         with self.assertRaises(tool.IntegrityError):
             tool.f32(row("x", struct.pack("<f", 1.0), 32, value_f64=1.0 + 1e-9))
 
+    def test_a_typed_raw_conflict_in_a_group_stops_the_parse(self):
+        data = fixture()
+        data[1][0][1]["value_f64"] = 2.0
+        with self.assertRaises(tool.IntegrityError):
+            parse_fixture(data)
+
     def test_parentless_rpc_is_visible_not_missing_health(self):
         scalar = row("MulticastNotifyHeal.HealTaken", struct.pack("<f", 5.0), 32,
                      compatible_checksum=1894010429, value_f64=5.0)
