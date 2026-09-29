@@ -65,44 +65,51 @@ use crate::reader::{MAX_FIELDS_PER_GROUP, MAX_FSTRING_BYTES};
 
 /// Streaming observer for checkpoint schema records. Borrowed strings are valid
 /// only for the callback; the cache receives its own owned copy afterwards.
+/// Every method defaults to a no-op.
 pub trait CheckpointTableSink {
     type Error;
 
     #[allow(clippy::too_many_arguments)]
     fn on_guid_entry(
         &mut self,
-        ordinal: u32,
-        guid: u32,
-        outer: u32,
-        path_is_string: bool,
-        literal_path: Option<&str>,
-        name_index: Option<u32>,
-        flags: u8,
-    ) -> core::result::Result<(), Self::Error>;
+        _ordinal: u32,
+        _guid: u32,
+        _outer: u32,
+        _path_is_string: bool,
+        _literal_path: Option<&str>,
+        _name_index: Option<u32>,
+        _flags: u8,
+    ) -> core::result::Result<(), Self::Error> {
+        Ok(())
+    }
 
     fn on_export_group(
         &mut self,
-        ordinal: u32,
-        path_name_index: u32,
-        group_path: &str,
-        declared_slots: u32,
-    ) -> core::result::Result<(), Self::Error>;
+        _ordinal: u32,
+        _path_name_index: u32,
+        _group_path: &str,
+        _declared_slots: u32,
+    ) -> core::result::Result<(), Self::Error> {
+        Ok(())
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn on_export_field(
         &mut self,
-        group_ordinal: u32,
-        path_name_index: u32,
-        slot: u32,
-        handle: u32,
-        checksum: u32,
-        rendered_name: &str,
-        exported_flag: u8,
-        fname_kind: u8,
-        base: Option<&str>,
-        index: Option<u32>,
-        number: Option<i32>,
-    ) -> core::result::Result<(), Self::Error>;
+        _group_ordinal: u32,
+        _path_name_index: u32,
+        _slot: u32,
+        _handle: u32,
+        _checksum: u32,
+        _rendered_name: &str,
+        _exported_flag: u8,
+        _fname_kind: u8,
+        _base: Option<&str>,
+        _index: Option<u32>,
+        _number: Option<i32>,
+    ) -> core::result::Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -196,46 +203,6 @@ struct NoopCheckpointTableSink;
 
 impl CheckpointTableSink for NoopCheckpointTableSink {
     type Error = core::convert::Infallible;
-
-    fn on_guid_entry(
-        &mut self,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: bool,
-        _: Option<&str>,
-        _: Option<u32>,
-        _: u8,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn on_export_group(
-        &mut self,
-        _: u32,
-        _: u32,
-        _: &str,
-        _: u32,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn on_export_field(
-        &mut self,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: &str,
-        _: u8,
-        _: u8,
-        _: Option<&str>,
-        _: Option<u32>,
-        _: Option<i32>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
 }
 
 /// [`read_checkpoint_tables`], delivering each record to `sink` after its wire
