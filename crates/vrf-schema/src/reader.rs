@@ -53,18 +53,40 @@ const MAX_NET_GUID_RECURSION: u32 = 16;
 /// an allocation.
 pub(crate) const MAX_FIELDS_PER_GROUP: u32 = 65_536;
 
-/// Read a byte-aligned FName: a u8 hardcoded flag, then an IntPacked index
-/// (rendered as decimal) or an FString and i32 number ([`render_fname`]).
-fn read_fname(reader: &mut BitReader<'_>) -> Result<String> {
-    let is_hardcoded = reader.read_u8()? != 0;
-    if is_hardcoded {
-        let name_index = reader.read_int_packed()?;
-        Ok(name_index.to_string())
-    } else {
-        let name = reader.read_fstring(MAX_FSTRING_BYTES)?;
-        let number = reader.read_i32()?;
-        Ok(render_fname(name, number))
+/// A byte-aligned FName as sent, with the name the schema stores.
+#[cfg_attr(not(feature = "checkpoint"), allow(dead_code))]
+pub(crate) struct FName {
+    /// The index in decimal, or [`render_fname`] of `base` and `number`.
+    pub(crate) rendered: String,
+    pub(crate) kind: u8,
+    pub(crate) base: Option<String>,
+    pub(crate) index: Option<u32>,
+    pub(crate) number: Option<i32>,
+}
+
+/// A u8 kind, then an IntPacked index (nonzero kind) or an FString and i32
+/// number (kind 0).
+pub(crate) fn read_fname(reader: &mut BitReader<'_>) -> Result<FName> {
+    let kind = reader.read_u8()?;
+    if kind != 0 {
+        let index = reader.read_int_packed()?;
+        return Ok(FName {
+            rendered: index.to_string(),
+            kind,
+            base: None,
+            index: Some(index),
+            number: None,
+        });
     }
+    let base = reader.read_fstring(MAX_FSTRING_BYTES)?;
+    let number = reader.read_i32()?;
+    Ok(FName {
+        rendered: render_fname(base.clone(), number),
+        kind,
+        base: Some(base),
+        index: None,
+        number: Some(number),
+    })
 }
 
 /// Read one frame's net-field export commands into `cache`, which accumulates
@@ -116,7 +138,7 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
 
         let handle = reader.read_int_packed()?;
         let compatible_checksum = reader.read_u32()?;
-        let name = read_fname(reader)?;
+        let name = read_fname(reader)?.rendered;
 
         let field = NetFieldExport {
             handle,

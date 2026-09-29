@@ -59,9 +59,9 @@ use vrf_bitio::{BitError, BitReader};
 
 use crate::cache::NetGuidCache;
 use crate::error::{Result, SchemaError};
-use crate::export::{NetFieldExport, NetFieldExportGroup, render_fname};
+use crate::export::{NetFieldExport, NetFieldExportGroup};
 use crate::guid::NetworkGuid;
-use crate::reader::{MAX_FIELDS_PER_GROUP, MAX_FSTRING_BYTES};
+use crate::reader::{MAX_FIELDS_PER_GROUP, MAX_FSTRING_BYTES, read_fname};
 
 /// Streaming observer for checkpoint schema records. Borrowed strings are valid
 /// only for the callback; the cache receives its own owned copy afterwards.
@@ -361,19 +361,19 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
                 .into());
             }
             let compatible_checksum = reader.read_u32()?;
-            let observed_name = read_observed_fname(&mut reader)?;
+            let name = read_fname(&mut reader)?;
             sink.on_export_field(
                 group_ordinal,
                 path_name_index,
                 slot,
                 handle,
                 compatible_checksum,
-                &observed_name.rendered,
+                &name.rendered,
                 exported_flag,
-                observed_name.kind,
-                observed_name.base.as_deref(),
-                observed_name.index,
-                observed_name.number,
+                name.kind,
+                name.base.as_deref(),
+                name.index,
+                name.number,
             )
             .map_err(CheckpointReadError::Sink)?;
             cache.set_field_on_group(
@@ -381,7 +381,7 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
                 NetFieldExport {
                     handle,
                     compatible_checksum,
-                    name: observed_name.rendered,
+                    name: name.rendered,
                 },
             );
             exported_fields += 1;
@@ -407,43 +407,6 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
     })
 }
 
-/// A checkpoint field's FName: the rendered name plus the raw parts the sink
-/// reports.
-struct ObservedFName {
-    rendered: String,
-    kind: u8,
-    base: Option<String>,
-    index: Option<u32>,
-    number: Option<i32>,
-}
-
-/// The FName encoding `reader.rs`'s `read_fname` reads (a kind byte, then an
-/// IntPacked index or an FString and i32 number), keeping the raw parts; both
-/// render through [`render_fname`].
-fn read_observed_fname(reader: &mut BitReader<'_>) -> Result<ObservedFName> {
-    let kind = reader.read_u8()?;
-    if kind != 0 {
-        let index = reader.read_int_packed()?;
-        Ok(ObservedFName {
-            rendered: index.to_string(),
-            kind,
-            base: None,
-            index: Some(index),
-            number: None,
-        })
-    } else {
-        let base = reader.read_fstring(MAX_FSTRING_BYTES)?;
-        let number = reader.read_i32()?;
-        Ok(ObservedFName {
-            rendered: render_fname(base.clone(), number),
-            kind,
-            base: Some(base),
-            index: None,
-            number: Some(number),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,8 +414,8 @@ mod tests {
 
     /// `(net_guid, outer_guid, path or None for a hardcoded name, name index)`.
     type GuidSpec<'a> = (u32, u32, Option<&'a str>, u32);
-    /// `(group path, declared slot count, exported (handle, name) pairs)`.
-    type GroupSpec<'a> = (&'a str, u32, &'a [(u32, &'a str)]);
+    /// `(group path, declared slot count, exported (handle, name, FName number))`.
+    type GroupSpec<'a> = (&'a str, u32, &'a [(u32, &'a str, i32)]);
     type GuidEvent = (u32, bool, Option<String>, Option<u32>, u8);
     type FieldEvent = (
         u32,
@@ -503,14 +466,14 @@ mod tests {
             body.extend(int_packed(7));
             body.extend(int_packed(*declared));
             for slot in 0..*declared {
-                match fields.iter().find(|(h, _)| *h == slot) {
-                    Some((h, name)) => {
+                match fields.iter().find(|(h, _, _)| *h == slot) {
+                    Some((h, name, number)) => {
                         body.push(1);
                         body.extend(int_packed(*h));
                         body.extend_from_slice(&0xdead_beefu32.to_le_bytes());
                         body.push(0); // FName: not hardcoded
                         body.extend(fstring_utf16(name));
-                        body.extend_from_slice(&0i32.to_le_bytes());
+                        body.extend_from_slice(&number.to_le_bytes());
                     }
                     None => body.push(0),
                 }
@@ -623,7 +586,7 @@ mod tests {
     fn observer_reports_raw_variants_before_cache_storage() {
         let archive = build(
             &[(7, 0, Some("/Game/X"), 0), (8, 7, None, 0)],
-            &[("/Script/G.Thing", 2, &[(1, "Value")])],
+            &[("/Script/G.Thing", 2, &[(1, "Value", 1)])],
             &[],
         );
         let mut cache = NetGuidCache::new();
@@ -641,12 +604,12 @@ mod tests {
                 7,
                 1,
                 1,
-                "Value".into(),
+                "Value_0".into(),
                 1,
                 0,
                 Some("Value".into()),
                 None,
-                Some(0),
+                Some(1),
             )]
         );
         assert_eq!(cache.get_path_by_guid(7), Some("/Game/X"));
@@ -771,7 +734,7 @@ mod tests {
                 (9, 7, None, 0),
                 (10, 8, None, 1),
             ],
-            &[("/Script/G.Thing", 2, &[(1, "Value")])],
+            &[("/Script/G.Thing", 2, &[(1, "Value", 0)])],
             &[0xa5],
         );
         let mut legacy_cache = NetGuidCache::new();
@@ -921,7 +884,7 @@ mod tests {
             &[(
                 "/Script/ShooterGame.Thing",
                 4,
-                &[(1, "Health"), (3, "Armor")],
+                &[(1, "Health", 0), (3, "Armor", 2)],
             )],
             &[0xAB; 32],
         );
@@ -941,7 +904,7 @@ mod tests {
             .get_group_by_path("/Script/ShooterGame.Thing")
             .unwrap();
         assert_eq!(g.get_field(1).map(|f| f.name.as_str()), Some("Health"));
-        assert_eq!(g.get_field(3).map(|f| f.name.as_str()), Some("Armor"));
+        assert_eq!(g.get_field(3).map(|f| f.name.as_str()), Some("Armor_1"));
         assert!(g.get_field(0).is_none(), "unexported slot must stay empty");
     }
 
@@ -951,7 +914,7 @@ mod tests {
     fn a_desynced_table_is_rejected_not_silently_accepted() {
         let mut archive = build(
             &[(7, 0, Some("/Game/X"), 0)],
-            &[("/Script/G.Thing", 2, &[(0, "A")])],
+            &[("/Script/G.Thing", 2, &[(0, "A", 0)])],
             &[0u8; 16],
         );
         // Move the declared frame offset one byte on: the tables still parse,
@@ -964,32 +927,6 @@ mod tests {
             matches!(err, SchemaError::CheckpointFrameOffsetMismatch { .. }),
             "expected a frame-offset mismatch, got {err}"
         );
-    }
-
-    /// FName numbers render as in the ReplayData reader: 0 bare, N as
-    /// `_{N-1}`.
-    #[test]
-    fn fname_numbers_survive_into_the_checkpoint_field_names() {
-        // Hand-built: the shared `build` helper always writes number 0.
-        let mut body = 1u32.to_le_bytes().to_vec(); // one group
-        body.extend(fstring_utf16("/Script/G.Thing"));
-        body.extend(int_packed(7));
-        body.extend(int_packed(2)); // two slots
-        for (slot, number) in [(0u32, 0i32), (1, 1)] {
-            body.push(1); // exported
-            body.extend(int_packed(slot));
-            body.extend_from_slice(&0u32.to_le_bytes()); // checksum
-            body.push(0); // FName: not hardcoded
-            body.extend(fstring_utf16("Value"));
-            body.extend_from_slice(&number.to_le_bytes());
-        }
-
-        let mut cache = NetGuidCache::new();
-        read_checkpoint_tables(&archive(0, &body, &[]), &mut cache).unwrap();
-
-        let g = cache.get_group_by_path("/Script/G.Thing").unwrap();
-        assert_eq!(g.get_field(0).map(|f| f.name.as_str()), Some("Value"));
-        assert_eq!(g.get_field(1).map(|f| f.name.as_str()), Some("Value_0"));
     }
 
     /// Within one checkpoint (a fresh cache), two paths at one index are a
