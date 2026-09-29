@@ -121,7 +121,7 @@ REPLAY_VECTORS = (
     ("248", "Location", "FVector", (), 598402184),
     # a bitfield bool (`uint8 bIsActive:1`) hashes as its storage type
     ("bIsActive", "bIsActive", "uint8", (), 2967469237),
-    # Blueprint fields matched by the 13.06 pak reader (bp-properties track)
+    # a top-level Blueprint field
     ("BoundToGamePhase", "BoundToGamePhase", "bool", (), 520326154),
 )
 

@@ -1,116 +1,39 @@
 #!/usr/bin/env python3
 """Check vrfkit's overlay types against the replay's own `compatible_checksum`.
 
-Every `NetFieldExport` a replay declares carries a `compatible_checksum`, and
-Unreal computes it from the property's NAME and its C++ TYPE
-(`GetRepLayoutCmdCompatibleChecksum` in UE 5.3 `RepLayout.cpp`):
+Unreal hashes each replicated property's NAME and C++ TYPE into its
+declaration (UE 5.3 `GetRepLayoutCmdCompatibleChecksum`); `StrCrc32` and
+`MemCrc32` are zlib's CRC-32, each TCHAR fed as four little-endian bytes:
 
-    crc = StrCrc32(lower(name), parent)       # every TCHAR fed as 4 bytes, LE
+    crc = StrCrc32(lower(name), parent)       # 0, or the containing struct's
     crc = StrCrc32(lower(cpp_type), crc)      # e.g. "int32", "fvector", "aactor*"
     crc = MemCrc32(<u32 LE static index>, crc)
 
-`StrCrc32` and `MemCrc32` are the standard reflected CRC-32 (zlib's), so this
-is `zlib.crc32` over the UTF-32LE bytes of the lower-cased strings, then the
-little-endian static-array index. `parent` is 0 for a class property or an
-RPC parameter; a member of a flattened (non-NetSerialize) struct continues
-from its struct property's checksum, and a `TArray`'s inner element from the
-array's. The formula was measured against 13.06 replays by the game-file
-analysis of 2026-09-28 (194 Blueprint fields and several native identities
-reproduce); the per-build count of reproduced identities this tool prints is
-what carries it to other builds.
-
-So a checksum is evidence about a TYPE that no descriptor, table or decoder
-in this repo contributed. This tool turns it into a check of the overlay:
-
- 1. Collect every declared identity -- `(group, field name, handle,
-    checksum)` from `manifest.json`'s `net_field_export_groups` and, when
-    present, `checkpoint_export_groups/fields.parquet` -- of one or more
-    exports.
- 2. Resolve the `FieldType` vrfkit gives it through overlay_mirror, which
-    follows `overlay::resolve_entry` over the overlay tables. Validated
-    2026-09-28: 12,937 of 12,937 distinct corpus identities resolve to the
-    same `FieldType` as the Rust `resolve_field_type_with_checksum`, and on 7
-    exports (11.06-13.06, main and checkpoint) the identities this calls typed
-    are exactly the ones whose rows carry a `value_*` (see
-    docs/CHECKSUM_TYPES.md).
- 3. Tier 1: map the `FieldType` to the C++ spellings it can stand for
-    (`CPP_TYPES`) and recompute the checksum under every KNOWN parent seed:
-    0, and the struct chains in `PARENT_CHAINS`, each with its provenance.
- 4. Tier 2: recover more parent seeds from the replay itself -- members of one
-    struct typed right imply the same parent (`SiblingSeeds`) -- and re-test
-    under them what tier 1 left untestable in that group. Tier 2 never sees
-    `PARENT_CHAINS`, so it re-derives their seeds independently, and a chain
-    seed it contradicts fails the run.
-
-Each typed identity lands in exactly one of three buckets:
+Every declared identity vrfkit types (resolved as `overlay::resolve_entry`
+does, through overlay_mirror) is recomputed from the C++ spellings its
+`FieldType` stands for (`CPP_TYPES`): tier 1 under seed 0 and `PARENT_CHAINS`,
+tier 2 under the parent seeds a group's own members agree on (`SiblingSeeds`),
+which never sees the chains and so cross-checks them. Each lands in one bucket:
 
     match       vrfkit's type reproduces the declared checksum
-    mismatch    vrfkit's type does not, but another C++ spelling in
-                `ALTERNATIVE_TYPES` (or an object pointer) does, under the
-                same seeds -- the checksum names a different type
-    untestable  nothing reproduces it, so the checksum says nothing here
+    mismatch    it does not, but another spelling (`ALTERNATIVE_TYPES` or an
+                object pointer) does under the same seeds
+    untestable  nothing reproduces it; never counted as a match
 
-`untestable` is never a match. The reasons are counted separately:
+`checksum_table.rs` entries are checked under every name that declares their
+checksum. Every counter prints with its zeros, beside the chance
+reproductions to expect (trials / 2^32). A mismatch kept on purpose is listed
+by its exact shape in `tools/fixtures/checksum_types_expected.json`; an item
+whose checksum the input declares but that covers no mismatch is STALE.
 
-  * enum-capable types (`Byte`, `EnumByte`, `EnumRemainingBits`, a
-    `SerializedInt` whose bound is not a whole unsigned width). A C++ enum
-    spelling (`TEnumAsByte<E>`, `E`, `E::Type`) has never been seen to
-    reproduce, so an enum property is untestable; a plain `uint8` still
-    counts, and an alternative that reproduces is still a mismatch.
-  * object references whose class is not among the candidates: the classes
-    the input itself declares groups for plus `ENGINE_CLASSES`, so a
-    reference to an undeclared class (a data asset, say) cannot be spelled.
-  * members of a flattened struct or array whose parent chain is not in
-    `PARENT_CHAINS` and whose siblings do not give it back (fewer than two
-    testable members, or only an ambiguous agreement). An object reference
-    offers only `UClass*` towards a parent: its thousands of `A<Class>*` /
-    `U<Class>*` candidates would make the agreement a lottery, so they are
-    tested at the parents others establish and never set one.
-  * a bare FName index (`"108"`) not in `HARDCODED_FNAMES`, a non-ASCII name,
-    or a declared checksum of 0.
-
-What it cannot tell apart, by construction:
-
-  * `Bool` reproduced as `uint8` is a bitfield bool (`uint8 bFoo:1`) or a
-    byte; the checksum names the storage type, and only the wire width
-    separates the two. Counted on its own line.
-  * A match says the name and C++ type are what the declaration hashed, not
-    the wire FORMAT a NetSerialize type uses, a quantization scale the C++
-    type does not name, or the meaning of a value -- `decode errors: 0` and
-    the value checks remain the evidence for those.
-  * Groups it never saw. Coverage is the input's; run it on the corpus.
-
-Every `checksum_table.rs` entry is checked the same way, under every name that
-declares its checksum in the input; entries no declaration carries are
-counted, not failed.
-
-Every counter prints with its zeros, and so does the price of every
-recomputation: each is a 1-in-2^32 chance of an accidental reproduction, and
-each comparison of two implied parents a 1-in-2^32 chance of an accidental
-agreement, so the expected number of each is printed beside the verdicts.
-
-A mismatch vrfkit keeps on purpose is listed, with its reason and evidence,
-in `tools/fixtures/checksum_types_expected.json`. An item names one mismatch
-shape exactly and covers every identity and `checksum_table.rs` carrier of
-that shape. It applies wherever the input declares its checksum outside the
-ClassNetCache groups, so an item whose mismatch is gone is STALE; an item
-whose checksum the input does not declare is not applicable, so a single
-export can still be checked. A mismatch a sibling seed decided cannot be
-listed (its label embeds the establishing pair, no stable key), so its chain
-must be named in `PARENT_CHAINS` first.
-
-Exit status: 0 when every mismatch is one an item names exactly and no item
-is STALE; 1 when a mismatch is not listed, when an item is STALE, when
-nothing was checked, or when a parent chain and the sibling tier disagree; 2
-when an input, an overlay table or the expected list cannot be read
-completely (an entry that does not parse, a `FieldType` variant `CPP_TYPES`
-does not classify, or a malformed item).
+Exit status: 0 when every mismatch is listed and no item is STALE; 1 on an
+unlisted mismatch, a STALE item, nothing checked, or a chain seed the sibling
+tier contradicts; 2 when an input, an overlay table or the expected list
+cannot be read whole. Design, limits and corpus figures: docs/CHECKSUM_TYPES.md.
 
 Usage:
     python tools/check_checksum_types.py --export out/probe [--export ...]
-    python tools/check_checksum_types.py --corpus DIR   # DIR/<export>/manifest.json
-    python tools/check_checksum_types.py --corpus DIR --json report.json
-    python tools/check_checksum_types.py --corpus DIR --expected other.json
+    python tools/check_checksum_types.py --corpus DIR [--json report.json] [--expected other.json]
 """
 from __future__ import annotations
 
@@ -170,11 +93,8 @@ def chain_checksum(links) -> int:
 # Name-level facts, not a dump: each entry is a name and a type with its
 # source, and the report prints how many declared checksums each reproduces.
 
-#: Hardcoded Unreal FNames the replay writes as a bare index (`"249"`). From
-#: UE 5.3 `UnrealNames.inl`; the indices were read back from the 13.06
-#: executable's name table by the 2026-09-28 game-file analysis. 248 and 253
-#: are also confirmed by the replay: `Location` reproduces as `FVector` at
-#: the top of the effect RPCs, `ID` as `int32` in `GroundVolumeFragment`.
+#: Hardcoded FNames the replay writes as a bare index (`"249"`): UE 5.3
+#: `UnrealNames.inl`, indices read from the 13.06 executable's name table.
 HARDCODED_FNAMES = {
     "58": "Name", "59": "Vector", "100": "Object", "102": "Actor",
     "215": "Role", "216": "RemoteRole", "241": "Team", "248": "Location",
@@ -521,11 +441,8 @@ def manifest_declarations(path: Path) -> tuple[str, list]:
 
 
 def checkpoint_declarations(groups_pq: Path, fields_pq: Path):
-    """`(declarations, declarations without a group, unique identities)`.
-
-    Every checkpoint re-declares the schema -- 54.9M rows over the 1,018-replay
-    corpus for 12,937 distinct identities -- so the join and the de-duplication
-    run in Arrow rather than row by row in Python.
+    """`(declarations, declarations without a group, unique identities)`,
+    joined and de-duplicated in Arrow: every checkpoint re-declares the schema.
     """
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -757,33 +674,17 @@ def deviation(name_length: int, hypothesis: str, truth: str):
 class SiblingSeeds:
     """Parent seeds recovered from a group's own declarations.
 
-    Members of one flattened struct continue from the same parent checksum,
-    so two differently named members whose types imply the SAME parent
+    Members of one flattened struct continue from one parent checksum, so two
+    differently named members whose types imply the SAME parent
     (`implied_parent`) are a 1-in-2^32 coincidence unless both types are
-    right -- except for the systematic false agreement this class refuses.
-
-    A wrong hypothesis of the truth's length shifts the implied parent by an
-    amount fixed by WHERE in the hashed string it is wrong and HOW
-    (`deviation`), so two members wrong the same way still agree, at a wrong
-    parent. That happens when:
-
-      A. both names have the same length and both get the same wrong
-         spelling of the same wrong truth. The corpus has it: the four 1-char
-         GUID words `A`/`B`/`C`/`D` of `BombPlayerState` imply one parent
-         under `int32`, `uint8`, `float` and `FName` alike, or
-      B. the name lengths differ by exactly as much as the misplaced part of
-         the spellings (`uint32` read as `uint64` beside `int32` read as
-         `int64`, names one character apart).
-
-    So a pair establishes a parent only if it is neither A (checked
-    directly, whatever the truth) nor B for any two spellings in the tool's
-    universe, every alternative and object pointer it knows (`deviation` keys
-    must not intersect). An alternative of a different length cannot agree
-    systematically: its shift depends on the name's own CRC. What remains is
-    chance, each comparison of implied parents a 1-in-2^32 ticket counted in
-    `comparisons`, and one blind spot: two truths OUTSIDE the universe that
-    deviate identically from their hypotheses, at offsets B aligns, would be
-    taken for right.
+    right, or both are wrong the same way (`deviation`). A pair is refused:
+      A. at the same name length under the same spelling, whatever the truth
+         (`BombPlayerState`'s GUID words `A`..`D` agree under any type), or
+      B. when any two spellings of the universe deviate identically at the
+         offsets its names align (`uint32` read as `uint64` beside `int32`
+         read as `int64`, names one character apart).
+    What remains is chance (`comparisons`) and one blind spot: two truths
+    outside the universe that deviate identically at aligned offsets.
     """
 
     def __init__(self, universe):

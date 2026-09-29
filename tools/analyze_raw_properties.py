@@ -236,9 +236,8 @@ def analyze_export(
             column = pc.cast(column, pa.string())
         return pc.is_valid(column)
 
-    # Only unnamed replicated-property rows with a payload need per-row work
-    # (1,623 of 1,648,356 rows on a 13.06 export), so the other counters are
-    # Arrow mask sums and only those rows reach Python, in physical order.
+    # Only unnamed property rows with a payload (under 0.2% of a 13.06 export)
+    # reach Python, in physical order; every other counter is an Arrow mask sum.
     for batch in parquet.iter_batches(columns=list(FIELD_COLUMNS)):
         group_paths = pc.cast(batch.column("group_path"), pa.string())
         if group_paths.null_count:
