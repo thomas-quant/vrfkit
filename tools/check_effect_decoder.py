@@ -7,7 +7,7 @@ one-byte empty arrays.  vrfkit runs that Rust decoder; this script deliberately
 calls the Python decoder that produces the valplay bundle, so the same vectors
 are checked on both sides.
 
-The two ``reference_*`` cases come from the C# reference bundle's
+The two ``reference_*`` cases come from the reference bundle's
 ``events.ndjson`` for replay 02d4d478:
 
 * packet 39959, ``FloatValues``: adds ``FiringState.BurstShotNumber``;
@@ -48,8 +48,8 @@ def _hex(text: str) -> bytes:
     return bytes.fromhex("".join(text.split()))
 
 
-# The exact f32 represented by the C# JSON number is the comparison value.
-# System.Text.Json renders a shortest round-trippable decimal, which can differ
+# The exact f32 represented by the reference JSON number is the comparison
+# value. The bundle holds a shortest round-trippable decimal, which can differ
 # textually from Python's f32 promoted to f64 (for example, random seeds).
 def _reference_f32(value: float) -> float:
     return struct.unpack("<f", struct.pack("<f", value))[0]
@@ -155,7 +155,7 @@ CASES = (
     Case("rust_empty_float", b"\x00", 8, bundle._EFFECT_FLOATS, ()),
     Case("rust_empty_object", b"\x00", 8, bundle._EFFECT_OBJECTS, ()),
     Case("rust_empty_vector", b"\x00", 8, bundle._EFFECT_VECTORS, ()),
-    # C# reference bundle packet 39959 FloatValues, fields listed in docstring.
+    # Reference bundle packet 39959 FloatValues, fields listed in docstring.
     Case(
         "reference_float_burst",
         _hex("""
@@ -170,7 +170,7 @@ CASES = (
             (285, _reference_f32(1614889000.0)),
         ),
     ),
-    # C# reference bundle packet 15347 ObjectValues, FXC.EffectContext=1368.
+    # Reference bundle packet 15347 ObjectValues, FXC.EffectContext=1368.
     Case(
         "reference_object_effect_context_only",
         _hex("0202202065042220b1140000"),

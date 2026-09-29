@@ -38,7 +38,7 @@ impl SlotTable {
         }
         self.slots[position] = Slot {
             tag: (hash >> 32) as u32,
-            // Entry counts are bounded by the generated table: no wrap.
+            // Entry counts are bounded by the static tables: no wrap.
             entry: (entry_index as u32) + 1,
         };
     }

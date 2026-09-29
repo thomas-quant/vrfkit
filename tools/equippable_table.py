@@ -1,13 +1,9 @@
 """Equippable class path -> display name and category.
 
-GENERATED FILE -- DO NOT EDIT BY HAND.
-Regenerate with: python tools/extract_equippables.py
-Source: third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs
-
-Keys cover the three path shapes that appear in replay data, mirroring
-the C# CreateDefinitions(): the full 'Package.Class_C' path, the package
-path alone, and the 'Default__Class_C' archetype form. Measured, exact
-path aliases cover known game asset renames without case-folding keys.
+Keys cover the three path shapes that appear in replay data: the full
+'Package.Class_C' path, the package path alone, and the 'Default__Class_C'
+archetype form. Measured, exact path aliases cover known game asset renames
+without case-folding keys.
 """
 
 # fmt: off

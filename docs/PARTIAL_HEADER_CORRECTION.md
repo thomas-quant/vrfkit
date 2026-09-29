@@ -1,9 +1,9 @@
 # Partial header order and recovered replay data
 
-The September 8, 2026 reassembly run corrects a header-order bug inherited
-from the reference parser. An always-present bit of unknown meaning comes
-**before** the conditional partial-initial and partial-final bits. Previously
-the parser read initial/final first, then discarded the third bit.
+The September 8, 2026 reassembly run corrects a header-order bug. An
+always-present bit of unknown meaning comes **before** the conditional
+partial-initial and partial-final bits. Previously the parser read
+initial/final first, then discarded the third bit.
 
 This preserved payload lengths and offsets while assigning the flag roles
 incorrectly. Every real initial fragment was consequently reported as a final
@@ -12,10 +12,9 @@ order. A previous independent preservation extractor also shared this header
 parser, so it correctly verified bytes and offsets without detecting the role
 error. Literal real-packet header fixtures now fail under the old ordering.
 
-The locally inspected C# reference also uses the old order. The correction is
-supported by measured packet chains and their successfully decoded content,
-not by agreement with that reference. The extra bit's purpose remains unknown;
-the fix does not assign it an engine feature name.
+The correction is supported by measured packet chains and their successfully
+decoded content. The extra bit's purpose remains unknown; the fix does not
+assign it an engine feature name.
 
 ## Full 714-replay result
 

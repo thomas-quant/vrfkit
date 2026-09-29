@@ -27,7 +27,7 @@ in this repo contributed. This tool turns it into a check of the overlay:
     present, `checkpoint_export_groups/fields.parquet` -- of one or more
     exports.
  2. Resolve the `FieldType` vrfkit gives it through overlay_mirror, which
-    follows `overlay::resolve_entry` over the generated tables. Validated
+    follows `overlay::resolve_entry` over the overlay tables. Validated
     2026-09-28: 12,937 of 12,937 distinct corpus identities resolve to the
     same `FieldType` as the Rust `resolve_field_type_with_checksum`, and on 7
     exports (11.06-13.06, main and checkpoint) the identities this calls typed
@@ -102,7 +102,7 @@ must be named in `PARENT_CHAINS` first.
 Exit status: 0 when every mismatch is one an item names exactly and no item
 is STALE; 1 when a mismatch is not listed, when an item is STALE, when
 nothing was checked, or when a parent chain and the sibling tier disagree; 2
-when an input, a generated table or the expected list cannot be read
+when an input, an overlay table or the expected list cannot be read
 completely (an entry that does not parse, a `FieldType` variant `CPP_TYPES`
 does not classify, or a malformed item).
 
@@ -391,7 +391,7 @@ def spec_for(field_type: str) -> FieldTypeSpec:
     return spec
 
 
-#: A generated table, a resolution constant or an input that cannot be read
+#: An overlay table, a resolution constant or an input that cannot be read
 #: whole (exit 2). overlay_mirror raises it for the tables.
 TableError = overlay_mirror.ParseError
 

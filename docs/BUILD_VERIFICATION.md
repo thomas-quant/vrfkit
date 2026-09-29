@@ -222,15 +222,14 @@ a different digest. Compare sources with Git rather than by digest alone.
 
 The shared replay audit supplements the transform tests. The sixteen builds
 11.06--12.09 have 79 independently captured native-machine-code cases each;
-the eight other builds have eleven upstream golden cases each. These remain
+the eight other builds have eleven golden cases each. These remain
 different sources of arithmetic evidence. They are not used as substitutes
 for any of the common replay checks.
 
 ## Earlier measurements
 
 [Build recovery](LEGACY_BUILD_SUPPORT.md) records the 48 samples used while
-adding 11.06--12.09. [Upstream parity](UPSTREAM_PARITY.md) records the earlier
-13.06 and ability-decoding sample. The physical-field and gameplay-observation
+adding 11.06--12.09. The physical-field and gameplay-observation
 measurements in [CURRENT_STATUS.md](CURRENT_STATUS.md) and related phase reports
 retain their own dates and denominators. This audit does not recompute those
 historical semantic inventories.

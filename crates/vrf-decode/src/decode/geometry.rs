@@ -173,7 +173,7 @@ pub(super) fn read_rep_movement(
     // The divisor is the table entry's: the header says only "scaled", and
     // classes differ -- against actors.parquet spawn positions, 25 of the 26
     // table classes pack whole units and one packs two decimals. A wrong
-    // divisor (the reference's fixed 100) consumes the same bits, so it raised
+    // divisor (a fixed 100) consumes the same bits, so it raised
     // no error and moved no counter. See docs/DATA.md.
     let location = read_quantized_vector(r, location_quant.scale())?;
     let rotation = match rotation_quant {

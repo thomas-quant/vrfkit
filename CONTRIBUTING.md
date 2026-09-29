@@ -56,11 +56,6 @@ python -W error tools/apply_type_corrections.py --check
 python -W error tools/check_effect_decoder.py --check
 python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check
 python -W error tools/generate_scoped_types.py --check
-python -W error tools/extract_equippables.py --check
-python -W error tools/extract_descriptors.py third_party/vrp/Replay.Valorant crates/vrf-decode/src/table.rs
-python -W error tools/apply_type_corrections.py
-cargo +1.86.0 fmt -p vrf-decode
-git diff --exit-code -- crates/vrf-decode/src/table.rs   # regenerated table == committed table
 python -W error tools/check_baseline_schemas.py
 python -W error tools/check_docs.py   # not --fast: runs both suites again to check the counts
 python -W error -m unittest discover -s tools/tests -p "test_*.py"
@@ -115,15 +110,15 @@ need a corpus — see [Environment](#environment) below.
 
 - **`rust`** (Windows, Rust 1.86): fmt, clippy, the all-features check, the
   feature matrix, the standalone component tool, strict rustdoc, the core-only
-  `vrfkit` and `vrf-container` tests, the interop test, the table
-  regeneration, and `check_docs.py` in full -- both suites with Python
+  `vrfkit` and `vrf-container` tests, the interop test, and `check_docs.py`
+  in full -- both suites with Python
   warnings as errors; a failed process, a missing or zero count, or a skipped
   Python test fails it. It then runs `check_corpus_baseline.py`,
   `verify_build_corpus.py` (validation, checkpoint export, reconciled
   counters, independent raw/typed comparisons, positive checkpoint decoding
   per build) and `validate_type_evidence.py --compare-typed` on the 12.10,
-  12.11 and 13.00 fixtures. Those are byte-identical to the upstream parser's
-  public test replays and are fetched from a pinned commit, SHA-256 checked.
+  12.11 and 13.00 fixtures, public test replays fetched from a pinned commit
+  and SHA-256 checked.
   Every identity in `tools/fixtures/public_fixture_type_evidence.json` must
   be observed and every independently decoded value must match; the fixtures
   cover only the fields they contain. The report and logs are kept 14 days as
@@ -214,9 +209,7 @@ them are needed for the sweep above; all of them are needed for §6.
 | `VRFKIT_JOBS` | Worker count for the corpus sweeps; default is cores - 2, capped at 16 | `validate_corpus.py` |
 | `VRFKIT_REQUIRE_CORPUS` | Set to anything to turn "corpus absent, skipping" into a failure | `crates/vrf-container/tests/corpus.rs`, `check_export_baseline.py`, `check_corpus_baseline.py` |
 
-`analyze_coverage.py` and `extract_equippables.py` read the C# descriptors
-vendored under [`third_party/vrp/`](third_party/vrp/README.md) (`--csharp-dir`
-/ `--csharp-root` for another checkout). `compare_combat_report.py` and
+`compare_combat_report.py` and
 `compare_rpc_params.py` take `--reference` and `--ours`, defaulting to a
 machine-local C# export produced as described in
 [docs/USAGE.md](docs/USAGE.md#regression-guards----after-non-trivial-changes);
@@ -270,33 +263,20 @@ These corrupt downstream consumers silently — no test fails when they break.
 
 | File | Generator |
 |---|---|
-| `crates/vrf-decode/src/table.rs` | `tools/extract_descriptors.py` on `third_party/vrp/Replay.Valorant`, then `tools/apply_type_corrections.py` |
 | `crates/vrf-decode/src/checksum_table.rs` | `tools/extract_checksum_types.py` against one or more fresh exports |
 | `crates/vrf-decode/src/scoped_types.rs` | `tools/generate_scoped_types.py` from reviewed exact group/name/checksum evidence |
 | `crates/vrf-transform/src/sbox.rs` | `tools/extract_sboxes.py` |
 | `crates/vrf-transform/tests/data/golden_vectors.rs` | `tools/extract_golden.py` |
 | `crates/vrf-transform/tests/data/native_vectors.rs` | `tools/capture_native_transforms.py` against pinned original executable readers |
-| `tools/equippable_table.py` | `tools/extract_equippables.py` from the vendored `third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs` |
 
-Run order: `extract_descriptors.py` → `apply_type_corrections.py` →
-`cargo fmt` → `extract_checksum_types.py` (against a **fresh** export).
-`extract_descriptors.py` rewrites `table.rs` whole, so it runs first. The
-corrections work on the one-line and the rustfmt layout alike, but `cargo fmt`
-must still run after them to reproduce the committed bytes. The checksum
-step's place is load-bearing too (below).
-
-The C# descriptor input is vendored under
-[`third_party/vrp/`](third_party/vrp/README.md),
-copied verbatim from the commit that README names. A descriptor change is an
-edit there, committed together with the regenerated `table.rs`. CI runs the
-first three steps against that directory and fails if `table.rs` changes:
+The overlay table `crates/vrf-decode/src/table.rs` and
+`tools/equippable_table.py` are not generated. A type change to the table goes
+into `tools/apply_type_corrections.py` with its evidence; run it, then
+`cargo fmt`, then `extract_checksum_types.py` against a **fresh** export:
 
 ```bash
-python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
-    crates/vrf-decode/src/table.rs
 python tools/apply_type_corrections.py
 cargo +1.86.0 fmt -p vrf-decode
-git diff --exit-code -- crates/vrf-decode/src/table.rs
 ```
 
 The checksum step is last because it learns from what the overlay table
@@ -305,8 +285,7 @@ yet -- the symptom is a field typed on the group you declared and still raw on
 its siblings, which is easy to read as the propagation not working. Re-export
 after rebuilding, then regenerate.
 
-The S-box and golden-vector generators need an upstream checkout; nothing
-under `third_party/` holds their input:
+The S-box and golden-vector generators need a C# source checkout:
 
 ```bash
 python tools/extract_sboxes.py <path>/ValorantSeededTransformHelpers.cs \
@@ -319,9 +298,9 @@ python tools/extract_golden.py <path>/ValorantSeededTransformTests.cs \
 
 `tools/apply_type_corrections.py` carries two kinds of entry:
 
-- **Corrections** — the C# descriptor declares a type and the wire disagrees.
+- **Corrections** — the declared type and the wire disagree.
   Each has cited wire evidence.
-- **ADDITIONS** — the C# descriptor is silent. These rest on unusually complete
+- **ADDITIONS** — no type is declared. These rest on unusually complete
   wire evidence (e.g. `Money` = 800 at pistol-round start across all actors). Do
   not widen the ADDITIONS list "by eye" — that undoes the reason it is allowed.
   Read the bar stated above `ADDITIONS` in the script first.

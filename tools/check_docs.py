@@ -69,13 +69,11 @@ README = REPO / "README.md"
 USAGE = REPO / "docs" / "USAGE.md"
 
 GENERATED_INVENTORY = {
-    "crates/vrf-decode/src/table.rs": "tools/extract_descriptors.py",
     "crates/vrf-decode/src/checksum_table.rs": "tools/extract_checksum_types.py",
     "crates/vrf-decode/src/scoped_types.rs": "tools/generate_scoped_types.py",
     "crates/vrf-transform/src/sbox.rs": "tools/extract_sboxes.py",
     "crates/vrf-transform/tests/data/golden_vectors.rs": "tools/extract_golden.py",
     "crates/vrf-transform/tests/data/native_vectors.rs": "tools/capture_native_transforms.py",
-    "tools/equippable_table.py": "tools/extract_equippables.py",
 }
 GENERATED_INVENTORY_DOCS = (
     "README.md",
@@ -195,7 +193,7 @@ def table_lengths() -> tuple[str, str] | None:
 
 
 def check_table_sizes(docs: dict[str, str]) -> list[str]:
-    """The generated overlay table's declared lengths, as quoted in prose."""
+    """The overlay table's declared lengths, as quoted in prose."""
     lengths = table_lengths()
     if lengths is None:
         return ["table.rs: could not read the declared slice lengths"]
@@ -210,7 +208,7 @@ def check_table_sizes(docs: dict[str, str]) -> list[str]:
     return problems
 
 
-#: How prose states the two generated table sizes, narrow enough that a match
+#: How prose states the two table sizes, narrow enough that a match
 #: is always that claim. Every such number must be the live one, so a stale
 #: figure cannot hide beside a correct one (`check_table_sizes` only asks
 #: whether the live number appears; see `stale_test_counts`).
@@ -337,7 +335,7 @@ MEASURED_RE = {
     # Each phrase below is specific enough to be that claim with no context.
     "matrix": (re.compile(r"(\d+) `cargo check`"), None, 0),
     "matrix_cases": (re.compile(r"the same (\d+) cases"), None, 0),
-    "golden": (re.compile(r"(\d+) mechanically extracted upstream golden vectors"), None, 0),
+    "golden": (re.compile(r"(\d+) mechanically extracted golden vectors"), None, 0),
     # "N builds" is generic -- the transform table talks about builds too -- so
     # it counts only on a line that names the semantic guard.
     "metrics_builds": (re.compile(r"(\d+) builds\b"),

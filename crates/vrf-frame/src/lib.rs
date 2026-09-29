@@ -84,11 +84,11 @@ use sections::{
     read_export_data, read_external_data, read_game_specific_frame_data, read_streaming_level_fixes,
 };
 
-/// Replay header flags that control DemoFrame parsing (`ReplayHeaderFlags.cs`).
+/// Replay header flags that control DemoFrame parsing.
 pub const FLAG_HAS_STREAMING_FIXES: u32 = 1 << 1;
 pub const FLAG_GAME_SPECIFIC_FRAME_DATA: u32 = 1 << 3;
 
-/// Unreal's `MaxPacketSizeInBits` (`Constants.cs`), in bytes.
+/// Unreal's `MaxPacketSizeInBits`, in bytes.
 const MAX_PACKET_SIZE_BYTES: i32 = 16384 / 8;
 
 /// A packet from the DemoFrame stream. See [`walk_demo_frames`] for how
@@ -105,8 +105,8 @@ pub struct DemoPacket<'a> {
 
 /// Section bytes a DemoFrame walk stepped over without decoding them.
 ///
-/// ExternalData and GameSpecificFrameData are skipped, as the reference skips
-/// them, by their declared lengths, so nothing else moves when a build starts
+/// ExternalData and GameSpecificFrameData are skipped by their declared
+/// lengths, so nothing else moves when a build starts
 /// sending them. Zero is a measurement, not a default. `#[non_exhaustive]` so a
 /// further tally is not a breaking change.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -144,7 +144,7 @@ pub struct FrameWalk {
     /// Section bytes stepped over without being decoded.
     pub skipped: FrameSkips,
     /// Frames whose `timeSeconds` was NaN or infinite. Their packets carry
-    /// 0 ms, as in the reference: a plausible wrong time, so it is counted.
+    /// 0 ms: a plausible wrong time, so it is counted.
     pub non_finite_times: u32,
 }
 
@@ -187,18 +187,15 @@ pub fn walk_demo_frames(
         frame_count += 1;
         let _current_level_index = reader.read_i32()?;
         let time_seconds = reader.read_f32()?;
-        // The reference (ReplayEventJsonWriter.cs:194):
-        //   float.IsFinite(seconds)
-        //     ? (long)Math.Round(seconds * 1000d, MidpointRounding.AwayFromZero)
-        //     : 0
-        // Scale in f64, then round half away from zero (`f64::round`);
-        // truncating put every frame with a fractional ms >= 0.5 one ms early.
+        // The rule: a finite time is `seconds * 1000` in f64, rounded half
+        // away from zero (`f64::round`); a non-finite one is 0.
+        // Truncating put every frame with a fractional ms >= 0.5 one ms early.
         // `is_finite` is explicit because `as u32` saturates +inf to u32::MAX
-        // where the reference gives 0, and any bit pattern can arrive here.
+        // where the rule gives 0, and any bit pattern can arrive here.
         // A finite value outside u32 ms is refused, not saturated: -1.0 s
         // would land on 0 ms, the replay's first frame, a plausible wrong time
-        // nothing reports. A non-finite time still becomes 0 ms, as in the
-        // reference, but is counted (`FrameWalk::non_finite_times`), so that
+        // nothing reports. A non-finite time still becomes 0 ms, but is
+        // counted (`FrameWalk::non_finite_times`), so that
         // same wrong time is reported. The range check reads the rounded
         // value, so -0.0004 s stays 0 ms.
         let time_ms = if time_seconds.is_finite() {
@@ -468,8 +465,8 @@ mod tests {
         Ok(time_ms.expect("the frame carries one packet"))
     }
 
-    /// Non-finite times are read as 0 ms, as the reference reads them, and
-    /// counted per frame; a finite time, -0.0 s and a refused one are not.
+    /// Non-finite times are read as 0 ms and counted per frame; a finite
+    /// time, -0.0 s and a refused one are not.
     #[test]
     fn non_finite_frame_times_are_counted_not_refused() {
         let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
@@ -517,7 +514,7 @@ mod tests {
 
     #[test]
     fn time_ms_matches_the_reference_formula_across_a_match() {
-        // A match's span of uneven timestamps against the reference expression
+        // A match's span of uneven timestamps against the rule's expression
         // in f64: catches the rounding rule and f32-vs-f64 drift in the
         // multiply, which named cases would not.
         for step in 0..2000 {

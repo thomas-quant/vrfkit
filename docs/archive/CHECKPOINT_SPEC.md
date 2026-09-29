@@ -546,11 +546,7 @@ probe 명령 (모두 `cp2` 안): `list`, `hex`, `gaps`, `gc`, `map`, `full`, `fu
 6. **`NumNetFieldExports` 는 `u32` 가 아니다.** u32 로 읽으면 작은 카운트에서 참값의 정확히
    2배 (IntPacked 가 1만큼 왼쪽 시프트하므로) 가 되어 조용히 넘친다.
 7. **guid 캐시 엔트리는 정적 GUID 전용이 아니다.** 25% 가 짝수 (동적) GUID.
-8. **C# 참조 파서는 체크포인트를 구현하지 않는다.** `ReplayChunkDispatcher.cs`
-   (`src/Replay.Unreal/Chunks/ReplayChunkDispatcher.cs`, `case ReplayChunkType.Checkpoint:`
-   팔)이 `"Skipping checkpoint chunk {ChunkIndex}."` 를 로그하고 더는 아무것도 안 한다.
-   인용할 일차-소스 구현이 없다; 위의 모든 것은 바이트에서 유도했다.
-   (`Replay.Encoding` 의 `ArchiveCheckpoint.cs` 는 관계없는 아카이브 저장/복원 헬퍼.)
+8. **인용할 일차-소스 구현이 없다.** 위의 모든 것은 바이트에서 유도했다.
 9. **Unreal Engine 소스는 어떤 것도 참조하거나 의존하지 않았다.** 위의 필드 *이름*
    (`bNoLoad`, `NetworkChecksum`, ...) 은 편의상 붙인 라벨이며; 바이트 레이아웃과 값 분포만이
    증거다.

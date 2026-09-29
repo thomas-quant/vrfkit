@@ -5,8 +5,8 @@
 use crate::error::ContainerError;
 use crate::io::le_u32;
 
-/// Chunk discriminant, from `ReplayChunkType.cs`. Header (0) must be the first
-/// chunk; values other than 0-3 are kept in `Unknown`.
+/// Chunk discriminant. Header (0) must be the first chunk; values other than
+/// 0-3 are kept in `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkType {
     Header,

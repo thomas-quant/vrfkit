@@ -2,7 +2,7 @@
 //!
 //! # These are format, not style
 //!
-//! Validated against the C# reference to **zero** error on yaw, pitch and
+//! Validated against an independent parser to **zero** error on yaw, pitch and
 //! velocity and at most 0.0005 on position (a 50,000-row join on 13.01;
 //! README, "Movement -- effectively bit-identical"). Every constant, width and
 //! rounding step here is wire layout, as are the move header, FixedVector and

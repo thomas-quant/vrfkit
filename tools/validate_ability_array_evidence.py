@@ -3,7 +3,7 @@
 Usage: python tools/validate_ability_array_evidence.py EXPORT_DIR [...]
 The input directories contain fields.parquet. Every matching parent is checked
 for explicit array/element terminators, exact bit consumption, known member
-handles, and the member widths declared by the pinned C# descriptors.
+handles, and the member widths the descriptors declare (pinned in ROUTES).
 """
 
 from __future__ import annotations

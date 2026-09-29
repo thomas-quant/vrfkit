@@ -204,7 +204,7 @@ The [recovery research](BUILD_RECOVERY_RESEARCH.md) records the method and scope
 Each recovered reader was decompiled separately and emulated independently of
 the Rust implementation. Its 79 native cases match, for **553 additional
 cases** and **1,264 native cases** across all sixteen recovered builds. The
-88 upstream vectors remain unchanged. Changing an 11.06 rotation count made
+88 golden vectors remain unchanged. Changing an 11.06 rotation count made
 the native comparison fail; restoring it passed. All referenced substitution
 tables match the shared S-boxes byte for byte. No installed game or driver
 was started or changed.
@@ -256,13 +256,13 @@ bit-copy helper. No game process was launched. The catalog records the exact
 All three 256-byte S-box tables referenced by the applicable readers match
 the existing tables byte for byte.
 
-There are 79 native cases per build: the eleven upstream staging boundaries,
-36 cases covering six edge seeds at six lengths, and 32 deterministic random
-cases up to 512 bits. All **711 expected-byte cases** match Rust, in addition
-to the unchanged 88 upstream golden vectors. Reversing one 12.09 rotation's
-count makes the native test fail; restoring it passes. The capture tool
-verifies executable hashes before emulation and rejects failure to return,
-instruction/time exhaustion, or an incorrect reader position.
+There are 79 native cases per build: the eleven golden-vector staging
+boundaries, 36 cases covering six edge seeds at six lengths, and 32
+deterministic random cases up to 512 bits. All **711 expected-byte cases**
+match Rust, in addition to the unchanged 88 golden vectors. Reversing one
+12.09 rotation's count makes the native test fail; restoring it passes. The
+capture tool verifies executable hashes before emulation and rejects failure
+to return, instruction/time exhaustion, or an incorrect reader position.
 
 Two real-corpus failures required fixes beyond the arithmetic:
 
@@ -327,7 +327,7 @@ The paired checkpoint baseline additionally gains 48 GUID and 48 Bool values
 from those same scopes, all independently matched to raw bits. Its field file
 shrinks by 320 bytes to 1,218,992, with SHA-256
 `21ce023b9a7c3b67c0d892cc519f50b097a7e97c88d6da93d98ad78cae00806e`.
-The archived pre-upstream binary reproduces both original baseline hashes;
+The archived `06807e7` binary reproduces both original baseline hashes;
 column comparison confirms only these previously-null typed cells change.
 All rows, raw bytes, names, identities and other columns are identical.
 
@@ -385,15 +385,12 @@ was run against the original reader and failed on the same misplaced length.
 ## Earlier identity-transform probe
 
 An identity transform on `sample-1` of every build failed all sixteen
-validations, at framing oracle rates of 0.711762%--3.804203%: neither plaintext
-passthrough nor accepting the branch is a decoding fix. The upstream parser at
-[`2b66c65`](https://github.com/michel-giehl/ValorantReplayParser/tree/2b66c65a7b116154e18ebb84d9f6795f2b080233/src/Replay.Encoding/PayloadEncryption/VersionedTransforms)
-has transforms only for the eight builds supported before; its maintainer
-located the reader through `UActorChannel::ReadContentBlockHeader`
-([issue #2](https://github.com/michel-giehl/ValorantReplayParser/issues/2)).
-A new transform needs independent expected-byte vectors and then validation and
-checkpoint-enabled export of every available sample: frame success alone is not
-evidence that typed values agree with the wire.
+validations, at framing oracle rates of 0.711762%--3.804203%: neither
+plaintext passthrough nor accepting the branch is a decoding fix. No published
+transform covers these builds. A new transform needs independent expected-byte
+vectors and then validation and checkpoint-enabled export of every available
+sample: frame success alone is not evidence that typed values agree with the
+wire.
 
 ## Binary analysis feasibility check
 

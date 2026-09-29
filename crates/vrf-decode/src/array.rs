@@ -1,6 +1,6 @@
 //! RepLayout DynamicArray decoder -- parses nested struct arrays from raw bits.
 //!
-//! # Wire format (confirmed against C# `RepLayoutArrayDecoders.cs`)
+//! # Wire format
 //!
 //! ```text
 //! DynamicArray:
@@ -25,11 +25,9 @@
 //!
 //! # Limits
 //!
-//! The C# parser uses `MaxItems = 256` elements and `MaxFields = 128` fields per
-//! element (`CombatRoundReportsDecoder`). Ours: [`MAX_ELEMENTS`] 4096 (real data
-//! peaks ~50), [`MAX_FIELDS_PER_ELEMENT`] 128 and [`MAX_RECURSION_DEPTH`] 12 (real
-//! data is 4-5 deep). A limit hit keeps the remaining raw bits and counts a
-//! truncation; nothing panics.
+//! [`MAX_ELEMENTS`] 4096 (real data peaks ~50), [`MAX_FIELDS_PER_ELEMENT`] 128
+//! and [`MAX_RECURSION_DEPTH`] 12 (real data is 4-5 deep). A limit hit keeps the
+//! remaining raw bits and counts a truncation; nothing panics.
 //!
 //! # Output
 //!
@@ -225,7 +223,7 @@ fn decode_struct_array_window(
 /// Decode a RepLayout dynamic array of object references (`TArray<UObject*>`)
 /// into `(wire index, NetGUID)` pairs, without diagnostics.
 ///
-/// `MultiItemSlot.MultiContents` (C# `TArray<AAresItem*>`) is this shape: the
+/// `MultiItemSlot.MultiContents` (`TArray<AAresItem*>`) is this shape: the
 /// [`decode_struct_array`] framing with exactly one field per element, at
 /// handle 2, holding the item actor's NetGUID as one IntPacked -- confirmed on
 /// 245/245 wire payloads. Malformed input returns what was decoded so far; the
@@ -587,8 +585,8 @@ fn decode_struct_fields(
 
 /// Consume the format's optional one-IntPacked trailer -- a ZERO one only.
 ///
-/// The C# reference reads an IntPacked whenever exactly eight bits remain after
-/// the index terminator and discards it, so any appended byte passes. Like
+/// The format allows one IntPacked when exactly eight bits remain after the
+/// index terminator; discarding it unread would let any appended byte pass. Like
 /// `consume_trailing_terminator` in `effect/framing.rs` this declines, but
 /// tallies instead of rejecting (callers keep the leaves already emitted): `0`
 /// is consumed silently; another value is left unread for the caller's residual
@@ -674,8 +672,8 @@ fn emit_remaining_raw(
 }
 
 /// Append a LEAF handle's label: the replay's declared name, then the schema's,
-/// then `_h{handle}`. The replay wins because the schema transcribes the C#
-/// reference and can disagree with the wire: handle 3 is `RoundNum` on the
+/// then `_h{handle}`. The replay wins because the schema was transcribed from
+/// descriptors and can disagree with the wire: handle 3 is `RoundNum` on the
 /// wire and `RoundNumber` in the schema, and Riot's typos (`DamageRecieved`,
 /// `HitsRecieved`) were silently corrected there. Container segments keep
 /// [`push_field_label`]: the schema decides the nesting, and handles 44 and 79
@@ -1321,7 +1319,7 @@ mod tests {
 
     /// Every byte that can follow the root terminator as the optional trailer
     /// moves exactly one counter, or none for the one byte that IS a
-    /// terminator (the C# reference discards any of them).
+    /// terminator (discarding any of them unread would hide an appended byte).
     #[test]
     fn every_root_trailer_byte_is_accounted_for() {
         for byte in 0..=u8::MAX {

@@ -25,7 +25,12 @@ LICENSE_TEXT_SHA256 = {
 }
 
 THIRD_PARTY_HEADING = "\n# Third-party notices\n"
-UPSTREAM_COPYRIGHT = "Copyright (c) 2026 Michel Giehl"
+DISCLAIMER_HEADING = "\n# Disclaimer\n"
+THIRD_PARTY_COPYRIGHT = "Copyright (c) 2026 Michel Giehl"
+
+#: Crates holding code ported from, or generated out of, the MIT-licensed
+#: third-party source. A crate archive carries only its own NOTICE.md.
+DERIVED_CRATES = ("vrf-bitio", "vrf-decode", "vrf-transform", "vrfkit")
 
 
 def lf(data: bytes) -> bytes:
@@ -74,23 +79,20 @@ class CrateLicenseTests(unittest.TestCase):
                                 f"{crate.name}/NOTICE.md does not open with the root's "
                                 "project section")
 
-    def test_every_crate_derived_from_upstream_ships_its_notice(self):
-        # The root NOTICE.md's "What is derived" table names each crate that
-        # holds code derived from or generated out of ValorantReplayParser. A
-        # crate archive carries only its own NOTICE.md, so each named crate
-        # repeats upstream's MIT notice there.
+    def test_every_derived_crate_ships_the_third_party_notice(self):
         notice = lf((REPOSITORY_ROOT / "NOTICE.md").read_bytes()).decode("utf-8")
-        named = sorted({row.split("`")[1].split("/")[1]
-                        for row in notice.splitlines() if row.startswith("| `crates/")})
-        # An empty parse would pass vacuously; the table names vrf-transform.
-        self.assertIn("vrf-transform", named)
-        for name in named:
+        project, heading, rest = notice.partition(THIRD_PARTY_HEADING)
+        third_party = heading + rest.partition(DISCLAIMER_HEADING)[0]
+        # An emptied section would be a substring of anything.
+        self.assertIn(THIRD_PARTY_COPYRIGHT, third_party)
+        self.assertIn("Permission is hereby granted", third_party)
+        for name in DERIVED_CRATES:
             with self.subTest(crate=name):
                 path = REPOSITORY_ROOT / "crates" / name / "NOTICE.md"
                 text = lf(path.read_bytes()).decode("utf-8")
-                self.assertIn("## ValorantReplayParser", text)
-                self.assertIn(UPSTREAM_COPYRIGHT, text,
-                              f"{name}/NOTICE.md lacks ValorantReplayParser's MIT notice")
+                self.assertEqual(text, project + third_party,
+                                 f"{name}/NOTICE.md is not the root's project and "
+                                 "third-party sections")
 
 
 if __name__ == "__main__":

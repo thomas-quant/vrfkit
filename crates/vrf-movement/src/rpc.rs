@@ -28,7 +28,7 @@ pub fn decode_movement_rpc(
     let end_bit = reader.len_bits();
     let mut result = RpcDecodeResult::default();
 
-    // First bit: consumed but value ignored (C# discards via `TryReadBit(out _)`).
+    // First bit: consumed but value ignored.
     // If no bits remain, the payload is empty.
     if reader.bits_remaining() == 0 {
         return Ok(result);
@@ -79,7 +79,7 @@ fn decode_updates_array(
     while reader.position() < end_bit {
         let encoded_index = reader.read_int_packed()?;
         if encoded_index == 0 {
-            // Exactly 8 bits left: the C#'s trailing IntPacked (never seen).
+            // Exactly 8 bits left: a trailing IntPacked (never seen).
             // Nothing depends on its value, but one that does not parse means
             // the grammar drifted, so the failure is counted.
             if end_bit.saturating_sub(reader.position()) == 8 && reader.read_int_packed().is_err() {
@@ -91,7 +91,7 @@ fn decode_updates_array(
         let index = encoded_index - 1;
         if index >= update_count {
             // An update the array never declared: the rest of the window goes,
-            // as in the C#, and is counted.
+            // and is counted.
             result.error_count += 1;
             reader.skip_remaining();
             break;
@@ -152,8 +152,7 @@ fn decode_single_update(
                 if let Some(guid) = shooter_guid {
                     // `sub_reader` has already moved `reader` past the whole
                     // stream, so a failure inside it cannot misplace the next
-                    // handle: count it and go on, as the C# does
-                    // (`ReadRemoteCharacterUpdate` seeks to the field's end).
+                    // handle: count it and go on.
                     if decode_component_data_stream(&mut sub, guid, result, emit).is_err() {
                         result.error_count += 1;
                     }
@@ -174,11 +173,10 @@ fn decode_single_update(
 }
 
 /// Decode a ComponentDataStream: a u16 envelope byte count, else the u16 is
-/// movementBitCount. Same rule as the C# reference (`TryParseByteWrappedPayload`
-/// in `ComponentDataStream.cs`): the u16 is a byte count iff it is non-zero and
-/// the envelope fits; the reference then commits its checkpoint and never rolls
-/// back on an inner failure, so neither does this. Every measured stream is
-/// wrapped (crate docs, "Measured on real replays").
+/// movementBitCount. The u16 is a byte count iff it is non-zero and the
+/// envelope fits, and that choice is final: an inner failure never rolls back
+/// to the other reading. Every measured stream is wrapped (crate docs,
+/// "Measured on real replays").
 fn decode_component_data_stream(
     reader: &mut BitReader<'_>,
     shooter_guid: u32,
@@ -204,7 +202,7 @@ fn decode_component_data_stream(
 }
 
 /// Read a u16, failing with `TruncatedComponentHeader` when fewer than 16 bits
-/// remain: stricter than the C#, which silently yields nothing there.
+/// remain, rather than silently yielding nothing.
 fn read_u16_checked(reader: &mut BitReader<'_>) -> Result<u16, MovementError> {
     if reader.bits_remaining() < 16 {
         return Err(MovementError::TruncatedComponentHeader {

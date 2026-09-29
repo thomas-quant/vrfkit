@@ -123,8 +123,8 @@ def actor_kind(class_path: str) -> str:
 
 
 # The internal agent codename from /Game/Characters/<name>/ (Sarge = Brimstone,
-# Smonk = Clove, Pandemic = Viper, ...; see third_party/vrp/.../Agents/Sarge/
-# SargeAgentDescriptor.cs), left as-is: display names are equippable_table.py's.
+# Smonk = Clove, Pandemic = Viper, ...), left as-is: display names are
+# equippable_table.py's.
 AGENT_RE = re.compile(r"/Game/Characters/(\w+)/")
 
 

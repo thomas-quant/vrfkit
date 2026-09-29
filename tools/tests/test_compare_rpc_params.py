@@ -142,7 +142,7 @@ def listed(packet=LISTED.packet_id, **values):
 
 
 def write_reference(directory, rows, sha=LISTED.replay_sha256):
-    """rpc_params.ndjson as the USAGE recipe greps it, and CliReader's manifest."""
+    """rpc_params.ndjson as the USAGE recipe greps it, and the export's manifest."""
     regional = {v: k for k, v in guard.REGIONAL_DAMAGE_MAP.items()}
     lines = []
     for packet, actor, obj, channel, func, params in rows:
@@ -246,7 +246,7 @@ class ExpectedDifferenceTests(FileTest):
         self.assertIn("0 applied", out)
 
     def test_the_record_reaching_the_reference_is_stale(self):
-        """The fix landing upstream: everything else matches, and it still fails."""
+        """The C# side gaining the record: everything else matches, and it still fails."""
         code, out = self.compare_files(COMMON + [listed()], COMMON + [listed()])
         self.assertEqual(code, 1, out)
         self.assertIn("STALE", out)

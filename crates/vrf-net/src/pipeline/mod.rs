@@ -245,8 +245,8 @@ pub trait ReplicationSink: GuidPathSink + FieldSink {
 }
 
 /// Leaf asset name of the VALORANT replay controller, the only
-/// PlayerController-kind actor in these replays; the reference keys the
-/// net-player-index byte off it (`channel::is_player_controller_path`
+/// PlayerController-kind actor in these replays; the net-player-index byte is
+/// keyed off it (`channel::is_player_controller_path`
 /// normalises its four spellings).
 pub const PLAYER_CONTROLLER_LEAF: &str = "BaseReplayController";
 

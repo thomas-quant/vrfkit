@@ -17,7 +17,6 @@ import bench_export  # noqa: E402
 import check_metrics_baseline  # noqa: E402
 import compare_with_csharp  # noqa: E402
 import extract_active_effects  # noqa: E402
-import extract_equippables  # noqa: E402
 import extract_sboxes  # noqa: E402
 import extract_spike_carrier  # noqa: E402
 
@@ -132,31 +131,6 @@ class AtomicOutputTests(unittest.TestCase):
                     ["extract_sboxes.py", str(source), str(output)]
                 ),
             )
-
-    def test_equippable_generator_preserves_previous_file(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            resolver = root / "Replay.Valorant" / extract_equippables.RESOLVER_RELPATH
-            resolver.parent.mkdir(parents=True)
-            resolver.write_text(
-                'Define("/Game/Vandal.Vandal_C", "Vandal", '
-                "ValorantEquippableCategory.Rifle)\n",
-                encoding="utf-8",
-            )
-            output = root / "equippable_table.py"
-
-            def generate():
-                argv = sys.argv
-                sys.argv = [
-                    "extract_equippables.py", "--csharp-root", str(root)
-                ]
-                try:
-                    with mock.patch.object(extract_equippables, "OUTPUT_PATH", output):
-                        extract_equippables.main()
-                finally:
-                    sys.argv = argv
-
-            self.assert_preserved_when_replace_fails(output, generate)
 
     def test_comparison_report_preserves_previous_file(self):
         with tempfile.TemporaryDirectory() as temp:

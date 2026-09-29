@@ -6,9 +6,9 @@ no new rows and retains every raw payload and parent. Routes are limited to
 the measured 13.01, 13.02, 13.04, and 13.05 builds and require the exact parent
 identity plus each child's declared handle, name, and checksum.
 
-Since the [2026-09-23 upstream parity update](UPSTREAM_PARITY.md) the parser
-also enables these measured routes on 13.06. For `KillData` that was checked
-on 2026-09-28: on all 38 13.06 exports of the common audit,
+Since 2026-09-23 the parser also enables these measured routes on 13.06. For
+`KillData` that was checked on 2026-09-28: on all 38 13.06 exports of the
+common audit,
 [`extract_kill_observations.py`](KILL_OBSERVATIONS.md#measured-builds) matched
 every typed child against its raw window. `SelectedV2` on 13.06 was not part
 of that check.
@@ -53,10 +53,10 @@ references; see [NESTED_ARRAY_REFERENCES.md](NESTED_ARRAY_REFERENCES.md).
 `SocketAsset` and `AttachmentAsset` are enabled only inside that verified
 nesting, not as unrelated direct children.
 
-No direct C# descriptor for these two parent groups exists in the consulted
-local reference checkout. This is measured wire interpretation, with explicit
-remaining semantic uncertainty. Repeated array updates and checkpoint snapshots
-are not independent kills or a deduplicated inventory ledger.
+No descriptor declares these two parent groups. This is measured wire
+interpretation, with explicit remaining semantic uncertainty. Repeated array
+updates and checkpoint snapshots are not independent kills or a deduplicated
+inventory ledger.
 
 ## Historical validation of this value-only batch
 

@@ -1,19 +1,16 @@
 //! Content-block group-path resolution.
 //!
 //! Every content block is attributed to a declared export group before any
-//! field in it can be named. The rules are the C# `ContentBlockPathResolver`'s
-//! (`resolve_actor_group_path`: `ResolveCachedActorExportGroupPath` /
-//! `ResolveCachedActorClassPath` in `ResolveActorPackageOrClassPath` order;
-//! `resolve_subobject_group_path`: `ResolveSubobjectExportGroupPath` /
-//! `ResolveSubobjectClassPath`; `create_combined_candidate`:
-//! `TryCreateCombinedCandidate`; `NetGuidCache::unique_leaf_match`:
-//! `UniqueLeafMatch`). The reference replay has 608,020 blocks, and
-//! docs/archive/PROJECT_STATUS.md 5-P measured this resolution at 371 ms, the
+//! field in it can be named (`resolve_actor_group_path`,
+//! `resolve_subobject_group_path`, `create_combined_candidate`,
+//! `NetGuidCache::unique_leaf_match`). The reference replay has 608,020
+//! blocks, and docs/archive/PROJECT_STATUS.md 5-P measured this resolution at
+//! 371 ms, the
 //! export's largest slice once the Parquet writers left the packet loop.
 //!
 //! # The memo
 //!
-//! [`BlockPathMemo`] is what this module adds over the C#. Resolution is a pure
+//! [`BlockPathMemo`] caches the resolution. Resolution is a pure
 //! function of the header's `is_actor`, `has_rep_layout`, `class_net_guid` and
 //! `object_net_guid` and the channel index and actor GUID -- the memo key --
 //! and of three inputs with independent stamps, none covering another: the
@@ -46,8 +43,8 @@ use super::{ChannelState, ExportSink};
 /// the block kind each applies to: the fallback when no `class_net_guid` names
 /// the class.
 ///
-/// The first four pairs are the C# `ContentBlockPathResolver`'s ClassNetCache
-/// effect entries. The rest go beyond it: VALORANT replicates components under
+/// The first four pairs are the ClassNetCache effect entries. The rest are
+/// RepLayout remaps: VALORANT replicates components under
 /// bare instance names but declares their layouts under the class, so without
 /// a remap every handle such a block carries stays unnamed (`CurrentEquippable`,
 /// the spike carrier, included). The class is usually native; for four
@@ -523,8 +520,7 @@ impl ExportSink<'_> {
     }
 
     /// A ClassNetCache block's function count: its group's declared slot count,
-    /// as the C# `ReadSerializedInt(FunctionsByHandle.Length)` reads it
-    /// (`FunctionsByHandle` sized to `replayGroup.NetFieldExportsLength`). 0 when
+    /// the bound its handle is read as a SerializedInt against. 0 when
     /// no group resolves: the payload is then preserved raw and counted as a
     /// stream failure, never dropped. May replace `current_group_path` (the
     /// bare-instance-name branch), which is why the memo stores the pair.
@@ -565,7 +561,6 @@ impl ExportSink<'_> {
         // `AudDeadeyeVOComponent`) -- has no archetype or class GUID on the wire.
         // Match it against the replay's own `_ClassNetCache` groups by Unreal
         // naming conventions and take the declared capacity, never a guess.
-        // The C# reference fails these blocks.
         if is_bare_instance_name(&self.current_group_path) {
             if let Some(group) = self
                 .cache
@@ -675,8 +670,7 @@ fn ends_with_class_name(path: &str, class_name: &str) -> bool {
     (sep == b'.' || sep == b':') && path[sep_index + 1..] == *class_name
 }
 
-/// Whether the path's leaf is a class default object (`Default__...`), as the
-/// C# `ReplayPath.IsClassDefaultObjectPath`.
+/// Whether the path's leaf is a class default object (`Default__...`).
 fn is_class_default_object_path(path: &str) -> bool {
     let leaf_start = path.rfind(['/', '.', ':']).map_or(0, |i| i + 1);
     path[leaf_start..].starts_with("Default__")
@@ -820,8 +814,8 @@ mod tests {
     /// `/Game/` Blueprint classes, names with spaces), every 13.06 addition
     /// listed. Each reaches its group from a RepLayout block and stays bare on a
     /// ClassNetCache block, which fails if the remap stops asking the block kind;
-    /// the table check below fails on any ClassNetCache pair beyond the C#
-    /// reference's four, which would bind that leaf's RPC stream to
+    /// the table check below fails on any ClassNetCache pair beyond the four
+    /// effect entries, which would bind that leaf's RPC stream to
     /// `<target>_ClassNetCache` -- the AbilitySystem mis-parse.
     #[test]
     fn component_names_read_from_the_game_reach_their_native_groups() {
@@ -934,7 +928,7 @@ mod tests {
                 "LocationalEffectManager",
                 "DamageHandlerComponent",
             ],
-            "only the C# reference's pairs remap a ClassNetCache block",
+            "only these pairs remap a ClassNetCache block",
         );
         for (leaf, _, kind) in KNOWN_SUBOBJECT_CLASS_PATHS {
             if *kind == GroupKind::RepLayout {

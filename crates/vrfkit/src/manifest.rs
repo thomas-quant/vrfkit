@@ -211,8 +211,7 @@ pub fn write_manifest(
     }
 
     // Net-field exports the cache could not place: an out-of-range handle (an
-    // unknown group cannot reach this call site). The C# reference drops these
-    // silently; expected zero.
+    // unknown group cannot reach this call site). Expected zero.
     wkv(
         &mut out,
         "dropped_field_exports",

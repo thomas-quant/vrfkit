@@ -76,10 +76,10 @@ pub(super) fn read_field_header(reader: &mut BitReader<'_>) -> Result<Option<(u3
     Ok(Some((handle, payload_bits)))
 }
 
-/// When exactly 8 bits remain after the zero terminator, the C# parser reads
-/// one more IntPacked and discards its value and any error, so any appended
-/// byte passes as a terminator. Here it must be zero and a read failure
-/// propagates: a silently permissive reference is not copied.
+/// When exactly 8 bits remain after the zero terminator, one more IntPacked
+/// follows. Discarding its value and any error would let any appended byte
+/// pass as a terminator, so here it must be zero and a read failure
+/// propagates.
 pub(super) fn consume_trailing_terminator(reader: &mut BitReader<'_>) -> Result<()> {
     if reader.bits_remaining() != 8 {
         return Ok(());

@@ -54,7 +54,7 @@ pub(super) fn read_dynamic_spawn_data(
         SPAWN_SCALE_FACTOR,
         UNIT_SCALE,
     )?);
-    // Velocity is read unconditionally, as NewActorSerializer.cs:69-72 does;
+    // Velocity is read unconditionally;
     // gating it cost one invisible bit (docs/archive/PROJECT_STATUS.md 17-A).
     state.spawn_velocity = Some(read_optional_quantized_vector(
         payload,
@@ -81,12 +81,11 @@ pub(super) fn read_dynamic_spawn_data(
 ///   [else] -> 3 x f64
 /// ```
 ///
-/// A clear leading bit means "take the default", not "absent":
-/// `ArchiveVectorReaders.ReadOptionalQuantizedVector` returns `defaultVector`,
-/// and `NewActorSerializer.cs:56-72` passes (0,0,0) for location and velocity
-/// and (1,1,1) for scale. So this always yields a vector; only a static actor,
-/// which never enters the block, leaves the fields `None` -- unknown, not
-/// (0,0,0) (docs/archive/PROJECT_STATUS.md 13-A has the corpus counts).
+/// A clear leading bit means "take the default", not "absent": (0,0,0) for
+/// location and velocity and (1,1,1) for scale in the spawn block. So
+/// this always yields a vector; only a static actor, which never enters the
+/// block, leaves the fields `None` -- unknown, not (0,0,0)
+/// (docs/archive/PROJECT_STATUS.md 13-A has the corpus counts).
 fn read_optional_quantized_vector(
     reader: &mut BitReader<'_>,
     scale_factor: i32,

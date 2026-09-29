@@ -14,20 +14,14 @@ This bounded search does not establish that no suitable dump exists elsewhere.
 
 ## Replay implementations and dumps checked
 
-The upstream
-[transform directory at `2b66c65`](https://github.com/michel-giehl/ValorantReplayParser/tree/2b66c65a7b116154e18ebb84d9f6795f2b080233/src/Replay.Encoding/PayloadEncryption/VersionedTransforms)
-contains 12.10, 12.11, 13.00, 13.01, 13.02, 13.04, 13.05 and 13.06. It has
-no transform for the seven target builds. The maintainer's
-[methodology comment](https://github.com/michel-giehl/ValorantReplayParser/issues/2#issuecomment-5016680427)
-describes locating the transformed reader through
-`UActorChannel::ReadContentBlockHeader` in Ghidra. It does not supply an
-unpacker for encrypted executables.
+The public replay implementation checked, and the default-branch trees of all
+nine of its public forks GitHub returned, have versioned transforms only from
+12.10 (12.10, 12.11, 13.00, 13.01, 13.02, 13.04, 13.05 and 13.06); none covers
+the seven target builds. Its published method locates the transformed reader
+through `UActorChannel::ReadContentBlockHeader` in Ghidra; it does not supply
+an unpacker for encrypted executables.
 
-The default-branch trees of all nine public forks GitHub returned have
-versioned transforms only from 12.10: 33k0 `914039a`, Chyste and
-bhaskoro-muthohar `b51d674`, Matthias1590, lincolnchun, xiaowan108 and
-bmblChloe `99d9646`, aubwang `64c54b4`, Archers007 `2017487`. Two dump
-collections do not provide the code either:
+Two dump collections do not provide the code either:
 [ZaweSec/Valorant-Dumps at `f7d8fd0`](https://github.com/ZaweSec/Valorant-Dumps/tree/f7d8fd081a69c838aedc54fae1661c61529a92fe)
 lists 2023 and January 2024 archives, older than the replay system Riot
 [introduced on PC with 11.06 in September 2025](https://playvalorant.com/en-us/news/dev/replays-everything-you-need-to-know/)

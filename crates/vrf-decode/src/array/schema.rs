@@ -4,8 +4,7 @@
 //! it decides the shape of the emitted paths, not just their labels.
 
 /// One struct level: which handles are nested arrays, and names for handles.
-/// Handles come from the C# descriptors (`CombatRoundReportsDecoder` and
-/// related).
+/// Handles come from the CombatRoundReports descriptors.
 #[derive(Debug, Clone)]
 pub struct ArrayFieldSchema {
     /// `(handle, element schema)` for each handle that is itself an array.
@@ -38,9 +37,9 @@ impl ArrayFieldSchema {
 
 // -- CombatRoundReports schema ------------------------------------------------
 //
-// From `CombatRoundReports.cs` (vendored under third_party/vrp, with each
-// member's type; handles confirmed against the manifest): Rounds[] -> Reports[]
-// at 4 -> Interactions[] at 10 -> DealtInteractions[] at 26 and
+// Member names and types from the descriptors, handles confirmed against the
+// manifest: Rounds[] -> Reports[] at 4 -> Interactions[] at 10 ->
+// DealtInteractions[] at 26 and
 // ReceivedInteractions[] at 61, each holding Regions[] (44 and 79) whose six
 // members sit at 45..=50 and 80..=85 respectively.
 

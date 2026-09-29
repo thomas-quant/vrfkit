@@ -16,8 +16,8 @@ pub trait GuidPathSink {
 
     /// The path this GUID is known by, if the receiver keeps one.
     ///
-    /// Decides the net-player-index byte as `ReadNetPlayerIndexStage.cs` does:
-    /// resolve the channel's archetype and actor paths and ask whether either
+    /// Decides the net-player-index byte: resolve the channel's archetype and
+    /// actor paths and ask whether either
     /// names a PlayerController. Answer from the receiver's cache, not from a
     /// set of `register_path` calls: paths reach the cache by more routes than
     /// pass through here. The default `None` (no cache) never consumes that byte.

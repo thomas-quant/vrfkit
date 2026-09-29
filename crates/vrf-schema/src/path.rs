@@ -1,7 +1,6 @@
 //! Replay path aliases. One logical path has equivalent spellings: with or
 //! without a `Default__` leaf prefix, `/_Core/` under `/Game/Characters/`, and
-//! the `_ClassNetCache` suffix. Matching is ordinal and exact, replicating
-//! `Replay.Unreal/Parsing/ReplayPath.cs`.
+//! the `_ClassNetCache` suffix. Matching is ordinal and exact.
 
 /// The suffix that marks an export group as an RPC (ClassNetCache) group: a
 /// wire discriminator, public for that reason. The Python adapter under
@@ -14,9 +13,9 @@ const CHARACTERS_ROOT: &str = "/Game/Characters/";
 const DEFAULT_OBJECT_PREFIX: &str = "Default__";
 
 /// Visit every lookup key for an export-group path: `path` itself, then its
-/// `Default__` and `/_Core/` aliases. The order matches C#
-/// `ReplayPath.LookupKeys` and decides which spelling wins. A visitor, not a
-/// `Vec<String>`: docs/PERFORMANCE_NOTES.md#path-alias-enumeration.
+/// `Default__` and `/_Core/` aliases. The order decides which spelling wins.
+/// A visitor, not a `Vec<String>`:
+/// docs/PERFORMANCE_NOTES.md#path-alias-enumeration.
 pub fn for_each_replay_path_key(path: &str, mut visit: impl FnMut(&str)) {
     find_replay_path_key::<()>(path, |key| {
         visit(key);

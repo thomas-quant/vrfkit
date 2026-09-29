@@ -127,7 +127,7 @@ pub struct NetStats {
     /// old one.
     pub channel_reopens_while_open: u64,
     /// Dynamic-actor opens whose payload ended before the mandatory spawn block
-    /// (the reference reads it unconditionally). Such an open fails like any
+    /// (read unconditionally). Such an open fails like any
     /// truncated read; this names the shape so a corpus run can say whether it
     /// occurs.
     pub actor_opens_missing_spawn: u64,
@@ -165,7 +165,7 @@ pub struct NetStats {
     /// Must-be-mapped GUIDs consumed.
     pub must_be_mapped_guids: u64,
     /// Diagnostic events, capped at [`MAX_DIAGNOSTIC_EVENTS`]: the context to
-    /// locate a failure in the replay and compare with the C# reference.
+    /// locate a failure in the replay.
     #[cfg(feature = "diagnostics")]
     pub diagnostics: Vec<DiagnosticEvent>,
     /// Events the cap refused. Non-zero means [`Self::diagnostics`] is a

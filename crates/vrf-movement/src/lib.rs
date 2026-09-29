@@ -131,12 +131,12 @@
 //!   every movement window runs to the end of its envelope.
 //! - The `<= 31` bits a section ends with after its last move are not padding.
 //!   The 3 bits where the next marker would sit are `000`, and the 8 to 23
-//!   bits after them are not all zero. Nothing reads them; the C# reference
-//!   (`MaxMovementPaddingBits`) stops at the same place.
+//!   bits after them are not all zero. Nothing reads them: a section stops
+//!   there (`MAX_MOVEMENT_PADDING_BITS`).
 //! - Exactly 24 bits follow the envelope in every stream (3,753,771,600 bits in
-//!   all). The decoder skips them unread, as the C# reference does, and
-//!   tallies them per stream; what they carry is not established.
-//! - Implemented after the C# reference but never seen: the direct form, a
+//!   all). The decoder skips them unread and tallies them per stream; what
+//!   they carry is not established.
+//! - Implemented but never seen: the direct form, a
 //!   sized movement window, the updates array's trailing 8-bit IntPacked,
 //!   variant-0 moves, and the f32 and f64 QuantizedVector forms.
 //!

@@ -1,4 +1,4 @@
-//! Pinned rows from replay `02d4d478`, with the values the C# reference
+//! Pinned rows from replay `02d4d478`, with the values an independent parser
 //! produced for the same bytes.
 
 use super::*;
@@ -57,7 +57,7 @@ fn owner_exclusive_player_info() -> Vec<Option<&'static str>> {
 // -- RoundResults tests ---------------------------------------------------
 
 /// Row 0 from replay 02d4d478, t=84942ms.
-/// C# output: [{RoundNumber:0, WinningTeam:"Red", WinningTeamRole:attacker, RoundResult:elimination}]
+/// Expected: [{RoundNumber:0, WinningTeam:"Red", WinningTeamRole:attacker, RoundResult:elimination}]
 #[test]
 fn round_results_row0_red_attacker_elimination() {
     let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
@@ -71,7 +71,7 @@ fn round_results_row0_red_attacker_elimination() {
 }
 
 /// Row 4 from replay 02d4d478, t=580448ms.
-/// C# output: [{RoundNumber:4, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:time_expired}]
+/// Expected: [{RoundNumber:4, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:time_expired}]
 #[test]
 fn round_results_row4_blue_defender_time_expired() {
     let data = hex("0a0abcd20a00000084d8eaca00000000007c0d048c300000");
@@ -85,7 +85,7 @@ fn round_results_row4_blue_defender_time_expired() {
 }
 
 /// Row 6 from replay 02d4d478, t=796414ms.
-/// C# output: [{RoundNumber:6, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:defuse}]
+/// Expected: [{RoundNumber:6, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:defuse}]
 #[test]
 fn round_results_row6_blue_defender_defuse() {
     let data = hex("0e0ebcd20a00000084d8eaca00000000007c0d048c100000");
@@ -200,7 +200,7 @@ fn round_results_unknown_member_name_is_reported_by_name() {
 // -- TeamEconomy tests ----------------------------------------------------
 
 /// Row 0 from replay 02d4d478, t=7ms. Initial spawn with ReplicationIds.
-/// C# output: [{Index:0, LV:0, ALV:0, RepId:272}, {Index:1, LV:0, ALV:0, RepId:274}]
+/// Expected: [{Index:0, LV:0, ALV:0, RepId:272}, {Index:1, LV:0, ALV:0, RepId:274}]
 #[test]
 fn team_economy_row0_initial_spawn() {
     let data = hex("0402722021047440000000007640000000000004722025047440000000007640000000000000");
@@ -218,7 +218,7 @@ fn team_economy_row0_initial_spawn() {
 }
 
 /// Row 1 from replay 02d4d478, t=62ms.
-/// C# output: [{Index:0, LV:4350, ALV:870, RepId:null}, {Index:1, LV:4150, ALV:830, RepId:null}]
+/// Expected: [{Index:0, LV:4350, ALV:870, RepId:null}, {Index:1, LV:4150, ALV:830, RepId:null}]
 #[test]
 fn team_economy_row1_round_start() {
     let data = hex("04027440fe100000764066030000000474403610000076403e0300000000");
@@ -236,7 +236,7 @@ fn team_economy_row1_round_start() {
 }
 
 /// Row 2 from replay 02d4d478, t=92033ms.
-/// C# output: [{Index:0, LV:21200, ALV:4240}, {Index:1, LV:11600, ALV:2320}]
+/// Expected: [{Index:0, LV:21200, ALV:4240}, {Index:1, LV:11600, ALV:2320}]
 #[test]
 fn team_economy_row2_midgame() {
     let data = hex("04027440d052000076409010000000047440502d00007640100900000000");
@@ -254,7 +254,7 @@ fn team_economy_row2_midgame() {
 // -- RoundInfos tests -----------------------------------------------------
 
 /// First RoundInfos row from replay 02d4d478, t=91927ms, actor 196.
-/// C# base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQGwHAABaQAAAAAAAAA=="
+/// Payload base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQGwHAABaQAAAAAAAAA=="
 /// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:1900, EL:0}]
 #[test]
 fn round_infos_row0_end_of_round1() {
@@ -271,7 +271,7 @@ fn round_infos_row0_end_of_round1() {
 }
 
 /// Second RoundInfos row from replay 02d4d478, t=91927ms, actor 184.
-/// C# base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQNAHAABaQMgAAAAAAA=="
+/// Payload base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQNAHAABaQMgAAAAAAA=="
 /// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:2000, EL:200}]
 #[test]
 fn round_infos_row1_different_player() {
@@ -288,7 +288,7 @@ fn round_infos_row1_different_player() {
 }
 
 /// Third RoundInfos row from replay 02d4d478, t=91927ms, actor 240.
-/// C# base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQDQIAABaQFgCAAAAAA=="
+/// Payload base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQDQIAABaQFgCAAAAAA=="
 /// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:2100, EL:600}]
 #[test]
 fn round_infos_row2_another_player() {

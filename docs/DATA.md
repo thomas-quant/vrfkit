@@ -103,10 +103,10 @@ evidence (measured in [FOLLOWUP.md](FOLLOWUP.md#typing-and-data-dictionaries)).
 
 | Data | Source | Status |
 |---|---|---|
-| K / D / A | `fields` CombatReport nested array | ✅ multiset-identical to the C# parser (on 13.01 -- see below) |
+| K / D / A | `fields` CombatReport nested array | ✅ multiset-identical (on 13.01 -- see below) |
 | Kill log (killer/killed NetGUID) | `events.characterDeath` word0/word1 + `MulticastNotifyKilledEnemy` RPC | ✅ 132/132 on 13.01; 9,677/9,677 over 71 replays on 13.02 by the same two-source join; Event structural overlay exact on 109,126/109,126 chunks across 527 replays |
 | Multikill level | `MulticastNotifyKilledEnemy.MultikillLevel` | ✅ single/double/triple/quad |
-| Kill timeline | `events.characterDeath` time_ms | ✅ (recovers the +13 the C# parser lost) |
+| Kill timeline | `events.characterDeath` time_ms | ✅ |
 
 ## Combat — damage
 
@@ -122,10 +122,9 @@ evidence (measured in [FOLLOWUP.md](FOLLOWUP.md#typing-and-data-dictionaries)).
 | Health / armour / overheal, absolute | `DamageableComponent` RPCs → `LifeChangeEvents[]` / `LifeChangeBySection[]` | ✅ typed section updates; actor/section timelines require joins, see below |
 | Heal / overheal-decay source references | `MulticastNotifyHeal` `HealCauser`, `EventInstigator`, `EventInstigatorPawn`; `MulticastNotifyOverhealDecay` `DecayCauser`, `EventInstigator`, `EventInstigatorPawn` | ✅ `ObjectNetGuid` by exact group/name/checksum. `EventInstigator` is the instigator's PlayerController: it never joins to `actors.parquet` (join through the pawn's `Controller`/`Owner`), and that is expected, not a decode fault. `DecayCauser` = 0 means no causer. No heal credit is implied; see [TARGETING_AND_HEAL_VALUES.md](TARGETING_AND_HEAL_VALUES.md) |
 
-**The historical "vs C#" figures here were measured on build 13.01 or earlier.**
-They describe the preserved comparison fixtures, not current upstream parser
-compatibility. A result from that fixture does not establish agreement on a
-newer build; a fresh comparison needs its own replay and implementation evidence.
+**The "multiset-identical" figures compare against an independent parser on
+build 13.01 or earlier.** A result from that fixture does not establish
+agreement on a newer build.
 
 ### Health is absolute, not a subtraction
 
@@ -456,7 +455,7 @@ crouch speed is ~190 cm/s.
 
 | Data | Source | Status |
 |---|---|---|
-| Position (cm) | `movement.parquet` pos_x/y/z | ✅ ≤0.0005 vs C# (on 13.01) |
+| Position (cm) | `movement.parquet` pos_x/y/z | ✅ ≤0.0005 against an independent parser (on 13.01) |
 | Rotation (yaw/pitch) | movement | ✅ exact |
 | Velocity | movement vel_x/y/z | ✅ exact |
 | Time (128 Hz tick, resets per round) / global | movement `timestamp` / `time_ms` | ✅ — `timestamp` is a **tick counter**, not milliseconds |
@@ -530,7 +529,7 @@ report their position in `fields.parquet` rows named `ReplicatedMovement`, whose
 second.
 
 **Exports made before 2026-09-28 are 100x too small on almost every class.** The
-reader divided every location by 100, the C# reference's `VectorNetQuantize100`.
+reader divided every location by 100, as `VectorNetQuantize100` would.
 The wire packs `round(world * scale)` and sets one bit saying "scaled", never the
 scale, and on all but one class the scale is 1 -- so `location` came out as
 world/100, a plausible point near the map origin, while every decode counter
@@ -623,8 +622,7 @@ What the evidence does **not** cover:
   nine pawn classes such as `Pawn_Killjoy_E_Turret_C` and 56 others. That is
   a pattern for whoever adds one of them, not a reason to skip measuring it.
 
-**New entries.** The generator (`extract_descriptors.py`,
-`REP_MOVEMENT_LOCATION`) gives every entry whole units -- Unreal's own
+**New entries.** `table.rs` states whole units for every entry -- Unreal's own
 `FRepMovement` default and the level of 25 of the 26 classes above -- and
 `apply_type_corrections.py` pins SeekerNade to two decimals. A default is a
 prior, not a measurement, so `tests::overlay` lists every group given a
@@ -632,13 +630,6 @@ prior, not a measurement, so `tests::overlay` lists every group given a
 level, and fails on a group it does not list: a new class cannot ship on the
 default without somebody running the spawn join first. A `RepMovement` literal
 written without a `location:` does not compile.
-
-**This member differs from the C# reference on purpose:** the reference still
-emits location/100 for every class. Keeping that reading
-([archive 13-J](archive/PROJECT_STATUS.md#13-j-the-ability-pawns-and-projectiles-got-descriptors-done-2026-08-02))
-rested on member-for-member parity (13-B) and on no metric reading the field;
-this page lists it as a position source, and a position 100x wrong is not
-parity worth keeping.
 
 ### RPC transforms: `249` is a rotation quaternion, not a rotator
 
@@ -814,11 +805,11 @@ intervals carried that player's subject; now none does.
   `EquippableGroundPickup_C` (handle 15, 277 rows) and `MyEquippable_0` on
   `EquippablePickupProjectile_C` (handle 16, 276 rows). `IsAlive` /`IsAlive_0`
   on Thorne's wall segments is the same shape. They are now rendered apart.
-  Consequence to know: `table.rs` is generated from C# descriptors that spell
-  the projectile's field `MyEquippable`, so that name entry no longer matches
-  and the field resolves through the weakest fallback — `compatible_checksum`
-  (`checksum_table.rs`, to `ObjectNetGuid`). No row lost its type, but the name
-  path for that one entry is dead until the generator learns the number.
+  Consequence to know: `table.rs` spells the projectile's field
+  `MyEquippable`, so that name entry no longer matches and the field resolves
+  through the weakest fallback — `compatible_checksum` (`checksum_table.rs`, to
+  `ObjectNetGuid`). No row lost its type, but the name path for that one entry
+  is dead until the table carries the number.
 - **A reused channel once inherited the previous actor's archetype**: on
   `08aec1e1` packet 28115 a `BP_Destructible_Snowman_B1` decoded as
   `Projectile_Pandemic_4_SmokeGrenade_C`, with typed `215`/`216` fields (13 of
@@ -962,7 +953,7 @@ so far points at one -- every pair below came from the IoStore containers.
 can hold came back with the class it already had: the 16 read from the game
 before, `InventoryComponent -> AresInventory` and
 `AbilitiesAndBuffsComponent -> AresAbilitySystemComponent` (first argued from
-handle shapes), and the C# reference's four effect components. None was
+handle shapes), and the four ClassNetCache effect components. None was
 contradicted. `AresAttributeSet_2` is in no package, as expected of a runtime
 subobject. The chain as this section used to state it -- `_GEN_VARIABLE` exports
 only -- finds five of those pairs nowhere in 13.06 (step 3), so the class
@@ -1085,7 +1076,7 @@ it mattered: on the 92 replays exported before the 29 pairs above, it read 22
 pairs `ok` in 773 (pair, replay) cases whose RepLayout rows were all still bare,
 at up to 4.9% of the target (`ShieldDamageSection` beside
 `ChildDamageSectionComponent`); only a simulated rename, at 15.6%, tripped it.
-The C# reference's four ClassNetCache pairs are judged on the rows they route
+The four ClassNetCache effect pairs are judged on the rows they route
 -- the leaf's ClassNetCache rows against `<class>_ClassNetCache`, any bare row
 `broken`. Their old RepLayout ratio read `DamageHandlerComponent` `broken` on 10
 healthy exports of the 1,018 and `absent` on the rest, and left its verdict
@@ -1346,5 +1337,5 @@ Two loose ends found on the way, neither a live bug: `RemoteRole` is declared
 on one and `Float` on another. `RemoteRole` never appears on the wire in this
 corpus, so nothing decodes through the odd entry.
 
-Generated files are never hand-edited; the only path is in
-[CONTRIBUTING.md](../CONTRIBUTING.md#generated-files--never-hand-edit).
+A type change to the table goes through `apply_type_corrections.py`, as
+[CONTRIBUTING.md](../CONTRIBUTING.md#generated-files--never-hand-edit) describes.

@@ -3,7 +3,7 @@
 **OUTCOME: implemented and verified.** Carried out in commits 47849d2
 (net_guids.parquet), b258dfd (adapter) and 1f3afe4 (fire mode). Every shot in
 02d4d478 resolves to a weapon -- 2,475 / 2,475 -- with names and categories
-identical to the C# reference across all 19 weapons. A1 was confirmed
+identical to an independent parser's across all 19 weapons. A1 was confirmed
 unnecessary, as predicted here.
 
 spray_control is now EXACT; posture's by_weapon is exact for all 10 players.
@@ -69,7 +69,7 @@ distinct firing_state GUIDs in shots    : 175
   present in guid -> outer              : 175 / 175  (100%)
 
 shots resolved to a weapon class_path   : 2,475 / 2,475  (100.00%)
-class_path equal to C# reference        : 2,475 / 2,475  (100%)
+class_path equal to the reference's     : 2,475 / 2,475  (100%)
 ```
 
 The 28 apparent mismatches in the first scoring pass were an artifact of the
@@ -91,18 +91,16 @@ equippable GUIDs are in our `actors.parquet` with **byte-identical class_path**.
 
 ---
 
-## How the C# parser resolves it (for reference)
+## Resolution tiers measured
 
-`ValorantReplayParser/src/Replay.Valorant/Combat/ValorantShotEventEnricher.cs:123`
-`ResolveShotEquippable`, three tiers in order:
+Three tiers, in order:
 
 1. `shot.EffectEquippable` -- GUID off the effect container.
    **Measured dead: 0 / 2,647.**
-2. `ResolveFromFiringState` (:163) -- walk the `FiringState` GUID's outer chain
-   (`TryGetOuterNetGuid`, max 16 levels) to an actor known to be an equippable.
-   **This is the one that fires.**
+2. Walk the `FiringState` GUID's outer chain (max 16 levels) to an actor known
+   to be an equippable. **This is the one that fires.**
 3. `FiringPlayerState -> BombPlayerState.PossessedCharacter ->
-   AresInventory.CurrentEquippable` (:78, :103). Not needed -- tier 2 is 100%.
+   AresInventory.CurrentEquippable`. Not needed -- tier 2 is 100%.
 
 ---
 
@@ -111,16 +109,15 @@ equippable GUIDs are in our `actors.parquet` with **byte-identical class_path**.
 | Step | Where | Size | Status |
 |---|---|---|---|
 | **A2. Export netguid -> (path, outer)** | Rust, `vrf-export` + a `NetGuidCache` accessor | small | The only Rust work. Data already in `guid_to_outer` (`cache.rs:89`) and `guid_to_path` (:88); the exporter simply never emits it. |
-| **A3. Outer-chain walk in the adapter** | Python, `to_valplay_bundle.py` | small | Mirror C# tier 2. Verified to hit 2,475/2,475. |
+| **A3. Outer-chain walk in the adapter** | Python, `to_valplay_bundle.py` | small | Tier 2. Verified to hit 2,475/2,475. |
 | **A4. class_path -> display name + category** | Python adapter | small | See invariant note below. |
 | ~~A1. Resolve `InventoryComponent` -> `AresInventory`~~ | Rust, `vrf-schema` | large | **Not needed for 7-A.** Tier 3 is unnecessary. |
 
-Export `path` alongside `outer` -- C# tier 2's own final fallback
-(`ValorantEquippableResolver.Resolve(value, netGuidCache)`, :184) uses the path,
-and `path` is what identifies a GUID as `FiringState` vs `ZoomedFiringState`.
-The table must cover **all** GUIDs in the chain, not only ones that opened an
-actor channel: the 175 firing_state GUIDs appear in zero rows of
-`actors.parquet` and zero rows of `fields.parquet`.
+Export `path` alongside `outer` -- `path` is what identifies a GUID as
+`FiringState` vs `ZoomedFiringState`. The table must cover **all** GUIDs in
+the chain, not only ones that opened an actor channel: the 175 firing_state
+GUIDs appear in zero rows of `actors.parquet` and zero rows of
+`fields.parquet`.
 
 Suggested shape: `net_guids.parquet` with `(net_guid, path, outer_net_guid)`,
 16,167 rows for this replay -- trivially small.
@@ -129,17 +126,12 @@ Suggested shape: `net_guids.parquet` with `(net_guid, path, outer_net_guid)`,
 
 ## Invariant conflict to decide before A4
 
-`ValorantReplayParser/src/Replay.Valorant/Combat/ValorantEquippableResolver.cs:20`
-is 130 lines of hardcoded table:
-
-```csharp
-Define("/Game/Equippables/Guns/Sidearms/Revolver/RevolverPistol.RevolverPistol_C",
-       "Sheriff", ValorantEquippableCategory.Sidearm),
-```
+Display names are nowhere on the wire: producing one takes a hardcoded
+`(class path, display name, category)` table.
 
 valplay's `_actorindex.py` docstring claims the name is "a server-stored field"
 and "nothing is hard-coded". True **only from valplay's side** -- the hardcoding
-lives one layer down, in the C# parser.
+lives one layer down.
 
 So reproducing `shot.equippable.name` requires a hardcoded table somewhere, which
 collides with PROJECT_STATUS.md section 8 / tradeoff 3

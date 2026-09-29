@@ -37,8 +37,7 @@ impl ExportSink<'_> {
     /// parameter from the group [`Self::compute_rpc_param_group_path`] finds, or
     /// `{func}._h{N}` without one.
     ///
-    /// The `FunctionParameters` grammar, confirmed against the C#
-    /// `ParseClassNetCachePayload`:
+    /// The `FunctionParameters` grammar:
     /// ```text
     ///   propertyChecksum : 1 bit (ignored)
     ///   loop:
@@ -279,7 +278,7 @@ impl ExportSink<'_> {
 
             // The projectile path is a RepLayout struct array. The replay's
             // declarations for handles 1-3 are unrelated siblings; the element
-            // handles come from the C# PathPoint descriptor, so the route is
+            // handles come from the PathPoint descriptor, so the route is
             // scoped to the observed parent identity, and that parent is kept.
             if projectile_path_array {
                 if let Some(raw) = raw_bits.as_deref() {

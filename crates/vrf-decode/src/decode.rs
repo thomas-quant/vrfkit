@@ -137,7 +137,7 @@ pub fn decode_field(
     let value = dispatch_decode(field_type, &mut reader, bit_count)?;
     let remaining = reader.bits_remaining();
     // No exemption, not even for `EnumRemainingBits` (it reads at most 32
-    // bits): the C# reference throws on leftover bits too.
+    // bits): leftover bits are an error.
     if remaining != 0 {
         return Err(DecodeError::NotFullyConsumed { remaining });
     }

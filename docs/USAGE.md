@@ -2,10 +2,10 @@
 
 The CLI, output schemas, library use, `tools/` scripts, and validation suite.
 
-Design rationale and the comparison against the existing parser are in
-[`../README.md`](../README.md); work history and measurement records are in
-[`archive/PROJECT_STATUS.md`](archive/PROJECT_STATUS.md). The byte-level format
-of the checkpoint chunks is in
+Design rationale is in [`../README.md`](../README.md); work history and
+measurement records are in
+[`archive/PROJECT_STATUS.md`](archive/PROJECT_STATUS.md). The byte-level
+format of the checkpoint chunks is in
 [`archive/CHECKPOINT_SPEC.md`](archive/CHECKPOINT_SPEC.md), and finished task
 specs are in [`archive/`](archive/README.md) -- all of these are for the
 record, not things to run.
@@ -666,7 +666,7 @@ Every loss and fallback counter for the run, including the checkpoint pass when
 | `event_layout_mismatches` | Known groups that failed any structural guard; all nullable overlay columns remain empty. |
 | `movement_envelope_trailers`, `movement_envelope_trailer_bits` | In each `sink` block: byte-wrapped movement streams and the bits after their envelopes, which nothing reads. Printed as `Envelope trailers:` (`Checkpoint envelope trailers:`); 24 bits per stream on every measured replay, which `verify_build_corpus.py` requires. |
 | `active_blinds_empty_trailers` | In each `sink` block: empty `ActiveBlinds` deltas whose one trailing zero byte the strict array walker was spared; the parent row keeps it. Printed as `ActiveBlinds trailers:` (`Checkpoint ActiveBlinds trailers:`). |
-| `frame_non_finite_times` | DemoFrames whose time was NaN or infinite; their packets carry 0 ms, as in the reference. `checkpoints.checkpoint_frame_non_finite_times` counts the snapshot frames. Printed as `Frame times:` (`Checkpoint frame times:`), and by `validate`. |
+| `frame_non_finite_times` | DemoFrames whose time was NaN or infinite; their packets carry 0 ms. `checkpoints.checkpoint_frame_non_finite_times` counts the snapshot frames. Printed as `Frame times:` (`Checkpoint frame times:`), and by `validate`. |
 | `checkpoints.checkpoint_trailing_bytes` | Checkpoint bytes no reader consumed: bytes after an archive inside its chunk, and archive bytes the Oodle codec never read -- the checkpoint twin of `replay_data_trailing_bytes`. Printed as `Trailing bytes:` under `=== Checkpoints ===`, and by `diag --json` as `checkpoint_meta.trailing_bytes`. 0 in all 19,166 checkpoint archives of 1,014 replays, 11.06-13.06 (census, 2026-09-28); `verify_build_corpus.py` fails a replay where it is not. |
 
 `content_blocks_lost` is `malformed_content_blocks + transform_failures + field_stream_failures +
@@ -715,37 +715,33 @@ needs it.
 
 ### Generators
 
-**Never hand-edit the output.**
+**Never hand-edit the output.** The overlay table
+`crates/vrf-decode/src/table.rs` (1,336 + 96 handles) and `equippable_table.py`
+are not generated: they are maintained in the repository.
 
 | Script | Produces |
 |---|---|
-| `extract_descriptors.py` | `crates/vrf-decode/src/table.rs` (overlay table 1,336 + 96 handles) from the vendored C# descriptors in `third_party/vrp/Replay.Valorant` |
-| `apply_type_corrections.py` | Applies verified corrections/additions to that file and recomputes the two-line generation header |
-| `extract_checksum_types.py` | `crates/vrf-decode/src/checksum_table.rs` -- `compatible_checksum` -> `FieldType`, learned from the fields the overlay table already declares. Needs an export directory rather than the C# tree, since checksums come from the replay. Checksums whose donors disagree are dropped, which is the safety property. Repeat `--export` to widen the basis; the run **merges** into the committed table rather than replacing it, because a checksum this basis did not happen to see is still correct. `--check` asks whether the two agree *where they overlap* -- not whether they are byte-identical, which a content-addressed table cannot be across different sets of replays. A committed type changes only on purpose: when a correction retypes a checksum's donors, the merge refuses the disagreement until `--retype CHECKSUM` names it (write mode only, and only for a real disagreement). |
+| `apply_type_corrections.py` | Applies verified corrections/additions to `table.rs` and recomputes its two-line count header |
+| `extract_checksum_types.py` | `crates/vrf-decode/src/checksum_table.rs` -- `compatible_checksum` -> `FieldType`, learned from the fields the overlay table already declares. Needs an export directory, since checksums come from the replay. Checksums whose donors disagree are dropped, which is the safety property. Repeat `--export` to widen the basis; the run **merges** into the committed table rather than replacing it, because a checksum this basis did not happen to see is still correct. `--check` asks whether the two agree *where they overlap* -- not whether they are byte-identical, which a content-addressed table cannot be across different sets of replays. A committed type changes only on purpose: when a correction retypes a checksum's donors, the merge refuses the disagreement until `--retype CHECKSUM` names it (write mode only, and only for a real disagreement). |
 | `extract_sboxes.py` | `crates/vrf-transform/src/sbox.rs` |
 | `extract_golden.py` | `crates/vrf-transform/tests/data/golden_vectors.rs` |
-| `extract_equippables.py` | `tools/equippable_table.py` from the vendored `third_party/vrp/Replay.Valorant/Combat/ValorantEquippableResolver.cs`; `--check` runs in CI. The names are the C# table's: the 13.06 game calls `CompactPistol_C` "Bandit", not "Compact Pistol". Left as generated on purpose -- the generator's docstring says why |
 
-Run `extract_descriptors.py` -> `apply_type_corrections.py` -> `cargo fmt`,
-the order CI runs. The corrections key on each entry's own group, field and
-type, so they rewrite the generator's one-line form and the rustfmt form
-alike; the script **re-verifies the final state after applying** rather than
-trusting its apply count, and fails if the two disagree.
+Run `apply_type_corrections.py` -> `cargo fmt`. The corrections key on each
+entry's own group, field and type, so they rewrite the one-line form and the
+rustfmt form alike; the script **re-verifies the final state after applying**
+rather than trusting its apply count, and fails if the two disagree.
 
 ```bash
-python tools/extract_descriptors.py third_party/vrp/Replay.Valorant \
-    crates/vrf-decode/src/table.rs
 python tools/apply_type_corrections.py           # apply, then verify (219 corrections)
 cargo +1.86.0 fmt -p vrf-decode
 
 python tools/apply_type_corrections.py --check   # verify only
 ```
 
-CI runs the extract, apply and fmt lines on every push and fails if
-`table.rs` then differs from the committed file.
+CI runs the `--check` line.
 
 Those 219 corrections are the live expectation set the script re-verifies.
-`ADDITIONS` is the subset the vendored C# input (`third_party/vrp`) is
+`ADDITIONS` is the subset the descriptors are
 **silent on**: currently 142 of them, each admitted on wire evidence recorded
 at its entry in `apply_type_corrections.py`, under the bar stated above the
 list, which also names the fields that failed it. The first three
@@ -768,7 +764,7 @@ and 32. `check_docs.py` checks both figures.
 | `check_component_remaps.py` | Whether each component remap still matches. Needs only an export, so it works on a replay from a build that has no baseline -- which is the case a renamed component would otherwise slip through. Fails, too, when an entry of the Rust table does not parse, since that pair would otherwise go unchecked. Re-derive a broken or renamed pair with `extract_component_classes` ([below](#reading-the-installed-game)). |
 | `check_checksum_types.py` | Whether each overlay type hashes to the replay's own `compatible_checksum`. Recomputes Unreal's checksum from the C++ type vrfkit decodes and sorts every typed identity into match / mismatch / untestable -- enums, object references of an unknown class and struct members whose parent checksum is unknown (no parent chain, and no unambiguous agreement among their siblings) are untestable, never a match -- and checks every `checksum_table.rs` checksum under the names that carry it. Needs only manifests (`--export`, or `--corpus` for a directory of them). A mismatch vrfkit keeps on purpose is listed, with its reason and evidence, in `tools/fixtures/checksum_types_expected.json`, keyed on its exact shape (checksum, wire name, parent chain, vrfkit's type, the C++ type the checksum names). Exits 1 on a mismatch no item names -- at `9f92756` the corpus had two, `EffectID` and `HandleNumber`, since retyped (`Int64`, `UInt32`); with them the corpus exits 0, only the listed `249` quaternions mismatching -- and on an item that applies to the input (its checksum is declared) but covers nothing, STALE; exit 2 on a malformed list. The method, the provenance of the formula and its limits are in [CHECKSUM_TYPES.md](CHECKSUM_TYPES.md). |
 | `check_entry_survival.py` | Whether every name-keyed entry -- `table.rs` (names and handles), `scoped_types.rs`, `checksum_table.rs`, the measured array routes, the component-remap targets and the group aliases -- is still declared build after build, read from the `manifest.json` and checkpoint declaration tables of a directory of exports. Separates a field the group stopped declaring, a group that moved (naming the successor, and whether the successor's field is still typed), and a class nobody used; judges each absence by the chance that it is sampling, so a three-replay build can never fail. Fails on an evidenced loss that is neither still typed nor listed with its reason in `tools/fixtures/entry_survival_expected.json`. Run it on every new build ([section 7](#checking-a-new-build-still-matches-every-entry)). |
-| `overlay_mirror.py` | Not a check -- the Python mirror of the overlay that `check_checksum_types.py` and `check_entry_survival.py` share: it parses the generated `table.rs`, `scoped_types.rs` and `checksum_table.rs` and the `overlay.rs` resolution constants, refusing any table that does not parse whole, and follows `overlay::resolve_entry`'s order. |
+| `overlay_mirror.py` | Not a check -- the Python mirror of the overlay that `check_checksum_types.py` and `check_entry_survival.py` share: it parses `table.rs` and the generated `scoped_types.rs` and `checksum_table.rs` and the `overlay.rs` resolution constants, refusing any table that does not parse whole, and follows `overlay::resolve_entry`'s order. |
 | `check_metrics_baseline.py` | **Semantics** -- rounds, score, K/D/A |
 | `compare_combat_report.py` | Metrics-input multiset |
 | `compare_rpc_params.py` | RPC parameters and records against the C# export, with its listed expected differences |
@@ -894,7 +890,7 @@ to independently verify this narrower scope.
 | Script | What it does |
 |---|---|
 | `to_valplay_bundle.py` | Parquet -> NDJSON bundle (events/movement/manifest). The format valplay's `compute_metrics.py` consumes |
-| `equippable_table.py` | **Generated file.** Weapon class path -> display name |
+| `equippable_table.py` | Weapon class path -> display name and category, maintained in the repository. `CompactPistol_C` stays "Compact Pistol", though the 13.06 game calls it "Bandit" |
 
 #### What the bundle manifest carries
 
@@ -1019,20 +1015,7 @@ there is no inferred cast attribution, explosion timing or start/stop interval
 join. Only the main stream is read. Repeated RPC parameter names split adjacent
 same-packet invocations; the export has no explicit invocation ID, so these
 groups are not proof of unique effects. Untyped members and ambiguous identity
-counts are printed even when zero. See [UPSTREAM_REVEALS.md](UPSTREAM_REVEALS.md).
-
-`compare_descriptor_sources.py --baseline <checkout-or-repo::ref>
---candidate <checkout-or-repo::ref> --downstream-table <table.rs> --output audit.json`
-compares C# descriptor inputs without fetching or changing their checkouts.
-It reports source-file, parsed type and handle changes, plus downstream entries
-that wholesale regeneration would remove or overwrite. Git commits, input
-digests and the extractor digest identify the compared sources. Changes are
-review candidates; unsupported C# syntax can appear only in the source-file
-diff, so an empty parsed diff does not prove an unchanged schema. The extractor
-understands inherited movement quantization, class-scoped constant paths and the
-reviewed ClassNetCache factories. Unsupported forms of these declarations fail
-explicitly. The schema-v3 report lists version-selected custom decoders that
-remain `Raw` separately.
+counts are printed even when zero.
 
 `validate_type_evidence.py <export-or-parent> <specifications.json>` independently
 reads raw payloads against explicit type proposals: the primitives and the
@@ -1097,7 +1080,6 @@ compares child paths, context, raw bits and typed values. `--require-routes`
 rejects an aggregate with no sample of either route; an individual replay may
 legitimately contain neither. The tool reads main `fields.parquet`; checkpoint
 behavior is separately covered by the export comparison and corpus guards.
-See [UPSTREAM_PARITY.md](UPSTREAM_PARITY.md) for the measured sample scope.
 
 `summarize_value_coverage.py <export-or-parent> [--jobs 4]` reads the physical
 `value_i64/f64/bool/str` columns and emits JSON to stdout. It counts each row
@@ -1131,7 +1113,6 @@ semantic evidence.
 
 | Script | What it does |
 |---|---|
-| `analyze_coverage.py` | Coverage analysis |
 | `extract_ability_stats.py` | Validates a build-scoped Statistic/FText dictionary from exact cast/effect array slots, with main and checkpoint observations separate. Dictionaries exist for the measured builds 13.01, 13.02, 13.04, 13.05 and 13.06; any other build's mappings are `unknown_build`. Unknown IDs, changed names, missing partners and conflicts remain visible and return a nonzero exit. Counts are snapshots, not casts. |
 | `extract_kill_observations.py` | Exports main and checkpoint KillData element snapshots with physical parent-row identity, independently checked raw values, nullable missing members and scoped reference status. Keeps all clocks separately; updates are not deduplicated kills. Accepts 11.06-12.09 and 13.01-13.06 (`MEASURED_BUILDS`) and refuses 12.10, 12.11, 13.00 and any other build before reading a row. See [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md#measured-builds). |
 | `extract_kill_ledger.py` | Retains character-death events, projects component-local KillData state and links mutually unique same-round PlayerState identities. Preserves unmatched events and observations. Reads the same measured builds as the observation extractor. See [KILL_LEDGER.md](KILL_LEDGER.md). |
@@ -1221,7 +1202,7 @@ type inference, so it establishes preservation and schema drift, not meaning.
 
 The pre-PR sweep, and what CI runs, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr); the suites have
-807 Rust tests and 1337 Python tests.
+807 Rust tests and 1233 Python tests.
 
 **The ASCII rule is correctness, not style.** The Windows console is cp949, so a
 single non-ASCII character in a format string truncates output at that point.
@@ -1264,16 +1245,13 @@ These read their inputs from `VRFKIT_CORPUS_DIR` and
 rather than the exit code.
 
 `compare_combat_report.py` is the exception: it exits 2 when either input is
-missing. Its C# side is `CliReader export` of the same replay, built from the
-vendored descriptor commit and kept machine-local because it carries
-per-player values (`compare_rpc_params.py` reads the same export). To produce
-it, from a ValorantReplayParser clone that has commit `8824794`:
+missing. Its C# side is a CliReader export of the same replay, kept
+machine-local because it carries per-player values (`compare_rpc_params.py`
+reads the same export). To produce it:
 
 ```bash
-REF="$LOCALAPPDATA/vrfkit/csharp-reference/8824794/02d4d478-1dfb-4412-9a77-29ca29105a9d"
-git -C <ValorantReplayParser> archive 8824794 Directory.Build.props src | tar -x -C <build-dir>
-dotnet build <build-dir>/src/CliReader/CliReader.csproj -c Release -o <cli-dir>   # .NET 10 SDK
-<cli-dir>/CliReader export <corpus>/02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf --output "$REF"
+REF="$LOCALAPPDATA/vrfkit/csharp-reference/02d4d478-1dfb-4412-9a77-29ca29105a9d"
+<cli> export <corpus>/02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf --output "$REF"
 grep CombatReportComponent "$REF/events.ndjson" > "$REF/combat_report.ndjson"
 grep rpc_received "$REF/events.ndjson" | grep -E \
   'MulticastNotifyKilledEnemy|MulticastNotifyDamage_Point|MulticastEndRound' > "$REF/rpc_params.ndjson"
@@ -1284,12 +1262,10 @@ Keep `$REF/manifest.json`: `compare_rpc_params.py` reads the replay's SHA-256
 from it. Without it no expected difference can be applied or checked, so the
 run cannot pass: it exits 2, or 1 if anything differs.
 
-Upstream (`b51d674`) will not do: it leaves CombatReport `Rounds` as a raw
-payload, and its Gekko descriptor misses every RPC on Gekko's character (see
-the README's C# comparison). On this replay `compare_combat_report.py` matches
-all ten shapes, and `compare_rpc_params.py` matches every parameter and every
-record but one: a damage record vrfkit has and the C# export does not, because
-the C# resolver cannot name the class of a component stably named `Damageable`
+The export must decode CombatReport `Rounds` and the RPCs on Gekko's
+character. On this replay `compare_combat_report.py` matches all ten shapes,
+and `compare_rpc_params.py` matches every parameter and every record but one:
+a damage record the export lacks
 ([FOLLOWUP.md](FOLLOWUP.md#the-damage-record-only-vrfkit-emits)). The tool
 lists that record as an expected difference and exits 0; it exits 1 on any
 other difference, and on that one if it stops occurring exactly as listed
@@ -1513,5 +1489,5 @@ strict audit still writes its results and exits nonzero. Read
 [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md) for the latest measured results.
 `check_docs.py` checks both supported-build tables against that committed
 report and the Rust registry, including the same verification wording and
-clean/checked denominators. The native/upstream vector counts remain separate
-arithmetic evidence; they do not substitute for any replay check.
+clean/checked denominators. The native and golden vector counts remain
+separate arithmetic evidence; they do not substitute for any replay check.

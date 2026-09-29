@@ -1,6 +1,6 @@
 //! Blueprint properties typed by exact group, name and checksum: entries of
 //! `tools/fixtures/scoped_type_evidence.json` (generated into
-//! `scoped_types.rs`) for classes the C# descriptors never described, typed on
+//! `scoped_types.rs`) for classes no descriptor described, typed on
 //! three independent legs -- the 13.06 class definition, the replay's
 //! `compatible_checksum` (recomputed in
 //! `tools/tests/test_compatible_checksum_facts.py`) and an independent reader of

@@ -27,7 +27,8 @@ OUTPUT = REPO / "crates/vrf-transform/tests/data/native_vectors.rs"
 
 
 def cases():
-    # Same input and staging boundaries as the MIT-licensed upstream vectors.
+    # Same input and staging boundaries as the golden vectors
+    # (crates/vrf-transform/tests/data/golden_vectors.rs).
     payload = bytes.fromhex(
         "BFDF6F9EA1F27BA00000C66EAFAF2E0000339C0DD34B0C45C48063038003562A43C0C949"
     )

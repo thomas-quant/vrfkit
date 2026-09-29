@@ -5,7 +5,7 @@ Research snapshot: `vrfkit` commit `922ac1c46d52f0e642cb78ccefc9517792c266d9` (2
 ## Proven locally
 
 - `decode_ftext` currently skips 33 bits, reads an 8-bit value, accepts only `5`, then reads `FString table_path`, 32 bits, and `FString key` ([`scalar.rs` lines 76-112](../../crates/vrf-decode/src/decode/scalar.rs#L76)). Its three checked-in vectors start `00 00 00 00 0B ...` and decode with zero residual bits ([tests lines 299-378](../../crates/vrf-decode/src/tests/scalar.rs#L299)). These facts prove the observed bits and successful key extraction, but do **not** prove that bit 33 begins an Unreal history discriminator.
-- The local C# reference labels `LocalizedRewardName` as `FText` while retaining it as `RawPayload` ([`OwnerExclusivePlayerInfoDescriptor.cs` lines 38-39 and 82-83](https://github.com/michel-giehl/ValorantReplayParser/blob/882479446baef070490ee073bf4dd4da429668cd/src/Replay.Valorant/GameState/OwnerExclusivePlayerInfoDescriptor.cs#L38)). This is type evidence, not wire-layout evidence.
+- The descriptor labels `LocalizedRewardName` as `FText` while retaining it as `RawPayload`. This is type evidence, not wire-layout evidence.
 - For the existing vectors, interpreting the first 40 bits as little-endian `u32 flags = 0`, followed by byte `0x0B`, is exact. The current 33+8 split instead consumes bit 0 of `0x0B` in the skipped region and reads `(0x0B >> 1) = 5`; the following zero bit then becomes the first bit consumed by the current inline-name/string decoding.
 - The new `LocalizedRewardName` h29 population supplied by the concurrent extraction has first 32 bits `1`, byte-at-bit-32 `3`, and bit 40 `0`; the current 33+8 view reports `1`. That arithmetic is likewise exact: `(3 >> 1) = 1` when bit 40 is zero.
 

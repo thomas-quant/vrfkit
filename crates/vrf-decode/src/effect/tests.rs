@@ -1,5 +1,5 @@
 //! Pinned wire vectors for the effect decoders: hex blobs from real packets,
-//! values checked against the C# reference. `tools/check_effect_decoder.py`
+//! values checked against an independent parser. `tools/check_effect_decoder.py`
 //! re-checks the same blobs on the Python port that produces the valplay
 //! bundle.
 
@@ -420,7 +420,7 @@ fn an_array_that_ends_without_its_terminator_is_rejected() {
 }
 
 /// The byte after the array terminator must be zero
-/// (`consume_trailing_terminator`), unlike the C# reference.
+/// (`consume_trailing_terminator`).
 #[test]
 fn a_non_zero_trailing_terminator_is_rejected() {
     // A well-formed 1-element float array, then one spare non-zero byte that

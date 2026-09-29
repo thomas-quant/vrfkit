@@ -175,9 +175,9 @@ fn no_scoped_identity_is_shadowed_by_the_table() {
     }
 }
 
-/// Upstream 8b7afcb's Raze fields are typed by exact identity only: the
-/// checksum is part of the key, and another group or checksum resolves to
-/// nothing rather than borrowing the type.
+/// Raze's scoped fields are typed by exact identity only: the checksum is part
+/// of the key, and another group or checksum resolves to nothing rather than
+/// borrowing the type.
 #[test]
 fn raze_scoped_identities_require_their_exact_checksum() {
     assert_eq!(
@@ -200,7 +200,7 @@ fn raze_scoped_identities_require_their_exact_checksum() {
         resolve("/Unobserved", "CosmeticRandomSeed", Some(2_863_861_815)),
         None
     );
-    // Of 8b7afcb's seven force-module identities only `Source` and `Duration`
+    // Of the seven force-module identities only `Source` and `Duration`
     // stay scoped: `Module`, `ModuleType`, `Character`, `NetTimestamp` and
     // `RespawnNumber` are typed by name in the table, which resolves first.
     assert_eq!(
@@ -227,8 +227,7 @@ fn raze_scoped_identities_require_their_exact_checksum() {
 
 /// The Boom Bot replicates short rotation components and a two-decimal
 /// location (spawn-verified). Raze's byte-rotation projectiles stay untyped
-/// until each has a spawn-join entry in `REP_MOVEMENT_LOCATION_EVIDENCE`
-/// (docs/UPSTREAM_RAZE_WARDEN.md).
+/// until each has a spawn-join entry in `REP_MOVEMENT_LOCATION_EVIDENCE`.
 #[test]
 fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
     assert_eq!(
@@ -255,10 +254,11 @@ fn boombot_movement_is_short_and_byte_rotation_projectiles_stay_raw() {
     }
 }
 
-/// Upstream's own recorded payloads from replay 42e03082 (not in the local
-/// corpus), decoded through the scoped identities: exact widths, exact values.
+/// Payloads an independent parser's tests recorded from replay 42e03082 (not
+/// in the local corpus), decoded through the scoped identities: exact widths,
+/// exact values.
 #[test]
-fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
+fn recorded_raze_payloads_decode_through_their_scoped_identities() {
     let mut stats = OverlayStats::default();
     let seed = apply_scoped(
         &mut stats,
@@ -293,8 +293,8 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
         rotation.value_str.as_deref(),
         Some("rot(90,284.03503,359.989)")
     );
-    // `ModuleType` resolves through its table entry (EnumByte); upstream's
-    // recorded 3-bit payload must still read 2.
+    // `ModuleType` resolves through its table entry (EnumByte); the recorded
+    // 3-bit payload must still read 2.
     let module_type = apply_scoped(
         &mut stats,
         FORCE_APPLY,
@@ -306,7 +306,7 @@ fn upstream_recorded_raze_payloads_decode_through_their_scoped_identities() {
     );
     assert_eq!(module_type.value_i64, Some(2));
     assert_eq!(stats.decoded_ok, 4);
-    // Upstream's truncation case: one byte cannot carry the rotator its
+    // The recorded truncation case: one byte cannot carry the rotator its
     // presence bits announce. Rejected and counted, not truncated.
     let truncated = apply_scoped(
         &mut stats,
@@ -472,7 +472,7 @@ fn the_alias_does_not_invent_a_type() {
     );
 }
 
-/// The generators' contract: both tables strictly sorted by their key, which
+/// Both tables' contract: strictly sorted by their key, which
 /// the reference binary searches need, and no key twice (a duplicate could
 /// resolve differently in the hash index and in the search).
 #[test]
@@ -493,7 +493,7 @@ fn table_is_sorted() {
     );
 }
 
-/// Live per-player credits under `MoneyManagementComponent`, a group no C#
+/// Live per-player credits under `MoneyManagementComponent`, a group no
 /// descriptor declares, read as Int32. Evidence: the MoneyManagementComponent
 /// entries in tools/apply_type_corrections.py.
 #[test]
@@ -546,12 +546,11 @@ fn ping_latency_is_typed() {
 
 #[test]
 fn equippable_used_is_an_object_net_guid() {
-    // The C# descriptor attaches a custom decoder (DamageParameters.cs:51 ->
-    // ValorantPayloadDecoders.Equippable) that is exactly
-    // archive.ReadIntPacked(), our ObjectNetGuid. tools/extract_descriptors.py
-    // types it from the decoder's name (PAYLOAD_DECODER_TYPES), and
-    // tools/apply_type_corrections.py EXPECTED only verifies it. Left Raw, the
-    // adapter guessed a fixed 16-bit LE integer that was never a valid NetGUID.
+    // The descriptor attaches a custom Equippable decoder that is exactly an
+    // IntPacked read, our ObjectNetGuid. The table types it from that
+    // decoder's name, and tools/apply_type_corrections.py EXPECTED only
+    // verifies it. Left Raw, the adapter guessed a fixed 16-bit LE integer
+    // that was never a valid NetGUID.
     for group in [DAMAGE_BASE, DAMAGE_POINT] {
         assert_eq!(
             TABLE.lookup(group, "EquippableUsed"),
@@ -735,8 +734,8 @@ fn only_the_seeker_nade_keeps_short_rotator_components() {
 
 #[test]
 fn damage_geometry_fields_are_quantized_vectors() {
-    // Typed from the C# decoders' names, like EquippableUsed. Scales are the
-    // C# call sites: VectorNetQuantize = 1, VectorNetQuantize100 = 100,
+    // Typed from the descriptors' decoder names, like EquippableUsed. Scales
+    // follow the decoder: VectorNetQuantize = 1, VectorNetQuantize100 = 100,
     // VectorNetQuantizeNormal = unit vector. Evidence: the damage-vector
     // EXPECTED rows in tools/apply_type_corrections.py.
     const BASE: &str = DAMAGE_BASE;
@@ -1396,7 +1395,7 @@ fn byte_rejects_payloads_wider_than_eight_bits() {
 }
 
 /// The hash index must answer exactly what the binary search answered, on
-/// every key in the generated table and on keys that are not in it. A wrong
+/// every key in the table and on keys that are not in it. A wrong
 /// overlay type moves NO counter, so only this equivalence would catch an
 /// index that quietly disagrees on a handful of entries.
 #[test]
@@ -1941,9 +1940,9 @@ const REP_MOVEMENT_LOCATION_EVIDENCE: [(&str, VectorQuantization); 27] = {
 };
 
 /// Every `RepMovement` type the overlay can assign carries the measured level,
-/// and no unlisted group gets one. The level is not on the wire, so the
-/// generator defaults it (extract_descriptors.py REP_MOVEMENT_LOCATION): a
-/// prior, not a measurement. A new class needs its spawn evidence here first.
+/// and no unlisted group gets one. The level is not on the wire, so a table
+/// entry carries a default (`RoundWholeNumber`): a prior, not a measurement.
+/// A new class needs its spawn evidence here first.
 /// All three routes are held to the list: the table and the scoped types by
 /// group, checksum propagation by admitting no `RepMovement` at all.
 #[test]

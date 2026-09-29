@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Extract blind updates and continuous-effect observations by target identity.
 
-Port of ValorantReplayParser 2b66c65's player-body distinction: only a
-SpawnedCharacter value proves a player target (player_identity.py). Every
+The player-body distinction: only a SpawnedCharacter value proves a player
+target (player_identity.py). Every
 observation is kept, blinds on non-player actors included. These are
 replicated updates and RPC observations, not hit counts, cast attribution or
 effect intervals; checkpoint snapshots are excluded.

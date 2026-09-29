@@ -490,7 +490,7 @@ class MeasuredCountTests(unittest.TestCase):
         self.assertEqual(len(problems), 2, problems)
 
     def test_a_stale_golden_vector_count_is_caught(self):
-        text = "66 mechanically extracted upstream golden vectors (11 staging"
+        text = "66 mechanically extracted golden vectors (11 staging"
         problems = guard.stale_measured_counts({"x.md": text}, {"golden": 77})
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("66", problems[0])

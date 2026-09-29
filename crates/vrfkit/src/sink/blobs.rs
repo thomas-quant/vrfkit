@@ -364,7 +364,7 @@ fn verified_requested_ignore_actor_leaf(
     .then_some(FieldType::ObjectNetGuid)
 }
 
-/// This descriptor is deliberately Raw in the generated table. The full FText
+/// This descriptor is deliberately Raw in the overlay table. The full FText
 /// reader is admitted only for this measured parent leaf; Skip, a conflict, or
 /// any future declared type change remains raw.
 fn verified_reward_localized_text(
@@ -766,7 +766,7 @@ impl ExportSink<'_> {
 
         // Resolve every leaf's type before touching `self.records`: the overlay
         // first, keyed on the name the replay declares for the handle (the
-        // generated table types most flattened members), with
+        // table types most flattened members), with
         // `decode_array_leaf`'s hardcoded map only for names the table lacks.
         // That map alone left `DeathLocation` (handle 104, `VectorDouble` in the
         // table) an all-null `_h104` on all 3,492 arrivals on 02d4d478.
@@ -1206,7 +1206,7 @@ pub(super) fn decode_leaf_with_stats(
     }
 }
 
-/// A handle -> type map derived from the C# `CombatRoundReportsDecoder`: the
+/// A handle -> type map derived from the CombatRoundReports descriptors: the
 /// floor for leaves the overlay cannot name (the caller asks it first). All
 /// `None` for an unknown handle or a failed decode.
 fn decode_array_leaf(

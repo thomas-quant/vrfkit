@@ -40,5 +40,5 @@ See CONTRIBUTING.md, "Replay evidence for parser changes". -->
 - [ ] Output is **byte-identical by committed SHA-256** on valid replays (or the measured baseline change is explained line by line).
 - [ ] No `unsafe` added.
 - [ ] No non-ASCII in Rust code or comments.
-- [ ] No generated file (`table.rs`, `checksum_table.rs`, `scoped_types.rs`, `sbox.rs`, `golden_vectors.rs`, `native_vectors.rs`, `equippable_table.py`) hand-edited. `scoped_types.rs` comes from `tools/generate_scoped_types.py`; `native_vectors.rs` from `tools/capture_native_transforms.py`.
+- [ ] No generated file (`checksum_table.rs`, `scoped_types.rs`, `sbox.rs`, `golden_vectors.rs`, `native_vectors.rs`) hand-edited. `scoped_types.rs` comes from `tools/generate_scoped_types.py`; `native_vectors.rs` from `tools/capture_native_transforms.py`.
 - [ ] No new hardcoded display names in a Rust crate.

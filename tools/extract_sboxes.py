@@ -1,5 +1,5 @@
-"""Extract the three VALORANT payload-transform S-box tables from the upstream C#
-source and emit them as a Rust module.
+"""Extract the three VALORANT payload-transform S-box tables from a C# source
+checkout of the reference parser and emit them as a Rust module.
 
 The tables are 256-byte permutation tables spliced across several C# string
 literals inside `Convert.FromHexString(...)`. Copying them by hand (or via a

@@ -22,9 +22,9 @@ Skip or conflicting types remain raw. Truncated packed child data preserves both
 child and parent raw rows and increments the array-leaf decode-error counter.
 
 TransitionContext is corrected from Raw to ObjectNetGuid for the exact
-EquippableStateMachineComponent group. The C# reference declares a raw payload
-labelled UTransitionContext; its raw reader does not establish the type. The
-corpus supplies exact packed-U32 consumption and actual transition-context object
+EquippableStateMachineComponent group. The descriptor declares a raw payload
+labelled UTransitionContext, which does not establish the type. The corpus
+supplies exact packed-U32 consumption and actual transition-context object
 identities. All 460,581 checkpoint observations encode zero.
 
 PostControlVelocity is added only for the exact HawkFlash projectile group. All

@@ -116,7 +116,7 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
         };
 
         // Out-of-range handles are dropped and counted (manifest
-        // `dropped_field_exports`), where C# only logs them.
+        // `dropped_field_exports`).
         cache.set_field_on_group(path_name_index, field);
     }
 
@@ -137,8 +137,7 @@ pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -
         }
         let byte_count = size as u64;
 
-        // Exactly `size` bytes, so consumption can be verified (C#
-        // EnsureFullyConsumed).
+        // Exactly `size` bytes, so consumption can be verified.
         let mut payload = reader.sub_reader(byte_count * 8)?;
 
         internal_load_object(&mut payload, cache, true, 0)?;
@@ -389,7 +388,7 @@ mod tests {
         let mut data = int_packed(1); // 1 export
         data.extend(int_packed(42)); // pathNameIndex
         data.extend(int_packed(0)); // isExported = false (reference)
-        // The error fires before isFieldExported is read, as in C#.
+        // The error fires before isFieldExported is read.
 
         let mut reader = BitReader::new(&data);
         let mut cache = NetGuidCache::new();
