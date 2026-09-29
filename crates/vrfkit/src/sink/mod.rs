@@ -8,13 +8,8 @@
 //! emitted whole as one marked preservation row, never as fabricated fields, so
 //! the Parquet output stays a **lossless** representation of the stream.
 //!
-//! This module holds the sink, the per-packet record buffers and the state that
-//! must outlive a packet; each submodule holds one concern.
-//!
-//! # What the sink costs
-//!
-//! `vrfkit validate` runs this whole path and writes no file, so it measures
-//! the sink alone: docs/PERFORMANCE_NOTES.md#what-the-whole-sink-costs.
+//! `vrfkit validate` runs this whole path and writes no file, so it times the
+//! sink alone: docs/PERFORMANCE_NOTES.md#what-the-whole-sink-costs.
 
 mod blobs;
 mod failure_stats;
@@ -48,7 +43,6 @@ use measured_routes::{MeasuredArrayRoute, MeasuredArrayRoutes};
 use paths::{BlockPathMemo, ChannelArchetype};
 use rpc::RpcParamGroupMemo;
 
-/// Static overlay table.
 static TABLE: OverlayTable = OverlayTable::with_handles(&OVERLAY_TABLE, &OVERLAY_HANDLE_TABLE);
 
 /// How many stream-failure lines to retain. See [`ChannelState::stream_failures`].
@@ -65,11 +59,9 @@ pub struct PlayerIdentity {
     pub character_net_guid: Option<u32>,
 }
 
-/// State that must outlive a packet, across packets and chunks. `ExportSink` is
-/// rebuilt for every packet (it borrows the `NetGuidCache` mutably), so the
-/// channel archetypes later ClassNetCache blocks resolve through, the two memos
-/// and the name pool live here; rebuilt half a million times they would never
-/// warm up.
+/// State that must outlive a packet. `ExportSink` is rebuilt for every packet
+/// (it borrows the `NetGuidCache` mutably), so the channel archetypes, the two
+/// memos and the name pool live here, or they would never warm up.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelState {
     /// channel_index -> archetype, stamped with its actor ([`ChannelArchetype`]).
@@ -77,17 +69,14 @@ pub struct ChannelState {
     rpc_param_groups: RpcParamGroupMemo,
     block_paths: BlockPathMemo,
     names: NameInterner,
-    /// Bumped when the archetype map changes, the one resolution input that
-    /// lives here rather than in the cache: one of [`BlockPathMemo`]'s three
+    /// Bumped when the archetype map changes: one of [`BlockPathMemo`]'s three
     /// stamps (see [`paths`]).
     resolution_generation: u64,
-    /// One line per block that framed and decoded but whose inner stream did not
-    /// walk, kept here because the sink dies with its packet. Capped at
+    /// One line per block whose inner stream did not walk, capped at
     /// [`MAX_STREAM_FAILURE_RECORDS`]: a wrong transform fails nearly every
     /// block and the first few dozen say it all; the population is in `failures`.
     stream_failures: Vec<String>,
-    /// Failure aggregation is opt-in for `diag`; ordinary decode and export
-    /// paths keep this as `None` and pay no map or payload-sampling cost.
+    /// Opt-in for `diag`; `None` elsewhere, so export pays no sampling cost.
     failures: Option<FailureAggregate>,
     /// PlayerState actor NetGUID -> [`PlayerIdentity`], filled by `on_field`.
     players: FxHashMap<u32, PlayerIdentity>,
@@ -116,12 +105,6 @@ impl ChannelState {
         self.failures = Some(FailureAggregate::new(retain_payloads));
     }
 
-    /// Whether this pass asks the replication layer for failure details and
-    /// payload callbacks.
-    pub fn failure_aggregate_enabled(&self) -> bool {
-        self.failures.is_some()
-    }
-
     /// Take the failure aggregate out, leaving it empty: the checkpoint pass
     /// drains each chunk's channel state into the caller's totals.
     #[must_use]
@@ -129,19 +112,16 @@ impl ChannelState {
         self.failures.take().unwrap_or_default()
     }
 
-    /// Captured player identities, for the manifest `players` array. Gated like
-    /// its only caller, the `export`-only `driver`, or it is dead code without.
+    /// Captured player identities, for the manifest `players` array.
     #[cfg(feature = "export")]
     #[must_use]
     pub fn players(&self) -> &FxHashMap<u32, PlayerIdentity> {
         &self.players
     }
 
-    /// Declare that something group-path resolution reads has changed. The
-    /// only callers are `set_channel_archetype` and `retire_channel_archetype`
-    /// in `paths` (the cache's GUID maps have `NetGuidCache::guid_generation`);
-    /// a resolution input no stamp covers is silent byte movement, not a test
-    /// failure.
+    /// Declare that the archetype map changed (the cache's GUID maps have
+    /// `NetGuidCache::guid_generation`): a resolution input no stamp covers is
+    /// silent byte movement, not a test failure.
     fn note_resolution_input_changed(&mut self) {
         self.resolution_generation = self.resolution_generation.wrapping_add(1);
     }
@@ -160,16 +140,13 @@ pub struct ExportStats {
     /// Exact 24-bit `TrackedRewards` windows with the measured opaque zero
     /// byte. They preserve their parent raw row and emit no child rows.
     pub tracked_rewards_opaque_empty_variants: u64,
-    /// Empty ActiveBlinds deltas whose one trailing zero IntPacked the strict
-    /// walker was spared (`active_blind_array_bits`). The parent row keeps the
-    /// byte; uncounted, a build that made such trailers common would move no
-    /// other number.
+    /// Empty ActiveBlinds deltas whose trailing zero IntPacked was spared
+    /// (`active_blind_array_bits`); the parent row keeps the byte, and no other
+    /// number moves if a build makes such trailers common.
     pub active_blinds_empty_trailers: u64,
-    /// EffectContainer blobs turned into a `value_str` JSON array: the only
-    /// signal this decoder worked, since the overlay buckets are filled before
-    /// the additive pass and a success moves no other counter (a silent
-    /// improvement misleads like a silent loss). Failures land in
-    /// `overlay.decoded_err`.
+    /// EffectContainer blobs turned into a `value_str` JSON array: the
+    /// decoder's only success signal, as the overlay buckets are filled first.
+    /// Failures land in `overlay.decoded_err`.
     pub effect_blobs_decoded: u64,
 
     /// Struct-blob (`RoundResults`, `TeamEconomy`, `RoundInfos`) parent rows
@@ -192,10 +169,9 @@ pub struct ExportStats {
     /// have, since that counter also counts RepLayout-tail decodes.
     pub cnc_bruteforce_payloads_attempted: u64,
 
-    /// Of those, payloads the fc=34 walk did not fit: no RPC row, only the
-    /// preservation row, which keeps every bit. 34 is empirical, so if an update
-    /// breaks the walk `CNC RPC rows` shrinks and this says why. Zero on the
-    /// replays measured when it was added.
+    /// Of those, payloads the fc=34 walk did not fit: only the preservation row,
+    /// which keeps every bit. 34 is empirical, so if an update breaks the walk
+    /// `CNC RPC rows` shrinks and this says why.
     pub cnc_bruteforce_payloads_unwalked: u64,
 
     /// Post-RepLayout ClassNetCache tails decoded under verified component
@@ -206,10 +182,9 @@ pub struct ExportStats {
     /// was not sufficient for the verified decoder.
     pub rep_layout_cnc_tails_preserved: u64,
 
-    /// Struct-blob decodes that returned an error. Additive, so a failure costs
-    /// no rows or bits, but it must be seen: uncounted, 13.02 moving
-    /// `RoundResults` from handle 93 to 81 exported as a clean run with no
-    /// match score in the Parquet.
+    /// Struct-blob decodes that returned an error: additive, so no row or bit is
+    /// lost, but a moved `RoundResults` handle would otherwise export a clean
+    /// run with no match score.
     pub struct_blobs_failed: u64,
 
     /// The first failure verbatim, so the summary can name the member and handle.
@@ -243,26 +218,13 @@ pub struct ExportStats {
     /// this is the only signal of an abandoned walk. Zero on valid replays.
     pub truncated_rpcs: u64,
 
-    /// Bits after an RPC's zero-handle terminator beyond the one trailing
-    /// alignment bit `FunctionParameters` allows. Counted, not rejected, and not
-    /// lost: such a payload also gets a whole-payload row under the function's
-    /// name, so every counted bit is in `raw_bits`.
-    ///
-    /// 259ed10 corpus audit (1,018 unique replays, `--checkpoints`): the main
-    /// pass is nonzero in 21 of 24 builds, 26,766 bits (12.07, 3 replays) to
-    /// 9,329,665 (13.05, 401 replays), and zero in the three single-fixture
-    /// builds (12.10, 12.11, 13.00) and on some replays; the checkpoint pass is
-    /// zero in every build. One source: `ActiveGameplayEffects` under
-    /// `/Script/ShooterGame.AresAbilitySystemComponent_ClassNetCache`, a
-    /// payload that continues past its zero handle (ClassNetCache framing also
-    /// carries custom-delta properties; see `ActiveGameplayEffects` in
-    /// docs/DATA.md). What those bits encode is not established; a suffix on
-    /// any other handle would be new. Method (2026-09-28): a Python re-walk of
-    /// the grammar over every bare-named ClassNetCache row with a payload in
-    /// `fields.parquet` and `checkpoint_fields.parquet` matched this counter in
-    /// 90 of 90 (export, stream) pairs (two exports per build, one per
-    /// single-fixture build); in 40 more exports 1,416 of 32,391 such rows had a
-    /// suffix, all `ActiveGameplayEffects`, 128 to 1,239 bits each.
+    /// Bits after an RPC's zero-handle terminator beyond the one alignment bit
+    /// `FunctionParameters` allows. Counted, not rejected, and not lost: the
+    /// payload also gets a whole-payload row, so every counted bit is in
+    /// `raw_bits`. Nonzero on the main pass of 21 of 24 corpus builds, all from
+    /// `ActiveGameplayEffects` on `AresAbilitySystemComponent_ClassNetCache`
+    /// (custom-delta data past the zero handle; see `ActiveGameplayEffects` in
+    /// docs/DATA.md); a suffix on any other handle would be new.
     pub rpc_suffix_bits_dropped: u64,
 
     /// Flattened array leaves whose resolved type failed to decode; the raw leaf
@@ -324,131 +286,71 @@ mod movement_stats_tests {
     use super::ExportStats;
     use vrf_movement::{MovementError, RpcDecodeResult};
 
-    fn ok(
-        total_moves: u32,
-        update_count: u32,
-        error_count: u32,
-    ) -> Result<RpcDecodeResult, MovementError> {
+    /// A clean-framed batch with `error_count` soft errors and the six tallies
+    /// (sized tails, bits, open tails, bits, envelope trailers, bits).
+    fn batch(error_count: u32, t: [u32; 6]) -> Result<RpcDecodeResult, MovementError> {
         Ok(RpcDecodeResult {
-            total_moves,
-            update_count,
             error_count,
+            sized_section_tails: t[0],
+            sized_section_tail_bits: t[1].into(),
+            open_section_tails: t[2],
+            open_section_tail_bits: t[3].into(),
+            envelope_trailer_streams: t[4],
+            envelope_trailer_bits: t[5].into(),
             ..Default::default()
         })
     }
 
-    fn with_tails(
-        error_count: u32,
-        sized: (u32, u64),
-        open: (u32, u64),
-    ) -> Result<RpcDecodeResult, MovementError> {
-        Ok(RpcDecodeResult {
-            total_moves: 1,
-            update_count: 1,
-            error_count,
-            sized_section_tails: sized.0,
-            sized_section_tail_bits: sized.1,
-            open_section_tails: open.0,
-            open_section_tail_bits: open.1,
-            ..Default::default()
-        })
-    }
-
-    fn with_trailers(
-        error_count: u32,
-        streams: u32,
-        bits: u64,
-    ) -> Result<RpcDecodeResult, MovementError> {
-        Ok(RpcDecodeResult {
-            total_moves: 1,
-            update_count: streams,
-            error_count,
-            envelope_trailer_streams: streams,
-            envelope_trailer_bits: bits,
-            ..Default::default()
-        })
-    }
-
-    /// Envelope trailers are summed from every `Ok` decode like the tails, and
-    /// never count as a movement error.
+    /// Each tail and trailer tally sums into its own counter from every `Ok`
+    /// decode, soft errors or not, and none is a movement error (which would
+    /// keep the batch as a raw row); an `Err` carries no tally.
     #[test]
-    fn envelope_trailers_are_summed_from_every_ok_decode_and_are_not_errors() {
+    fn tallies_sum_field_by_field_and_are_not_errors() {
         let mut s = ExportStats::default();
-        s.record_movement_decode(with_trailers(0, 3, 72).as_ref());
-        s.record_movement_decode(with_trailers(1, 2, 37).as_ref());
-        assert_eq!(s.movement_envelope_trailers, 5);
-        assert_eq!(s.movement_envelope_trailer_bits, 109);
-        assert_eq!(s.movement_rpc_errors, 1, "only the soft error");
-        assert_eq!(
-            (
-                s.movement_sized_section_tails,
-                s.movement_open_section_tails
-            ),
-            (0, 0),
-            "not read as section tails"
-        );
+        s.record_movement_decode(batch(0, [1, 2, 3, 4, 5, 6]).as_ref());
+        s.record_movement_decode(batch(1, [10, 20, 30, 40, 50, 60]).as_ref());
         s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
-        assert_eq!(s.movement_envelope_trailers, 5, "an Err carries no tally");
+        let tallies = [
+            s.movement_sized_section_tails,
+            s.movement_sized_section_tail_bits,
+            s.movement_open_section_tails,
+            s.movement_open_section_tail_bits,
+            s.movement_envelope_trailers,
+            s.movement_envelope_trailer_bits,
+        ];
+        assert_eq!(tallies, [11, 22, 33, 44, 55, 66]);
+        assert_eq!(s.movement_rpc_errors, 2, "the soft error and the Err");
     }
 
-    /// Section tails are summed from every `Ok` decode, soft errors or not, and
-    /// never count as a movement error (which would keep the batch as a raw row).
+    /// A clean decode records nothing; soft errors count per occurrence and
+    /// keep the first text; a later hard error adds one without overwriting
+    /// it; a first hard error records its Display.
     #[test]
-    fn section_tails_are_summed_from_every_ok_decode_and_are_not_errors() {
+    fn movement_errors_count_every_occurrence_and_keep_the_first() {
         let mut s = ExportStats::default();
-        s.record_movement_decode(with_tails(0, (1, 40), (0, 0)).as_ref());
-        s.record_movement_decode(with_tails(2, (2, 7), (3, 90)).as_ref());
-        assert_eq!(s.movement_sized_section_tails, 3);
-        assert_eq!(s.movement_sized_section_tail_bits, 47);
-        assert_eq!(s.movement_open_section_tails, 3);
-        assert_eq!(s.movement_open_section_tail_bits, 90);
-        assert_eq!(s.movement_rpc_errors, 2, "only the soft errors");
-        s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
-        assert_eq!(s.movement_sized_section_tails, 3, "an Err carries no tally");
-    }
-
-    #[test]
-    fn a_clean_decode_records_nothing() {
-        let mut s = ExportStats::default();
-        s.record_movement_decode(ok(5, 1, 0).as_ref());
+        s.record_movement_decode(batch(0, [0; 6]).as_ref());
         assert_eq!(s.movement_rpc_errors, 0);
         assert!(s.movement_first_error.is_none());
-    }
-
-    #[test]
-    fn soft_errors_are_counted_and_first_error_is_kept() {
-        let mut s = ExportStats::default();
-        s.record_movement_decode(ok(2, 5, 3).as_ref());
-        assert_eq!(s.movement_rpc_errors, 3);
-        // `error_count` counts decode problems per occurrence; the updates
-        // after a failed stream are still decoded, so none were "skipped".
+        s.record_movement_decode(batch(3, [0; 6]).as_ref());
+        s.record_movement_decode(Err(MovementError::InvalidMagic(0x00)).as_ref());
+        assert_eq!(s.movement_rpc_errors, 4);
         assert_eq!(
             s.movement_first_error.as_deref(),
             Some("3 movement decode error(s) in one RPC batch")
         );
-        // A later hard failure adds to the count but must not overwrite the
-        // first error.
-        let first = s.movement_first_error.clone();
-        s.record_movement_decode(Err(MovementError::InvalidMagic(0x00)).as_ref());
-        assert_eq!(s.movement_rpc_errors, 4);
-        assert_eq!(s.movement_first_error, first);
-    }
 
-    #[test]
-    fn a_hard_error_records_its_display() {
-        let mut s = ExportStats::default();
-        s.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
-        assert_eq!(s.movement_rpc_errors, 1);
-        let msg = s.movement_first_error.expect("first error recorded");
+        let mut hard = ExportStats::default();
+        hard.record_movement_decode(Err(MovementError::ErrorSentinel).as_ref());
+        assert_eq!(hard.movement_rpc_errors, 1);
+        let msg = hard.movement_first_error.expect("first error recorded");
         assert!(msg.contains("sentinel"), "got: {msg}");
     }
 }
 
-/// The record buffers a sink fills for one packet, lent to it so their capacity
-/// survives the packet: one allocation for the whole run
-/// (docs/PERFORMANCE_NOTES.md#recordbuffers-are-lent-not-owned).
-/// [`ExportSink::new`] clears them, so a caller that never drains them -- the
-/// validation oracle -- does not accumulate the whole replay.
+/// The record buffers a sink fills for one packet, lent so their capacity
+/// survives it (docs/PERFORMANCE_NOTES.md#recordbuffers-are-lent-not-owned).
+/// [`ExportSink::new`] clears them, so a caller that never drains them does not
+/// accumulate the whole replay.
 #[derive(Debug, Default)]
 pub struct RecordBuffers {
     pub fields: Vec<FieldRecord>,
@@ -484,11 +386,9 @@ pub struct ExportSink<'a> {
     current_is_abilities_and_buffs: bool,
     /// Interned: a block's rows share one allocation of the path ([`intern`]).
     current_group_path: Arc<str>,
-    /// The half-finished overlay key hash for [`current_group_path`](Self::current_group_path).
-    /// Overlay probes run ~2M times per replay, each block's with one long group
-    /// path and short field names, so only the name half is hashed per probe.
-    /// A stale value turns hits into misses (`raw_bits` only), never a wrong
-    /// type: the slot tag and full string equality still reject the key.
+    /// The half-finished overlay key hash for [`current_group_path`](Self::current_group_path),
+    /// so each of ~2M probes per replay hashes only the field name. A stale
+    /// value turns hits into misses (`raw_bits` only), never a wrong type.
     current_group_hash: GroupHashState,
     current_group_resolution_source: &'static str,
     current_function_count_source: &'static str,
@@ -550,9 +450,8 @@ impl<'a> ExportSink<'a> {
         self.checkpoint_block_scope = Some((checkpoint, field_row_offset, block_index_offset));
     }
 
-    /// Set `current_group_path` and refresh its cached hash together. Every
-    /// assignment goes through here (the three are in [`paths`]: memo hit, fresh
-    /// resolution, instance-name replacement), or
+    /// Set `current_group_path` and refresh its cached hash together; every
+    /// assignment goes through here, or
     /// [`current_group_hash`](Self::current_group_hash) goes stale.
     fn set_current_group_path(&mut self, path: Arc<str>) {
         self.current_group_hash = group_hash_state(&path);
@@ -560,17 +459,17 @@ impl<'a> ExportSink<'a> {
     }
 
     /// Push one field row, stamped with the current block context. Every
-    /// `FieldRecord` this crate produces is built here, so no call site can get
-    /// the six block-context columns wrong.
+    /// `FieldRecord` this crate produces is built and counted here, so no call
+    /// site can get the six block-context columns or `fields_emitted` wrong.
     fn push_field(&mut self, row: FieldValues) {
+        self.stats.fields_emitted += 1;
         self.records.fields.push(FieldRecord {
             time_ms: self.time_ms,
             packet_id: self.packet_id,
             channel_index: self.current_channel,
             actor_net_guid: self.current_actor_guid,
             object_net_guid: self.current_object_guid,
-            // A refcount bump, not a copy: this is the 1.25-million-row column
-            // the interning exists for.
+            // A refcount bump, not a copy: the column the interning exists for.
             group_path: Arc::clone(&self.current_group_path),
             handle: row.handle,
             field_name: row.field_name,
@@ -606,10 +505,9 @@ struct FieldValues {
     value_str: Option<String>,
 }
 
-/// The group path a sink starts with: clones of one process-wide empty `Arc`,
-/// not the 530,401 fresh allocations one per sink would cost over a replay.
-/// Observable only if a field arrived before its content block, which the
-/// framer never does.
+/// The group path a sink starts with: one process-wide empty `Arc`, not an
+/// allocation per packet. Observable only if a field arrived before its
+/// content block, which the framer never does.
 fn empty_group_path() -> Arc<str> {
     use std::sync::OnceLock;
     static EMPTY: OnceLock<Arc<str>> = OnceLock::new();
@@ -617,16 +515,11 @@ fn empty_group_path() -> Arc<str> {
 }
 
 impl GuidPathSink for ExportSink<'_> {
-    /// Record a GUID -> path mapping the wire declared inline.
-    ///
-    /// A write that would change nothing is skipped, saving the `to_string`
-    /// allocation. The memo does not rely on the skip: `set_net_guid_path` makes
-    /// the same comparison (a zero outer is `None` in both) and moves
-    /// `NetGuidCache::guid_generation`, [`BlockPathMemo`]'s stamp for the GUID
-    /// maps, only on a real change, so nothing is bumped here. The outer is
-    /// compared too: a repeat with the same path and an invalid outer *removes*
-    /// the outer, and skipping it would keep a stale one in resolved group paths
-    /// and in `net_guids.parquet`'s `outer_net_guid` column.
+    /// Record a GUID -> path mapping the wire declared inline. A write that
+    /// would change nothing is skipped (saving the `to_string`); the memo does
+    /// not rely on it, as `set_net_guid_path` moves `guid_generation` only on a
+    /// real change. The outer is compared too: a repeat with an invalid outer
+    /// *removes* it, and skipping that would keep a stale `outer_net_guid`.
     fn register_path(&mut self, guid: u32, path: &str, outer_guid: NetworkGuid) {
         let outer = if outer_guid.0 != 0 {
             Some(vrf_schema::NetworkGuid(outer_guid.0))
@@ -649,35 +542,41 @@ impl GuidPathSink for ExportSink<'_> {
 /// Builders shared by the sink's test modules.
 #[cfg(test)]
 mod test_fixtures {
+    use vrf_net::content::ContentBlockHeader;
     use vrf_net::pipeline::ActorChannelState;
     use vrf_net::types::NetworkGuid;
+    use vrf_schema::NetGuidCache;
 
-    /// Append `value` as Unreal's `IntPacked`, LSB-first.
-    pub(super) fn packed(bits: &mut Vec<bool>, mut value: u32) {
-        loop {
-            let byte = ((value & 127) << 1) | u32::from(value > 127);
-            bits.extend((0..8).map(|bit| byte & (1 << bit) != 0));
-            value >>= 7;
-            if value == 0 {
-                break;
-            }
+    use super::{ChannelState, ExportSink, RecordBuffers};
+
+    /// What a sink borrows, owned by one test.
+    #[derive(Default)]
+    pub(super) struct Rig {
+        pub(super) cache: NetGuidCache,
+        pub(super) state: ChannelState,
+        pub(super) records: RecordBuffers,
+    }
+
+    impl Rig {
+        pub(super) fn sink(&mut self) -> ExportSink<'_> {
+            ExportSink::new(&mut self.cache, &mut self.state, &mut self.records)
         }
     }
 
-    /// Pack an LSB-first bit list into bytes.
-    pub(super) fn bytes(bits: &[bool]) -> Vec<u8> {
-        let mut raw = vec![0; bits.len().div_ceil(8)];
-        for (index, bit) in bits.iter().enumerate() {
-            raw[index / 8] |= u8::from(*bit) << (index % 8);
+    pub(super) fn actor_block(has_rep_layout: bool) -> ContentBlockHeader {
+        ContentBlockHeader {
+            has_rep_layout,
+            is_actor: true,
+            ..ContentBlockHeader::default()
         }
-        raw
     }
 
-    /// Unpack bytes into an LSB-first bit list.
-    pub(super) fn bits_from_bytes(raw: &[u8]) -> Vec<bool> {
-        raw.iter()
-            .flat_map(|byte| (0..8).map(move |bit| byte & (1 << bit) != 0))
-            .collect()
+    pub(super) fn subobject_block(guid: u32, has_rep_layout: bool) -> ContentBlockHeader {
+        ContentBlockHeader {
+            has_rep_layout,
+            object_net_guid: NetworkGuid(guid),
+            ..ContentBlockHeader::default()
+        }
     }
 
     /// An `ActorChannelState` for one channel open.

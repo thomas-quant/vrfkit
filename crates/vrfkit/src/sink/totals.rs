@@ -1,23 +1,15 @@
-//! The one place a packet sink's counters are accumulated.
-//!
-//! `ExportSink` is rebuilt for every packet -- ~530,000 times on the reference
-//! replay -- so a counter the caller does not read reads as a permanent zero:
-//! `cnc_rpcs_emitted`, the only signal the `AbilitiesAndBuffsComponent`
-//! brute-force produced RPC structure, once reached no summary, and the
-//! checkpoint pass once dropped [`ArrayDecodeStats::errors`], `truncated_rpcs`
-//! and the movement errors, so an overrun checkpoint array lost its children
-//! with no failure recorded. Both passes and `diag` share
-//! [`SinkTotals::absorb`], which is why it lives here, not in the
-//! `export`-gated driver: `diag` is built without the feature.
+//! The one place a packet sink's counters are accumulated. `ExportSink` is
+//! rebuilt for every packet, so a counter the caller does not read reads as a
+//! permanent zero. Both passes and `diag` (built without `export`) share
+//! [`SinkTotals::absorb`].
 //!
 //! `absorb` destructures `ExportStats` with no `..` and sums the overlay and
 //! array counters through `OverlayStats::merge_counts_from` and
 //! `ArrayDecodeStats::merge_from`, written the same way, so a counter added to
-//! any of the three does not compile until it is summed here (bound but not
-//! summed, it is an unused variable). A counter summed into the wrong field is
-//! caught by `absorb_sums_every_counter_into_its_own_field`. Not covered: the
-//! printers -- the summary, the manifest's `quality` block and the `diag` JSON
-//! name their lines by hand; only the `diag` list is checked, in `diagnose.rs`.
+//! any of the three does not compile until it is summed here;
+//! `absorb_sums_every_counter_into_its_own_field` catches one summed into the
+//! wrong field. The printers (summary, manifest `quality`, `diag` JSON) name
+//! their lines by hand; only the `diag` list is checked, in `diagnose.rs`.
 
 use vrf_decode::{ArrayDecodeStats, OverlayErrorReport, OverlayStats};
 
@@ -26,14 +18,8 @@ use super::ExportStats;
 /// Everything a packet's sink counted, summed across packets.
 #[derive(Debug, Default)]
 pub(crate) struct SinkTotals {
-    /// Rows pushed at the sites that count them (properties, RPC parameters and
-    /// a partial walk's whole-payload row, life-change and path-point members,
-    /// array leaves, struct-blob members, `_cnc_h*` and RepLayout tail rows);
-    /// movement batch rows, zero-bit RPC markers, unwalked RPCs' raw rows,
-    /// unresolved-payload preservation rows and targeting children are not. So
-    /// it matches neither NetStats' `fields` (framed RepLayout properties) nor
-    /// the `fields.parquet` row count: on 02d4d478, 1,060,119 against
-    /// `Fields: 429,648` and 1,296,660 rows.
+    /// Every row `push_field` wrote: the `fields.parquet` (or
+    /// `checkpoint_fields.parquet`) row count, not NetStats' `fields`.
     pub fields_emitted: u64,
     /// The sink's own count of four events vrf-net counts beside the same
     /// callbacks (RPCs, actor opens and closes, content blocks live and
@@ -169,11 +155,10 @@ mod tests {
     use vrf_decode::{DecodeErrorKind, FieldType, OverlayErrorReport};
 
     /// Every counter lands in its own `SinkTotals` field, summed across packets,
-    /// which the destructures cannot see (a sized/open movement-tail swap once
-    /// compiled and passed every test). Each counter gets a distinct value from
-    /// `next()`, starting at 2, through no-`..` literals and destructures over
-    /// three packets, so one assigned, doubled, bumped per packet or summed into
-    /// another field misses its total. Beside `absorb`, so core-only builds run it.
+    /// which the destructures cannot see. Each counter gets a distinct value
+    /// from `next()`, starting at 2, over three packets, so one assigned,
+    /// doubled, bumped per packet or summed into another field misses its
+    /// total. Beside `absorb`, so core-only builds run it.
     #[test]
     fn absorb_sums_every_counter_into_its_own_field() {
         let last = std::cell::Cell::new(0u64);

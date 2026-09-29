@@ -1,21 +1,17 @@
 //! A string pool for the two name columns of `fields.parquet`: a row's name
-//! costs a refcount instead of an allocation, and buffered rows share one copy.
-//! It saves the allocation, memcpy and retained bytes, not a lookup (`intern`
-//! still hashes). Arrow never sees the `Arc`: the dictionary builders get `&str`
-//! as before, so dictionaries and encoded bytes are unchanged. Counts (shared
-//! with vrf-export's `FieldRecord`): docs/PERFORMANCE_NOTES.md#name-interning.
+//! costs a refcount, not an allocation (the lookup still hashes), and buffered
+//! rows share one copy. Arrow sees only `&str`, so the Parquet bytes do not
+//! depend on it. Counts: docs/PERFORMANCE_NOTES.md#name-interning.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use vrf_schema::FxHashSet;
 
-/// Ceiling on pooled names: a bound on wire-driven input, not a memory knob. An
-/// unnamed RPC parameter is `"{function}._h{handle}"` with the handle straight
-/// off the wire, so a corrupt or unknown-build payload could mint unbounded
-/// names; past the cap `intern` still returns a correct `Arc<str>`, only
-/// unshared. Measured on 02d4d478 with an instrumented build: 1,449,542 intern
-/// calls, 4,557 distinct names -- the cap is an order of magnitude above that.
+/// Ceiling on pooled names, a bound on wire-driven input: an unnamed RPC
+/// parameter is `"{function}._h{handle}"` with the handle off the wire. Past the
+/// cap `intern` still returns a correct, unshared `Arc<str>`. The reference
+/// replay pools 4,557 names.
 const MAX_POOLED_NAMES: usize = 65_536;
 
 /// Pool of interned names, plus the scratch buffer [`Self::intern_fmt`] builds
@@ -36,20 +32,10 @@ impl NameInterner {
     /// allocation-free path for the composed names (RPC parameters, array
     /// leaves, struct-blob members), which are the majority of rows.
     pub fn intern_fmt(&mut self, f: impl FnOnce(&mut String)) -> Arc<str> {
-        // Split the borrow: `f` writes into `scratch` while `pool` is untouched.
         let Self { pool, scratch } = self;
         scratch.clear();
         f(scratch);
         pooled(pool, scratch)
-    }
-
-    /// [`Self::intern_fmt`] for `"{a}{sep}{b}"`.
-    pub fn intern_join(&mut self, a: &str, sep: char, b: &str) -> Arc<str> {
-        self.intern_fmt(|out| {
-            out.push_str(a);
-            out.push(sep);
-            out.push_str(b);
-        })
     }
 
     /// Number of distinct names currently pooled. Diagnostic only.
@@ -98,7 +84,7 @@ mod tests {
     fn a_formatted_name_pools_with_its_plain_twin() {
         let mut interner = NameInterner::default();
         let plain = interner.intern("Fire.Damage");
-        let built = interner.intern_join("Fire", '.', "Damage");
+        let built = interner.intern_fmt(|out| put(out, format_args!("Fire.{}", "Damage")));
         assert_eq!(&*built, "Fire.Damage");
         assert!(Arc::ptr_eq(&plain, &built));
         assert_eq!(interner.len(), 1);
