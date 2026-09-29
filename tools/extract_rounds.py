@@ -48,16 +48,12 @@ PLANTED_AT_SITE = "PlantedAtSite"
 _NAMES = pa.array([SET_PHASE, PLANTED_AT_SITE, *PHASE_RPCS.values()])
 
 SCHEMA = pa.schema([
-    pa.field("round_ordinal", pa.int32()),
-    pa.field("round_number", pa.int32()),
-    *(pa.field(column, pa.int64()) for column in PHASE_COLUMNS.values()),
-    *(pa.field(column, pa.string()) for column in RESULT_COLUMNS.values()),
-    pa.field("attacker_team", pa.string()),
-    pa.field("plant_ms", pa.int64()),
-    # TimedBomb's EnumByte; null when not replicated (4 of 9 plants on 13.01).
-    pa.field("plant_site", pa.int32()),
-    pa.field("defuse_ms", pa.int64()),
-    pa.field("explode_ms", pa.int64()),
+    ("round_ordinal", pa.int32()), ("round_number", pa.int32()),
+    *((column, pa.int64()) for column in PHASE_COLUMNS.values()),
+    *((column, pa.string()) for column in (*RESULT_COLUMNS.values(), "attacker_team")),
+    # plant_site is TimedBomb's EnumByte, null when not replicated (4 of 9 plants on 13.01).
+    ("plant_ms", pa.int64()), ("plant_site", pa.int32()),
+    ("defuse_ms", pa.int64()), ("explode_ms", pa.int64()),
 ])
 
 #: Values filed into a round by time: roundStarted word0, spike events, the site.
@@ -159,10 +155,13 @@ def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
     return rounds, counts, problems
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+def parquet_cli(description, build, schema, noun, argv=None) -> int:
+    """The --export/--out command of a Parquet view: print `build`'s counts and
+    each column's non-null count, then write its rows atomically -- unless it
+    reports a problem or --out names an export table: FAILED, exit 1, no file."""
+    ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--export", type=Path, required=True, help="directory written by `vrfkit export`")
-    ap.add_argument("--out", type=Path, required=True, help="output rounds.parquet path")
+    ap.add_argument("--out", type=Path, required=True, help="output .parquet path")
     args = ap.parse_args(argv)
     try:
         refuse_input_path(args.out, [*args.export.glob("*.parquet"), args.export / "manifest.json"])
@@ -170,19 +169,23 @@ def main(argv=None) -> int:
     except (OSError, ValueError, KeyError) as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
-    print(f"{len(rows)} played round(s)")
+    print(f"{len(rows)} {noun}")
     for key, value in counts.items():
         print(f"  {key}: {value}")
     print("  non-null: " + ", ".join(
-        f"{name} {sum(r[name] is not None for r in rows)}" for name in SCHEMA.names))
+        f"{name} {sum(r[name] is not None for r in rows)}" for name in schema.names))
     for problem in problems:
         print(f"FAILED: {problem}", file=sys.stderr)
     if problems:
         return 1
-    table = pa.Table.from_pylist(rows, schema=SCHEMA)
+    table = pa.Table.from_pylist(rows, schema=schema)
     atomic_write_file(args.out, lambda out: pq.write_table(table, out, compression="zstd"))
     print(f"wrote {args.out}")
     return 0
+
+
+def main(argv=None) -> int:
+    return parquet_cli(__doc__, build, SCHEMA, "played round(s)", argv)
 
 
 if __name__ == "__main__":

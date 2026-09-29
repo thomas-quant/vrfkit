@@ -16,9 +16,7 @@ with `events.characterDeath` (victim = word1); anything unpaired fails the run.
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -27,60 +25,47 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_file, refuse_input_path
     from .equippable_table import EQUIPPABLE_BY_PATH
+    from .extract_rounds import parquet_cli
     from .player_identity import load_player_bodies
     from .wire_bits import iter_selected, text
 else:
-    from atomic_io import atomic_write_file, refuse_input_path
     from equippable_table import EQUIPPABLE_BY_PATH
+    from extract_rounds import parquet_cli
     from player_identity import load_player_bodies
     from wire_bits import iter_selected, text
 
 FUNCTIONS = ("MulticastNotifyDamage_Point", "MulticastNotifyDamage_Base")
 #: Parameter -> (column, value column); vectors are "(x,y,z)" strings.
 SCALARS = {
+    "DamagerPlayerState": ("damager_player_state", "value_i64"),
+    "EquippableUsed": ("weapon_net_guid", "value_i64"),
     "DamageDealt": ("damage_dealt", "value_f64"), "DamageTaken": ("damage_taken", "value_f64"),
     "FalloffMultiplier": ("falloff", "value_f64"), "DamagedBone": ("bone", "value_str"),
     "RegionalDamage": ("regional_damage", "value_i64"), "bDamageKilledTarget": ("killed", "value_bool"),
     "bIsWallPenetration": ("wallbang", "value_bool"), "NetTimestamp": ("net_timestamp", "value_f64"),
-    "RespawnNumber": ("respawn_number", "value_i64"), "EquippableUsed": ("weapon_net_guid", "value_i64"),
-    "DamagerPlayerState": ("damager_player_state", "value_i64"),
+    "RespawnNumber": ("respawn_number", "value_i64"),
 }
+_TYPES = {"value_i64": pa.int64(), "value_f64": pa.float64(), "value_str": pa.string(),
+          "value_bool": pa.bool_()}
 VECTORS = {"DamageOrigin": "origin", "DamageImpactLocation": "impact", "DamageDirection": "direction"}
 SENTINELS = {"net_timestamp": -3.4028234663852886e38, "respawn_number": -1}
 #: A killing blow lands 8-31 ms after its characterDeath (3,148 pairs, 22 exports).
 KILL_FEED_SLACK_MS = 100
 
 SCHEMA = pa.schema([
-    pa.field("time_ms", pa.int64()), pa.field("packet_id", pa.int64()),
-    pa.field("function", pa.string()),
-    pa.field("victim_actor_net_guid", pa.int64()), pa.field("victim_class_path", pa.string()),
-    pa.field("victim_subject", pa.string()),
-    pa.field("damager_player_state", pa.int64()), pa.field("damager_subject", pa.string()),
-    pa.field("weapon_net_guid", pa.int64()), pa.field("weapon_class_path", pa.string()),
-    pa.field("weapon_name", pa.string()),
-    *(pa.field(f"{v}_{axis}", pa.float64()) for v in VECTORS.values() for axis in "xyz"),
-    pa.field("damage_dealt", pa.float64()), pa.field("damage_taken", pa.float64()),
-    pa.field("falloff", pa.float64()), pa.field("bone", pa.string()),
-    pa.field("regional_damage", pa.int32()), pa.field("killed", pa.bool_()),
-    pa.field("wallbang", pa.bool_()), pa.field("net_timestamp", pa.float64()),
-    pa.field("respawn_number", pa.int32()),
+    ("time_ms", pa.int64()), ("packet_id", pa.int64()), ("function", pa.string()),
+    ("victim_actor_net_guid", pa.int64()),
+    *((name, pa.string()) for name in ("victim_class_path", "victim_subject", "damager_subject",
+                                        "weapon_class_path", "weapon_name")),
+    *((column, _TYPES[value]) for column, value in SCALARS.values()),
+    *((f"{v}_{axis}", pa.float64()) for v in VECTORS.values() for axis in "xyz"),
 ])
 COUNT_KEYS = (*FUNCTIONS, "repeated-parameter splits", "sentinels nulled",
               "untyped parameter rows", "unparsed vectors", "actor GUIDs with two classes",
               "weapon GUIDs without a class", "killing blows on a player body",
               "characterDeath events", "kill feed pairs", "killing blows without a death",
               "deaths without a killing blow")
-
-
-def parse_vector(text_value):
-    """(x, y, z) from "(x,y,z)", or None."""
-    try:
-        x, y, z = (float(part) for part in text_value.strip("()").split(","))
-    except (AttributeError, ValueError):
-        return None
-    return x, y, z
 
 
 def actor_classes(export: Path, counts: Counter) -> dict:
@@ -145,14 +130,12 @@ def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
                 value = None
             out[column] = value
         for parameter, prefix in VECTORS.items():
-            row = parameters.get(parameter)
-            if row is None:
-                continue
-            vector = parse_vector(row["value_str"])
-            if vector is None:
-                counts["unparsed vectors"] += 1
-                continue
-            out[f"{prefix}_x"], out[f"{prefix}_y"], out[f"{prefix}_z"] = vector
+            if parameter in parameters:
+                try:
+                    out[f"{prefix}_x"], out[f"{prefix}_y"], out[f"{prefix}_z"] = map(
+                        float, parameters[parameter]["value_str"].strip("()").split(","))
+                except (AttributeError, ValueError):
+                    counts["unparsed vectors"] += 1
         for column in ("weapon_net_guid", "damager_player_state"):
             out[column] = out[column] or None  # GUID 0 is the null reference
         out["damager_subject"] = subject_of_state.get(out["damager_player_state"])
@@ -185,29 +168,7 @@ def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--export", type=Path, required=True, help="directory written by `vrfkit export`")
-    ap.add_argument("--out", type=Path, required=True, help="output damage_events.parquet path")
-    args = ap.parse_args(argv)
-    try:
-        refuse_input_path(args.out, [*args.export.glob("*.parquet"), args.export / "manifest.json"])
-        rows, counts, problems = build(args.export)
-    except (OSError, ValueError, KeyError) as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
-    print(f"{len(rows)} damage invocation(s)")
-    for key, value in counts.items():
-        print(f"  {key}: {value}")
-    print("  non-null: " + ", ".join(
-        f"{name} {sum(r[name] is not None for r in rows)}" for name in SCHEMA.names))
-    for problem in problems:
-        print(f"FAILED: {problem}", file=sys.stderr)
-    if problems:
-        return 1
-    table = pa.Table.from_pylist(rows, schema=SCHEMA)
-    atomic_write_file(args.out, lambda out: pq.write_table(table, out, compression="zstd"))
-    print(f"wrote {args.out}")
-    return 0
+    return parquet_cli(__doc__, build, SCHEMA, "damage invocation(s)", argv)
 
 
 if __name__ == "__main__":
