@@ -271,14 +271,14 @@ Measured on `02d4d478` (48,215,213 bytes):
 
 | File | Rows | Bytes | Notes |
 |---|---|---|---|
-| `fields.parquet` | 1,296,660 | 12,691,368 | |
+| `fields.parquet` | 1,296,660 | 12,691,843 | |
 | `movement.parquet` | 1,844,147 | 19,984,802 | |
-| `actors.parquet` | 3,827 | 68,243 | |
+| `actors.parquet` | 3,827 | 76,830 | |
 | `net_guids.parquet` | 16,167 | 114,423 | |
 | `events.parquet` | 195 | 12,455 | |
 | `partials.parquet` | 0 | 2,505 | main-only; with checkpoints: 0 rows, 2,505 bytes |
-| `checkpoint_fields.parquet` | 352,089 | 1,190,437 | requires `--checkpoints` |
-| `checkpoint_actors.parquet` | 3,014 | 24,345 | requires `--checkpoints` |
+| `checkpoint_fields.parquet` | 352,089 | 1,193,006 | requires `--checkpoints` |
+| `checkpoint_actors.parquet` | 3,014 | 25,848 | requires `--checkpoints` |
 | `checkpoint_net_guids.parquet` | 74,270 | 175,916 | requires `--checkpoints` |
 | `checkpoint_blocks.parquet` | 22,247 | 112,649 | requires `--checkpoints` |
 | `checkpoint_guid_entries.parquet` | 74,270 | 219,662 | requires `--checkpoints` |
@@ -468,6 +468,7 @@ still show up here when they open a channel.
 | `archetype_path` | str? | Archetype path (absent for static actors) |
 | `spawn_x` / `spawn_y` / `spawn_z` | f32? | Spawn position |
 | `spawn_pitch` / `spawn_yaw` / `spawn_roll` | f32? | Spawn rotation |
+| `spawn_vx` / `spawn_vy` / `spawn_vz` | f32? | Spawn velocity, world units per second; 0 when the spawn block sent none |
 
 Static actors and `close` rows carry no spatial data, so the spawn fields are
 null.

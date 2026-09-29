@@ -38,8 +38,17 @@
   "movement_envelope_trailers": 1837580,
   "movement_envelope_trailer_bits": 44101920,
   "targeting_world_locations_decoded": 0,
+  "route_children_player_information": 563,
+  "route_children_tracked_rewards": 8527,
+  "route_children_selected_v2": 4100,
+  "route_children_kill_data": 1386,
+  "route_children_server_active_effects": 1364,
+  "route_children_requested_ignore_actors": 2670,
+  "route_children_active_blinds": 0,
+  "route_children_projectile_path": 0,
   "tracked_rewards_opaque_empty_variants": 7,
   "active_blinds_empty_trailers": 0,
+  "rpc_param_walks": 113215,
   "event_layout_mismatches": 0,
   "event_payloads_decoded": 195,
   "event_payload_unknown_groups": 0,
@@ -86,6 +95,15 @@
   "cp_sink_actor_closes": 0,
   "cp_sink_content_blocks": 22247,
   "cp_targeting_world_locations_decoded": 0,
+  "cp_route_children_player_information": 5292,
+  "cp_route_children_tracked_rewards": 7742,
+  "cp_route_children_selected_v2": 73800,
+  "cp_route_children_kill_data": 11865,
+  "cp_route_children_server_active_effects": 4837,
+  "cp_route_children_requested_ignore_actors": 0,
+  "cp_route_children_active_blinds": 0,
+  "cp_route_children_projectile_path": 0,
+  "cp_rpc_param_walks": 0,
   "cp_tracked_rewards_opaque_empty_variants": 0,
   "cp_active_blinds_empty_trailers": 0,
   "cp_movement_sized_section_tails": 0,
@@ -103,8 +121,8 @@
  "parquet": {
   "fields": {
    "rows": 1296660,
-   "bytes": 12691368,
-   "sha256": "a2992d248a86c2cee163a3727bed961a4b5637ebe22aa77fe74e0b45828c4f3d"
+   "bytes": 12691843,
+   "sha256": "6e542a82801097ddf8efc34e15ef4aa0fd2700398adf9c8e98b627e687ac40db"
   },
   "movement": {
    "rows": 1844147,
@@ -113,8 +131,8 @@
   },
   "actors": {
    "rows": 3827,
-   "bytes": 68243,
-   "sha256": "7ac509108455ec9eaa0fa87ac0aa896f8ccab4354a54e6e36d9a6bb16ab36f05"
+   "bytes": 76830,
+   "sha256": "d76794ce202c8385aa5a7a595f1ef7531acf54baddbf67eb81b55ce314e07361"
   },
   "net_guids": {
    "rows": 16167,
@@ -133,13 +151,13 @@
   },
   "checkpoint_fields": {
    "rows": 352089,
-   "bytes": 1190437,
-   "sha256": "8869f266145c014d284231384dbeb8506b409188969f04b3b4ade904e3aaa1c9"
+   "bytes": 1193006,
+   "sha256": "15191d4ae23df70c185a20f0932c4107a29bcc5622867622a41795c0e949c503"
   },
   "checkpoint_actors": {
    "rows": 3014,
-   "bytes": 24345,
-   "sha256": "18db731697dae07835e0bd01898ae90ceef5365cd627b3ae2a38ecc43b2ae9b8"
+   "bytes": 25848,
+   "sha256": "30bf8b63f7ea0a0415c37f61c147aac5e5364f41b52f16c156f8f4148ce7f4a4"
   },
   "checkpoint_net_guids": {
    "rows": 74270,

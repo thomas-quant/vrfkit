@@ -728,7 +728,7 @@ intervals carried that player's subject; now none does.
 
 | Data | Source | Status |
 |---|---|---|
-| Every actor spawn/despawn + class/archetype/spawn location | `actors.parquet` -- `event` is `open`/`close`/`dormant`; only `close` is a despawn | ✅ |
+| Every actor spawn/despawn + class/archetype/spawn location and velocity | `actors.parquet` -- `event` is `open`/`close`/`dormant`; only `close` is a despawn; velocity in world units per second | ✅ |
 | GUID → object path | `net_guids.parquet` | ✅ |
 | Containment chain (subobject → parent) | `net_guids.outer_net_guid` | ✅ |
 | Full declared schema (475 groups, handle→name) | `manifest.net_field_export_groups` | ✅ |
