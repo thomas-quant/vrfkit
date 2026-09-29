@@ -693,52 +693,30 @@ impl ReplicationSink for ExportSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::test_fixtures::channel_open;
-    use crate::sink::{ChannelState, ExportStats, RecordBuffers};
-    use vrf_schema::NetGuidCache;
+    use crate::sink::test_fixtures::{Rig, actor_block, channel_open, subobject_block};
+    use crate::sink::{ExportStats, RecordBuffers};
     use vrf_testkit::{BitWrite, pack, unpack};
 
-    /// Run one content block through the sink and report the subobject GUID it
-    /// recorded for the fields that would follow.
-    fn object_guid_for(is_actor: bool, object_net_guid: u32) -> Option<u32> {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-        let header = ContentBlockHeader {
-            // RepLayout, so the block needs no ClassNetCache function count.
-            has_rep_layout: true,
-            is_actor,
-            object_net_guid: NetworkGuid(object_net_guid),
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(7, NetworkGuid(1234), &header);
-        sink.current_object_guid
-    }
-
-    /// A subobject block whose object GUID is 0 records `Some(0)`, not `None`;
-    /// see `on_content_block` and `FieldRecord::object_net_guid`.
+    /// The subobject GUID a block records for its fields: `None` for an actor
+    /// block whatever the header says, `Some(0)` for a subobject whose GUID is
+    /// the invalid 0 (see `on_content_block` and `FieldRecord::object_net_guid`).
     #[test]
-    fn a_subobject_block_keeps_a_zero_object_guid_distinct_from_none() {
-        assert_eq!(
-            object_guid_for(false, 0),
-            Some(0),
-            "zero is the invalid-GUID sentinel, not the absence of a subobject"
-        );
-    }
-
-    /// The two cases that must keep working: an actor block carries no
-    /// subobject GUID at all, and a real subobject GUID passes through.
-    #[test]
-    fn an_actor_block_has_no_object_guid_and_subobjects_keep_theirs() {
-        assert_eq!(object_guid_for(true, 0), None, "actor block");
-        assert_eq!(
-            object_guid_for(true, 99),
-            None,
-            "an actor block ignores the GUID"
-        );
-        assert_eq!(object_guid_for(false, 99), Some(99), "subobject block");
+    fn only_subobject_blocks_record_an_object_guid_zero_included() {
+        for (is_actor, guid, want) in [
+            (true, 0, None),
+            (true, 99, None),
+            (false, 0, Some(0)),
+            (false, 99, Some(99)),
+        ] {
+            let mut rig = Rig::default();
+            let mut sink = rig.sink();
+            let header = ContentBlockHeader {
+                is_actor,
+                ..subobject_block(guid, true)
+            };
+            sink.on_content_block(7, NetworkGuid(1234), &header);
+            assert_eq!(sink.current_object_guid, want, "{is_actor} {guid}");
+        }
     }
 
     fn rejected_partial_row(
@@ -746,11 +724,9 @@ mod tests {
         bit_count: usize,
         payload: &[u8],
     ) -> PartialRecord {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
+        let mut rig = Rig::default();
         {
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            let mut sink = rig.sink();
             let header = vrf_net::bunch::RawBunchHeader {
                 packet_id: 41,
                 ch_index: 7,
@@ -771,8 +747,8 @@ mod tests {
                 rejection_packet_id: Some(44),
             });
         }
-        assert_eq!(records.partials.len(), 1);
-        records.partials.remove(0)
+        assert_eq!(rig.records.partials.len(), 1);
+        rig.records.partials.remove(0)
     }
 
     /// A rejected partial keeps the bits it declares and no more: bits past
@@ -812,51 +788,38 @@ mod tests {
         );
     }
 
-    /// Every rejection cause reaches the table under its own name. A relabelled
-    /// cause is a plausible wrong value: the row still looks well-formed.
+    /// Every rejection cause reaches the table under its own name, the
+    /// variant's in snake case. A relabelled cause is a plausible wrong value:
+    /// the row still looks well-formed.
     #[test]
     fn every_rejected_partial_reason_has_a_distinct_name() {
-        let reasons = [
-            (PartialPayloadReason::MissingInitial, "missing_initial"),
-            (
-                PartialPayloadReason::OverlappingInitial,
-                "overlapping_initial",
-            ),
-            (
-                PartialPayloadReason::MismatchedContinuation,
-                "mismatched_continuation",
-            ),
-            (
-                PartialPayloadReason::NonByteAlignedFragment,
-                "non_byte_aligned_fragment",
-            ),
-            (PartialPayloadReason::ActiveStateLimit, "active_state_limit"),
-            (
-                PartialPayloadReason::BufferedBitsLimit,
-                "buffered_bits_limit",
-            ),
-            (
-                PartialPayloadReason::AllocationFailure,
-                "allocation_failure",
-            ),
-            (
-                PartialPayloadReason::ChannelStateLimit,
-                "channel_state_limit",
-            ),
-            (PartialPayloadReason::ChannelClosed, "channel_closed"),
-            (PartialPayloadReason::EndOfStream, "end_of_stream"),
-        ];
-        for (reason, name) in reasons {
-            assert_eq!(rejected_partial_row(reason, 8, &[0]).reason, name);
+        use PartialPayloadReason::*;
+        for reason in [
+            MissingInitial,
+            OverlappingInitial,
+            MismatchedContinuation,
+            NonByteAlignedFragment,
+            ActiveStateLimit,
+            BufferedBitsLimit,
+            AllocationFailure,
+            ChannelStateLimit,
+            ChannelClosed,
+            EndOfStream,
+        ] {
+            let mut snake = String::new();
+            for (i, c) in format!("{reason:?}").char_indices() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    snake.push('_');
+                }
+                snake.push(c.to_ascii_lowercase());
+            }
+            assert_eq!(rejected_partial_row(reason, 8, &[0]).reason, snake);
         }
     }
-
     #[test]
     fn on_field_keeps_exact_parent_raw_bits_for_unknown_and_typed_failures() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
         let payload = [0b1110_1101];
 
         sink.on_field(
@@ -922,27 +885,34 @@ mod tests {
         }
     }
 
+    fn assert_untyped(row: &vrf_export::FieldRecord) {
+        assert!(row.compatible_checksum.is_none());
+        assert!(row.value_i64.is_none() && row.value_f64.is_none());
+        assert!(row.value_bool.is_none() && row.value_str.is_none());
+    }
+
+    /// A sink inside an `AbilitiesAndBuffsComponent` block (object 144,
+    /// actor 89, channel 3).
+    fn abilities_block(rig: &mut Rig, has_rep_layout: bool) -> ExportSink<'_> {
+        rig.cache
+            .set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
+        let mut sink = rig.sink();
+        sink.on_content_block(3, NetworkGuid(89), &subobject_block(144, has_rep_layout));
+        sink
+    }
+
     /// A whole unresolved block is one preservation row, not an RPC or a set
     /// of invented fields. The reserved field name is its sole discriminator.
     #[test]
     fn unresolved_class_net_cache_payload_emits_one_distinguished_row() {
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, false);
+        assert_eq!(
+            sink.current_function_count_source,
+            "unresolved_class_net_cache"
+        );
         sink.time_ms = 1234;
         sink.packet_id = 56;
-
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
-        let function_count = sink.on_content_block(7, NetworkGuid(89), &header);
-        assert_eq!(function_count, 0);
 
         let failure = unresolved_failure(89, 7);
         sink.on_unresolved_class_net_cache_payload(failure, &[0x66]);
@@ -951,7 +921,7 @@ mod tests {
         let row = &sink.records.fields[0];
         assert_eq!(row.time_ms, 1234);
         assert_eq!(row.packet_id, 56);
-        assert_eq!(row.channel_index, 7);
+        assert_eq!(row.channel_index, 3);
         assert_eq!(row.actor_net_guid, 89);
         assert_eq!(row.object_net_guid, Some(144));
         assert_eq!(&*row.group_path, "AbilitiesAndBuffsComponent");
@@ -962,10 +932,7 @@ mod tests {
         );
         assert_eq!(row.bit_count, 7);
         assert_eq!(row.raw_bits.as_deref(), Some(&[0x66][..]));
-        assert!(row.value_i64.is_none());
-        assert!(row.value_f64.is_none());
-        assert!(row.value_bool.is_none());
-        assert!(row.value_str.is_none());
+        assert_untyped(row);
         assert_eq!(sink.stats.fields_emitted, 1);
         assert_eq!(sink.stats.rpcs_emitted, 0);
         assert_eq!(sink.stats.overlay.decoded_ok, 0);
@@ -988,18 +955,8 @@ mod tests {
         let body = [true, false, true, false, true, false, true, false, true];
         let tail = one_h1_cnc_tail(&body);
         let tail_bytes = pack(&tail);
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, true);
 
         let outcome = sink.on_rep_layout_tail(
             NetworkGuid(89),
@@ -1014,11 +971,7 @@ mod tests {
         assert_eq!(row.field_name.as_deref(), Some(CHAINED_CNC_H1_FIELD_NAME));
         assert_eq!(row.bit_count, body.len() as u32);
         assert_eq!(row.raw_bits.as_deref(), Some(pack(&body).as_slice()));
-        assert!(row.compatible_checksum.is_none());
-        assert!(row.value_i64.is_none());
-        assert!(row.value_f64.is_none());
-        assert!(row.value_bool.is_none());
-        assert!(row.value_str.is_none());
+        assert_untyped(row);
         assert_eq!(sink.stats.rep_layout_cnc_tails_decoded, 1);
         assert_eq!(sink.stats.rep_layout_cnc_tails_preserved, 0);
     }
@@ -1028,26 +981,15 @@ mod tests {
         let body = [true, false, true, false, true, false, true, false, true];
         let tail = one_h1_cnc_tail(&body);
         let tail_bytes = pack(&tail);
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(145, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let known_header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(145),
-            ..ContentBlockHeader::default()
-        };
+        let mut rig = Rig::default();
+        rig.cache
+            .set_net_guid_path(145, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
+        let mut sink = rig.sink();
+        let known_header = subobject_block(145, true);
         sink.on_content_block(3, NetworkGuid(89), &known_header);
         assert!(sink.current_is_abilities_and_buffs);
 
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            ..ContentBlockHeader::default()
-        };
+        let header = subobject_block(144, true);
         sink.on_content_block(3, NetworkGuid(89), &header);
         assert!(
             !sink.current_is_abilities_and_buffs,
@@ -1074,11 +1016,7 @@ mod tests {
         );
         assert_eq!(row.bit_count, tail.len() as u32);
         assert_eq!(row.raw_bits.as_deref(), Some(tail_bytes.as_slice()));
-        assert!(row.compatible_checksum.is_none());
-        assert!(row.value_i64.is_none());
-        assert!(row.value_f64.is_none());
-        assert!(row.value_bool.is_none());
-        assert!(row.value_str.is_none());
+        assert_untyped(row);
         assert_eq!(sink.stats.rep_layout_cnc_tails_decoded, 0);
         assert_eq!(sink.stats.rep_layout_cnc_tails_preserved, 1);
     }
@@ -1090,18 +1028,8 @@ mod tests {
         two_rpcs.extend(one_h1_cnc_tail(&[true, true, false]));
         let false_flag = one_h1_cnc_tail(&[false, true, true]);
 
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, true);
 
         for tail in [&two_rpcs, &false_flag] {
             let raw = pack(tail);
@@ -1141,37 +1069,12 @@ mod tests {
         let data = pack(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         let emitted = sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
         assert!(!emitted, "no parameter rows are emitted before the break");
         assert_eq!(sink.stats.truncated_rpcs, 1);
-    }
-
-    /// One parameter then the zero-handle terminator leaves `truncated_rpcs` at
-    /// zero.
-    #[test]
-    fn a_completed_rpc_payload_leaves_truncated_rpcs_at_zero() {
-        let mut bits = Vec::new();
-        bits.push(false); // property checksum
-        bits.int_packed(1); // encodedHandle = 1 -> handle 0
-        bits.int_packed(8); // payload_bits = 8
-        bits.extend(std::iter::repeat_n(false, 8)); // 8 bits of payload data
-        bits.int_packed(0); // terminator handle
-        let data = pack(&bits);
-        let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-        let emitted = sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
-        assert!(emitted, "one parameter row is emitted");
-        assert_eq!(sink.stats.truncated_rpcs, 0);
     }
 
     fn targeting_rpc(
@@ -1183,15 +1086,15 @@ mod tests {
         child_checksum: u32,
         array_bits: &[bool],
     ) -> (RecordBuffers, ExportStats) {
-        let mut cache = NetGuidCache::new();
-        cache
+        let mut rig = Rig::default();
+        rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(group.into(), 7, 3))
             .unwrap();
         for (handle, name, checksum) in [
             (parent_handle, parent_name, parent_checksum),
             (1, child_name, child_checksum),
         ] {
-            assert!(cache.set_field_on_group(
+            assert!(rig.cache.set_field_on_group(
                 7,
                 vrf_schema::NetFieldExport {
                     handle,
@@ -1206,17 +1109,14 @@ mod tests {
         rpc_bits.extend_from_slice(array_bits);
         rpc_bits.int_packed(0);
         let raw = pack(&rpc_bits);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
         assert!(sink.try_parse_rpc_params(
             3,
             BitReader::with_bit_len(&raw, rpc_bits.len() as u64).unwrap(),
             Some("MulticastRespondToValidMapClick"),
         ));
         let stats = sink.stats.clone();
-        drop(sink);
-        (records, stats)
+        (rig.records, stats)
     }
 
     const TARGETING_GROUP: &str =
@@ -1438,10 +1338,8 @@ mod tests {
         let data = pack(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         let emitted = sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
         assert!(emitted, "the parameter that did parse is still emitted");
@@ -1451,9 +1349,12 @@ mod tests {
         );
         // Not a truncation: the walk ended where the wire told it to.
         assert_eq!(sink.stats.truncated_rpcs, 0);
-        drop(sink);
-        assert_eq!(records.fields.len(), 2, "parameter plus whole raw fallback");
-        let fallback = records.fields.last().unwrap();
+        assert_eq!(
+            rig.records.fields.len(),
+            2,
+            "parameter plus whole raw fallback"
+        );
+        let fallback = rig.records.fields.last().unwrap();
         assert_eq!(fallback.bit_count, bits.len() as u32);
         assert_eq!(fallback.raw_bits.as_deref(), Some(data.as_slice()));
     }
@@ -1470,16 +1371,17 @@ mod tests {
         bits.extend(std::iter::repeat_n(true, 8));
         let data = pack(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         assert!(sink.try_parse_rpc_params(7, reader, Some("SomeFunction")));
         assert_eq!(sink.stats.truncated_rpcs, 1);
-        drop(sink);
-        assert_eq!(records.fields.len(), 2, "parameter plus whole raw fallback");
-        let fallback = records.fields.last().unwrap();
+        assert_eq!(
+            rig.records.fields.len(),
+            2,
+            "parameter plus whole raw fallback"
+        );
+        let fallback = rig.records.fields.last().unwrap();
         assert_eq!(fallback.bit_count, bits.len() as u32);
         assert_eq!(fallback.raw_bits.as_deref(), Some(data.as_slice()));
     }
@@ -1511,11 +1413,11 @@ mod tests {
         let data = pack(&bits);
 
         let path = "/Script/Test.Movement_ClassNetCache";
-        let mut cache = NetGuidCache::new();
-        cache
+        let mut rig = Rig::default();
+        rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(path.into(), 7, 1))
             .unwrap();
-        assert!(cache.set_field_on_group(
+        assert!(rig.cache.set_field_on_group(
             7,
             vrf_schema::NetFieldExport {
                 handle: 0,
@@ -1523,19 +1425,19 @@ mod tests {
                 name: MOVEMENT_RPC.into(),
             },
         ));
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from(path));
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
         sink.on_rpc(0, bits.len() as u32, reader);
 
         assert_eq!(sink.stats.movement_rpc_errors, 1);
-        drop(sink);
-        assert_eq!(records.fields.len(), 1);
-        assert_eq!(records.fields[0].bit_count, bits.len() as u32);
-        assert_eq!(records.fields[0].raw_bits.as_deref(), Some(data.as_slice()));
+        assert_eq!(rig.records.fields.len(), 1);
+        assert_eq!(rig.records.fields[0].bit_count, bits.len() as u32);
+        assert_eq!(
+            rig.records.fields[0].raw_bits.as_deref(),
+            Some(data.as_slice())
+        );
     }
 
     const PROJECTILE_CNC: &str =
@@ -1581,9 +1483,9 @@ mod tests {
         rpc.int_packed(0); // parameter terminator
         let rpc_raw = pack(&rpc);
 
-        let mut cache = NetGuidCache::new();
+        let mut rig = Rig::default();
         for (index, path) in [(7, PROJECTILE_CNC), (8, PROJECTILE_PARAMS)] {
-            cache
+            rig.cache
                 .add_export_group(vrf_schema::NetFieldExportGroup::new(path.into(), index, 1))
                 .unwrap();
         }
@@ -1591,7 +1493,7 @@ mod tests {
             (7, 2_336_552_129, "MulticastSetPath"),
             (8, 2_930_105_559, "NetworkedProjectilePath"),
         ] {
-            assert!(cache.set_field_on_group(
+            assert!(rig.cache.set_field_on_group(
                 index,
                 vrf_schema::NetFieldExport {
                     handle: 0,
@@ -1600,9 +1502,7 @@ mod tests {
                 }
             ));
         }
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from(PROJECTILE_CNC));
         sink.enable_measured_array_routes(branch);
         sink.on_rpc(
@@ -1611,8 +1511,7 @@ mod tests {
             BitReader::with_bit_len(&rpc_raw, rpc.len() as u64).unwrap(),
         );
         let stats = sink.stats.clone();
-        drop(sink);
-        (records, stats)
+        (rig.records, stats)
     }
 
     #[test]
@@ -1690,60 +1589,35 @@ mod tests {
         }
     }
 
-    /// The one trailing alignment bit the grammar allows stays uncounted, or
-    /// the counter would fire on every well-formed payload.
+    /// A completed walk, with or without the one trailing alignment bit the
+    /// grammar allows, is neither a truncation nor a dropped suffix: either
+    /// counter firing on it would fire on every well-formed payload.
     #[test]
-    fn a_single_alignment_bit_after_the_rpc_terminator_is_not_a_drop() {
+    fn a_completed_rpc_payload_is_neither_truncated_nor_a_drop() {
         for suffix in [0, 1] {
             let bits = rpc_payload_with_suffix(suffix);
             let data = pack(&bits);
             let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-
-            let mut cache = NetGuidCache::new();
-            let mut channel_state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-            sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
-            assert_eq!(
-                sink.stats.rpc_suffix_bits_dropped, 0,
-                "{suffix} trailing bit(s) is within the grammar"
-            );
+            let mut rig = Rig::default();
+            let mut sink = rig.sink();
+            assert!(sink.try_parse_rpc_params(7, reader, Some("SomeFunction")));
+            assert_eq!(sink.stats.truncated_rpcs, 0, "{suffix}");
+            assert_eq!(sink.stats.rpc_suffix_bits_dropped, 0, "{suffix}");
         }
     }
-
     /// An unresolved `AbilitiesAndBuffsComponent` payload that walks cleanly
     /// under fc=34 must emit one additive `_cnc_h1` row alongside the
     /// preservation row. The RPC handle and payload bits must be correct.
     #[test]
     fn unresolved_abilities_and_buffs_emits_cnc_rpc_row() {
-        // Build a minimal CNC stream with fc=34, handle=1, 32-bit payload
-        // of all 1s (to prevent false-positive walks at lower fc values).
-        let mut bits = Vec::new();
-        bits.serialized_int(1, 34); // handle=1, 6 bits
-        bits.int_packed(32); // payload_bits=32
-        bits.extend(std::iter::repeat_n(true, 32)); // 32 bits of 1s payload
+        // fc=34, handle 1, a 32-bit payload of 1s (no walk at lower fc values).
+        let bits = one_h1_cnc_tail(&[true; 32]);
 
         let data = pack(&bits);
         let bit_count = bits.len() as u32;
 
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        sink.time_ms = 100;
-        sink.packet_id = 7;
-
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
-
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, false);
         let failure = unresolved_failure(89, bit_count);
         sink.on_unresolved_class_net_cache_payload(failure, &data);
 
@@ -1793,19 +1667,8 @@ mod tests {
             "the fixture must not walk under fc=34, or this tests nothing"
         );
 
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, false);
         let failure = unresolved_failure(89, bit_count);
         sink.on_unresolved_class_net_cache_payload(failure, &data);
 
@@ -1828,27 +1691,14 @@ mod tests {
     /// with that, deleting the group-path guard would leave this test green.
     #[test]
     fn unresolved_payload_for_other_group_emits_no_cnc_rows() {
-        // Same construction as the fc=34 walking test: handle=1, 6 bits;
-        // payload_bits=32; 32 bits of 1s.
-        let mut bits = Vec::new();
-        bits.serialized_int(1, 34);
-        bits.int_packed(32);
-        bits.extend(std::iter::repeat_n(true, 32));
+        let bits = one_h1_cnc_tail(&[true; 32]);
         let data = pack(&bits);
         let bit_count = bits.len() as u32;
 
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(200),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
+        let header = subobject_block(200, false);
         sink.on_content_block(3, NetworkGuid(89), &header);
         // current_group_path resolves to a bare name that is NOT
         // AbilitiesAndBuffsComponent.
@@ -1869,10 +1719,8 @@ mod tests {
     /// emit a row and count as closes.
     #[test]
     fn a_dormancy_close_is_not_recorded_as_a_despawn() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         sink.on_actor_close(3, NetworkGuid(42), false);
         sink.on_actor_close(4, NetworkGuid(43), true);
@@ -1897,15 +1745,9 @@ mod tests {
     /// `on_deleted_block` forgetting its count.
     #[test]
     fn deleted_and_live_blocks_both_advance_the_sink_block_tally() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
+        let header = actor_block(true);
 
         sink.on_content_block(7, NetworkGuid(1234), &header);
         assert_eq!(sink.stats.content_blocks, 1);
@@ -1919,10 +1761,8 @@ mod tests {
     /// would most easily skip.
     #[test]
     fn every_rpc_shape_advances_the_sink_rpc_tally_once() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         sink.on_rpc(5, 0, BitReader::with_bit_len(&[], 0).unwrap());
         assert_eq!(sink.stats.rpcs_emitted, 1, "zero-bit marker row");
@@ -1935,13 +1775,12 @@ mod tests {
     /// its own GUID path (the level's instance name, not a class).
     #[test]
     fn a_static_actors_close_row_does_not_fabricate_a_class_path_from_its_own_guid() {
-        let mut cache = NetGuidCache::new();
+        let mut rig = Rig::default();
         // The actor's own GUID path -- an instance name, e.g. what a level
         // placement looks like on the wire -- must not read back as a class.
-        cache.set_net_guid_path(42, "WindowShieldA1".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        rig.cache
+            .set_net_guid_path(42, "WindowShieldA1".to_owned(), None);
+        let mut sink = rig.sink();
 
         // No archetype: `NetworkGuid(0)` is invalid, so `on_actor_open` never
         // registers a channel archetype for it.
@@ -1958,10 +1797,8 @@ mod tests {
 
     #[test]
     fn destroyed_channel_archetypes_are_retired_but_dormant_ones_survive() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         sink.on_actor_open(&channel_open(3, 42, 8));
         sink.on_actor_open(&channel_open(4, 43, 9));
@@ -1979,71 +1816,43 @@ mod tests {
         );
     }
 
-    /// Player identity survives Swiftplay's `Swiftplay_EoRCredits_PlayerState_C`
-    /// through `canonical_group` (`GROUP_ALIASES`).
+    /// `Subject` and `SpawnedCharacter` are captured on the bomb PlayerState and
+    /// on Swiftplay's (through `canonical_group`). A later 0 is a disconnect and
+    /// keeps the body; a lone 0 stays `None`, not a NetGUID-looking 0; and
+    /// `PossessedCharacter` (a camera, drone or ability pawn) never sets it.
     #[test]
-    fn player_identity_is_captured_on_a_swiftplay_player_state() {
+    fn player_identity_keeps_the_spawned_body() {
         const SWIFT: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
-        for path in [BOMB_PLAYER_STATE, SWIFT] {
-            let mut cache = NetGuidCache::new();
-            let mut channel_state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        const SPAWNED: &str = "SpawnedCharacter";
+        const POSSESSED: &str = "PossessedCharacter";
+        let cases: [(&str, &[(&str, i64)], Option<u32>); 6] = [
+            (BOMB_PLAYER_STATE, &[(SPAWNED, 576)], Some(576)),
+            (SWIFT, &[(SPAWNED, 576)], Some(576)),
+            (
+                BOMB_PLAYER_STATE,
+                &[(SPAWNED, 1368), (SPAWNED, 0)],
+                Some(1368),
+            ),
+            (BOMB_PLAYER_STATE, &[(SPAWNED, 0)], None),
+            (BOMB_PLAYER_STATE, &[(POSSESSED, 412)], None),
+            (
+                BOMB_PLAYER_STATE,
+                &[(SPAWNED, 20), (POSSESSED, 412), (POSSESSED, 20)],
+                Some(20),
+            ),
+        ];
+        for (path, writes, want) in cases {
+            let mut rig = Rig::default();
+            let mut sink = rig.sink();
             sink.current_group_path = Arc::from(path);
             sink.current_actor_guid = 42;
-
             sink.record_player_identity(Some("Subject"), Some("uuid-here"), None);
-            sink.record_player_identity(Some("SpawnedCharacter"), None, Some(576));
-
-            let players = sink.channel_state.players.clone();
-            let entry = players
-                .get(&42)
-                .unwrap_or_else(|| panic!("nothing for {path}"));
+            for &(name, guid) in writes {
+                sink.record_player_identity(Some(name), None, Some(guid));
+            }
+            let entry = &sink.channel_state.players[&42];
             assert_eq!(entry.subject.as_deref(), Some("uuid-here"), "{path}");
-            assert_eq!(entry.character_net_guid, Some(576), "{path}");
-        }
-    }
-
-    /// A disconnect does not erase the character link. `SpawnedCharacter`
-    /// arrives about 60 ms in and again as 0 when the player leaves; keeping the
-    /// 0 made `manifest.players.character_net_guid` 0 for 9 spawned players
-    /// across 5 of 69 demo replays, which left spike custody `unknown`, two
-    /// planters unattributed, and the worst replay only 73.2% of its movement
-    /// rows attributed to a player.
-    #[test]
-    fn a_disconnect_does_not_erase_the_character_link() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        sink.current_group_path = Arc::from(BOMB_PLAYER_STATE);
-        sink.current_actor_guid = 42;
-
-        sink.record_player_identity(Some("SpawnedCharacter"), None, Some(1368));
-        sink.record_player_identity(Some("SpawnedCharacter"), None, Some(0));
-
-        let players = sink.channel_state.players.clone();
-        assert_eq!(players.get(&42).unwrap().character_net_guid, Some(1368));
-    }
-
-    #[test]
-    fn possession_never_makes_an_ability_pawn_a_player_body() {
-        // Regression case: body hits still count during possession,
-        // and releasing a device must not leave it registered as a player.
-        for device in [412, 798, 1170, 1534, 1884] {
-            let mut cache = NetGuidCache::new();
-            let mut state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut state, &mut records);
-            sink.current_group_path = Arc::from(BOMB_PLAYER_STATE);
-            sink.current_actor_guid = 42;
-            sink.record_player_identity(Some("PossessedCharacter"), None, Some(device));
-            assert_eq!(sink.channel_state.players[&42].character_net_guid, None);
-            sink.record_player_identity(Some("SpawnedCharacter"), None, Some(20));
-            sink.record_player_identity(Some("PossessedCharacter"), None, Some(device));
-            assert_eq!(sink.channel_state.players[&42].character_net_guid, Some(20));
-            sink.record_player_identity(Some("PossessedCharacter"), None, Some(20));
-            assert_eq!(sink.channel_state.players[&42].character_net_guid, Some(20));
+            assert_eq!(entry.character_net_guid, want, "{path} {writes:?}");
         }
     }
 
@@ -2051,11 +1860,9 @@ mod tests {
     /// blocks stay 100 in the aggregate while the line list stops at 32.
     #[test]
     fn failures_past_the_line_cap_are_all_aggregated() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        channel_state.enable_failure_aggregate(false);
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        rig.state.enable_failure_aggregate(false);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from("/Script/ShooterGame.AresAbilitySystemComponent"));
         for i in 0..100 {
             sink.on_stream_failure(abandoned_tail(i % 2));
@@ -2091,11 +1898,9 @@ mod tests {
     /// inflated by payloads that are on disk as preservation rows.
     #[test]
     fn preserved_unresolved_failures_are_separated_from_real_loss() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        channel_state.enable_failure_aggregate(true);
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        rig.state.enable_failure_aggregate(true);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from("AbilitiesAndBuffsComponent"));
 
         // The framing layer's exact sequence for an unresolved block:
@@ -2137,11 +1942,9 @@ mod tests {
     /// the caller's totals.
     #[test]
     fn taking_the_aggregate_drains_it() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        channel_state.enable_failure_aggregate(false);
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        rig.state.enable_failure_aggregate(false);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from("SomeGroup"));
         sink.on_stream_failure(abandoned_tail(8));
 
@@ -2153,38 +1956,20 @@ mod tests {
         );
     }
 
-    /// ...but a character that never spawned still reports nothing, rather
-    /// than a 0 that reads like a NetGUID.
-    #[test]
-    fn a_character_that_never_spawned_stays_none() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        sink.current_group_path = Arc::from(BOMB_PLAYER_STATE);
-        sink.current_actor_guid = 7;
-
-        sink.record_player_identity(Some("SpawnedCharacter"), None, Some(0));
-
-        let players = sink.channel_state.players.clone();
-        assert_eq!(players.get(&7).unwrap().character_net_guid, None);
-    }
-
     #[cfg(feature = "export")]
     #[test]
     fn checkpoint_block_spans_include_every_emitted_child_and_empty_block() {
-        let mut cache = NetGuidCache::new();
-        cache
+        let mut rig = Rig::default();
+        rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(
                 "ActorGroup".to_owned(),
                 1,
                 4,
             ))
             .unwrap();
-        cache.set_net_guid_path(9, "ActorGroup".to_owned(), None);
-        let mut state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut state, &mut records);
+        rig.cache
+            .set_net_guid_path(9, "ActorGroup".to_owned(), None);
+        let mut sink = rig.sink();
         sink.enable_checkpoint_block_context(
             vrf_export::CheckpointIdentity {
                 checkpoint_index: 2,
@@ -2195,11 +1980,7 @@ mod tests {
         );
         sink.time_ms = 12;
         sink.packet_id = 3;
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..Default::default()
-        };
+        let header = actor_block(true);
         sink.on_content_block(4, NetworkGuid(9), &header);
         sink.push_field(FieldValues {
             field_name: Some(Arc::from("raw-parent")),

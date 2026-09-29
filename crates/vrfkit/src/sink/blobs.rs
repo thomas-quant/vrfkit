@@ -871,7 +871,8 @@ fn decode_array_leaf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::{ChannelState, ExportStats, MeasuredArrayRoutes, RecordBuffers};
+    use crate::sink::test_fixtures::Rig;
+    use crate::sink::{ExportStats, MeasuredArrayRoutes, RecordBuffers};
     use std::sync::Arc;
     use vrf_export::FieldRecord;
     use vrf_net::field::FieldSink;
@@ -1012,14 +1013,14 @@ mod tests {
         branch: Option<&str>,
     ) -> (RecordBuffers, ExportStats) {
         let (group, parent, checksum) = identity;
-        let mut cache = NetGuidCache::new();
-        cache
+        let mut rig = Rig::default();
+        rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(group.into(), 7, 128))
             .unwrap();
         for (handle, name, compatible_checksum) in
             std::iter::once((0, parent, checksum)).chain(leaves.iter().copied())
         {
-            assert!(cache.set_field_on_group(
+            assert!(rig.cache.set_field_on_group(
                 7,
                 vrf_schema::NetFieldExport {
                     handle,
@@ -1028,9 +1029,7 @@ mod tests {
                 }
             ));
         }
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from(group));
         if let Some(branch) = branch {
             sink.enable_measured_array_routes(branch);
@@ -1042,7 +1041,7 @@ mod tests {
             BitReader::with_bit_len(&raw, bits.len() as u64).unwrap(),
         );
         let stats = sink.stats;
-        (records, stats)
+        (rig.records, stats)
     }
 
     #[test]

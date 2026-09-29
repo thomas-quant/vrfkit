@@ -540,10 +540,8 @@ mod tests {
     #![allow(unused_must_use)]
 
     use super::*;
-    use crate::sink::RecordBuffers;
-    use crate::sink::test_fixtures::channel_open;
+    use crate::sink::test_fixtures::{Rig, actor_block, channel_open};
     use vrf_net::pipeline::ReplicationSink;
-    use vrf_schema::NetGuidCache;
 
     /// Build a cache holding `groups` as declared export groups and mapping
     /// `guid` to `guid_path`, then run one actor content block through a sink
@@ -554,26 +552,21 @@ mod tests {
         guid_path: &str,
         has_rep_layout: bool,
     ) -> String {
-        let mut cache = NetGuidCache::new();
+        let mut rig = Rig::default();
         for (i, path) in groups.iter().enumerate() {
-            cache.add_export_group(vrf_schema::NetFieldExportGroup::new(
-                (*path).to_owned(),
-                i as u32 + 1,
-                4,
-            ));
+            rig.cache
+                .add_export_group(vrf_schema::NetFieldExportGroup::new(
+                    (*path).to_owned(),
+                    i as u32 + 1,
+                    4,
+                ));
         }
-        cache.set_net_guid_path(guid, guid_path.to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        rig.cache
+            .set_net_guid_path(guid, guid_path.to_owned(), None);
+        let mut sink = rig.sink();
 
-        let header = ContentBlockHeader {
-            has_rep_layout,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
         // No archetype is registered, so only the actor-GUID path is left.
-        sink.on_content_block(3, NetworkGuid(guid), &header);
+        sink.on_content_block(3, NetworkGuid(guid), &actor_block(has_rep_layout));
         sink.current_group_path.to_string()
     }
 
@@ -804,32 +797,29 @@ mod tests {
     /// actor's archetype; see [`ChannelArchetype`].
     #[test]
     fn a_reused_channel_does_not_inherit_the_previous_actors_archetype() {
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(vrf_schema::NetFieldExportGroup::new(
-            "/Game/Effects/Smoke.Smoke_C".to_owned(),
-            1,
-            4,
-        ));
+        let mut rig = Rig::default();
+        rig.cache
+            .add_export_group(vrf_schema::NetFieldExportGroup::new(
+                "/Game/Effects/Smoke.Smoke_C".to_owned(),
+                1,
+                4,
+            ));
         // GUID 8 is the dynamic actor's archetype; its outer names the class.
-        cache.set_net_guid_path(
+        rig.cache.set_net_guid_path(
             8,
             "Default__Smoke_C".to_owned(),
             Some(vrf_schema::NetworkGuid(9)),
         );
-        cache.set_net_guid_path(9, "/Game/Effects/Smoke".to_owned(), None);
+        rig.cache
+            .set_net_guid_path(9, "/Game/Effects/Smoke".to_owned(), None);
         // GUID 77 is a static actor that opens later on the same channel and
         // brings no archetype with it.
-        cache.set_net_guid_path(77, "SomeStaticProp".to_owned(), None);
+        rig.cache
+            .set_net_guid_path(77, "SomeStaticProp".to_owned(), None);
 
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
 
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
+        let header = actor_block(true);
 
         // The dynamic actor opens on channel 5 and resolves to its class.
         sink.on_actor_open(&channel_open(5, 42, 8));
@@ -853,28 +843,24 @@ mod tests {
     /// archetype keeps its class.
     #[test]
     fn the_same_actor_reopening_without_an_archetype_keeps_its_class() {
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(vrf_schema::NetFieldExportGroup::new(
-            "/Game/Effects/Smoke.Smoke_C".to_owned(),
-            1,
-            4,
-        ));
-        cache.set_net_guid_path(
+        let mut rig = Rig::default();
+        rig.cache
+            .add_export_group(vrf_schema::NetFieldExportGroup::new(
+                "/Game/Effects/Smoke.Smoke_C".to_owned(),
+                1,
+                4,
+            ));
+        rig.cache.set_net_guid_path(
             8,
             "Default__Smoke_C".to_owned(),
             Some(vrf_schema::NetworkGuid(9)),
         );
-        cache.set_net_guid_path(9, "/Game/Effects/Smoke".to_owned(), None);
+        rig.cache
+            .set_net_guid_path(9, "/Game/Effects/Smoke".to_owned(), None);
 
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
 
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
+        let header = actor_block(true);
 
         sink.on_actor_open(&channel_open(5, 42, 8));
         sink.on_actor_close(5, NetworkGuid(42), true);
@@ -895,31 +881,26 @@ mod tests {
     fn a_guid_path_registration_invalidates_the_memo() {
         use vrf_net::net_guid::GuidPathSink;
 
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(vrf_schema::NetFieldExportGroup::new(
-            "/Script/ShooterGame.AresWorldSettings".to_owned(),
-            1,
-            4,
-        ));
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
+        let mut rig = Rig::default();
+        rig.cache
+            .add_export_group(vrf_schema::NetFieldExportGroup::new(
+                "/Script/ShooterGame.AresWorldSettings".to_owned(),
+                1,
+                4,
+            ));
 
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
+        let header = actor_block(true);
 
         // First pass: GUID 42 has no path at all, so the block falls through to
         // the unknown marker.
         {
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            let mut sink = rig.sink();
             sink.on_content_block(3, NetworkGuid(42), &header);
             assert_eq!(&*sink.current_group_path, "<unknown:42>");
         }
         // Second pass: the same block, after the wire declared the GUID's path.
         {
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            let mut sink = rig.sink();
             sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
             sink.on_content_block(3, NetworkGuid(42), &header);
             assert_eq!(
@@ -934,30 +915,26 @@ mod tests {
     /// `guid_generation` is the only stamp that moves.
     #[test]
     fn a_frame_level_guid_registration_invalidates_the_memo() {
-        let mut cache = NetGuidCache::new();
-        cache.add_export_group(vrf_schema::NetFieldExportGroup::new(
-            "/Script/ShooterGame.AresWorldSettings".to_owned(),
-            1,
-            4,
-        ));
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
+        let mut rig = Rig::default();
+        rig.cache
+            .add_export_group(vrf_schema::NetFieldExportGroup::new(
+                "/Script/ShooterGame.AresWorldSettings".to_owned(),
+                1,
+                4,
+            ));
 
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
+        let header = actor_block(true);
 
         {
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            let mut sink = rig.sink();
             sink.on_content_block(3, NetworkGuid(42), &header);
             assert_eq!(&*sink.current_group_path, "<unknown:42>");
         }
-        // The frame-level write: straight into the cache, with no sink alive.
-        cache.set_net_guid_path(42, "AresWorldSettings".to_owned(), None);
+        // The frame-level write: straight into the rig.cache, with no sink alive.
+        rig.cache
+            .set_net_guid_path(42, "AresWorldSettings".to_owned(), None);
         {
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            let mut sink = rig.sink();
             sink.on_content_block(3, NetworkGuid(42), &header);
             assert_eq!(
                 &*sink.current_group_path, "/Script/ShooterGame.AresWorldSettings",
@@ -973,16 +950,10 @@ mod tests {
     fn a_redundant_registration_leaves_the_memo_alone() {
         use vrf_net::net_guid::GuidPathSink;
 
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
+        let header = actor_block(true);
 
         sink.register_path(42, "AresWorldSettings", NetworkGuid(7));
         sink.on_content_block(3, NetworkGuid(42), &header);
@@ -995,7 +966,7 @@ mod tests {
         );
 
         // A different outer is a real change (the `outer_net_guid` column and a
-        // resolution input): an invalid outer removes the one the cache held.
+        // resolution input): an invalid outer removes the one the rig.cache held.
         sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
         sink.on_content_block(3, NetworkGuid(42), &header);
         assert!(

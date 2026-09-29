@@ -644,8 +644,42 @@ impl GuidPathSink for ExportSink<'_> {
 /// Builders shared by the sink's test modules.
 #[cfg(test)]
 mod test_fixtures {
+    use vrf_net::content::ContentBlockHeader;
     use vrf_net::pipeline::ActorChannelState;
     use vrf_net::types::NetworkGuid;
+    use vrf_schema::NetGuidCache;
+
+    use super::{ChannelState, ExportSink, RecordBuffers};
+
+    /// What a sink borrows, owned by one test.
+    #[derive(Default)]
+    pub(super) struct Rig {
+        pub(super) cache: NetGuidCache,
+        pub(super) state: ChannelState,
+        pub(super) records: RecordBuffers,
+    }
+
+    impl Rig {
+        pub(super) fn sink(&mut self) -> ExportSink<'_> {
+            ExportSink::new(&mut self.cache, &mut self.state, &mut self.records)
+        }
+    }
+
+    pub(super) fn actor_block(has_rep_layout: bool) -> ContentBlockHeader {
+        ContentBlockHeader {
+            has_rep_layout,
+            is_actor: true,
+            ..ContentBlockHeader::default()
+        }
+    }
+
+    pub(super) fn subobject_block(guid: u32, has_rep_layout: bool) -> ContentBlockHeader {
+        ContentBlockHeader {
+            has_rep_layout,
+            object_net_guid: NetworkGuid(guid),
+            ..ContentBlockHeader::default()
+        }
+    }
 
     /// An `ActorChannelState` for one channel open.
     pub(super) fn channel_open(
