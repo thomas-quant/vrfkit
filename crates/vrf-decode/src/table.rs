@@ -1,9 +1,5 @@
-// Overlay table mapping (group_path, field_name) -> FieldType.
-//
-// Maintained here. tools/apply_type_corrections.py holds the measured
-// corrections and additions and rewrites the counts below.
-// 1336 entries from 224 groups.
-// Raw/Custom: 115, Skip: 131, Typed: 1090.
+// Overlay table: (group_path, field_name) -> FieldType, sorted, one entry per line.
+// Maintained here; measured types are pinned in tools/apply_type_corrections.py.
 
 use crate::decode::FieldType;
 use crate::overlay::{OverlayEntry, OverlayHandleEntry};

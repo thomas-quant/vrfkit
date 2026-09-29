@@ -86,10 +86,12 @@ Consequences for how you work:
 - **Type changes to `crates/vrf-decode/src/table.rs` go through
   `tools/apply_type_corrections.py`**, with their evidence.
   CI runs it with `--check` and fails if a measured correction is missing.
-- **Some entries in that table are unreachable.** The four `LifeChangeEvents`
-  member entries never appear as a top-level parameter. "Fixing" one compiles,
-  passes tests, and changes no rows. The real typing happens in
-  `crates/vrfkit/src/sink/rpc.rs`.
+- **Some entries in that table are unreachable by name.** The four
+  `LifeChangeEvents` member entries never appear as a top-level parameter, so
+  "fixing" one changes no row through its name. They still donate 6 checksums
+  (e.g. 4098809706 Float, 1435614478 ObjectNetGuid) to `checksum_table.rs`: a
+  retype changes what `extract_checksum_types.py` learns, and deleting them
+  removes the donors. The real typing happens in `crates/vrfkit/src/sink/rpc.rs`.
 - **One name entry is dead by design.** `EquippablePickupProjectile_C`'s
   `MyEquippable` no longer matches: FName instance numbers are part of the name,
   so the wire says `MyEquippable_0`. It still resolves through the

@@ -726,14 +726,14 @@ are not generated: they are maintained in the repository.
 | `extract_sboxes.py` | `crates/vrf-transform/src/sbox.rs` |
 | `extract_golden.py` | `crates/vrf-transform/tests/data/golden_vectors.rs` |
 
-Run `apply_type_corrections.py`. The corrections key on each
-entry's own group, field and type, so they rewrite the one-line form and the
-rustfmt form alike; the script **re-verifies the final state after applying**
-rather than trusting its apply count, and fails if the two disagree.
+Run `apply_type_corrections.py`. Each pin sets its entry's type, inserting an
+absent exact key; a glob pin must match at least one entry. `--check` fails when
+applying would change `table.rs` at all -- a type, a missing entry, the order or
+the declared length -- and prints the difference.
 
 ```bash
-python tools/apply_type_corrections.py           # apply, then verify (219 corrections)
-python tools/apply_type_corrections.py --check   # verify only
+python tools/apply_type_corrections.py           # apply (219 corrections)
+python tools/apply_type_corrections.py --check   # fail unless applying changes nothing
 ```
 
 CI runs the `--check` line.
