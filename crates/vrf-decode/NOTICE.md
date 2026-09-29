@@ -73,15 +73,7 @@ SOFTWARE.
 
 | Area | Relationship |
 |---|---|
-| `crates/vrf-transform` | The eight 12.10--13.06 per-build payload transforms and their constants are a port of `Replay.Encoding/PayloadEncryption`. The substitution tables and golden test vectors are extracted mechanically from that source (`tools/extract_sboxes.py`, `tools/extract_golden.py`). |
-| `crates/vrf-bitio` | The Unreal wire primitives (`IntPacked`, bounded `SerializedInt`, `FString`, bit copying) follow the semantics implemented in `Replay.Encoding/Archives`. |
-
-The reverse engineering of VALORANT's payload transformation originates with that
-project. The additional 11.06--12.09 word transforms were recovered independently
-from pinned original executables, using the shared primitives established by
-that project. Native expected-byte vectors are captured by
-`tools/capture_native_transforms.py`; their staging-boundary input is the
-upstream test payload. No game executable bytes are distributed here.
+| `crates/vrf-decode/src/table.rs` | Generated from the vendored copy of ValorantReplayParser's C# descriptor sources in `third_party/vrp` (`tools/extract_descriptors.py`), then corrected against wire evidence (`tools/apply_type_corrections.py`). |
 
 ## Prior art acknowledged upstream
 
