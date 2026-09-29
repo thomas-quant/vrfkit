@@ -4,9 +4,9 @@
 //! lends that exact cache state to its packets, so packet-side export
 //! mutations precede the next packet and a later frame's schema cannot leak
 //! backward. [`writers`] runs the large tables off the packet loop,
-//! [`checkpoints`] is the optional snapshot pass, [`publish`] stages and
-//! publishes the directory, and [`summary`] prints the stderr report whose
-//! labels the Python harnesses parse.
+//! [`checkpoints`] is the optional snapshot pass on its own thread,
+//! [`publish`] stages and publishes the directory, and [`summary`] prints the
+//! stderr report whose labels the Python harnesses parse.
 
 pub(crate) mod checkpoints;
 mod publish;
