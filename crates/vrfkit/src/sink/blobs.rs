@@ -2157,10 +2157,21 @@ mod tests {
                 let Some((identity, leaf, bits)) = case_for(route) else {
                     continue;
                 };
-                let (records, mut stats) = export_array(identity, &[leaf], &bits, branch);
+                let (records, stats) = export_array(identity, &[leaf], &bits, branch);
                 let at = format!("{branch:?} {route:?}");
-                // One child, counted on its own route alone.
-                let counted = MeasuredArrayRoute::ALL.map(|r| *stats.route_children(r));
+                // One child, counted on its own route alone. The fields are read
+                // directly, in `ALL` order: `route_children` would read back any
+                // swap of its own arms as consistent.
+                let counted = [
+                    stats.route_children_player_information,
+                    stats.route_children_tracked_rewards,
+                    stats.route_children_selected_v2,
+                    stats.route_children_kill_data,
+                    stats.route_children_server_active_effects,
+                    stats.route_children_requested_ignore_actors,
+                    stats.route_children_active_blinds,
+                    stats.route_children_projectile_path,
+                ];
                 let want = MeasuredArrayRoute::ALL
                     .map(|r| u64::from(r == route && admitted.admits(route)));
                 assert_eq!(counted, want, "{at}");
