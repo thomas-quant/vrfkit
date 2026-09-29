@@ -1,6 +1,9 @@
 //! The decode pass every subcommand runs: `validate`, `diag` and `export`, over
 //! the ReplayData stream and over each Checkpoint snapshot.
 
+use std::sync::mpsc::sync_channel;
+use std::thread;
+
 use vrf_container::{
     ChunkIterator, ChunkType, ContainerError, Preamble, decompress_replay_data_with_trailing,
 };
@@ -67,29 +70,47 @@ pub(crate) enum Chunk<'d> {
     Other,
 }
 
-/// Call `on_chunk` for every chunk in file order.
+/// Call `on_chunk` for every chunk in file order. A helper thread walks the
+/// same chunk list and decompresses the next ReplayData chunk while
+/// `on_chunk` handles the ones before it (Oodle is ~20% of `validate` and
+/// order-free). Errors still reach the caller at their own chunk, and an early
+/// return drops the receiver, which stops the helper.
 pub(crate) fn for_each_chunk(
     data: &[u8],
     replay: &Replay<'_>,
     mut on_chunk: impl FnMut(Chunk<'_>) -> Result<(), CliError>,
 ) -> Result<(), CliError> {
     let (compressed, encrypted) = (replay.compressed, replay.encrypted);
-    for chunk in replay.chunks(data) {
-        let chunk = chunk.and_then(|(kind, payload)| {
-            Ok(match kind {
+    thread::scope(|scope| {
+        // Rendezvous: the helper holds at most one decompressed chunk ahead.
+        let (tx, rx) = sync_channel(0);
+        let chunks = replay.chunks(data).map_while(Result::ok);
+        scope.spawn(move || {
+            for (_, payload) in chunks.filter(|(kind, _)| *kind == ChunkType::ReplayData) {
+                let plain = decompress_replay_data_with_trailing(payload, compressed, encrypted);
+                if tx.send(plain).is_err() {
+                    return;
+                }
+            }
+        });
+        for chunk in replay.chunks(data) {
+            let (kind, payload) = chunk?;
+            on_chunk(match kind {
                 ChunkType::ReplayData => {
-                    let (plain, unread) =
-                        decompress_replay_data_with_trailing(payload, compressed, encrypted)?;
+                    // Closed early only by a panic, which the scope re-raises.
+                    let decompressed = rx.recv().map_err(|_| {
+                        CliError::Usage("the decompression thread stopped".to_owned())
+                    })?;
+                    let (plain, unread) = decompressed?;
                     Chunk::ReplayData(plain, unread)
                 }
                 ChunkType::Checkpoint => Chunk::Checkpoint(payload),
                 ChunkType::Event => Chunk::Event(payload),
                 ChunkType::Header | ChunkType::Unknown(_) => Chunk::Other,
-            })
-        });
-        on_chunk(chunk?)?;
-    }
-    Ok(())
+            })?;
+        }
+        Ok(())
+    })
 }
 
 /// One replication stream -- the ReplayData stream, or one checkpoint
@@ -192,5 +213,55 @@ impl<'a> Pass<'a> {
     pub fn finish(&mut self) {
         let mut sink = ExportSink::new(&mut self.cache, &mut self.channels, &mut self.buffers);
         self.reader.finish_with_sink(&mut sink);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vrf_container::parse_preamble;
+    use vrf_testkit::{Info, add_i32, add_u32, chunk, header_payload, replay_info};
+
+    use super::*;
+
+    /// An uncompressed ReplayData chunk of 4 frame bytes declaring
+    /// `memory_size`: anything but 4 fails decompression.
+    fn replay_data(memory_size: i32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, 0);
+        add_u32(&mut buf, 60_000);
+        add_i32(&mut buf, 4);
+        add_i32(&mut buf, memory_size);
+        buf.extend([0; 4]);
+        chunk(1, &buf)
+    }
+
+    /// The helper decompresses ahead, yet a bad chunk's error arrives only
+    /// after the chunk before it, and an `on_chunk` error wins over it.
+    #[test]
+    fn errors_arrive_at_their_own_chunk_and_on_chunk_errors_stop_the_walk() {
+        let mut data = replay_info(&Info::default());
+        data.extend(chunk(0, &header_payload()));
+        for memory_size in [4, 5, 4] {
+            data.extend(replay_data(memory_size));
+        }
+        let preamble = parse_preamble(&data).unwrap();
+        let replay = Replay::new(&preamble);
+
+        let mut walked = 0;
+        let result = for_each_chunk(&data, &replay, |chunk| {
+            walked += u32::from(matches!(chunk, Chunk::ReplayData(..)));
+            Ok(())
+        });
+        assert!(matches!(result, Err(CliError::Container(_))), "{result:?}");
+        assert_eq!(walked, 1, "the chunk before the bad one was walked first");
+
+        let result = for_each_chunk(&data, &replay, |chunk| match chunk {
+            Chunk::ReplayData(..) => Err(CliError::Usage("stop".into())),
+            _ => Ok(()),
+        });
+        assert!(
+            matches!(&result, Err(CliError::Usage(m)) if m == "stop"),
+            "{result:?}"
+        );
     }
 }
