@@ -562,8 +562,7 @@ mod tests {
                     4,
                 ));
         }
-        rig.cache
-            .set_net_guid_path(guid, guid_path.to_owned(), None);
+        rig.cache.set_net_guid_path(guid, guid_path, None);
         let mut sink = rig.sink();
 
         // No archetype is registered, so only the actor-GUID path is left.
@@ -687,13 +686,9 @@ mod tests {
                 1,
                 4,
             ));
-        rig.cache.set_net_guid_path(
-            8,
-            "Default__Smoke_C".to_owned(),
-            Some(vrf_schema::NetworkGuid(9)),
-        );
         rig.cache
-            .set_net_guid_path(9, "/Game/Effects/Smoke".to_owned(), None);
+            .set_net_guid_path(8, "Default__Smoke_C", Some(NetworkGuid(9)));
+        rig.cache.set_net_guid_path(9, "/Game/Effects/Smoke", None);
         rig
     }
 
@@ -704,8 +699,7 @@ mod tests {
         let mut rig = smoke_rig();
         // GUID 77 is a static actor that opens later on the same channel and
         // brings no archetype with it.
-        rig.cache
-            .set_net_guid_path(77, "SomeStaticProp".to_owned(), None);
+        rig.cache.set_net_guid_path(77, "SomeStaticProp", None);
 
         let mut sink = rig.sink();
         let header = actor_block(true);
@@ -771,8 +765,7 @@ mod tests {
             if through_sink {
                 sink.register_path(42, "AresWorldSettings", NetworkGuid(0));
             } else {
-                rig.cache
-                    .set_net_guid_path(42, "AresWorldSettings".to_owned(), None);
+                rig.cache.set_net_guid_path(42, "AresWorldSettings", None);
             }
             let mut sink = rig.sink();
             sink.on_content_block(3, NetworkGuid(42), &header);

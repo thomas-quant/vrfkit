@@ -865,7 +865,7 @@ mod tests {
     /// actor 89, channel 3).
     fn abilities_block(rig: &mut Rig, has_rep_layout: bool) -> ExportSink<'_> {
         rig.cache
-            .set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
+            .set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT, None);
         let mut sink = rig.sink();
         sink.on_content_block(3, NetworkGuid(89), &subobject_block(144, has_rep_layout));
         sink
@@ -953,7 +953,7 @@ mod tests {
         let tail_bytes = pack(&tail);
         let mut rig = Rig::default();
         rig.cache
-            .set_net_guid_path(145, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
+            .set_net_guid_path(145, ABILITIES_AND_BUFFS_COMPONENT, None);
         let mut sink = rig.sink();
         let known_header = subobject_block(145, true);
         sink.on_content_block(3, NetworkGuid(89), &known_header);
@@ -1746,8 +1746,7 @@ mod tests {
         let mut rig = Rig::default();
         // The actor's own GUID path -- an instance name, e.g. what a level
         // placement looks like on the wire -- must not read back as a class.
-        rig.cache
-            .set_net_guid_path(42, "WindowShieldA1".to_owned(), None);
+        rig.cache.set_net_guid_path(42, "WindowShieldA1", None);
         let mut sink = rig.sink();
 
         // No archetype: `NetworkGuid(0)` is invalid, so `on_actor_open` never
@@ -1935,8 +1934,7 @@ mod tests {
                 4,
             ))
             .unwrap();
-        rig.cache
-            .set_net_guid_path(9, "ActorGroup".to_owned(), None);
+        rig.cache.set_net_guid_path(9, "ActorGroup", None);
         let mut sink = rig.sink();
         sink.enable_checkpoint_block_context(
             vrf_export::CheckpointIdentity {

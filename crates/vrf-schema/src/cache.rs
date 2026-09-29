@@ -176,17 +176,23 @@ impl NetGuidCache {
         self.guid_generation
     }
 
-    /// Register a NetGUID -> path mapping. A write that changes nothing does
-    /// not bump [`Self::guid_generation`]: frame ExportData re-declares GUIDs
-    /// every frame, which would collapse a memo's hit rate.
-    pub fn set_net_guid_path(&mut self, net_guid: u32, path: String, outer: Option<NetworkGuid>) {
+    /// Register a NetGUID -> path mapping; an invalid outer removes the old
+    /// one. A write that changes nothing neither allocates nor bumps
+    /// [`Self::guid_generation`]: frame ExportData re-declares GUIDs every
+    /// frame, which would collapse a memo's hit rate.
+    pub fn set_net_guid_path(
+        &mut self,
+        net_guid: u32,
+        path: impl AsRef<str> + Into<String>,
+        outer: Option<NetworkGuid>,
+    ) {
         let outer = outer.filter(|g| g.is_valid());
-        if self.guid_to_path.get(&net_guid).map(String::as_str) == Some(path.as_str())
+        if self.guid_to_path.get(&net_guid).map(String::as_str) == Some(path.as_ref())
             && self.guid_to_outer.get(&net_guid).copied() == outer
         {
             return;
         }
-        self.guid_to_path.insert(net_guid, path);
+        self.guid_to_path.insert(net_guid, path.into());
         match outer {
             Some(g) => {
                 self.guid_to_outer.insert(net_guid, g);
@@ -405,13 +411,13 @@ mod tests {
     #[test]
     fn a_redundant_set_net_guid_path_call_does_not_bump_guid_generation() {
         let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Test_C", None);
         let after_first = cache.guid_generation();
 
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Test_C", None);
         assert_eq!(cache.guid_generation(), after_first, "no change, no bump");
 
-        cache.set_net_guid_path(17, "/Game/Test.Other_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Other_C", None);
         assert_ne!(
             cache.guid_generation(),
             after_first,
@@ -423,8 +429,8 @@ mod tests {
     fn cache_outer_guid_chain() {
         let mut cache = NetGuidCache::new();
         let outer = NetworkGuid(11);
-        cache.set_net_guid_path(17, "Default__Test_C".into(), Some(outer));
-        cache.set_net_guid_path(11, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "Default__Test_C", Some(outer));
+        cache.set_net_guid_path(11, "/Game/Test.Test_C", None);
 
         assert_eq!(cache.get_outer_guid(17).unwrap(), outer);
         assert_eq!(cache.get_outer_path(17).unwrap(), "/Game/Test.Test_C");
@@ -433,8 +439,8 @@ mod tests {
     #[test]
     fn cache_net_guid_entries_yields_guid_path_and_outer() {
         let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(11, "/Game/Test.Test_C".into(), None);
-        cache.set_net_guid_path(17, "FiringState".into(), Some(NetworkGuid(11)));
+        cache.set_net_guid_path(11, "/Game/Test.Test_C", None);
+        cache.set_net_guid_path(17, "FiringState", Some(NetworkGuid(11)));
 
         let mut entries = cache.net_guid_entries();
         entries.sort_by_key(|e| e.net_guid);
@@ -454,7 +460,7 @@ mod tests {
         cache
             .add_export_group(NetFieldExportGroup::new("/Game/Test.Test_C".into(), 7, 2))
             .unwrap();
-        cache.set_net_guid_path(17, "/Game/Test.Test_C".into(), None);
+        cache.set_net_guid_path(17, "/Game/Test.Test_C", None);
 
         cache.clear();
 

@@ -16,14 +16,7 @@
 use crate::cache::NetGuidCache;
 use crate::export::NetFieldExportGroup;
 use crate::hash::FxHashMap;
-
-/// Whether a name is a qualified path rather than a bare leaf: one byte pass
-/// (`unique_leaf_match` alone makes 174,485 calls on the reference replay), safe
-/// because UTF-8 never encodes an ASCII byte inside a multi-byte sequence.
-#[inline]
-pub(crate) fn has_path_separator(name: &str) -> bool {
-    name.bytes().any(|b| matches!(b, b'/' | b'.' | b':'))
-}
+use crate::path::has_path_separator;
 
 /// Longest `stem + suffix` built on the stack; the reference replay's longest
 /// leaf is 61 bytes and the longest suffix 23.

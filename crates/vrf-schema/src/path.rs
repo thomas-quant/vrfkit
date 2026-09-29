@@ -52,13 +52,20 @@ pub fn find_class_net_cache_key<T>(
     })
 }
 
-/// Toggle the `Default__` prefix: strip it, or add it to a bare leaf (no `/`,
-/// `.` or `:`).
+/// Whether a name is a qualified path rather than a bare leaf: one byte pass
+/// (`unique_leaf_match` alone makes 174,485 calls on the reference replay), safe
+/// because UTF-8 never encodes an ASCII byte inside a multi-byte sequence.
+#[inline]
+pub(crate) fn has_path_separator(name: &str) -> bool {
+    name.bytes().any(|b| matches!(b, b'/' | b'.' | b':'))
+}
+
+/// Toggle the `Default__` prefix: strip it, or add it to a bare leaf.
 fn default_object_alias(path: &str) -> Option<String> {
     if let Some(rest) = path.strip_prefix(DEFAULT_OBJECT_PREFIX) {
         return Some(rest.to_owned());
     }
-    if !path.contains('/') && !path.contains('.') && !path.contains(':') {
+    if !has_path_separator(path) {
         let mut prefixed = String::with_capacity(DEFAULT_OBJECT_PREFIX.len() + path.len());
         prefixed.push_str(DEFAULT_OBJECT_PREFIX);
         prefixed.push_str(path);

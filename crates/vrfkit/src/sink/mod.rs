@@ -604,23 +604,9 @@ fn empty_group_path() -> Arc<str> {
 }
 
 impl GuidPathSink for ExportSink<'_> {
-    /// Record a GUID -> path mapping the wire declared inline. A write that
-    /// would change nothing is skipped (saving the `to_string`); the memo does
-    /// not rely on it, as `set_net_guid_path` moves `guid_generation` only on a
-    /// real change. The outer is compared too: a repeat with an invalid outer
-    /// *removes* it, and skipping that would keep a stale `outer_net_guid`.
+    /// Record a GUID -> path mapping the wire declared inline.
     fn register_path(&mut self, guid: u32, path: &str, outer_guid: NetworkGuid) {
-        let outer = if outer_guid.0 != 0 {
-            Some(vrf_schema::NetworkGuid(outer_guid.0))
-        } else {
-            None
-        };
-        if self.cache.get_path_by_guid(guid) == Some(path)
-            && self.cache.get_outer_guid(guid) == outer
-        {
-            return;
-        }
-        self.cache.set_net_guid_path(guid, path.to_string(), outer);
+        self.cache.set_net_guid_path(guid, path, Some(outer_guid));
     }
 
     fn path_for_guid(&self, guid: u32) -> Option<&str> {
@@ -677,15 +663,9 @@ mod test_fixtures {
         ActorChannelState {
             channel_index,
             is_open: true,
-            is_dormant: false,
             actor_net_guid: NetworkGuid(actor),
             archetype_net_guid: NetworkGuid(archetype),
-            level_guid: NetworkGuid(0),
-            spawn_location: None,
-            spawn_rotation: None,
-            spawn_scale: None,
-            spawn_velocity: None,
-            open_packet_id: 0,
+            ..ActorChannelState::default()
         }
     }
 }
