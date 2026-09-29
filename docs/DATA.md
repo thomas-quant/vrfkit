@@ -860,16 +860,11 @@ now decodes 225 of 225 as an `FText`, which is the check working in the other
 direction.
 
 **And check the reason you gave for not doing something.** `LocalizedStat` was
-left untyped on the grounds that `Statistic` already carried the same fact.
-`Statistic` decodes to a bare integer; that historical argument ignored whether
-consumers had a usable dictionary. The current `extract_ability_stats.py` pairs
-it with `LocalizedStat` inside the same serialized cast/effect slot and exposes
-a build-scoped mapping. All 714 exports yielded 155,150 paired observations,
-with no missing partners or mapping conflicts: 31 IDs in each of 13.01, 13.02
-and 13.04, and 32 in 13.05. Unobserved IDs remain unknown. On 2026-09-28,
-38 13.06 exports gave 14,814 paired observations of 29 IDs, again with no
-missing partners or conflicts, each under exactly its 13.05 name. 13.05's
-IDs 57, 62 and 65 were not observed on 13.06 and stay unknown for that build.
+left untyped on the grounds that `Statistic` carried the same fact, but
+`Statistic` is a bare integer. The two pair 1:1 in every cast/effect slot
+(155,150 pairs on 714 13.01-13.05 exports, 14,814 on 38 13.06 exports, no
+missing partner or conflict), so a consumer reads the name from
+`LocalizedStat` in that element.
 
 ### Done, and where the reasoning lives
 
@@ -1171,8 +1166,8 @@ the 25 parent exports and `ok` on each of the 25 new ones.
 
 The analysis tools that read these exports were run on both sides of 8 of those
 replays (5 with bare armour rows). The healing, section, section-timeline,
-kill, match, player-effect, spike-carrier, active-effect, ability, ammo-audit
-and FastArray tools write the same output from either export, apart from the
+kill, match, player-effect, spike-carrier, active-effect, ability and
+FastArray tools write the same output from either export, apart from the
 input hashes they record, or refuse the same builds. That includes the healing tool's join on the heal causer's
 `class_path`: it reads `Owner` and `Instigator` rows, and the armour group
 declares neither name. Three outputs move, each by exactly the moved rows.

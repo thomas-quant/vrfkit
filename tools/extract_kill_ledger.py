@@ -6,31 +6,29 @@ a bounded corroboration; ambiguous matches are never resolved by greedy order.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-import argparse
 import json
 import math
 from pathlib import Path
 import struct
-import sys
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from . import extract_kill_observations as observation_extractor
-    from .atomic_io import atomic_write_text, sha256_file as file_sha
-    from .extract_kill_observations import InputError, exact_ref
+    from . import extract_kill_observations as observation_extractor, kill_state
+    from .atomic_io import run_json_cli, sha256_file as file_sha
+    from .wire_bits import InputError, exact_ref, iter_selected, text
 else:
-    import extract_kill_observations as observation_extractor
-    from atomic_io import atomic_write_text, sha256_file as file_sha
-    from extract_kill_observations import InputError, exact_ref
+    import extract_kill_observations as observation_extractor, kill_state
+    from atomic_io import run_json_cli, sha256_file as file_sha
+    from wire_bits import InputError, exact_ref, iter_selected, text
 
-#: Matched lags measure 5-41 ms on the 714-export corpus, and a 100 ms cap
-#: changed no match (docs/KILL_LEDGER.md, "Validation scope").
+#: Matched lags measure 5-41 ms; a 100 ms cap changed no match.
 MAX_REPLICATION_LAG_MS = 50
 #: This file and the modules it runs, hashed as provenance and refused as --out.
-SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','atomic_io.py')
+SOURCE_NAMES = ('extract_kill_ledger.py','kill_state.py','extract_kill_observations.py','wire_bits.py',
+                'atomic_io.py')
 DEATH_NAME = 'EReplayEventGroup::CharacterDeath'
 IDENTITY_STATUSES = (
     'resolved', 'absent_reference', 'null_reference', 'lifecycle_time_regression',
@@ -224,24 +222,12 @@ def player_state_rows(path):
     """Preserve physical field ordinals while selecting top-level properties."""
     columns = ['actor_net_guid','object_net_guid','group_path','field_name','time_ms','packet_id',
                'value_i64','value_f64','value_bool','value_str','raw_bits','bit_count']
-    offset = 0
-    result = []
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=65536,columns=columns,use_threads=False):
-        selected = pc.fill_null(pc.and_(pc.equal(pc.cast(batch['field_name'],pa.string()),'PlayerState'),
-                                        pc.is_null(batch['object_net_guid'])),False)
-        indices = pc.indices_nonzero(selected)
-        rows = batch.take(indices).to_pylist()
-        result.extend((offset+index,row) for index,row in zip(indices.to_pylist(),rows))
-        offset += batch.num_rows
-    return result
+    return list(iter_selected(path, columns, lambda b: pc.and_(
+        pc.equal(text(b, 'field_name'), 'PlayerState'), pc.is_null(b['object_net_guid']))))
 
 
-def extract(export, observations_path=None):
+def extract(export):
     """Return all death events, validated state, and explicit unmatched records."""
-    if __package__:
-        from . import kill_state
-    else:
-        import kill_state
     export = Path(export)
     sources = {name:file_sha(Path(__file__).parent/name) for name in SOURCE_NAMES}
     parquet_names = ('fields','checkpoint_fields','actors','net_guids','checkpoint_actors',
@@ -249,26 +235,7 @@ def extract(export, observations_path=None):
     inputs = {name+'.parquet':file_sha(export/(name+'.parquet')) for name in parquet_names}
     manifest_hash = file_sha(export/'manifest.json')
     manifest = json.loads((export/'manifest.json').read_text(encoding='utf-8'))
-    cache_hash = None
-    if observations_path is None:
-        observations = observation_extractor.extract(export)
-    else:
-        observations_path = Path(observations_path)
-        cache_hash = file_sha(observations_path)
-        observations = json.loads(observations_path.read_text(encoding='utf-8'))
-    expected_inputs = {k:v for k,v in inputs.items() if k != 'events.parquet'}
-    provenance = observations['provenance']
-    if (provenance['export_id'] != export.name or provenance['replay_build'] != manifest['replay_build']
-        or provenance['manifest_sha256'] != manifest_hash or provenance['input_sha256'] != expected_inputs
-        or provenance['extractor_sha256'] != sources['extract_kill_observations.py']):
-        raise InputError('observation provenance does not match this export and extractor')
-    if observations_path is not None:
-        # Receipts identify inputs; they do not prove that cached values were
-        # derived from those inputs. Check the document against fresh extraction.
-        fresh = observation_extractor.extract(export)
-        canonical = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False)
-        if canonical(observations) != canonical(fresh):
-            raise InputError('observation cache content differs from source export')
+    observations = observation_extractor.extract(export)
     projection = kill_state.project_kill_state(observations)
     actor_rows = pq.read_table(export/'actors.parquet',use_threads=False).to_pylist()
     identity = ActorIdentityIndex(actor_rows,player_state_rows(export/'fields.parquet'))
@@ -343,15 +310,10 @@ def extract(export, observations_path=None):
         ]
     if inputs != {name:file_sha(export/name) for name in inputs} or manifest_hash != file_sha(export/'manifest.json'):
         raise InputError('source export changed during ledger extraction')
-    if cache_hash is not None and cache_hash != file_sha(observations_path):
-        raise InputError('observation cache changed during extraction')
-    if sources != {name:file_sha(Path(__file__).parent/name) for name in sources}:
-        raise InputError('extractor source changed during execution')
     return {
         'schema_version':1,'kind':'vrfkit_character_death_ledger',
         'provenance':{'export_id':export.name,'replay_build':manifest['replay_build'],
-                      'input_sha256':inputs,'manifest_sha256':manifest_hash,'source_sha256':sources,
-                      'observation_cache_sha256':cache_hash},
+                      'input_sha256':inputs,'manifest_sha256':manifest_hash,'source_sha256':sources},
         'join_contract':{'identity':'active character PlayerState at prior time',
                          'round':'matching KillData round_number and strictly prior validated roundStarted word0',
                          'lag_ms_min':0,'lag_ms_max':MAX_REPLICATION_LAG_MS,'mutual_unique_required':True},
@@ -371,27 +333,13 @@ def extract(export, observations_path=None):
 
 
 def main(argv=None):
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--export',type=Path,required=True)
-    parser.add_argument('--observations',type=Path,help='Optional observation document to verify against fresh extraction')
-    parser.add_argument('--out',type=Path,required=True)
-    args=parser.parse_args(argv)
     pa.set_cpu_count(1)
     pa.set_io_thread_count(1)
-    try:
-        observation_extractor.reject_overwrite(args.export,args.out)
-        protected=[Path(__file__).with_name(name) for name in SOURCE_NAMES]
-        if args.observations is not None:
-            protected.append(args.observations)
-        if args.out.resolve() in {p.resolve() for p in protected}:
-            raise InputError('output aliases source code or observation input')
-        result=extract(args.export,args.observations)
-        atomic_write_text(args.out,json.dumps(result,ensure_ascii=True,separators=(',',':'),allow_nan=False)+'\n')
-    except (OSError,ValueError,KeyError,TypeError) as exc:
-        print(f'FAILED: {exc}',file=sys.stderr)
-        return 1
-    print(f"wrote {args.out}: {result['counts']['character_death_events']} character-death events, {result['counts']['matched_pairs']} matched observations")
-    return 0
+    return run_json_cli(__doc__, extract, lambda d, out: [
+        f"wrote {out}: {d['counts']['character_death_events']} character-death events, "
+        f"{d['counts']['matched_pairs']} matched observations"],
+        argv, sources=[Path(__file__).with_name(name) for name in SOURCE_NAMES],
+        ensure_ascii=True, separators=(',', ':'), allow_nan=False)
 
 
 if __name__=='__main__':

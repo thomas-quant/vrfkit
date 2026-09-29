@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,35 @@ class AtomicOutputTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "simulated replace failure"):
                 operation()
         self.assertEqual(output.read_text(encoding="utf-8"), previous)
+
+    def test_json_cli_refuses_inputs_keeps_hard_links_and_the_old_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            export = root / "export"
+            export.mkdir()
+            table, source, out = export / "fields.parquet", root / "tool.py", root / "out.json"
+            for path in (table, export / "manifest.json", source):
+                path.write_text("input", encoding="utf-8")
+
+            def run(target):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    return atomic_io.run_json_cli("", lambda e: {"n": 1}, lambda d, o: ["ok"],
+                                                  ["--export", str(export), "--out", str(target)],
+                                                  sources=[source])
+
+            for target in (table, export / "manifest.json", source):
+                with self.subTest(target=target.name):
+                    self.assertEqual(run(target), 1)
+                    self.assertEqual(target.read_text(encoding="utf-8"), "input")
+            # A hard link to an input is replaced by name; the input keeps its bytes.
+            os.link(table, out)
+            self.assertEqual(run(out), 0)
+            self.assertEqual((table.read_text(encoding="utf-8"), out.read_text(encoding="utf-8")),
+                             ("input", '{"n": 1}\n'))
+            out.write_text(self.OLD, encoding="utf-8")
+            with mock.patch.object(atomic_io.os, "replace", side_effect=OSError("simulated")):
+                self.assertEqual(run(out), 1)
+            self.assertEqual(out.read_text(encoding="utf-8"), self.OLD)
 
     def test_benchmark_baseline_update_preserves_previous_file(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -10,9 +10,6 @@ writes one row per effect instance.
 `spawn_x/y/z` is the spawn transform: a placed effect's world location. For
 the few that relocate, fields.parquet carries the live `ReplicatedMovement`
 location or `MulticastAddSmokeScreenPoint.Translation`, in the same units.
-(Exports before 2026-09-28 wrote that location 100x too small on every class
-but one; see docs/DATA.md, "`ReplicatedMovement.location` is world units, at
-a per-class level".)
 """
 
 from __future__ import annotations
@@ -30,21 +27,11 @@ if __package__:
 else:
     from atomic_io import atomic_write_file
 
-# Substrings marking a persistent ability effect, matched case-insensitively
-# on the full class_path. Broad on purpose (a missed effect just does not
-# appear), but a false positive is not harmless. On the 1,018-export corpus
-# (parser 259ed10, 2026-09-28; actors.parquet opens) three names matched a
-# keyword they do not mean, each handled below:
-#   Gun_Deadeye_X_Giantslayer_Prototype_FIreRatePrototype -- Chamber's ult gun,
-#     "fire" in "FIreRate": 17,304 of 32,714 damage_zone rows, median lifetime
-#     ~100 s. An equippable: `gun_` leaves are excluded.
-#   Projectile_Breach_Q_ThroughWalls_Flash -- "wall" in "ThroughWalls": 1,416
-#     rows filed as walls. A flash projectile (no other is in this table;
-#     Vyse's placed flash trap is, as a trap). See NOT_EFFECT_TOKENS.
-#   GameObject_Sarge_X_OrbitalStrike_Production -- "orb" in "OrbitalStrike":
-#     174 rows filed as orbs. Brimstone's ult is 4-9 s of area damage, so
-#     `classify` files it as a damage_zone.
-# Every other class kept its type across the corpus when these three changed.
+# Substrings marking a persistent effect, matched case-insensitively on the
+# class path. Broad on purpose; the three names that match a keyword they do
+# not mean are handled: Chamber's ult gun ("fire" in "FIreRate", 17,304 rows)
+# by the `gun_` leaf exclusion, Breach's ThroughWalls flash by
+# NOT_EFFECT_TOKENS, and Brimstone's OrbitalStrike by `classify` (damage_zone).
 EFFECT_KEYWORDS = (
     "smoke",
     "smokezone",
@@ -67,9 +54,7 @@ EFFECT_KEYWORDS = (
     "alarmbot",
 )
 
-# Fragments that contain a keyword without naming an effect, removed before
-# matching: "ThroughWall" is Breach's flash's whole claim to "wall", while
-# Phoenix's `FlameWall_ThroughWall` stays a wall through "FlameWall".
+# Removed before matching; Phoenix's `FlameWall_ThroughWall` stays a wall.
 NOT_EFFECT_TOKENS = ("throughwall",)
 
 #: Every `effect_type` value, in the order the summary prints them.
@@ -107,9 +92,7 @@ def classify(class_path: str) -> str:
 
 
 #: Leaf-name prefix -> `actor_kind`. A projectile and the zone it places are
-#: two rows by design: on 0002c486 an Omen smoke is a `Projectile_Wraith_4_Smoke`
-#: (median 2.3 s) overlapping a `Zone_Wraith_4_Smoke` (median 16 s). The kind
-#: lets a consumer count either.
+#: two rows by design (Omen's smoke: a 2.3 s projectile, then a 16 s zone).
 ACTOR_KINDS = {"projectile": "projectile", "gameobject": "game_object",
                "zone": "zone", "patch": "patch", "pawn": "pawn"}
 #: Every `actor_kind` value, in the order the summary prints them.
@@ -163,10 +146,7 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
     sy = cols["spawn_y"]
     sz = cols["spawn_z"]
 
-    # Pair each open with the close that follows it, never first open to last
-    # close. On the 1,018-export corpus (parser 259ed10, 2026-09-28; every
-    # actors.parquet `open`, all classes) no GUID reopens: 2,326,969 opens, 0
-    # opened twice in one export. The pairing stays for builds that might.
+    # Pair each open with the close after it, never first open to last close.
     events: dict[int, list[tuple]] = {}
     for i in range(len(guid)):
         cp = class_path[i]
@@ -187,9 +167,7 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
         pending_went_dormant = False  # did THIS instance see a dormant event
         for t, ev, x, y, z, cp in evs:
             if ev == "open":
-                if pending is not None:
-                    # Reopened before closing: the prior instance never closed
-                    # in this export. Emit it open-ended so it is not lost.
+                if pending is not None:  # reopened before closing: keep it open-ended
                     rows.append(_row(g, pending, None))
                 pending = (t, x, y, z, cp)
                 pending_went_dormant = False
@@ -198,13 +176,10 @@ def build_with_tally(out_dir: Path) -> tuple[list[dict], dict]:
                     rows.append(_row(g, pending, t))
                     pending = None
                     pending_went_dormant = False
-                # A close with no pending open is an orphan (actor opened before
-                # the export window); drop it rather than invent an open time.
+                # A close with no open (opened before the export) is dropped.
             elif ev == "dormant":
-                # Dormancy is NOT destruction: a settled smoke or wall stops
-                # replicating as its steady state. The instance stays pending,
-                # open-ended absent a later close; since that row looks like
-                # one the export window cut off, the tally counts it.
+                # Dormancy is not destruction: the instance stays open, and
+                # the tally tells it from one the export cut off.
                 if pending is not None and not pending_went_dormant:
                     pending_went_dormant = True
                     tally["went_dormant"] += 1
@@ -263,15 +238,12 @@ def main() -> int:
     by_type = Counter(r["effect_type"] for r in rows)
     by_kind = Counter(r["actor_kind"] for r in rows)
     print(f"wrote {args.out} ({len(rows)} effect instances)")
-    # Every type and kind is printed, zeros included: a family that stopped
-    # matching must read as 0, not as a line that is no longer there.
+    # Zeros included: a family that stopped matching must read as 0.
     for t in EFFECT_TYPES:
         print(f"  {t:12s} {by_type[t]}")
     print("  by actor kind (class leaf prefix):")
     for k in ACTOR_KIND_ORDER:
         print(f"    {k:12s} {by_kind[k]}")
-    # Printed with its zero, on its own line: went_dormant is not a share of
-    # open_ended (see build_with_tally).
     open_ended = sum(1 for r in rows if r["close_ms"] is None)
     print(f"  {'open-ended':12s} {open_ended}")
     print(f"  {'':12s} ({tally['went_dormant']} instance(s) went dormant at "

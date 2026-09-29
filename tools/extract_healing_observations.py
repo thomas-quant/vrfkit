@@ -1,24 +1,32 @@
-"""Extract conservative healing observations from one vrfkit export."""
+"""Extract conservative healing observations from one vrfkit export.
+
+The MulticastNotifyHeal amount and sections come from the section parser
+(extract_section_observations.parse_group); this adds the declaration and
+heal-name gates, the heal source and recipient corroboration and the summaries."""
 
 from __future__ import annotations
-import argparse, collections, json, math, re, struct, sys
+import collections, json, re
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from .extract_kill_observations import InputError, parse_array, exact_ref
+    from . import extract_section_observations as sections
+    from .atomic_io import run_json_cli, sha256_file as sha
     from .player_identity import load_player_bodies
+    from .wire_bits import InputError, iter_selected, load_net_guids, text
 else:
-    from atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from extract_kill_observations import InputError, parse_array, exact_ref
+    import extract_section_observations as sections
+    from atomic_io import run_json_cli, sha256_file as sha
     from player_identity import load_player_bodies
+    from wire_bits import InputError, iter_selected, load_net_guids, text
+IntegrityError = sections.IntegrityError
 SCHEMA_VERSION = 1
-OUTER_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
+ROUTE = "MulticastNotifyHeal"
+OUTER_GROUP = sections.OUTER_GROUP
 PARAM_GROUP = "/Script/ShooterGame.DamageableComponent:MulticastNotifyHeal"
-OUTER = (6, "MulticastNotifyHeal", 791426194)
+OUTER = (6, ROUTE, 791426194)
 DECL = {
     0: ("HealTaken", 1894010429),
     1: ("LifeChangeBySection", 163390906),
@@ -30,44 +38,30 @@ DECL = {
     8: ("EventInstigatorPawn", 3901949544),
     9: ("HealCauser", 546618027),
 }
-TOP = {
-    f"MulticastNotifyHeal.{n}": (h, c)
-    for h, (n, c) in DECL.items()
-    if h in (0, 1, 7, 8, 9)
-}
-MEMBERS = {
-    2: "ChangedComponent",
-    3: "LifeResult",
-    4: "DeltaLife",
-    5: "bAliveAfterChange",
-}
-MEMBER_HANDLES = {name: handle for handle, name in MEMBERS.items()}
+TOP = {f"{ROUTE}.{n}": (h, c) for h, (n, c) in DECL.items() if h in (0, 1, 7, 8, 9)}
 #: The optional top-level references, by their declared handle.
 OPTIONAL = {name: handle for name, (handle, _) in TOP.items() if handle >= 7}
 RX = re.compile(
     r"^MulticastNotifyHeal\.LifeChangeBySection\[(\d+)\]\.(ChangedComponent|LifeResult|DeltaLife|bAliveAfterChange)$"
 )
-FIELD_COLS = [
-    "time_ms",
-    "packet_id",
-    "channel_index",
-    "actor_net_guid",
-    "object_net_guid",
-    "group_path",
-    "handle",
-    "field_name",
-    "compatible_checksum",
-    "bit_count",
-    "raw_bits",
-    "value_i64",
-    "value_f64",
-    "value_bool",
-    "value_str",
-]
-CHECKPOINT_FIELD_COLS = ["checkpoint_index", "checkpoint_id", *FIELD_COLS]
+FIELD_COLS = sections.FIELDS
+CHECKPOINT_FIELD_COLS = sections.CP_FIELDS
 #: Every status `edge()` can return, so the per-edge tally prints zeros too.
 EDGE_STATUSES = ("present", "null", "absent", "duplicate", "invalid")
-#: The export files read, and the helper modules hashed beside this file.
+#: Every status `active_instance()` can return.
+LIFECYCLE_STATUSES = (
+    "active", "lifecycle_time_regression", "ambiguous_actor_lifecycle",
+    "lifecycle_boundary_same_time", "no_prior_actor_open",
+    "actor_reopened_without_unique_active_instance", "actor_close_without_open", "actor_closed",
+)
+#: Every final source status: a non-present causer edge, a non-active causer
+#: lifecycle, or the reference outcome of an active one.
+SOURCE_STATUSES = (
+    *EDGE_STATUSES[1:], *LIFECYCLE_STATUSES[1:], "reference_update_same_time",
+    "corroborated_static_manifest_character", "conflicting_manifest_characters",
+    "no_manifest_character_reference",
+)
+#: The export files read.
 INPUT_NAMES = (
     "manifest.json",
     "fields.parquet",
@@ -75,103 +69,25 @@ INPUT_NAMES = (
     "actors.parquet",
     "net_guids.parquet",
 )
-HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py", "player_identity.py")
-
-
-class IntegrityError(InputError):
-    pass
-
-
-def iter_rows(path, columns):
-    ordinal = 0
-    for batch in pq.ParquetFile(path).iter_batches(
-        batch_size=65536, columns=columns, use_threads=False
-    ):
-        for row in batch.to_pylist():
-            yield ordinal, row
-            ordinal += 1
+SOURCES = [Path(__file__).resolve(), *(Path(__file__).with_name(n) for n in (
+    "extract_section_observations.py", "wire_bits.py", "atomic_io.py", "player_identity.py"))]
 
 
 def iter_selected_fields(path, include_references, columns=FIELD_COLS):
-    base = 0
-    for batch in pq.ParquetFile(path).iter_batches(
-        batch_size=65536, columns=columns, use_threads=False
-    ):
-        names = pc.cast(
-            batch.column(batch.schema.get_field_index("field_name")), pa.string()
-        )
-        mask = pc.starts_with(names, pattern="MulticastNotifyHeal.")
-        if include_references:
-            mask = pc.or_(
-                mask, pc.is_in(names, value_set=pa.array(["Owner", "Instigator"]))
-            )
-        indices = pc.indices_nonzero(pc.fill_null(mask, False))
-        rows = batch.take(indices).to_pylist()
-        for index, row in zip(indices.to_pylist(), rows):
-            yield base + index, row
-        base += batch.num_rows
+    def mask(batch):
+        names = text(batch, "field_name")
+        heal = pc.starts_with(names, pattern="MulticastNotifyHeal.")
+        if not include_references:
+            return heal
+        return pc.or_(heal, pc.is_in(names, value_set=pa.array(["Owner", "Instigator"])))
+    return iter_selected(path, columns, mask)
 
 
-def raw_record(r, ordinal, population):
-    record = {
-        "population": population,
-        "physical_row_ordinal": ordinal,
-        **{k: r.get(k) for k in FIELD_COLS if k != "raw_bits"},
-        "raw_bits_hex": r["raw_bits"].hex() if r.get("raw_bits") is not None else None,
-    }
-    for name in ("checkpoint_index", "checkpoint_id"):
-        if name in r:
-            record[name] = r[name]
-    return record
-
-
-def exact_f32(r):
-    if (
-        r["bit_count"] != 32
-        or r["raw_bits"] is None
-        or len(r["raw_bits"]) != 4
-        or r["value_f64"] is None
-        or not math.isfinite(r["value_f64"])
-    ):
-        raise InputError("invalid f32 row")
-    v = struct.unpack("<f", r["raw_bits"])[0]
-    if struct.pack("<d", float(r["value_f64"])) != struct.pack("<d", float(v)):
-        raise IntegrityError("f32 typed/raw mismatch")
-    if any(r[x] is not None for x in ("value_i64", "value_bool", "value_str")):
-        raise InputError("f32 conflicting typed columns")
-    return v
-
-
-def exact_bool(r):
-    if (
-        r["bit_count"] != 1
-        or r["raw_bits"] is None
-        or len(r["raw_bits"]) != 1
-        or r["raw_bits"][0] not in (0, 1)
-        or type(r["value_bool"]) is not bool
-        or r["value_bool"] != (r["raw_bits"][0] == 1)
-    ):
-        raise InputError("bool typed/raw mismatch")
-    if any(r[x] is not None for x in ("value_i64", "value_f64", "value_str")):
-        raise InputError("bool conflicting typed columns")
-    return r["value_bool"]
-
-
-def ref_value(r, typed):
-    if r["raw_bits"] is None or len(r["raw_bits"]) != (r["bit_count"] + 7) // 8:
-        raise InputError("invalid reference window")
-    v = exact_ref(r["raw_bits"], r["bit_count"])
-    if typed:
-        # Absent (a stale export, not corruption) fails apart from wrong.
-        if r["value_i64"] is None:
-            raise IntegrityError("untyped reference; re-export with a parser that types it")
-        if type(r["value_i64"]) is not int or r["value_i64"] != v:
-            raise IntegrityError("reference typed/raw mismatch")
-    elif r["value_i64"] is not None:
-        raise InputError("unexpected typed reference")
-    if any(r[x] is not None for x in ("value_f64", "value_bool", "value_str")):
-        raise InputError("reference conflicting typed columns")
-    return v
+def typed_ref(r):
+    """A typed ObjectNetGuid; an untyped one is a stale export, not corruption."""
+    if r["value_i64"] is None:
+        raise IntegrityError("untyped reference; re-export with a parser that types it")
+    return sections.reference(r)
 
 
 def declarations(manifest):
@@ -239,14 +155,14 @@ def active_instance(rows, guid, event):
     return (active, "active") if active is not None else (None, "actor_closed")
 
 
-def edge(name, by, typed):
+def edge(name, by):
     q = by.get(name, [])
     if not q:
         return {"status": "absent", "value": None, "source_rows": []}
     if len(q) != 1:
         return {"status": "duplicate", "value": None, "source_rows": [x[0] for x in q]}
     try:
-        v = ref_value(q[0][1], typed)
+        v = typed_ref(q[0][1])
     except IntegrityError:
         raise
     except InputError as e:
@@ -263,130 +179,45 @@ def edge(name, by, typed):
     }
 
 
-def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=False):
+def amount_of(group):
+    """The section parser's result as a heal amount: validated only for an
+    exact array whose HealTaken equals its delta sum, with no schema error."""
+    state = group["section_state"]
+    if group["schema_errors"]:
+        error = "foreign or invalid schema"
+    elif state["status"] == "parentless_rpc":
+        error = "missing or duplicate amount parent"
+    elif state["status"] != "validated_array":
+        error = state["error"]
+    elif not state["relation"]["matches"]:
+        error = "HealTaken does not equal section delta sum"
+    else:
+        return {"status": "validated", "heal_taken": state["scalar"],
+                "sections": state["sections"], "array_capacity": state["array_capacity"]}
+    return {"status": "invalid", "error": error, "heal_taken": None, "sections": []}
+
+
+def parse_observation(key, items, guid_paths, actors, refs, players, segments, declared):
+    group = sections.parse_group(ROUTE, key, items, guid_paths, segments, declared)
+    # The section parser keeps a declared extra parameter raw; here it is a changed schema.
+    reported = {e["source_row"] for e in group["schema_errors"]}
+    group["schema_errors"] += [{"source_row": o, "error": "unknown heal parameter row"} for o, r in items
+                               if o not in reported and r["field_name"] not in TOP and not RX.match(r["field_name"] or "")]
     by = collections.defaultdict(list)
-    schema_errors = []
     for ordinal, r in items:
-        try:
-            validate_row_schema(r)
-        except InputError as e:
-            schema_errors.append({"source_row": ordinal, "error": str(e)})
         by[r["field_name"]].append((ordinal, r))
-    duplicates = {n: [x[0] for x in q] for n, q in by.items() if len(q) > 1}
-    # All three direct references are typed ObjectNetGuid by exact scoped
-    # entries (tools/fixtures/scoped_type_evidence.json), each equal to its raw
-    # window; read as untyped, every edge would be "invalid" behind exit 0.
-    top = {
-        n: edge(n, by, typed=True)
-        for n in (
-            "MulticastNotifyHeal.EventInstigator",
-            "MulticastNotifyHeal.EventInstigatorPawn",
-            "MulticastNotifyHeal.HealCauser",
-        )
-    }
-    reasons = []
-    if duplicates:
-        reasons.append("duplicate_same_coordinate_member")
-    if disjoint:
-        reasons.append("disjoint_same_coordinate_group")
-    if schema_errors:
-        reasons.append("foreign_or_invalid_schema")
-    amount = None
-    sections = []
-    healq = by.get("MulticastNotifyHeal.HealTaken", [])
-    parentq = by.get("MulticastNotifyHeal.LifeChangeBySection", [])
-    try:
-        if schema_errors:
-            raise InputError("foreign or invalid schema")
-        if len(healq) != 1 or len(parentq) != 1:
-            raise InputError("missing or duplicate amount parent")
-        heal = exact_f32(healq[0][1])
-        parent = parentq[0][1]
-        if any(
-            parent[x] is not None
-            for x in ("value_i64", "value_f64", "value_bool", "value_str")
-        ):
-            raise IntegrityError("array parent has typed value")
-        capacity, elements, leaves = parse_array(
-            parent["raw_bits"], parent["bit_count"], set(MEMBERS)
-        )
-        # (source row, element index, member handle, row) per emitted child.
-        children = []
-        for name, q in by.items():
-            m = RX.match(name or "")
-            if m:
-                if len(q) != 1:
-                    raise InputError("duplicate emitted child")
-                children.append(
-                    (q[0][0], int(m.group(1)), MEMBER_HANDLES[m.group(2)], q[0][1])
-                )
-        emitted = {(i, h): r for _, i, h, r in children}
-        parsed = {(i, h): (w, raw) for i, h, w, raw in leaves}
-        if len(parsed) != len(leaves) or set(parsed) != set(emitted):
-            raise InputError("parent/child leaf set mismatch")
-        child_ordinals = sorted(o for o, _, _, _ in children)
-        if child_ordinals and (
-            child_ordinals
-            != list(range(child_ordinals[0], child_ordinals[0] + len(child_ordinals)))
-            or parentq[0][0] != child_ordinals[-1] + 1
-        ):
-            raise InputError(
-                "emitted children are not contiguous immediately before parent"
-            )
-        emitted_order = [(i, h) for _, i, h, _ in sorted(children, key=lambda c: c[0])]
-        if emitted_order != [(index, handle) for index, handle, _, _ in leaves]:
-            raise InputError("emitted child order differs from parent wire order")
-        grouped = collections.defaultdict(dict)
-        for (i, h), (w, raw) in parsed.items():
-            r = emitted[(i, h)]
-            if r["bit_count"] != w or r["raw_bits"] != raw:
-                raise InputError("parent/child raw mismatch")
-            grouped[i][MEMBERS[h]] = (
-                r,
-                (
-                    ref_value(r, True)
-                    if h == 2
-                    else exact_f32(r) if h in (3, 4) else exact_bool(r)
-                ),
-            )
-        if (
-            elements != len(grouped)
-            or capacity < elements
-            or any(set(x) != set(MEMBERS.values()) for x in grouped.values())
-        ):
-            raise InputError("section cardinality mismatch")
-        sections = [
-            {
-                "index": i,
-                "changed_component_ref": x["ChangedComponent"][1],
-                "changed_component_path": guid_paths.get(x["ChangedComponent"][1]),
-                "life_result": x["LifeResult"][1],
-                "delta_life": x["DeltaLife"][1],
-                "alive_after_change": x["bAliveAfterChange"][1],
-            }
-            for i, x in sorted(grouped.items())
-        ]
-        total = sections[0]["delta_life"] if sections else 0.0
-        for section in sections[1:]:
-            total += section["delta_life"]
-        if struct.pack("<f", total) != struct.pack("<f", heal):
-            raise InputError("HealTaken does not equal section delta sum")
-        amount = {
-            "status": "validated",
-            "heal_taken": heal,
-            "sections": sections,
-            "array_capacity": capacity,
-        }
-    except IntegrityError:
-        raise
-    except InputError as e:
-        amount = {
-            "status": "invalid",
-            "error": str(e),
-            "heal_taken": None,
-            "sections": [],
-        }
-        reasons.append("amount_invalid")
+    top = {n: edge(n, by) for n in (
+        "MulticastNotifyHeal.EventInstigator",
+        "MulticastNotifyHeal.EventInstigatorPawn",
+        "MulticastNotifyHeal.HealCauser",
+    )}
+    amount = amount_of(group)
+    reasons = set(group["ambiguity_reasons"]) - {"array_validation_failed",
+                                                 "scalar_delta_relation_mismatch"}
+    if amount["status"] != "validated":
+        reasons.add("amount_invalid")
+    if group["schema_errors"]:
+        reasons.add("foreign_or_invalid_schema")
     event = key[:2]
     causer = top["MulticastNotifyHeal.HealCauser"]
     source = {
@@ -431,7 +262,7 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
                 < event
             ]
             source["reference_history"] = [
-                raw_record(row, o, "main_reference_evidence") for o, row in scoped
+                sections.raw(row, o, "main_reference_evidence") for o, row in scoped
             ]
             if any(x[1]["time_ms"] == event[0] for x in refs.get(causer["value"], [])):
                 source["status"] = "reference_update_same_time"
@@ -447,14 +278,12 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
                         continue
                     p = max((x[1]["time_ms"], x[1]["packet_id"]) for x in q)
                     q = [x for x in q if (x[1]["time_ms"], x[1]["packet_id"]) == p]
-                    vals = set()
-                    for _, row in q:
-                        vals.add(ref_value(row, True))
+                    vals = {typed_ref(row) for _, row in q}
                     source[field.lower()] = {
                         "status": "present" if len(vals) == 1 else "conflict",
                         "value": next(iter(vals)) if len(vals) == 1 else None,
                         "source_rows": [
-                            raw_record(row, o, "main_reference_evidence")
+                            sections.raw(row, o, "main_reference_evidence")
                             for o, row in q
                         ],
                     }
@@ -477,11 +306,8 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
     pawn["static_manifest_character"] = pawn.get("value") in players
     pawn["static_manifest_subject"] = players.get(pawn.get("value"))
     source["event_instigator"]["semantics"] = (
-        "PlayerController NetGUID: equals the replicated Controller and Owner "
-        "of the EventInstigatorPawn actor, and never resolved to an opened "
-        "actor or a net_guids path in the 2026-09-28 corpus audit, so an "
-        "unresolved join is expected and is not a decode fault; no "
-        "heal-credit meaning"
+        "PlayerController NetGUID (the pawn's Controller and Owner); does not join "
+        "to actors.parquet or net_guids; no heal-credit meaning"
     )
     recipient_instance, recipient_status = active_instance(actors, key[3], event)
     recipient = {
@@ -498,19 +324,11 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
         )
     return {
         "population": "main",
-        "identity": {
-            "time_ms": key[0],
-            "packet_id": key[1],
-            "channel_index": key[2],
-            "actor_net_guid": key[3],
-            "object_net_guid": key[4],
-            "group_path": key[5],
-            "outer_handle": key[6],
-        },
+        "identity": group["identity"],
         "identity_semantics": "coordinate-grouped observation; not a proven gameplay call",
-        "source_rows": [raw_record(r, o, "main") for o, r in items],
-        "schema_errors": schema_errors,
-        "ambiguity_reasons": sorted(set(reasons)),
+        "source_rows": group["source_rows"],
+        "schema_errors": group["schema_errors"],
+        "ambiguity_reasons": sorted(reasons),
         "amount": amount,
         "source_corroboration": source,
         "recipient_corroboration": recipient,
@@ -520,31 +338,18 @@ def parse_observation(key, items, guid_paths, actors, refs, players, disjoint=Fa
 def extract(export):
     inputs = [export / n for n in INPUT_NAMES]
     before = {p.name: sha(p) for p in inputs}
-    source_files = [
-        Path(__file__).resolve(),
-        *(Path(__file__).with_name(n) for n in HELPER_NAMES),
-    ]
-    source_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     declared = declarations(manifest)
+    section_declarations = sections.declarations(manifest, (ROUTE,))
     bodies = load_player_bodies(export, manifest)
     players = bodies.subjects
-    paths = {
-        x["net_guid"]: x["path"]
-        for _, x in iter_rows(export / "net_guids.parquet", ["net_guid", "path"])
-    }
+    paths = load_net_guids(export, "path")
     actors = collections.defaultdict(list)
-    for o, r in iter_rows(
+    for o, r in enumerate(pq.read_table(
         export / "actors.parquet",
-        [
-            "time_ms",
-            "packet_id",
-            "channel_index",
-            "actor_net_guid",
-            "event",
-            "class_path",
-        ],
-    ):
+        columns=["time_ms", "packet_id", "channel_index", "actor_net_guid", "event", "class_path"],
+        use_threads=False,
+    ).to_pylist()):
         if r["event"] in ("open", "close"):
             r["_ordinal"] = o
             actors[r["actor_net_guid"]].append(r)
@@ -567,15 +372,7 @@ def extract(export):
             ):
                 raise IntegrityError("observed optional heal row lacks its declaration")
             selected.append((o, r))
-            k = (
-                r["time_ms"],
-                r["packet_id"],
-                r["channel_index"],
-                r["actor_net_guid"],
-                r["object_net_guid"],
-                r["group_path"],
-                r["handle"],
-            )
+            k = tuple(r[c] for c in sections.COORDINATE_COLUMNS)
             groups[k].append((o, r))
             if (
                 k != last_key
@@ -592,7 +389,7 @@ def extract(export):
     for o, r in iter_selected_fields(
         export / "checkpoint_fields.parquet", False, CHECKPOINT_FIELD_COLS
     ):
-        record = raw_record(r, o, "checkpoint")
+        record = sections.raw(r, o, "checkpoint")
         try:
             validate_row_schema(r)
             record["schema_status"] = "matches_main_route"
@@ -601,7 +398,7 @@ def extract(export):
             record["schema_error"] = str(e)
         cp.append(record)
     observations = [
-        parse_observation(k, v, paths, actors, refs, players, segments[k] > 1)
+        parse_observation(k, v, paths, actors, refs, players, segments[k], section_declarations)
         for k, v in sorted(groups.items())
     ]
     valid = [
@@ -615,9 +412,13 @@ def extract(export):
         k: dict.fromkeys(EDGE_STATUSES, 0)
         for k in ("causer", "event_instigator", "event_instigator_pawn")
     }
+    source_status = dict.fromkeys(SOURCE_STATUSES, 0)
+    recipient_status = dict.fromkeys(LIFECYCLE_STATUSES, 0)
     for x in observations:
         for k, tally in edge_status.items():
             tally[x["source_corroboration"][k]["status"]] += 1
+        source_status[x["source_corroboration"]["status"]] += 1
+        recipient_status[x["recipient_corroboration"]["lifecycle_status"]] += 1
     by_section = collections.Counter()
     by_recipient = collections.Counter()
     for x in valid:
@@ -627,9 +428,6 @@ def extract(export):
     after = {p.name: sha(p) for p in inputs}
     if before != after:
         raise IntegrityError("input changed during extraction")
-    source_after = {p.name: sha(p) for p in source_files}
-    if source_before != source_after:
-        raise IntegrityError("implementation changed during extraction")
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "vrfkit_healing_observations",
@@ -641,8 +439,7 @@ def extract(export):
             "replay_build": manifest.get("replay_build"),
             "input_sha256_before": before,
             "input_sha256_after": after,
-            "implementation_sha256_before": source_before,
-            "implementation_sha256_after": source_after,
+            "implementation_sha256": {p.name: sha(p) for p in SOURCES},
         },
         "observations": observations,
         "checkpoint_observations": cp,
@@ -666,31 +463,21 @@ def extract(export):
             ),
             "ambiguous_groups": sum(bool(x["ambiguity_reasons"]) for x in observations),
             "source_edge_status": edge_status,
+            "source_status": source_status,
+            "recipient_lifecycle_status": recipient_status,
         },
     }
 
 
+def summary(d, out):
+    yield f"wrote {out} ({d['counts']['main_coordinate_groups']} observations)"
+    for key in ("source_status", "recipient_lifecycle_status", "source_edge_status"):
+        yield f"  {key}: {json.dumps(d['counts'][key], sort_keys=True)}"
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--export", required=True, type=Path)
-    p.add_argument("--out", required=True, type=Path)
-    a = p.parse_args(argv)
-    try:
-        protected = [a.export / n for n in INPUT_NAMES] + [
-            Path(__file__),
-            *(Path(__file__).with_name(n) for n in HELPER_NAMES),
-        ]
-        if aliases(a.out, protected):
-            raise InputError("output aliases an input or implementation file")
-        d = extract(a.export)
-        atomic_write_text(
-            a.out, json.dumps(d, indent=2, sort_keys=True, allow_nan=False) + "\n"
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as e:
-        print(f"FAILED: {e}", file=sys.stderr)
-        return 1
-    print(f"wrote {a.out} ({d['counts']['main_coordinate_groups']} observations)")
-    return 0
+    return run_json_cli(__doc__, extract, summary, argv, sources=SOURCES,
+                        indent=2, sort_keys=True, allow_nan=False)
 
 
 if __name__ == "__main__":

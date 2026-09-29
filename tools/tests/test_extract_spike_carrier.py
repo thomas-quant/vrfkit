@@ -130,8 +130,7 @@ class ReconnectedCarrierTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        # PlayerState 300 has a subject and no character, as the eleventh
-        # PlayerState of 4b8191e8 and 8cda0666 does.
+        # PlayerState 300 has a subject and no character, as some real ones do.
         (root / "manifest.json").write_text(json.dumps({"players": [
             {"actor_net_guid": 256, "subject": "reconnected", "character_net_guid": 45530},
             {"actor_net_guid": 300, "subject": "no-character", "character_net_guid": None}]}),

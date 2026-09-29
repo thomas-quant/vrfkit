@@ -193,7 +193,7 @@ def make_export(root, build='++Ares-Core+release-13.05'):
 
 
 class IntegrationTests(unittest.TestCase):
-    def test_real_cli_and_cache_retain_physical_sources(self):
+    def test_real_cli_retains_physical_sources(self):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t); export=make_export(root/'export'); out=root/'ledger.json'
             command=[sys.executable,'-W','error',str(Path(tool.__file__)),
@@ -207,10 +207,6 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(result['death_events'][0]['victim_identity']['mapping_field_rows'],[1])
             self.assertEqual(result['death_events'][0]['round_identity']['round_event_row_ordinal'],0)
             self.assertEqual(result['state_projection']['entities'][0]['base']['source']['physical_parent_row_ordinal'],12)
-            cache=root/'observations.json'; cache.write_text(json.dumps(result['source_observations']),encoding='utf-8')
-            cached=tool.extract(export,cache)
-            self.assertEqual(cached['death_events'],result['death_events'])
-            self.assertEqual(cached['provenance']['observation_cache_sha256'],tool.file_sha(cache))
 
     def test_measured_13_06_export_is_joined(self):
         with tempfile.TemporaryDirectory() as t:
@@ -230,20 +226,6 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(run.returncode,1,run.stderr)
             self.assertIn('outside the measured KillData set',run.stderr)
             self.assertFalse(out.exists())
-
-    def test_cache_cannot_forge_values_or_receipts(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export'); cache=root/'observations.json'
-            original=tool.observation_extractor.extract(export)
-            for kind in ('value','receipt'):
-                changed=copy.deepcopy(original)
-                if kind=='value':
-                    changed['observations'][0]['actor_net_guid']=99
-                else:
-                    changed['provenance']['manifest_sha256']='0'*64
-                cache.write_text(json.dumps(changed),encoding='utf-8')
-                with self.assertRaisesRegex(InputError,'cache content|provenance'):
-                    tool.extract(export,cache)
 
     def test_missing_raw_event_is_retained_unjoined(self):
         with tempfile.TemporaryDirectory() as t:
@@ -283,12 +265,11 @@ class IntegrationTests(unittest.TestCase):
 
     def test_cli_refuses_source_aliases_without_writing(self):
         with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export'); cache=root/'cache.json'
-            cache.write_text('{}',encoding='utf-8')
-            for output in (export/'events.parquet',cache,Path(tool.__file__),Path(tool.__file__).with_name('kill_state.py')):
+            root=Path(t); export=make_export(root/'export')
+            for output in (export/'events.parquet',Path(tool.__file__),Path(tool.__file__).with_name('kill_state.py')):
                 before=output.read_bytes()
                 run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
-                                    '--export',str(export),'--out',str(output),'--observations',str(cache)],
+                                    '--export',str(export),'--out',str(output)],
                                    capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
                 self.assertEqual(run.returncode,1,run.stderr)
                 self.assertIn('FAILED:',run.stderr)

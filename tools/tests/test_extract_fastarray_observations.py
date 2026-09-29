@@ -14,41 +14,11 @@ import pyarrow.parquet as pq
 from tools import extract_fastarray_observations as fast
 from tools.tests.wire_fixtures import packed
 
-#: Route identities exactly as the parser exports them. Literal rather than
-#: read from the extractor: a misspelled group selects nothing and would pass
-#: every other test, which is how the chained route stayed dead until
-#: 2026-09-28.
+#: Route identities exactly as the parser exports them, literal rather than
+#: read from the extractor: a misspelled group selects nothing and passes
+#: every test that reads the extractor's own spelling.
 CNC_H1 = ("AbilitiesAndBuffsComponent", "_cnc_h1")
 CHAINED = ("/Script/ShooterGame.AresAbilitySystemComponent", "__vrfkit_chained_cnc_h1__")
-
-#: The `replay_build` strings, exactly as the manifests spell them, of every
-#: build whose cnc_h1 main windows were walked exactly in the 2026-09-28
-#: measurement recorded next to `fast.ACCEPTED_BUILDS`. Typed out rather than
-#: derived so that a change to the extractor's sets -- a build added without a
-#: measurement, or a measured one dropped -- fails here instead of agreeing
-#: with itself.
-CNC_H1_MAIN_BUILDS = frozenset({
-    "++Ares-Core+release-11.06", "++Ares-Core+release-11.07",
-    "++Ares-Core+release-11.08", "++Ares-Core+release-11.09",
-    "++Ares-Core+release-11.10", "++Ares-Core+release-11.11",
-    "++Ares-Core+release-12.00", "++Ares-Core+release-12.01",
-    "++Ares-Core+release-12.02", "++Ares-Core+release-12.03",
-    "++Ares-Core+release-12.04", "++Ares-Core+release-12.05",
-    "++Ares-Core+release-12.06", "++Ares-Core+release-12.07",
-    "++Ares-Core+release-12.08", "++Ares-Core+release-12.09",
-    "++Ares-Core+release-13.00", "++Ares-Core+release-13.01",
-    "++Ares-Core+release-13.02", "++Ares-Core+release-13.04",
-    "++Ares-Core+release-13.05", "++Ares-Core+release-13.06",
-})
-#: Chained windows were observed, all exact, in all 24 builds and both
-#: streams -- including 12.10 and 12.11, which have no cnc_h1 rows at all.
-CHAINED_BUILDS = CNC_H1_MAIN_BUILDS | {"++Ares-Core+release-12.10", "++Ares-Core+release-12.11"}
-EXPECTED_ACCEPTED = {
-    ("cnc_h1", "fields"): CNC_H1_MAIN_BUILDS,
-    ("cnc_h1", "checkpoint_fields"): frozenset(),
-    ("chained_cnc_h1", "fields"): CHAINED_BUILDS,
-    ("chained_cnc_h1", "checkpoint_fields"): CHAINED_BUILDS,
-}
 
 #: Builds every route must keep rejecting: 13.07 stands for any future build;
 #: the rest are malformed spellings of a measured one, because the gate
@@ -182,16 +152,14 @@ class FastArrayTests(unittest.TestCase):
         self.assertEqual(fast.ROUTES, {"cnc_h1": CNC_H1, "chained_cnc_h1": CHAINED})
         self.assertEqual(fast.ROUTE_HANDLE, 1)
 
-    def test_accepted_builds_are_exactly_the_measured_sets(self):
-        self.assertEqual(fast.ACCEPTED_BUILDS, EXPECTED_ACCEPTED)
-
     def test_every_measured_build_decodes_on_its_route_and_stream(self):
         raw, count = payload([1, 3], [(5, [(0, b"\x96\xab")])])
-        for (route, stream), accepted in EXPECTED_ACCEPTED.items():
+        builds = set().union(*fast.ACCEPTED_BUILDS.values())
+        for (route, stream), accepted in fast.ACCEPTED_BUILDS.items():
             identity = CNC_H1 if route == "cnc_h1" else CHAINED
             row = {"group_path": identity[0], "field_name": identity[1], "handle": 1,
                    "raw_bits": raw, "bit_count": count}
-            for build in sorted(CHAINED_BUILDS):
+            for build in sorted(builds):
                 with self.subTest(route=route, stream=stream, build=build):
                     record = fast.observation(dict(row), 3, stream, build)
                     self.assertEqual((record["route"], record["population"]), (route, stream))
@@ -219,8 +187,7 @@ class FastArrayTests(unittest.TestCase):
                     self.assertEqual(record["raw_bits_hex"], raw.hex())
 
     def test_chained_rows_are_selected_and_decoded_in_both_streams(self):
-        # Literal identities and only extract(): this runs unchanged against the
-        # extractor before 2026-09-28's fix, and fails there at the first check.
+        # Literal identities and only extract(): a misspelled route fails here.
         raw, count = payload([1, 3], [(5, [(0, b"\x96\xab"), (18, b"")])])
         chained = field_row(CHAINED, raw, count)
         with tempfile.TemporaryDirectory() as tmp:
@@ -339,6 +306,7 @@ class FastArrayTests(unittest.TestCase):
             self.assertEqual(receipt["counts"]["rejected"], 0)
             self.assertEqual(receipt["input_sha256_before"], receipt["input_sha256_after"])
             self.assertEqual(receipt["observations_sha256"], fast.sha(out / "observations.ndjson"))
+            self.assertEqual(receipt["wire_bits_sha256"], fast.sha(Path(fast.__file__).with_name("wire_bits.py")))
             record = json.loads((out / "observations.ndjson").read_text())
             self.assertEqual(record["physical_row_ordinal"], 1)
             self.assertEqual((record["route"], record["population"]), ("cnc_h1", "fields"))

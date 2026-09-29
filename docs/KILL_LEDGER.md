@@ -76,15 +76,12 @@ classification. These populations must not be summed as ordinary player kills.
 ## Provenance and failure behavior
 
 The output records SHA-256 values for nine input Parquet tables, the manifest,
-and four implementation files. Sources are checked before and after extraction.
-An optional `--observations observations.json` verifies an existing observation
-document: both its receipts and its entire content must match fresh extraction.
-This option checks a saved document; it does not skip reading the source data.
+and five implementation files. The inputs are checked before and after extraction.
 
 Missing references stay null with explicit status. Count keys include zero
 values. Input/schema/value violations return a nonzero exit; a successful
 document is written atomically. Output paths that alias input tables, the
-observation document or the implementation files are refused.
+manifest or the implementation files are refused.
 
 ## Legacy builds, 2026-09-28
 

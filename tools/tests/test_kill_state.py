@@ -1,16 +1,12 @@
 import copy
-import importlib.util
 import math
 import pathlib
 import struct
+import sys
 import unittest
 
-
-MODULE_PATH = pathlib.Path(__file__).parents[1] / "kill_state.py"
-SPEC = importlib.util.spec_from_file_location("kill_state", MODULE_PATH)
-kill_state = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(kill_state)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import kill_state
 
 
 def raw(handle, value, bits=8):

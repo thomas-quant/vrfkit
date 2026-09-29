@@ -222,15 +222,12 @@ what it holds.
   yourself once no export to that destination is running, or move a
   `previous` sibling elsewhere to keep it.
 - **The corpus tools never read a leftover as an export.**
-  `audit_match_observations.py`, `validate_type_evidence.py`,
-  `summarize_value_coverage.py` and `summarize_unresolved_fields.py` skip
-  these names while discovering exports and list what they skipped under
-  `skipped_generated_dirs` in their reports; `export_scan.py` is the one
-  definition. At 259ed10 all four read a `previous` sibling as a second
-  export of the same replay and exited 0 with doubled counts.
-  `audit_match_observations.py` and `validate_type_evidence.py` also refuse a
-  discovered directory without `manifest.json`, since only a finished export
-  has one.
+  `validate_type_evidence.py`, `summarize_value_coverage.py` and
+  `summarize_unresolved_fields.py` skip these names while discovering exports
+  and list what they skipped under `skipped_generated_dirs` in their reports;
+  `export_scan.py` is the one definition. `validate_type_evidence.py` also
+  refuses a discovered directory without `manifest.json`, since only a
+  finished export has one.
 
 #### Lines to actually watch in the summary
 
@@ -850,19 +847,13 @@ distinct game facts. Per-export SQLite shards keep aggregation bounded and
 
 ```bash
 python tools/summarize_unresolved_fields.py out/exports --output-dir out/raw-audit --jobs 12
-python tools/audit_match_observations.py --exports out/exports --out out/ammo-audit.json --jobs 12
 python tools/generate_scoped_types.py --check
 ```
 
-`audit_match_observations.py` compares magazine decreases with an explicit
-weapon-scoped continuous-effect RPC through the component's outer NetGUID.
-It reports unmatched and ambiguous evidence; it does not classify the RPC as
-a shot. Conflicting same-packet ammo values break the transition chain, and
-conflicting object mappings cannot support a match. Sampling, when requested,
-is evenly spaced by export name, not stratified by game build. With
-`--exports`, a child without `manifest.json` is a failed export, and the
-leftovers of an interrupted export are skipped and listed
-([If an export is interrupted](#if-an-export-is-interrupted)).
+`extract_match_observations.py` gives each ammo decrease
+`weapon_rpc_within_300ms`: how many weapon-scoped continuous-effect RPCs on the
+magazine's outer NetGUID lie within 300 ms, tallied with zeros. It does not
+classify the RPC as a shot.
 
 `generate_scoped_types.py` regenerates `scoped_types.rs` from the reviewed
 `tools/fixtures/scoped_type_evidence.json`. These types require the exact
@@ -1083,16 +1074,15 @@ This measures value presence, not semantic understanding or block preservation.
 
 | Script | What it does |
 |---|---|
-| `extract_ability_stats.py` | Validates a build-scoped Statistic/FText dictionary from exact cast/effect array slots, with main and checkpoint observations separate. Dictionaries exist for the measured builds 13.01, 13.02, 13.04, 13.05 and 13.06; any other build's mappings are `unknown_build`. Unknown IDs, changed names, missing partners and conflicts remain visible and return a nonzero exit. Counts are snapshots, not casts. |
 | `extract_kill_observations.py` | Exports main and checkpoint KillData element snapshots with physical parent-row identity, independently checked raw values, nullable missing members and scoped reference status. Keeps all clocks separately; updates are not deduplicated kills. Accepts 11.06-12.09 and 13.01-13.06 (`MEASURED_BUILDS`) and refuses 12.10, 12.11, 13.00 and any other build before reading a row. See [KILL_OBSERVATIONS.md](KILL_OBSERVATIONS.md#measured-builds). |
 | `extract_kill_ledger.py` | Retains character-death events, projects component-local KillData state and links mutually unique same-round PlayerState identities. Preserves unmatched events and observations. Reads the same measured builds as the observation extractor. See [KILL_LEDGER.md](KILL_LEDGER.md). |
 | `extract_healing_observations.py` | Retains serialized heal amounts, section state, raw source rows and separate identity corroboration. Amount sums do not establish effective HP restored or player healing credit. See [HEALING_OBSERVATIONS.md](HEALING_OBSERVATIONS.md) for validation status. |
 | `extract_fastarray_observations.py` | Writes numeric AbilitiesAndBuffs FastArray headers, deleted/changed item IDs and raw field offsets to NDJSON, retaining each input window and physical row identity. Reads two exported routes, `_cnc_h1` under `AbilitiesAndBuffsComponent` and `__vrfkit_chained_cnc_h1__` under `/Script/ShooterGame.AresAbilitySystemComponent`, and labels each record with its `route` and stream (`population`). Accepts what was measured on 2026-09-28: `_cnc_h1` main rows on 22 builds (12.10 and 12.11 have none) and chained rows in both streams on all 24. Any other route, stream or build keeps its raw bits with a rejection reason, and the exit is nonzero. The receipt counts every route and stream, zeros included. Field meanings remain unknown. See [the wire investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md). |
 | `extract_ground_volumes.py` | Decodes the cells of ground-area volumes (GroundVolumeComponent `FragmentInfo` items, including the bare `PatchVolume` rows) with the names and checksums each replay declares: world-space polygon, floor, ceiling, grid cell, travel distances, status, owner actor class. Writes items, every source window with its raw bits and status, and a receipt with counts including zeros; exits nonzero on any rejected window. Measured builds only. The receipt maps `253` to `ID` and `X`/`Y` to `GridPos` by exact (name, checksum); `Status` gets its enumerator name in 13.06 replays only, the build the names were read from. See [GROUND_VOLUMES.md](GROUND_VOLUMES.md). |
 | `extract_section_observations.py` | Retains damage, healing, overheal-decay and reset section observations with raw parent/child checks. Distinguishes parentless records, known non-health sections and unresolved references. See [SECTION_OBSERVATIONS.md](SECTION_OBSERVATIONS.md). |
-| `extract_section_timeline.py` | Builds observed section timelines with exact predecessors and explicit ordering/lifetime gaps; uses the pure `section_timeline.py` helper. See [SECTION_TIMELINE.md](SECTION_TIMELINE.md). |
-| `extract_section_packet_timeline.py` | Retains the strict timeline and adds main packet-order comparisons with separate eligibility and arithmetic counters; uses the pure `section_packet_timeline.py` helper. See [SECTION_PACKET_TIMELINE.md](SECTION_PACKET_TIMELINE.md). |
+| `section_timeline.py` | Builds the main-stream section timeline: each section state's exact predecessor with explicit ordering/lifetime gaps, a strict (time-ordered) and a packet-ordered continuity decision, and separate eligibility and arithmetic counters. See [SECTION_TIMELINE.md](SECTION_TIMELINE.md) and [SECTION_PACKET_TIMELINE.md](SECTION_PACKET_TIMELINE.md). |
 | `kill_state.py` | Validates complete KillData bases and finisher revisions; compares checkpoint snapshots without counting them as new kills. Python module used by the ledger command. |
+| `wire_bits.py` | Python module, not a command: the bit reader, replicated-array and FastArray-header parsers and the Arrow-filtered Parquet row reader that the section, healing, kill, ground-volume and FastArray extractors share. |
 | `extract_match_observations.py` | Exports evidence-labelled ammo changes, equip/reload intervals, round balances, team loadouts, defuse observations and economic state. Money decreases and transaction snapshots remain separate; temporal association is not a verified purchase ledger. A decrease between `switchTeams` and the next `roundStarted` (the team-switch credit reset) is published as `money_decreases_in_team_switch_window` instead and is never a snapshot's nearest decrease; the window count prints with its zero. |
 | `extract_ability_lifecycle.py` | Emits ability-path actor candidates with observed open/close/dormant events and explicit Owner/Instigator references. Player links are identity evidence, not proof of casts, and reach every `SpawnedCharacter` pawn of a player (`player_reference_provenance` names an earlier pawn). Missing closes remain censored; no nearest-player attribution or fixed duration is used. |
 | `player_identity.py` | Python module used by `extract_player_effects.py`, `extract_spike_carrier.py`, `extract_ability_lifecycle.py` and `extract_healing_observations.py`, not a command. Admits every non-zero `SpawnedCharacter` value in main `fields.parquet` (BombPlayerState and its Swiftplay alias) as a player body, joined to the manifest `subject` -- not only the manifest's last value, which drops the pawn a player had before reconnecting. A pawn claimed by two PlayerStates or subjects is a conflict. Its counts (earlier pawns, conflicts, manifest disagreements, untyped or foreign rows) are reported with their zeros by every tool that uses it. |
@@ -1102,7 +1092,6 @@ This measures value presence, not semantic understanding or block preservation.
 | `extract_spike_carrier.py` | Derives a `spike_carrier.parquet` view -- one row per spike custody interval, resolved through to the manifest `subject`. Reads `BombEquippable_C.Owner` on the spike's own channel rather than the inventory side, so it covers carrying-in-the-backpack and not just in-hand, and it follows proxy carriers (Gekko's Wingman) back through `Instigator`. A carrier is any `SpawnedCharacter` pawn of a player, including one from before a reconnect; `carrier_identity_provenance` says which. |
 
 ```bash
-python tools/extract_ability_stats.py --export <export-directory> --out ability-stats.json
 python tools/extract_match_observations.py --export <export-directory> --out observations.json
 python tools/extract_kill_observations.py --export <export-directory> --out kill-observations.json
 python tools/extract_kill_ledger.py --export <export-directory> --out kill-ledger.json
@@ -1110,8 +1099,7 @@ python tools/extract_healing_observations.py --export <export-directory> --out h
 python tools/extract_fastarray_observations.py --export-dir <export-directory> --out-dir <new-output-directory>
 python tools/extract_ground_volumes.py --export-dir <export-directory> --out-dir <new-output-directory>
 python tools/extract_section_observations.py --export <export-directory> --out sections.json
-python tools/extract_section_timeline.py --export <export-directory> --out timeline.json
-python tools/extract_section_packet_timeline.py --export <export-directory> --out packet-timeline.json
+python tools/section_timeline.py --export <export-directory> --out timeline.json
 python tools/extract_ability_lifecycle.py --export <export-directory> --out ability-lifecycle.json
 ```
 

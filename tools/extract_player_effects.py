@@ -10,20 +10,20 @@ effect intervals; checkpoint snapshots are excluded.
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import run_json_cli
     from .player_identity import FINAL_PROVENANCE, load_player_bodies
+    from .wire_bits import load_net_guids
 else:
-    from atomic_io import atomic_write_text
+    from atomic_io import run_json_cli
     from player_identity import FINAL_PROVENANCE, load_player_bodies
+    from wire_bits import load_net_guids
 
 
 BLIND_GROUP = "/Script/ShooterGame.BlindManagerComponent"
@@ -42,12 +42,7 @@ def build(export_dir: Path) -> dict:
     bodies = load_player_bodies(export_dir, manifest)
     players = bodies.subjects
     conflicts = bodies.conflicts
-    guid_paths = defaultdict(set)
-    for row in pq.read_table(export_dir / "net_guids.parquet",
-                             columns=["net_guid", "path"]).to_pylist():
-        guid_paths[row["net_guid"]].add(row["path"])
-    paths = {guid: next(iter(values)) for guid, values in guid_paths.items()
-             if len(values) == 1}
+    paths = load_net_guids(export_dir, "path")
     fields = pq.read_table(export_dir / "fields.parquet", columns=COLUMNS,
                            filters=[("group_path", "in", [BLIND_GROUP, EFFECT_GROUP])])
     records = []
@@ -129,25 +124,13 @@ def build(export_dir: Path) -> dict:
         "records": records,
         "totals": {**{key: tally[key] for key in counters},
                    "conflicting_manifest_character_guids": len(conflicts),
-                   "conflicting_effect_paths": sum(len(v) > 1 for v in guid_paths.values()),
                    "player_identity": bodies.counts},
     }
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--export", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
-    args = parser.parse_args(argv)
-    try:
-        document = build(args.export)
-        atomic_write_text(args.out, json.dumps(document, indent=2, ensure_ascii=True,
-                                               allow_nan=False) + "\n")
-    except (OSError, ValueError) as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps(document["totals"], sort_keys=True))
-    return 0
+    return run_json_cli(__doc__, build, lambda d, out: [json.dumps(d["totals"], sort_keys=True)],
+                        argv, sources=[Path(__file__)], indent=2, allow_nan=False)
 
 
 if __name__ == "__main__":

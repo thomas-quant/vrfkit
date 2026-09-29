@@ -12,32 +12,28 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import hashlib
 import json
-import os
 from pathlib import Path
-import shutil
 import sys
-import tempfile
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+if __package__:
+    from .atomic_io import sha256_file as sha, staged_output
+    from .wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
+else:
+    from atomic_io import sha256_file as sha, staged_output
+    from wire_bits import Bits as _Bits, WireError, fastarray_header, iter_selected, text
+
 SCHEMA_VERSION = 2
-#: Every route's rows carry handle 1. A selected row with another handle is
-#: rejected as `route_identity`, so it is counted rather than skipped.
+#: Every route's rows carry handle 1; another handle rejects as `route_identity`.
 ROUTE_HANDLE = 1
 #: route -> the exact (group_path, field_name) pair, not a cross product. Both
-#: are the handle-1 payload of an AbilitiesAndBuffs ClassNetCache stream after
-#: the same fc=34 outer walk (decode_cnc_payload), starting at the FastArray
-#: support bit. In crates/vrfkit/src/sink/stream.rs:
-#:   cnc_h1          emit_brute_forced_cnc_rpcs: whole unresolved CNC payloads,
-#:                   group AbilitiesAndBuffsComponent.
-#:   chained_cnc_h1  on_rep_layout_tail: a CNC tail after a RepLayout prefix,
-#:                   only for the pre-remap identity, exactly one handle-1 RPC
-#:                   and a set first bit (checked on a clone, so it stays in
-#:                   raw_bits); group /Script/ShooterGame.AresAbilitySystemComponent.
+#: are the handle-1 payload of an AbilitiesAndBuffs ClassNetCache stream from
+#: the FastArray support bit (crates/vrfkit/src/sink/stream.rs: `cnc_h1` from
+#: emit_brute_forced_cnc_rpcs, `chained_cnc_h1` from on_rep_layout_tail).
 ROUTES = {
     "cnc_h1": ("AbilitiesAndBuffsComponent", "_cnc_h1"),
     "chained_cnc_h1": ("/Script/ShooterGame.AresAbilitySystemComponent",
@@ -51,23 +47,11 @@ def _builds(*versions: str) -> frozenset[str]:
     return frozenset(f"++Ares-Core+release-{v}" for v in versions)
 
 
-#: (route, stream) -> builds whose windows were all walked exactly: measured,
-#: not supported. Another build rejects as `unvalidated_build`, an empty set as
-#: `unvalidated_checkpoint_route`/`unvalidated_main_route`; each keeps the exit
-#: nonzero until measured. 2026-09-28, parser 259ed10, 1,018 exports, each
-#: route's pair scanned in both tables with any handle; decode() and an
-#: independent reader agreed on every header word, ID and field boundary
-#: (more, and the 2026-09-09 first run: docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md):
-#:   cnc_h1: 3,999,493 of 3,999,493 windows exact, all main, handle 1; none on
-#:     12.10/12.11 or in checkpoints. 13.00 is thin: six windows in one replay,
-#:     one telling this variant from the one-flag-bit-per-item one
-#:     (ChecksumMode::Present, crates/vrf-decode/src/fastarray.rs), against at
-#:     least 6,302 on every other build.
-#:   chained_cnc_h1: 250,053 main and 181,108 checkpoint windows exact, handle
-#:     1, both streams of all 24 builds, each with at least five the
-#:     one-flag-bit variant rejects (12.10, 12.11, 13.00: 5 to 7 per stream).
-#: The same fifteen handles on every changed item of both routes is an
-#: alignment check, not a property schema.
+#: (route, stream) -> builds whose windows were all walked exactly, in
+#: agreement with an independent reader: measured, not supported. Another build
+#: rejects as `unvalidated_build`, an empty set as `unvalidated_*_route`, and
+#: the exit is nonzero. cnc_h1 has no 12.10/12.11 or checkpoint windows; its
+#: 13.00 entry rests on six windows (docs/GAS_AND_PATCHVOLUME_INVESTIGATION.md).
 _LEGACY = ("11.06", "11.07", "11.08", "11.09", "11.10", "11.11", "12.00", "12.01",
            "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09")
 ACCEPTED_BUILDS = {
@@ -86,43 +70,9 @@ COLUMNS = ["time_ms", "packet_id", "channel_index", "actor_net_guid",
            "compatible_checksum", "bit_count", "raw_bits"]
 
 
-class WireError(ValueError):
-    """A numeric structure cannot be established for this window."""
-
-
-class Bits:
-    def __init__(self, raw: bytes, bit_count: int):
-        if not isinstance(raw, bytes) or type(bit_count) is not int or bit_count < 0 or len(raw) != (bit_count + 7) // 8:
-            raise WireError("invalid_window")
-        self.raw, self.end, self.pos = raw, bit_count, 0
-
-    def read(self, width: int) -> int:
-        if width < 0 or width > 32 or self.pos + width > self.end:
-            raise WireError("truncated_scalar")
-        start, shift = divmod(self.pos, 8)
-        value = int.from_bytes(self.raw[start:(self.pos + width + 7) // 8], "little")
-        self.pos += width
-        return (value >> shift) & ((1 << width) - 1)
-
-    def i32(self) -> int:
-        value = self.read(32)
-        return value if value < (1 << 31) else value - (1 << 32)
-
-    def packed(self) -> int:
-        value = 0
-        for index in range(5):
-            byte = self.read(8)
-            if index == 4 and byte >> 1 > 15:
-                raise WireError("packed_overflow")
-            value |= (byte >> 1) << (7 * index)
-            if not byte & 1:
-                return value
-        raise WireError("packed_unterminated")
-
-    def skip(self, width: int) -> None:
-        if self.pos + width > self.end:
-            raise WireError("field_overrun")
-        self.pos += width
+class Bits(_Bits):
+    TRUNCATED = "truncated_scalar"
+    OVERRUN = "field_overrun"
 
 
 def decode(raw: bytes, bit_count: int) -> dict:
@@ -132,15 +82,7 @@ def decode(raw: bytes, bit_count: int) -> dict:
     need no monotonicity: a delta can span updates missing from this stream.
     """
     reader = Bits(raw, bit_count)
-    if reader.read(1) != 1:
-        raise WireError("unsupported_support_bit")
-    array_key, base_key, deletes, changed = [reader.i32() for _ in range(4)]
-    if min(deletes, changed) < 0:
-        raise WireError("negative_count")
-    # Every changed item needs an i32 ID and at least an 8-bit terminator.
-    if deletes * 32 + changed * 40 > reader.end - reader.pos:
-        raise WireError("count_bounds")
-    deleted_ids = [reader.i32() for _ in range(deletes)]
+    array_key, base_key, deleted_ids, changed = fastarray_header(reader)
     entries = []
     for _ in range(changed):
         item_id = reader.i32()
@@ -152,20 +94,15 @@ def decode(raw: bytes, bit_count: int) -> dict:
             width = reader.packed()
             fields.append({"handle": encoded - 1, "bit_offset": reader.pos,
                            "bit_count": width})
-            reader.skip(width)
+            reader.take(width)
         entries.append({"item_id": item_id, "fields": fields})
     if reader.pos != reader.end:
         raise WireError("unconsumed_suffix")
     return {"supports_delta_struct_serialization": True,
             "array_replication_key": array_key, "base_replication_key": base_key,
-            "num_deletes": deletes, "num_changed": changed,
+            "num_deletes": len(deleted_ids), "num_changed": changed,
             "deleted_item_ids": deleted_ids, "changed_items": entries,
             "consumed_bits": reader.pos}
-
-
-def sha(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def route_mask(groups: pa.Array, names: pa.Array) -> pa.Array:
@@ -180,23 +117,12 @@ def route_mask(groups: pa.Array, names: pa.Array) -> pa.Array:
 
 def selected_rows(path: Path, checkpoint: bool):
     columns = [*COLUMNS, *(["checkpoint_index", "checkpoint_id"] if checkpoint else [])]
-    ordinal = 0
-    for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=65536, use_threads=False):
-        groups = pc.cast(batch.column("group_path"), pa.string())
-        names = pc.cast(batch.column("field_name"), pa.string())
-        positions = pc.indices_nonzero(route_mask(groups, names))
-        for index, row in zip(positions.to_pylist(), batch.take(positions).to_pylist()):
-            yield ordinal + index, row
-        ordinal += batch.num_rows
+    return iter_selected(path, columns, lambda b: route_mask(text(b, "group_path"), text(b, "field_name")))
 
 
 def unselected_route_name_rows(path: Path) -> int:
-    """Rows carrying a route's field name under a group no route pairs it with.
-
-    Diagnostic only, neither selected nor decoded: a route once went
-    unselected on every export because nothing counted this. On the
-    2026-09-28 corpus the count is 0 in both streams.
-    """
+    """Rows carrying a route's field name under a group no route pairs it
+    with: counted, neither selected nor decoded (0 on every measured export)."""
     route_names = pa.array(sorted({name for _, name in ROUTES.values()}))
     total = 0
     for batch in pq.ParquetFile(path).iter_batches(columns=["group_path", "field_name"],
@@ -254,24 +180,13 @@ def tally(counts: Counter, prefix: str, record: dict) -> None:
 
 
 def extract(export_dir: Path, out_dir: Path) -> dict:
-    export_dir, out_dir = export_dir.resolve(), out_dir.resolve()
-    if out_dir == export_dir or out_dir.is_relative_to(export_dir):
-        raise ValueError("output must be outside the source export")
-    if out_dir.exists():
-        raise ValueError("output directory already exists")
-    paths = [export_dir / n for n in ("manifest.json", "fields.parquet", "checkpoint_fields.parquet")]
-    before = {str(path): sha(path) for path in paths}
-    build = json.loads(paths[0].read_text(encoding="utf-8"))["replay_build"]
-    script_hash = sha(Path(__file__))
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".fastarray-", dir=out_dir.parent))
-    counts = empty_counts()
-    reasons = Counter()
-    try:
+    def write(stage: Path) -> dict:
+        build = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))["replay_build"]
+        counts, reasons = empty_counts(), Counter()
         output = stage / "observations.ndjson"
         with output.open("w", encoding="utf-8", newline="\n") as handle:
-            for path in paths[1:]:
-                stream = path.stem
+            for stream in STREAMS:
+                path = export_dir / f"{stream}.parquet"
                 counts[f"unselected_route_name.{stream}.rows"] += unselected_route_name_rows(path)
                 for ordinal, row in selected_rows(path, stream == "checkpoint_fields"):
                     record = observation(row, ordinal, stream, build)
@@ -281,23 +196,15 @@ def extract(export_dir: Path, out_dir: Path) -> dict:
                     if record["structure"] is None:
                         reasons[record["status"]] += 1
                     handle.write(json.dumps(record, separators=(",", ":")) + "\n")
-        after = {str(path): sha(path) for path in paths}
-        if before != after or sha(Path(__file__)) != script_hash:
-            raise ValueError("input or extractor changed during read")
-        receipt = {"schema_version": SCHEMA_VERSION, "replay_build": build,
-                   "routes": {route: {"group_path": group, "field_name": name, "handle": ROUTE_HANDLE}
-                              for route, (group, name) in ROUTES.items()},
-                   "counts": dict(counts), "rejection_reasons": dict(reasons),
-                   "input_sha256_before": before, "input_sha256_after": after,
-                   "extractor_sha256": script_hash, "observations_sha256": sha(output),
-                   "scope": "Numeric FastArray boundaries; no field names, gameplay meanings, casts, or player attribution."}
-        (stage / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8",
-                                            newline="\n")
-        os.rename(stage, out_dir)
-        return receipt
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+        return {"schema_version": SCHEMA_VERSION, "replay_build": build,
+                "routes": {route: {"group_path": group, "field_name": name, "handle": ROUTE_HANDLE}
+                           for route, (group, name) in ROUTES.items()},
+                "counts": dict(counts), "rejection_reasons": dict(reasons),
+                "extractor_sha256": sha(Path(__file__)), "observations_sha256": sha(output),
+                "wire_bits_sha256": sha(Path(__file__).with_name("wire_bits.py")),
+                "scope": "Numeric FastArray boundaries; no field names, gameplay meanings, casts, or player attribution."}
+    return staged_output(export_dir, out_dir, ("manifest.json", *(f"{s}.parquet" for s in STREAMS)),
+                         write, prefix=".fastarray-")
 
 
 def main() -> int:

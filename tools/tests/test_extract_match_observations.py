@@ -137,6 +137,33 @@ class MatchObservationTests(unittest.TestCase):
         })
         self.assertEqual(result["attribution_coverage"]["round_balance_player"]["joined"], 3)
 
+    def test_weapon_scoped_rpcs_are_counted_per_ammo_decrease(self):
+        """Magazine 100's weapon is its outer 200, a dynamic actor with no
+        net_guids row; the decrease 30 -> 28 is at t=20."""
+        gun = "/Game/Equippables/Guns/Rifles/Test.Test_C_ClassNetCache"
+        other = [(21, 1, 201, 0, gun, observations.WEAPON_RPC, 7, None),
+                 (21, 1, 200, 0, "/Script/ShooterGame.X_ClassNetCache", observations.WEAPON_RPC, 7, None)]
+        for times, count, tally in (((), 0, "none"), ((21,), 1, "unique"),
+                                    ((15, 320), 2, "multiple"), ((321,), 0, "none")):
+            with self.subTest(times=times), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                write_export(root)
+                append_field_rows(root, other + [(t, 1, 200, 0, gun, observations.WEAPON_RPC, 7, None)
+                                                 for t in times])
+                result = observations.build(root)
+            self.assertEqual(result["ammo_changes"][0]["weapon_rpc_within_300ms"], count)
+            self.assertEqual(result["ammo_decrease_weapon_rpc_within_300ms"],
+                             {k: int(k == tally) for k in observations.WEAPON_RPC_TALLY})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            net = pq.read_table(root / "net_guids.parquet").to_pylist()
+            pq.write_table(pa.Table.from_pylist([dict(r, outer_net_guid=None) if r["net_guid"] == 100
+                                                 else r for r in net]), root / "net_guids.parquet")
+            result = observations.build(root)
+        self.assertIsNone(result["ammo_changes"][0]["weapon_rpc_within_300ms"])
+        self.assertEqual(result["ammo_decrease_weapon_rpc_within_300ms"]["no_weapon"], 1)
+
     def test_same_packet_conflict_is_not_value_sorted_into_a_change(self):
         changes, ambiguous = observations._changes([
             (10, 1, 0, 30),
@@ -256,17 +283,22 @@ class MatchObservationTests(unittest.TestCase):
             rows = observations.build(root)["reload_intervals"]
         self.assertTrue(rows[-1]["left_censored"])
 
-    def test_conflicting_guid_metadata_and_second_weapon_do_not_join(self):
+    def test_a_repeated_net_guid_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); write_export(root)
+            net = pq.read_table(root / "net_guids.parquet")
+            pq.write_table(pa.concat_tables([net, net.slice(0, 1)]), root / "net_guids.parquet")
+            with self.assertRaisesRegex(ValueError, "repeats"):
+                observations.build(root)
+
+    def test_a_second_weapons_magazine_does_not_join(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); write_export(root)
             net = pq.read_table(root / "net_guids.parquet")
             pq.write_table(pa.concat_tables([net, pa.table({
-                "net_guid": [100, 101, 100],
-                "path": ["MagazineAmmo", "MagazineAmmo", "MagazineAmmo"],
-                "outer_net_guid": [201, 201, 200],
+                "net_guid": [101], "path": ["MagazineAmmo"], "outer_net_guid": [201],
             })]), root / "net_guids.parquet")
             append_field_rows(root, [
-                (18, 1, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
                 (10, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 30, None),
                 (18, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
             ])
@@ -334,6 +366,24 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(balance["packet_id"], 1)
         self.assertEqual(balance["owner_controller_guid"], 42)
         self.assertEqual(balance["player_state_guid"], 600)
+
+    def test_a_cleared_owner_ends_the_round_balance_join(self):
+        """Owner 43 is cleared to 0 on both links (a disconnect), then a
+        balance is written: no controller holds it, so no player joins."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            append_field_rows(root, [
+                (95, 1, 602, 0, "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C", "Owner", 0, None),
+                (95, 2, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "Owner", 0, None),
+                (100, 1, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "RoundInfos[6].EndOfRoundMoney", 1300, None),
+            ])
+            result = observations.build(root)
+
+        balance = next(row for row in result["round_balances"] if row["round_info_slot"] == 6)
+        self.assertEqual((balance["owner_controller_guid"], balance["player_state_guid"],
+                          balance["player_join_source"]), (0, None, "unavailable"))
+        self.assertEqual(result["attribution_coverage"]["round_balance_player"]["joined"], 3)
 
     def test_packet_order_is_stable_when_source_rows_are_shuffled(self):
         samples = [
@@ -457,16 +507,6 @@ class MatchObservationTests(unittest.TestCase):
 
         self.assertEqual(result["money_decreases_in_team_switch_window"], [])
         self.assertIn(199, [row["time_ms"] for row in result["money_decreases"]])
-
-    def test_input_overwrite_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            for source_name in ("fields.parquet", "net_guids.parquet",
-                                "events.parquet", "manifest.json"):
-                with self.subTest(source_name=source_name):
-                    with self.assertRaisesRegex(ValueError, "input export file"):
-                        observations._reject_input_overwrite(root, root / source_name)
 
 
 if __name__ == "__main__":

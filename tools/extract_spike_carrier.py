@@ -8,18 +8,12 @@ resolves each owner NetGUID to a class and joins players to their manifest
 `subject`, from fields.parquet, actors.parquet and manifest.json alone. The
 export must type `Owner`/`Instigator` (value_i64); older ones do not.
 
-A player is every pawn a `SpawnedCharacter` value names (player_identity.py):
-on the 1,018-export corpus (2026-09-28) the manifest-only join left 123
-`Owner` writes in 32 exports `unknown`, every one an earlier pawn of a
-manifest player. `carrier_identity_provenance` says which pawn it was.
+A player is every pawn a `SpawnedCharacter` value names (player_identity.py),
+including one from before a reconnect; `carrier_identity_provenance` says which.
 
-Three signals overlap; `Owner` is the one used:
-
-  Owner                  custody, in the backpack too, not only in hand.
-  NewCharacter           `MulticastPlayBombPickedUpAudio`: fires only on a
-                         pickup, always agreeing with that tick's `Owner`; the
-                         cross-check that established `Owner`. Not read here.
-  NewCurrentEquippable   `AresInventory`: actually in hand, the `in_hand` flag.
+`Owner` is custody (in the backpack too); `AresInventory.NewCurrentEquippable`
+sets `in_hand`. The pickup RPC `MulticastPlayBombPickedUpAudio` always agrees
+with `Owner` and is not read.
 
 An EquippableGroundPickup_C (on the floor) or EquippablePickupProjectile_C
 (mid-air after a drop) owner means loose. Any other non-player owner, such as
@@ -91,10 +85,8 @@ def carrier_at(held, t_ms: int):
 
 
 def unresolved(rows, events) -> list[str]:
-    """What this extraction failed to resolve, as lines; any line makes the
-    exit nonzero. No custody at all (a valid, empty Parquet is otherwise a
-    success) and a plant with NO CARRIER (the chain from the `Owner` log to
-    `spikePlanted` dropped something)."""
+    """What this extraction failed to resolve, one line each; any line makes
+    the exit nonzero: no custody at all, or a plant with NO CARRIER."""
     problems = []
     if not rows:
         problems.append(
@@ -114,10 +106,8 @@ def load(out_dir: Path):
         if not (out_dir / name).exists():
             raise SystemExit(f"no {name} in {out_dir} -- run `vrfkit export` first")
 
-    # Filtered in Arrow: converting whole columns to Python took ~90% of the
-    # run (4.7 s of 4.8 s on a 1.66M-row 12.09 export) for ~1% of the rows.
-    # Table.filter keeps physical row order, which the first Instigator
-    # write per actor depends on.
+    # Filtered in Arrow (~1% of the rows are read); the first Instigator write
+    # per actor depends on the physical order Table.filter keeps.
     fields = pq.read_table(out_dir / "fields.parquet", columns=list(FIELD_COLUMNS))
     fields = fields.filter(pc.is_in(fields.column("field_name"),
                                     value_set=pa.array(FIELD_NAMES)))
@@ -140,9 +130,8 @@ def load(out_dir: Path):
 def build(out_dir: Path):
     f, a, manifest, events = load(out_dir)
 
-    # Dynamic actors (the spike, pawns) appear only in actors.parquet. No GUID
-    # on the sample export has two class paths, so a flat map is safe; one that
-    # recycles GUIDs would need time scoping.
+    # Dynamic actors (the spike, pawns) appear only in actors.parquet. A flat
+    # map: a GUID recycled for another class would need time scoping.
     guid_class: dict[int, str] = {}
     for g, cp in zip(a["actor_net_guid"], a["class_path"]):
         if cp:
@@ -161,8 +150,7 @@ def build(out_dir: Path):
     bodies = load_player_bodies(out_dir, manifest)
     pawn_subject = bodies.subjects
 
-    # Round boundaries from roundStarted events. Metadata that is not an
-    # integer gives a null round_number, a visible absence, not an ordinal.
+    # Non-integer roundStarted metadata gives a null round_number.
     round_starts: list[tuple[int, int | None]] = []
     malformed_round_meta = 0
     for grp, t1, meta in zip(events.get("group", []), events.get("time1", []),
@@ -214,9 +202,7 @@ def build(out_dir: Path):
                 "to_ms": end,
                 "duration_ms": (end - t) if end is not None else None,
                 "owner_net_guid": owner,
-                # A failed lookup is None, never "": `leaf()` and
-                # `classify_owner()` use "" internally, which would group as a
-                # real category.
+                # None, never "": "" would group as a real category.
                 "owner_class": leaf(cls) or None,
                 "holder_kind": kind,
                 "carrier_pawn_guid": carrier,
@@ -270,7 +256,6 @@ def main() -> int:
         print(f"  {k:8s} {n}")
     print(f"  malformed roundStarted metadata: {malformed_round_meta} "
           f"(round_number is null for the interval(s) it touches)")
-    # Printed with its zero, like the line above.
     earlier = sum(r["carrier_identity_provenance"] == EARLIER_PROVENANCE for r in rows)
     print(f"  carried by an earlier SpawnedCharacter pawn: {earlier} interval(s); "
           f"player identity: {json.dumps(identity, sort_keys=True)}")
@@ -280,8 +265,7 @@ def main() -> int:
           f"with a carrier {len({r['round_number'] for r in held})}, "
           f"bombs {len({r['bomb_net_guid'] for r in rows})}")
 
-    # The carrier at plant time: the join's answer, not a check, since
-    # `spikePlanted` names no planter; `unresolved` fails a NO CARRIER.
+    # The carrier at plant time is the join's answer: `spikePlanted` names no planter.
     for grp, t1 in zip(events.get("group", []), events.get("time1", [])):
         if grp != "spikePlanted":
             continue

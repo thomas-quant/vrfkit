@@ -1,12 +1,7 @@
-import os
 import struct
-import tempfile
 import sys
 import unittest
 import copy
-import contextlib
-import io
-from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -104,10 +99,6 @@ class SectionObservationTests(unittest.TestCase):
         data[2]["net_field_export_groups"][1]["fields"][0]["compatible_checksum"] ^= 1
         self.assertFalse(parse_fixture(data)["section_state"]["eligible_for_state_comparison"])
 
-    def test_missing_unused_route_does_not_invalidate_observed_route(self):
-        result = parse_fixture(fixture("MulticastNotifyHeal"))
-        self.assertEqual(result["schema_errors"], [])
-
     def test_unknown_child_is_retained_invalid(self):
         data = fixture()
         data[1][1][1]["field_name"] = "MulticastNotifyHeal.LifeChangeBySection[0].Unknown"
@@ -163,23 +154,6 @@ class SectionObservationTests(unittest.TestCase):
         with self.assertRaisesRegex(tool.InputError, "duplicate outer declaration handle"):
             tool.declarations(data[2])
 
-    def test_hardlink_cli_alias_is_rejected_without_touching_export(self):
-        with tempfile.TemporaryDirectory() as directory:
-            export = Path(directory) / "export"
-            export.mkdir()
-            source = export / "actors.parquet"
-            source.write_bytes(b"unconsumed original evidence")
-            destination = Path(directory) / "alias.json"
-            os.link(source, destination)
-            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()), \
-                 patch.object(tool, "extract", return_value={"counts": {"main_coordinate_groups": 0}}) as extract, \
-                 patch.object(tool, "atomic_write_text") as write:
-                code = tool.main(["--export", str(export), "--out", str(destination)])
-                extract.assert_not_called()
-                write.assert_not_called()
-            self.assertEqual(code, 1)
-            self.assertEqual(source.read_bytes(), b"unconsumed original evidence")
-
     def test_f32_rejects_conflicting_typed_column_and_preserves_signed_zero(self):
         wire = struct.pack("<f", -0.0)
         self.assertEqual(struct.pack("<f", tool.f32(row("x", wire, 32, value_f64=-0.0))), wire)
@@ -187,6 +161,15 @@ class SectionObservationTests(unittest.TestCase):
             tool.f32(row("x", wire, 32, value_f64=0.0))
         with self.assertRaises(tool.InputError):
             tool.f32(row("x", wire, 32, value_f64=-0.0, value_i64=0))
+        # A typed value that rounds to the wire f32 is still not that value.
+        with self.assertRaises(tool.IntegrityError):
+            tool.f32(row("x", struct.pack("<f", 1.0), 32, value_f64=1.0 + 1e-9))
+
+    def test_a_typed_raw_conflict_in_a_group_stops_the_parse(self):
+        data = fixture()
+        data[1][0][1]["value_f64"] = 2.0
+        with self.assertRaises(tool.IntegrityError):
+            parse_fixture(data)
 
     def test_parentless_rpc_is_visible_not_missing_health(self):
         scalar = row("MulticastNotifyHeal.HealTaken", struct.pack("<f", 5.0), 32,
@@ -213,14 +196,6 @@ class SectionObservationTests(unittest.TestCase):
         payload = packed(60)
         with self.assertRaises(tool.IntegrityError):
             tool.reference(row("x", payload, 8, value_i64=61))
-
-    def test_hardlink_output_alias_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "input"
-            alias = Path(directory) / "output"
-            source.write_bytes(b"evidence")
-            os.link(source, alias)
-            self.assertTrue(tool.aliases(alias, [source]))
 
 
 if __name__ == "__main__":

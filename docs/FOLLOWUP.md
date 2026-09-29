@@ -68,12 +68,6 @@ two audited time fields add 37,549,404 verified main values and 52,306
 checkpoint values. Their 32-bit Float wire type is established; their exact
 game-side epochs are not.
 
-`extract_ability_stats.py` paired 155,150 serialized array-element snapshots
-across all 714 exports, including checkpoints, with zero structural issues,
-unknown mappings or collisions. Builds 13.01, 13.02 and 13.04 exposed 31 IDs;
-13.05 exposed 32. These counts are replicated snapshots, not ability casts,
-and unobserved IDs remain unknown.
-
 `extract_match_observations.py` also ran over all 714 exports. Its outputs are
 evidence-labelled state changes and snapshots: 2,369,843 ammo changes,
 4,677,915 equip intervals, 123,073 reload intervals, 2,596,769 defuse progress

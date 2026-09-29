@@ -101,8 +101,8 @@ class PlayerEffectTests(unittest.TestCase):
                 "group_path": group, "field_name": name, "value_i64": value}
 
     def reconnect(self, extra=()):
-        """39c2bb2c (13.05): PlayerState 256 is given 1510, loses it on a
-        disconnect, and reconnects as 45530 -- the manifest keeps 45530."""
+        """PlayerState 256 is given 1510, loses it on a disconnect, and
+        reconnects as 45530 -- the manifest keeps 45530."""
         players = [{"actor_net_guid": 256, "subject": "reconnected",
                     "character_net_guid": 45530}]
         fields = [self.spawned(256, 1510, 66), self.spawned(256, 0, 1851838),

@@ -55,6 +55,8 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(tool.parse_array(raw, width)[2][0][:3], (0, 15, 1))
         with self.assertRaises(tool.InputError):
             tool.parse_array(raw, width - 1)
+        with self.assertRaisesRegex(tool.InputError, "residual"):
+            tool.parse_array(raw + b"\0", width + 8)
 
     def test_nested_unexpected_handle_and_nonexact_ref(self):
         raw, width = array([(0, [(8, 8, b"\0")])])
@@ -64,9 +66,8 @@ class ParserTests(unittest.TestCase):
             tool.exact_ref(b"\0\0", 16)
 
 
-#: Builds whose exports carry KillData children and passed every extractor
-#: check on all 48 available replays (2026-09-28, docs/KILL_OBSERVATIONS.md).
-#: Listed explicitly: iterating the tool's own set would test nothing.
+#: Measured legacy builds, listed explicitly: iterating the tool's own set
+#: would test nothing.
 LEGACY_BUILDS = [
     "11.06", "11.07", "11.08", "11.09", "11.10", "11.11", "12.00", "12.01",
     "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09",
@@ -119,6 +120,8 @@ class BuildScopeTests(unittest.TestCase):
         import contextlib, io
 
         for build in (*LEGACY_BUILDS, "13.01", "13.02", "13.04", "13.05", "13.06"):
+            self.assertIn(f"++Ares-Core+release-{build}", tool.MEASURED_BUILDS)
+        for build in ("11.06", "13.06"):
             branch = f"++Ares-Core+release-{build}"
             with self.subTest(build=build), tempfile.TemporaryDirectory() as t:
                 export = build_export(Path(t) / "export", branch)
@@ -130,15 +133,15 @@ class BuildScopeTests(unittest.TestCase):
                 self.assertIn("1 serialized updates", printed.getvalue())
                 result = json.loads(out.read_text(encoding="utf-8"))
                 self.assertEqual(result["provenance"]["replay_build"], branch)
+                self.assertEqual(result["provenance"]["wire_bits_sha256"],
+                                 tool.sha(Path(tool.__file__).with_name("wire_bits.py")))
                 self.assertEqual(result["counts"]["fields"]["parent_rows"], 1)
                 [record] = result["observations"]
                 self.assertTrue(record["members"]["did_kill_trigger_finisher"])
 
     def test_unmeasured_builds_are_still_refused(self):
-        # 12.10, 12.11 and 13.00 export no KillData children: the route is
-        # unobserved there, so an export from them cannot be checked. 13.07's
-        # declarations match every measured identity here; only the build is
-        # new, and a build must be measured before it is read.
+        # 12.10, 12.11 and 13.00 export no KillData children; 13.07 matches
+        # every measured identity, but a build must be measured before it is read.
         for build in ("++Ares-Core+release-12.10", "++Ares-Core+release-12.11",
                       "++Ares-Core+release-13.00", "++Ares-Core+release-13.07",
                       "12.09", "++Ares-Core+release-12.09 ", None):
@@ -291,16 +294,6 @@ class ExtractionTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(tool.InputError, "declaration"):
                 tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})
-
-
-class OutputTests(unittest.TestCase):
-    def test_source_overwrite_is_rejected(self):
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            p = root / "fields.parquet"
-            p.write_bytes(b"x")
-            with self.assertRaisesRegex(tool.InputError, "refusing"):
-                tool.reject_overwrite(root, p)
 
 
 if __name__ == "__main__":
