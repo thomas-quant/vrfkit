@@ -39,9 +39,9 @@ pub trait FieldSink {
 }
 
 /// The record a walk is inside, so the caller can name the failing record in a
-/// `StreamFailure`. Diagnostics only: the untracked entry points leave it
-/// alone; the `_tracked` variants fill one in, as the pipeline's content-block
-/// walks do when the sink's `wants_stream_failure_details` asks.
+/// `StreamFailure`. Diagnostics only: the pipeline's content-block walks fill
+/// one in when the sink's `wants_stream_failure_details` asks;
+/// [`parse_rep_layout`] and [`parse_class_net_cache`] never do.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WalkContext {
     /// Bit offset inside the block where the current record begins, set
@@ -109,16 +109,6 @@ pub fn parse_rep_layout(
     sink: &mut dyn FieldSink,
 ) -> Result<(u32, u64)> {
     let (count, remainder) = parse_rep_layout_impl(reader, sink, None, false).into_result()?;
-    Ok((count, remainder.bit_count()))
-}
-
-/// [`parse_rep_layout`] with failure-position tracking. See [`WalkContext`].
-pub fn parse_rep_layout_tracked(
-    reader: &mut BitReader<'_>,
-    sink: &mut dyn FieldSink,
-    ctx: &mut WalkContext,
-) -> Result<(u32, u64)> {
-    let (count, remainder) = parse_rep_layout_impl(reader, sink, Some(ctx), false).into_result()?;
     Ok((count, remainder.bit_count()))
 }
 
@@ -219,16 +209,6 @@ pub fn parse_class_net_cache(
     sink: &mut dyn FieldSink,
 ) -> Result<(u32, u64)> {
     parse_class_net_cache_impl(reader, function_count, sink, None).into_result()
-}
-
-/// [`parse_class_net_cache`] with failure-position tracking. See [`WalkContext`].
-pub fn parse_class_net_cache_tracked(
-    reader: &mut BitReader<'_>,
-    function_count: u32,
-    sink: &mut dyn FieldSink,
-    ctx: &mut WalkContext,
-) -> Result<(u32, u64)> {
-    parse_class_net_cache_impl(reader, function_count, sink, Some(ctx)).into_result()
 }
 
 pub(crate) fn parse_class_net_cache_content_block(
@@ -490,7 +470,7 @@ mod tests {
     /// failed record. This is the measured CachedAttributeSet shape: handle 61
     /// decodes successfully, then a zero terminator leaves a tail behind.
     #[test]
-    fn tracked_early_terminator_clears_previous_handle() {
+    fn walk_context_early_terminator_clears_previous_handle() {
         let mut bits = Vec::new();
         bits.push(false); // checksum
         write_int_packed(&mut bits, 62); // encoded handle 62 -> handle 61
@@ -504,12 +484,15 @@ mod tests {
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let mut context = WalkContext::default();
-        let (count, abandoned) =
-            parse_rep_layout_tracked(&mut reader, &mut sink, &mut context).unwrap();
+        let WalkOutcome::Complete { count, remainder } =
+            parse_rep_layout_content_block(&mut reader, &mut sink, Some(&mut context))
+        else {
+            panic!("valid prefix and tail must complete")
+        };
 
         assert_eq!(count, 1);
         assert_eq!(sink.fields, vec![(61, 16)]);
-        assert_eq!(abandoned, 8);
+        assert_eq!(remainder, RepLayoutRemainder::ClassNetCache(8));
         assert_eq!(context.record_offset, terminator_offset);
         assert_eq!(context.last_handle, None);
     }
