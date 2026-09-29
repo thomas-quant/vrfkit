@@ -18,10 +18,8 @@ mod measured_routes;
 mod paths;
 mod rpc;
 mod stream;
-mod totals;
 
-pub use failure_stats::FailureAggregate;
-pub(crate) use totals::SinkTotals;
+pub use failure_stats::{FailureAggregate, MAX_FAILURE_CELLS};
 
 use std::sync::Arc;
 
@@ -83,11 +81,6 @@ pub struct ChannelState {
 }
 
 impl ChannelState {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Record one stream failure, up to the cap.
     pub fn push_stream_failure(&mut self, line: String) {
         if self.stream_failures.len() < MAX_STREAM_FAILURE_RECORDS {
@@ -127,14 +120,22 @@ impl ChannelState {
     }
 }
 
-/// Counters the driver aggregates across packets.
+/// Everything one pass's sink counted: `Pass::walk` lends the pass's totals
+/// to each packet's sink, so they accumulate in place.
 #[derive(Debug, Clone, Default)]
 pub struct ExportStats {
+    /// Every row `push_field` wrote: the `fields.parquet` (or
+    /// `checkpoint_fields.parquet`) row count, not NetStats' `fields`.
     pub fields_emitted: u64,
+    /// The sink's own count of four events vrf-net counts beside the same
+    /// callbacks, so each must equal its `NetStats` twin: a difference is a
+    /// missing or extra `+= 1` here, never framing. The manifest prefixes them
+    /// `sink_`; `tools/verify_build_corpus.py` fails a replay whose pair differs.
     pub rpcs_emitted: u64,
     pub actor_opens: u64,
     pub actor_closes: u64,
     pub content_blocks: u64,
+    /// Its `error_report` holds the pass's decode errors.
     pub overlay: OverlayStats,
     pub array: ArrayDecodeStats,
     /// Exact 24-bit `TrackedRewards` windows with the measured opaque zero
@@ -187,7 +188,8 @@ pub struct ExportStats {
     /// run with no match score.
     pub struct_blobs_failed: u64,
 
-    /// The first failure verbatim, so the summary can name the member and handle.
+    /// The first failure verbatim, never overwritten: it names the member and
+    /// handle a build moved.
     pub struct_blob_first_error: Option<String>,
 
     /// Movement-decode problems: soft errors counted per occurrence
@@ -233,6 +235,58 @@ pub struct ExportStats {
 
     /// Typed world-location children emitted from the guarded map-click array.
     pub targeting_world_locations_decoded: u64,
+}
+
+/// `counters` and `counters_mut` over one list per struct. Each destructure
+/// has no `..`, so a new counter does not compile until it is listed, and each
+/// name is its field's (the decoder structs' prefixed).
+macro_rules! export_counters {
+    ($($prefix:literal $ty:ident $(.$place:ident)? { $($field:ident),* } except { $($skip:ident),* })*) => {
+        impl ExportStats {
+            /// Every counter by its published name; the two first-error strings
+            /// and the overlay's error report are not counters.
+            pub(crate) fn counters(&self) -> Vec<(&'static str, u64)> {
+                let mut all = Vec::new();
+                $({
+                    let $ty { $(ref $field,)* $($skip: _,)* } = (*self)$(.$place)?;
+                    all.extend([$((concat!($prefix, stringify!($field)), *$field)),*]);
+                })*
+                all
+            }
+
+            /// [`Self::counters`], writable.
+            #[cfg(all(test, feature = "export"))]
+            pub(crate) fn counters_mut(&mut self) -> Vec<(&'static str, &mut u64)> {
+                let mut all = Vec::new();
+                $({
+                    let $ty { $(ref mut $field,)* $($skip: _,)* } = (*self)$(.$place)?;
+                    all.extend([$((concat!($prefix, stringify!($field)), $field)),*]);
+                })*
+                all
+            }
+        }
+    };
+}
+
+export_counters! {
+    "" ExportStats {
+        fields_emitted, rpcs_emitted, actor_opens, actor_closes, content_blocks,
+        tracked_rewards_opaque_empty_variants, active_blinds_empty_trailers, effect_blobs_decoded,
+        struct_blobs_decoded, multi_contents_items_emitted, cnc_rpcs_emitted,
+        cnc_bruteforce_payloads_attempted, cnc_bruteforce_payloads_unwalked,
+        rep_layout_cnc_tails_decoded, rep_layout_cnc_tails_preserved, struct_blobs_failed,
+        movement_rpc_errors, movement_sized_section_tails, movement_sized_section_tail_bits,
+        movement_open_section_tails, movement_open_section_tail_bits, movement_envelope_trailers,
+        movement_envelope_trailer_bits, truncated_rpcs, rpc_suffix_bits_dropped,
+        array_leaf_decode_errors, targeting_world_locations_decoded
+    } except { overlay, array, struct_blob_first_error, movement_first_error }
+    "overlay_" OverlayStats.overlay {
+        decoded_ok, decoded_err, raw_or_skip, not_in_table, no_field_name, handle_conflicts_refused
+    } except { error_report }
+    "array_" ArrayDecodeStats.array {
+        elements_decoded, fields_emitted, truncations, errors, unconsumed_nested_bits,
+        unconsumed_root_bits, implicit_terminations
+    } except {}
 }
 
 impl ExportStats {
@@ -282,7 +336,7 @@ impl ExportStats {
 }
 
 #[cfg(test)]
-mod movement_stats_tests {
+mod stats_tests {
     use super::ExportStats;
     use vrf_movement::{MovementError, RpcDecodeResult};
 
@@ -344,6 +398,41 @@ mod movement_stats_tests {
         assert_eq!(hard.movement_rpc_errors, 1);
         let msg = hard.movement_first_error.expect("first error recorded");
         assert!(msg.contains("sentinel"), "got: {msg}");
+    }
+
+    /// Two struct blobs that fail differently: both are counted and the first
+    /// failure's text stays (`Pass::walk` lends one `ExportStats` to every
+    /// packet, so this holds across packets too).
+    #[test]
+    fn a_later_struct_blob_failure_keeps_the_first_error() {
+        use std::sync::Arc;
+        use vrf_bitio::BitReader;
+        use vrf_net::field::FieldSink;
+        let group = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
+        let mut rig = super::test_fixtures::Rig::default();
+        let export_group = vrf_schema::NetFieldExportGroup::new(group.into(), 7, 8);
+        rig.cache.add_export_group(export_group).unwrap();
+        let field = vrf_schema::NetFieldExport {
+            handle: 1,
+            compatible_checksum: 0,
+            name: "RoundResults".into(),
+        };
+        assert!(rig.cache.set_field_on_group(7, field));
+        let mut sink = rig.sink();
+        sink.set_current_group_path(Arc::from(group));
+        for bits in [3u32, 40] {
+            sink.on_field(
+                1,
+                bits,
+                BitReader::with_bit_len(&[0xFF; 8], u64::from(bits)).unwrap(),
+            );
+        }
+        assert_eq!(sink.stats.struct_blobs_failed, 2);
+        let first = sink.stats.struct_blob_first_error.as_deref().unwrap();
+        assert!(
+            first.contains("needed 8 bit(s) at position 0 of 3"),
+            "{first}"
+        );
     }
 }
 

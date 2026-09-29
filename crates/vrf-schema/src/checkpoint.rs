@@ -115,10 +115,14 @@ pub trait CheckpointTableSink {
 pub enum CheckpointReadError<E> {
     #[error(transparent)]
     Schema(#[from] SchemaError),
-    #[error(transparent)]
-    Bit(#[from] BitError),
     #[error("checkpoint table observer failed")]
     Sink(E),
+}
+
+impl<E> From<BitError> for CheckpointReadError<E> {
+    fn from(error: BitError) -> Self {
+        Self::Schema(error.into())
+    }
 }
 
 /// The largest corpus checkpoint carries about 12,000 guid entries.
@@ -139,7 +143,7 @@ pub struct CheckpointTables {
     /// Byte offset where the DemoFrame begins.
     pub frame_offset: usize,
     /// Entries whose path arrived as an index into the literal paths (not an EName).
-    pub hardcoded_paths: u32,
+    pub indexed_paths: u32,
     /// Literal GUID-path entries read, in either mode.
     pub literal_paths: u32,
     /// Wire indices resolved through preceding literal paths.
@@ -183,7 +187,6 @@ pub fn read_checkpoint_tables(data: &[u8], cache: &mut NetGuidCache) -> Result<C
     match read_checkpoint_tables_with_sink(data, cache, &mut sink) {
         Ok(tables) => Ok(tables),
         Err(CheckpointReadError::Schema(error)) => Err(error),
-        Err(CheckpointReadError::Bit(error)) => Err(SchemaError::Bitio(error)),
         Err(CheckpointReadError::Sink(never)) => match never {},
     }
 }
@@ -231,7 +234,7 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         .into());
     }
 
-    let mut hardcoded_paths = 0u32;
+    let mut indexed_paths = 0u32;
     let mut literal_paths = Vec::new();
     let mut literal_count = 0u32;
     let mut resolved_path_indices = 0u32;
@@ -249,7 +252,7 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
                 (true, path, None)
             }
             0 => {
-                hardcoded_paths += 1;
+                indexed_paths += 1;
                 let index = reader.read_int_packed()?;
                 let path = match mode {
                     CheckpointPathMode::LegacyDecimal => index.to_string(),
@@ -387,7 +390,7 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         group_count,
         exported_fields,
         frame_offset: map_end,
-        hardcoded_paths,
+        indexed_paths,
         literal_paths: literal_count,
         resolved_path_indices,
     })
@@ -719,7 +722,7 @@ mod tests {
         assert_eq!(measured.frame_offset, legacy.frame_offset);
         assert_eq!(measured.guid_count, legacy.guid_count);
         assert_eq!(measured.exported_fields, legacy.exported_fields);
-        assert_eq!(measured.hardcoded_paths, 2);
+        assert_eq!(measured.indexed_paths, 2);
         assert_eq!(measured.literal_paths, 2);
         assert_eq!(legacy.literal_paths, 2);
         assert_eq!(measured.resolved_path_indices, 2);
@@ -858,7 +861,7 @@ mod tests {
         assert_eq!(t.guid_count, 2);
         assert_eq!(t.group_count, 1);
         assert_eq!(t.exported_fields, 2);
-        assert_eq!(t.hardcoded_paths, 1);
+        assert_eq!(t.indexed_paths, 1);
         assert_eq!(t.frame_offset, archive.len() - 32);
         assert_eq!(cache.get_path_by_guid(7), Some("/Game/Maps/Ascent/Ascent"));
         // The non-observer wrapper also uses the checkpoint-local path table.

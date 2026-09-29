@@ -6,8 +6,8 @@ tables too, under `--checkpoints`), checked three ways:
 
   1. CROSS-CHECK: the counters that are Parquet row counts
      (`cross_check_identities`) must equal them, baseline or not; a counter
-     the summary did not print fails too. fields.parquet has no such
-     identity (it also carries RPC parameters and array leaves).
+     the summary did not print fails too. fields.parquet's is the sink's
+     `Sink tally` fields (NetStats' `Fields:` counts framed properties only).
   2. MANIFEST: the counts the manifest publishes beside the summary
      (`MANIFEST_CHECKS`) must agree with it, and under `--checkpoints` every
      checkpoint GUID path must match the main stream's own declaration
@@ -70,6 +70,7 @@ def cross_check_identities(counters: dict, parquet: dict) -> list:
         ("NetGUID rows", counters.get("net_guid_rows"), parquet["net_guids"]["rows"]),
         ("Movement rows", counters.get("movement_rows"), parquet["movement"]["rows"]),
         ("Event rows", counters.get("event_rows"), parquet["events"]["rows"]),
+        ("Sink tally fields", counters.get("fields_emitted"), parquet["fields"]["rows"]),
         (
             "Partial raw rows (main + checkpoint)",
             None if counters.get("partial_rows") is None or counters.get("cp_partial_rows", 0) is None
@@ -84,6 +85,9 @@ def cross_check_identities(counters: dict, parquet: dict) -> list:
             parquet["actors"]["rows"],
         ),
     ]
+    if "cp_fields_emitted" in counters or "checkpoint_fields" in parquet:
+        identities.append(("Checkpoint sink fields", counters.get("cp_fields_emitted"),
+                           parquet.get("checkpoint_fields", {}).get("rows")))
     if "cp_actor_rows_written" in counters or "checkpoint_actors" in parquet:
         identities.append(("Checkpoint actors", counters.get("cp_actor_rows_written"),
                            parquet.get("checkpoint_actors", {}).get("rows")))

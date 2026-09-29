@@ -22,7 +22,6 @@ use crate::field::{self, RepLayoutRemainder};
 use crate::stats::NetStats;
 use crate::types::NetworkGuid;
 
-#[cfg(feature = "diagnostics")]
 use crate::stats::{BunchFlagSnapshot, ContentBlockHeaderSnapshot, DiagnosticEvent, SkipReason};
 
 use super::{
@@ -30,9 +29,7 @@ use super::{
 };
 
 /// Per-bunch context. Only the channel (`header.ch_index`) and the actor are
-/// read on the success path; the rest feeds diagnostic events, which is why
-/// they are threaded through a build without that feature ([`super::BunchIds`]).
-#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+/// read on the success path; the rest feeds diagnostic events.
 pub(super) struct BunchContext<'a> {
     pub header: &'a RawBunchHeader,
     pub ids: super::BunchIds,
@@ -42,7 +39,6 @@ pub(super) struct BunchContext<'a> {
 }
 
 /// Why a block produced a diagnostic event, with what it had read by then.
-#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum Failure<'h> {
     HeaderRead,
@@ -66,20 +62,14 @@ pub(super) fn frame_content_blocks(
 
     while !payload.at_end() {
         let block_start = payload.position();
-        let abort_at = |payload: &mut BitReader<'_>, stats: &mut NetStats, consumed, failure| {
-            abort(
-                payload,
-                stats,
-                ctx,
-                block_index,
-                block_start,
-                consumed,
-                failure,
-            );
-        };
+        let abort_at =
+            |payload: &mut BitReader<'_>, stats: &mut NetStats, sink, consumed, failure| {
+                let at = (ctx, block_index, block_start);
+                abort(payload, stats, sink, at, consumed, failure);
+            };
 
         let Ok(header) = content::read_content_block_header(payload, actor_net_guid, sink) else {
-            return abort_at(payload, stage.stats, block_start, Failure::HeaderRead);
+            return abort_at(payload, stage.stats, sink, block_start, Failure::HeaderRead);
         };
 
         if header.is_deleted {
@@ -93,12 +83,12 @@ pub(super) fn frame_content_blocks(
         let bits_start = payload.position();
         let Ok(content_bits) = payload.read_int_packed() else {
             let failure = Failure::ContentBitsRead(&header);
-            return abort_at(payload, stage.stats, bits_start, failure);
+            return abort_at(payload, stage.stats, sink, bits_start, failure);
         };
         if u64::from(content_bits) > payload.bits_remaining() {
             let consumed = payload.position();
             let failure = Failure::Overrun(&header, content_bits);
-            return abort_at(payload, stage.stats, consumed, failure);
+            return abort_at(payload, stage.stats, sink, consumed, failure);
         }
 
         let function_count = sink.on_content_block(ch_index, actor_net_guid, &header);
@@ -124,19 +114,16 @@ pub(super) fn frame_content_blocks(
             let remaining = payload.len_bits() - payload_start;
             let failure = Failure::Parse(&header, content_bits);
             let skipped = u64::from(content_bits);
-            record(
-                stage.stats,
-                ctx,
-                block_index,
-                payload_start,
-                remaining,
-                skipped,
-                failure,
-            );
+            let at = (ctx, block_index, payload_start);
+            record(stage.stats, sink, at, remaining, skipped, failure);
         }
         block_index += 1;
     }
 }
+
+/// Where an event happened: the bunch, the block index within it, and a bit
+/// position -- `block_start` in `abort`, the event's `consumed_bits` in `record`.
+type At<'c, 'h> = (&'c BunchContext<'h>, u32, u64);
 
 /// Abandon the rest of the bunch after a framing failure in the block that
 /// began at `block_start`; `consumed` is the event's `consumed_bits`.
@@ -148,9 +135,8 @@ pub(super) fn frame_content_blocks(
 fn abort(
     payload: &mut BitReader<'_>,
     stats: &mut NetStats,
-    ctx: &BunchContext<'_>,
-    block_index: u32,
-    block_start: u64,
+    sink: &dyn ReplicationSink,
+    (ctx, block_index, block_start): At<'_, '_>,
     consumed: u64,
     failure: Failure<'_>,
 ) {
@@ -162,31 +148,21 @@ fn abort(
     } else {
         stats.content_block_framing_failures += 1;
     }
-    record(
-        stats,
-        ctx,
-        block_index,
-        consumed,
-        remaining,
-        abandoned,
-        failure,
-    );
+    let at = (ctx, block_index, consumed);
+    record(stats, sink, at, remaining, abandoned, failure);
     payload.skip_remaining();
 }
 
-/// Record one diagnostic event. Without the `diagnostics` feature the body is
-/// empty, so the loop reads the same in both builds and the call optimises away.
-#[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
+/// Record one diagnostic event (built only if the capped log keeps it), with
+/// the actor's and archetype's paths as the sink's GUID cache holds them now.
 fn record(
     stats: &mut NetStats,
-    ctx: &BunchContext<'_>,
-    block_index: u32,
-    consumed_bits: u64,
+    sink: &dyn ReplicationSink,
+    (ctx, block_index, consumed_bits): At<'_, '_>,
     remaining_bits: u64,
     bits_skipped: u64,
     failure: Failure<'_>,
 ) {
-    #[cfg(feature = "diagnostics")]
     stats.record_diagnostic(|| {
         let (reason, block, content_bits) = match failure {
             Failure::HeaderRead => (SkipReason::HeaderReadError, None, None),
@@ -204,6 +180,7 @@ fn record(
             Failure::Parse(block, bits) => (SkipReason::ParseFailure, Some(block), Some(bits)),
         };
         let h = ctx.header;
+        let path = |guid: NetworkGuid| sink.path_for_guid(guid.0).map(str::to_owned);
         DiagnosticEvent {
             reason,
             packet_id: h.packet_id,
@@ -212,9 +189,9 @@ fn record(
             channel_bunch_index: ctx.ids.channel_bunch_index,
             channel_index: h.ch_index,
             actor_net_guid: ctx.actor_net_guid.0,
-            actor_path: None,
+            actor_path: path(ctx.actor_net_guid),
             archetype_net_guid: ctx.archetype_net_guid.0,
-            class_path: None,
+            class_path: path(ctx.archetype_net_guid),
             bunch_flags: BunchFlagSnapshot {
                 b_open: h.b_open,
                 b_close: h.b_close,
@@ -412,7 +389,7 @@ fn report(
     stats.skipped_bits += charge;
 }
 
-#[cfg(all(test, feature = "diagnostics"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::stats::SkipReason;
@@ -445,8 +422,18 @@ mod tests {
             ..Default::default()
         };
         let mut stats = NetStats::default();
+        let mut sink = super::super::tests::TestSink::default();
+        sink.guid_paths
+            .insert(9, "/Game/Default__Archetype_C".into());
 
-        record(&mut stats, &ctx, 3, 120, 80, 33, Failure::Parse(&block, 33));
+        record(
+            &mut stats,
+            &sink,
+            (&ctx, 3, 120),
+            80,
+            33,
+            Failure::Parse(&block, 33),
+        );
 
         assert_eq!(stats.diagnostics.len(), 1);
         assert_eq!(stats.diagnostics_dropped, 0);
@@ -465,6 +452,8 @@ mod tests {
             (ev.channel_index, ev.actor_net_guid, ev.archetype_net_guid),
             (5, 2, 9)
         );
+        let paths = (ev.actor_path.as_deref(), ev.class_path.as_deref());
+        assert_eq!(paths, (None, Some("/Game/Default__Archetype_C")));
         assert_eq!(ev.block_index_in_bunch, 3);
         assert_eq!((ev.consumed_bits, ev.remaining_bits), (120, 80));
         assert_eq!(ev.content_bits, Some(33));

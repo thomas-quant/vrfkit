@@ -52,7 +52,7 @@ SINK_ZERO = (
 )
 #: Each sink event tally and the NetStats counter it must equal: vrf-net calls
 #: the sink beside its own increment, so a difference is broken bookkeeping.
-#: `fields_emitted` has no pair: it counts rows, not framed properties.
+#: `fields_emitted` pairs with fields.parquet's rows instead (`check_export`).
 SINK_NET_EQUAL = (
     ("sink_rpcs_emitted", "rpcs"),
     ("sink_actor_opens", "actor_opens"),
@@ -79,7 +79,7 @@ def manifest_counts(manifest):
     counts, failures = {}, []
     for key in ("content_blocks_lost", "event_trailing_bytes",
                 "replay_data_trailing_bytes", "event_layout_mismatches",
-                "overlay_error_buckets", "overlay_errors_reported"):
+                "overlay_error_buckets", "overlay_errors_reported", "unknown_chunks"):
         counts[key] = require_count(quality, key)
         if counts[key]:
             failures.append(f"{key}={counts[key]}")

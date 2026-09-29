@@ -666,7 +666,8 @@ Every loss and fallback counter for the run, including the checkpoint pass when
 | `frame_non_finite_times` | DemoFrames whose time was NaN or infinite; their packets carry 0 ms. `checkpoints.checkpoint_frame_non_finite_times` counts the snapshot frames. Printed as `Frame times:` (`Checkpoint frame times:`), and by `validate`. |
 | `checkpoints.checkpoint_trailing_bytes` | Checkpoint bytes no reader consumed: bytes after an archive inside its chunk, and archive bytes the Oodle codec never read -- the checkpoint twin of `replay_data_trailing_bytes`. Printed as `Trailing bytes:` under `=== Checkpoints ===`, and by `diag --json` as `checkpoint_meta.trailing_bytes`. 0 in all 19,166 checkpoint archives of 1,014 replays, 11.06-13.06 (census, 2026-09-28); `verify_build_corpus.py` fails a replay where it is not. |
 
-`content_blocks_lost` is `malformed_content_blocks + transform_failures + field_stream_failures +
+`content_blocks_lost` is `content_block_framing_failures + malformed_content_blocks +
+transform_failures + field_stream_failures +
 max(0, rpc_stream_failures - unresolved_rpc_payloads_preserved)`, computed by
 `NetStats::lost_content_blocks` and shared with `validate`'s summary so the two
 cannot drift.

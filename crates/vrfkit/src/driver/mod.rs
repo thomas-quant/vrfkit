@@ -23,7 +23,6 @@ use vrf_container::{
     event_payload_seconds_matches_time, known_event_word_count, parse_event_chunk,
     parse_known_event_payload, parse_preamble,
 };
-use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     ActorWriter, EventRecord, EventWriter, FieldWriter, MovementWriter, NetGuidRecord,
     NetGuidWriter, PartialRecord, PartialWriter,
@@ -101,7 +100,6 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
     );
 
     let mut pass = Pass::new(&replay)?;
-    let mut error_report = OverlayErrorReport::default();
     let mut totals = RunTotals::default();
 
     // The checkpoint pass shares only the chunk list with this one, so it runs
@@ -114,7 +112,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
                 Chunk::Event(payload) => write_event(payload, &mut event_writer, &mut totals)?,
                 Chunk::ReplayData(frames, unread) => {
                     totals.replay_data_trailing_bytes += unread as u64;
-                    pass.walk(&frames, &mut totals.sink, &mut error_report, |buffers| {
+                    pass.walk(&frames, &mut totals.sink, |buffers| {
                         fields.append(&mut buffers.fields)?;
                         totals.movement_rows += buffers.movement.len() as u64;
                         movement.append(&mut buffers.movement)?;
@@ -128,7 +126,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
                     })?;
                     totals.chunks_processed += 1;
                 }
-                Chunk::Checkpoint(_) | Chunk::Other => {}
+                Chunk::Checkpoint(_) => {}
             }
             Ok(())
         });
@@ -138,7 +136,7 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         });
         (main, checkpoints.transpose())
     });
-    main?;
+    totals.unknown_chunks = main?;
     let mut checkpoints = checkpoints?;
 
     // Joined before the elapsed time is taken and any file size is read, so
@@ -152,10 +150,12 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         &mut totals.partial_rows,
         &mut totals.partial_bits,
     )?;
+    // Both passes' decode errors: the only place a checkpoint-only one surfaces.
+    let mut error_report = std::mem::take(&mut totals.sink.overlay.error_report);
     // After every main-pass row: partials.parquet is ordered by pass, then
     // stream position.
     if let Some(cp) = checkpoints.as_mut() {
-        error_report.merge_from(&cp.errors);
+        error_report.merge_from(&cp.stats.sink.overlay.error_report);
         push_partials(
             &mut partial_writer,
             cp.partials.drain(..),
@@ -185,14 +185,11 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
 
     // Before the summary, so the path it prints names a file that exists.
     let staged_manifest_path = out_path.join(MANIFEST);
-    let mut players: Vec<(u32, Option<String>, Option<u32>)> = pass
-        .channels
-        .players()
-        .iter()
+    let mut players: Vec<_> = (pass.channels.players().iter())
         .filter(|(_, id)| id.subject.is_some())
-        .map(|(&g, id)| (g, id.subject.clone(), id.character_net_guid))
+        .map(|(&guid, id)| (guid, id))
         .collect();
-    players.sort_unstable_by_key(|(g, _, _)| *g);
+    players.sort_unstable_by_key(|(guid, _)| *guid);
     manifest::write_manifest(
         &staged_manifest_path,
         vrf_path,
