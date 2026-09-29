@@ -1169,7 +1169,7 @@ fn the_error_report_names_the_cause_of_each_failure() {
         ByteArrayLengthCapExceeded,
         FTextTree,
     );
-    static ENTRIES: [OverlayEntry; 15] = [
+    static ENTRIES: [OverlayEntry; 16] = [
         entry("BadTextBool", FieldType::FTextTree),
         entry("BadUtf8", FieldType::FString),
         entry("ByteArrayOverCap", FieldType::ByteArray { max_bytes: 1 }),
@@ -1178,6 +1178,7 @@ fn the_error_report_names_the_cause_of_each_failure() {
             FieldType::ByteArray { max_bytes: 8 },
         ),
         entry("LongInt", FieldType::Int32),
+        entry("LongTextString", FieldType::FTextTree),
         entry("MistypedFText", FieldType::FText),
         entry("NaNVector", FieldType::VectorNetQuantize { scale: 100 }),
         entry("NegativeFNameNumber", FieldType::FName),
@@ -1299,6 +1300,20 @@ fn the_error_report_names_the_cause_of_each_failure() {
         (
             "BadTextBool",
             bytes(&[1, 0, 0, 0, 4, 3, 0, 0, 0, 0, 0, 0, 0xf0, 0x3f, 2, 0, 0, 0]),
+            "FTextTree",
+            "Malformed",
+        ),
+        // A string-table name of 1,000 bytes in a 201-bit window, as for
+        // `OverlongPrefix`.
+        (
+            "LongTextString",
+            BitWriter::new()
+                .bits(0, 32)
+                .bits(11, 8)
+                .bits(0, 1)
+                .i32(1000)
+                .repeat(false, 128)
+                .finish(),
             "FTextTree",
             "Malformed",
         ),

@@ -338,7 +338,9 @@ fn read_archive_bool(r: &mut BitReader<'_>) -> Result<bool, FTextTreeError> {
         value => Err(FTextTreeError::InvalidBool { value }),
     }
 }
+/// A length past the payload is `InvalidLength`, as `read_fstring` reports it.
 fn read_string(r: &mut BitReader<'_>) -> Result<String, FTextTreeError> {
+    let start = r.position();
     let length = r.read_i32()?;
     if length == 0 {
         return Ok(String::new());
@@ -353,6 +355,14 @@ fn read_string(r: &mut BitReader<'_>) -> Result<String, FTextTreeError> {
             max_bytes: MAX_STRING_BYTES,
         });
     };
+    if bytes * 8 > r.bits_remaining() {
+        let length = i64::from(length);
+        return Err(BitError::InvalidLength {
+            position: start,
+            length,
+        }
+        .into());
+    }
     let width = if wide { 16 } else { 8 };
     let mut v = Vec::with_capacity(units as usize);
     for _ in 0..units {
@@ -366,12 +376,7 @@ fn read_string(r: &mut BitReader<'_>) -> Result<String, FTextTreeError> {
     } else {
         String::from_utf8(v.into_iter().map(|unit| unit as u8).collect()).ok()
     };
-    text.ok_or_else(|| {
-        BitError::InvalidString {
-            position: r.position(),
-        }
-        .into()
-    })
+    text.ok_or_else(|| BitError::InvalidString { position: start }.into())
 }
 fn json_string(s: &mut String, value: &str) -> fmt::Result {
     s.push('"');
@@ -737,6 +742,21 @@ mod tests {
                 Err(FTextTreeError::StringTooLong { .. })
             ));
         }
+        // Under the cap but past the window: the prefix is at fault, not an EOF.
+        let mut past = BitWriter::new();
+        past.bits(0, 32)
+            .bits(11, 8)
+            .bits(0, 1)
+            .i32(1000)
+            .repeat(false, 128);
+        let (raw, count) = past.finish();
+        assert_eq!(
+            decode_ftext_tree(&raw, count),
+            Err(FTextTreeError::BitIo(BitError::InvalidLength {
+                position: 41,
+                length: 1000
+            }))
+        );
     }
 
     #[test]
