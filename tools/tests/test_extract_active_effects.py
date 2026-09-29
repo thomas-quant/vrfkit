@@ -1,7 +1,6 @@
 """`extract_active_effects.py`: a dormant actor is not despawned, and its
 open-ended instance is counted as `went_dormant`; the classifier's keyword
-false positives stay excluded (EFFECT_KEYWORDS holds the corpus counts).
-"""
+false positives stay excluded."""
 from __future__ import annotations
 
 import sys
@@ -85,8 +84,7 @@ ULT_ORB = "/Game/GameObjects/CollectibleOrbs/UltPointOrb.UltPointOrb_C"
 
 
 class ClassifierTests(unittest.TestCase):
-    """Substring keywords matched names they were not written for (the corpus
-    counts are EFFECT_KEYWORDS')."""
+    """Substring keywords that match names they were not written for."""
 
     def test_chambers_ult_gun_is_not_an_effect(self):
         """'fire' inside 'FIreRate': an equippable, not a zone."""
