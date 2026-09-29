@@ -11,7 +11,8 @@
 //! cannot match by accident: each output must report its own pass's totals,
 //! not zeros, the other pass's or its last chunk's. With no packets,
 //! `validate` ends in exit 2 (no content blocks), asserted so a crash (exit 1)
-//! cannot pass for it.
+//! cannot pass for it. Between the main chunks sit one chunk of an unknown type
+//! and a second Header, so every `Unknown chunks` output must read 1, not 0 or 2.
 
 mod common;
 
@@ -45,6 +46,8 @@ fn replay(dir: &std::path::Path) -> PathBuf {
         0,
         &frame(f32::NEG_INFINITY, &[(9, 5)], 3, &[]),
     ));
+    data.extend(chunk(4, &[0; 64]));
+    data.extend(chunk(0, &header_payload()));
     let mut frames = frame(f32::INFINITY, &[(1, 4)], 7, &[]);
     frames.extend(frame(2.5, &[], 0, &[]));
     data.extend(main_chunk(&frames));
@@ -92,6 +95,7 @@ fn validate_reports_the_replay_data_frame_skips() {
         line_value(&run.stdout, "Frame times:"),
         format!("{MAIN_NON_FINITE} non-finite")
     );
+    assert_eq!(line_value(&run.stdout, "Unknown chunks:"), "1");
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -122,6 +126,7 @@ fn diag_reports_each_pass_frame_skips() {
         json_u64(&json, "non_finite_frame_times"),
         CHECKPOINT_NON_FINITE
     );
+    assert_eq!(json_u64(&json, "unknown"), 1);
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -154,6 +159,7 @@ fn export_reports_each_pass_frame_skips_in_summary_and_manifest() {
         summary("Checkpoint frame times:"),
         format!("{CHECKPOINT_NON_FINITE} non-finite")
     );
+    assert_eq!(summary("Unknown chunks:"), "1");
 
     let manifest =
         std::fs::read_to_string(out.join("manifest.json")).expect("export wrote a manifest");
@@ -168,5 +174,6 @@ fn export_reports_each_pass_frame_skips_in_summary_and_manifest() {
         json_u64(&manifest, "checkpoint_frame_non_finite_times"),
         CHECKPOINT_NON_FINITE
     );
+    assert_eq!(json_u64(&manifest, "unknown_chunks"), 1);
     std::fs::remove_dir_all(dir).ok();
 }
