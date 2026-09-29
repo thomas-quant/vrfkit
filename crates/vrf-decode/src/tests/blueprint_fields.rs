@@ -75,7 +75,7 @@ fn decode_cases(cases: &[Case<'_>]) -> OverlayStats {
 }
 
 /// Real 13.06 payloads, and the values an independent reader
-/// (`struct.unpack` / an IntPacked loop) gave them in the corpus audit.
+/// (`struct.unpack` / an IntPacked loop) gave them.
 #[test]
 fn two_d_blueprint_payloads_decode_to_the_independent_values() {
     // Sova's recon bolt: three little-endian doubles, a world position.

@@ -51,71 +51,49 @@ pub use team_economy::{TeamEconomyUpdate, decode_team_economy, decode_team_econo
 /// Errors that can occur while decoding a struct-array blob.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum StructBlobError {
-    /// The underlying bit reader hit EOF or produced a malformed primitive.
     #[error("bit read: {0}")]
     BitIo(#[from] vrf_bitio::BitError),
-
-    /// A primitive nested in the blob was structurally invalid.
     #[error("field decode: {0}")]
     Decode(#[from] crate::DecodeError),
-
-    /// The declared array element count exceeds a sane maximum.
     #[error("array count {count} exceeds maximum {max}")]
     ArrayCountTooLarge { count: u32, max: u32 },
-
-    /// An element index is out of bounds relative to the declared count.
     #[error("element index {index} >= declared count {count}")]
     IndexOutOfBounds { index: u32, count: u32 },
-
-    /// A field payload declared more bits than remain in the stream.
     #[error("field payload {bits} bits exceeds remaining {remaining}")]
     PayloadTooLarge { bits: u32, remaining: u64 },
-
-    /// An unexpected field handle (`decode_team_economy` only).
+    /// `decode_team_economy` only.
     #[error("unsupported field handle {handle} in {context}")]
     UnsupportedHandle { handle: u32, context: &'static str },
-
-    /// The replay declares no name for a handle the blob carries, so there is
-    /// nothing to select a member with.
+    /// Nothing to select a member with.
     #[error("undeclared field handle {handle} in {context}")]
     UndeclaredHandle { handle: u32, context: &'static str },
-
-    /// The handle is declared, under a name this decoder has no arm for --
-    /// the shape this takes when a build renames or adds a member.
+    /// The shape a member takes when a build renames or adds it.
     #[error("unsupported member {name} (handle {handle}) in {context}")]
     UnsupportedMember {
         name: String,
         handle: u32,
         context: &'static str,
     },
-
-    /// Too many fields in a single element.
     #[error("too many fields in element ({context})")]
     TooManyFields { context: &'static str },
-
-    /// A byte enum carried a value this decoder has no variant for. Reported,
-    /// because `None` means "not sent".
+    /// Reported, because `None` means "not sent".
     #[error("{enum_name} has no variant for value {value} in {context}")]
     UnknownEnumValue {
         enum_name: &'static str,
         value: u8,
         context: &'static str,
     },
-
-    /// An enum member declared no bits or more than a byte of payload.
+    /// No bits, or more than a byte.
     #[error("{name} enum width {bits} is invalid in {context}")]
     InvalidEnumWidth {
         name: String,
         bits: u64,
         context: &'static str,
     },
-
-    /// Bits remain after the blob should have been fully consumed.
     #[error("not fully consumed: {remaining} bits left")]
     NotFullyConsumed { remaining: u64 },
-
-    /// A member did not consume its field window. The parent is aligned past
-    /// the window whatever the member read, so only this check sees it.
+    /// The parent is aligned past the window whatever the member read, so
+    /// only this check sees it.
     #[error("{name} (handle {handle}) left {remaining} of its {declared} bits unread in {context}")]
     MemberNotFullyConsumed {
         name: String,
