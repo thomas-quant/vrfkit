@@ -389,7 +389,7 @@ class ClassifyTests(unittest.TestCase):
 
 
 def identity(group, name, handle, checksum, build="13.06"):
-    return cct.Identity(group, name, handle, checksum, {build}, 1)
+    return cct.Identity(group, name, handle, checksum, {build})
 
 
 class ReportTests(unittest.TestCase):

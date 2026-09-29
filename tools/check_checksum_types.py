@@ -218,23 +218,8 @@ PARENT_CHAINS = (
     Chain((("ServerActiveEffects", "TArray"), ("ServerActiveEffects", "FActiveEffectInfo"),
            ("EffectID", "FEffectID")),
           "exe reflection 13.06: FActiveEffectInfo.EffectID"),
-    Chain((("ServerActiveEffects", "TArray"), ("ServerActiveEffects", "FActiveEffectInfo"),
-           ("Transform", "FTransform")),
-          "exe reflection 13.06: FActiveEffectInfo.Transform"),
     Chain((("AuthBlindManagerState", "FBlindManagerState"),),
           "exe reflection 13.06: UBlindManagerComponent.AuthBlindManagerState"),
-    Chain((("AuthBlindManagerState", "FBlindManagerState"), ("ActiveBlinds", "TArray"),
-           ("ActiveBlinds", "FActiveBlind")),
-          "exe reflection 13.06: FBlindManagerState.ActiveBlinds (TArray<FActiveBlind>)"),
-    Chain((("AuthBlindManagerState", "FBlindManagerState"), ("ActiveBlinds", "TArray"),
-           ("ActiveBlinds", "FActiveBlind"), ("BlindEffectID", "FEffectID")),
-          "exe reflection 13.06: FActiveBlind.BlindEffectID"),
-    Chain((("FragmentInfo", "FGroundVolumeFragmentArray"), ("Items", "TArray"),
-           ("Items", "FGroundVolumeFragment")),
-          "exe reflection 13.06: UGroundVolumeComponent.FragmentInfo.Items"),
-    Chain((("FragmentInfo", "FGroundVolumeFragmentArray"), ("Items", "TArray"),
-           ("Items", "FGroundVolumeFragment"), ("GridPos", "FIntPoint")),
-          "exe reflection 13.06: FGroundVolumeFragment.GridPos"),
 )
 
 #: Engine classes an object reference commonly points at. The candidates for
@@ -452,7 +437,6 @@ class Identity:
     handle: int
     checksum: int
     builds: set = field(default_factory=set)
-    exports: int = 0
 
 
 def export_dirs(corpus: Path | None, exports) -> tuple[list[Path], list[Path]]:
@@ -489,7 +473,6 @@ def load_declarations(dirs) -> tuple[dict, collections.Counter]:
         if ident is None:
             ident = ids[key] = Identity(group, name, handle, checksum)
         ident.builds.add(build)
-        ident.exports += 1
 
     for d in dirs:
         build, main_declared = manifest_declarations(d / "manifest.json")
