@@ -24,6 +24,12 @@ if __package__:
 else:  # direct script execution
     from atomic_io import atomic_write_text
 
+ROUTE_CHILDREN = ("Route children: {} player info / {} rewards / {} selected / {} kills / "
+                  "{} active effects / {} ignore actors / {} blinds / {} projectile path")
+ROUTES = tuple(f"route_children_{name}" for name in (
+    "player_information", "tracked_rewards", "selected_v2", "kill_data",
+    "server_active_effects", "requested_ignore_actors", "active_blinds", "projectile_path"))
+
 #: Who reads a line. P: check_export_baseline.py pins every key (the committed
 #: `*_02d4d478.json` hold exactly these). G: check_decode_errors_corpus.py
 #: gates on it. `cp_` keys are the `=== Checkpoints ===` block, printed only
@@ -72,11 +78,15 @@ LINES = (
      "array_unconsumed_root_bits array_unconsumed_nested_bits array_implicit_terminations", "G"),
     ("Array leaf errs: {}", "array_leaf_decode_errors", "G"),
     ("Target locations: {} array children", "targeting_world_locations_decoded", "P"),
+    # One count per measured array route: a route that stops typing shows here
+    # while the others keep the array totals up.
+    (ROUTE_CHILDREN, " ".join(ROUTES), "PG"),
     # A measured opaque shape, legitimately nonzero; not a decode-error count.
     ("Reward opaque: {} empty variants", "tracked_rewards_opaque_empty_variants", "PG"),
     # Empty deltas whose trailing zero byte was spared: a measured tolerance.
     ("ActiveBlinds trailers: {} empty deltas", "active_blinds_empty_trailers", "PG"),
     ("Truncated RPCs: {}", "truncated_rpcs", "G"),
+    ("RPC param walks: {}", "rpc_param_walks", "PG"),
     ("Event layout err: {}", "event_layout_mismatches", "P"),
     ("Event payloads: {} decoded / {} unknown groups",
      "event_payloads_decoded event_payload_unknown_groups", "P"),
@@ -125,6 +135,9 @@ LINES = (
      "cp_array_implicit_terminations", "G"),
     ("Checkpoint leaf: {} typed decode errors", "cp_array_leaf_decode_errors", "G"),
     ("Checkpoint targets: {} array children", "cp_targeting_world_locations_decoded", "P"),
+    ("Checkpoint r" + ROUTE_CHILDREN[1:],
+     " ".join("cp_" + key for key in ROUTES), "PG"),
+    ("Checkpoint RPC walks: {}", "cp_rpc_param_walks", "PG"),
     ("Checkpoint reward opaque: {} empty variants",
      "cp_tracked_rewards_opaque_empty_variants", "PG"),
     ("Checkpoint ActiveBlinds trailers: {} empty deltas", "cp_active_blinds_empty_trailers",

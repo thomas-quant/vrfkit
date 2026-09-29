@@ -578,6 +578,7 @@ impl ExportSink<'_> {
             return;
         }
 
+        let rows_before = self.stats.fields_emitted;
         for (f, (leaf, nested)) in flattened.iter().zip(leaves) {
             let errors = &mut self.stats.array_leaf_decode_errors;
             let columns = match leaf {
@@ -602,6 +603,9 @@ impl ExportSink<'_> {
                 let name: [&str; 3] = [parent, &f.path, &member.path];
                 self.push_child(handle, &name, bits, &member.raw_bits, columns);
             }
+        }
+        if let Some(route) = route {
+            *self.stats.route_children(route) += self.stats.fields_emitted - rows_before;
         }
     }
 
@@ -2153,8 +2157,13 @@ mod tests {
                 let Some((identity, leaf, bits)) = case_for(route) else {
                     continue;
                 };
-                let (records, stats) = export_array(identity, &[leaf], &bits, branch);
+                let (records, mut stats) = export_array(identity, &[leaf], &bits, branch);
                 let at = format!("{branch:?} {route:?}");
+                // One child, counted on its own route alone.
+                let counted = MeasuredArrayRoute::ALL.map(|r| *stats.route_children(r));
+                let want = MeasuredArrayRoute::ALL
+                    .map(|r| u64::from(r == route && admitted.admits(route)));
+                assert_eq!(counted, want, "{at}");
                 let parent = records.fields.last().unwrap();
                 assert_eq!(parent.field_name.as_deref(), Some(identity.1), "{at}");
                 assert_eq!(parent.raw_bits.as_deref(), Some(pack(&bits).as_slice()));

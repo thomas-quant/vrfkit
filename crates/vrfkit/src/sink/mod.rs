@@ -222,6 +222,10 @@ pub struct ExportStats {
     /// this is the only signal of an abandoned walk. Zero on valid replays.
     pub truncated_rpcs: u64,
 
+    /// RPC parameter walks begun (a function name resolved): the work whose
+    /// zero `truncated_rpcs` is evidence of.
+    pub rpc_param_walks: u64,
+
     /// Bits after an RPC's zero-handle terminator beyond the one alignment bit
     /// `FunctionParameters` allows. Counted, not rejected, and not lost: the
     /// payload also gets a whole-payload row, so every counted bit is in
@@ -237,6 +241,18 @@ pub struct ExportStats {
 
     /// Typed world-location children emitted from the guarded map-click array.
     pub targeting_world_locations_decoded: u64,
+
+    /// Child rows each measured array route emitted ([`Self::route_children`]):
+    /// a route whose layout moved refuses every leaf while the others keep the
+    /// array totals up.
+    pub route_children_player_information: u64,
+    pub route_children_tracked_rewards: u64,
+    pub route_children_selected_v2: u64,
+    pub route_children_kill_data: u64,
+    pub route_children_server_active_effects: u64,
+    pub route_children_requested_ignore_actors: u64,
+    pub route_children_active_blinds: u64,
+    pub route_children_projectile_path: u64,
 }
 
 /// `counters` and `counters_mut` over one list per struct. Each destructure
@@ -279,8 +295,12 @@ export_counters! {
         rep_layout_cnc_tails_decoded, rep_layout_cnc_tails_preserved, struct_blobs_failed,
         movement_rpc_errors, movement_sized_section_tails, movement_sized_section_tail_bits,
         movement_open_section_tails, movement_open_section_tail_bits, movement_envelope_trailers,
-        movement_envelope_trailer_bits, truncated_rpcs, rpc_suffix_bits_dropped,
-        array_leaf_decode_errors, targeting_world_locations_decoded
+        movement_envelope_trailer_bits, truncated_rpcs, rpc_param_walks, rpc_suffix_bits_dropped,
+        array_leaf_decode_errors, targeting_world_locations_decoded,
+        route_children_player_information, route_children_tracked_rewards,
+        route_children_selected_v2, route_children_kill_data, route_children_server_active_effects,
+        route_children_requested_ignore_actors, route_children_active_blinds,
+        route_children_projectile_path
     } except { overlay, array, struct_blob_first_error, movement_first_error }
     "overlay_" OverlayStats.overlay {
         decoded_ok, decoded_err, raw_or_skip, not_in_table, no_field_name, handle_conflicts_refused
@@ -292,6 +312,27 @@ export_counters! {
 }
 
 impl ExportStats {
+    /// `route`'s child-row counter; no wildcard, so a new route does not
+    /// compile until it has one.
+    fn route_children(&mut self, route: MeasuredArrayRoute) -> &mut u64 {
+        match route {
+            MeasuredArrayRoute::AllPlayersObfuscatedPlayerInformation => {
+                &mut self.route_children_player_information
+            }
+            MeasuredArrayRoute::TrackedRewards => &mut self.route_children_tracked_rewards,
+            MeasuredArrayRoute::SelectedV2 => &mut self.route_children_selected_v2,
+            MeasuredArrayRoute::KillData => &mut self.route_children_kill_data,
+            MeasuredArrayRoute::ServerActiveEffects => {
+                &mut self.route_children_server_active_effects
+            }
+            MeasuredArrayRoute::RequestedIgnoreActors => {
+                &mut self.route_children_requested_ignore_actors
+            }
+            MeasuredArrayRoute::ActiveBlinds => &mut self.route_children_active_blinds,
+            MeasuredArrayRoute::NetworkedProjectilePath => &mut self.route_children_projectile_path,
+        }
+    }
+
     /// Record a movement-RPC decode outcome: soft per-update errors and hard
     /// `Err`s both count, and the first is kept verbatim for the summary.
     pub fn record_movement_decode(

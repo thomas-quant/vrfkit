@@ -234,6 +234,10 @@ pub(super) fn print(
         totals.sink.targeting_world_locations_decoded
     );
     eprintln!(
+        "  Route children:   {}",
+        report::route_children(&totals.sink)
+    );
+    eprintln!(
         "  Reward opaque:    {} empty variants",
         totals.sink.tracked_rewards_opaque_empty_variants
     );
@@ -243,6 +247,7 @@ pub(super) fn print(
         totals.sink.active_blinds_empty_trailers
     );
     eprintln!("  Truncated RPCs:   {}", totals.sink.truncated_rpcs);
+    eprintln!("  RPC param walks:  {}", totals.sink.rpc_param_walks);
     eprintln!(
         "  RPC suffix bits:  {}",
         totals.sink.rpc_suffix_bits_dropped
@@ -443,6 +448,11 @@ fn print_checkpoints(cp: &CheckpointStats) {
         "  Checkpoint targets: {} array children",
         cp.sink.targeting_world_locations_decoded
     );
+    eprintln!(
+        "  Checkpoint route children: {}",
+        report::route_children(&cp.sink)
+    );
+    eprintln!("  Checkpoint RPC walks: {}", cp.sink.rpc_param_walks);
     eprintln!(
         "  Checkpoint reward opaque: {} empty variants",
         cp.sink.tracked_rewards_opaque_empty_variants

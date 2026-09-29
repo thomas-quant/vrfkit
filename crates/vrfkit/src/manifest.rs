@@ -141,9 +141,11 @@ pub fn write_manifest(
         .map(|&(guid, id)| player_json(guid, id))
         .collect();
     doc.add("players", array(1, players));
-    // Net-field exports the cache could not place (an out-of-range handle).
-    // Expected zero.
-    doc.add("dropped_field_exports", cache.dropped_field_exports());
+    // Net-field exports the cache could not place (an out-of-range handle), and
+    // declarations that renamed what later rows mean. Expected zero.
+    doc.add("dropped_field_exports", cache.dropped_field_exports())
+        .add("replaced_export_groups", cache.replaced_export_groups())
+        .add("renamed_field_exports", cache.renamed_field_exports());
     let groups = (cache.groups().iter())
         .map(|group| {
             let fields = (group.populated_fields())

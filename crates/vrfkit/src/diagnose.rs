@@ -160,9 +160,9 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     }
     json.push_str("  \"failures\": {\n");
     json.push_str("    \"main\": ");
-    push_failure_aggregate(&mut json, &main_failures);
+    push_failure_aggregate(&mut json, &main_failures, &net_main);
     json.push_str(",\n    \"checkpoint\": ");
-    push_failure_aggregate(&mut json, &cp_stats.failures);
+    push_failure_aggregate(&mut json, &cp_stats.failures, &cp_stats.net);
     json.push_str("\n  }\n");
     json.push_str("}\n");
 
@@ -172,16 +172,18 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     }
 
     // A one-line stderr receipt wherever the JSON went, so a caller sees the
-    // reconciliation shape without parsing JSON.
+    // reconciliation without parsing JSON.
     eprintln!(
-        "diag: main failures {} (payloads preserved {}, real loss {}) | \
-         checkpoint failures {} (payloads preserved {}, real loss {})",
+        "diag: main failures {} (payloads preserved {}, real loss {}, reconciled {}) | \
+         checkpoint failures {} (payloads preserved {}, real loss {}, reconciled {})",
         main_failures.total_failures(),
         main_failures.preserved_unresolved(),
         main_failures.real_loss(),
+        main_failures.reconciles(&net_main),
         cp_stats.failures.total_failures(),
         cp_stats.failures.preserved_unresolved(),
         cp_stats.failures.real_loss(),
+        cp_stats.failures.reconciles(&cp_stats.net),
     );
     Ok(())
 }
@@ -383,16 +385,17 @@ fn net_members(s: &NetStats) -> Vec<(&'static str, u64)> {
     members
 }
 
-fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
+fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate, net: &NetStats) {
     let overflow = agg.overflow();
     out.push_str(&format!(
         "{{\"total_failures\": {}, \"preserved_unresolved\": {}, \"real_loss\": {}, \
-         \"cell_limit\": {}, \"overflow\": {{\"count\": {}, \"bit_count_total\": {}, \
-         \"consumed_bits_total\": {}, \"abandoned_bits_total\": {}}}, \"payloads_included\": {}, \
-         \"cells\": [",
+         \"reconciled\": {}, \"cell_limit\": {}, \"overflow\": {{\"count\": {}, \
+         \"bit_count_total\": {}, \"consumed_bits_total\": {}, \"abandoned_bits_total\": {}}}, \
+         \"payloads_included\": {}, \"cells\": [",
         agg.total_failures(),
         agg.preserved_unresolved(),
         agg.real_loss(),
+        agg.reconciles(net),
         MAX_FAILURE_CELLS,
         overflow.count,
         overflow.bit_count_total,

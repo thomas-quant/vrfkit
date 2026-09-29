@@ -72,6 +72,7 @@ impl ExportSink<'_> {
         if rpc_reader.read_bit().is_err() {
             return false;
         }
+        self.stats.rpc_param_walks += 1;
 
         let mut emitted_any = false;
         // Set only on the three malformed-read breaks below, never on the
@@ -257,7 +258,7 @@ impl ExportSink<'_> {
             // the route is scoped to the observed parent identity.
             if let (true, Some(raw)) = (projectile_path_array, raw_bits.as_deref()) {
                 if super::blobs::strict_nested_array_preflight(raw, payload_bits, &[1, 2, 3]) {
-                    self.emit_exact_array_leaves(
+                    self.stats.route_children_projectile_path += self.emit_exact_array_leaves(
                         &full_field_name,
                         rpc_handle,
                         (raw, payload_bits),

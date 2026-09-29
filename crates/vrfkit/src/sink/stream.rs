@@ -624,7 +624,7 @@ impl ReplicationSink for ExportSink<'_> {
     }
 
     /// Sample the payload of a block whose inner stream failed to walk; framing
-    /// calls it beside that block's `on_stream_failure` (before or after it).
+    /// calls it after that block's `on_stream_failure`.
     fn on_stream_failure_payload(&mut self, failure: StreamFailure, payload: &[u8]) {
         if let Some(failures) = self.channel_state.failures.as_mut() {
             failures.note_payload(&failure, Arc::clone(&self.current_group_path), payload);
@@ -1027,7 +1027,8 @@ mod tests {
 
     /// A first parameter declaring more bits than remain bumps `truncated_rpcs`:
     /// no row lands, so the counter alone tells this from a payload with no
-    /// parameters.
+    /// parameters. `rpc_param_walks` counts the walks that could set it, and
+    /// not a payload with no function name, which never starts one.
     #[test]
     fn a_truncated_rpc_payload_increments_truncated_rpcs() {
         let mut bits = Vec::new();
@@ -1041,9 +1042,12 @@ mod tests {
         let mut rig = Rig::default();
         let mut sink = rig.sink();
 
+        assert!(!sink.try_parse_rpc_params(7, reader.clone(), None));
+        assert_eq!(sink.stats.rpc_param_walks, 0);
         let emitted = sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
         assert!(!emitted, "no parameter rows are emitted before the break");
         assert_eq!(sink.stats.truncated_rpcs, 1);
+        assert_eq!(sink.stats.rpc_param_walks, 1);
     }
 
     fn targeting_rpc(
@@ -1542,6 +1546,7 @@ mod tests {
             ("++Ares-Core+release-13.05", 3),
         ] {
             let (records, stats) = projectile_path_rpc(&array, branch);
+            assert_eq!(stats.route_children_projectile_path, want_children as u64);
             assert_eq!(stats.array.errors, 0, "{branch}");
             assert_eq!(stats.array_leaf_decode_errors, 0, "{branch}");
             assert_eq!(records.fields.len(), want_children + 1, "{branch}");

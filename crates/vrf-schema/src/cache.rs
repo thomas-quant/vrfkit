@@ -38,6 +38,10 @@ pub struct NetGuidCache {
     guid_generation: u64,
     /// See [`Self::dropped_field_exports`].
     dropped_field_exports: u64,
+    /// See [`Self::replaced_export_groups`].
+    replaced_export_groups: u64,
+    /// See [`Self::renamed_field_exports`].
+    renamed_field_exports: u64,
 }
 
 impl NetGuidCache {
@@ -96,6 +100,7 @@ impl NetGuidCache {
             // because merging would let the old class's slots name handles the
             // new class never declared.
             self.groups[idx] = group;
+            self.replaced_export_groups += 1;
             // The old class's spellings and leaf claim go with it.
             self.rebuild_group_indexes();
             idx
@@ -248,14 +253,11 @@ impl NetGuidCache {
     /// Set a field on the group at `path_name_index`. `false`, counted in
     /// [`Self::dropped_field_exports`], when the group or the handle is absent.
     pub fn set_field_on_group(&mut self, path_name_index: u32, field: NetFieldExport) -> bool {
-        let placed = if let Some(group) = self.get_group_by_index_mut(path_name_index) {
-            group.set_field(field)
-        } else {
-            false
-        };
-        if !placed {
-            self.dropped_field_exports += 1;
-        }
+        let group = (self.by_index.get(&path_name_index)).map(|&i| &mut self.groups[i]);
+        let old = group.as_ref().and_then(|g| g.get_field(field.handle));
+        self.renamed_field_exports += u64::from(old.is_some_and(|old| old.name != field.name));
+        let placed = group.is_some_and(|g| g.set_field(field));
+        self.dropped_field_exports += u64::from(!placed);
         placed
     }
 
@@ -267,8 +269,21 @@ impl NetGuidCache {
         self.dropped_field_exports
     }
 
-    /// Remove all groups and GUID mappings (not the `dropped_field_exports`
-    /// tally) and bump both generations. For tests or replay-boundary resets.
+    /// Groups whose `path_name_index` a new path took over, replacing them
+    /// with no rows moved: later rows carry the new class's names.
+    #[must_use]
+    pub fn replaced_export_groups(&self) -> u64 {
+        self.replaced_export_groups
+    }
+
+    /// Field exports that overwrote a populated handle with another name.
+    #[must_use]
+    pub fn renamed_field_exports(&self) -> u64 {
+        self.renamed_field_exports
+    }
+
+    /// Remove all groups and GUID mappings (not the three tallies) and bump
+    /// both generations. For tests or replay-boundary resets.
     pub fn clear(&mut self) {
         self.schema_generation = self.schema_generation.wrapping_add(1);
         self.guid_generation = self.guid_generation.wrapping_add(1);
@@ -365,9 +380,15 @@ mod tests {
             },
         );
 
+        // A re-declaration of the same path merges: not a replacement.
+        cache
+            .add_export_group(NetFieldExportGroup::new("/Script/G.Old".into(), 7, 2))
+            .unwrap();
+        assert_eq!(cache.replaced_export_groups(), 0);
         cache
             .add_export_group(NetFieldExportGroup::new("/Script/G.New".into(), 7, 2))
             .unwrap();
+        assert_eq!(cache.replaced_export_groups(), 1);
 
         let group = cache.get_group_by_index(7).unwrap();
         assert_eq!(group.path, "/Script/G.New");
@@ -376,6 +397,27 @@ mod tests {
             "handle 0 must not carry the old class's field after the index was reused: {:?}",
             group.get_field(0)
         );
+    }
+
+    /// A handle re-exported under another name is counted; the same name
+    /// again, or a first export at a new handle, is not.
+    #[test]
+    fn a_renamed_field_export_is_counted() {
+        let mut cache = NetGuidCache::new();
+        cache
+            .add_export_group(NetFieldExportGroup::new("/Script/G.A".into(), 7, 2))
+            .unwrap();
+        for (handle, name, renamed) in [(0, "A", 0), (0, "A", 0), (1, "B", 0), (0, "C", 1)] {
+            let field = NetFieldExport {
+                handle,
+                compatible_checksum: 0,
+                name: name.into(),
+            };
+            assert!(cache.set_field_on_group(7, field));
+            assert_eq!(cache.renamed_field_exports(), renamed, "{handle} {name}");
+        }
+        let group = cache.get_group_by_index(7).unwrap();
+        assert_eq!(group.get_field(0).unwrap().name, "C");
     }
 
     /// An unknown `path_name_index` refuses the field and counts the drop.

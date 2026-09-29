@@ -59,7 +59,10 @@ CHECKPOINT_FAILURES = tuple("cp_" + key for key in FAILURES)
 #: they move nothing else. Minimum per replay over the 1,018-export audit:
 #: 4,654 decoded rows, 16 struct blobs, 32 array elements, 182 array fields and
 #: 3,001 movement rows, so a one-replay corpus passes. A corpus total cannot
-#: catch a walker stopped on one build or one route.
+#: catch a walker stopped on one build. The per-route child counts print but
+#: gate nothing: routes are admitted per build (four on the 12.10-13.00
+#: fixtures, three on 11.06), so a one-build corpus can total 0 on a route;
+#: check_export_baseline.py pins each on the reference replay.
 MUST_MOVE = (
     ("overlay_decoded_ok", ("overlay_decode_errors",)),
     ("struct_blobs_decoded", ("struct_blobs_failed",)),
@@ -67,17 +70,15 @@ MUST_MOVE = (
                                 "array_unconsumed_nested_bits", "array_implicit_terminations")),
     ("array_fields_emitted", ("array_leaf_decode_errors",)),
     ("movement_rows", ("movement_rpc_errors", "movement_open_section_tails")),
+    ("rpc_param_walks", ("truncated_rpcs",)),
 )
 #: The checkpoint pass: the same minus movement (at least 2,054 decoded
 #: fields, 16 blobs, 30 array elements and 255 array fields per replay).
 CHECKPOINT_MUST_MOVE = tuple(("cp_" + work, tuple("cp_" + g for g in gates))
                              for work, gates in MUST_MOVE[:4])
 
-#: `(failure counter, why no work counter backs it)`. `RPCs:` cannot back
-#: truncated_rpcs: it also counts ClassNetCache tails (>= 6 per replay) and
-#: unresolved RPCs, neither of which enters the walk.
+#: `(failure counter, why no work counter backs it)`.
 UNBACKED = (
-    ("truncated_rpcs", "summary.rs prints no count of RPC parameter walks"),
     ("cnc_bruteforce_payloads_unwalked",
      "`CNC brute force: N attempted` is legitimately 0 on the 12.10 and 12.11 public "
      "fixtures, so it cannot be a must-move counter"),

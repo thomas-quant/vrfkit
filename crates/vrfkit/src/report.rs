@@ -1,6 +1,7 @@
-//! Counter text that `validate` and the export summary both print. Each call
-//! site keeps its own label and padding, which the corpus tools anchor on;
-//! only the text after the label lives here, so the reports cannot drift.
+//! Counter text printed on more than one line: `validate` and the export
+//! summary, or its main and checkpoint blocks. Each call site keeps its own
+//! label and padding, which the corpus tools anchor on; only the text after
+//! the label lives here, so the reports cannot drift.
 
 use vrf_frame::FrameSkips;
 use vrf_net::stats::NetStats;
@@ -10,6 +11,22 @@ pub fn frame_skips(skips: &FrameSkips) -> String {
     format!(
         "{} external blobs / {} external bytes / {} game-specific bytes",
         skips.external_data_blobs, skips.external_data_bytes, skips.game_specific_bytes
+    )
+}
+
+/// Every measured array route's child rows, zeros included.
+#[cfg(feature = "export")]
+pub fn route_children(sink: &crate::sink::ExportStats) -> String {
+    format!(
+        "{} player info / {} rewards / {} selected / {} kills / {} active effects / {} ignore actors / {} blinds / {} projectile path",
+        sink.route_children_player_information,
+        sink.route_children_tracked_rewards,
+        sink.route_children_selected_v2,
+        sink.route_children_kill_data,
+        sink.route_children_server_active_effects,
+        sink.route_children_requested_ignore_actors,
+        sink.route_children_active_blinds,
+        sink.route_children_projectile_path
     )
 }
 
