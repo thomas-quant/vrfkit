@@ -158,25 +158,13 @@ impl NetGuidCache {
     /// The first claim among a stem's three `_ClassNetCache` candidates, in this
     /// order, which decides a stem declared under more than one convention.
     fn try_cnc_leaf_candidates(&self, stem: &str) -> Option<Option<&NetFieldExportGroup>> {
-        for suffix in [
+        [
             "_ClassNetCache",
             "Component_ClassNetCache",
             "_C_ClassNetCache",
-        ] {
-            if let Some(claim) = with_joined(stem, suffix, |k| self.lookup_cnc_leaf(k)) {
-                return Some(claim);
-            }
-        }
-        None
-    }
-
-    /// [`Self::leaf_claim`], keeping only a claim on a `_ClassNetCache` group.
-    /// Every caller passes a leaf ending in that suffix, so the filter cannot
-    /// fail today; it guards a future caller. An ambiguous claim passes it.
-    fn lookup_cnc_leaf(&self, leaf: &str) -> Option<Option<&NetFieldExportGroup>> {
-        self.leaf_claim(leaf).filter(|claim| {
-            claim.is_none_or(|group| group.path.ends_with(crate::path::CLASS_NET_CACHE_SUFFIX))
-        })
+        ]
+        .into_iter()
+        .find_map(|suffix| with_joined(stem, suffix, |k| self.leaf_claim(k)))
     }
 }
 
