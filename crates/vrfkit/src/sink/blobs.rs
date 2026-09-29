@@ -1929,20 +1929,27 @@ mod tests {
         assert_eq!(stats.array_leaf_decode_errors, 1);
     }
 
+    /// Only on its measured group, parent, checksum and branch; anywhere else
+    /// the literal is an ordinary raw field.
     #[test]
     fn tracked_rewards_literal_opaque_empty_variant_keeps_only_parent_raw() {
         let bits = unpack(&[0x02, 0x00, 0x00]);
-        let (records, stats) = export_array(
-            (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM),
-            &[(49, "Rewards", 0)],
-            &bits,
-            Some(MEASURED_BUILD),
-        );
+        let (o, p, c) = (OWNER, REWARDS_PARENT, REWARDS_CHECKSUM);
+        let b = Some(MEASURED_BUILD);
+        for (identity, branch) in [
+            ((o, p, c + 1), b),
+            (("/Script/ShooterGame.Other", p, c), b),
+            ((o, "OtherRewards", c), b),
+            ((o, p, c), None),
+        ] {
+            let (records, stats) = export_array(identity, &[(49, "Rewards", 0)], &bits, branch);
+            let at = format!("{identity:?} {branch:?}");
+            assert_eq!(records.fields.len(), 1, "{at}");
+            assert_eq!(stats.tracked_rewards_opaque_empty_variants, 0, "{at}");
+        }
+        let (records, stats) = export_array((o, p, c), &[(49, "Rewards", 0)], &bits, b);
         assert_eq!(records.fields.len(), 1);
-        assert_eq!(
-            records.fields[0].field_name.as_deref(),
-            Some(REWARDS_PARENT)
-        );
+        assert_eq!(records.fields[0].field_name.as_deref(), Some(p));
         assert_eq!(
             records.fields[0].raw_bits.as_deref(),
             Some([2, 0, 0].as_slice())

@@ -34,8 +34,9 @@ use super::{ChannelState, ExportSink};
 /// RepLayout-only: VALORANT replicates components under bare instance names but
 /// declares their layouts under the class (native, or the `/Game/` Blueprint
 /// class the replay declares), and the AbilitySystem `_ClassNetCache` group is
-/// declared with an incomplete function table, so a remapped component's RPC
-/// stream stays bare (and is brute-forced at fc=34).
+/// declared with an incomplete function table, so its RPC stream stays
+/// unresolved and is brute-forced at fc=34; every remapped component's RPC rows
+/// stay bare.
 ///
 /// The pairs are read from the shipped game by `tools/extract_component_classes`
 /// (docs/DATA.md, "Reading component classes out of the game", has the

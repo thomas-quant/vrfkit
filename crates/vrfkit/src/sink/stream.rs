@@ -1793,7 +1793,8 @@ mod tests {
     /// `Subject` and `SpawnedCharacter` are captured on the bomb PlayerState and
     /// on Swiftplay's (through `canonical_group`). A later 0 is a disconnect and
     /// keeps the body; a lone 0 stays `None`, not a NetGUID-looking 0; and
-    /// `PossessedCharacter` (a camera, drone or ability pawn) never sets it.
+    /// `PossessedCharacter` (a camera, drone or ability pawn) never sets or
+    /// replaces it.
     #[test]
     fn player_identity_keeps_the_spawned_body() {
         const SWIFT: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
@@ -1811,7 +1812,7 @@ mod tests {
             (BOMB_PLAYER_STATE, vec![(POSSESSED, 412)], None),
             (
                 BOMB_PLAYER_STATE,
-                vec![(SPAWNED, 20), (POSSESSED, 412), (POSSESSED, 20)],
+                vec![(SPAWNED, 20), (POSSESSED, 20), (POSSESSED, 412)],
                 Some(20),
             ),
         ] {
