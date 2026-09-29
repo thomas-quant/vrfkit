@@ -322,85 +322,9 @@ fn parse_all_vrf_files() {
     );
 }
 
-/// A minimal but structurally valid replay, built from the same field order
-/// `info.rs` and `header.rs` read. Only enough to reach the chunk walk.
+/// A minimal but structurally valid replay: only enough to reach the chunk walk.
 mod fixture {
-    fn add_u16(buf: &mut Vec<u8>, v: u16) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn add_u32(buf: &mut Vec<u8>, v: u32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn add_i32(buf: &mut Vec<u8>, v: i32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn add_i64(buf: &mut Vec<u8>, v: i64) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn add_f32(buf: &mut Vec<u8>, v: f32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn add_fstring(buf: &mut Vec<u8>, s: &str) {
-        add_i32(buf, (s.len() + 1) as i32);
-        buf.extend_from_slice(s.as_bytes());
-        buf.push(0);
-    }
-
-    fn replay_info() -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32(&mut buf, 0x43F4_EFDD); // file magic
-        add_u32(&mut buf, 7); // file version
-        add_i32(&mut buf, 1); // one custom version
-        for word in [0x95A4_F03E_u32, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9] {
-            add_u32(&mut buf, word);
-        }
-        add_i32(&mut buf, 7); // LocalFileReplay version
-        add_i32(&mut buf, 60_000); // length in ms
-        add_u32(&mut buf, 19); // network version
-        add_u32(&mut buf, 1234); // changelist
-        add_fstring(&mut buf, "Match");
-        add_u32(&mut buf, 0); // is live
-        add_i64(&mut buf, 42); // timestamp
-        add_u32(&mut buf, 0); // compressed
-        add_u32(&mut buf, 0); // encrypted
-        add_i32(&mut buf, 0); // encryption key length
-        buf
-    }
-
-    fn header_payload() -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32(&mut buf, 0x2CF5_A13D); // network magic
-        add_u32(&mut buf, 19); // network version
-        add_i32(&mut buf, 0); // custom version count
-        add_u32(&mut buf, 0x1122_3344); // network checksum
-        add_u32(&mut buf, 32); // engine net proto version
-        add_u32(&mut buf, 0x5566_7788); // game net proto version
-        for word in [0x0011_2233_u32, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF] {
-            add_u32(&mut buf, word);
-        }
-        add_u16(&mut buf, 12); // major
-        add_u16(&mut buf, 10); // minor
-        add_u16(&mut buf, 1); // patch
-        add_u32(&mut buf, 123_456); // changelist
-        add_fstring(&mut buf, "++Ares-Core+release-12.10");
-        buf.extend_from_slice(&[3, 0, 0, 0, 49, 56, 0]); // valorant skip: 3 bytes
-        add_u32(&mut buf, 1001); // UE4 version
-        add_u32(&mut buf, 1002); // UE5 version
-        add_u32(&mut buf, 1003); // package version license
-        add_i32(&mut buf, 1); // one level name
-        add_fstring(&mut buf, "Ascent");
-        add_u32(&mut buf, 42); // level time
-        add_u32(&mut buf, 0b1010); // flags
-        add_i32(&mut buf, 0); // game-specific data count
-        add_f32(&mut buf, 15.0);
-        add_f32(&mut buf, 30.0);
-        add_f32(&mut buf, 33.3);
-        add_f32(&mut buf, 250.0);
-        add_fstring(&mut buf, "Windows");
-        buf.push(7); // build config
-        buf.push(3); // build target type
-        buf
-    }
+    use vrf_testkit::{Info, add_i32, add_u32, chunk, header_payload, replay_info};
 
     /// Replay info followed by a single Header chunk, and nothing else.
     pub fn header_only_replay() -> Vec<u8> {
@@ -410,12 +334,10 @@ mod fixture {
     /// `header_only_replay` with `residual` bytes after the header's layout,
     /// inside its chunk.
     pub fn with_header_residual(residual: usize) -> Vec<u8> {
-        let mut data = replay_info();
-        let mut payload = header_payload();
-        payload.resize(payload.len() + residual, 0);
-        add_u32(&mut data, 0); // chunk type: Header
-        add_i32(&mut data, payload.len() as i32);
-        data.extend_from_slice(&payload);
+        let mut header = header_payload();
+        header.resize(header.len() + residual, 0);
+        let mut data = replay_info(&Info::default());
+        data.extend(chunk(0, &header));
         data
     }
 
@@ -429,7 +351,6 @@ mod fixture {
     /// `minimal_replay` with `residual` bytes after the ReplayData chunk's
     /// data, inside the chunk.
     pub fn with_replay_data_residual(residual: usize) -> Vec<u8> {
-        let mut data = header_only_replay();
         let mut payload = Vec::new();
         add_u32(&mut payload, 0); // Time1
         add_u32(&mut payload, 47); // Time2
@@ -437,9 +358,8 @@ mod fixture {
         add_i32(&mut payload, 4); // MemorySizeInBytes
         payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
         payload.resize(payload.len() + residual, 0xCD);
-        add_u32(&mut data, 1); // chunk type: ReplayData
-        add_i32(&mut data, payload.len() as i32);
-        data.extend_from_slice(&payload);
+        let mut data = header_only_replay();
+        data.extend(chunk(1, &payload));
         data
     }
 }

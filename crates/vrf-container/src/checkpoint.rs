@@ -139,7 +139,7 @@ pub fn decompress_checkpoint_with_trailing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::helpers::add_fstring_utf16;
+    use vrf_testkit::add_fstring_utf16;
 
     /// The strings are UTF-16, as every corpus checkpoint string is.
     fn build(archive: &[u8], trailing: usize) -> Vec<u8> {

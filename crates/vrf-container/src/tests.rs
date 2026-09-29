@@ -1,172 +1,7 @@
 //! Unit and integration tests for the container parser.
 
 use super::*;
-
-pub(crate) mod helpers {
-    pub fn add_u16(buf: &mut Vec<u8>, v: u16) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    pub fn add_u32(buf: &mut Vec<u8>, v: u32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    pub fn add_i32(buf: &mut Vec<u8>, v: i32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    pub fn add_i64(buf: &mut Vec<u8>, v: i64) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    pub fn add_f32(buf: &mut Vec<u8>, v: f32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    pub fn add_fstring(buf: &mut Vec<u8>, s: &str) {
-        let encoded: Vec<u8> = s.bytes().chain(std::iter::once(0u8)).collect();
-        add_i32(buf, encoded.len() as i32);
-        buf.extend_from_slice(&encoded);
-    }
-
-    /// Serialise an FString in its UTF-16 form: a negative length counting
-    /// code units (terminator included), then little-endian UTF-16.
-    #[cfg_attr(not(any(feature = "event", feature = "checkpoint")), allow(dead_code))]
-    pub fn add_fstring_utf16(buf: &mut Vec<u8>, s: &str) {
-        let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0u16)).collect();
-        add_i32(buf, -(units.len() as i32));
-        for unit in units {
-            add_u16(buf, unit);
-        }
-    }
-
-    pub fn add_guid(buf: &mut Vec<u8>, guid: [u32; 4]) {
-        for word in guid {
-            add_u32(buf, word);
-        }
-    }
-
-    /// The `LocalFileReplay` custom-version GUID, the one the info parser pins.
-    pub const LOCAL_REPLAY: [u32; 4] = [0x95A4_F03E, 0x7E0B_49E4, 0xBA43_D356, 0x94FF_87D9];
-
-    /// The replay info fields a test varies. [`replay_info`] fixes the rest:
-    /// file version 7, 60000 ms, network version 19, changelist 1234, not
-    /// live, uncompressed, no encryption key.
-    pub struct Info {
-        pub magic: u32,
-        pub custom_versions: Vec<([u32; 4], i32)>,
-        pub friendly_name: &'static str,
-        pub timestamp: i64,
-        pub encrypted: bool,
-    }
-
-    /// A valid replay info: the file magic and `LocalFileReplay` version 7.
-    impl Default for Info {
-        fn default() -> Self {
-            Info {
-                magic: 0x43F4_EFDD,
-                custom_versions: vec![(LOCAL_REPLAY, 7)],
-                friendly_name: "Match",
-                timestamp: 42,
-                encrypted: false,
-            }
-        }
-    }
-
-    pub fn replay_info(info: &Info) -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32(&mut buf, info.magic);
-        add_u32(&mut buf, 7); // file version
-        add_i32(&mut buf, info.custom_versions.len() as i32);
-        for &(guid, version) in &info.custom_versions {
-            add_guid(&mut buf, guid);
-            add_i32(&mut buf, version);
-        }
-        add_i32(&mut buf, 60000); // length_in_ms
-        add_u32(&mut buf, 19); // network version
-        add_u32(&mut buf, 1234); // changelist
-        add_fstring(&mut buf, info.friendly_name);
-        add_u32(&mut buf, 0); // is_live
-        add_i64(&mut buf, info.timestamp);
-        add_u32(&mut buf, 0); // compressed
-        add_u32(&mut buf, u32::from(info.encrypted));
-        add_i32(&mut buf, 0); // encryption key length
-        buf
-    }
-
-    /// Build a raw chunk (type + size + payload).
-    pub fn build_chunk(chunk_type: u32, payload: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32(&mut buf, chunk_type);
-        add_i32(&mut buf, payload.len() as i32);
-        buf.extend_from_slice(payload);
-        buf
-    }
-
-    pub fn build_header_payload() -> Vec<u8> {
-        build_header_payload_for_branch("++Ares-Core+release-12.10", 0, &[3, 0, 0, 0, 49, 56, 0])
-    }
-
-    pub fn build_header_payload_for_branch(
-        branch: &str,
-        custom_version_count: i32,
-        valorant_skip: &[u8],
-    ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        add_u32(&mut buf, 0x2CF5_A13D); // NetworkMagic
-        add_u32(&mut buf, 19); // NetworkVersion
-        add_i32(&mut buf, custom_version_count);
-        // Each custom version entry is 20 bytes
-        for _ in 0..custom_version_count {
-            buf.extend_from_slice(&[0u8; 20]);
-        }
-        add_u32(&mut buf, 0x1122_3344); // NetworkChecksum
-        add_u32(&mut buf, 32); // EngineNetworkProtocolVersion
-        add_u32(&mut buf, 0x5566_7788); // GameNetworkProtocolVersion
-        add_guid(
-            &mut buf,
-            [0x0011_2233, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF],
-        );
-
-        add_u16(&mut buf, 12); // Major
-        add_u16(&mut buf, 10); // Minor
-        add_u16(&mut buf, 1); // Patch
-        add_u32(&mut buf, 123456); // Changelist
-        add_fstring(&mut buf, branch);
-
-        // ValorantSkipByteCount + skip bytes
-        buf.extend_from_slice(valorant_skip);
-
-        add_u32(&mut buf, 1001); // UE4Version
-        add_u32(&mut buf, 1002); // UE5Version
-        add_u32(&mut buf, 1003); // PackageVersionLicense
-
-        // LevelNamesAndTimes: 1 entry
-        add_i32(&mut buf, 1);
-        add_fstring(&mut buf, "Ascent");
-        add_u32(&mut buf, 42);
-
-        add_u32(&mut buf, 0b1010); // Flags: HasStreamingFixes | GameSpecificFrameData
-
-        // GameSpecificData: 2 entries
-        add_i32(&mut buf, 2);
-        add_fstring(&mut buf, "valorant");
-        add_fstring(&mut buf, "competitive");
-
-        // Recording params
-        add_f32(&mut buf, 15.0);
-        add_f32(&mut buf, 30.0);
-        add_f32(&mut buf, 33.3);
-        add_f32(&mut buf, 250.0);
-
-        // Platform + build info
-        add_fstring(&mut buf, "Windows");
-        buf.push(7); // BuildConfig
-        buf.push(3); // BuildTargetType (Client)
-
-        buf
-    }
-}
+use vrf_testkit::*;
 
 #[test]
 fn info_empty_input_rejected() {
@@ -179,7 +14,7 @@ fn info_empty_input_rejected() {
 
 #[test]
 fn info_bad_magic_rejected() {
-    let data = helpers::replay_info(&helpers::Info {
+    let data = replay_info(&Info {
         magic: 0xDEAD_BEEF,
         ..Default::default()
     });
@@ -195,8 +30,8 @@ fn info_bad_magic_rejected() {
 #[test]
 fn info_bad_file_version_rejected() {
     let mut data = Vec::new();
-    helpers::add_u32(&mut data, 0x43F4_EFDD);
-    helpers::add_u32(&mut data, 6); // wrong version
+    add_u32(&mut data, 0x43F4_EFDD);
+    add_u32(&mut data, 6); // wrong version
     data.extend_from_slice(&[0u8; 100]);
     let result = info::parse_replay_info(&data);
     assert!(matches!(
@@ -207,7 +42,7 @@ fn info_bad_file_version_rejected() {
 
 #[test]
 fn info_missing_custom_version_rejected() {
-    let data = helpers::replay_info(&helpers::Info {
+    let data = replay_info(&Info {
         custom_versions: Vec::new(),
         ..Default::default()
     });
@@ -221,8 +56,8 @@ fn info_missing_custom_version_rejected() {
 #[test]
 fn info_newer_or_older_custom_version_rejected() {
     for version in [8, 6] {
-        let data = helpers::replay_info(&helpers::Info {
-            custom_versions: vec![(helpers::LOCAL_REPLAY, version)],
+        let data = replay_info(&Info {
+            custom_versions: vec![(LOCAL_REPLAY, version)],
             ..Default::default()
         });
         let result = info::parse_replay_info(&data);
@@ -237,10 +72,10 @@ fn info_newer_or_older_custom_version_rejected() {
 /// the replay readable; the reason is on the custom-version loop in `info.rs`.
 #[test]
 fn info_accepts_unknown_custom_version_guids() {
-    let data = helpers::replay_info(&helpers::Info {
+    let data = replay_info(&Info {
         custom_versions: vec![
             ([0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444], 999),
-            (helpers::LOCAL_REPLAY, 7),
+            (LOCAL_REPLAY, 7),
         ],
         ..Default::default()
     });
@@ -251,7 +86,7 @@ fn info_accepts_unknown_custom_version_guids() {
 
 #[test]
 fn info_valid_parses_summary() {
-    let data = helpers::replay_info(&helpers::Info {
+    let data = replay_info(&Info {
         friendly_name: "Match  ",
         timestamp: 123456789,
         ..Default::default()
@@ -270,7 +105,7 @@ fn info_valid_parses_summary() {
 
 #[test]
 fn info_completed_encrypted_without_key_rejected() {
-    let data = helpers::replay_info(&helpers::Info {
+    let data = replay_info(&Info {
         encrypted: true,
         ..Default::default()
     });
@@ -297,7 +132,7 @@ fn info_truncated_input_rejected() {
 
 #[test]
 fn header_valid_parses_all_fields() {
-    let payload = helpers::build_header_payload();
+    let payload = header_payload();
     let header = header::parse_replay_header(&payload).unwrap();
 
     assert_eq!(header.network_version, 19);
@@ -340,7 +175,7 @@ fn header_valid_parses_all_fields() {
 /// reported rather than skipped.
 #[test]
 fn header_trailing_bytes_are_reported_not_discarded() {
-    let mut payload = helpers::build_header_payload();
+    let mut payload = header_payload();
     payload.extend_from_slice(&[0xAA; 5]);
     let header = header::parse_replay_header(&payload).unwrap();
     assert_eq!(header.trailing_bytes, 5);
@@ -353,7 +188,7 @@ fn header_legacy_builds_have_no_valorant_skip_field() {
         "12.04", "12.05",
     ] {
         let branch = format!("++Ares-Core+release-{build}");
-        let payload = helpers::build_header_payload_for_branch(&branch, 3, &[]);
+        let payload = header_payload_for_branch(&branch, 3, &[]);
         let parsed = header::parse_replay_header(&payload);
         assert!(parsed.is_ok(), "{build}: {parsed:?}");
         let header = parsed.unwrap();
@@ -379,20 +214,20 @@ fn header_skip_field_starts_at_12_06() {
             &[2, 0, 0, 0, 57, 0][..],
             &[3, 0, 0, 0, 49, 56, 0][..],
         ] {
-            let payload = helpers::build_header_payload_for_branch(&branch, 3, skip);
+            let payload = header_payload_for_branch(&branch, 3, skip);
             let header = header::parse_replay_header(&payload).unwrap();
             assert_eq!(header.ue4_version, 1001, "{build}");
             assert_eq!(header.platform, "Windows", "{build}");
             assert_eq!(header.trailing_bytes, 0, "{build}");
         }
-        let missing = helpers::build_header_payload_for_branch(&branch, 3, &[]);
+        let missing = header_payload_for_branch(&branch, 3, &[]);
         assert!(header::parse_replay_header(&missing).is_err(), "{build}");
     }
 }
 
 #[test]
 fn header_bad_network_magic_rejected() {
-    let mut payload = helpers::build_header_payload();
+    let mut payload = header_payload();
     payload[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
     let result = header::parse_replay_header(&payload);
     assert!(matches!(
@@ -405,7 +240,7 @@ fn header_bad_network_magic_rejected() {
 
 #[test]
 fn header_negative_custom_version_count_rejected() {
-    let mut payload = helpers::build_header_payload();
+    let mut payload = header_payload();
     payload[8..12].copy_from_slice(&(-1i32).to_le_bytes());
     let result = header::parse_replay_header(&payload);
     assert!(matches!(
@@ -436,9 +271,9 @@ fn chunk_iter_empty_returns_none() {
 #[test]
 fn chunk_iter_multiple_chunks() {
     let mut data = Vec::new();
-    data.extend_from_slice(&helpers::build_chunk(0, &[0x11])); // Header
-    data.extend_from_slice(&helpers::build_chunk(1, &[0x22, 0x33])); // ReplayData
-    data.extend_from_slice(&helpers::build_chunk(3, &[])); // Event (empty)
+    data.extend_from_slice(&chunk(0, &[0x11])); // Header
+    data.extend_from_slice(&chunk(1, &[0x22, 0x33])); // ReplayData
+    data.extend_from_slice(&chunk(3, &[])); // Event (empty)
 
     let mut iter = ChunkIterator::new(&data, 0);
 
@@ -478,8 +313,8 @@ fn chunk_iter_truncated_header_rejected() {
 fn chunk_iter_truncated_payload_rejected() {
     // Chunk header says 100 bytes payload but only 2 are available
     let mut data = Vec::new();
-    helpers::add_u32(&mut data, 1); // type
-    helpers::add_i32(&mut data, 100); // size = 100
+    add_u32(&mut data, 1); // type
+    add_i32(&mut data, 100); // size = 100
     data.extend_from_slice(&[0u8; 2]); // only 2 bytes
     let mut iter = ChunkIterator::new(&data, 0);
     assert!(matches!(
@@ -494,8 +329,8 @@ fn chunk_iter_truncated_payload_rejected() {
 #[test]
 fn chunk_iter_negative_size_rejected() {
     let mut data = Vec::new();
-    helpers::add_u32(&mut data, 0);
-    helpers::add_i32(&mut data, -1);
+    add_u32(&mut data, 0);
+    add_i32(&mut data, -1);
     let mut iter = ChunkIterator::new(&data, 0);
     assert!(matches!(
         iter.next_chunk().unwrap_err(),
@@ -505,7 +340,7 @@ fn chunk_iter_negative_size_rejected() {
 
 #[test]
 fn chunk_type_unknown_preserved() {
-    let data = helpers::build_chunk(0xFFFF_FFFF, &[0x42]);
+    let data = chunk(0xFFFF_FFFF, &[0x42]);
     let mut iter = ChunkIterator::new(&data, 0);
     let chunk = iter.next_chunk().unwrap().unwrap();
     assert_eq!(chunk.chunk_type, ChunkType::Unknown(0xFFFF_FFFF));
@@ -513,11 +348,10 @@ fn chunk_type_unknown_preserved() {
 
 #[test]
 fn preamble_valid_file() {
-    let mut data = helpers::replay_info(&helpers::Info::default());
-    let header_payload = helpers::build_header_payload();
-    data.extend_from_slice(&helpers::build_chunk(0, &header_payload));
+    let mut data = replay_info(&Info::default());
+    data.extend_from_slice(&chunk(0, &header_payload()));
     let after_header = data.len();
-    data.extend_from_slice(&helpers::build_chunk(1, &[0xDE; 16]));
+    data.extend_from_slice(&chunk(1, &[0xDE; 16]));
 
     let preamble = parse_preamble(&data).unwrap();
     assert_eq!(preamble.info.length_in_ms, 60000);
@@ -530,11 +364,10 @@ fn preamble_valid_file() {
 
 #[test]
 fn preamble_unknown_chunk_before_header_rejected() {
-    let mut data = helpers::replay_info(&helpers::Info::default());
+    let mut data = replay_info(&Info::default());
     let unknown = ChunkType::Unknown(0xFFFF_FFFF);
-    data.extend_from_slice(&helpers::build_chunk(unknown.to_raw(), &[0x01, 0x02]));
-    let header_payload = helpers::build_header_payload();
-    data.extend_from_slice(&helpers::build_chunk(0, &header_payload));
+    data.extend_from_slice(&chunk(unknown.to_raw(), &[0x01, 0x02]));
+    data.extend_from_slice(&chunk(0, &header_payload()));
 
     assert!(matches!(
         parse_preamble(&data).unwrap_err(),
@@ -544,8 +377,8 @@ fn preamble_unknown_chunk_before_header_rejected() {
 
 #[test]
 fn preamble_data_before_header_rejected() {
-    let mut data = helpers::replay_info(&helpers::Info::default());
-    data.extend_from_slice(&helpers::build_chunk(1, &[0xDE; 16]));
+    let mut data = replay_info(&Info::default());
+    data.extend_from_slice(&chunk(1, &[0xDE; 16]));
 
     let result = parse_preamble(&data);
     assert!(matches!(
@@ -557,12 +390,9 @@ fn preamble_data_before_header_rejected() {
 #[test]
 fn preamble_recognized_non_header_chunks_are_not_silently_skipped() {
     for chunk_type in [ChunkType::Checkpoint, ChunkType::Event] {
-        let mut data = helpers::replay_info(&helpers::Info::default());
-        data.extend_from_slice(&helpers::build_chunk(chunk_type.to_raw(), &[0xAB]));
-        data.extend_from_slice(&helpers::build_chunk(
-            ChunkType::Header.to_raw(),
-            &helpers::build_header_payload(),
-        ));
+        let mut data = replay_info(&Info::default());
+        data.extend_from_slice(&chunk(chunk_type.to_raw(), &[0xAB]));
+        data.extend_from_slice(&chunk(ChunkType::Header.to_raw(), &header_payload()));
 
         assert!(matches!(
             parse_preamble(&data).unwrap_err(),
@@ -574,7 +404,7 @@ fn preamble_recognized_non_header_chunks_are_not_silently_skipped() {
 
 #[test]
 fn fstring_length_and_encoding_errors_keep_their_typed_source() {
-    let valid = helpers::replay_info(&helpers::Info::default());
+    let valid = replay_info(&Info::default());
     let name_offset = valid
         .windows(b"Match\0".len())
         .position(|window| window == b"Match\0")
@@ -608,12 +438,12 @@ fn fstring_length_and_encoding_errors_keep_their_typed_source() {
 /// and carries four bytes that are not a codec stream.
 fn compressed_replay_data_needing_64_bytes() -> Vec<u8> {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 0); // Time1
-    helpers::add_u32(&mut payload, 0); // Time2
-    helpers::add_i32(&mut payload, 12); // SizeInBytes
-    helpers::add_i32(&mut payload, 64); // MemorySizeInBytes
-    helpers::add_i32(&mut payload, 64); // archive decompressed_size
-    helpers::add_i32(&mut payload, 4); // archive compressed_size
+    add_u32(&mut payload, 0); // Time1
+    add_u32(&mut payload, 0); // Time2
+    add_i32(&mut payload, 12); // SizeInBytes
+    add_i32(&mut payload, 64); // MemorySizeInBytes
+    add_i32(&mut payload, 64); // archive decompressed_size
+    add_i32(&mut payload, 4); // archive compressed_size
     payload.extend_from_slice(&[0; 4]);
     payload
 }
@@ -642,7 +472,7 @@ fn a_compressed_archive_with_the_decoder_reaches_the_codec() {
 
 #[test]
 fn preamble_no_header_chunk_rejected() {
-    let data = helpers::replay_info(&helpers::Info::default());
+    let data = replay_info(&Info::default());
     let result = parse_preamble(&data);
     assert!(matches!(
         result.unwrap_err(),
@@ -653,10 +483,10 @@ fn preamble_no_header_chunk_rejected() {
 #[test]
 fn replay_data_meta_valid() {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 1000); // time1
-    helpers::add_u32(&mut payload, 2000); // time2
-    helpers::add_i32(&mut payload, 64); // size_in_bytes
-    helpers::add_i32(&mut payload, 128); // memory_size_in_bytes
+    add_u32(&mut payload, 1000); // time1
+    add_u32(&mut payload, 2000); // time2
+    add_i32(&mut payload, 64); // size_in_bytes
+    add_i32(&mut payload, 128); // memory_size_in_bytes
     payload.extend_from_slice(&[0u8; 64]); // data placeholder
 
     let meta = parse_replay_data_meta(&payload).unwrap();
@@ -679,10 +509,10 @@ fn replay_data_meta_truncated() {
 #[test]
 fn replay_data_meta_negative_memory_size_rejected() {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_i32(&mut payload, 10);
-    helpers::add_i32(&mut payload, -1); // negative
+    add_u32(&mut payload, 0);
+    add_u32(&mut payload, 0);
+    add_i32(&mut payload, 10);
+    add_i32(&mut payload, -1); // negative
     let result = parse_replay_data_meta(&payload);
     assert!(matches!(
         result.unwrap_err(),
@@ -693,10 +523,10 @@ fn replay_data_meta_negative_memory_size_rejected() {
 #[test]
 fn decompress_uncompressed_valid() {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 100); // time1
-    helpers::add_u32(&mut payload, 200); // time2
-    helpers::add_i32(&mut payload, 4); // size = memory_size
-    helpers::add_i32(&mut payload, 4); // memory_size
+    add_u32(&mut payload, 100); // time1
+    add_u32(&mut payload, 200); // time2
+    add_i32(&mut payload, 4); // size = memory_size
+    add_i32(&mut payload, 4); // memory_size
     payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
     let result = decompress_replay_data(&payload, false, false).unwrap();
@@ -706,10 +536,10 @@ fn decompress_uncompressed_valid() {
 #[test]
 fn decompress_uncompressed_size_mismatch_rejected() {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_i32(&mut payload, 10); // size != memory_size
-    helpers::add_i32(&mut payload, 20);
+    add_u32(&mut payload, 0);
+    add_u32(&mut payload, 0);
+    add_i32(&mut payload, 10); // size != memory_size
+    add_i32(&mut payload, 20);
     payload.extend_from_slice(&[0u8; 20]);
 
     let result = decompress_replay_data(&payload, false, false);
@@ -724,10 +554,10 @@ fn decompress_uncompressed_size_mismatch_rejected() {
 #[test]
 fn replay_data_trailing_bytes_are_reported_not_discarded() {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 100);
-    helpers::add_u32(&mut payload, 200);
-    helpers::add_i32(&mut payload, 4); // SizeInBytes
-    helpers::add_i32(&mut payload, 4); // MemorySizeInBytes
+    add_u32(&mut payload, 100);
+    add_u32(&mut payload, 200);
+    add_i32(&mut payload, 4); // SizeInBytes
+    add_i32(&mut payload, 4); // MemorySizeInBytes
     payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
     payload.extend_from_slice(&[0x11, 0x22, 0x33]); // past the declared archive
 
@@ -744,10 +574,10 @@ fn replay_data_trailing_bytes_are_reported_not_discarded() {
 #[test]
 fn replay_data_exact_payload_reports_no_trailing_bytes() {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_i32(&mut payload, 4);
-    helpers::add_i32(&mut payload, 4);
+    add_u32(&mut payload, 0);
+    add_u32(&mut payload, 0);
+    add_i32(&mut payload, 4);
+    add_i32(&mut payload, 4);
     payload.extend_from_slice(&[1, 2, 3, 4]);
 
     assert_eq!(parse_replay_data_meta(&payload).unwrap().trailing_bytes, 0);
@@ -760,10 +590,10 @@ fn replay_data_exact_payload_reports_no_trailing_bytes() {
 #[test]
 fn replay_data_short_payload_reports_no_trailing_bytes() {
     let mut payload = Vec::new();
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_u32(&mut payload, 0);
-    helpers::add_i32(&mut payload, 64); // declares more than is here
-    helpers::add_i32(&mut payload, 64);
+    add_u32(&mut payload, 0);
+    add_u32(&mut payload, 0);
+    add_i32(&mut payload, 64); // declares more than is here
+    add_i32(&mut payload, 64);
     payload.extend_from_slice(&[1, 2, 3, 4]);
 
     assert_eq!(parse_replay_data_meta(&payload).unwrap().trailing_bytes, 0);
@@ -771,21 +601,6 @@ fn replay_data_short_payload_reports_no_trailing_bytes() {
         decompress_replay_data(&payload, false, false),
         Err(ContainerError::Truncated { .. })
     ));
-}
-
-/// An Oodle archive around one uncompressed Kraken block holding `plain`, then
-/// `unread` bytes inside the declared `compressed_size` that no block reads.
-/// Per oozextract 0.5.4's block-header parse, `0x4C` is header nibble `0xC`
-/// with the uncompressed bit set and `0x06` is Kraken without checksums.
-#[cfg(feature = "oodle")]
-fn archive_with_unread_input(plain: &[u8], unread: usize) -> Vec<u8> {
-    let mut archive = Vec::new();
-    helpers::add_i32(&mut archive, plain.len() as i32); // decompressed_size
-    helpers::add_i32(&mut archive, (2 + plain.len() + unread) as i32); // compressed_size
-    archive.extend_from_slice(&[0x4C, 0x06]);
-    archive.extend_from_slice(plain);
-    archive.extend(std::iter::repeat_n(0xAB, unread));
-    archive
 }
 
 /// Archive bytes no block reads are counted together with the framing residual
@@ -796,10 +611,10 @@ fn replay_data_input_the_codec_never_reads_is_counted() {
     for (unread, past_archive) in [(7, 0), (0, 0), (7, 3)] {
         let archive = archive_with_unread_input(&[1, 2, 3, 4, 5], unread);
         let mut payload = Vec::new();
-        helpers::add_u32(&mut payload, 0); // Time1
-        helpers::add_u32(&mut payload, 0); // Time2
-        helpers::add_i32(&mut payload, archive.len() as i32); // SizeInBytes
-        helpers::add_i32(&mut payload, 5); // MemorySizeInBytes
+        add_u32(&mut payload, 0); // Time1
+        add_u32(&mut payload, 0); // Time2
+        add_i32(&mut payload, archive.len() as i32); // SizeInBytes
+        add_i32(&mut payload, 5); // MemorySizeInBytes
         payload.extend_from_slice(&archive);
         payload.extend(std::iter::repeat_n(0xCD, past_archive));
 
@@ -863,12 +678,12 @@ mod event_chunks {
         body: &[u8],
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        helpers::add_fstring(&mut buf, id);
-        helpers::add_fstring(&mut buf, group);
-        helpers::add_fstring(&mut buf, metadata);
-        helpers::add_u32(&mut buf, time1);
-        helpers::add_u32(&mut buf, time2);
-        helpers::add_i32(&mut buf, body.len() as i32);
+        add_fstring(&mut buf, id);
+        add_fstring(&mut buf, group);
+        add_fstring(&mut buf, metadata);
+        add_u32(&mut buf, time1);
+        add_u32(&mut buf, time2);
+        add_i32(&mut buf, body.len() as i32);
         buf.extend_from_slice(body);
         buf
     }
@@ -1028,12 +843,12 @@ mod event_chunks {
         // Legal though no corpus event uses it; misread, it would give a wrong
         // group name rather than an error.
         let mut payload = Vec::new();
-        helpers::add_fstring_utf16(&mut payload, "utf16id");
-        helpers::add_fstring_utf16(&mut payload, "roundStarted");
-        helpers::add_fstring(&mut payload, "7");
-        helpers::add_u32(&mut payload, 11);
-        helpers::add_u32(&mut payload, 11);
-        helpers::add_i32(&mut payload, 1);
+        add_fstring_utf16(&mut payload, "utf16id");
+        add_fstring_utf16(&mut payload, "roundStarted");
+        add_fstring(&mut payload, "7");
+        add_u32(&mut payload, 11);
+        add_u32(&mut payload, 11);
+        add_i32(&mut payload, 1);
         payload.push(0x5A);
 
         let event = parse_event_chunk(&payload).unwrap();
@@ -1046,12 +861,12 @@ mod event_chunks {
     #[test]
     fn event_chunk_negative_payload_size_rejected() {
         let mut payload = Vec::new();
-        helpers::add_fstring(&mut payload, "id");
-        helpers::add_fstring(&mut payload, "group");
-        helpers::add_fstring(&mut payload, "");
-        helpers::add_u32(&mut payload, 1);
-        helpers::add_u32(&mut payload, 1);
-        helpers::add_i32(&mut payload, -1);
+        add_fstring(&mut payload, "id");
+        add_fstring(&mut payload, "group");
+        add_fstring(&mut payload, "");
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 1);
+        add_i32(&mut payload, -1);
 
         assert!(matches!(
             parse_event_chunk(&payload).unwrap_err(),
@@ -1084,7 +899,7 @@ mod event_chunks {
     fn event_chunk_truncated_header_rejected() {
         // The header itself runs off the end: an id, then nothing.
         let mut payload = Vec::new();
-        helpers::add_fstring(&mut payload, "id");
+        add_fstring(&mut payload, "id");
         assert!(matches!(
             parse_event_chunk(&payload).unwrap_err(),
             ContainerError::FString {
@@ -1112,11 +927,11 @@ mod event_chunks {
         let event_payload = build_event_chunk("id", "spikePlanted", "", 69118, 69118, &body);
 
         let mut data = Vec::new();
-        helpers::add_u32(&mut data, ChunkType::Checkpoint.to_raw());
-        helpers::add_i32(&mut data, 2);
+        add_u32(&mut data, ChunkType::Checkpoint.to_raw());
+        add_i32(&mut data, 2);
         data.extend_from_slice(&[0u8; 2]);
-        helpers::add_u32(&mut data, ChunkType::Event.to_raw());
-        helpers::add_i32(&mut data, event_payload.len() as i32);
+        add_u32(&mut data, ChunkType::Event.to_raw());
+        add_i32(&mut data, event_payload.len() as i32);
         data.extend_from_slice(&event_payload);
 
         let mut iter = ChunkIterator::new(&data, 0);
@@ -1145,12 +960,12 @@ mod event_payload_layouts {
     /// `[u32 tag][words][FString name][f32 seconds]`, seconds fixed at 1.5.
     fn event_payload(tag: u32, words: &[u32], name: &str) -> Vec<u8> {
         let mut out = Vec::new();
-        helpers::add_u32(&mut out, tag);
+        add_u32(&mut out, tag);
         for &word in words {
-            helpers::add_u32(&mut out, word);
+            add_u32(&mut out, word);
         }
-        helpers::add_fstring(&mut out, name);
-        helpers::add_f32(&mut out, 1.5);
+        add_fstring(&mut out, name);
+        add_f32(&mut out, 1.5);
         out
     }
 
