@@ -181,6 +181,18 @@ def weapon_theme(raw, width):
     return payload[:-1].decode("utf-8")
 
 
+def load_net_guids(export, *columns):
+    """{net_guid: its `columns`' values, one value for one column} from
+    net_guids.parquet. The writer emits each GUID once, so a repeat raises."""
+    table = pq.read_table(export / "net_guids.parquet", columns=["net_guid", *columns], use_threads=False)
+    guids = table.column("net_guid").to_pylist()
+    values = [table.column(column).to_pylist() for column in columns]
+    out = dict(zip(guids, values[0] if len(columns) == 1 else zip(*values)))
+    if len(out) != len(guids):
+        raise InputError("net_guids.parquet repeats a NetGUID")
+    return out
+
+
 def text(batch, name):
     """A batch column as strings, for Arrow-side masks."""
     return pc.cast(batch.column(name), pa.string())

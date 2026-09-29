@@ -47,10 +47,10 @@ import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import sha256_file as sha, staged_output
-    from .wire_bits import Bits, WireError, fastarray_header, iter_selected, text
+    from .wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
 else:
     from atomic_io import sha256_file as sha, staged_output
-    from wire_bits import Bits, WireError, fastarray_header, iter_selected, text
+    from wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
 
 #: 2: items gained `status_name`, the receipt `declarations.resolved_names`.
 SCHEMA_VERSION = 2
@@ -401,11 +401,6 @@ def owner_classes(export_dir: Path) -> dict:
     return owners
 
 
-def object_paths(export_dir: Path) -> dict:
-    table = pq.read_table(export_dir / "net_guids.parquet", columns=["net_guid", "path", "outer_net_guid"])
-    return {row["net_guid"]: (row["path"], row["outer_net_guid"]) for row in table.to_pylist()}
-
-
 def window_record(row: dict, ordinal: int, population: str, build: str, schema: ReplaySchema):
     """(window record, decoded items, per-window counts)."""
     route = ROUTE_BY_GROUP[row["group_path"]]
@@ -487,7 +482,7 @@ def write(export_dir: Path, stage: Path) -> dict:
     manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
     build = manifest["replay_build"]
     schema = load_schema(export_dir, manifest)
-    owners, objects = owner_classes(export_dir), object_paths(export_dir)
+    owners, objects = owner_classes(export_dir), load_net_guids(export_dir, "path", "outer_net_guid")
     declared_items = schema.item_identities()
     counts = Counter({k: 0 for k in COUNTERS})
     reasons = Counter()

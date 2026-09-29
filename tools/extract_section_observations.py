@@ -11,14 +11,13 @@ import collections, json, math, re, struct
 from pathlib import Path
 
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import run_json_cli, sha256_file as sha
-    from .wire_bits import InputError, exact_ref, iter_selected, parse_array, text
+    from .wire_bits import InputError, exact_ref, iter_selected, load_net_guids, parse_array, text
 else:
     from atomic_io import run_json_cli, sha256_file as sha
-    from wire_bits import InputError, exact_ref, iter_selected, parse_array, text
+    from wire_bits import InputError, exact_ref, iter_selected, load_net_guids, parse_array, text
 
 SCHEMA_VERSION = 1
 OUTER_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
@@ -261,9 +260,7 @@ def extract(export):
     before = {p.name: sha(p) for p in inputs}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     decl = declarations(manifest)
-    path_sets = collections.defaultdict(set)
-    for r in pq.read_table(export / "net_guids.parquet", columns=["net_guid","path"], use_threads=False).to_pylist(): path_sets[r["net_guid"]].add(r["path"])
-    paths = {guid: next(iter(values)) if len(values) == 1 else None for guid, values in path_sets.items()}
+    paths = load_net_guids(export, "path")
     groups = {}; segments = collections.Counter(); selected = []; last = None; last_o = None
     for o, r in selected_rows(export / "fields.parquet", FIELDS):
         # selected_rows yields only rows named `<route>.`, so this is a route.

@@ -22,8 +22,10 @@ import pyarrow.parquet as pq
 
 if __package__:
     from .atomic_io import run_json_cli
+    from .wire_bits import load_net_guids
 else:  # direct script execution
     from atomic_io import run_json_cli
+    from wire_bits import load_net_guids
 
 
 MAGAZINE_PATH = "MagazineAmmo"
@@ -175,21 +177,9 @@ def build(export_dir: Path) -> dict:
     if missing:
         raise ValueError(f"missing required export tables: {', '.join(missing)}")
 
-    net = _read_columns(export_dir / "net_guids.parquet",
-                        ["net_guid", "path", "outer_net_guid"])
-    # A NetGUID with conflicting metadata is not a join key: taking the last
-    # row would make a reload/ammo relation depend on Parquet order.
-    path_values = defaultdict(set)
-    outer_values = defaultdict(set)
-    for guid, path, outer in zip(net["net_guid"], net["path"], net["outer_net_guid"]):
-        if path:
-            path_values[guid].add(path)
-        if outer is not None:
-            outer_values[guid].add(outer)
-    path_of = {guid: next(iter(values)) for guid, values in path_values.items()
-               if len(values) == 1}
-    outer_of = {guid: next(iter(values)) for guid, values in outer_values.items()
-                if len(values) == 1}
+    net = load_net_guids(export_dir, "path", "outer_net_guid")
+    path_of = {guid: path for guid, (path, _) in net.items() if path}
+    outer_of = {guid: outer for guid, (_, outer) in net.items() if outer is not None}
 
     events = _read_columns(export_dir / "events.parquet", ["group", "time1"])
     round_starts = sorted(time for group, time in zip(events["group"], events["time1"])

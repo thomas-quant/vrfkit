@@ -283,17 +283,22 @@ class MatchObservationTests(unittest.TestCase):
             rows = observations.build(root)["reload_intervals"]
         self.assertTrue(rows[-1]["left_censored"])
 
-    def test_conflicting_guid_metadata_and_second_weapon_do_not_join(self):
+    def test_a_repeated_net_guid_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); write_export(root)
+            net = pq.read_table(root / "net_guids.parquet")
+            pq.write_table(pa.concat_tables([net, net.slice(0, 1)]), root / "net_guids.parquet")
+            with self.assertRaisesRegex(ValueError, "repeats"):
+                observations.build(root)
+
+    def test_a_second_weapons_magazine_does_not_join(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); write_export(root)
             net = pq.read_table(root / "net_guids.parquet")
             pq.write_table(pa.concat_tables([net, pa.table({
-                "net_guid": [100, 101, 100],
-                "path": ["MagazineAmmo", "MagazineAmmo", "MagazineAmmo"],
-                "outer_net_guid": [201, 201, 200],
+                "net_guid": [101], "path": ["MagazineAmmo"], "outer_net_guid": [201],
             })]), root / "net_guids.parquet")
             append_field_rows(root, [
-                (18, 1, 0, 100, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
                 (10, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 30, None),
                 (18, 1, 0, 101, "/Script/ShooterGame.AmmoComponent", "AuthResourceAmount", 35, None),
             ])

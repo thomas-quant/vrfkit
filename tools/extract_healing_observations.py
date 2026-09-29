@@ -15,12 +15,12 @@ if __package__:
     from . import extract_section_observations as sections
     from .atomic_io import run_json_cli, sha256_file as sha
     from .player_identity import load_player_bodies
-    from .wire_bits import InputError, iter_selected, text
+    from .wire_bits import InputError, iter_selected, load_net_guids, text
 else:
     import extract_section_observations as sections
     from atomic_io import run_json_cli, sha256_file as sha
     from player_identity import load_player_bodies
-    from wire_bits import InputError, iter_selected, text
+    from wire_bits import InputError, iter_selected, load_net_guids, text
 IntegrityError = sections.IntegrityError
 SCHEMA_VERSION = 1
 ROUTE = "MulticastNotifyHeal"
@@ -337,11 +337,7 @@ def extract(export):
     section_declarations = sections.declarations(manifest)
     bodies = load_player_bodies(export, manifest)
     players = bodies.subjects
-    paths = {
-        x["net_guid"]: x["path"]
-        for x in pq.read_table(export / "net_guids.parquet", columns=["net_guid", "path"],
-                               use_threads=False).to_pylist()
-    }
+    paths = load_net_guids(export, "path")
     actors = collections.defaultdict(list)
     for o, r in enumerate(pq.read_table(
         export / "actors.parquet",

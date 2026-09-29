@@ -11,7 +11,7 @@ effect intervals; checkpoint snapshots are excluded.
 from __future__ import annotations
 
 import json
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -19,9 +19,11 @@ import pyarrow.parquet as pq
 if __package__:
     from .atomic_io import run_json_cli
     from .player_identity import FINAL_PROVENANCE, load_player_bodies
+    from .wire_bits import load_net_guids
 else:
     from atomic_io import run_json_cli
     from player_identity import FINAL_PROVENANCE, load_player_bodies
+    from wire_bits import load_net_guids
 
 
 BLIND_GROUP = "/Script/ShooterGame.BlindManagerComponent"
@@ -40,12 +42,7 @@ def build(export_dir: Path) -> dict:
     bodies = load_player_bodies(export_dir, manifest)
     players = bodies.subjects
     conflicts = bodies.conflicts
-    guid_paths = defaultdict(set)
-    for row in pq.read_table(export_dir / "net_guids.parquet",
-                             columns=["net_guid", "path"]).to_pylist():
-        guid_paths[row["net_guid"]].add(row["path"])
-    paths = {guid: next(iter(values)) for guid, values in guid_paths.items()
-             if len(values) == 1}
+    paths = load_net_guids(export_dir, "path")
     fields = pq.read_table(export_dir / "fields.parquet", columns=COLUMNS,
                            filters=[("group_path", "in", [BLIND_GROUP, EFFECT_GROUP])])
     records = []
@@ -127,7 +124,6 @@ def build(export_dir: Path) -> dict:
         "records": records,
         "totals": {**{key: tally[key] for key in counters},
                    "conflicting_manifest_character_guids": len(conflicts),
-                   "conflicting_effect_paths": sum(len(v) > 1 for v in guid_paths.values()),
                    "player_identity": bodies.counts},
     }
 
