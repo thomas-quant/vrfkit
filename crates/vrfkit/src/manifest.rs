@@ -1,5 +1,5 @@
 //! Hand-rolled JSON for manifest.json: no serde; one member per line, joined
-//! by [`Object`] and [`array`].
+//! by [`Object`] and [`array()`].
 //!
 //! The header's game-specific data entries are JSON documents themselves (on
 //! 02d4d478 entry 1 is a 219,304-character match roster). They are emitted as
