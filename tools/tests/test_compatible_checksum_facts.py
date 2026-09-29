@@ -1,53 +1,24 @@
 """Name-level facts that pin a property's C++ type, recomputed from its checksum.
 
-Every replay field declaration carries a `compatible_checksum`, and Unreal
-derives it from the property's lowercase name, its lowercase C++ type and its
-static array index -- chained, for a struct member or an array element, from
-the checksum of the property that contains it. So a claim like "`EffectID` is
-an `int64`" can be checked against the number the replay itself sends: the
-type is right if the chain reproduces the checksum and a rival type does not.
+A declaration's `compatible_checksum` hashes the property's lowercase name, C++
+type and static index, chained from its containing property's checksum
+(`check_checksum_types.chain_checksum`, pinned against an independent FCrc
+implementation in test_check_checksum_types). A fact is right when its chain
+reproduces the replay's checksum and a rival leaf type does not. The chains are
+a parent's name and C++ type from the 13.06 executable's reflection; the
+overlay comments cite them, and this file is where those citations can fail.
 
-The formula is the one the 2026-09-28 game-file analysis measured on 194
-Blueprint fields of the 13.06 build (CRC32 over the UTF-32LE lowercase name,
-then the lowercase C++ type, then the static index as little-endian u32). The
-chains below are small facts about the game's types -- a parent's name and
-C++ type -- taken from the 13.06 executable's reflection, read-only. They are
-what the comments beside the overlay entries cite; this file is where those
-citations can fail.
-
-Each fact also names the `FieldType` the repository gives that checksum in
-`crates/vrf-decode/src/checksum_table.rs`, when it gives one there, so a
-retyped donor whose checksum table was never regenerated shows up here too.
+Each fact also names the `FieldType` `checksum_table.rs` gives that checksum,
+when it has an entry, so a retyped donor whose table was not regenerated fails.
 """
-import struct
 import sys
 import unittest
-import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import extract_checksum_types as ect  # noqa: E402
 import generate_scoped_types as gst  # noqa: E402
-
-
-def _crc(text: str, seed: int) -> int:
-    return zlib.crc32(text.lower().encode("utf-32-le"), seed)
-
-
-def compatible_checksum(chain) -> int:
-    """The checksum of the last `(name, cpp_type)` step, chained from the first.
-
-    `cpp_type` is the spelling `GetCPPType` gives, compared lowercase: `int64`,
-    `uint32`, `bool`, `TArray`, `F<Struct>`, `A<Class>*`. An array element is
-    its own step, carrying the array's name and the element type.
-    """
-    checksum = 0
-    for name, cpp_type in chain:
-        checksum = _crc(name, checksum)
-        checksum = _crc(cpp_type, checksum)
-        checksum = zlib.crc32(struct.pack("<I", 0), checksum)
-    return checksum
-
+from check_checksum_types import chain_checksum  # noqa: E402
 
 #: (replay checksum, chain, rival leaf types that must NOT reproduce it,
 #:  the FieldType checksum_table.rs must give it or None when it has no entry,
@@ -126,10 +97,9 @@ FACTS = [
 #:  reproduce it, the FieldType every scoped entry carrying the checksum must
 #:  have, where).
 #:
-#: Each name and C++ type is a name-level fact from the 13.06 Blueprint class
-#: definitions (read-only, 2026-09-28): the property's FProperty class, and
-#: for an object reference its class, which fixes the `A`/`U` prefix. A
-#: top-level Blueprint property has no parent, so its chain is one step.
+#: Each name and C++ type comes from the 13.06 Blueprint class definitions:
+#: the FProperty class, and for an object reference its class, which fixes the
+#: `A`/`U` prefix. A top-level Blueprint property's chain is one step.
 SCOPED_FACTS = [
     (3110715024, "TrailPosition", "FVector", ["FVector3f", "FRotator"],
      "FieldType::VectorDouble", "Projectile_Hunter_{Q_RevealBolt,4_ExplosiveBolt}_C"),
@@ -153,9 +123,7 @@ SCOPED_FACTS = [
     # FText one keeps only string-table keys and refuses both forms it sends.
     (4004484071, "OverrideMatchTimerText", "FText", ["FString", "FName"],
      "FieldType::FTextTree", "BombGameState_C, Swiftplay_EoRCredits_GameState_C"),
-    # The other Blueprint identities of 2026-09-28 (the ceremonies, the kill
-    # effect classes, map interactables, ability items and effect objects):
-    # a class reference is `UClass*`, not `TSubclassOf<>`, and an object
+    # A class reference is `UClass*`, not `TSubclassOf<>`; an object
     # reference's A/U prefix is its class's.
     (1807371052, "ActiveSlowTimeEffects", "bool", ["uint8"],
      "FieldType::Bool", "BombGameState_C, Swiftplay_EoRCredits_GameState_C"),
@@ -284,10 +252,10 @@ def field_type_of(cpp_type: str) -> str:
 class FormulaTests(unittest.TestCase):
     def test_a_known_blueprint_field_reproduces(self):
         """A fact with no struct nesting, as an anchor for the formula itself."""
-        self.assertEqual(compatible_checksum([("Deployed", "bool")]), 3902815170)
+        self.assertEqual(chain_checksum([("Deployed", "bool")]), 3902815170)
 
     def test_every_leaf_depends_on_its_parents(self):
-        leaf_only = compatible_checksum([("EffectID", "int64")])
+        leaf_only = chain_checksum([("EffectID", "int64")])
         self.assertNotEqual(leaf_only, 2340855891)
 
 
@@ -295,14 +263,14 @@ class FactTests(unittest.TestCase):
     def test_every_chain_reproduces_its_replay_checksum(self):
         for checksum, chain, _rivals, _table, where in FACTS:
             with self.subTest(where=where):
-                self.assertEqual(compatible_checksum(chain), checksum)
+                self.assertEqual(chain_checksum(chain), checksum)
 
     def test_no_rival_leaf_type_reproduces_it(self):
         for checksum, chain, rivals, _table, where in FACTS:
             for rival in rivals:
                 with self.subTest(where=where, rival=rival):
                     self.assertNotEqual(
-                        compatible_checksum(chain[:-1] + [(chain[-1][0], rival)]),
+                        chain_checksum(chain[:-1] + [(chain[-1][0], rival)]),
                         checksum)
 
     def test_the_checksum_table_agrees_with_the_proven_type(self):
@@ -321,13 +289,13 @@ class ScopedFactTests(unittest.TestCase):
     def test_every_blueprint_property_reproduces_its_replay_checksum(self):
         for checksum, name, cpp_type, _rivals, _field_type, where in SCOPED_FACTS:
             with self.subTest(where=where, name=name):
-                self.assertEqual(compatible_checksum([(name, cpp_type)]), checksum)
+                self.assertEqual(chain_checksum([(name, cpp_type)]), checksum)
 
     def test_no_rival_type_reproduces_it(self):
         for checksum, name, _cpp_type, rivals, _field_type, where in SCOPED_FACTS:
             for rival in rivals:
                 with self.subTest(where=where, name=name, rival=rival):
-                    self.assertNotEqual(compatible_checksum([(name, rival)]), checksum)
+                    self.assertNotEqual(chain_checksum([(name, rival)]), checksum)
 
     def test_every_scoped_entry_with_the_checksum_has_the_proven_type(self):
         """Each fact must be used, by entries of its own name and its type.
