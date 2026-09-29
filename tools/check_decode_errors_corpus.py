@@ -73,7 +73,9 @@ MUST_MOVE = (
 CHECKPOINT_MUST_MOVE = tuple(("cp_" + work, tuple("cp_" + g for g in gates))
                              for work, gates in MUST_MOVE[:4])
 
-#: `(failure counter, why no work counter backs it)`.
+#: `(failure counter, why no work counter backs it)`. `RPCs:` cannot back
+#: truncated_rpcs: it also counts ClassNetCache tails (>= 6 per replay) and
+#: unresolved RPCs, neither of which enters the walk.
 UNBACKED = (
     ("truncated_rpcs", "summary.rs prints no count of RPC parameter walks"),
     ("cnc_bruteforce_payloads_unwalked",
