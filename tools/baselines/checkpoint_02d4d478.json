@@ -1,158 +1,159 @@
 {
-  "counters": {
-    "chunks": 19,
-    "packets": 530401,
-    "export_groups": 475,
-    "content_blocks": 608080,
-    "rep_layout_blocks": 258903,
-    "class_net_cache_blocks": 349168,
-    "fields": 429648,
-    "rpcs": 342990,
-    "actor_opens": 2028,
-    "actor_closes": 1799,
-    "bunches": 530401,
-    "malformed_packets": 0,
-    "skipped_bits": 18217181,
-    "movement_rows": 1844147,
-    "net_guid_rows": 16167,
-    "event_rows": 195,
-    "partial_rows": 0,
-    "partial_bits": 0,
-    "event_layout_mismatches": 0,
-    "event_payloads_decoded": 195,
-    "event_payload_unknown_groups": 0,
-    "overlay_decoded_ok": 822185,
-    "overlay_decode_errors": 0,
-    "overlay_raw_skip": 24747,
-    "overlay_not_in_table": 140814,
-    "overlay_no_field_name": 1249,
-    "overlay_rows_offered": 988995,
-    "effect_blobs_decoded": 61617,
-    "struct_blobs_decoded": 207,
-    "struct_blobs_failed": 0,
-    "targeting_world_locations_decoded": 0,
-    "tracked_rewards_opaque_empty_variants": 7,
-    "cnc_rpcs_emitted": 4901,
-    "cnc_bruteforce_payloads_attempted": 4683,
-    "cnc_bruteforce_payloads_unwalked": 0,
-    "rep_layout_cnc_tails_decoded": 218,
-    "rep_layout_cnc_tails_preserved": 114,
-    "movement_sized_section_tails": 0,
-    "movement_sized_section_tail_bits": 0,
-    "movement_open_section_tails": 0,
-    "movement_open_section_tail_bits": 0,
-    "movement_envelope_trailers": 1837580,
-    "movement_envelope_trailer_bits": 44101920,
-    "active_blinds_empty_trailers": 0,
-    "cp_partial_rows": 0,
-    "cp_partial_bits": 0,
-    "cp_chunks": 18,
-    "cp_guid_entries": 74270,
-    "cp_group_records": 8307,
-    "cp_exported_fields": 49314,
-    "cp_frames": 18,
-    "cp_frame_packets": 3691,
-    "cp_field_rows": 352089,
-    "cp_actor_rows_written": 3014,
-    "cp_net_guid_rows_written": 74270,
-    "cp_block_rows_written": 22247,
-    "cp_guid_entry_rows_written": 74270,
-    "cp_export_group_rows_written": 8307,
-    "cp_export_field_rows_written": 49314,
-    "cp_literal_paths": 55744,
-    "cp_indexed_paths": 18526,
-    "cp_resolved_path_indices": 18526,
-    "cp_struct_blobs_decoded": 205,
-    "cp_struct_blobs_failed": 0,
-    "cp_targeting_world_locations_decoded": 0,
-    "cp_tracked_rewards_opaque_empty_variants": 0,
-    "cp_cnc_rpcs_emitted": 170,
-    "cp_cnc_bruteforce_payloads_attempted": 0,
-    "cp_cnc_bruteforce_payloads_unwalked": 0,
-    "cp_rep_layout_cnc_tails_decoded": 170,
-    "cp_rep_layout_cnc_tails_preserved": 0,
-    "cp_movement_sized_section_tails": 0,
-    "cp_movement_sized_section_tail_bits": 0,
-    "cp_movement_open_section_tails": 0,
-    "cp_movement_open_section_tail_bits": 0,
-    "cp_movement_envelope_trailers": 0,
-    "cp_movement_envelope_trailer_bits": 0,
-    "cp_active_blinds_empty_trailers": 0,
-    "frame_external_data_blobs": 0,
-    "frame_external_data_bytes": 0,
-    "frame_game_specific_bytes": 0,
-    "frame_non_finite_times": 0,
-    "cp_frame_external_data_blobs": 0,
-    "cp_frame_external_data_bytes": 0,
-    "cp_frame_game_specific_bytes": 0,
-    "cp_frame_non_finite_times": 0
+ "replay": "02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf",
+ "counters": {
+  "chunks": 19,
+  "packets": 530401,
+  "export_groups": 475,
+  "content_blocks": 608080,
+  "rep_layout_blocks": 258903,
+  "class_net_cache_blocks": 349168,
+  "fields": 429648,
+  "rpcs": 342990,
+  "actor_opens": 2028,
+  "actor_closes": 1799,
+  "bunches": 530401,
+  "malformed_packets": 0,
+  "skipped_bits": 18217181,
+  "movement_rows": 1844147,
+  "net_guid_rows": 16167,
+  "event_rows": 195,
+  "partial_rows": 0,
+  "partial_bits": 0,
+  "event_layout_mismatches": 0,
+  "event_payloads_decoded": 195,
+  "event_payload_unknown_groups": 0,
+  "overlay_decoded_ok": 822185,
+  "overlay_decode_errors": 0,
+  "overlay_raw_skip": 24747,
+  "overlay_not_in_table": 140814,
+  "overlay_no_field_name": 1249,
+  "overlay_rows_offered": 988995,
+  "effect_blobs_decoded": 61617,
+  "struct_blobs_decoded": 207,
+  "struct_blobs_failed": 0,
+  "targeting_world_locations_decoded": 0,
+  "tracked_rewards_opaque_empty_variants": 7,
+  "cnc_rpcs_emitted": 4901,
+  "cnc_bruteforce_payloads_attempted": 4683,
+  "cnc_bruteforce_payloads_unwalked": 0,
+  "rep_layout_cnc_tails_decoded": 218,
+  "rep_layout_cnc_tails_preserved": 114,
+  "movement_sized_section_tails": 0,
+  "movement_sized_section_tail_bits": 0,
+  "movement_open_section_tails": 0,
+  "movement_open_section_tail_bits": 0,
+  "movement_envelope_trailers": 1837580,
+  "movement_envelope_trailer_bits": 44101920,
+  "active_blinds_empty_trailers": 0,
+  "frame_external_data_blobs": 0,
+  "frame_external_data_bytes": 0,
+  "frame_game_specific_bytes": 0,
+  "frame_non_finite_times": 0,
+  "cp_partial_rows": 0,
+  "cp_partial_bits": 0,
+  "cp_chunks": 18,
+  "cp_trailing_bytes": 0,
+  "cp_guid_entries": 74270,
+  "cp_group_records": 8307,
+  "cp_exported_fields": 49314,
+  "cp_frames": 18,
+  "cp_frame_packets": 3691,
+  "cp_field_rows": 352089,
+  "cp_actor_rows_written": 3014,
+  "cp_net_guid_rows_written": 74270,
+  "cp_block_rows_written": 22247,
+  "cp_guid_entry_rows_written": 74270,
+  "cp_export_group_rows_written": 8307,
+  "cp_export_field_rows_written": 49314,
+  "cp_literal_paths": 55744,
+  "cp_indexed_paths": 18526,
+  "cp_resolved_path_indices": 18526,
+  "cp_struct_blobs_decoded": 205,
+  "cp_struct_blobs_failed": 0,
+  "cp_targeting_world_locations_decoded": 0,
+  "cp_tracked_rewards_opaque_empty_variants": 0,
+  "cp_cnc_rpcs_emitted": 170,
+  "cp_cnc_bruteforce_payloads_attempted": 0,
+  "cp_cnc_bruteforce_payloads_unwalked": 0,
+  "cp_rep_layout_cnc_tails_decoded": 170,
+  "cp_rep_layout_cnc_tails_preserved": 0,
+  "cp_movement_sized_section_tails": 0,
+  "cp_movement_sized_section_tail_bits": 0,
+  "cp_movement_open_section_tails": 0,
+  "cp_movement_open_section_tail_bits": 0,
+  "cp_movement_envelope_trailers": 0,
+  "cp_movement_envelope_trailer_bits": 0,
+  "cp_active_blinds_empty_trailers": 0,
+  "cp_frame_external_data_blobs": 0,
+  "cp_frame_external_data_bytes": 0,
+  "cp_frame_game_specific_bytes": 0,
+  "cp_frame_non_finite_times": 0
+ },
+ "parquet": {
+  "fields": {
+   "rows": 1296660,
+   "bytes": 12691368,
+   "sha256": "a2992d248a86c2cee163a3727bed961a4b5637ebe22aa77fe74e0b45828c4f3d"
   },
-  "parquet": {
-    "fields": {
-      "rows": 1296660,
-      "bytes": 12691368,
-      "sha256": "a2992d248a86c2cee163a3727bed961a4b5637ebe22aa77fe74e0b45828c4f3d"
-    },
-    "movement": {
-      "rows": 1844147,
-      "bytes": 19984802,
-      "sha256": "3f512fba743b98923dc7366686d5be387b9ae98a4282f0abe33878311048ecfc"
-    },
-    "actors": {
-      "rows": 3827,
-      "bytes": 68243,
-      "sha256": "7ac509108455ec9eaa0fa87ac0aa896f8ccab4354a54e6e36d9a6bb16ab36f05"
-    },
-    "net_guids": {
-      "rows": 16167,
-      "bytes": 114423,
-      "sha256": "77b64c48bf205dbc8c08626a22fd6ddb363f65808846f36148eaa607746bdf9a"
-    },
-    "events": {
-      "rows": 195,
-      "bytes": 12455,
-      "sha256": "f4a628909f2be9d616bdb440a86183c68e619c00d7883830b66e2e081e31cb51"
-    },
-    "partials": {
-      "rows": 0,
-      "bytes": 2505,
-      "sha256": "8945eaca3d7e4f22c6fec2835b867f06e9023e14651d22874e1512fd11181d6d"
-    },
-    "checkpoint_fields": {
-      "rows": 352089,
-      "bytes": 1190437,
-      "sha256": "8869f266145c014d284231384dbeb8506b409188969f04b3b4ade904e3aaa1c9"
-    },
-    "checkpoint_actors": {
-      "rows": 3014,
-      "bytes": 24345,
-      "sha256": "18db731697dae07835e0bd01898ae90ceef5365cd627b3ae2a38ecc43b2ae9b8"
-    },
-    "checkpoint_net_guids": {
-      "rows": 74270,
-      "bytes": 175916,
-      "sha256": "d380739c65c23f8f3d08dfe40156829633572181e21b787b85d271a75887d573"
-    },
-    "checkpoint_blocks": {
-      "rows": 22247,
-      "bytes": 112649,
-      "sha256": "006c95ecb8dce921fe8b4961acd9b8de180c7dbec92e114417d60f8e94aa6e48"
-    },
-    "checkpoint_guid_entries": {
-      "rows": 74270,
-      "bytes": 219662,
-      "sha256": "cd59c5c3e51b2c440291df78bfa0ac5c9c0e496840f96f444560e4ab51a04afd"
-    },
-    "checkpoint_export_groups": {
-      "rows": 8307,
-      "bytes": 16481,
-      "sha256": "0c0039daecedfc0dd9f2fdaed82ee3febb63406706f05b4bd014c5947d5d4630"
-    },
-    "checkpoint_export_fields": {
-      "rows": 49314,
-      "bytes": 106370,
-      "sha256": "cb10bea2ebe68c4af60d987b376804cfc33e7908f69dd76f5c0777c3eb613ac1"
-    }
+  "movement": {
+   "rows": 1844147,
+   "bytes": 19984802,
+   "sha256": "3f512fba743b98923dc7366686d5be387b9ae98a4282f0abe33878311048ecfc"
   },
-  "replay": "02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf"
+  "actors": {
+   "rows": 3827,
+   "bytes": 68243,
+   "sha256": "7ac509108455ec9eaa0fa87ac0aa896f8ccab4354a54e6e36d9a6bb16ab36f05"
+  },
+  "net_guids": {
+   "rows": 16167,
+   "bytes": 114423,
+   "sha256": "77b64c48bf205dbc8c08626a22fd6ddb363f65808846f36148eaa607746bdf9a"
+  },
+  "events": {
+   "rows": 195,
+   "bytes": 12455,
+   "sha256": "f4a628909f2be9d616bdb440a86183c68e619c00d7883830b66e2e081e31cb51"
+  },
+  "partials": {
+   "rows": 0,
+   "bytes": 2505,
+   "sha256": "8945eaca3d7e4f22c6fec2835b867f06e9023e14651d22874e1512fd11181d6d"
+  },
+  "checkpoint_fields": {
+   "rows": 352089,
+   "bytes": 1190437,
+   "sha256": "8869f266145c014d284231384dbeb8506b409188969f04b3b4ade904e3aaa1c9"
+  },
+  "checkpoint_actors": {
+   "rows": 3014,
+   "bytes": 24345,
+   "sha256": "18db731697dae07835e0bd01898ae90ceef5365cd627b3ae2a38ecc43b2ae9b8"
+  },
+  "checkpoint_net_guids": {
+   "rows": 74270,
+   "bytes": 175916,
+   "sha256": "d380739c65c23f8f3d08dfe40156829633572181e21b787b85d271a75887d573"
+  },
+  "checkpoint_blocks": {
+   "rows": 22247,
+   "bytes": 112649,
+   "sha256": "006c95ecb8dce921fe8b4961acd9b8de180c7dbec92e114417d60f8e94aa6e48"
+  },
+  "checkpoint_guid_entries": {
+   "rows": 74270,
+   "bytes": 219662,
+   "sha256": "cd59c5c3e51b2c440291df78bfa0ac5c9c0e496840f96f444560e4ab51a04afd"
+  },
+  "checkpoint_export_groups": {
+   "rows": 8307,
+   "bytes": 16481,
+   "sha256": "0c0039daecedfc0dd9f2fdaed82ee3febb63406706f05b4bd014c5947d5d4630"
+  },
+  "checkpoint_export_fields": {
+   "rows": 49314,
+   "bytes": 106370,
+   "sha256": "cb10bea2ebe68c4af60d987b376804cfc33e7908f69dd76f5c0777c3eb613ac1"
+  }
+ }
 }

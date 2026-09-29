@@ -491,13 +491,14 @@ class CheckpointGuidCrossCheckTests(unittest.TestCase):
                    "  Checkpoint envelope trailers: 0 streams / 0 bits\n"
                    "  ActiveBlinds trailers: 0 empty deltas\n"
                    "  Checkpoint ActiveBlinds trailers: 0 empty deltas\n"
+                   "  Trailing bytes:   0\n"
                    f"GUID entries: {len(DECLARATIONS)}\n"
                    f"GUID paths: {literals} literals / {indices} indices / {indices} resolved\n")
         sink = {"tracked_rewards_opaque_empty_variants": 0, "targeting_world_locations_decoded": 0,
                 **dict.fromkeys(guard.SINK_TALLY_KEYS, 0)}
         frames = {f"frame_{key}": 0 for key in guard.FRAME_SKIP_KEYS}
         manifest = {"quality": {"sink": sink, **frames, "checkpoints": dict(
-            sink=sink, checkpoint_actor_rows_dropped=0,
+            sink=sink, checkpoint_actor_rows_dropped=0, checkpoint_trailing_bytes=0,
             **{f"checkpoint_{key}": value for key, value in frames.items()},
             checkpoint_path_resolution_mode="preceding_literal_zero_based",
             checkpoint_literal_paths=literals, checkpoint_indexed_paths=indices,
@@ -819,6 +820,77 @@ class SinkTallyCounterTests(unittest.TestCase):
                     else:
                         with self.assertRaisesRegex(SystemExit, "movement_envelope_trailers=12"):
                             guard.measure(Path("fake.exe"), out / "sample.vrf", out)
+
+
+class CheckpointTrailingCounterTests(unittest.TestCase):
+    """The checkpoint block's `Trailing bytes:` line: read only off its own
+    line, and required to agree with `checkpoint_trailing_bytes`."""
+
+    LINE = "  Trailing bytes:   14\n"
+
+    def test_the_count_is_read_only_off_its_own_line(self):
+        pattern = guard.CHECKPOINT_COUNTERS["cp_trailing_bytes"]
+        quoted = "  Struct blob err:  Trailing bytes: 9\n"
+        for text in (quoted + self.LINE, self.LINE + quoted):
+            with self.subTest(text=text):
+                self.assertEqual(re.search(pattern, text).group(1), "14")
+        self.assertIsNone(re.search(pattern, quoted))
+
+    def test_the_count_must_match_the_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = root / "manifest.json"
+            data = {"quality": {"checkpoints": {"checkpoint_trailing_bytes": 14}}}
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            counts = {"cp_trailing_bytes": 14}
+            self.assertEqual(guard.checkpoint_trailing_manifest_errors(root, counts, True), [])
+            self.assertIn("manifest cp_trailing_bytes=14 disagrees with summary 13", " ".join(
+                guard.checkpoint_trailing_manifest_errors(root, {"cp_trailing_bytes": 13}, True)))
+            self.assertIn("disagrees with summary None", " ".join(
+                guard.checkpoint_trailing_manifest_errors(root, {}, True)))
+            for invalid in (None, True, -1, "14", 14.0):
+                with self.subTest(invalid=invalid):
+                    data["quality"]["checkpoints"]["checkpoint_trailing_bytes"] = invalid
+                    manifest.write_text(json.dumps(data), encoding="utf-8")
+                    self.assertIn("nonnegative integers", " ".join(
+                        guard.checkpoint_trailing_manifest_errors(root, counts, True)))
+            del data["quality"]["checkpoints"]["checkpoint_trailing_bytes"]
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            self.assertIn("omits", " ".join(
+                guard.checkpoint_trailing_manifest_errors(root, counts, True)))
+            self.assertEqual(guard.checkpoint_trailing_manifest_errors(root, counts, False), [])
+
+    def test_a_checkpoint_measurement_whose_manifest_disagrees_is_refused(self):
+        """`measure` runs the check under `--checkpoints`. The other manifest
+        checks and the GUID cross-check are stubbed to pass, so only this
+        wiring decides the outcome."""
+        for printed, passes in ((14, True), (15, False)):
+            with self.subTest(printed=printed), tempfile.TemporaryDirectory() as temp, \
+                    contextlib.ExitStack() as stack:
+                out = Path(temp)
+                for name in (*guard.PARQUET_FILES, *guard.CHECKPOINT_PARQUET_FILES):
+                    pq.write_table(pa.table({"value": [1]}), out / f"{name}.parquet")
+                (out / "manifest.json").write_text(json.dumps(
+                    {"quality": {"checkpoints": {"checkpoint_trailing_bytes": 14}}}),
+                    encoding="utf-8")
+                for name in ("reward_opaque_manifest_errors", "targeting_manifest_errors",
+                             "sink_tally_manifest_errors", "frame_skip_manifest_errors",
+                             "checkpoint_manifest_errors"):
+                    stack.enter_context(patch.object(guard, name, return_value=[]))
+                stack.enter_context(patch.object(
+                    guard, "checkpoint_guid_crosscheck",
+                    return_value=(dict.fromkeys(guard.GUID_CROSSCHECK_KEYS, 0), [])))
+                stack.enter_context(patch.object(guard.subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout=f"  Trailing bytes:   {printed}\n", stderr="")))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                if passes:
+                    current = guard.measure(Path("fake.exe"), out / "sample.vrf", out,
+                                            checkpoints=True)
+                    self.assertEqual(current["counters"]["cp_trailing_bytes"], 14)
+                else:
+                    with self.assertRaisesRegex(SystemExit,
+                                                "cp_trailing_bytes=14 disagrees with summary 15"):
+                        guard.measure(Path("fake.exe"), out / "sample.vrf", out, checkpoints=True)
 
 
 class RequiredInputTests(unittest.TestCase):
