@@ -68,6 +68,10 @@ pub enum EffectBlobError {
     ArrayCountTooLarge { count: u32, max: u32 },
     #[error("element index {index} >= declared count {count}")]
     IndexOutOfBounds { index: u32, count: u32 },
+    /// A repeat would overwrite the earlier element; all 61,709 arrays on
+    /// `02d4d478` ascend.
+    #[error("element index {index} does not follow {previous}")]
+    NonAscendingIndex { index: u32, previous: u32 },
     #[error("field payload {bits} bits exceeds remaining {remaining}")]
     PayloadTooLarge { bits: u32, remaining: u64 },
     /// A guard against endless field loops.

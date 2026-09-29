@@ -35,8 +35,6 @@ enum Leaf {
     Field(FieldType),
     /// KillData `WeaponTheme`: an FString that must carry its null terminator.
     WeaponTheme,
-    /// TrackedRewards `LocalizedRewardName`: the full FText reader.
-    LocalizedText,
     /// A raw container whose own array is typed by [`NESTED_RULES`].
     Nested,
 }
@@ -69,15 +67,15 @@ type LeafRule = (
 /// 714 replays), not the values' meaning or units.
 #[rustfmt::skip]
 const LEAF_RULES: &[LeafRule] = {
-    use FieldType::{Bool, Byte, EnumByte, FName, Float, Int32, Int64, ObjectNetGuid, UInt32, VectorDouble};
-    use Leaf::{Field, LocalizedText, Nested, WeaponTheme};
+    use FieldType::{Bool, Byte, EnumByte, FName, FTextTree, Float, Int32, Int64, ObjectNetGuid, UInt32, VectorDouble};
+    use Leaf::{Field, Nested, WeaponTheme};
     use MeasuredArrayRoute::*;
     use Overlay::*;
     &[
         (AllPlayersObfuscatedPlayerInformation, 49, None, None, Field(Bool), SameType, &[]),
         (AllPlayersObfuscatedPlayerInformation, 50, None, None, Field(EnumByte), SameType, &[]),
         (TrackedRewards, 28, Some("RewardName"), Some(1_337_472_711), Field(FName), SameType, &[]),
-        (TrackedRewards, 29, Some("LocalizedRewardName"), Some(483_770_233), LocalizedText, RawEntry, &[]),
+        (TrackedRewards, 29, Some("LocalizedRewardName"), Some(483_770_233), Field(FTextTree), RawEntry, &[]),
         (TrackedRewards, 30, Some("InstancesOfReward"), Some(2_922_243_316), Field(Int32), SameType, &[]),
         (TrackedRewards, 31, Some("RewardGrantStrategy"), Some(3_589_631_714), Field(EnumByte), SameType, &[]),
         (TrackedRewards, 32, Some("Source"), Some(1_118_571_008), Field(EnumByte), SameType, &[]),
@@ -320,9 +318,6 @@ fn decode_leaf(leaf: Leaf, raw: &[u8], bit_count: u32, failures: &mut u64) -> De
         }
         Leaf::Nested => return (None, None, None, None),
         Leaf::WeaponTheme => kill_weapon_theme(raw, bit_count),
-        Leaf::LocalizedText => vrf_decode::decode_ftext_tree(raw, bit_count)
-            .ok()
-            .map(|value| value.to_json()),
     };
     if text.is_none() {
         *failures = failures.saturating_add(1);
@@ -831,18 +826,13 @@ pub(super) fn decode_leaf_with_stats(
     bit_count: u32,
     failures: &mut u64,
 ) -> DecodedColumns {
-    use vrf_decode::{DecodedValue, decode_field};
-
-    match decode_field(field_type, raw, bit_count) {
-        Ok(DecodedValue::I64(v)) => (Some(v), None, None, None),
-        Ok(DecodedValue::F64(v)) => (None, Some(v), None, None),
-        Ok(DecodedValue::Bool(v)) => (None, None, Some(v), None),
-        Ok(DecodedValue::Str(v)) => (None, None, None, Some(v)),
-        Err(_) => {
+    vrf_decode::decode_field(field_type, raw, bit_count).map_or_else(
+        |_| {
             *failures = failures.saturating_add(1);
-            (None, None, None, None)
-        }
-    }
+            DecodedColumns::default()
+        },
+        vrf_decode::DecodedValue::into_columns,
+    )
 }
 
 /// A handle -> type map derived from the CombatRoundReports descriptors: the
@@ -1150,7 +1140,7 @@ mod tests {
                 483_770_233,
                 Some(FieldType::Raw)
             ),
-            Some(Leaf::LocalizedText)
+            Some(Leaf::Field(FieldType::FTextTree))
         );
         for (handle, name, checksum, resolved) in [
             (29, "Other", 483_770_233, FieldType::Raw),

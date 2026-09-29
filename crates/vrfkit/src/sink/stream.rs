@@ -148,7 +148,7 @@ impl FieldSink for ExportSink<'_> {
             self.emit_multi_contents(name, raw, bit_count);
         }
 
-        let (value_i64, value_f64, value_bool, value_str) = match apply_overlay_with_checksum(
+        let (value_i64, value_f64, value_bool, value_str) = apply_overlay_with_checksum(
             &TABLE,
             &self.current_group_path,
             self.current_group_hash,
@@ -158,15 +158,9 @@ impl FieldSink for ExportSink<'_> {
             raw_bits.as_deref(),
             bit_count,
             &mut self.stats.overlay,
-        ) {
-            Some(result) => (
-                result.value_i64,
-                result.value_f64,
-                result.value_bool,
-                result.value_str,
-            ),
-            None => (None, None, None, None),
-        };
+        )
+        .map(|result| result.into_columns())
+        .unwrap_or_default();
 
         self.record_player_identity(field_name.as_deref(), value_str.as_deref(), value_i64);
 
