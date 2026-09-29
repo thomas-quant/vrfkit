@@ -137,6 +137,33 @@ class MatchObservationTests(unittest.TestCase):
         })
         self.assertEqual(result["attribution_coverage"]["round_balance_player"]["joined"], 3)
 
+    def test_weapon_scoped_rpcs_are_counted_per_ammo_decrease(self):
+        """Magazine 100's weapon is its outer 200, a dynamic actor with no
+        net_guids row; the decrease 30 -> 28 is at t=20."""
+        gun = "/Game/Equippables/Guns/Rifles/Test.Test_C_ClassNetCache"
+        other = [(21, 1, 201, 0, gun, observations.WEAPON_RPC, 7, None),
+                 (21, 1, 200, 0, "/Script/ShooterGame.X_ClassNetCache", observations.WEAPON_RPC, 7, None)]
+        for times, count, tally in (((), 0, "none"), ((21,), 1, "unique"),
+                                    ((15, 320), 2, "multiple"), ((321,), 0, "none")):
+            with self.subTest(times=times), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                write_export(root)
+                append_field_rows(root, other + [(t, 1, 200, 0, gun, observations.WEAPON_RPC, 7, None)
+                                                 for t in times])
+                result = observations.build(root)
+            self.assertEqual(result["ammo_changes"][0]["weapon_rpc_within_300ms"], count)
+            self.assertEqual(result["ammo_decrease_weapon_rpc_within_300ms"],
+                             {k: int(k == tally) for k in observations.WEAPON_RPC_TALLY})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            net = pq.read_table(root / "net_guids.parquet").to_pylist()
+            pq.write_table(pa.Table.from_pylist([dict(r, outer_net_guid=None) if r["net_guid"] == 100
+                                                 else r for r in net]), root / "net_guids.parquet")
+            result = observations.build(root)
+        self.assertIsNone(result["ammo_changes"][0]["weapon_rpc_within_300ms"])
+        self.assertEqual(result["ammo_decrease_weapon_rpc_within_300ms"]["no_weapon"], 1)
+
     def test_same_packet_conflict_is_not_value_sorted_into_a_change(self):
         changes, ambiguous = observations._changes([
             (10, 1, 0, 30),

@@ -29,6 +29,10 @@ else:  # direct script execution
 
 MAGAZINE_PATH = "MagazineAmmo"
 SHOT_EFFECT_ID = "ReplayPlayContinuousEffectAtLocation.EffectID"
+#: Gun-scoped RPC whose actor is the magazine's outer (the weapon).
+WEAPON_RPC = "MulticastPlayContinuousEffectFromClient.EffectID"
+#: Each ammo decrease by how many WEAPON_RPC rows of its weapon lie within 300 ms.
+WEAPON_RPC_TALLY = ("no_weapon", "none", "unique", "multiple")
 ROUND_MONEY_RE = re.compile(r"RoundInfos\[(\d+)\]\.(StartOfRoundMoney|EndOfRoundMoney)$")
 TEAM_ECONOMY_RE = re.compile(
     r"TeamEconomy\[(\d+)\]\.(LoadoutValue|AverageLoadoutValue)$"
@@ -148,7 +152,7 @@ def _read_columns(path: Path, columns: list[str], *, observation_fields=False) -
         scalar_names = pa.array(sorted(PURCHASE_FIELDS | {
             "AuthResourceAmount", "CurrentEquippable", "NewCurrentEquippable",
             "CurrentState", "Money", "DefuseProgress", "LoadoutValue",
-            "AverageLoadoutValue", "Owner", SHOT_EFFECT_ID,
+            "AverageLoadoutValue", "Owner", SHOT_EFFECT_ID, WEAPON_RPC,
         }))
         indexed = pc.match_substring_regex(
             names, "^(?:" + ROUND_MONEY_RE.pattern + "|" + TEAM_ECONOMY_RE.pattern + ")"
@@ -158,9 +162,10 @@ def _read_columns(path: Path, columns: list[str], *, observation_fields=False) -
     return {name: table.column(name).to_pylist() for name in columns}
 
 
-def _near(sorted_times: list[int], time_ms: int, window_ms: int) -> bool:
-    position = bisect.bisect_left(sorted_times, time_ms - window_ms)
-    return position < len(sorted_times) and sorted_times[position] <= time_ms + window_ms
+def _near(sorted_times: list[int], time_ms: int, window_ms: int) -> int:
+    """How many of `sorted_times` lie within +/-window_ms of time_ms."""
+    return (bisect.bisect_right(sorted_times, time_ms + window_ms)
+            - bisect.bisect_left(sorted_times, time_ms - window_ms))
 
 
 def _stable_rows(rows: list[dict]) -> list[dict]:
@@ -225,6 +230,7 @@ def build(export_dir: Path) -> dict:
     owner_info_controllers = defaultdict(list)
     player_controllers = defaultdict(list)
     shot_times = []
+    weapon_rpc_times = defaultdict(list)
 
     for row in range(len(fields["time_ms"])):
         time_ms = fields["time_ms"][row]
@@ -278,8 +284,13 @@ def build(export_dir: Path) -> dict:
         elif (group.endswith("ReplayEffectComponent_ClassNetCache")
               and name == SHOT_EFFECT_ID):
             shot_times.append(time_ms)
+        elif (name == WEAPON_RPC and group.startswith("/Game/Equippables/Guns/")
+              and group.endswith("_ClassNetCache")):
+            weapon_rpc_times[actor].append(time_ms)
 
     shot_times.sort()
+    for times in weapon_rpc_times.values():
+        times.sort()
     owner_info_controller_timelines = {
         info: _timeline(samples) for info, samples in owner_info_controllers.items()
     }
@@ -298,6 +309,7 @@ def build(export_dir: Path) -> dict:
         team_values[(team_guid, source, slot)][(time_ms, packet_id)][value_kind] = value
     ammo_changes = []
     ambiguous_ammo_packets = 0
+    weapon_rpc_tally = dict.fromkeys(WEAPON_RPC_TALLY, 0)
     for component, samples in magazine.items():
         weapon = outer_of.get(component)
         changes, ambiguous = _changes(samples)
@@ -305,6 +317,10 @@ def build(export_dir: Path) -> dict:
         for time_ms, before, after, delta in changes:
             if not delta:
                 continue
+            rpcs = None
+            if delta < 0:
+                rpcs = _near(weapon_rpc_times.get(weapon, []), time_ms, 300) if weapon else None
+                weapon_rpc_tally[WEAPON_RPC_TALLY[1 + min(rpcs, 2)] if weapon else "no_weapon"] += 1
             ammo_changes.append({
                 "time_ms": time_ms,
                 "magazine_component_guid": component,
@@ -313,11 +329,12 @@ def build(export_dir: Path) -> dict:
                 "after": after,
                 "delta": delta,
                 "kind": "decrease" if delta < 0 else "increase",
-                "round_start_within_150ms": _near(round_starts, time_ms, 150),
+                "round_start_within_150ms": bool(_near(round_starts, time_ms, 150)),
                 # Global timing only: EffectID has no demonstrated weapon join.
                 "global_effect_id_within_300ms": (
-                    _near(shot_times, time_ms, 300) if delta < 0 else None
+                    bool(_near(shot_times, time_ms, 300)) if delta < 0 else None
                 ),
+                "weapon_rpc_within_300ms": rpcs,
             })
 
     # Raw counter observations, joined to reload state intervals only through
@@ -609,7 +626,9 @@ def build(export_dir: Path) -> dict:
         "evidence_rules": {
         "scalar_dedup": "consecutive equal values collapse by time_ms, packet_id",
             "same_packet_conflict": "conflicting values become unknown boundaries, never value-sorted transitions",
-            "ammo_shot_join": "decrease carries only a global EffectID observation within +/-300ms",
+            "ammo_shot_join": ("a decrease carries a global EffectID observation and a count "
+                               "of its weapon's gun-scoped RPCs within +/-300ms; neither is a "
+                               "shot count"),
             "defuse_completion": "events.spikeDefused is authoritative; progress is never completion",
             "purchase": "PurchasedItemComponent rows are snapshots; Money decreases are separate events",
             "money_team_switch": ("a Money decrease at or after switchTeams and before the "
@@ -648,6 +667,7 @@ def build(export_dir: Path) -> dict:
                 "source": "OwnerExclusivePlayerInfo.Owner@time -> BombPlayerState.Owner@time",
             },
         },
+        "ammo_decrease_weapon_rpc_within_300ms": weapon_rpc_tally,
         "ambiguous_same_packet_counts": {
             "ammo": ambiguous_ammo_packets,
             "inventory": ambiguous_inventory_packets,
@@ -682,6 +702,8 @@ def main() -> int:
                  "round_balances", "team_loadouts", "money_decreases",
                  "money_decreases_in_team_switch_window", "transaction_snapshots"):
         print(f"  {name}: {len(result[name])}")
+    print(f"  ammo decreases by weapon RPCs within 300 ms: "
+          f"{json.dumps(result['ammo_decrease_weapon_rpc_within_300ms'])}")
     windows = result["team_switch_windows"]
     print(f"  team switch windows: {windows['switches']} "
           f"({windows['closed_by_end_of_stream']} open to the end of the stream)")

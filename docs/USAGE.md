@@ -222,15 +222,12 @@ what it holds.
   yourself once no export to that destination is running, or move a
   `previous` sibling elsewhere to keep it.
 - **The corpus tools never read a leftover as an export.**
-  `audit_match_observations.py`, `validate_type_evidence.py`,
-  `summarize_value_coverage.py` and `summarize_unresolved_fields.py` skip
-  these names while discovering exports and list what they skipped under
-  `skipped_generated_dirs` in their reports; `export_scan.py` is the one
-  definition. At 259ed10 all four read a `previous` sibling as a second
-  export of the same replay and exited 0 with doubled counts.
-  `audit_match_observations.py` and `validate_type_evidence.py` also refuse a
-  discovered directory without `manifest.json`, since only a finished export
-  has one.
+  `validate_type_evidence.py`, `summarize_value_coverage.py` and
+  `summarize_unresolved_fields.py` skip these names while discovering exports
+  and list what they skipped under `skipped_generated_dirs` in their reports;
+  `export_scan.py` is the one definition. `validate_type_evidence.py` also
+  refuses a discovered directory without `manifest.json`, since only a
+  finished export has one.
 
 #### Lines to actually watch in the summary
 
@@ -853,19 +850,13 @@ distinct game facts. Per-export SQLite shards keep aggregation bounded and
 
 ```bash
 python tools/summarize_unresolved_fields.py out/exports --output-dir out/raw-audit --jobs 12
-python tools/audit_match_observations.py --exports out/exports --out out/ammo-audit.json --jobs 12
 python tools/generate_scoped_types.py --check
 ```
 
-`audit_match_observations.py` compares magazine decreases with an explicit
-weapon-scoped continuous-effect RPC through the component's outer NetGUID.
-It reports unmatched and ambiguous evidence; it does not classify the RPC as
-a shot. Conflicting same-packet ammo values break the transition chain, and
-conflicting object mappings cannot support a match. Sampling, when requested,
-is evenly spaced by export name, not stratified by game build. With
-`--exports`, a child without `manifest.json` is a failed export, and the
-leftovers of an interrupted export are skipped and listed
-([If an export is interrupted](#if-an-export-is-interrupted)).
+`extract_match_observations.py` gives each ammo decrease
+`weapon_rpc_within_300ms`: how many weapon-scoped continuous-effect RPCs on the
+magazine's outer NetGUID lie within 300 ms, tallied with zeros. It does not
+classify the RPC as a shot.
 
 `generate_scoped_types.py` regenerates `scoped_types.rs` from the reviewed
 `tools/fixtures/scoped_type_evidence.json`. These types require the exact

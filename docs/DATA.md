@@ -1167,8 +1167,8 @@ the 25 parent exports and `ok` on each of the 25 new ones.
 
 The analysis tools that read these exports were run on both sides of 8 of those
 replays (5 with bare armour rows). The healing, section, section-timeline,
-kill, match, player-effect, spike-carrier, active-effect, ability, ammo-audit
-and FastArray tools write the same output from either export, apart from the
+kill, match, player-effect, spike-carrier, active-effect, ability and
+FastArray tools write the same output from either export, apart from the
 input hashes they record, or refuse the same builds. That includes the healing tool's join on the heal causer's
 `class_path`: it reads `Owner` and `Instigator` rows, and the armour group
 declares neither name. Three outputs move, each by exactly the moved rows.
