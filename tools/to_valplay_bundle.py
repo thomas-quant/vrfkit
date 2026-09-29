@@ -1510,8 +1510,9 @@ def _write_manifest(manifest: dict, output_dir: Path, adapter: dict):
         "level_names_and_times": levels,
         "adapter": adapter,
     }
+    # LF on every platform, as the extractors' receipts are.
     (output_dir / "manifest.json").write_text(
-        json.dumps(out_manifest, indent=2), encoding='utf-8'
+        json.dumps(out_manifest, indent=2), encoding='utf-8', newline='\n'
     )
 
 

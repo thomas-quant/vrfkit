@@ -2128,6 +2128,15 @@ class UpstreamAccountingForwardingTests(SeamTestCase):
         self.assertNotIn("players", published)
         self.assertNotIn("11111111-2222-3333-4444-555555555555", raw)
 
+    def test_the_manifest_is_written_with_lf_line_endings(self):
+        """LF on every platform, like the extractors' receipts (not CRLF on
+        Windows), read from the published bundle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _, _ = self.build(tmp, manifest=self.full_manifest())
+            data = (out / "manifest.json").read_bytes()
+        self.assertIn(b"\n", data)
+        self.assertNotIn(b"\r\n", data)
+
     def test_the_manifest_key_set_is_pinned(self):
         """The bundle's shape is a contract, so it is spelled out once."""
         with tempfile.TemporaryDirectory() as tmp:
