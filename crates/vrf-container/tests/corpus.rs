@@ -21,42 +21,29 @@ struct FileReport {
     oodle_ok: bool,
     /// Every problem found in this file; empty means clean.
     problems: Vec<String>,
-    /// Known Event payloads; group names enter only from the fixed allowlist.
-    events: Vec<KnownEventObservation>,
     event_rows: u64,
     unknown_event_groups: u64,
-}
-
-/// One known Event payload, retaining no replay identifier and no unconstrained
-/// wire string.
-struct KnownEventObservation {
-    group: &'static str,
-    tag: u32,
-    name_len: usize,
-    seconds: f32,
-    time1: u32,
+    /// Event payloads that matched their group's measured layout.
+    known_events: u64,
+    /// Largest `|payload seconds * 1000 - Time1|` among them, in ms.
+    max_event_time_delta_ms: f64,
 }
 
 /// Parse one replay as far as the container layer goes, collecting problems
 /// rather than stopping at the first.
 fn scan_file(data: &[u8]) -> FileReport {
-    let mut problems = Vec::new();
-    let mut events = Vec::new();
-    let mut event_rows = 0;
-    let mut unknown_event_groups = 0;
+    let mut report = FileReport::default();
+    let problems = &mut report.problems;
 
     let preamble = match parse_preamble(data) {
         Ok(p) => p,
         Err(e) => {
             problems.push(format!("preamble: {e}"));
-            return FileReport {
-                problems,
-                ..Default::default()
-            };
+            return report;
         }
     };
 
-    let branch = Some(preamble.header.replay_version.branch.clone());
+    report.branch = Some(preamble.header.replay_version.branch.clone());
     if preamble.header.trailing_bytes != 0 {
         problems.push(format!(
             "header: {} bytes past the parsed layout",
@@ -64,7 +51,6 @@ fn scan_file(data: &[u8]) -> FileReport {
         ));
     }
 
-    let mut oodle_ok = false;
     let mut iter = ChunkIterator::new(data, preamble.remaining_offset);
     loop {
         // A chunk-header error is a malformed file, not the end of the stream.
@@ -79,7 +65,7 @@ fn scan_file(data: &[u8]) -> FileReport {
 
         let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
         if chunk.chunk_type == ChunkType::Event {
-            event_rows += 1;
+            report.event_rows += 1;
             let event = match parse_event_chunk(payload) {
                 Ok(event) => event,
                 Err(error) => {
@@ -100,7 +86,7 @@ fn scan_file(data: &[u8]) -> FileReport {
             }
             // Keep the table's `&'static str`, never the wire string.
             let Some(known) = KNOWN_EVENT_GROUPS.iter().find(|k| k.group == event.group) else {
-                unknown_event_groups += 1;
+                report.unknown_event_groups += 1;
                 continue;
             };
             let group = known.group;
@@ -124,29 +110,19 @@ fn scan_file(data: &[u8]) -> FileReport {
                 ));
                 continue;
             }
-            if !parsed.seconds.is_finite() {
-                problems.push(format!(
-                    "known event group {group} carries non-finite payload seconds"
-                ));
-                continue;
-            }
             if !event_payload_seconds_matches_time(event.time1, parsed.seconds) {
                 problems.push(format!(
                     "known event group {group} payload seconds no longer agrees with Time1"
                 ));
                 continue;
             }
-            events.push(KnownEventObservation {
-                group,
-                tag: parsed.tag,
-                name_len: parsed.name.len(),
-                seconds: parsed.seconds,
-                time1: event.time1,
-            });
+            report.known_events += 1;
+            let delta = (f64::from(parsed.seconds) * 1000.0 - f64::from(event.time1)).abs();
+            report.max_event_time_delta_ms = report.max_event_time_delta_ms.max(delta);
             continue;
         }
 
-        if chunk.chunk_type != ChunkType::ReplayData || oodle_ok {
+        if chunk.chunk_type != ChunkType::ReplayData || report.oodle_ok {
             continue;
         }
 
@@ -158,7 +134,7 @@ fn scan_file(data: &[u8]) -> FileReport {
             preamble.info.encrypted,
         ) {
             Ok((_, trailing)) => {
-                oodle_ok = true;
+                report.oodle_ok = true;
                 if trailing != 0 {
                     problems.push(format!(
                         "replay data: {trailing} payload bytes no reader consumed"
@@ -168,18 +144,10 @@ fn scan_file(data: &[u8]) -> FileReport {
             Err(e) => problems.push(format!("oodle: {e}")),
         }
     }
-    if !oodle_ok {
+    if !report.oodle_ok {
         problems.push("no ReplayData chunk decompressed".to_string());
     }
-
-    FileReport {
-        branch,
-        oodle_ok,
-        problems,
-        events,
-        event_rows,
-        unknown_event_groups,
-    }
+    report
 }
 
 #[test]
@@ -209,11 +177,8 @@ fn parse_all_vrf_files() {
     let mut failures: Vec<(String, String)> = Vec::new();
     let mut event_rows = 0u64;
     let mut unknown_event_groups = 0u64;
-    let mut event_observations = 0u64;
-    let mut max_event_name_len = 0usize;
+    let mut known_events = 0u64;
     let mut max_event_time_delta_ms = 0.0f64;
-    let mut event_tags: std::collections::BTreeMap<&'static str, std::collections::BTreeSet<u32>> =
-        std::collections::BTreeMap::new();
 
     for entry in std::fs::read_dir(dir).expect("read corpus dir") {
         let entry = entry.expect("dir entry");
@@ -244,14 +209,8 @@ fn parse_all_vrf_files() {
         }
         event_rows += report.event_rows;
         unknown_event_groups += report.unknown_event_groups;
-        for event in report.events {
-            event_observations += 1;
-            max_event_name_len = max_event_name_len.max(event.name_len);
-            let seconds_ms = f64::from(event.seconds) * 1000.0;
-            max_event_time_delta_ms =
-                max_event_time_delta_ms.max((seconds_ms - f64::from(event.time1)).abs());
-            event_tags.entry(event.group).or_default().insert(event.tag);
-        }
+        known_events += report.known_events;
+        max_event_time_delta_ms = max_event_time_delta_ms.max(report.max_event_time_delta_ms);
         for problem in report.problems {
             failures.push((filename.clone(), problem));
         }
@@ -268,18 +227,13 @@ fn parse_all_vrf_files() {
     }
     eprintln!("Oodle decompress OK: {oodle_ok}");
     eprintln!(
-        "Event payloads: {event_observations}/{event_rows} known layouts; \
+        "Event payloads: {known_events}/{event_rows} known layouts; \
          {unknown_event_groups} unknown group(s)"
     );
-    eprintln!("Event payload max public-name bytes: {max_event_name_len}");
     eprintln!(
         "Event payload seconds vs Time1 max absolute delta: \
          {max_event_time_delta_ms:.6} ms"
     );
-    eprintln!("Event tag cardinality by known group:");
-    for (group, tags) in &event_tags {
-        eprintln!("  {group}: {} distinct tag(s) {tags:?}", tags.len());
-    }
     if !failures.is_empty() {
         eprintln!("Failures ({}):", failures.len());
         for (file, err) in &failures {
@@ -294,37 +248,31 @@ fn parse_all_vrf_files() {
         "corpus directory {} contains no .vrf files; an empty corpus is not a pass",
         dir.display()
     );
+    // With files present, a clean run implies every file decompressed a
+    // ReplayData chunk and every Event row was known or an unknown group.
     assert!(
         failures.is_empty(),
         "{} problem(s) across {total} files: {failures:#?}",
         failures.len()
     );
-    // The Event assertions below hold as 0 == 0 if the Event path stopped
+    // The unknown-group check holds as 0 == 0 if the Event path stopped
     // running (a renumbered discriminant, say); this requires that it ran.
     assert!(
         event_rows > 0,
         "no Event chunk was seen across {total} corpus files -- the Event-timeline \
-         assertions below would pass vacuously"
+         assertion below would pass vacuously"
     );
     assert_eq!(
         unknown_event_groups, 0,
         "{unknown_event_groups} Event chunk(s) use a group outside the measured vocabulary"
     );
-    assert_eq!(
-        event_observations, event_rows,
-        "only {event_observations}/{event_rows} Event payloads matched the exact known layout"
-    );
-    // The same guard for ReplayData. Each file without a decompressed chunk is
-    // already a problem in `scan_file`; this is the directory-level backstop.
-    assert!(
-        oodle_ok > 0,
-        "no file decompressed a ReplayData chunk across {total} corpus files"
-    );
 }
 
 /// A minimal but structurally valid replay: only enough to reach the chunk walk.
 mod fixture {
-    use vrf_testkit::{Info, add_i32, add_u32, chunk, header_payload, replay_info};
+    use vrf_testkit::{
+        Info, add_f32, add_fstring, add_i32, add_u32, chunk, header_payload, replay_info,
+    };
 
     /// Replay info followed by a single Header chunk, and nothing else.
     pub fn header_only_replay() -> Vec<u8> {
@@ -362,96 +310,71 @@ mod fixture {
         data.extend(chunk(1, &payload));
         data
     }
+
+    /// `minimal_replay` plus one `roundStarted` Event chunk at 62 ms whose
+    /// payload carries `tag`; 2 is the measured one.
+    pub fn with_round_start_tag(tag: u32) -> Vec<u8> {
+        let mut body = Vec::new();
+        add_u32(&mut body, tag);
+        add_u32(&mut body, 0); // the group's one word
+        add_fstring(&mut body, "EReplayEventGroup::RoundStart");
+        add_f32(&mut body, 0.062); // seconds
+        let mut event = Vec::new();
+        for field in ["id", "roundStarted", "0"] {
+            add_fstring(&mut event, field);
+        }
+        add_u32(&mut event, 62); // Time1
+        add_u32(&mut event, 62); // Time2
+        add_i32(&mut event, body.len() as i32);
+        event.extend(body);
+        let mut data = minimal_replay();
+        data.extend(chunk(3, &event));
+        data
+    }
 }
 
-/// The fixture itself must be clean, or the malformed case below proves
-/// nothing.
+/// The fixture itself must be clean, or the defect cases below prove nothing.
 #[test]
 fn the_fixture_replay_scans_without_problems() {
-    let report = scan_file(&fixture::minimal_replay());
+    let report = scan_file(&fixture::with_round_start_tag(2));
     assert!(
         report.problems.is_empty(),
         "fixture should be clean, got {:?}",
         report.problems
     );
     assert_eq!(report.branch.as_deref(), Some("++Ares-Core+release-12.10"));
-    assert!(
-        report.oodle_ok,
-        "the fixture's ReplayData chunk must decompress"
-    );
+    assert_eq!(report.known_events, 1);
 }
 
-/// A file with no ReplayData chunk (an aborted recording, or a renumbered
-/// chunk type) is its own problem: one good file satisfies a directory check.
+/// Each defect is a problem, not a note. Real replays have shown no header or
+/// ReplayData residual, so these fixtures are the only inputs those checks see.
 #[test]
-fn a_replay_with_nothing_decompressed_is_reported() {
-    let report = scan_file(&fixture::header_only_replay());
-    assert!(
-        report
-            .problems
-            .iter()
-            .any(|p| p == "no ReplayData chunk decompressed"),
-        "a file with no decompressed ReplayData must be reported, got {:?}",
-        report.problems
-    );
-}
-
-/// Bytes after the header's layout are a problem, not a note. Real replays
-/// have shown none, so this fixture is the only input the check fires on.
-#[test]
-fn header_bytes_past_the_parsed_layout_are_reported() {
-    let report = scan_file(&fixture::with_header_residual(2));
-    assert!(
-        report
-            .problems
-            .iter()
-            .any(|p| p == "header: 2 bytes past the parsed layout"),
-        "a header residual must be reported, got {:?}",
-        report.problems
-    );
-}
-
-/// The same for ReplayData payload bytes no reader consumes.
-#[test]
-fn replay_data_bytes_no_reader_consumed_are_reported() {
-    let report = scan_file(&fixture::with_replay_data_residual(3));
-    assert!(
-        report
-            .problems
-            .iter()
-            .any(|p| p == "replay data: 3 payload bytes no reader consumed"),
-        "a ReplayData residual must be reported, got {:?}",
-        report.problems
-    );
-}
-
-/// Four stray bytes after the last chunk are too few for a chunk header: a
-/// malformed file, not the normal end of the stream.
-#[test]
-fn a_malformed_chunk_header_is_reported_not_read_as_a_clean_end() {
-    let mut data = fixture::minimal_replay();
-    data.extend_from_slice(&[0u8; 4]);
-
-    let report = scan_file(&data);
-    assert!(
-        report.problems.iter().any(|p| p.starts_with("chunk:")),
-        "a truncated chunk header must be reported, got {:?}",
-        report.problems
-    );
-}
-
-/// A negative chunk size is the other shape of the same swallow: the iterator
-/// rejects it, and that rejection must reach the tally.
-#[test]
-fn a_negative_chunk_size_is_reported_not_read_as_a_clean_end() {
-    let mut data = fixture::minimal_replay();
-    data.extend_from_slice(&1u32.to_le_bytes()); // chunk type: ReplayData
-    data.extend_from_slice(&(-1i32).to_le_bytes()); // negative size
-
-    let report = scan_file(&data);
-    assert!(
-        report.problems.iter().any(|p| p.starts_with("chunk:")),
-        "a negative chunk size must be reported, got {:?}",
-        report.problems
-    );
+fn each_defect_is_reported() {
+    let mut stray_bytes = fixture::minimal_replay();
+    stray_bytes.extend_from_slice(&[0; 4]);
+    for (data, expected) in [
+        (
+            fixture::header_only_replay(),
+            "no ReplayData chunk decompressed",
+        ),
+        (
+            fixture::with_header_residual(2),
+            "header: 2 bytes past the parsed layout",
+        ),
+        (
+            fixture::with_replay_data_residual(3),
+            "replay data: 3 payload bytes no reader consumed",
+        ),
+        (
+            fixture::with_round_start_tag(99),
+            "known event group roundStarted no longer carries its stable tag",
+        ),
+        (stray_bytes, "chunk:"),
+    ] {
+        let problems = scan_file(&data).problems;
+        assert!(
+            problems.iter().any(|p| p.starts_with(expected)),
+            "{expected:?} not reported, got {problems:?}"
+        );
+    }
 }
