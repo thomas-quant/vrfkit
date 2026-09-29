@@ -132,8 +132,8 @@ class RpcNameTests(unittest.TestCase):
         self.assertIn("C# only: 1", section)
         self.assertIn("vrfkit only: 1", section)
         self.assertIn("Both: 1", section)
-        self.assertRegex(section, r"C# only -- ALL 1 .*\n\s+ClientCsharpOnly")
-        self.assertRegex(section, r"vrfkit only -- .*\n\s+ZeroParamOnly")
+        self.assertRegex(section, r"C# only, INVESTIGATE \(1\):\n\s+ClientCsharpOnly")
+        self.assertRegex(section, r"vrfkit only, sample \(1\):\n\s+ZeroParamOnly")
         self.assertNotIn("Rounds[3]", section)
         self.assertNotIn("rpcs_by_name", section)
 
@@ -195,6 +195,14 @@ class MovementMultiplicityTests(unittest.TestCase):
             ],
         )
         self.assertIn("Joined: 2 / 2", report)
+
+    def test_a_value_the_reference_lacks_is_not_compared_as_zero(self):
+        row = self.csharp_row(1)
+        del row["yaw"]
+        report = self.compare([row], [{"time_ms": 100, "character_net_guid": 42,
+                                       "pos_x": 1, "yaw": 170.0}])
+        self.assertIn("Yaw: no data", report)
+        self.assertIn("Pitch (1 rows)", report)
 
 
 if __name__ == "__main__":

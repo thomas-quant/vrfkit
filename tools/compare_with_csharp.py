@@ -3,48 +3,58 @@
 It is a report, not a gate: vrfkit exports more than the C# parser, so
 "vrfkit only" is expected, and C#-only pairs are listed under INVESTIGATE, not
 gated. Only a comparison that measured nothing fails (`coverage_problems`).
-NDJSON is streamed, for 86+ MB files.
+NDJSON is streamed.
 
 Usage:
     python tools/compare_with_csharp.py CSHARP_DIR VRFKIT_DIR
 
-    CSHARP_DIR   the C# bundle (manifest.json, events.ndjson, movement.ndjson)
+    CSHARP_DIR   the C# export (manifest.json, events.ndjson, movement.ndjson)
     VRFKIT_DIR   vrfkit's export of the same replay (manifest.json,
                  fields.parquet, movement.parquet)
-
-A slimmed C# bundle drops ~97% of rpc_received and some keys of the events it
-keeps; its manifest.json keeps the full counts, which the totals use.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
+import statistics
 import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Iterator
 
-if __package__:
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    from atomic_io import atomic_write_text
-
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from atomic_io import atomic_write_text  # noqa: E402
 from to_valplay_bundle import (  # noqa: E402
     CLASS_NET_CACHE_SUFFIX,
     UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME,
 )
 
+#: C# movement rows whose values are compared.
+MOVEMENT_SAMPLE = 50000
 
-def iter_ndjson(path: Path) -> Iterator[dict]:
-    """Yield parsed dicts from an NDJSON file, one line at a time (streaming)."""
-    with path.open("r", encoding="utf-8") as f:
+
+def iter_ndjson(path: Path, kind: str | None = None) -> Iterator[dict]:
+    """Stream an NDJSON file; with `kind`, only records of that `type`, and a
+    line not containing the word is skipped unparsed."""
+    needle = kind.encode() if kind else b""
+    with path.open("rb") as f:
         for line in f:
-            line = line.strip()
-            if line:
-                yield json.loads(line)
+            if needle in line and line.strip():
+                obj = json.loads(line)
+                if kind is None or obj.get("type") == kind:
+                    yield obj
+
+
+def listing(title: str, items: list, limit: int | None = None) -> list[str]:
+    """`### title (count):`, the first `limit` items, and how many were cut."""
+    lines = [f"\n### {title} ({len(items):,}):"] + [f"  {i}" for i in items[:limit]]
+    if limit is not None and len(items) > limit:
+        lines.append(f"  ... and {len(items) - limit} more")
+    return lines
 
 
 def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
@@ -59,16 +69,10 @@ def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
     lines.append("-" * 55)
 
     def row(label, cs_val, vk_val):
-        # A key absent from a manifest is not a measured zero: it renders as
-        # "?", never as a matched 0.
-        if cs_val is None or vk_val is None:
-            match = "?"
-            cs_disp = f"{cs_val:>12,}" if cs_val is not None else f"{'?':>12}"
-            vk_disp = f"{vk_val:>12,}" if vk_val is not None else f"{'?':>12}"
-        else:
-            match = "✓" if cs_val == vk_val else "✗"
-            cs_disp = f"{cs_val:>12,}"
-            vk_disp = f"{vk_val:>12,}"
+        # A key absent from a manifest is "?", never a matched 0.
+        cs_disp, vk_disp = (f"{'?':>12}" if v is None else f"{v:>12,}"
+                            for v in (cs_val, vk_val))
+        match = "?" if None in (cs_val, vk_val) else "✓" if cs_val == vk_val else "✗"
         lines.append(f"{label:<20} {cs_disp} {vk_disp} {match:>6}")
 
     row("Packets",       cs_stats.get("packet_count"),        vk_stats.get("packet_count"))
@@ -76,20 +80,11 @@ def compare_totals(cs_manifest: dict, vk_manifest: dict) -> str:
                          vk_stats.get("bunch_count", vk_counts.get("bunch_count")))
     row("Actor opens",   cs_counts.get("actor_spawned"),      vk_counts.get("actor_opens"))
     row("Actor closes",  cs_counts.get("actor_closed"),       vk_counts.get("actor_closes"))
-
-    cs_groups = len(cs_manifest.get("net_field_export_groups", []))
-    vk_groups = len(vk_manifest.get("net_field_export_groups", []))
-    row("Export groups",  cs_groups, vk_groups)
-
-    # vrfkit's movement row count lives under the manifest's top-level
-    # "quality" object (crates/vrfkit/src/manifest.rs), not under "counts".
+    row("Export groups", len(cs_manifest.get("net_field_export_groups", [])),
+                         len(vk_manifest.get("net_field_export_groups", [])))
+    # vrfkit keeps its movement row count under "quality", not "counts".
     row("Movement rows", cs_counts.get("movement"),
         vk_manifest.get("quality", {}).get("movement_rows"))
-    fields_decoded = cs_counts.get("export_group_received")
-    if fields_decoded is not None:
-        fields_decoded += cs_counts.get("filtered_export_groups", 0)
-    row("Fields decoded", fields_decoded,
-        vk_counts.get("fields"))
     row("RPCs (total)",  cs_counts.get("rpc_received"),       vk_counts.get("rpcs"))
 
     lines.append("")
@@ -106,36 +101,20 @@ def compare_group_paths(cs_manifest: dict, vk_manifest: dict,
 
     if vk_parquet_path.exists():
         tbl = pq.read_table(vk_parquet_path, columns=["group_path"])
-        vk_parquet_paths = set(tbl.column("group_path").to_pylist())
-        lines.append(f"vrfkit manifest groups: {len(vk_paths)}")
-        lines.append(f"vrfkit parquet distinct group_path: {len(vk_parquet_paths)}")
+        distinct = len(set(tbl.column("group_path").to_pylist()))
+        lines.append(f"vrfkit parquet distinct group_path: {distinct}")
     else:
-        vk_parquet_paths = set()
         lines.append("(fields.parquet not found — using manifest only)")
 
-    both = cs_paths & vk_paths
-    cs_only = cs_paths - vk_paths
-    vk_only = vk_paths - cs_paths
-
-    lines.append(f"\nC# manifest groups: {len(cs_paths)}")
-    lines.append(f"vrfkit manifest groups: {len(vk_paths)}")
-    lines.append(f"Both: {len(both)}")
-    lines.append(f"C# only: {len(cs_only)}")
-    lines.append(f"vrfkit only: {len(vk_only)}")
-
-    if cs_only:
-        lines.append(f"\n### C# only ({len(cs_only)}):")
-        for p in sorted(cs_only)[:50]:
-            lines.append(f"  {p}")
-        if len(cs_only) > 50:
-            lines.append(f"  ... and {len(cs_only) - 50} more")
-
-    if vk_only:
-        lines.append(f"\n### vrfkit only ({len(vk_only)}):")
-        for p in sorted(vk_only)[:50]:
-            lines.append(f"  {p}")
-        if len(vk_only) > 50:
-            lines.append(f"  ... and {len(vk_only) - 50} more")
+    cs_only, vk_only = sorted(cs_paths - vk_paths), sorted(vk_paths - cs_paths)
+    lines += [f"\nC# manifest groups: {len(cs_paths)}",
+              f"vrfkit manifest groups: {len(vk_paths)}",
+              f"Both: {len(cs_paths & vk_paths)}",
+              f"C# only: {len(cs_only)}",
+              f"vrfkit only: {len(vk_only)}"]
+    for title, paths in (("C# only", cs_only), ("vrfkit only", vk_only)):
+        if paths:
+            lines += listing(title, paths, 50)
 
     lines.append("")
     return "\n".join(lines)
@@ -144,11 +123,9 @@ def compare_group_paths(cs_manifest: dict, vk_manifest: dict,
 def coverage_problems(cs_pairs: set, vk_pairs: set) -> list[str]:
     """Why this comparison compared nothing, if it compared nothing.
 
-    No threshold on the differences can be defended without the corpus in
-    hand, but a report must not announce a result it never measured: `cs_only`
-    is also empty when the C# side yielded no pairs at all (an empty, slimmed
-    or wrong events.ndjson). C#-only pairs are not reported here; gating on
-    them would keep a tool measuring known-incomplete coverage red forever.
+    `cs_only` is also empty when the C# side yielded no pairs at all, so an
+    empty difference alone is no result. C#-only pairs are not gated: that
+    would keep a tool measuring known-incomplete coverage red forever.
     """
     if not cs_pairs and not vk_pairs:
         return ["neither side produced a single (group, field) pair: "
@@ -168,57 +145,42 @@ def coverage_problems(cs_pairs: set, vk_pairs: set) -> list[str]:
 
 def coverage_lines(cs_pairs: set, vk_pairs: set) -> list[str]:
     """The C#-only / vrfkit-only breakdown, split out so it can be tested."""
-    both = cs_pairs & vk_pairs
-    cs_only = cs_pairs - vk_pairs
-    vk_only = vk_pairs - cs_pairs
+    def pairs(s):
+        return [f"({gp}, {fn})" for gp, fn in sorted(s)]
 
-    lines = [
-        f"\n  Both (intersection): {len(both):,}",
-        f"  C# only:             {len(cs_only):,}",
-        f"  vrfkit only:         {len(vk_only):,}",
-        f"\n### Both -- sample (first 30 of {len(both):,}):",
-    ]
-    lines += [f"  ({gp}, {fn})" for gp, fn in sorted(both)[:30]]
-
+    both, cs_only, vk_only = cs_pairs & vk_pairs, cs_pairs - vk_pairs, vk_pairs - cs_pairs
+    lines = [f"\n  Both (intersection): {len(both):,}",
+             f"  C# only:             {len(cs_only):,}",
+             f"  vrfkit only:         {len(vk_only):,}"]
+    lines += listing("Both, sample", pairs(both), 30)
     if cs_only:
-        lines.append(f"\n### C# only -- ALL {len(cs_only)} entries (INVESTIGATE):")
-        lines += [f"  ({gp}, {fn})" for gp, fn in sorted(cs_only)]
+        lines += listing("C# only, INVESTIGATE", pairs(cs_only))
     elif cs_pairs:
         lines.append("\n### C# only: NONE -- vrfkit covers everything C# has!")
     else:
-        # The claim above is only meaningful when the C# side had pairs to
-        # miss. Without them an empty difference is an empty measurement.
         lines.append("\n### C# only: NOT MEASURED -- the C# side produced no "
                      "pairs, so this says nothing about coverage.")
-
-    lines.append(f"\n### vrfkit only -- sample (first 30 of {len(vk_only):,}):")
-    lines += [f"  ({gp}, {fn})" for gp, fn in sorted(vk_only)[:30]]
-    if len(vk_only) > 30:
-        lines.append(f"  ... and {len(vk_only) - 30} more")
-    return lines
+    return lines + listing("vrfkit only, sample", pairs(vk_only), 30)
 
 
 def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
     """Compare (group_path, field_name) pairs between C# events and vrfkit
     parquet: `(report text, problems)`."""
-    lines = ["## 3. (Group, Field) coverage comparison\n"]
+    lines = ["## 3. (Group, Field) coverage comparison\n",
+             "Scanning C# events.ndjson for export_group_received..."]
 
     cs_pairs: set[tuple[str, str]] = set()
-    lines.append("Scanning C# events.ndjson for export_group_received...")
-    count = 0
-    cs_unnamed = 0
-    for obj in iter_ndjson(cs_events_path):
-        if obj.get("type") != "export_group_received":
-            continue
+    count = cs_unnamed = 0
+    for obj in iter_ndjson(cs_events_path, "export_group_received"):
         count += 1
         group_path = obj.get("export_group_path", "")
         payload = obj.get("payload", {})
         if isinstance(payload, dict):
-            for key in payload.keys():
-                if not group_path or not key:
+            for key in payload:
+                if group_path and key:
+                    cs_pairs.add((group_path, key))
+                else:
                     cs_unnamed += 1
-                    continue
-                cs_pairs.add((group_path, key))
 
     lines.append(f"  Scanned {count:,} export_group_received records")
     lines.append(f"  Distinct (group, field) pairs from C#: {len(cs_pairs):,}")
@@ -232,13 +194,11 @@ def compare_group_field_coverage(cs_events_path: Path, vk_parquet_path: Path):
     vk_pairs: set[tuple[str, str]] = set()
     vk_unnamed = 0
     for gp, fn in zip(tbl.column("group_path").to_pylist(),
-                       tbl.column("field_name").to_pylist()):
-        # A preserved whole-block payload is not a field; counted, it would
-        # read as coverage vrfkit does not have.
+                      tbl.column("field_name").to_pylist()):
+        # Neither a preserved whole-block payload nor an unnamed row is field
+        # coverage vrfkit has.
         if fn == UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME:
             continue
-        # An unnamed row is not field coverage either, and sorting (path, None)
-        # beside a named field raised TypeError on 13.06 exports.
         if not gp or not fn:
             vk_unnamed += 1
             continue
@@ -280,37 +240,24 @@ def rpc_name_lines(cs_names: set, vk_names: set) -> list[str]:
     cs_only, vk_only = sorted(cs_names - vk_names), sorted(vk_names - cs_names)
     lines = [f"  Both: {len(cs_names & vk_names)}",
              f"  C# only: {len(cs_only)}",
-             f"  vrfkit only: {len(vk_only)} (expected: the C# side is slimmed)"]
+             f"  vrfkit only: {len(vk_only)}"]
     if not cs_names:
         lines.append("\n### C# only: NOT MEASURED -- the C# side has no rpc_received "
                      "records, so this says nothing about vrfkit.")
     elif cs_only:
-        lines.append(f"\n### C# only -- ALL {len(cs_only)} (INVESTIGATE):")
-        lines += [f"  {name}" for name in cs_only]
+        lines += listing("C# only, INVESTIGATE", cs_only)
     else:
-        lines.append("\n### C# only: NONE -- vrfkit emits every RPC name the C# side kept.")
-    lines.append(f"\n### vrfkit only -- sample (first 30 of {len(vk_only):,}):")
-    lines += [f"  {name}" for name in vk_only[:30]]
-    if len(vk_only) > 30:
-        lines.append(f"  ... and {len(vk_only) - 30} more")
-    return lines
+        lines.append("\n### C# only: NONE -- vrfkit emits every RPC name the C# side has.")
+    return lines + listing("vrfkit only, sample", vk_only, 30)
 
 
 def compare_rpc_names(cs_events_path: Path, vk_parquet_path: Path) -> str:
     """Compare RPC function names between the two parsers."""
     lines = ["## 4. RPC name comparison\n"]
-    lines.append("NOTE: C# events.ndjson is slimmed — only ~3% of RPCs survive.")
-    lines.append("      Full RPC count comes from manifest.json counts.rpc_received.")
-
-    cs_rpc_names: Counter = Counter()
-    for obj in iter_ndjson(cs_events_path):
-        if obj.get("type") != "rpc_received":
-            continue
-        fname = obj.get("function_name", "<unknown>")
-        cs_rpc_names[fname] += 1
-
-    lines.append(f"\n  C# slim RPC distinct names: {len(cs_rpc_names)}")
-    lines.append(f"  C# slim RPC total records: {sum(cs_rpc_names.values()):,}")
+    cs_rpc_names = Counter(obj.get("function_name", "<unknown>")
+                           for obj in iter_ndjson(cs_events_path, "rpc_received"))
+    lines.append(f"  C# RPC distinct names: {len(cs_rpc_names)}")
+    lines.append(f"  C# RPC total records: {sum(cs_rpc_names.values()):,}")
 
     if vk_parquet_path.exists():
         vk_rpc_names = vrfkit_rpc_names(vk_parquet_path)
@@ -320,7 +267,7 @@ def compare_rpc_names(cs_events_path: Path, vk_parquet_path: Path) -> str:
     else:
         lines.append("  fields.parquet not found -- vrfkit's RPC names NOT MEASURED.")
 
-    lines.append("\n  C# slim RPC function_name breakdown:")
+    lines.append("\n  C# RPC function_name breakdown:")
     for name, count in cs_rpc_names.most_common():
         lines.append(f"    {name}: {count:,}")
 
@@ -328,8 +275,13 @@ def compare_rpc_names(cs_events_path: Path, vk_parquet_path: Path) -> str:
     return "\n".join(lines)
 
 
+def _xyz(value) -> list:
+    return [value.get(axis) for axis in "xyz"] if isinstance(value, dict) else [None]
+
+
 def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
-    """Compare movement data by joining on (time_ms, character_net_guid)."""
+    """Compare the first MOVEMENT_SAMPLE C# movement rows with vrfkit's, joined
+    on (time_ms, character GUID): exact, then +-1 ms."""
     lines = ["## 5. Movement value comparison\n"]
 
     if not cs_movement_path.exists():
@@ -339,77 +291,45 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
         lines.append("vrfkit movement.parquet not found.")
         return "\n".join(lines)
 
-    cs_row_count = 0
     with cs_movement_path.open("r", encoding="utf-8") as f:
-        for _ in f:
-            cs_row_count += 1
-    lines.append(f"C# movement rows (in file): {cs_row_count:,}")
-
-    vk_meta = pq.read_metadata(vk_movement_path)
-    vk_row_count = vk_meta.num_rows
-    lines.append(f"vrfkit movement rows: {vk_row_count:,}")
-    lines.append(f"Difference: {vk_row_count - cs_row_count:,} (vrfkit - C#)")
-
-    schema = pq.read_schema(vk_movement_path)
-    lines.append(f"vrfkit movement columns: {[f.name for f in schema]}")
-
-    # The first SAMPLE_SIZE C# rows, joined to vrfkit's rows of the same time
-    # range on (time_ms, character GUID): exact, then +-1 ms.
-    SAMPLE_SIZE = 50000
-
-    lines.append(f"\nSampling first {SAMPLE_SIZE:,} C# rows for value comparison...")
+        cs_row_count = sum(1 for _ in f)
+    vk_row_count = pq.read_metadata(vk_movement_path).num_rows
+    lines += [f"C# movement rows (in file): {cs_row_count:,}",
+              f"vrfkit movement rows: {vk_row_count:,}",
+              f"Difference: {vk_row_count - cs_row_count:,} (vrfkit - C#)",
+              f"vrfkit movement columns: {pq.read_schema(vk_movement_path).names}",
+              f"\nSampling first {MOVEMENT_SAMPLE:,} C# rows for value comparison..."]
 
     cs_sample: list[tuple[int, int, dict]] = []
-    cs_read = 0
-    for obj in iter_ndjson(cs_movement_path):
-        if cs_read >= SAMPLE_SIZE:
-            break
-        time_ms = obj.get("time_ms")
-        char_guid = obj.get("shooter_character_net_guid")
+    for obj in itertools.islice(iter_ndjson(cs_movement_path), MOVEMENT_SAMPLE):
+        time_ms, char_guid = obj.get("time_ms"), obj.get("shooter_character_net_guid")
         if time_ms is not None and char_guid is not None:
             cs_sample.append((time_ms, char_guid, obj))
-        cs_read += 1
-
-    if cs_sample:
-        min_time = min(row[0] for row in cs_sample)
-        max_time = max(row[0] for row in cs_sample)
-    else:
+    if not cs_sample:
         lines.append("No C# samples found.")
         return "\n".join(lines)
 
-    import pyarrow.dataset as ds
-    dataset = ds.dataset(vk_movement_path)
-    vk_tbl = dataset.to_table(
-        filter=(ds.field("time_ms") >= min_time) & (ds.field("time_ms") <= max_time + 1)
-    )
-    vk_cols = [f.name for f in vk_tbl.schema]
+    min_time = min(row[0] for row in cs_sample)
+    max_time = max(row[0] for row in cs_sample)
+    # movement.parquet's schema is fixed and non-nullable (vrf-export's movement_schema).
+    columns = ["time_ms", "character_net_guid", "pos_x", "pos_y", "pos_z", "yaw", "pitch",
+               "vel_x", "vel_y", "vel_z"]
+    vk_tbl = ds.dataset(vk_movement_path).to_table(
+        columns=columns,
+        filter=(ds.field("time_ms") >= min_time) & (ds.field("time_ms") <= max_time + 1))
+    vk = {name: vk_tbl.column(name).to_pylist() for name in columns}
+    vk_rows: defaultdict[tuple[int, int], deque[int]] = defaultdict(deque)
+    for i, key in enumerate(zip(vk["time_ms"], vk["character_net_guid"])):
+        vk_rows[key].append(i)
 
-    vk_sample: defaultdict[tuple[int, int], deque[int]] = defaultdict(deque)
-    # movement.parquet has always named it this (vrf-export's movement_schema).
-    char_col = "character_net_guid"
-    if char_col not in vk_cols:
-        lines.append(f"Cannot find character GUID column in vrfkit. Columns: {vk_cols}")
-        return "\n".join(lines)
-
-    time_col = vk_tbl.column("time_ms").to_pylist()
-    guid_col = vk_tbl.column(char_col).to_pylist()
-    for i in range(vk_tbl.num_rows):
-        vk_sample[(time_col[i], guid_col[i])].append(i)
-    vk_columns_data = {}
-    for col_name in vk_cols:
-        vk_columns_data[col_name] = vk_tbl.column(col_name).to_pylist()
-
-    joined = 0
-    missed = 0
-    errors_pos = []
-    errors_yaw = []
-    errors_pitch = []
-    errors_vel = []
-
+    # A value the C# row lacks is not compared, never read as 0.
+    errors: dict[str, list[float]] = {"Position (max axis)": [], "Yaw": [], "Pitch": [],
+                                      "Velocity (max axis)": []}
+    joined = missed = 0
     for t, g, cs_row in cs_sample:
         vk_idx = None
         for key in ((t, g), (t - 1, g), (t + 1, g)):
-            candidates = vk_sample.get(key)
+            candidates = vk_rows.get(key)
             if candidates:
                 vk_idx = candidates.popleft()
                 break
@@ -417,103 +337,58 @@ def compare_movement(cs_movement_path: Path, vk_movement_path: Path) -> str:
             missed += 1
             continue
         joined += 1
+        for label, cs_vals, columns in (
+            ("Position (max axis)", _xyz(cs_row.get("position")), ("pos_x", "pos_y", "pos_z")),
+            ("Yaw", [cs_row.get("yaw")], ("yaw",)),
+            ("Pitch", [cs_row.get("pitch")], ("pitch",)),
+            ("Velocity (max axis)", _xyz(cs_row.get("velocity")), ("vel_x", "vel_y", "vel_z")),
+        ):
+            if None not in cs_vals:
+                errors[label].append(max(abs(c - vk[col][vk_idx])
+                                         for c, col in zip(cs_vals, columns)))
 
-        cs_pos = cs_row.get("position", {})
-        if "pos_x" in vk_cols:
-            vk_x = vk_columns_data["pos_x"][vk_idx]
-            vk_y = vk_columns_data["pos_y"][vk_idx]
-            vk_z = vk_columns_data["pos_z"][vk_idx]
-        else:
-            vk_x = vk_y = vk_z = None
-
-        if isinstance(cs_pos, dict) and vk_x is not None:
-            dx = abs((cs_pos.get("x", 0) or 0) - (vk_x or 0))
-            dy = abs((cs_pos.get("y", 0) or 0) - (vk_y or 0))
-            dz = abs((cs_pos.get("z", 0) or 0) - (vk_z or 0))
-            errors_pos.append(max(dx, dy, dz))
-
-        cs_yaw = cs_row.get("yaw", 0) or 0
-        cs_pitch = cs_row.get("pitch", 0) or 0
-        if "yaw" in vk_cols:
-            vk_yaw = vk_columns_data["yaw"][vk_idx] or 0
-            vk_pitch = vk_columns_data["pitch"][vk_idx] or 0
-            errors_yaw.append(abs(cs_yaw - vk_yaw))
-            errors_pitch.append(abs(cs_pitch - vk_pitch))
-
-        cs_vel = cs_row.get("velocity", {})
-        if "vel_x" in vk_cols:
-            vvx = vk_columns_data["vel_x"][vk_idx]
-            vvy = vk_columns_data["vel_y"][vk_idx]
-            vvz = vk_columns_data["vel_z"][vk_idx]
-        else:
-            vvx = vvy = vvz = None
-
-        if isinstance(cs_vel, dict) and vvx is not None:
-            dvx = abs((cs_vel.get("x", 0) or 0) - (vvx or 0))
-            dvy = abs((cs_vel.get("y", 0) or 0) - (vvy or 0))
-            dvz = abs((cs_vel.get("z", 0) or 0) - (vvz or 0))
-            errors_vel.append(max(dvx, dvy, dvz))
-
-    lines.append(f"  Joined: {joined:,} / {len(cs_sample):,} ({100*joined/max(1,len(cs_sample)):.1f}%)")
+    lines.append(f"  Joined: {joined:,} / {len(cs_sample):,} ({100*joined/len(cs_sample):.1f}%)")
     lines.append(f"  Missed (no match even ±1ms): {missed:,}")
-    lines.append(f"  Join method: exact (time_ms, {char_col}), fallback ±1ms")
-
-    def stats_line(name, vals):
-        if not vals:
-            return f"  {name}: no data"
-        import statistics
-        vals_sorted = sorted(vals)
-        p99_idx = int(len(vals_sorted) * 0.99)
-        return (f"  {name}: max={max(vals):.4f}, mean={statistics.mean(vals):.4f}, "
-                f"p99={vals_sorted[p99_idx]:.4f}, median={statistics.median(vals):.4f}")
+    lines.append("  Join method: exact (time_ms, character_net_guid), fallback ±1ms")
 
     lines.append(f"\n  Error statistics (over {joined:,} joined rows):")
-    lines.append(stats_line("Position (max axis)", errors_pos))
-    lines.append(stats_line("Yaw", errors_yaw))
-    lines.append(stats_line("Pitch", errors_pitch))
-    lines.append(stats_line("Velocity (max axis)", errors_vel))
+    for label, vals in errors.items():
+        if not vals:
+            lines.append(f"  {label}: no data")
+            continue
+        vals.sort()
+        lines.append(f"  {label} ({len(vals):,} rows): max={vals[-1]:.4f}, "
+                     f"mean={statistics.mean(vals):.4f}, p99={vals[int(len(vals) * 0.99)]:.4f}, "
+                     f"median={statistics.median(vals):.4f}")
 
     lines.append("")
     return "\n".join(lines)
 
 
-def compare_raw_blobs(cs_events_path: Path, vk_parquet_path: Path) -> str:
-    """Find {BitCount, Data, TypeName} blobs in C# and check vrfkit coverage."""
-    lines = ["## 6. Raw blob TypeName comparison\n"]
+def compare_raw_blobs(cs_events_path: Path) -> str:
+    """Count the C# side's {BitCount, Data, TypeName} blobs by TypeName; the
+    vrfkit side is not measured here."""
+    lines = ["## 6. C# raw blob TypeNames\n"]
 
     typename_counts: Counter = Counter()
     blob_groups: defaultdict = defaultdict(set)  # TypeName -> set of group_paths
 
-    for obj in iter_ndjson(cs_events_path):
-        if obj.get("type") != "export_group_received":
-            continue
-        group_path = obj.get("export_group_path", "")
+    for obj in iter_ndjson(cs_events_path, "export_group_received"):
         payload = obj.get("payload", {})
         if not isinstance(payload, dict):
             continue
-        for key, val in payload.items():
+        for val in payload.values():
             if isinstance(val, dict) and "TypeName" in val and "BitCount" in val:
-                tname = val["TypeName"]
-                typename_counts[tname] += 1
-                blob_groups[tname].add(group_path)
+                typename_counts[val["TypeName"]] += 1
+                blob_groups[val["TypeName"]].add(obj.get("export_group_path", ""))
 
     lines.append(f"Distinct TypeName values in C# blobs: {len(typename_counts)}")
     lines.append(f"Total blob instances: {sum(typename_counts.values()):,}")
     lines.append(f"\n{'TypeName':<50} {'Count':>8}  Groups (sample)")
     lines.append("-" * 90)
     for tname, count in typename_counts.most_common():
-        groups_sample = sorted(blob_groups[tname])[:3]
-        groups_str = "; ".join(g.split("/")[-1] for g in groups_sample)
+        groups_str = "; ".join(g.split("/")[-1] for g in sorted(blob_groups[tname])[:3])
         lines.append(f"{tname:<50} {count:>8}  {groups_str}")
-
-    if vk_parquet_path.exists():
-        schema = pq.read_schema(vk_parquet_path)
-        col_names = [f.name for f in schema]
-        # Never empty: fields.parquet always has its raw_bits column.
-        raw_cols = [c for c in col_names if "raw" in c.lower() or "blob" in c.lower() or "bits" in c.lower()]
-        lines.append(f"\nvrfkit parquet raw-related columns: {raw_cols}")
-    else:
-        lines.append("\nfields.parquet not found.")
 
     lines.append("")
     return "\n".join(lines)
@@ -521,53 +396,36 @@ def compare_raw_blobs(cs_events_path: Path, vk_parquet_path: Path) -> str:
 
 def main():
     if len(sys.argv) != 3:
-        print(f"Usage: python {sys.argv[0]} <csharp_dir> <vrfkit_dir>")
-        sys.exit(1)
+        sys.exit(f"Usage: python {sys.argv[0]} <csharp_dir> <vrfkit_dir>")
+    cs_dir, vk_dir = Path(sys.argv[1]), Path(sys.argv[2])
+    cs_events = cs_dir / "events.ndjson"
+    vk_fields = vk_dir / "fields.parquet"
+    cs_manifest = json.loads((cs_dir / "manifest.json").read_text(encoding="utf-8"))
+    vk_manifest = json.loads((vk_dir / "manifest.json").read_text(encoding="utf-8"))
 
-    cs_dir = Path(sys.argv[1])
-    vk_dir = Path(sys.argv[2])
-
-    cs_manifest_path = cs_dir / "manifest.json"
-    cs_events_path = cs_dir / "events.ndjson"
-    cs_movement_path = cs_dir / "movement.ndjson"
-    vk_manifest_path = vk_dir / "manifest.json"
-    vk_fields_path = vk_dir / "fields.parquet"
-    vk_movement_path = vk_dir / "movement.parquet"
-
-    with cs_manifest_path.open("r", encoding="utf-8") as f:
-        cs_manifest = json.load(f)
-    with vk_manifest_path.open("r", encoding="utf-8") as f:
-        vk_manifest = json.load(f)
-
-    report_parts = []
-    report_parts.append("# vrfkit vs C# Parser Comparison Report\n")
-    report_parts.append(f"Replay: {cs_manifest.get('source_file', 'unknown')}")
-    report_parts.append(f"Build: {cs_manifest.get('replay_build', 'unknown')}")
-    report_parts.append(f"Duration: {cs_manifest.get('duration_ms', 'unknown')} ms\n")
-
-    report_parts.append(compare_totals(cs_manifest, vk_manifest))
-
-    report_parts.append(compare_group_paths(cs_manifest, vk_manifest, vk_fields_path))
-
-    coverage_text, problems = compare_group_field_coverage(
-        cs_events_path, vk_fields_path)
-    report_parts.append(coverage_text)
-
-    report_parts.append(compare_rpc_names(cs_events_path, vk_fields_path))
-
-    report_parts.append(compare_movement(cs_movement_path, vk_movement_path))
-
-    report_parts.append(compare_raw_blobs(cs_events_path, vk_fields_path))
+    report_parts = [
+        "# vrfkit vs C# Parser Comparison Report\n",
+        f"Replay: {cs_manifest.get('source_file', 'unknown')}",
+        f"Build: {cs_manifest.get('replay_build', 'unknown')}",
+        f"Duration: {cs_manifest.get('duration_ms', 'unknown')} ms\n",
+        compare_totals(cs_manifest, vk_manifest),
+        compare_group_paths(cs_manifest, vk_manifest, vk_fields),
+    ]
+    coverage_text, problems = compare_group_field_coverage(cs_events, vk_fields)
+    report_parts += [
+        coverage_text,
+        compare_rpc_names(cs_events, vk_fields),
+        compare_movement(cs_dir / "movement.ndjson", vk_dir / "movement.parquet"),
+        compare_raw_blobs(cs_events),
+    ]
 
     full_report = "\n".join(report_parts)
     print(full_report)
-
     out_path = vk_dir / "comparison_report.txt"
     atomic_write_text(out_path, full_report)
     print(f"\n[Report written to {out_path}]")
 
-    # A report (see the module docstring), but not one that finishes quietly
-    # after comparing nothing.
+    # A report, but not one that finishes quietly after comparing nothing.
     if problems:
         print(f"\nFAILED: {len(problems)} reason(s) this comparison measured "
               f"nothing", file=sys.stderr)
@@ -578,6 +436,5 @@ def main():
 
 
 if __name__ == "__main__":
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     raise SystemExit(main())
