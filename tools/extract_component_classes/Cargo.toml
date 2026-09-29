@@ -1,22 +1,11 @@
 [package]
 name = "extract-component-classes"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.86"
-license = "Apache-2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 publish = false
 
-# Standalone, with its own target directory and lockfile: it reads the
-# installed game, which nothing in `crates/` does.
-[workspace]
-
-[[bin]]
-name = "extract-component-classes"
-path = "src/main.rs"
-
 [dependencies]
-# The oozextract version vrf-container uses.
-oozextract = "0.5.4"
-
-[profile.release]
-opt-level = 3
+oozextract = { workspace = true }
+# The default `disable-bounds-checking` feature is unsafe code.
+cityhasher = { version = "0.1", default-features = false }

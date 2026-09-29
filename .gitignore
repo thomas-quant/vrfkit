@@ -1,19 +1,13 @@
-/target
+target/
+/target-*/
 **/*.rs.bk
-
-# tools/extract_component_classes is a standalone cargo project (not a
-# workspace member) so it builds into its own target directory.
-tools/extract_component_classes/target/
-
-# Python bytecode from the generators in tools/.
 __pycache__/
 *.py[cod]
 
-# Working copy of the C# sources the S-box and golden-vector generators read.
-# Their outputs are committed instead.
+# Local checkout of the reference C# sources; never committed.
 /.refsrc/
 
-# Replay binaries and parsed output are large and user-specific.
+# Replays and parsed output are large and user-specific.
 *.vrf
 /out/
 *.parquet
@@ -24,12 +18,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Per-agent build directories used when several tasks compile in parallel.
-/target-*/
-
-# Agent worktrees created by the Claude Code harness. Transient scratch
-# checkouts of this same repo; never part of a commit.
+# Agent and local worktrees of this repo.
 /.claude/
-
-# Local linked worktrees used for isolated feature development.
 /.worktrees/

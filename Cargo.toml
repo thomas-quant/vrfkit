@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "tools/extract_component_classes"]
 
 [workspace.package]
 version = "0.2.2"
@@ -22,6 +22,7 @@ vrf-frame = { path = "crates/vrf-frame" }
 vrf-movement = { path = "crates/vrf-movement" }
 vrf-decode = { path = "crates/vrf-decode" }
 thiserror = "2"
+oozextract = "0.5.4"
 # Payloads <=16 bytes stay inline; `union`'s unsafe is smallvec's, not ours.
 smallvec = { version = "1", features = ["union"] }
 
