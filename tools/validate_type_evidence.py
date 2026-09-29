@@ -99,7 +99,7 @@ def _signed(value: int, width: int) -> int:
     return (value ^ sign) - sign
 
 
-class _Bits:
+class Bits:
     """LSB-first reader over exactly ``bit_count`` bits of one payload.
 
     Written from the Unreal layouts rather than from ``vrf-bitio``, so the two
@@ -109,6 +109,8 @@ class _Bits:
     """
 
     def __init__(self, raw: bytes, bit_count: int):
+        if len(raw) != (bit_count + 7) // 8:
+            raise ValueError(f"raw_bits holds {len(raw)} bytes, bit_count {bit_count} needs {(bit_count + 7) // 8}")
         self._value = int.from_bytes(raw, "little")
         if self._value >> bit_count:
             raise ValueError("nonzero padding above bit_count")
@@ -165,7 +167,7 @@ class _Bits:
         return data[:-unit].decode("utf-8" if unit == 1 else "utf-16-le")
 
 
-def _fname(reader: _Bits) -> str:
+def fname(reader: Bits) -> str:
     if reader.bit():
         return str(reader.int_packed())
     name = reader.fstring()
@@ -185,7 +187,7 @@ FTEXT_DIGITS = ("minimum_integral_digits", "maximum_integral_digits",
                 "minimum_fractional_digits", "maximum_fractional_digits")
 
 
-def _ftext_bool(reader: _Bits) -> bool:
+def _ftext_bool(reader: Bits) -> bool:
     """An archive bool: a whole u32 that must be 0 or 1."""
     value = reader.bits(32)
     if value not in (0, 1):
@@ -193,7 +195,7 @@ def _ftext_bool(reader: _Bits) -> bool:
     return bool(value)
 
 
-def _ftext_tree(reader: _Bits, depth: int = 0) -> dict:
+def _ftext_tree(reader: Bits, depth: int = 0) -> dict:
     """``FText`` serialization: u32 flags, a history byte, then the history,
     for the histories the module docstring lists, written from the Unreal
     layouts rather than from ``ftext.rs``. Returned in the shape the
@@ -255,7 +257,7 @@ def _ftext_tree(reader: _Bits, depth: int = 0) -> dict:
     raise ValueError(f"FText history {history}")
 
 
-def _packed_vector(reader: _Bits) -> dict:
+def _packed_vector(reader: Bits) -> dict:
     """``ReadPackedVector``: a SerializeInt(128) header whose low six bits are
     the component width and whose seventh says "scaled"; width 0 falls back to
     three raw floats, or doubles when the seventh bit is set. Returned
@@ -282,7 +284,7 @@ def _unit_scale(vector: dict) -> tuple[float, float, float]:
     return tuple(float(p) for p in vector["packed"])
 
 
-def _vector_net_quantize100(reader: _Bits) -> tuple[float, float, float]:
+def _vector_net_quantize100(reader: Bits) -> tuple[float, float, float]:
     """``FVector_NetQuantize100``: a packed vector whose scaled integers are
     hundredths. Unlike a ``ReplicatedMovement`` location, the type names its
     scale, so it is applied here."""
@@ -294,7 +296,7 @@ def _vector_net_quantize100(reader: _Bits) -> tuple[float, float, float]:
     return tuple(float(p) for p in vector["packed"])
 
 
-def _rotator(reader: _Bits, width: int) -> tuple[float, float, float]:
+def _rotator(reader: Bits, width: int) -> tuple[float, float, float]:
     """A rotator: one presence bit per component, then `width` bits if set."""
     return tuple(
         reader.bits(width) * 360.0 / (1 << width) if reader.bit() else 0.0
@@ -302,7 +304,7 @@ def _rotator(reader: _Bits, width: int) -> tuple[float, float, float]:
     )
 
 
-def _rep_movement(reader: _Bits, rotation_bits: int) -> dict:
+def _rep_movement(reader: Bits, rotation_bits: int) -> dict:
     """``FRepMovement::NetSerialize``, in wire order."""
     sleep = reader.bit()
     physics = reader.bit()
@@ -354,7 +356,7 @@ def _exported_rep_movement(text: str) -> dict:
     }
 
 
-#: Types read with `_Bits`, and the column their typed value is exported in.
+#: Types read with `Bits`, and the column their typed value is exported in.
 BIT_LEVEL_TYPES = {"EnumByte": "value_i64", "EnumRemainingBits": "value_i64",
                    "FName": "value_str", "FTextTree": "value_str",
                    "RotationShort": "value_str",
@@ -363,7 +365,7 @@ BIT_LEVEL_TYPES = {"EnumByte": "value_i64", "EnumRemainingBits": "value_i64",
 
 
 def _decode_bits(raw: bytes, bit_count: int, type_name: str):
-    reader = _Bits(raw, bit_count)
+    reader = Bits(raw, bit_count)
     if type_name == "EnumByte":
         if not 1 <= bit_count <= 8:
             raise ValueError("EnumByte is not 1..8 bits")
@@ -373,7 +375,7 @@ def _decode_bits(raw: bytes, bit_count: int, type_name: str):
             raise ValueError("EnumRemainingBits wider than 32 bits")
         value = reader.bits(bit_count)
     elif type_name == "FName":
-        value = _fname(reader)
+        value = fname(reader)
     elif type_name == "FTextTree":
         value = _ftext_tree(reader)
     elif type_name == "RotationShort":
@@ -438,7 +440,7 @@ def decode_exact(raw: bytes, bit_count: int, type_name: str):
             raise ValueError("FString lacks its terminator")
         return raw[4:-unit].decode("utf-8" if length > 0 else "utf-16-le")
     if type_name == "ObjectNetGuid":
-        reader = _Bits(raw, bit_count)
+        reader = Bits(raw, bit_count)
         value = reader.int_packed()
         if reader.remaining():
             raise ValueError("ObjectNetGuid leaves residual bits")

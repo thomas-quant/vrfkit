@@ -102,9 +102,9 @@ class AbilityArrayEvidenceTests(unittest.TestCase):
     def test_an_int_packed_fifth_byte_past_32_bits_is_refused(self):
         """Only four bits of the fifth byte fit in a u32, the limit vrf-bitio
         and validate_type_evidence enforce."""
-        self.assertEqual(evidence.Bits(b"\xff\xff\xff\xff\x1e", 40).packed(), 0xFFFFFFFF)
+        self.assertEqual(evidence.Bits(b"\xff\xff\xff\xff\x1e", 40).int_packed(), 0xFFFFFFFF)
         with self.assertRaisesRegex(ValueError, "IntPacked"):
-            evidence.Bits(b"\xff\xff\xff\xff\x20", 40).packed()
+            evidence.Bits(b"\xff\xff\xff\xff\x20", 40).int_packed()
 
     def test_typed_comparison_fails_if_children_disappear_or_go_null(self):
         key = next(key for key in evidence.ROUTES if "NetworkedProjectilePath" in key[1])
