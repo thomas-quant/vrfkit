@@ -1151,23 +1151,44 @@ def _parse_field_path(path: str, tally=None):
     return list(parts)
 
 
+class _Node(dict):
+    """A dict `_set_nested` built to hold rows' members. The type tells it
+    from a row's own dict value (a raw blob, a vector): a row replacing
+    members restructures the key, one replacing a value overwrites it."""
+
+    __slots__ = ()
+
+
+def _count_overwrite(tally, previous) -> None:
+    """Count a row's value replacing `previous`, something already present,
+    under the one reason that describes it: members `_set_nested` built (a
+    `_Node` or an array) are a shape conflict, any row's own value, typed or
+    a raw blob, a same-named overwrite. An empty `_Node` is an array filler
+    and holds nothing."""
+    if isinstance(previous, (_Node, list)):
+        if previous:
+            _bump(tally, "payload_shape_conflicts")
+    else:
+        _bump(tally, "property_key_collisions")
+
+
 def _set_nested(root: dict, parts: list, value, tally=None):
     """Set `value` at `parts` (a parsed flat path such as
     'Rounds[0].Reports[0].DamageDealt') in a nested dict/list payload.
 
-    Arrays grow with None/{} fillers, and each array element gets an 'Index'
-    equal to its subscript, as the C# parser writes (compute_metrics dedups
-    on inter.get("Index")).
+    Arrays grow with None/_Node fillers, and each array element gets an
+    'Index' equal to its subscript, as the C# parser writes (compute_metrics
+    dedups on inter.get("Index")).
 
-    Two rows can disagree about a key's shape ('Foo' scalar, 'Foo.Bar'
-    nested): the second wins and the first's value is gone. The five
-    `payload_shape_conflicts` bumps below count it when this function
-    replaces; 'Foo' after 'Foo.Bar' is a one-segment path that
-    `_build_property_events` assigns and counts as `property_key_collisions`.
-    A leaf replaced by a same-named row is counted here under that name too.
-    Fillers and the injected Index hold nothing of the export's, so a real
-    `Index` row replacing the injected one (TeamEconomy[i].Index on 13.01) is
-    not counted.
+    A replacement counts once. Rows that disagree about a key's shape ('Foo'
+    scalar, 'Foo.Bar' nested) are `payload_shape_conflicts`: the second wins
+    and the first's value is gone. A value landing on another row's value is
+    `property_key_collisions`, a raw blob included: each of 02d4d478's 4,785
+    `TrackedRewards[i].Rewards` overwrites comes from a different handle. A
+    deeper row reaching a row's own dict value adds its members beside it and
+    loses nothing, so it is not counted. Fillers and the injected Index hold
+    nothing of the export's, so a real `Index` row replacing the injected one
+    (TeamEconomy[i].Index on 13.01) is not counted.
     """
     obj = root
     element = None  # the subscript `obj` sits at, when it is an array element
@@ -1180,41 +1201,36 @@ def _set_nested(root: dict, parts: list, value, tally=None):
                 _bump(tally, "payload_shape_conflicts")
                 arr = obj[name] = []
             while len(arr) <= idx:
-                arr.append(None if is_last else {})
+                arr.append(None if is_last else _Node())
             if is_last:
-                if isinstance(arr[idx], (dict, list)) and arr[idx]:
-                    _bump(tally, "payload_shape_conflicts")
-                elif arr[idx] is not None and not isinstance(arr[idx], (dict, list)):
-                    _bump(tally, "property_key_collisions")
+                if arr[idx] is not None:
+                    _count_overwrite(tally, arr[idx])
                 arr[idx] = value
             else:
                 if not isinstance(arr[idx], dict):
                     if arr[idx] is not None:
                         _bump(tally, "payload_shape_conflicts")
-                    arr[idx] = {}
+                    arr[idx] = _Node()
                 arr[idx].setdefault("Index", idx)
                 obj = arr[idx]
                 element = idx
         elif is_last:
-            previous = obj.get(name)
-            if isinstance(previous, (dict, list)) and previous:
-                _bump(tally, "payload_shape_conflicts")
-            elif (name in obj and not isinstance(previous, (dict, list))
-                  and not (name == "Index" and previous == element)):
-                # An Index equal to the element's subscript is the injected one.
-                _bump(tally, "property_key_collisions")
+            # An Index equal to the element's subscript is the injected one.
+            if name in obj and not (name == "Index" and obj[name] == element):
+                _count_overwrite(tally, obj[name])
             obj[name] = value
         else:
-            nxt = obj.setdefault(name, {})
+            nxt = obj.setdefault(name, _Node())
             if not isinstance(nxt, dict):
                 _bump(tally, "payload_shape_conflicts")
-                nxt = obj[name] = {}
+                nxt = obj[name] = _Node()
             obj = nxt
             element = None
 
 
 def _drop_padding_elements(node):
-    """Remove the `{}` fillers `_set_nested` appends to reach a sparse index.
+    """Remove the empty `_Node` fillers `_set_nested` appends to reach a
+    sparse index.
 
     The reference emits only elements present, and a filler is harmful:
     compute_metrics sorts `{t["Index"]: t for t in teams}`, and a filler's
@@ -2039,9 +2055,10 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                     continue
                 # The parser flattens struct members and static-array elements
                 # under one name only `handle` tells apart, so a repeat here is
-                # a different property, not a newer copy: 24,060 on 02d4d478.
+                # a different property, not a newer copy: 24,060 of 02d4d478's
+                # 28,845 property_key_collisions.
                 if bare_name in payload:
-                    tally.bump("property_key_collisions")
+                    _count_overwrite(tally, payload[bare_name])
                 payload[bare_name] = value
             elif parts[0][0] in RAW_BLOB_PREFERRED:
                 # A decoded member of a raw-blob field is not published (the

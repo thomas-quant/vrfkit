@@ -909,9 +909,12 @@ names the shape; valplay's resume marker records it and rebuilds when it moves.
 `losses` carries every counter, zero included, so a clean conversion reads as
 zeros rather than as missing keys; the console summary prints only the ones
 that fired. `property_key_collisions` counts property values a same-named row
-of the same event overwrote -- rows the export tells apart only by `handle`, so
-the lost value is a different property, not an older copy (24,060 on
-02d4d478). `non_finite_movement_rows` counts movement lines holding a
+of the same event overwrote, typed values and raw blobs alike -- rows the
+export tells apart only by `handle`, so the lost value is a different property,
+not an older copy (28,845 on 02d4d478). `payload_shape_conflicts` counts only
+rows that disagree about a key's shape, members against a row's own value (272
+on 02d4d478, each a nested array's container blob replaced by its decoded
+elements). `non_finite_movement_rows` counts movement lines holding a
 non-finite position, velocity, yaw or pitch. Those are written `Infinity` /
 `-Infinity` / `NaN`, as every non-finite float in the bundle is spelled: Python's
 `json` reads them, a strict parser such as orjson rejects the line. None occurs
