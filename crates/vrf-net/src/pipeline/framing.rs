@@ -1,12 +1,9 @@
 //! Content-block framing: the per-block hot loop.
 //!
-//! Measured block/bunch/actor-open rates on the reference replay: docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
-//!
-//! Everything here runs per block, so work that can be hoisted out or made
-//! conditional on a failure path belongs elsewhere. The loop reads a block
-//! header and its payload bit count, hands the header to the sink (which
-//! answers a function count for ClassNetCache blocks), then decodes the
-//! payload and walks its field or RPC stream.
+//! Everything here runs per block (rates:
+//! docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478), so
+//! work that can be hoisted out or made conditional on a failure path
+//! belongs elsewhere.
 //!
 //! # Failure policy
 //!
@@ -268,18 +265,14 @@ fn decode_into_scratch(
 }
 
 /// Decode one block payload and walk it: RepLayout when `function_count` is
-/// `None`, ClassNetCache with that count otherwise.
+/// `None`, ClassNetCache with that count otherwise. Returns `false` only for
+/// a failed transform, already counted; the caller, holding the block's
+/// header and position, records its `ParseFailure` event.
 ///
-/// Returns `false` only when the payload transform failed: that is already
-/// counted, and the caller records its `ParseFailure` event, since only it
-/// holds the block's header and position. Every other outcome, a stream
-/// failure included, is reported here.
-///
-/// A stream `Err` charges the whole block, never `bits_remaining()` (0 when
-/// the last `IntPacked` expires at the block end; see [`abort`]), as a
-/// transform failure does and as [`NetStats::lost_content_blocks`] counts it.
-/// Records emitted before the failure are then counted in `fields` / `rpcs`
-/// *and* charged, erring loud. An `Ok` walk charges only the tail it abandoned.
+/// A stream `Err` charges the whole block, never `bits_remaining()` (see
+/// [`abort`]), as [`NetStats::lost_content_blocks`] counts it: records
+/// emitted before it are counted *and* charged, erring loud. An `Ok` walk
+/// charges only the tail it abandoned.
 pub(super) fn decode_and_walk(
     payload: &mut BitReader<'_>,
     bit_count: usize,

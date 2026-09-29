@@ -163,27 +163,14 @@ fn parse_rep_layout_impl(
 
 /// Parse a ClassNetCache RPC stream, emitting every invocation to the sink.
 ///
-/// `function_count`, the class's net-cache function count (the caller's to
-/// know: this layer has no descriptors), bounds the handle read. Returns the
-/// RPCs emitted and the bits abandoned mid-block (too few bits left for a
-/// payload length, or a declared payload that overran), as
-/// [`parse_rep_layout`] does.
+/// `function_count` (the caller's to know: this layer has no descriptors)
+/// bounds the handle read. Returns the RPCs emitted and the bits abandoned
+/// mid-block, as [`parse_rep_layout`] does.
 ///
-/// # Handle-read clamp (minimum of two)
-///
-/// `UActorChannel::ReadFieldHeaderAndPayload`
-/// (`Engine/Source/Runtime/Engine/Private/DataChannel.cpp`) reads the handle as
-///
-/// ```text
-/// ReadInt(FMath::Max(NetFieldExportGroup->NetFieldExports.Num(), 2))
-/// ```
-///
-/// Without the clamp a capacity-1 group reads a 0-bit handle where the server
-/// wrote one bit, and the stream desyncs by one bit: the cause of all four
-/// corpus stream failures (SegmentManager x2, Spline x1, MapMissileMarker x1),
-/// each of which walks exactly to its block end with the clamp. Confirmed by
-/// `Shiqan/FortniteReplayDecompressor` (C#) and `xNocken/replay-reader` (JS).
-/// A count of 0 means an unresolved group: it fails loudly, never clamped.
+/// The handle is read as `UActorChannel::ReadFieldHeaderAndPayload` reads it,
+/// `ReadInt(Max(NetFieldExports.Num(), 2))`: without the minimum of two a
+/// capacity-1 group reads a 0-bit handle where the server wrote one bit, and
+/// the stream desyncs. A count of 0 is an unresolved group: it fails, unclamped.
 pub fn parse_class_net_cache(
     reader: &mut BitReader<'_>,
     function_count: u32,

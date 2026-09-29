@@ -14,13 +14,10 @@ pub trait GuidPathSink {
     /// A GUID path was read from the wire.
     fn register_path(&mut self, guid: u32, path: &str, outer_guid: NetworkGuid);
 
-    /// The path this GUID is known by, if the receiver keeps one.
-    ///
-    /// Decides the net-player-index byte: resolve the channel's archetype and
-    /// actor paths and ask whether either
-    /// names a PlayerController. Answer from the receiver's cache, not from a
-    /// set of `register_path` calls: paths reach the cache by more routes than
-    /// pass through here. The default `None` (no cache) never consumes that byte.
+    /// The path this GUID is known by in the receiver's NetGuidCache, which
+    /// decides the net-player-index byte. Answer from the cache, not from
+    /// `register_path` calls: paths reach it by more routes. The default
+    /// `None` never consumes that byte.
     fn path_for_guid(&self, _guid: u32) -> Option<&str> {
         None
     }

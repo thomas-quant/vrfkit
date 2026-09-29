@@ -26,13 +26,9 @@ use super::{ActorChannelState, ChannelTable, PLAYER_CONTROLLER_LEAF, Replication
 /// | archetype GUID path (class default object) | `Default__BaseReplayController_C` |
 /// | `/_Core/` elided alias | `/Game/Characters/BaseReplayController` |
 ///
-/// The 12.01--12.06 samples name the role BaseJanusController, whose opening
-/// bunch also carries the net-player-index byte; that exact leaf is accepted
-/// too.
-///
-/// Getting this wrong is silent: the index byte is not consumed, every content
-/// block after it in the bunch shifts by 8 bits, and that surfaces only as one
-/// malformed block and a few hundred skipped bits.
+/// 12.01-12.06 name it BaseJanusController, also accepted. A miss is silent:
+/// the byte stays unread and the bunch's blocks shift by 8 bits, surfacing
+/// only as one malformed block.
 pub(super) fn is_player_controller_path(path: &str) -> bool {
     let segment = path.rsplit('/').next().unwrap_or(path);
     // `Asset.Class_C` -> `Class_C`; a bare segment is unchanged.
@@ -42,17 +38,10 @@ pub(super) fn is_player_controller_path(path: &str) -> bool {
     matches!(class, PLAYER_CONTROLLER_LEAF | "BaseJanusController")
 }
 
-/// Whether this channel's actor or archetype resolves to the replay
-/// controller, which decides the net-player-index byte.
-///
-/// Unreal writes that 1-byte player index between the spawn data and the first
-/// content block only for a dynamic PlayerController. vrfkit recognises one as
-/// an opened dynamic actor whose archetype or actor path names a
+/// Whether this channel's actor or archetype path, from the sink's cache,
+/// names the replay controller: Unreal writes a 1-byte player index between
+/// the spawn data and the first content block only for a dynamic
 /// PlayerController.
-/// Paths come from the sink's cache (`GuidPathSink::path_for_guid` says why).
-/// A missed byte does not desync visibly: with the spawn-velocity bit in
-/// [`super::spawn`] the misframed header re-synchronises a few bits later
-/// (docs/archive/PROJECT_STATUS.md 17-A has the mechanism and measurements).
 pub(super) fn is_player_controller_channel(
     actor_net_guid: NetworkGuid,
     archetype_net_guid: NetworkGuid,
@@ -66,11 +55,9 @@ pub(super) fn is_player_controller_channel(
 
 /// Read a package-map export bunch: a run of GUID declarations with paths.
 ///
-/// Both skip paths drop the whole bunch, differently. A RepLayout export is a
-/// *limitation* (this parser does not implement that variant): counted on its
-/// own line, `Ok`. An impossible GUID count is a *failure*: every path
-/// declaration after it is lost, so it is an `Err`, which the caller counts
-/// and whose abandoned bits it tallies.
+/// A RepLayout export is an unimplemented variant: skipped whole, counted on
+/// its own line, `Ok`. An impossible GUID count loses every declaration
+/// after it: `Err`, so the caller counts it and tallies the bits.
 pub(super) fn read_package_map_exports(
     payload: &mut BitReader<'_>,
     stats: &mut NetStats,
@@ -78,7 +65,6 @@ pub(super) fn read_package_map_exports(
 ) -> Result<()> {
     let has_rep_layout_export = payload.read_bit()?;
     if has_rep_layout_export {
-        // Unsupported variant: skip the bunch, but say so.
         stats.rep_layout_export_bunches += 1;
         payload.skip_remaining();
         return Ok(());
@@ -133,9 +119,8 @@ pub(super) fn handle_channel_open(
         ..Default::default()
     };
 
-    // A dynamic actor's spawn block is mandatory (read unconditionally), so a
-    // payload that ends here fails the read.
-    // The shape is counted so a corpus run can say whether it ever occurs.
+    // A dynamic actor's spawn block is mandatory: a payload that ends here
+    // fails the read, and is counted apart.
     if actor_net_guid.is_dynamic() {
         if payload.at_end() {
             stats.actor_opens_missing_spawn += 1;

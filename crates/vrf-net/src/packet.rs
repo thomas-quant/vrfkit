@@ -14,14 +14,14 @@ use std::collections::HashMap;
 
 /// Result of reading one packet.
 ///
-/// [`crate::ReplicationReader`] reads only `is_malformed`. The other fields
-/// are for direct callers of [`RawPacketReader::read_packet`], published API
-/// (an extractor built on it is recorded in docs/TRANSPORT_PRESERVATION.md).
+/// [`crate::ReplicationReader`] reads only `is_malformed`; the rest is for
+/// direct callers of the public [`RawPacketReader::read_packet`].
 #[derive(Debug, Clone)]
 pub struct PacketReadResult {
     /// Number of bunches successfully parsed from this packet.
     pub bunch_count: u32,
-    /// Whether the packet was malformed (last byte zero or payload overrun).
+    /// Whether the packet was malformed: no sentinel, a bunch header that
+    /// does not read, or a payload overrun.
     pub is_malformed: bool,
     /// Errors found by the advisory partial tracker (see [`RawPacketReader`]);
     /// not [`crate::NetStats::partial_errors`], and never summed into it.
@@ -44,12 +44,11 @@ struct PartialState {
 /// global counter diverges when channels interleave reliable bunches); it
 /// reaches the pipeline's reassembly accumulator as `ch_sequence`.
 ///
-/// The partial tracker is advisory. Nothing in this workspace reads its
-/// outputs (`has_partial_error` and `is_partial_completed` on callback headers,
-/// [`PacketReadResult::partial_error_count`]): the pipeline strips them, and
-/// its accumulator is the one partial authority. It stays because
-/// `read_packet` is published API: deleting it would leave that count a
-/// permanent 0 (docs/FOLLOWUP.md, considered 2026-09-28).
+/// The partial tracker is advisory: the pipeline strips its outputs
+/// (`has_partial_error`, `is_partial_completed`,
+/// [`PacketReadResult::partial_error_count`]) and its accumulator is the one
+/// partial authority. It stays because `read_packet` is public; without it
+/// that count would be a permanent 0.
 pub struct RawPacketReader {
     partial_bunches: HashMap<u32, PartialState>,
     in_reliable_sequence: HashMap<u32, i32>,
@@ -207,9 +206,8 @@ impl RawPacketReader {
             header.ch_sequence = packet_id;
         }
 
-        // Always present after bPartial and before bPartialInitial/Final
-        // (docs/PARTIAL_HEADER_CORRECTION.md). Only its position is
-        // corpus-verified; its meaning is not, so it stays unnamed.
+        // Always present after bPartial: its position is corpus-verified,
+        // its meaning is not.
         let _valorant_bit = reader.read_bit()?;
 
         if header.b_partial {
@@ -326,21 +324,9 @@ impl Default for RawPacketReader {
     }
 }
 
-/// The true bit size of a packet: the bits below its sentinel, the highest `1`
-/// bit of the last byte (the bits above it are padding).
-///
-/// ```text
-/// bitSize = len*8 - 1
-/// while (lastByte & 0x80) == 0: lastByte <<= 1; bitSize -= 1
-/// ```
-///
-/// That reference loop counts the last byte's leading zeros, so
-/// `leading_zeros` gives the same answer. The caller rejects a zero last byte,
-/// so the count is at most 7 and the result never underflows.
-///
-/// # Panics
-///
-/// In debug builds, if `last_byte` is zero (the caller skipped that check).
+/// The bits below the sentinel, the last byte's highest `1` bit: the byte's
+/// leading zeros are padding. The caller rejects a zero last byte, so the
+/// count is at most 7 and the result never underflows.
 fn compute_bit_size(packet: &[u8], last_byte: u8) -> i32 {
     debug_assert!(last_byte != 0, "caller must reject a zero last byte");
     (packet.len() as i32) * 8 - 1 - last_byte.leading_zeros() as i32
@@ -454,9 +440,8 @@ mod tests {
 
     #[test]
     fn captured_partial_headers_assign_boundary_bits_in_wire_order() {
-        // Literal header prefixes from packets 790-792 of replay 00e5adab...
-        // (13.05); the initial is byte-identical in packet 1 of 02d4d478...
-        // (13.01). Captured bytes, deliberately not made by the test writers.
+        // Header prefixes captured from 13.05 packets 790-792 (the initial is
+        // byte-identical on 13.01), not made by the test writers.
         let fixtures = [
             (&[0x10, 0xa0, 0x90, 0x7b][..], true, false, 15_816),
             (&[0x10, 0x20, 0x90, 0x7b][..], false, false, 15_816),

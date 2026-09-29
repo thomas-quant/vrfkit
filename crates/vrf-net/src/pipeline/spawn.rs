@@ -1,10 +1,9 @@
 //! Dynamic-actor spawn data: archetype, level, transform and velocity.
 //!
-//! Open-count on the reference replay: docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478.
-//!
 //! The block Unreal writes right after the actor GUID when a channel opens for
-//! a *dynamic* (even, non-zero GUID) actor: small and rare, but its bit width
-//! decides everything after it in the same bunch.
+//! a *dynamic* (even, non-zero GUID) actor: rare (open counts:
+//! docs/PERFORMANCE_NOTES.md#measured-rates-reference-replay-02d4d478), but
+//! its bit width decides everything after it in the same bunch.
 
 use vrf_bitio::BitReader;
 
@@ -54,8 +53,7 @@ pub(super) fn read_dynamic_spawn_data(
         SPAWN_SCALE_FACTOR,
         UNIT_SCALE,
     )?);
-    // Velocity is read unconditionally;
-    // gating it cost one invisible bit (docs/archive/PROJECT_STATUS.md 17-A).
+    // Velocity is read unconditionally: gating it loses one bit, silently.
     state.spawn_velocity = Some(read_optional_quantized_vector(
         payload,
         SPAWN_SCALE_FACTOR,
@@ -81,11 +79,9 @@ pub(super) fn read_dynamic_spawn_data(
 ///   [else] -> 3 x f64
 /// ```
 ///
-/// A clear leading bit means "take the default", not "absent": (0,0,0) for
-/// location and velocity and (1,1,1) for scale in the spawn block. So
-/// this always yields a vector; only a static actor, which never enters the
-/// block, leaves the fields `None` -- unknown, not (0,0,0)
-/// (docs/archive/PROJECT_STATUS.md 13-A has the corpus counts).
+/// A clear leading bit means "take the default" (origin, or unit scale), not
+/// "absent": only a static actor, which has no spawn block, leaves the
+/// fields `None`.
 fn read_optional_quantized_vector(
     reader: &mut BitReader<'_>,
     scale_factor: i32,

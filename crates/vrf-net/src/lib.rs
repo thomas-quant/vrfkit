@@ -16,8 +16,10 @@
 //! handles), typed field decoding, and NetGuidCache storage (through
 //! [`net_guid::GuidPathSink`]).
 //!
-//! A malformed bunch is discarded and counted; it does not abort the replay,
-//! and no discard goes uncounted.
+//! A malformed bunch is discarded and counted; it does not abort the replay.
+//! Not every lost bit is tallied: a malformed packet's tail is counted only
+//! as a packet, and the payload after a cleanly read package-map export list
+//! not at all.
 //!
 //! # Features
 //!

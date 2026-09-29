@@ -5,10 +5,7 @@ use crate::types::ChannelCloseReason;
 
 /// Maximum simultaneously active partial-bunch assemblies.
 ///
-/// Bounds a stream that sends one initial fragment on each new channel
-/// forever, with ample headroom: Unreal advances each assembly only by
-/// packet-sized fragments. For scale, 02d4d478 completes 56 assemblies from
-/// 131 fragments (`validate` at 061155a); its simultaneous peak is not measured.
+/// Bounds a stream that starts an assembly on each new channel forever.
 pub const MAX_ACTIVE_PARTIAL_BUNCHES: usize = 4_096;
 
 /// Maximum raw bits retained across all partial-bunch assemblies (64 MiB).
@@ -272,11 +269,9 @@ impl PartialBunchAccumulator {
                 .expect("checked above");
             *stats_partial_fragments += 1;
 
-            // Not `b_partial_final` alone: an overlapping initial that is also
-            // final arrives here already errored. Marked complete, it would be
-            // neither taken (`should_process` is false, so no `take_completed`)
-            // nor drained (`drain_unfinished` skips complete entries): its bits
-            // would reach no counter while `partial_completed` claimed success.
+            // An overlapping initial that is also final arrives here errored:
+            // marked complete it would be neither taken nor drained, its bits
+            // in no counter while `partial_completed` claimed success.
             if header.b_partial_final && !header.has_partial_error {
                 state.is_complete = true;
                 header.is_partial_completed = true;
@@ -309,9 +304,7 @@ impl PartialBunchAccumulator {
         }
     }
 
-    /// Take the completed payload for a channel, if available.
-    ///
-    /// Returns `(buffer, bit_count, stored_header)`.
+    /// The channel's completed payload: `(buffer, bit_count, stored_header)`.
     pub fn take_completed(&mut self, ch_index: u32) -> Option<(Vec<u8>, usize, RawBunchHeader)> {
         if !self.fragments.get(&ch_index)?.is_complete {
             return None;
@@ -320,12 +313,9 @@ impl PartialBunchAccumulator {
             .map(|taken| (taken.buffer, taken.bit_count, taken.header))
     }
 
-    /// Drop every partial bunch still awaiting fragments and return them.
-    ///
-    /// Called once at end of stream: until then an abandoned assembly cannot
-    /// be told from one in progress, and no sequence rule was broken, so no
-    /// earlier counter covers it. A complete but untaken entry is the
-    /// caller's choice ([`Self::take_completed`]), not a loss, and is skipped.
+    /// Drop and return every assembly still awaiting fragments, at end of
+    /// stream (until then an abandoned one looks in progress). A complete but
+    /// untaken entry is not a loss and is skipped.
     pub fn drain_unfinished(&mut self) -> Vec<PreservedPartial> {
         self.total_buffered_bits = 0;
         self.fragments
