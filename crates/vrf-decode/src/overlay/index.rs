@@ -17,7 +17,7 @@ struct Slot {
 /// the entry count so a probe chain always ends on an empty slot (contents are
 /// fixed at build time).
 #[derive(Debug, Clone)]
-struct SlotTable {
+pub(super) struct SlotTable {
     slots: Box<[Slot]>,
     mask: usize,
 }
@@ -46,7 +46,7 @@ impl SlotTable {
     /// The first entry index whose slot tag matches and which `matches` (the
     /// authoritative comparison; the tag only filters) confirms.
     #[inline]
-    fn find(&self, hash: u64, mut matches: impl FnMut(usize) -> bool) -> Option<usize> {
+    pub(super) fn find(&self, hash: u64, mut matches: impl FnMut(usize) -> bool) -> Option<usize> {
         let tag = (hash >> 32) as u32;
         let mut position = (hash as usize) & self.mask;
         loop {
@@ -122,8 +122,8 @@ pub(super) fn handle_hash(group_path: &str, handle: u32) -> u64 {
 /// export sink caches per content block (~2M probes a replay; 80% of blocks hit
 /// the group-path memo), so a per-field probe pays only for the field name and
 /// the final avalanche. Opaque. A stale state only turns hits into misses (raw
-/// bits), never a wrong value: the tag and the full string comparison in
-/// `OverlayIndex::find_name` still guard every hit.
+/// bits), never a wrong value: the full string comparison still guards every
+/// hit.
 #[derive(Debug, Clone, Copy)]
 pub struct GroupHashState {
     /// State after [`mix_bytes`] on the group path, seeded with [`HASH_SEED`].
@@ -161,9 +161,9 @@ pub(super) fn handle_hash_from_group(group: GroupHashState, handle: u32) -> u64 
 /// direct names, `b`-stripped names and handles -- built once on first lookup.
 #[derive(Debug, Clone)]
 pub(super) struct OverlayIndex {
-    by_name: SlotTable,
-    by_stripped_name: SlotTable,
-    by_handle: SlotTable,
+    pub(super) by_name: SlotTable,
+    pub(super) by_stripped_name: SlotTable,
+    pub(super) by_handle: SlotTable,
 }
 
 impl OverlayIndex {
@@ -194,51 +194,5 @@ impl OverlayIndex {
             by_stripped_name,
             by_handle,
         }
-    }
-
-    /// Direct lookup. `field_name` is compared first: names are short and
-    /// almost always differ, paths are long and share prefixes.
-    #[inline]
-    pub(super) fn find_name(
-        &self,
-        entries: &[OverlayEntry],
-        hash: u64,
-        group_path: &str,
-        field_name: &str,
-    ) -> Option<usize> {
-        self.by_name.find(hash, |position| {
-            let entry = &entries[position];
-            entry.field_name == field_name && entry.group_path == group_path
-        })
-    }
-
-    /// Lookup of the `b`-prefixed spelling of `field_name`, using the hash of
-    /// the UNprefixed key -- see the module docs.
-    #[inline]
-    pub(super) fn find_b_prefixed_name(
-        &self,
-        entries: &[OverlayEntry],
-        hash: u64,
-        group_path: &str,
-        field_name: &str,
-    ) -> Option<usize> {
-        self.by_stripped_name.find(hash, |position| {
-            let entry = &entries[position];
-            entry.field_name.strip_prefix('b') == Some(field_name) && entry.group_path == group_path
-        })
-    }
-
-    #[inline]
-    pub(super) fn find_handle(
-        &self,
-        handle_entries: &[OverlayHandleEntry],
-        hash: u64,
-        group_path: &str,
-        handle: u32,
-    ) -> Option<usize> {
-        self.by_handle.find(hash, |position| {
-            let entry = &handle_entries[position];
-            entry.handle == handle && entry.group_path == group_path
-        })
     }
 }

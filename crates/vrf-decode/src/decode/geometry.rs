@@ -1,21 +1,21 @@
-//! Vector, rotator, transform and replicated-movement readers. Each renders
-//! into `value_str` through a model type's `Display` ([`crate::types`]).
+//! Vector, rotator, transform and replicated-movement readers; each value
+//! renders into `value_str` through its model type's `Display`.
 
 use vrf_bitio::{BitError, BitReader};
 
-use super::{DecodeError, DecodedValue, render};
+use super::DecodeError;
 use crate::types::{
     FQuat, FRepMovement, FRotator, FTransform, FVector, RotatorQuantization, VectorQuantization,
 };
 
-pub(super) fn decode_vector_net_quantize(
+pub(super) fn read_vector_net_quantize(
     r: &mut BitReader<'_>,
     scale: u32,
-) -> Result<DecodedValue, DecodeError> {
+) -> Result<FVector, DecodeError> {
     if scale == 0 {
         return Err(DecodeError::InvalidQuantizationScale { scale });
     }
-    Ok(render(read_quantized_vector(r, scale)?))
+    read_quantized_vector(r, scale)
 }
 
 pub(super) fn read_float_vector(r: &mut BitReader<'_>) -> Result<FVector, BitError> {
@@ -34,8 +34,6 @@ pub(super) fn read_double_vector(r: &mut BitReader<'_>) -> Result<FVector, BitEr
     })
 }
 
-/// Read a quantized vector.
-///
 /// ```text
 /// header = SerializedInt(128): bits [5:0] componentBitCount, bit [6] extraInfo
 /// componentBitCount > 0: 3 x componentBitCount bits, two's complement
@@ -99,20 +97,16 @@ fn read_packed_quantized_vector(
     Ok(FVector { x, y, z })
 }
 
-/// Fixed-point normal vector: 3 x SerializedInt(65536), bias = 32768, scale = 32767.
+/// Fixed-point normal vector: 3 x SerializedInt(65536), bias 32768, scale 32767.
 pub(super) fn read_fixed_vector_normal(r: &mut BitReader<'_>) -> Result<FVector, BitError> {
     const BIAS: i32 = 1 << 15;
-    const SCALE: f64 = (BIAS - 1) as f64;
-    const MAX: u32 = 1 << 16;
-
-    let dx = r.read_serialized_int(MAX)?;
-    let dy = r.read_serialized_int(MAX)?;
-    let dz = r.read_serialized_int(MAX)?;
-
+    let mut axis = || -> Result<f64, BitError> {
+        Ok(f64::from(r.read_serialized_int(1 << 16)? as i32 - BIAS) / f64::from(BIAS - 1))
+    };
     Ok(FVector {
-        x: (dx as i32 - BIAS) as f64 / SCALE,
-        y: (dy as i32 - BIAS) as f64 / SCALE,
-        z: (dz as i32 - BIAS) as f64 / SCALE,
+        x: axis()?,
+        y: axis()?,
+        z: axis()?,
     })
 }
 
@@ -170,39 +164,21 @@ pub(super) fn read_rep_movement(
     let rep_server_frame = r.read_bit()?;
     let rep_server_handle = r.read_bit()?;
 
-    // The divisor is the table entry's: the header says only "scaled", and
-    // classes differ -- against actors.parquet spawn positions, 25 of the 26
-    // table classes pack whole units and one packs two decimals. A wrong
-    // divisor (a fixed 100) consumes the same bits, so it raised
-    // no error and moved no counter. See docs/DATA.md.
+    // The divisor is the table entry's: the header says only "scaled", classes
+    // differ (docs/DATA.md), and a wrong divisor reads the same bits silently.
     let location = read_quantized_vector(r, location_quant.scale())?;
     let rotation = match rotation_quant {
         RotatorQuantization::ByteComponents => read_rotation(r, 8)?,
         RotatorQuantization::ShortComponents => read_rotation(r, 16)?,
     };
-    // Whole units: Unreal's default VelocityQuantizationLevel. Displacement
-    // between updates / dt / reported speed has a median of 0.97-1.06 on each
-    // of the 18 typed classes that move; unobservable on the two-decimal
-    // Pawn_Aggrobot_SeekerNade_C, whose 932 velocities are all zero.
+    // Whole units, Unreal's default VelocityQuantizationLevel: displacement /
+    // dt / reported speed has a median of 0.97-1.06 on all 18 moving classes.
     let linear_velocity = read_quantized_vector(r, 1)?;
-
-    let angular_velocity = if rep_physics {
-        Some(read_quantized_vector(r, 1)?)
-    } else {
-        None
-    };
-
-    let server_frame = if rep_server_frame {
-        Some(r.read_int_packed()?)
-    } else {
-        None
-    };
-
-    let server_physics_handle = if rep_server_handle {
-        Some(r.read_int_packed()?)
-    } else {
-        None
-    };
+    let angular_velocity = rep_physics
+        .then(|| read_quantized_vector(r, 1))
+        .transpose()?;
+    let server_frame = rep_server_frame.then(|| r.read_int_packed()).transpose()?;
+    let server_physics_handle = rep_server_handle.then(|| r.read_int_packed()).transpose()?;
 
     Ok(FRepMovement {
         location,

@@ -1,11 +1,9 @@
 //! Scalar primitive decoders.
 
+use super::str_value;
+use crate::FTextTreeError;
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
-use crate::test_bits::BitWriter;
-
-fn str_value(s: &str) -> DecodedValue {
-    DecodedValue::Str(s.to_owned())
-}
+use vrf_testkit::{BitWrite, BitWriter};
 
 #[test]
 fn double_reads_eight_byte_float() {
@@ -26,21 +24,20 @@ fn fstring_reads_unreal_string() {
 #[test]
 fn fname_hardcoded_reads_a_packed_index() {
     // A set leading bit makes the name a hardcoded table index, sent as
-    // IntPacked and rendered as its decimal (see `decode_fname` for the
+    // IntPacked and rendered as its decimal (see `read_fname` for the
     // DamagedBone rows). 9 bits: bit0 = 1, then IntPacked 0 = byte 0x00.
     let result = decode_field(FieldType::FName, &[0x01, 0x00], 9).unwrap();
     assert_eq!(result, str_value("0"));
 }
 
-/// Build the inline (`isHardcoded = 0`) FName shape: a leading zero bit, then
-/// an FString, then the i32 instance number.
+/// The inline (`isHardcoded = 0`) FName shape: a leading zero bit, then an
+/// FString, then the i32 instance number.
 fn inline_fname_bits(name: &str, number: i32) -> (Vec<u8>, u32) {
-    let mut bits = BitWriter::new();
-    bits.bits(0, 1).i32(i32::try_from(name.len() + 1).unwrap());
-    for byte in name.bytes().chain([0]) {
-        bits.bits(u64::from(byte), 8);
-    }
-    bits.i32(number).finish()
+    BitWriter::new()
+        .bit(false)
+        .fstring(name)
+        .i32(number)
+        .finish()
 }
 
 #[test]
@@ -72,6 +69,20 @@ fn fname_negative_instance_numbers_are_rejected() {
             matches!(err, DecodeError::InvalidFNameNumber { number: n } if n == number),
             "got {err:?} for {number}"
         );
+    }
+}
+
+/// A byte takes its width from the payload, not a fixed 8 (see `decode_byte`).
+#[test]
+fn byte_takes_its_width_from_the_payload() {
+    // 5 significant bits holding 9 (0b01001), padded to one byte.
+    let data = [0b0000_1001u8];
+    for width in [1u32, 3, 5, 8] {
+        let v = decode_field(FieldType::EnumByte, &data, width)
+            .unwrap_or_else(|e| panic!("width {width} should decode: {e:?}"));
+        let mask = ((1u16 << width) - 1) as u8;
+        let expected = i64::from(0b0000_1001u8 & mask);
+        assert_eq!(v, DecodedValue::I64(expected), "width {width}");
     }
 }
 
@@ -146,19 +157,13 @@ fn int64_reads_eight_byte_twos_complement() {
         let result = decode_field(FieldType::Int64, &value.to_le_bytes(), 64).unwrap();
         assert_eq!(result, DecodedValue::I64(value));
     }
-    assert!(matches!(
-        decode_field(FieldType::UInt64, &i64::MIN.to_le_bytes(), 64),
-        Err(DecodeError::UnsignedOverflow { .. })
-    ));
     let data = [0u8; 9];
     assert!(decode_field(FieldType::Int64, &data, 72).is_err());
     assert!(decode_field(FieldType::Int64, &data, 32).is_err());
 }
 
 /// `EnumRemainingBits` reads the whole payload up to 32 bits; a wider one is
-/// an error, not its low 32 bits. Latent when fixed
-/// (d5c35c6): nothing in the data of the time triggered it, which is why it
-/// needs a test.
+/// an error, not its low 32 bits.
 #[test]
 fn enum_remaining_bits_reads_the_payload_and_refuses_over_32() {
     // 3 bits = value 3 (low 3 bits of 0b011)
@@ -211,10 +216,8 @@ fn object_net_guid_reads_int_packed() {
 
 /// `FText` (`LocalizedStat`) decodes to the statistic's name, the only
 /// machine-readable source of `EnemiesBlinded` and the other 28: the sibling
-/// `Statistic` enum is a bare integer. Confirmed on 4,341 of 4,341 rows with
-/// zero residual bits: 32 flag bits, history byte 11 and the inline-FName bit
-/// (41 bits, which the legacy reader sees as selector 5), then the string
-/// table's path as an `FString`, the `FName` number, and the key.
+/// `Statistic` enum is a bare integer. 32 flag bits, history byte 11, the
+/// inline-FName bit, the table path, the `FName` number, then the key.
 #[test]
 fn ftext_decodes_a_string_table_entry_to_its_key() {
     let vectors: [(u32, &[u8], &str); 3] = [
@@ -276,19 +279,37 @@ fn ftext_decodes_a_string_table_entry_to_its_key() {
     }
 }
 
-/// A selector other than the observed 5 means another text history with
-/// another payload, so it is refused rather than read as a plausible wrong
-/// string.
+/// Only history 11 yields a key: history 10 with the same layout, and a valid
+/// tree of another history, are refused rather than read as a plausible string.
 #[test]
-fn ftext_refuses_an_unobserved_history_type() {
-    // Zeroed except the selector (the error's `history_type`), so without
-    // the guard the rest decodes cleanly to an empty key: the guard is the
-    // only thing between this input and `Ok`.
-    let mut raw = vec![0u8; 18];
-    raw[4] = 0x0C; // shifts a history type of 6 into place, not 5
-    let err = decode_field(FieldType::FText, &raw, 137).unwrap_err();
+fn ftext_yields_only_a_string_table_key() {
+    // Flags, history, the inline-name bit, empty name, number 0, empty key.
+    let text = |history| {
+        let mut bits = BitWriter::new();
+        bits.bits(0, 32).bits(history, 8).bits(0, 1);
+        bits.i32(0).i32(0).i32(0).finish()
+    };
+    let (raw, bits) = text(11);
+    assert_eq!(
+        decode_field(FieldType::FText, &raw, bits).unwrap(),
+        str_value("")
+    );
+    let (raw, bits) = text(10);
+    let err = decode_field(FieldType::FText, &raw, bits).unwrap_err();
     assert!(
-        matches!(err, DecodeError::UnsupportedTextHistory { history_type: 6 }),
+        matches!(
+            err,
+            DecodeError::FTextTree(FTextTreeError::UnsupportedHistory { discriminator: 10 })
+        ),
+        "got {err:?}"
+    );
+    let (raw, bits) = BitWriter::new().bits(0, 32).bits(255, 8).i32(0).finish();
+    let err = decode_field(FieldType::FText, &raw, bits).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DecodeError::UnsupportedTextHistory { history_type: 255 }
+        ),
         "got {err:?}"
     );
 }

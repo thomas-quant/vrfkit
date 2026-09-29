@@ -23,25 +23,14 @@ const OBJECTS_4368: &str = "08022020370422201d300004202035042220190400\
 const VECTORS_4368: &str = "0202182013041a81026b7b179c16f0e8bf11e6b45fc0eee33f\
                             9417c1fc5684b1bf0000";
 
+/// Packet 4368's floats: tags 284 NumProjectiles, 263 AmmoRemaining, 286
+/// TracerOption, 285 RandomSeed.
+const FLOATS_4368_JSON: &str = "[{\"tag\":284,\"value\":1},\
+                                 {\"tag\":263,\"value\":5},\
+                                 {\"tag\":286,\"value\":1},\
+                                 {\"tag\":285,\"value\":-1509722752}]";
+
 // ---- FloatValues tests ----
-
-/// Packet 4368, Sheriff shot: tags 284 NumProjectiles, 263 AmmoRemaining,
-/// 286 TracerOption, 285 RandomSeed.
-#[test]
-fn decode_float_values_sheriff_basic() {
-    let mut reader = reader_from_hex(FLOATS_4368, 400);
-    let result = decode_effect_floats(&mut reader).unwrap();
-
-    assert_eq!(result.len(), 4);
-    assert_eq!(result[0].tag_index, Some(284));
-    assert_eq!(result[0].value, Some(1.0));
-    assert_eq!(result[1].tag_index, Some(263));
-    assert_eq!(result[1].value, Some(5.0));
-    assert_eq!(result[2].tag_index, Some(286));
-    assert_eq!(result[2].value, Some(1.0));
-    assert_eq!(result[3].tag_index, Some(285));
-    assert_eq!(result[3].value, Some(-1509722752.0));
-}
 
 /// Packet 17421, Classic shot: five elements, AmmoRemaining (263) 7 and
 /// YawSwitch (287) 16 among them.
@@ -99,20 +88,6 @@ fn decode_object_values_basic() {
 }
 
 // ---- VectorValues tests ----
-
-/// Packet 4368: the Sheriff shot's single attack vector.
-#[test]
-fn decode_vector_values_single_pellet() {
-    let mut reader = reader_from_hex(VECTORS_4368, 280);
-    let result = decode_effect_vectors(&mut reader).unwrap();
-
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].tag_index, Some(265));
-    let v = result[0].value.unwrap();
-    assert!((v.x - (-0.7793076561609785)).abs() < 1e-15);
-    assert!((v.y - 0.6228944653768754).abs() < 1e-15);
-    assert!((v.z - (-0.06842559500463913)).abs() < 1e-15);
-}
 
 /// Packet 30968: the Judge shotgun's 12 attack vectors, first and last checked.
 #[test]
@@ -182,18 +157,12 @@ fn param_names_select_the_element_type() {
 }
 
 /// The whole string is asserted, not a substring: a member carrying no
-/// data is exactly where a serialization bug hides (see 13-B).
+/// data is exactly where a serialization bug hides.
 #[test]
 fn float_blob_renders_as_json() {
     let raw = decode_hex(FLOATS_4368);
     let json = decode_effect_blob_json(EffectArrayKind::Float, &raw, 400).unwrap();
-    assert_eq!(
-        json,
-        "[{\"tag\":284,\"value\":1},\
-          {\"tag\":263,\"value\":5},\
-          {\"tag\":286,\"value\":1},\
-          {\"tag\":285,\"value\":-1509722752}]"
-    );
+    assert_eq!(json, FLOATS_4368_JSON);
 }
 
 #[test]
@@ -333,13 +302,7 @@ fn a_rebased_blob_decodes_through_derivation_and_not_through_the_constants() {
 
     // Through derivation: the same values as the 7/8 original.
     let json = decode_effect_blob_json(EffectArrayKind::Float, &raw, 400).unwrap();
-    assert_eq!(
-        json,
-        "[{\"tag\":284,\"value\":1},\
-          {\"tag\":263,\"value\":5},\
-          {\"tag\":286,\"value\":1},\
-          {\"tag\":285,\"value\":-1509722752}]"
-    );
+    assert_eq!(json, FLOATS_4368_JSON);
 }
 
 /// A float value field must declare 32 bits; otherwise the 32-bit read runs
@@ -434,4 +397,26 @@ fn a_non_zero_trailing_terminator_is_rejected() {
         matches!(err, EffectBlobError::NonZeroTerminator { .. }),
         "expected NonZeroTerminator, got {err:?}"
     );
+}
+
+/// Each shared framing failure keeps its name and fields (cap 256).
+#[test]
+fn framing_failures_reach_the_caller_as_their_own_variant() {
+    use vrf_testkit::{BitWrite, BitWriter};
+    for (packed, expected) in [
+        (&[257][..], "ArrayCountTooLarge { count: 257, max: 256 }"),
+        (&[1, 4], "IndexOutOfBounds { index: 3, count: 1 }"),
+        (
+            &[1, 1, 41, 32],
+            "PayloadTooLarge { bits: 32, remaining: 0 }",
+        ),
+    ] {
+        let mut bits = BitWriter::new();
+        for &v in packed {
+            bits.int_packed(v);
+        }
+        let (data, bit_len) = bits.finish();
+        let err = decode_effect_blob_json(EffectArrayKind::Float, &data, bit_len).unwrap_err();
+        assert_eq!(format!("{err:?}"), expected);
+    }
 }

@@ -2,8 +2,9 @@
 //! produced for the same bytes.
 
 use super::*;
-use crate::test_bits::{BitWriter, hex};
+use crate::test_bits::hex;
 use vrf_bitio::BitReader;
+use vrf_testkit::{BitWrite, BitWriter};
 
 // -- Declarations ---------------------------------------------------------
 //
@@ -54,48 +55,93 @@ fn owner_exclusive_player_info() -> Vec<Option<&'static str>> {
     d
 }
 
-// -- RoundResults tests ---------------------------------------------------
-
-/// Row 0 from replay 02d4d478, t=84942ms.
-/// Expected: [{RoundNumber:0, WinningTeam:"Red", WinningTeamRole:attacker, RoundResult:elimination}]
-#[test]
-fn round_results_row0_red_attacker_elimination() {
-    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
-    let mut r = BitReader::with_bit_len(&data, 264).unwrap();
-    let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].round_number, 0);
-    assert_eq!(results[0].winning_team.as_deref(), Some("Red"));
-    assert_eq!(results[0].winning_team_role, Some(AresTeamRole::Attacker));
-    assert_eq!(results[0].round_result, Some(AresRoundOutcome::Elimination));
+/// A reader over a whole pinned blob: every one is a whole number of bytes.
+fn reader(data: &[u8]) -> BitReader<'_> {
+    BitReader::with_bit_len(data, data.len() as u64 * 8).unwrap()
 }
 
-/// Row 4 from replay 02d4d478, t=580448ms.
-/// Expected: [{RoundNumber:4, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:time_expired}]
+// -- RoundResults ---------------------------------------------------------
+
+/// Round 0 of `02d4d478` on 13.01 (t=84942ms) and of `f1110ea5` on 13.02
+/// (t=72684ms), where the same members sit at 81..=84.
+const ROUND_RESULTS_1301: &str =
+    "0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000";
+const ROUND_RESULTS_1302: &str =
+    "0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000";
+
 #[test]
-fn round_results_row4_blue_defender_time_expired() {
-    let data = hex("0a0abcd20a00000084d8eaca00000000007c0d048c300000");
-    let mut r = BitReader::with_bit_len(&data, 192).unwrap();
-    let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].round_number, 4);
-    assert_eq!(results[0].winning_team.as_deref(), Some("Blue"));
-    assert_eq!(results[0].winning_team_role, Some(AresTeamRole::Defender));
-    assert_eq!(results[0].round_result, Some(AresRoundOutcome::TimeExpired));
+fn round_results_rows_decode_to_the_pinned_values() {
+    use AresRoundOutcome::{Defuse, Elimination, TimeExpired};
+    use AresTeamRole::{Attacker, Defender};
+    let (d1301, d1302) = (bomb_game_state_1301(), bomb_game_state_1302());
+    // Rounds 4 and 6 of 02d4d478, t=580448ms and t=796414ms.
+    let row4 = "0a0abcd20a00000084d8eaca00000000007c0d048c300000";
+    let row6 = "0e0ebcd20a00000084d8eaca00000000007c0d048c100000";
+    for (digits, declared, (round_number, team, role, outcome)) in [
+        (
+            ROUND_RESULTS_1301,
+            &d1301,
+            (0, "Red", Attacker, Elimination),
+        ),
+        (row4, &d1301, (4, "Blue", Defender, TimeExpired)),
+        (row6, &d1301, (6, "Blue", Defender, Defuse)),
+        (
+            ROUND_RESULTS_1302,
+            &d1302,
+            (0, "Blue", Defender, Elimination),
+        ),
+    ] {
+        let data = hex(digits);
+        let results = decode_round_results(&mut reader(&data), declared).unwrap();
+        let want = RoundResult {
+            round_number,
+            winning_team: Some(team.to_owned()),
+            winning_team_role: Some(role),
+            round_result: Some(outcome),
+        };
+        assert_eq!(results, [want], "{digits}");
+    }
 }
 
-/// Row 6 from replay 02d4d478, t=796414ms.
-/// Expected: [{RoundNumber:6, WinningTeam:"Blue", WinningTeamRole:defender, RoundResult:defuse}]
+/// Bytes under the other build's declaration, or under none, FAIL by the
+/// first member's handle rather than return an empty vector: that is how a
+/// whole build's missing match scores looked like a clean export. The decoder
+/// is keyed on the declaration, and there is no safe fallback set of handle
+/// numbers to guess with.
 #[test]
-fn round_results_row6_blue_defender_defuse() {
-    let data = hex("0e0ebcd20a00000084d8eaca00000000007c0d048c100000");
-    let mut r = BitReader::with_bit_len(&data, 192).unwrap();
-    let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].round_number, 6);
-    assert_eq!(results[0].winning_team.as_deref(), Some("Blue"));
-    assert_eq!(results[0].winning_team_role, Some(AresTeamRole::Defender));
-    assert_eq!(results[0].round_result, Some(AresRoundOutcome::Defuse));
+fn round_results_under_another_declaration_name_the_undeclared_handle() {
+    for (digits, declared, handle) in [
+        (ROUND_RESULTS_1302, bomb_game_state_1301(), 81),
+        (ROUND_RESULTS_1301, bomb_game_state_1302(), 93),
+        (ROUND_RESULTS_1301, Vec::new(), 93),
+    ] {
+        let data = hex(digits);
+        let err = decode_round_results(&mut reader(&data), &declared).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StructBlobError::UndeclaredHandle { handle: h, context: "RoundResults" } if h == handle
+            ),
+            "expected an undeclared-handle error naming handle {handle}, got {err:?}"
+        );
+    }
+}
+
+/// A handle that IS declared, under a name with no arm, names itself in the
+/// error. This is the shape a renamed or added member takes.
+#[test]
+fn round_results_unknown_member_name_is_reported_by_name() {
+    let data = hex(ROUND_RESULTS_1301);
+    let mut declared = bomb_game_state_1301();
+    declared[93] = Some("WinningTeamV2");
+    let err = decode_round_results(&mut reader(&data), &declared).unwrap_err();
+    match err {
+        StructBlobError::UnsupportedMember { name, handle, .. } => {
+            assert_eq!(name, "WinningTeamV2");
+            assert_eq!(handle, 93);
+        }
+        other => panic!("expected UnsupportedMember, got {other:?}"),
+    }
 }
 
 /// A 0-bit blob is an error for all three decoders: not even the element
@@ -112,221 +158,102 @@ fn a_zero_bit_blob_is_an_error_for_every_decoder() {
             })
         )
     };
-    let blob = || BitReader::with_bit_len(&[], 0).unwrap();
-    let err = decode_round_results(&mut blob(), &bomb_game_state_1301()).unwrap_err();
+    let err = decode_round_results(&mut reader(&[]), &bomb_game_state_1301()).unwrap_err();
     assert!(eof(err.clone()), "RoundResults: {err:?}");
-    let err = decode_round_infos(&mut blob(), &owner_exclusive_player_info()).unwrap_err();
+    let err = decode_round_infos(&mut reader(&[]), &owner_exclusive_player_info()).unwrap_err();
     assert!(eof(err.clone()), "RoundInfos: {err:?}");
-    let err = decode_team_economy(&mut blob()).unwrap_err();
+    let err = decode_team_economy(&mut reader(&[])).unwrap_err();
     assert!(eof(err.clone()), "TeamEconomy: {err:?}");
 }
 
-// -- RoundResults on build 13.02 ------------------------------------------
+// -- TeamEconomy and RoundInfos -------------------------------------------
 
-/// Round 0 from replay `f1110ea5`, build `++Ares-Core+release-13.02`,
-/// t=72684ms. Members sit at 81..=84 here; the 13.01 decoder read nothing.
+/// `02d4d478` at t=7ms (the initial spawn, with replication IDs), t=62ms and
+/// t=92033ms; per element: replication ID, loadout value, average loadout.
 #[test]
-fn round_results_1302_round0() {
-    let data = hex("0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000");
-    let mut r = BitReader::with_bit_len(&data, 272).unwrap();
-    let results = decode_round_results(&mut r, &bomb_game_state_1302()).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].round_number, 0);
-    assert_eq!(results[0].winning_team.as_deref(), Some("Blue"));
-    assert_eq!(results[0].winning_team_role, Some(AresTeamRole::Defender));
-    assert_eq!(results[0].round_result, Some(AresRoundOutcome::Elimination));
-}
-
-/// 13.02 bytes under the 13.01 declaration must FAIL by name, not return an
-/// empty vector: that is how a whole build's missing match scores looked like
-/// a clean export.
-#[test]
-fn round_results_1302_bytes_under_1301_declaration_is_an_error() {
-    let data = hex("0202a4d20a00000084d8eaca00000000004c0d848a00aa800202ac20f50200000000");
-    let mut r = BitReader::with_bit_len(&data, 272).unwrap();
-    let err = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            StructBlobError::UndeclaredHandle {
-                handle: 81,
-                context: "RoundResults"
-            }
-        ),
-        "expected an undeclared-handle error naming handle 81, got {err:?}"
-    );
-}
-
-/// The mirror: 13.01 bytes under the 13.02 declaration fail at handle 93, so
-/// the decoder is keyed on the declaration, not on either set of numbers.
-#[test]
-fn round_results_1301_bytes_under_1302_declaration_is_an_error() {
-    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
-    let mut r = BitReader::with_bit_len(&data, 264).unwrap();
-    let err = decode_round_results(&mut r, &bomb_game_state_1302()).unwrap_err();
-    assert!(
-        matches!(err, StructBlobError::UndeclaredHandle { handle: 93, .. }),
-        "expected an undeclared-handle error naming handle 93, got {err:?}"
-    );
-}
-
-/// An empty declaration is an error, not an empty result. There is no safe
-/// fallback set of handle numbers to guess with.
-#[test]
-fn round_results_with_no_declaration_is_an_error() {
-    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
-    let mut r = BitReader::with_bit_len(&data, 264).unwrap();
-    assert!(decode_round_results(&mut r, &[]).is_err());
-}
-
-/// A handle that IS declared, under a name with no arm, names itself in the
-/// error. This is the shape a renamed or added member takes.
-#[test]
-fn round_results_unknown_member_name_is_reported_by_name() {
-    let data = hex("0202bcc208000000a4cac800000000007c0d028c00c2800202c420250400000000");
-    let mut r = BitReader::with_bit_len(&data, 264).unwrap();
-    let mut declared = bomb_game_state_1301();
-    declared[93] = Some("WinningTeamV2");
-    let err = decode_round_results(&mut r, &declared).unwrap_err();
-    match err {
-        StructBlobError::UnsupportedMember { name, handle, .. } => {
-            assert_eq!(name, "WinningTeamV2");
-            assert_eq!(handle, 93);
-        }
-        other => panic!("expected UnsupportedMember, got {other:?}"),
+fn team_economy_rows_decode_to_the_pinned_values() {
+    let spawn = "0402722021047440000000007640000000000004722025047440000000007640000000000000";
+    let start = "04027440fe100000764066030000000474403610000076403e0300000000";
+    let midgame = "04027440d052000076409010000000047440502d00007640100900000000";
+    for (digits, elements) in [
+        (spawn, [(Some(272), 0, 0), (Some(274), 0, 0)]),
+        (start, [(None, 4350, 870), (None, 4150, 830)]),
+        (midgame, [(None, 21200, 4240), (None, 11600, 2320)]),
+    ] {
+        let want: Vec<TeamEconomyUpdate> = (0..)
+            .zip(elements)
+            .map(
+                |(index, (replication_id, loadout, average))| TeamEconomyUpdate {
+                    index,
+                    replication_id,
+                    loadout_value: Some(loadout),
+                    average_loadout_value: Some(average),
+                },
+            )
+            .collect();
+        let data = hex(digits);
+        assert_eq!(
+            decode_team_economy(&mut reader(&data)).unwrap(),
+            want,
+            "{digits}"
+        );
     }
 }
 
-// -- TeamEconomy tests ----------------------------------------------------
+/// Three players' first RoundInfos row, all at t=91927ms (actors 196, 184 and
+/// 240): round 0, nothing at its start, then end-of-round money and loadout.
+const ROUND_INFOS: [(&str, i32, i32); 3] = [
+    (
+        "020252400000000054400000000056400000000058406c0700005a40000000000000",
+        1900,
+        0,
+    ),
+    (
+        "02025240000000005440000000005640000000005840d00700005a40c80000000000",
+        2000,
+        200,
+    ),
+    (
+        "02025240000000005440000000005640000000005840340800005a40580200000000",
+        2100,
+        600,
+    ),
+];
 
-/// Row 0 from replay 02d4d478, t=7ms. Initial spawn with ReplicationIds.
-/// Expected: [{Index:0, LV:0, ALV:0, RepId:272}, {Index:1, LV:0, ALV:0, RepId:274}]
 #[test]
-fn team_economy_row0_initial_spawn() {
-    let data = hex("0402722021047440000000007640000000000004722025047440000000007640000000000000");
-    let mut r = BitReader::with_bit_len(&data, 304).unwrap();
-    let results = decode_team_economy(&mut r).unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].index, 0);
-    assert_eq!(results[0].replication_id, Some(272));
-    assert_eq!(results[0].loadout_value, Some(0));
-    assert_eq!(results[0].average_loadout_value, Some(0));
-    assert_eq!(results[1].index, 1);
-    assert_eq!(results[1].replication_id, Some(274));
-    assert_eq!(results[1].loadout_value, Some(0));
-    assert_eq!(results[1].average_loadout_value, Some(0));
+fn round_infos_rows_decode_to_the_pinned_values() {
+    for (digits, end_money, end_loadout) in ROUND_INFOS {
+        let want = PlayerRoundInfo {
+            index: 0,
+            round_number: Some(0),
+            start_of_round_money: Some(0),
+            start_of_round_loadout_value: Some(0),
+            end_of_round_money: Some(end_money),
+            end_of_round_loadout_value: Some(end_loadout),
+        };
+        let data = hex(digits);
+        let results = decode_round_infos(&mut reader(&data), &owner_exclusive_player_info());
+        assert_eq!(results.unwrap(), [want], "{digits}");
+    }
 }
 
-/// Row 1 from replay 02d4d478, t=62ms.
-/// Expected: [{Index:0, LV:4350, ALV:870, RepId:null}, {Index:1, LV:4150, ALV:830, RepId:null}]
-#[test]
-fn team_economy_row1_round_start() {
-    let data = hex("04027440fe100000764066030000000474403610000076403e0300000000");
-    let mut r = BitReader::with_bit_len(&data, 240).unwrap();
-    let results = decode_team_economy(&mut r).unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].index, 0);
-    assert_eq!(results[0].replication_id, None);
-    assert_eq!(results[0].loadout_value, Some(4350));
-    assert_eq!(results[0].average_loadout_value, Some(870));
-    assert_eq!(results[1].index, 1);
-    assert_eq!(results[1].replication_id, None);
-    assert_eq!(results[1].loadout_value, Some(4150));
-    assert_eq!(results[1].average_loadout_value, Some(830));
-}
-
-/// Row 2 from replay 02d4d478, t=92033ms.
-/// Expected: [{Index:0, LV:21200, ALV:4240}, {Index:1, LV:11600, ALV:2320}]
-#[test]
-fn team_economy_row2_midgame() {
-    let data = hex("04027440d052000076409010000000047440502d00007640100900000000");
-    let mut r = BitReader::with_bit_len(&data, 240).unwrap();
-    let results = decode_team_economy(&mut r).unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].index, 0);
-    assert_eq!(results[0].loadout_value, Some(21200));
-    assert_eq!(results[0].average_loadout_value, Some(4240));
-    assert_eq!(results[1].index, 1);
-    assert_eq!(results[1].loadout_value, Some(11600));
-    assert_eq!(results[1].average_loadout_value, Some(2320));
-}
-
-// -- RoundInfos tests -----------------------------------------------------
-
-/// First RoundInfos row from replay 02d4d478, t=91927ms, actor 196.
-/// Payload base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQGwHAABaQAAAAAAAAA=="
-/// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:1900, EL:0}]
-#[test]
-fn round_infos_row0_end_of_round1() {
-    let data = hex("020252400000000054400000000056400000000058406c0700005a40000000000000");
-    let mut r = BitReader::with_bit_len(&data, 272).unwrap();
-    let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].index, 0);
-    assert_eq!(results[0].round_number, Some(0));
-    assert_eq!(results[0].start_of_round_money, Some(0));
-    assert_eq!(results[0].start_of_round_loadout_value, Some(0));
-    assert_eq!(results[0].end_of_round_money, Some(1900));
-    assert_eq!(results[0].end_of_round_loadout_value, Some(0));
-}
-
-/// Second RoundInfos row from replay 02d4d478, t=91927ms, actor 184.
-/// Payload base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQNAHAABaQMgAAAAAAA=="
-/// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:2000, EL:200}]
-#[test]
-fn round_infos_row1_different_player() {
-    let data = hex("02025240000000005440000000005640000000005840d00700005a40c80000000000");
-    let mut r = BitReader::with_bit_len(&data, 272).unwrap();
-    let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].index, 0);
-    assert_eq!(results[0].round_number, Some(0));
-    assert_eq!(results[0].start_of_round_money, Some(0));
-    assert_eq!(results[0].start_of_round_loadout_value, Some(0));
-    assert_eq!(results[0].end_of_round_money, Some(2000));
-    assert_eq!(results[0].end_of_round_loadout_value, Some(200));
-}
-
-/// Third RoundInfos row from replay 02d4d478, t=91927ms, actor 240.
-/// Payload base64: "AgJSQAAAAABUQAAAAABWQAAAAABYQDQIAABaQFgCAAAAAA=="
-/// Decoded: [{Index:0, RN:0, SM:0, SL:0, EM:2100, EL:600}]
-#[test]
-fn round_infos_row2_another_player() {
-    let data = hex("02025240000000005440000000005640000000005840340800005a40580200000000");
-    let mut r = BitReader::with_bit_len(&data, 272).unwrap();
-    let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].index, 0);
-    assert_eq!(results[0].end_of_round_money, Some(2100));
-    assert_eq!(results[0].end_of_round_loadout_value, Some(600));
-}
-
-// -- TooManyFields boundary (B12) -----------------------------------------
+// -- The fields-per-element cap -------------------------------------------
 
 /// The framing module's `MAX_FIELDS_PER_ELEMENT`, repeated rather than
 /// imported on purpose: a changed cap must fail the boundary tests.
 const MAX_FIELDS_PER_ELEMENT: u32 = 8;
 
 /// A `RoundInfos` blob whose single, correctly terminated element carries `n`
-/// zero `RoundNumber` fields (handle 40), each `handle(1) bitcount(1)
-/// payload(4)` bytes; a one-byte IntPacked `v < 128` is the byte `v << 1`.
+/// 32-bit zero `RoundNumber` fields (handle 40).
 fn round_infos_with_n_fields(n: u32) -> (Vec<u8>, u64) {
-    /// One-byte IntPacked for values that fit in 7 bits (no continuation).
-    const fn ip1(v: u8) -> u8 {
-        v << 1
-    }
-    let mut bytes = Vec::new();
-    bytes.push(ip1(1)); // array count = 1
-    bytes.push(ip1(1)); // element encoded_index = 1 (index 0)
+    let mut bits = BitWriter::new();
+    bits.int_packed(1).int_packed(1); // one element, index 0
     for _ in 0..n {
-        bytes.push(ip1(41)); // encoded_handle = 41 (handle 40 = "RoundNumber")
-        bytes.push(ip1(32)); // bit_count = 32
-        bytes.extend_from_slice(&[0u8; 4]); // 32-bit zero payload
+        bits.int_packed(41).int_packed(32).u32(0);
     }
-    bytes.push(0); // field terminator (encoded_handle = 0)
-    bytes.push(0); // element terminator (encoded_index = 0)
-    let bits = u64::try_from(bytes.len() * 8).unwrap();
-    (bytes, bits)
+    bits.int_packed(0).int_packed(0); // field and element terminators
+    let (data, bit_len) = bits.finish();
+    (data, u64::from(bit_len))
 }
 
 /// MAX fields in one element must parse: the guard rejects only the MAX+1-th.
@@ -356,21 +283,46 @@ fn round_infos_rejects_one_more_than_max_fields() {
     );
 }
 
+/// Each shared framing failure keeps its name and fields (cap 128).
+#[test]
+fn framing_failures_reach_the_caller_as_their_own_variant() {
+    for (packed, expected) in [
+        (&[129][..], "ArrayCountTooLarge { count: 129, max: 128 }"),
+        (&[1, 4], "IndexOutOfBounds { index: 3, count: 1 }"),
+        (
+            &[1, 1, 41, 32],
+            "PayloadTooLarge { bits: 32, remaining: 0 }",
+        ),
+    ] {
+        let mut bits = BitWriter::new();
+        for &v in packed {
+            bits.int_packed(v);
+        }
+        let (data, bit_len) = bits.finish();
+        let mut r = BitReader::with_bit_len(&data, u64::from(bit_len)).unwrap();
+        let err = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap_err();
+        assert_eq!(format!("{err:?}"), expected);
+    }
+}
+
 // -- Unknown enum values --------------------------------------------------
 
 /// One element carrying a single member at `handle`, whose payload window is
-/// `width` bits holding `value` (zero past its 32 bits).
-fn one_member(handle: u32, value: u32, width: u32) -> (Vec<u8>, u64) {
+/// `payload`.
+fn one_member_bits(handle: u32, payload: &[bool]) -> (Vec<u8>, u64) {
     let mut bits = BitWriter::new();
-    bits.int_packed(1); // element count
-    bits.int_packed(1); // encoded index -> element 0
-    bits.int_packed(handle + 1);
-    bits.int_packed(width);
-    bits.bits(u64::from(value), width);
-    bits.int_packed(0); // end of element
-    bits.int_packed(0); // end of array
+    bits.int_packed(1).int_packed(1); // one element, index 0
+    bits.int_packed(handle + 1).int_packed(payload.len() as u32);
+    bits.extend_bits(payload);
+    bits.int_packed(0).int_packed(0); // end of element, end of array
     let (data, bit_len) = bits.finish();
     (data, u64::from(bit_len))
+}
+
+/// [`one_member_bits`] with a `width`-bit window holding `value` (zero past its
+/// 32 bits).
+fn one_member(handle: u32, value: u32, width: u32) -> (Vec<u8>, u64) {
+    one_member_bits(handle, BitWriter::new().bits(u64::from(value), width))
 }
 
 /// An `AresTeamRole` value outside the declared variants is `UnknownEnumValue`,
@@ -417,16 +369,6 @@ fn round_results_unknown_outcome_is_an_error_not_an_absent_field() {
     );
 }
 
-/// A value INSIDE the declared range still decodes, so the guard above cannot
-/// be satisfied by rejecting everything.
-#[test]
-fn round_results_known_enum_values_still_decode() {
-    let (data, bit_len) = one_member(94, 2, 3);
-    let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
-    let results = decode_round_results(&mut r, &bomb_game_state_1301()).unwrap();
-    assert_eq!(results[0].winning_team_role, Some(AresTeamRole::Defender));
-}
-
 #[test]
 fn round_results_zero_width_enum_is_an_error_not_an_absent_field() {
     let (data, bit_len) = one_member(94, 0, 0);
@@ -448,24 +390,9 @@ fn round_results_zero_width_enum_is_an_error_not_an_absent_field() {
 
 #[test]
 fn struct_fname_rejects_a_negative_instance_number() {
-    // Inline (not hardcoded) "Blue" with instance number -1.
-    let mut fname = BitWriter::new();
-    fname.bits(0, 1).i32(5);
-    for byte in b"Blue\0" {
-        fname.bits(u64::from(*byte), 8);
-    }
-    fname.i32(-1);
-    // One element whose WinningTeam (handle 93 on 13.01) is that FName.
-    let mut bits = BitWriter::new();
-    bits.int_packed(1); // element count
-    bits.int_packed(1); // encoded index -> round 0
-    bits.int_packed(94);
-    bits.int_packed(fname.bit_len());
-    bits.append(&fname);
-    bits.int_packed(0); // end of element
-    bits.int_packed(0); // end of array
-    let (data, bit_len) = bits.finish();
-    let mut reader = BitReader::with_bit_len(&data, u64::from(bit_len)).unwrap();
+    // WinningTeam (handle 93 on 13.01) as an inline "Blue" with instance -1.
+    let (data, bit_len) = one_member_bits(93, BitWriter::new().bit(false).fstring("Blue").i32(-1));
+    let mut reader = BitReader::with_bit_len(&data, bit_len).unwrap();
     let err = decode_round_results(&mut reader, &bomb_game_state_1301())
         .expect_err("the struct decoder must propagate invalid FName numbers");
     assert!(
@@ -502,16 +429,6 @@ fn round_infos_member_that_underreads_its_window_is_an_error() {
         }
         other => panic!("expected MemberNotFullyConsumed, got {other:?}"),
     }
-}
-
-/// The exact-width case still decodes, so the guard above cannot be satisfied
-/// by rejecting every member.
-#[test]
-fn round_infos_member_with_an_exact_window_still_decodes() {
-    let (data, bit_len) = one_member(43, 1900, 32);
-    let mut r = BitReader::with_bit_len(&data, bit_len).unwrap();
-    let results = decode_round_infos(&mut r, &owner_exclusive_player_info()).unwrap();
-    assert_eq!(results[0].end_of_round_money, Some(1900));
 }
 
 /// TeamEconomy declares its replication ID as hardcoded FName `241` and
