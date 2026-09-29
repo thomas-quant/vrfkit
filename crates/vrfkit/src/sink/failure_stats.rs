@@ -316,40 +316,19 @@ mod tests {
     #[test]
     fn reconciles_checks_both_invariants_against_net_stats() {
         let mut agg = FailureAggregate::default();
-        let preserved = StreamFailure {
-            payload_preserved: true,
-            ..failure(
-                StreamKind::Rpc,
-                StreamFailureCause::UnresolvedFunctionCount,
-                0,
-            )
-        };
-        agg.note_failure(
-            &failure(StreamKind::RepLayout, StreamFailureCause::ReadError, 9),
-            "A".into(),
-        );
-        agg.note_failure(&preserved, "B".into());
-        let net = NetStats {
-            field_stream_failures: 1,
-            rpc_stream_failures: 1,
-            unresolved_rpc_payloads_preserved: 1,
+        let mut rpc = failure(StreamKind::Rpc, StreamFailureCause::ReadError, 0);
+        rpc.payload_preserved = true;
+        let field = failure(StreamKind::RepLayout, StreamFailureCause::ReadError, 9);
+        agg.note_failure(&field, "A".into());
+        agg.note_failure(&rpc, "B".into());
+        let net = |field, rpc, preserved| NetStats {
+            field_stream_failures: field,
+            rpc_stream_failures: rpc,
+            unresolved_rpc_payloads_preserved: preserved,
             ..NetStats::default()
         };
-        assert!(agg.reconciles(&net));
-        for wrong in [
-            NetStats {
-                rpc_stream_failures: 2,
-                ..net.clone()
-            },
-            NetStats {
-                field_stream_failures: 0,
-                ..net.clone()
-            },
-            NetStats {
-                unresolved_rpc_payloads_preserved: 0,
-                ..net.clone()
-            },
-        ] {
+        assert!(agg.reconciles(&net(1, 1, 1)));
+        for wrong in [net(1, 2, 1), net(0, 1, 1), net(1, 1, 0)] {
             assert!(!agg.reconciles(&wrong));
         }
     }
