@@ -15,7 +15,7 @@
 //! | `resolve` | Bare-name resolution over the leaf index |
 //! | `path` | Alias generation (`Default__`, `/_Core/`, `_ClassNetCache`) |
 //! | `hash` | The hasher the cache's maps use, and why it is not the default |
-//! | `reader` | The ReplayData wire format for exports and export GUIDs |
+//! | `reader` | The ReplayData wire format for exports and export GUIDs, and [`load_object`] (vrf-net's too) |
 //! | `checkpoint` | The two tables a Checkpoint archive carries |
 //!
 //! # Cargo features
@@ -49,7 +49,7 @@ pub use path::{
     CLASS_NET_CACHE_SUFFIX, find_class_net_cache_key, find_replay_path_key,
     for_each_replay_path_key,
 };
-pub use reader::{read_export_guids, read_net_field_exports};
+pub use reader::{load_object, read_export_guids, read_net_field_exports};
 
 #[cfg(feature = "checkpoint")]
 pub use checkpoint::{

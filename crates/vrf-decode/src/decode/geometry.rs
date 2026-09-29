@@ -34,67 +34,19 @@ pub(super) fn read_double_vector(r: &mut BitReader<'_>) -> Result<FVector, BitEr
     })
 }
 
-/// ```text
-/// header = SerializedInt(128): bits [5:0] componentBitCount, bit [6] extraInfo
-/// componentBitCount > 0: 3 x componentBitCount bits, two's complement
-///   (all-ones reads as -1, not -max); divided by scaleFactor if extraInfo
-/// componentBitCount == 0: 3 x f32 if extraInfo == 0, else 3 x f64
-/// ```
-fn read_quantized_vector(r: &mut BitReader<'_>, scale_factor: u32) -> Result<FVector, DecodeError> {
-    let header = r.read_serialized_int(1 << 7)?;
-    let component_bit_count = header & 63;
-    let extra_info = header >> 6;
-
-    if component_bit_count > 0 {
-        return Ok(read_packed_quantized_vector(
-            r,
-            component_bit_count,
-            extra_info,
-            scale_factor,
-        )?);
-    }
-    let v = if extra_info == 0 {
-        read_float_vector(r)?
-    } else {
-        read_double_vector(r)?
-    };
-    // Only this raw-float fallback can be NaN or infinite (the packed path is
-    // an integer over a non-zero scale); see FRepMovement's Display.
-    finite_vector(v, "quantized vector")
-}
-
-/// Pass an [`FVector`] through, or reject it if any component is not finite.
-fn finite_vector(v: FVector, context: &'static str) -> Result<FVector, DecodeError> {
+/// [`BitReader::read_quantized_vector`]. Only its raw-float fallback can be
+/// NaN or infinite (the packed path is an integer over a non-zero scale); see
+/// FRepMovement's Display.
+fn read_quantized_vector(r: &mut BitReader<'_>, scale: u32) -> Result<FVector, DecodeError> {
+    let [x, y, z] = r.read_quantized_vector(scale)?;
+    let v = FVector { x, y, z };
     if v.x.is_finite() && v.y.is_finite() && v.z.is_finite() {
         Ok(v)
     } else {
-        Err(DecodeError::NonFiniteComponent { context })
+        Err(DecodeError::NonFiniteComponent {
+            context: "quantized vector",
+        })
     }
-}
-
-fn read_packed_quantized_vector(
-    r: &mut BitReader<'_>,
-    component_bit_count: u32,
-    extra_info: u32,
-    scale_factor: u32,
-) -> Result<FVector, BitError> {
-    let x_raw = r.read_bits(component_bit_count)?;
-    let y_raw = r.read_bits(component_bit_count)?;
-    let z_raw = r.read_bits(component_bit_count)?;
-    let sign_bit = 1u64 << (component_bit_count - 1);
-
-    let fx = (x_raw ^ sign_bit) as i64 - sign_bit as i64;
-    let fy = (y_raw ^ sign_bit) as i64 - sign_bit as i64;
-    let fz = (z_raw ^ sign_bit) as i64 - sign_bit as i64;
-
-    let (x, y, z) = if extra_info > 0 {
-        let sf = f64::from(scale_factor);
-        (fx as f64 / sf, fy as f64 / sf, fz as f64 / sf)
-    } else {
-        (fx as f64, fy as f64, fz as f64)
-    };
-
-    Ok(FVector { x, y, z })
 }
 
 /// Fixed-point normal vector: 3 x SerializedInt(65536), bias 32768, scale 32767.
@@ -110,28 +62,10 @@ pub(super) fn read_fixed_vector_normal(r: &mut BitReader<'_>) -> Result<FVector,
     })
 }
 
-/// A compressed rotator: three components of `width` bits (16 short, 8 byte).
-/// `360 / 2^width` divides by a power of two, so it is exact in `f32`.
+/// [`BitReader::read_compressed_rotator`]: `width` 16 is short, 8 byte.
 pub(super) fn read_rotation(r: &mut BitReader<'_>, width: u32) -> Result<FRotator, BitError> {
-    let scale = 360.0 / (1u32 << width) as f32;
-    let pitch = read_compressed_rotation_component(r, width, scale)?;
-    let yaw = read_compressed_rotation_component(r, width, scale)?;
-    let roll = read_compressed_rotation_component(r, width, scale)?;
+    let [pitch, yaw, roll] = r.read_compressed_rotator(width)?;
     Ok(FRotator { pitch, yaw, roll })
-}
-
-/// A presence bit, then an unsigned `width`-bit component scaled to degrees.
-fn read_compressed_rotation_component(
-    r: &mut BitReader<'_>,
-    width: u32,
-    scale: f32,
-) -> Result<f32, BitError> {
-    if r.read_bit()? {
-        let v = r.read_bits(width)?;
-        Ok(v as f32 * scale)
-    } else {
-        Ok(0.0)
-    }
 }
 
 fn read_quaternion(r: &mut BitReader<'_>) -> Result<FQuat, BitError> {
