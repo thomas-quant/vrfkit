@@ -2056,7 +2056,9 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                 # The parser flattens struct members and static-array elements
                 # under one name only `handle` tells apart, so a repeat here is
                 # a different property, not a newer copy: 24,060 of 02d4d478's
-                # 28,845 property_key_collisions.
+                # 28,845 property_key_collisions. Keyed by name, not handle:
+                # valplay consumes names, and a handle key would change which
+                # value survives.
                 if bare_name in payload:
                     _count_overwrite(tally, payload[bare_name])
                 payload[bare_name] = value
