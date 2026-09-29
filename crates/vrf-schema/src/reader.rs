@@ -40,7 +40,7 @@ use crate::export::{NetFieldExport, NetFieldExportGroup, render_fname};
 use crate::guid::{ExportFlags, NetworkGuid};
 
 /// Cap on a path-name FString, so a corrupt prefix cannot size an allocation.
-pub(crate) const MAX_FSTRING_BYTES: i64 = 1024 * 1024; // 1 MiB
+pub(crate) const MAX_FSTRING_BYTES: i64 = 1024 * 1024;
 
 const MAX_NET_GUID_RECURSION: u32 = 16;
 
@@ -143,6 +143,9 @@ pub fn read_net_field_exports(reader: &mut BitReader<'_>, cache: &mut NetGuidCac
 #[must_use = "the GUID payload count is a tally; bind it or discard it explicitly"]
 pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -> Result<u32> {
     let num_guids = reader.read_int_packed()?;
+    let mut register = |guid, path, outer: NetworkGuid| {
+        cache.set_net_guid_path(guid, path, outer.is_valid().then_some(outer));
+    };
 
     for _ in 0..num_guids {
         let size = reader.read_i32()?;
@@ -150,7 +153,7 @@ pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -
             return Err(SchemaError::NegativePayloadSize { size });
         }
         let mut payload = reader.sub_reader(size as u64 * 8)?;
-        internal_load_object(&mut payload, cache, 0)?;
+        load_object(&mut payload, true, MAX_FSTRING_BYTES, 0, &mut register)?;
 
         if payload.bits_remaining() >= 8 {
             return Err(SchemaError::TrailingPayloadData {
@@ -162,11 +165,16 @@ pub fn read_export_guids(reader: &mut BitReader<'_>, cache: &mut NetGuidCache) -
     Ok(num_guids)
 }
 
-/// Read a NetGUID object reference, recursing into its outer, and register it.
-fn internal_load_object(
+/// Read one NetGUID object reference (the object layout above), recursing
+/// into its outer, and pass each path to `register(guid, path, outer)`,
+/// outers first. The flags byte is read when `is_exporting` or for the
+/// default object (GUID 1); `max_path_bytes` caps the path FString.
+pub fn load_object(
     reader: &mut BitReader<'_>,
-    cache: &mut NetGuidCache,
+    is_exporting: bool,
+    max_path_bytes: i64,
     depth: u32,
+    register: &mut impl FnMut(u32, String, NetworkGuid),
 ) -> Result<NetworkGuid> {
     if depth >= MAX_NET_GUID_RECURSION {
         return Err(SchemaError::RecursionLimitExceeded {
@@ -179,22 +187,21 @@ fn internal_load_object(
         return Ok(net_guid);
     }
 
-    let flags = ExportFlags(reader.read_u8()?);
+    let flags = if is_exporting || net_guid.is_default() {
+        ExportFlags(reader.read_u8()?)
+    } else {
+        ExportFlags::NONE
+    };
     if !flags.contains(ExportFlags::HAS_PATH) {
         return Ok(net_guid);
     }
-    let outer_guid = internal_load_object(reader, cache, depth + 1)?;
-    let path_name = reader.read_fstring(MAX_FSTRING_BYTES)?;
+    let outer_guid = load_object(reader, is_exporting, max_path_bytes, depth + 1, register)?;
+    let path_name = reader.read_fstring(max_path_bytes)?;
     if flags.contains(ExportFlags::HAS_NETWORK_CHECKSUM) {
         let _checksum = reader.read_u32()?;
     }
 
-    cache.set_net_guid_path(
-        net_guid.0,
-        path_name,
-        outer_guid.is_valid().then_some(outer_guid),
-    );
-
+    register(net_guid.0, path_name, outer_guid);
     Ok(net_guid)
 }
 
@@ -345,9 +352,9 @@ mod tests {
         assert_eq!(n, Err(SchemaError::UnknownPathIndex { index: 42 }));
     }
 
-    /// A handle past the declared slots is dropped and counted. The manifest's
-    /// `dropped_field_exports` is 0 on every corpus replay, so only this test
-    /// shows it moves.
+    /// A handle past the declared slots is dropped and counted.
+    /// `dropped_field_exports` is 0 in all 1,018 corpus manifests, so only this
+    /// test shows it moves.
     #[test]
     fn out_of_range_handle_is_dropped_and_counted() {
         let mut w = BitWriter::new();

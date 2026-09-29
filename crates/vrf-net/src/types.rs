@@ -4,9 +4,6 @@
 /// 16 384 bits), the `read_serialized_int` bound for a bunch's bit count.
 pub const MAX_PACKET_SIZE_BITS: u32 = 2 * 1024 * 8;
 
-/// Maximum recursion depth for `InternalLoadObject`.
-pub const MAX_NET_GUID_RECURSION: u32 = 16;
-
 /// Maximum number of GUIDs in a single package-map export bunch.
 pub const MAX_GUID_COUNT: u32 = 2048;
 

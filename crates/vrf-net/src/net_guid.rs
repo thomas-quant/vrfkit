@@ -1,13 +1,12 @@
-//! Net GUID loading -- `InternalLoadObject` recursive reader.
-//!
-//! Unreal's wire form of an object reference: a GUID, then, when its export
-//! flags carry a path, that path and possibly an outer GUID, recursively. The
-//! paths go to the caller's [`GuidPathSink`], which owns the NetGuidCache.
+//! Net GUID references (`InternalLoadObject`), read by vrf-schema's
+//! [`load_object`](vrf_schema::load_object). The paths go to the caller's
+//! [`GuidPathSink`], which owns the NetGuidCache.
 
 use vrf_bitio::BitReader;
+use vrf_schema::SchemaError;
 
 use crate::error::{NetError, Result};
-use crate::types::{ExportFlags, MAX_NET_GUID_RECURSION, NetworkGuid};
+use crate::types::NetworkGuid;
 
 /// Callback invoked when a net GUID's path is decoded from the stream.
 pub trait GuidPathSink {
@@ -23,20 +22,7 @@ pub trait GuidPathSink {
     }
 }
 
-/// Read a net GUID reference (and any associated export data) from the stream.
-///
-/// ```text
-/// Wire layout:
-///   net_guid           : IntPacked (u32)
-///   if guid == default || is_exporting:
-///     export_flags     : u8
-///   if HasPath in export_flags:
-///     outer_guid       : InternalLoadObject (recursive)
-///     path_name        : FString
-///     if HasNetworkChecksum:
-///       checksum       : u32
-/// ```
-///
+/// Read a net GUID reference, path cap 4096 bytes, and register its paths.
 /// `is_exporting` is true inside a package-map export bunch; in content-block
 /// headers only the default GUID (1) carries inline path data.
 pub fn internal_load_object(
@@ -45,36 +31,14 @@ pub fn internal_load_object(
     depth: u32,
     sink: &mut dyn GuidPathSink,
 ) -> Result<NetworkGuid> {
-    if depth >= MAX_NET_GUID_RECURSION {
-        return Err(NetError::GuidRecursionLimit { depth });
-    }
-
-    let guid = NetworkGuid(reader.read_int_packed()?);
-    if !guid.is_valid() {
-        return Ok(guid);
-    }
-
-    let flags = if guid.is_default() || is_exporting {
-        ExportFlags(reader.read_u8()?)
-    } else {
-        ExportFlags::NONE
-    };
-
-    if !flags.contains(ExportFlags::HAS_PATH) {
-        return Ok(guid);
-    }
-
-    let outer_guid = internal_load_object(reader, is_exporting, depth + 1, sink)?;
-
-    // Cap the FString at 4096 bytes to reject a corrupt length early.
-    let path = reader.read_fstring(4096)?;
-
-    if flags.contains(ExportFlags::HAS_NETWORK_CHECKSUM) {
-        let _checksum = reader.read_u32()?;
-    }
-
-    sink.register_path(guid.0, &path, outer_guid);
-    Ok(guid)
+    let mut register = |guid, path: String, outer| sink.register_path(guid, &path, outer);
+    vrf_schema::load_object(reader, is_exporting, 4096, depth, &mut register).map_err(|e| match e {
+        SchemaError::Bitio(e) => NetError::Bit(e),
+        SchemaError::RecursionLimitExceeded { limit } => NetError::GuidRecursionLimit {
+            depth: limit.max(depth),
+        },
+        e => unreachable!("load_object fails only on a read or its depth limit, not {e}"),
+    })
 }
 
 #[cfg(test)]
@@ -149,5 +113,19 @@ mod tests {
         assert_eq!(sink.0[0].0, 18);
         assert_eq!(sink.0[0].1, "/Game/Test.Test_C");
         assert_eq!(sink.0[0].2, NetworkGuid(0));
+    }
+
+    /// Sixteen nested HasPath GUIDs reach the limit before a 17th is read.
+    #[test]
+    fn nesting_to_the_depth_limit_is_an_error() {
+        let mut bits: Vec<bool> = Vec::new();
+        for _ in 0..16 {
+            bits.int_packed(2).u8(0x01);
+        }
+        let data = pack(&bits);
+        let mut sink = VecSink::default();
+        let result = internal_load_object(&mut BitReader::new(&data), true, 0, &mut sink);
+        assert_eq!(result, Err(NetError::GuidRecursionLimit { depth: 16 }));
+        assert!(sink.0.is_empty());
     }
 }
