@@ -57,6 +57,12 @@ class PlayerBodiesTests(unittest.TestCase):
         self.assertEqual([value for _, _, value in bodies.history[256]], [1510, 0, 45530])
         self.assertNotIn(0, bodies.subjects)
 
+    def test_history_follows_packet_order_not_time(self):
+        """A non-finite frame exports time 0; packet order is the wire's."""
+        bodies = self.bodies([spawned(256, 1510, 100, 1), spawned(256, 45530, 0, 2)])
+        self.assertEqual([value for _, _, value in bodies.history[256]], [1510, 45530])
+        self.assertEqual(bodies.counts["manifest_history_disagreements"], 0)
+
     def test_the_final_provenance_string_is_the_one_records_already_carry(self):
         """Records the manifest join labelled must come out byte-identical."""
         self.assertEqual(identity.FINAL_PROVENANCE,

@@ -34,7 +34,7 @@ import time
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import NamedTuple
 
 try:
@@ -243,8 +243,8 @@ class _Tally(dict):
             "shot effect (tag, value) pairs with one half unreadable "
             "(pair dropped, e.g. a missing FiringState.AttackVector.N)",
         "effect_array_residual_bits":
-            "shot effect blobs with more than a byte left over after "
-            "decoding (framing did not end where this parse expected)",
+            "shot effect blobs with bits left over after decoding "
+            "(framing did not end where this parse expected)",
         "missing_manifest":
             "manifest.json absent (replay metadata substituted)",
         "empty_gameplay_tag_table":
@@ -715,9 +715,8 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
     so a shot is not lost whole, and counts the two shapes that fabricate
     downstream values: a pair with one half unreadable (dropped by
     `_decode_effect_blob`, like a missing `FiringState.AttackVector.N`; see
-    spray_control.py), and more than 7 bits left after the element loop
-    (Rust's `ResidualBits` threshold: the framing did not end where this
-    parse expected).
+    spray_control.py), and any bit left after the element loop (Rust's
+    `ResidualBits`).
     """
     r = _BitReader(data, bit_count)
     try:
@@ -780,9 +779,8 @@ def _decode_effect_elements(data: bytes, bit_count: int, spec: _EffectArraySpec,
     half_read = sum(1 for tag, val in elements if tag is None or val is None)
     if half_read:
         _bump(tally, "effect_half_read_pairs", half_read)
-    # However the loop ended, more than 7 bits left is Rust's `ResidualBits`;
-    # sub-byte padding is normal, as the Rust guard also tolerates.
-    if r.bits_remaining() > 7:
+    # Any bit left is Rust's `ResidualBits`: bit_count is exact, not padded.
+    if r.bits_remaining():
         _bump(tally, "effect_array_residual_bits")
     return elements
 
@@ -915,8 +913,8 @@ def _build_shot_event(
     effect_id = scalar_params.get("EffectID")
     source_id = scalar_params.get("SourceID")
     start_time = scalar_params.get("StartMovementTime")
-    is_local = scalar_params.get("bLocalEffect") or scalar_params.get("LocalEffect")
-    is_transient = scalar_params.get("bTransient") or scalar_params.get("Transient")
+    is_local = scalar_params.get("bLocalEffect")
+    is_transient = scalar_params.get("bTransient")
     wait_on = scalar_params.get("WaitOnReplicationActor")
     alliance = scalar_params.get("AllianceFilter")
 
@@ -980,7 +978,7 @@ def _build_shot_event(
         if isinstance(start_time, float) else start_time,
         "source_id": source_id,
         "is_local_effect": bool(is_local),
-        "is_transient": bool(is_transient) if is_transient is not None else True,
+        "is_transient": True if is_transient is None else bool(is_transient),
         "wait_on_replication_actor": wait_on or 0,
         # Null when absent, as the reference on 101 of 02d4d478's 2,647
         # effects; a default would merge two input states.
@@ -1142,6 +1140,12 @@ def _parse_field_path_cached(path: str):
                 unparsable += 1
             parts.append((seg, None))
     return tuple(parts), unparsable
+
+
+@lru_cache(maxsize=None)
+def _container_names(path: str) -> tuple:
+    """Every prefix of `path` ending at a '[': the containers its row implies."""
+    return tuple(path[:i] for i, c in enumerate(path) if c == '[')
 
 
 def _parse_field_path(path: str, tally=None):
@@ -1836,7 +1840,7 @@ def _build_actor_events(export_dir: Path, actor_first: dict, actor_last: dict,
     """
     events = []
     guid_class = {}  # actor net guid -> spawn class path
-    actor_event_counts = Counter()
+    actor_event_counts = Counter(dict.fromkeys(_ACTOR_EVENT_TYPES.values(), 0))
 
     # actors.parquet is authoritative: class, archetype and location come from
     # the spawn data itself.
@@ -1982,15 +1986,14 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
     for (pid, actor, obj, gp), row_indices in prop_groups.items():
         ms = col_time[row_indices[0]]
 
-        # Two passes: vrfkit emits both the container row ("Rounds", the whole
-        # array) and its decoded sub-fields ("Rounds[0].Reports[0]..."), the
-        # elements first (stream.rs). Collect the names that have indexed
-        # sub-fields, so the second pass skips their containers.
+        # A container row ("Rounds", "Sel[1].Att") arrives beside its decoded
+        # elements, before or after them; every prefix ending at a '[' names
+        # one, and the second pass skips it at any depth.
         indexed_names = set()
         for ri in row_indices:
             fn = col_fn[ri]
             if fn and '[' in fn:
-                indexed_names.add(fn[:fn.index('[')])
+                indexed_names.update(_container_names(fn))
 
         payload = {}
         # {RAW_BLOB_PREFERRED name: blob built?}, only once one is touched.
@@ -2028,7 +2031,8 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
                     if value is not None and not blob_state[fn]:
                         payload[fn] = value
                 continue
-            if value is None and not is_raw:
+            # A container is skipped raw or typed: its elements carry the data.
+            if fn in indexed_names or (value is None and not is_raw):
                 continue
 
             # See "Combat report leaf labels".
@@ -2048,13 +2052,7 @@ def _build_property_events(cols: _FieldColumns, prop_groups: dict, tally: _Tally
 
             parts = _parse_field_path(fn, tally)
             if len(parts) == 1 and parts[0][1] is None:
-                # A container of indexed sub-fields is skipped, raw OR typed:
-                # its elements carry the data. No typed container occurs on
-                # the 1,018-export corpus (2026-09-28); typing one upstream
-                # must not change the bundle.
                 bare_name = parts[0][0]
-                if bare_name in indexed_names:
-                    continue
                 # The parser flattens struct members and static-array elements
                 # under one name only `handle` tells apart, so a repeat here is
                 # a different property, not a newer copy: 24,060 of 02d4d478's
@@ -2694,7 +2692,7 @@ def main():
         if manifest_path.exists():
             m = json.loads(manifest_path.read_text(encoding='utf-8'))
             source = m.get("source_file", "")
-            stem = Path(source).stem if source else export_dir.name
+            stem = PureWindowsPath(source).stem if source else export_dir.name
         else:
             stem = export_dir.name
         output_dir = Path(__file__).resolve().parent.parent / "out" / "valplay_bundle" / stem

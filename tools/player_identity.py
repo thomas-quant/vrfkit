@@ -106,8 +106,9 @@ def player_bodies(manifest: dict, rows: list[dict]) -> PlayerBodies:
         if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
             raise ValueError(f"SpawnedCharacter is not a u32 NetGUID: {value!r}")
         history[int(row["actor_net_guid"])].append(
-            (int(row["time_ms"]), int(row["packet_id"]), ordinal, value))
-    history = {state: tuple((t, p, v) for t, p, _, v in sorted(writes))
+            (int(row["packet_id"]), ordinal, int(row["time_ms"]), value))
+    # Packet order, not time: a non-finite frame exports time_ms 0.
+    history = {state: tuple((t, p, v) for p, _, t, v in sorted(writes))
                for state, writes in history.items()}
 
     subject_of = {}

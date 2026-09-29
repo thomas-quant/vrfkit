@@ -625,6 +625,18 @@ class TransactionalConversionTests(unittest.TestCase):
             self.assertIn("backup", stderr.getvalue().lower())
 
 
+class DefaultOutputTests(unittest.TestCase):
+    def test_a_windows_source_file_names_the_bundle_directory_on_any_os(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "manifest.json").write_text(
+                json.dumps({"source_file": "D:\\replays\\match.vrf"}), encoding="utf-8")
+            with (mock.patch.object(sys, "argv", ["to_valplay_bundle.py", tmp]),
+                  mock.patch.object(bundle.gc, "disable"),
+                  mock.patch.object(bundle, "convert") as convert):
+                bundle.main()
+        self.assertEqual(convert.call_args.args[1].name, "match")
+
+
 class ShotEventTests(unittest.TestCase):
     def build_shot(self, scalar_params: dict) -> dict:
         return bundle._build_shot_event(
@@ -669,6 +681,11 @@ class ShotEventTests(unittest.TestCase):
                 "roll": 0.0,
             },
         )
+
+    def test_wire_booleans_are_published_as_sent(self):
+        shot = self.build_shot({"bTransient": False, "bLocalEffect": True})
+        self.assertEqual((shot["is_transient"], shot["is_local_effect"]), (False, True))
+        self.assertIs(self.build_shot({})["is_transient"], True)
 
     def test_an_undecoded_alliance_filter_passes_through_unchanged(self):
         """An untyped AllianceFilter's raw blob passes through, never a repr."""
@@ -748,6 +765,11 @@ class EffectFramingTallyTests(unittest.TestCase):
 
     def test_a_tail_after_the_terminator_is_counted(self):
         self.assertEqual(self.residual(self.ONE_ELEMENT + bytes(6)), ([(284, 1.0)], 1))
+
+    def test_a_sub_byte_tail_is_counted(self):
+        # Rust rejects any leftover bit: ResidualBits { remaining: 4 }.
+        self.assertEqual(self.residual(self.ONE_ELEMENT + b"\x00", len(self.ONE_ELEMENT) * 8 + 4),
+                         ([(284, 1.0)], 1))
 
     def test_an_oversized_count_is_counted(self):
         # IntPacked 383, past Rust's MAX_ARRAY_COUNT of 256, then 40 bytes.
@@ -1257,6 +1279,17 @@ class PropertyKeyCollisionTallyTests(TallyTestCase):
         self.assertEqual(event["payload"], {"Foo": {"Bar": 2.0}, "Arr": [4.0]})
         self.assertEqual(tally["property_key_collisions"], 2)
         self.assertEqual(tally["payload_shape_conflicts"], 0)
+
+    def test_a_nested_container_row_is_skipped_before_or_after_its_elements(self):
+        """`Sel[1].Att` carries the blob of `Sel[1].Att[i]`; the elements win."""
+        container = self.row("Sel[1].Att", 1, b"\x01", "raw_bits", bit_count=8)
+        elements = [self.row("Sel[1].Att[0]", 2, 5.0), self.row("Sel[1].Att[1]", 3, 6.0)]
+        for label, rows in (("first", [container, *elements]), ("last", [*elements, container])):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                tally = self.tally_of(tmp, rows)
+                (event,) = self.events_of(tmp, "export_group_received")
+                self.assertEqual(event["payload"], {"Sel": [{"Index": 1, "Att": [5.0, 6.0]}]})
+                self.assertEqual(tally["payload_shape_conflicts"], 0)
 
     def test_a_real_index_member_replacing_the_injected_one_is_not_counted(self):
         """13.01, 12.05 and 11.06 exports carry real `TeamEconomy[i].Index`

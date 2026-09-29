@@ -909,9 +909,9 @@ too. `property_key_collisions` counts property values a same-named row
 of the same event overwrote, typed values and raw blobs alike -- rows the
 export tells apart only by `handle`, so the lost value is a different property,
 not an older copy (28,845 on 02d4d478). `payload_shape_conflicts` counts only
-rows that disagree about a key's shape, members against a row's own value (272
-on 02d4d478, each a nested array's container blob replaced by its decoded
-elements). `non_finite_movement_rows` counts movement lines holding a
+rows that disagree about a key's shape, members against a row's own value (0 on
+02d4d478: an array's container row is skipped at any depth, its decoded
+elements carry the value). `non_finite_movement_rows` counts movement lines holding a
 non-finite position, velocity, yaw or pitch. Those are written `Infinity` /
 `-Infinity` / `NaN`, as every non-finite float in the bundle is spelled: Python's
 `json` reads them, a strict parser such as orjson rejects the line. None occurs
