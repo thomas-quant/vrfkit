@@ -1,13 +1,38 @@
-"""Observed section adjacency; actor lifetime does not prove game lifetime."""
+"""Build the main-stream section timeline of one export: each section state's
+observed predecessor, with a strict (time-ordered) and a packet-ordered
+continuity decision. Adjacency is observation order, not effective HP, game
+life or component life."""
 from __future__ import annotations
 
+import argparse
 import collections
+import json
 import math
 import struct
+import sys
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+
+if __package__:
+    from . import extract_section_observations
+    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
+else:
+    import extract_section_observations
+    from atomic_io import aliases, atomic_write_text, sha256_file as sha
 
 RESET = "MulticastSectionLifeChange"
 SIGNS = {"MulticastNotifyDamage_Base": 1, "MulticastNotifyDamage_Point": 1,
          "MulticastNotifyHeal": 1, "MulticastNotifyOverhealDecay": -1}
+#: Strict reasons that packet order can resolve; every other strict reason stays.
+REMOVED_STRICT_REASONS = {"same_time_tie", "prior_tie_censor", "lifecycle_unresolved",
+                          "prior_lifecycle_unresolved", "actor_channel_instance_changed"}
+INPUT_NAMES = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet",
+               "net_guids.parquet", "actors.parquet")
+SOURCE_NAMES = ("section_timeline.py", "extract_section_observations.py",
+                "extract_kill_observations.py", "atomic_io.py")
 
 
 def _traces(rows):
@@ -20,11 +45,9 @@ def _traces(rows):
 
 
 def active_at(history, coordinate):
-    """Require ordered lifecycle evidence; cross-table same-ms order is unknown.
-
-    Inspect the entire trace for duplicate/regressed clocks before resolving
-    a prefix. Sorting first would hide damaged or incomplete lifetime evidence.
-    """
+    """The open record active at a coordinate's time. The whole trace must be
+    ordered first: sorting would hide damaged lifetime evidence, and the order
+    of two tables' rows within one ms is unknown."""
     clocks = [(r.get("time_ms"), r.get("packet_id")) for _, r in history]
     if any(t is None or p is None for t, p in clocks):
         return None, "missing_lifecycle_clock"
@@ -46,6 +69,43 @@ def active_at(history, coordinate):
             if any(active[k] != row[k] for k in ("actor_net_guid", "channel_index")):
                 return None, "close_identity_mismatch"
             active = None
+    if active is None:
+        return None, "no_active_actor"
+    if any(active[k] != coordinate[k] for k in ("actor_net_guid", "channel_index")):
+        return None, "active_identity_mismatch"
+    return active, "active"
+
+
+def active_at_packet(history, coordinate):
+    """As active_at, by main packet id; events in the coordinate's own packet
+    are unordered. The whole trace is validated, then only its prefix replayed."""
+    last = active = reason = None
+    for ordinal, row in history:
+        packet = row.get("packet_id")
+        if packet is None:
+            return None, "missing_packet_clock"
+        if last is not None and packet <= last:
+            return None, "packet_clock_duplicate_or_regression"
+        last = packet
+        if packet == coordinate["packet_id"]:
+            reason = "same_packet_boundary"
+        if row["event"] == "open":
+            if active is not None:
+                return None, "reopen_without_close"
+            active = {**row, "physical_row_ordinal": ordinal}
+        elif row["event"] == "close":
+            if active is None:
+                return None, "close_without_open"
+            if any(active[k] != row[k] for k in ("actor_net_guid", "channel_index")):
+                return None, "close_identity_mismatch"
+            active = None
+    if reason:
+        return None, reason
+    active = None
+    for ordinal, row in history:
+        if row["packet_id"] >= coordinate["packet_id"]:
+            break
+        active = {**row, "physical_row_ordinal": ordinal} if row["event"] == "open" else None
     if active is None:
         return None, "no_active_actor"
     if any(active[k] != coordinate[k] for k in ("actor_net_guid", "channel_index")):
@@ -96,8 +156,21 @@ def _arithmetic(prior, section, route):
     return result
 
 
+def _arithmetic_counts(nodes, key):
+    out = {f"{key}_{scope}arithmetic_{suffix}": 0
+           for scope in ("", "eligible_") for suffix in ("true", "false", "unknown")}
+    for node in nodes:
+        value = node["route_arithmetic"]["matches"]
+        suffix = "true" if value is True else "false" if value is False else "unknown"
+        out[f"{key}_arithmetic_{suffix}"] += 1
+        if node[key]["eligible"]:
+            out[f"{key}_eligible_arithmetic_{suffix}"] += 1
+    return out
+
+
 def build(raw, actor_rows):
-    """Retain states and barriers; adjacency eligibility is not effective HP."""
+    """Strict nodes and barriers from section observations, then each node's
+    packet-ordered `packet_view`."""
     actors, channels = _traces(actor_rows)
     observations = sorted(raw["observations"], key=lambda o: min(
         r["physical_row_ordinal"] for r in o["source_rows"]))
@@ -199,7 +272,116 @@ def build(raw, actor_rows):
                 "route_arithmetic": _arithmetic(prior, section, obs["route"])}
             nodes.append(node)
             previous[key] = node
-    return {"nodes": nodes, "barriers": barriers, "scalar_warnings": warnings,
-        "counts": {"nodes": len(nodes), "barriers": len(barriers), "scalar_warnings": len(warnings),
-            "continuity_eligible": sum(n["continuity"]["eligible"] for n in nodes),
-            "continuity_ineligible": sum(not n["continuity"]["eligible"] for n in nodes)}}
+    counts = {"nodes": len(nodes), "barriers": len(barriers), "scalar_warnings": len(warnings),
+              "continuity_eligible": sum(n["continuity"]["eligible"] for n in nodes),
+              "continuity_ineligible": sum(not n["continuity"]["eligible"] for n in nodes)}
+    packet_ties = collections.Counter()
+    time_groups = collections.defaultdict(list)
+    for n in nodes:
+        c, k = n["origin"]["coordinate"], n["state_key"]
+        state = k["actor_net_guid"], k["object_net_guid"], k["changed_component_ref"]
+        packet_ties[(*state, c["packet_id"])] += 1
+        time_groups[(*state, c["time_ms"])].append(c["packet_id"])
+    by_id = {tuple(n["node_id"]): n for n in nodes}
+    for node in nodes:
+        c, k = node["origin"]["coordinate"], node["state_key"]
+        state = k["actor_net_guid"], k["object_net_guid"], k["changed_component_ref"]
+        life = _lifetime(actors, channels, c, active_at_packet)
+        prior = by_id.get(tuple(node["previous_node_id"])) if node["previous_node_id"] else None
+        strict = node["continuity"]["reasons"]
+        reasons = [x for x in strict if x not in REMOVED_STRICT_REASONS]
+        tied = packet_ties[(*state, c["packet_id"])] > 1
+        if tied:
+            reasons.append("same_packet_tie")
+        if prior and prior.get("packet_view", {}).get("same_packet_tie"):
+            reasons.append("prior_packet_tie_censor")
+        if life["status"] != "active":
+            reasons.append("packet_lifecycle_unresolved")
+        if prior:
+            prior_life = prior["packet_view"]["actor_lifecycle"]
+            if prior_life["status"] != "active":
+                reasons.append("prior_packet_lifecycle_unresolved")
+            elif life["status"] == "active" and prior_life != life:
+                reasons.append("packet_actor_channel_instance_changed")
+            if c["packet_id"] <= prior["origin"]["coordinate"]["packet_id"]:
+                reasons.append("nonincreasing_packet")
+        reasons = sorted(set(reasons))
+        packets = time_groups[(*state, c["time_ms"])]
+        node["packet_view"] = {
+            "eligible": not reasons, "reasons": reasons,
+            "removed_strict_reasons": sorted(x for x in strict if x in REMOVED_STRICT_REASONS),
+            "scope": "main_packet_ordered_observation_comparison_only",
+            "game_life": "unproved", "component_life": "unproved", "same_packet_tie": tied,
+            "actor_lifecycle": life, "actor_channel_lifecycle": life,
+            "predecessor_lifecycle": prior["packet_view"]["actor_channel_lifecycle"] if prior else None,
+            "same_time_group": {"group_size": len(packets), "same_packet": len(set(packets)) < len(packets),
+                                "packets": sorted(packets)},
+            "predecessor_same_time_group": prior["packet_view"]["same_time_group"] if prior else None,
+            "strict_previous_node_id": node["previous_node_id"],
+            "arithmetic_matches": node["route_arithmetic"]["matches"]}
+    strict_counts = {"eligible": counts["continuity_eligible"], "ineligible": counts["continuity_ineligible"],
+                     **_arithmetic_counts(nodes, "continuity")}
+    packet_counts = {"eligible": sum(n["packet_view"]["eligible"] for n in nodes),
+                     "ineligible": sum(not n["packet_view"]["eligible"] for n in nodes),
+                     "resolved_from_strict_ineligible": sum(
+                         n["packet_view"]["eligible"] and not n["continuity"]["eligible"] for n in nodes),
+                     **_arithmetic_counts(nodes, "packet_view")}
+    return {"nodes": nodes, "barriers": barriers, "scalar_warnings": warnings, "counts": counts,
+            "strict_counts_retained": {**counts, **strict_counts}, "packet_counts": packet_counts}
+
+
+def actor_rows(path):
+    """(physical row ordinal, row) for each open/close row of actors.parquet."""
+    ordinal = 0
+    for batch in pq.ParquetFile(path).iter_batches(batch_size=65536, columns=[
+            "time_ms", "packet_id", "channel_index", "actor_net_guid", "event", "class_path"],
+            use_threads=False):
+        events = pc.cast(batch.column("event"), pa.string())
+        indices = pc.indices_nonzero(pc.is_in(events, value_set=pa.array(["open", "close"])))
+        for offset, row in zip(indices.to_pylist(), batch.take(indices).to_pylist()):
+            row["_ordinal"] = ordinal + offset
+            yield ordinal + offset, row
+        ordinal += batch.num_rows
+
+
+def extract(export):
+    inputs = [export / n for n in INPUT_NAMES]
+    before = {p.name: sha(p) for p in inputs}
+    raw = extract_section_observations.extract(export)
+    timeline = build(raw, list(actor_rows(export / "actors.parquet")))
+    after = {p.name: sha(p) for p in inputs}
+    if before != after:
+        raise ValueError("input changed during extraction")
+    here = Path(__file__).resolve().parent
+    return {"schema_version": 2, "kind": "vrfkit_section_packet_timeline",
+            "export_id": export.name, "source": str(export.resolve()),
+            "provenance": {"input_sha256_before": before, "input_sha256_after": after,
+                           "implementation_sha256": {n: sha(here / n) for n in SOURCE_NAMES},
+                           "raw_observation_counts": raw["counts"],
+                           "replay_build": raw["provenance"]["replay_build"],
+                           "population": "main_only"},
+            **timeline}
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--export", required=True, type=Path)
+    p.add_argument("--out", required=True, type=Path)
+    a = p.parse_args(argv)
+    try:
+        here = Path(__file__).resolve().parent
+        protected = [x for x in a.export.iterdir() if x.is_file()] + [here / n for n in SOURCE_NAMES]
+        if aliases(a.out, protected):
+            raise ValueError("output aliases an input or implementation file")
+        data = extract(a.export)
+        atomic_write_text(a.out, json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    except (OSError, ValueError) as e:
+        print("FAILED: " + str(e), file=sys.stderr)
+        return 1
+    print("wrote %s (%d packet-eligible, %d resolved)" % (
+        a.out, data["packet_counts"]["eligible"], data["packet_counts"]["resolved_from_strict_ineligible"]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
