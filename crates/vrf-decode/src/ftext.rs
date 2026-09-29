@@ -227,13 +227,11 @@ impl FTextTree {
         }
     }
 }
-/// Charge one node against the total-node budget: each tree (each
-/// [`decode_tree`] call) and each format argument. `checked_add` keeps the
-/// check sound on its own, not only while `MAX_NODES` stays below `u16::MAX`.
+
+/// Charge one node (each tree and each format argument) against the budget;
+/// the first charge past `MAX_NODES` (256) returns, so `+= 1` cannot overflow.
 fn charge_node_budget(nodes: &mut u16) -> Result<(), FTextTreeError> {
-    *nodes = nodes
-        .checked_add(1)
-        .ok_or(FTextTreeError::NodeLimit { limit: MAX_NODES })?;
+    *nodes += 1;
     if *nodes > MAX_NODES {
         return Err(FTextTreeError::NodeLimit { limit: MAX_NODES });
     }
@@ -413,33 +411,47 @@ mod tests {
     /// The FText pieces these tests assemble, on the shared writer.
     trait FTextBits {
         fn string(&mut self, value: &str) -> &mut Self;
+        /// Flags and history 11, then the inline-name bit: a string table's head.
+        fn table_head(&mut self, flags: u32) -> &mut Self;
         fn table(&mut self, flags: u32, name: &str, number: i32, key: &str) -> &mut Self;
+        /// Flags, history 3 and an empty source: a format history up to its count.
+        fn format_head(&mut self, flags: u32) -> &mut Self;
+        /// Flags and history 4, then a double source: an `AsNumber` up to its options.
+        fn number_head(&mut self, flags: u32, value: f64) -> &mut Self;
         fn empty(&mut self) -> &mut Self;
     }
 
     impl FTextBits for BitWriter {
         fn string(&mut self, value: &str) -> &mut Self {
-            self.i32((value.len() + 1) as i32);
-            for byte in value.bytes() {
-                self.bits(u64::from(byte), 8);
-            }
-            self.bits(0, 8)
+            self.i32((value.len() + 1) as i32)
+                .bytes(value.as_bytes())
+                .u8(0)
+        }
+        fn table_head(&mut self, flags: u32) -> &mut Self {
+            self.u32(flags).u8(11).bit(false)
         }
         fn table(&mut self, flags: u32, name: &str, number: i32, key: &str) -> &mut Self {
-            self.bits(u64::from(flags), 32).bits(11, 8).bits(0, 1);
-            self.string(name).i32(number).string(key)
+            self.table_head(flags).string(name).i32(number).string(key)
+        }
+        fn format_head(&mut self, flags: u32) -> &mut Self {
+            self.u32(flags).u8(3).empty()
+        }
+        fn number_head(&mut self, flags: u32, value: f64) -> &mut Self {
+            self.u32(flags).u8(4).u8(3).bits(value.to_bits(), 64)
         }
         fn empty(&mut self) -> &mut Self {
-            self.bits(0, 32).bits(255, 8).i32(0)
+            self.u32(0).u8(255).i32(0)
         }
+    }
+
+    fn decode(bits: &BitWriter) -> Result<FTextTree, FTextTreeError> {
+        let (raw, count) = bits.finish();
+        decode_ftext_tree(&raw, count)
     }
 
     #[test]
     fn string_table_preserves_suffix_and_escapes_json() {
-        let mut bits = BitWriter::new();
-        bits.table(7, "Table\\Name", 2, "line\n\"key");
-        let (raw, count) = bits.finish();
-        let tree = decode_ftext_tree(&raw, count).unwrap();
+        let tree = decode(BitWriter::new().table(7, "Table\\Name", 2, "line\n\"key")).unwrap();
         assert_eq!(
             tree.to_json(),
             r#"{"flags":7,"history":11,"kind":"string_table","table":{"name":"Table\\Name","number":2},"key":"line\n\"key"}"#
@@ -449,18 +461,10 @@ mod tests {
     #[test]
     fn format_keeps_duplicate_names_and_unsigned_bits() {
         let mut bits = BitWriter::new();
-        bits.bits(9, 32);
-        bits.bits(3, 8);
-        bits.table(0, "T", 0, "Source");
-        bits.i32(2);
-        bits.string("same");
-        bits.bits(0, 8);
-        bits.bits(u64::MAX, 64);
-        bits.string("same");
-        bits.bits(4, 8);
-        bits.empty();
-        let (raw, count) = bits.finish();
-        let json = decode_ftext_tree(&raw, count).unwrap().to_json();
+        bits.u32(9).u8(3).table(0, "T", 0, "Source").i32(2);
+        bits.string("same").u8(0).bits(u64::MAX, 64);
+        bits.string("same").u8(4).empty();
+        let json = decode(&bits).unwrap().to_json();
         assert!(json.contains(r#""bits_u64":"18446744073709551615""#));
         assert_eq!(json.matches(r#""name":"same""#).count(), 2);
     }
@@ -469,18 +473,11 @@ mod tests {
     fn format_accepts_zero_one_and_two_arguments() {
         for count in 0..=2 {
             let mut bits = BitWriter::new();
-            bits.bits(0, 32);
-            bits.bits(3, 8);
-            bits.empty();
-            bits.i32(count);
+            bits.format_head(0).i32(count);
             for index in 0..count {
-                bits.string("arg");
-                bits.bits(0, 8);
-                bits.bits(index as u64, 64);
+                bits.string("arg").u8(0).bits(index as u64, 64);
             }
-            let (raw, width) = bits.finish();
-            let FTextTree::Format { arguments, .. } = decode_ftext_tree(&raw, width).unwrap()
-            else {
+            let FTextTree::Format { arguments, .. } = decode(&bits).unwrap() else {
                 panic!("format history");
             };
             assert_eq!(arguments.len(), count as usize);
@@ -489,68 +486,29 @@ mod tests {
 
     #[test]
     fn rejects_bad_terminator_count_tag_flags_and_residual() {
-        let mut terminator = BitWriter::new();
-        terminator.bits(0, 32);
-        terminator.bits(11, 8);
-        terminator.bits(0, 1);
-        terminator.i32(2);
-        terminator.bits(u64::from(b'A'), 8);
-        terminator.bits(u64::from(b'X'), 8);
-        let (raw, count) = terminator.finish();
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            decode(BitWriter::new().table_head(0).i32(2).bytes(b"AX")),
             Err(FTextTreeError::MissingStringTerminator)
         ));
-        let mut count_bits = BitWriter::new();
-        count_bits.bits(0, 32);
-        count_bits.bits(3, 8);
-        count_bits.empty();
-        count_bits.i32(-1);
-        let (raw, count) = count_bits.finish();
+        for count in [-1, 129] {
+            assert!(matches!(
+                decode(BitWriter::new().format_head(0).i32(count)),
+                Err(FTextTreeError::InvalidArgumentCount { .. })
+            ));
+        }
+        let mut tag = BitWriter::new();
+        tag.format_head(0).i32(2).string("first").u8(0).bits(1, 64);
+        tag.string("second").u8(99);
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
-            Err(FTextTreeError::InvalidArgumentCount { .. })
-        ));
-        let mut too_wide = BitWriter::new();
-        too_wide.bits(0, 32);
-        too_wide.bits(3, 8);
-        too_wide.empty();
-        too_wide.i32(129);
-        let (raw, count) = too_wide.finish();
-        assert!(matches!(
-            decode_ftext_tree(&raw, count),
-            Err(FTextTreeError::InvalidArgumentCount { .. })
-        ));
-        let mut tag_bits = BitWriter::new();
-        tag_bits.bits(0, 32);
-        tag_bits.bits(3, 8);
-        tag_bits.empty();
-        tag_bits.i32(2);
-        tag_bits.string("first");
-        tag_bits.bits(0, 8);
-        tag_bits.bits(1, 64);
-        tag_bits.string("second");
-        tag_bits.bits(99, 8);
-        let (raw, count) = tag_bits.finish();
-        assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            decode(&tag),
             Err(FTextTreeError::UnsupportedArgumentTag { tag: 99 })
         ));
-        let mut empty = BitWriter::new();
-        empty.bits(1, 32);
-        empty.bits(255, 8);
-        empty.i32(0);
-        let (raw, count) = empty.finish();
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            decode(BitWriter::new().u32(1).u8(255).i32(0)),
             Err(FTextTreeError::InvalidEmptyForm)
         ));
-        let mut residual = BitWriter::new();
-        residual.empty();
-        residual.bits(1, 1);
-        let (raw, count) = residual.finish();
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            decode(BitWriter::new().empty().bit(true)),
             Err(FTextTreeError::TrailingBits { .. })
         ));
     }
@@ -613,15 +571,9 @@ mod tests {
     #[test]
     fn as_number_reads_the_no_options_branch_and_a_culture() {
         let mut bits = BitWriter::new();
-        bits.bits(0, 32);
-        bits.bits(4, 8);
-        bits.bits(3, 8);
-        bits.bits((-2.5f64).to_bits(), 64);
-        bits.bits(0, 32);
-        bits.string("ko-KR");
-        let (raw, count) = bits.finish();
+        bits.number_head(0, -2.5).u32(0).string("ko-KR");
         assert_eq!(
-            decode_ftext_tree(&raw, count).unwrap().to_json(),
+            decode(&bits).unwrap().to_json(),
             r#"{"flags":0,"history":4,"kind":"as_number","source":{"tag":3,"double":-2.5},"format":null,"culture":"ko-KR"}"#
         );
     }
@@ -632,20 +584,9 @@ mod tests {
     #[test]
     fn as_number_format_options_keep_their_wire_order() {
         let mut bits = BitWriter::new();
-        bits.bits(0, 32);
-        bits.bits(4, 8);
-        bits.bits(3, 8);
-        bits.bits(1.0f64.to_bits(), 64);
-        bits.bits(1, 32);
-        bits.bits(1, 32);
-        bits.bits(0, 32);
-        bits.bits(0xff, 8);
-        for limit in [1, 2, 3, 4] {
-            bits.i32(limit);
-        }
-        bits.i32(0);
-        let (raw, count) = bits.finish();
-        let FTextTree::AsNumber { format, .. } = decode_ftext_tree(&raw, count).unwrap() else {
+        bits.number_head(0, 1.0).u32(1).u32(1).u32(0).u8(0xff);
+        bits.i32(1).i32(2).i32(3).i32(4).i32(0);
+        let FTextTree::AsNumber { format, .. } = decode(&bits).unwrap() else {
             panic!("history 4");
         };
         assert_eq!(
@@ -664,45 +605,35 @@ mod tests {
 
     #[test]
     fn as_number_refuses_other_sources_bad_bools_and_non_finite_values() {
-        let number = |tag: u64, value: f64, has_format: u64, always_sign: u64| {
+        let number = |tag: u8, value: f64, has_format: u32, always_sign: u32| {
             let mut bits = BitWriter::new();
-            bits.bits(1, 32);
-            bits.bits(4, 8);
-            bits.bits(tag, 8);
-            bits.bits(value.to_bits(), 64);
-            bits.bits(has_format, 32);
+            bits.u32(1)
+                .u8(4)
+                .u8(tag)
+                .bits(value.to_bits(), 64)
+                .u32(has_format);
             if has_format == 1 {
-                bits.bits(always_sign, 32);
-                bits.bits(1, 32);
-                bits.bits(0, 8);
-                for _ in 0..4 {
-                    bits.i32(2);
-                }
+                bits.u32(always_sign).u32(1).u8(0);
+                bits.i32(2).i32(2).i32(2).i32(2);
             }
-            bits.i32(0);
-            bits.finish()
+            decode(bits.i32(0))
         };
-        let (raw, count) = number(3, 1.5, 1, 0);
-        assert!(decode_ftext_tree(&raw, count).is_ok());
+        assert!(number(3, 1.5, 1, 0).is_ok());
         // A float source (2) is four bytes, not eight: refused, not misread.
-        let (raw, count) = number(2, 1.5, 1, 0);
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            number(2, 1.5, 1, 0),
             Err(FTextTreeError::UnsupportedArgumentTag { tag: 2 })
         ));
-        let (raw, count) = number(3, f64::NAN, 1, 0);
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            number(3, f64::NAN, 1, 0),
             Err(FTextTreeError::NonFiniteNumber)
         ));
-        let (raw, count) = number(3, 1.5, 2, 0);
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            number(3, 1.5, 2, 0),
             Err(FTextTreeError::InvalidBool { value: 2 })
         ));
-        let (raw, count) = number(3, 1.5, 1, 7);
         assert!(matches!(
-            decode_ftext_tree(&raw, count),
+            number(3, 1.5, 1, 7),
             Err(FTextTreeError::InvalidBool { value: 7 })
         ));
     }
@@ -710,58 +641,33 @@ mod tests {
     #[test]
     fn unicode_strings_are_strict_and_byte_bounded() {
         let mut valid = BitWriter::new();
-        valid.bits(0, 32);
-        valid.bits(11, 8);
-        valid.bits(0, 1);
-        valid.i32(-3);
-        for unit in [0xd83d, 0xde00, 0] {
-            valid.bits(unit, 16);
-        }
-        valid.i32(0);
-        valid.string("Key");
-        let (raw, count) = valid.finish();
-        let FTextTree::StringTable { table, .. } = decode_ftext_tree(&raw, count).unwrap() else {
+        valid.table_head(0).i32(-3).u16(0xd83d).u16(0xde00).u16(0);
+        valid.i32(0).string("Key");
+        let FTextTree::StringTable { table, .. } = decode(&valid).unwrap() else {
             panic!("string table");
         };
         assert_eq!(table.name, "\u{1f600}");
 
-        for (length, units, width) in [(2, vec![0xff, 0], 8), (-2, vec![0xd800, 0], 16)] {
+        for (length, units, width) in [(2, [0xff, 0], 8), (-2, [0xd800, 0], 16)] {
             let mut invalid = BitWriter::new();
-            invalid.bits(0, 32);
-            invalid.bits(11, 8);
-            invalid.bits(0, 1);
-            invalid.i32(length);
+            invalid.table_head(0).i32(length);
             for unit in units {
                 invalid.bits(unit, width);
             }
-            let (raw, count) = invalid.finish();
             assert!(matches!(
-                decode_ftext_tree(&raw, count),
+                decode(&invalid),
                 Err(FTextTreeError::BitIo(BitError::InvalidString { .. }))
             ));
         }
         for length in [65_537, -32_769, i32::MIN] {
-            let mut invalid = BitWriter::new();
-            invalid.bits(0, 32);
-            invalid.bits(11, 8);
-            invalid.bits(0, 1);
-            invalid.i32(length);
-            let (raw, count) = invalid.finish();
             assert!(matches!(
-                decode_ftext_tree(&raw, count),
+                decode(BitWriter::new().table_head(0).i32(length)),
                 Err(FTextTreeError::StringTooLong { .. })
             ));
         }
         // Under the cap but past the window: the prefix is at fault, not an EOF.
-        let mut past = BitWriter::new();
-        past.bits(0, 32)
-            .bits(11, 8)
-            .bits(0, 1)
-            .i32(1000)
-            .repeat(false, 128);
-        let (raw, count) = past.finish();
         assert_eq!(
-            decode_ftext_tree(&raw, count),
+            decode(BitWriter::new().table_head(0).i32(1000).repeat(false, 128)),
             Err(FTextTreeError::BitIo(BitError::InvalidLength {
                 position: 41,
                 length: 1000
@@ -774,19 +680,17 @@ mod tests {
         for levels in [MAX_DEPTH - 1, MAX_DEPTH] {
             let mut nested = BitWriter::new();
             for _ in 0..levels {
-                nested.bits(0, 32);
-                nested.bits(3, 8);
+                nested.u32(0).u8(3);
             }
             nested.empty();
             for _ in 0..levels {
                 nested.i32(0);
             }
-            let (raw, count) = nested.finish();
             if levels < MAX_DEPTH {
-                assert!(decode_ftext_tree(&raw, count).is_ok());
+                assert!(decode(&nested).is_ok());
             } else {
                 assert!(matches!(
-                    decode_ftext_tree(&raw, count),
+                    decode(&nested),
                     Err(FTextTreeError::DepthLimit { .. })
                 ));
             }
@@ -795,21 +699,15 @@ mod tests {
         // argument crosses the global budget while its local count is valid.
         for arguments in [127, 128] {
             let mut wide = BitWriter::new();
-            wide.bits(0, 32);
-            wide.bits(3, 8);
-            wide.empty();
-            wide.i32(arguments);
+            wide.format_head(0).i32(arguments);
             for _ in 0..arguments {
-                wide.string("arg");
-                wide.bits(4, 8);
-                wide.empty();
+                wide.string("arg").u8(4).empty();
             }
-            let (raw, count) = wide.finish();
             if arguments == 127 {
-                assert!(decode_ftext_tree(&raw, count).is_ok());
+                assert!(decode(&wide).is_ok());
             } else {
                 assert!(matches!(
-                    decode_ftext_tree(&raw, count),
+                    decode(&wide),
                     Err(FTextTreeError::NodeLimit { .. })
                 ));
             }
