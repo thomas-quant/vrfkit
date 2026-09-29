@@ -49,9 +49,7 @@ LINES = (
     ("Movement rows: {}", "movement_rows", "PG"),
     ("NetGUID rows: {}", "net_guid_rows", "P"),
     ("Event rows: {}", "event_rows", "P"),
-    # `decoded` keeps a decoder that stops running (0 decoded, 0 failed) from
-    # reading as clean: 13.02 moved RoundResults from handle 93 to 81 and
-    # nothing else on the summary moved.
+    # `decoded` keeps a stopped decoder (0 decoded, 0 failed) from reading clean.
     ("Struct blobs: {} decoded / {} failed", "struct_blobs_decoded struct_blobs_failed", "PG"),
     ("Movement errors: {}", "movement_rpc_errors", "G"),
     # A measured tally in sized and open windows, not a loss verdict.
