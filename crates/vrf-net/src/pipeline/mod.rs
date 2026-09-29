@@ -193,7 +193,8 @@ pub trait ReplicationSink: GuidPathSink + FieldSink {
         }
     }
 
-    /// Optional raw diagnostic sample for a chained tail that was not decoded.
+    /// Optional raw diagnostic sample for a chained tail that was not decoded,
+    /// after its [`Self::on_stream_failure`].
     fn on_rep_layout_tail_failure_payload(
         &mut self,
         _failure: StreamFailure,
@@ -227,17 +228,19 @@ pub trait ReplicationSink: GuidPathSink + FieldSink {
     /// A block framed and decoded, but its inner stream could not be walked.
     /// Default no-op (the [`NetStats`] counters move either way); override to
     /// attach names the sink holds, the resolved group path in particular.
+    /// The three payload callbacks for the same failure always come after it.
     fn on_stream_failure(&mut self, _failure: StreamFailure) {}
 
     /// The decoded payload of a block whose inner stream could not be walked,
-    /// only when [`Self::wants_stream_failure_details`], and not for unresolved
+    /// after [`Self::on_stream_failure`], only when
+    /// [`Self::wants_stream_failure_details`], and not for unresolved
     /// ClassNetCache blocks ([`Self::on_unresolved_class_net_cache_payload`]).
     /// Diagnostics only; default no-op.
     fn on_stream_failure_payload(&mut self, _failure: StreamFailure, _payload: &[u8]) {}
 
     /// Preserve one whole decoded ClassNetCache payload whose function table
-    /// could not be resolved: a block-level data event, not a fabricated RPC.
-    /// `payload` is exactly `ceil(failure.bit_count / 8)` bytes, the final
+    /// could not be resolved: a block-level data event, not a fabricated RPC,
+    /// after its [`Self::on_stream_failure`]. `payload` is exactly `ceil(failure.bit_count / 8)` bytes, the final
     /// byte's unused high bits cleared; the parser consumed none of it.
     fn on_unresolved_class_net_cache_payload(&mut self, _failure: StreamFailure, _payload: &[u8]) {}
 }
@@ -643,7 +646,7 @@ impl ReplicationReader {
     /// channel open) leave the reader at an indeterminate bit when they fail,
     /// so the rest of the bunch cannot be framed. The charge is the whole
     /// window (`payload`'s window is this bunch's payload), never
-    /// `bits_remaining()`, by the rule on `framing::abandoned_from`.
+    /// `bits_remaining()`, by the rule on `framing::abort`.
     fn abandon_bunch(payload: &mut BitReader<'_>, stage: &mut Stage<'_>) {
         stage.stats.bunch_header_failures += 1;
         stage.stats.skipped_bits += payload.len_bits();
@@ -770,9 +773,10 @@ impl ReplicationReader {
         let ctx = BunchContext {
             header,
             ids,
+            actor_net_guid,
             archetype_net_guid,
         };
-        framing::frame_content_blocks(payload, ch_index, actor_net_guid, stage, sink, &ctx);
+        framing::frame_content_blocks(payload, stage, sink, &ctx);
     }
 }
 
@@ -839,6 +843,9 @@ mod tests {
         rpcs: Vec<(u32, u32)>,
         stream_failures: Vec<StreamFailure>,
         unresolved_payloads: Vec<(StreamFailure, Vec<u8>)>,
+        /// `stream_failures.len()` at each payload callback: the failure must
+        /// already be there.
+        failures_before_payload: Vec<usize>,
         opens: Vec<u32>,
         closes: Vec<u32>,
         paths: Vec<(u32, String)>,
@@ -934,7 +941,19 @@ mod tests {
             failure: StreamFailure,
             payload: &[u8],
         ) {
+            self.failures_before_payload
+                .push(self.stream_failures.len());
             self.unresolved_payloads.push((failure, payload.to_vec()));
+        }
+
+        fn on_stream_failure_payload(&mut self, _: StreamFailure, _: &[u8]) {
+            self.failures_before_payload
+                .push(self.stream_failures.len());
+        }
+
+        fn on_rep_layout_tail_failure_payload(&mut self, _: StreamFailure, _: BitReader<'_>) {
+            self.failures_before_payload
+                .push(self.stream_failures.len());
         }
     }
 
@@ -2077,7 +2096,7 @@ mod tests {
         assert_eq!(reader.stats().malformed_packets, 1);
     }
 
-    /// One block handed straight to `decode_and_parse_*`, bypassing framing.
+    /// One block handed straight to `decode_and_walk`, bypassing framing.
     struct Run {
         /// What the call returned: `false` only for a failed transform.
         transformed: bool,
@@ -2108,23 +2127,14 @@ mod tests {
             scratch: &mut scratch,
         };
         let actor = NetworkGuid(2);
-        let transformed = match function_count {
-            None => framing::decode_and_parse_rep_layout(
-                &mut payload,
-                bit_count,
-                actor,
-                &mut stage,
-                &mut sink,
-            ),
-            Some(count) => framing::decode_and_parse_class_net_cache(
-                &mut payload,
-                bit_count,
-                actor,
-                count,
-                &mut stage,
-                &mut sink,
-            ),
-        };
+        let transformed = framing::decode_and_walk(
+            &mut payload,
+            bit_count,
+            actor,
+            function_count,
+            &mut stage,
+            &mut sink,
+        );
         Run {
             transformed,
             stats,
@@ -2177,6 +2187,7 @@ mod tests {
         assert_eq!(failure.remaining_bits, 7);
         assert_eq!(decoded, &[0x66]);
         assert_eq!(decoded[0] >> 7, 0, "high padding bit must stay zero");
+        assert_eq!(sink.failures_before_payload, [1], "failure, then payload");
         assert_eq!(stats.rpcs, 0);
         assert_eq!(stats.rpc_stream_failures, 1);
         assert_eq!(stats.unresolved_rpc_payloads_preserved, 1);
@@ -2355,6 +2366,7 @@ mod tests {
         assert_eq!(failure.kind, StreamKind::Rpc);
         assert_eq!(failure.bit_count, 13);
         assert!(failure.payload_preserved);
+        assert_eq!(sink.failures_before_payload, [1], "failure, then payload");
     }
 
     #[test]
@@ -2410,7 +2422,7 @@ mod tests {
     }
 
     /// The `Err` arm charges the whole block (see
-    /// `decode_and_parse_rep_layout`), not the reader's remainder. Nine decoded
+    /// `decode_and_walk`), not the reader's remainder. Nine decoded
     /// bits: the checksum, then 0x01 -- an `IntPacked` chunk promising another
     /// the block lacks -- so the handle read fails with the window consumed and
     /// `bits_remaining() == 0`.
@@ -2472,6 +2484,7 @@ mod tests {
         );
         assert_eq!(sink.stream_failures.len(), 1);
         assert_eq!(sink.stream_failures[0].remaining_bits, 0);
+        assert_eq!(sink.failures_before_payload, [1], "failure, then payload");
         assert_eq!(
             stats.skipped_bits, 9,
             "a stream failure with no bits behind it is the defect this pins"
@@ -2506,6 +2519,7 @@ mod tests {
         let mut stats = NetStats::default();
         let mut channels = ChannelTable::default();
         let header = RawBunchHeader {
+            ch_index: 5,
             payload_bit_count: bits.len() as i32,
             ..Default::default()
         };
@@ -2516,6 +2530,7 @@ mod tests {
                 global_bunch_index: 0,
                 channel_bunch_index: 1,
             },
+            actor_net_guid: NetworkGuid(42),
             archetype_net_guid: NetworkGuid(0),
         };
         let mut stage = Stage {
@@ -2524,14 +2539,7 @@ mod tests {
             transform: reader.transform,
             scratch: &mut reader.scratch,
         };
-        framing::frame_content_blocks(
-            &mut payload,
-            5,
-            NetworkGuid(42),
-            &mut stage,
-            &mut sink,
-            &ctx,
-        );
+        framing::frame_content_blocks(&mut payload, &mut stage, &mut sink, &ctx);
         assert!(
             payload.at_end(),
             "an abort leaves nothing behind for a caller to misread"
@@ -2550,7 +2558,7 @@ mod tests {
     }
 
     /// A header that fails to read has consumed what it read: the abort charges
-    /// those 12 bits, not the 0 left (see `framing::abandoned_from`).
+    /// those 12 bits, not the 0 left (see `framing::abort`).
     #[test]
     fn a_truncated_block_header_charges_the_bits_it_consumed() {
         let (stats, sink) = frame_bits(&truncated_subobject_header());
@@ -2640,6 +2648,7 @@ mod tests {
         let mut channels = ChannelTable::default();
         let header = RawBunchHeader {
             packet_id: 42,
+            ch_index: 5,
             b_open: true,
             b_reliable: true,
             payload_bit_count: bits.len() as i32,
@@ -2652,6 +2661,7 @@ mod tests {
                 global_bunch_index: 100,
                 channel_bunch_index: 7,
             },
+            actor_net_guid: NetworkGuid(42),
             archetype_net_guid: NetworkGuid(0),
         };
         let mut stage = Stage {
@@ -2661,14 +2671,7 @@ mod tests {
             scratch: &mut reader.scratch,
         };
 
-        framing::frame_content_blocks(
-            &mut payload_reader,
-            5,
-            NetworkGuid(42),
-            &mut stage,
-            &mut sink,
-            &ctx,
-        );
+        framing::frame_content_blocks(&mut payload_reader, &mut stage, &mut sink, &ctx);
 
         assert_eq!(stats.malformed_content_blocks, 1);
         assert_eq!(

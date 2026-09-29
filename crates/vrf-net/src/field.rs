@@ -66,7 +66,7 @@ pub enum RepLayoutRemainder {
 }
 
 impl RepLayoutRemainder {
-    fn bit_count(self) -> u64 {
+    pub(crate) fn bit_count(self) -> u64 {
         match self {
             Self::None => 0,
             Self::ClassNetCache(bits) | Self::Malformed(bits) => bits,
@@ -74,30 +74,15 @@ impl RepLayoutRemainder {
     }
 }
 
-/// Internal walk result that keeps the count of records emitted before a later
-/// read failed; the public parsers still return `Result<(count, remainder)>`.
-pub(crate) enum WalkOutcome<R> {
-    Complete { count: u32, remainder: R },
-    Failed { count: u32, error: NetError },
-}
-
-impl<R> WalkOutcome<R> {
-    fn into_result(self) -> Result<(u32, R)> {
-        match self {
-            Self::Complete { count, remainder } => Ok((count, remainder)),
-            Self::Failed { error, .. } => Err(error),
-        }
-    }
-}
+/// A walk's outcome and the count of records it emitted, before any error.
+pub(crate) type Walk<R> = (u32, Result<R>);
 
 /// Run a record walk written with `?`, keeping the count of records it
 /// emitted before any error.
-fn walk<R>(body: impl FnOnce(&mut u32) -> Result<R>) -> WalkOutcome<R> {
+fn walk<R>(body: impl FnOnce(&mut u32) -> Result<R>) -> Walk<R> {
     let mut count = 0;
-    match body(&mut count) {
-        Ok(remainder) => WalkOutcome::Complete { count, remainder },
-        Err(error) => WalkOutcome::Failed { count, error },
-    }
+    let outcome = body(&mut count);
+    (count, outcome)
 }
 
 /// Parse a RepLayout property stream, emitting every field to the sink.
@@ -108,8 +93,8 @@ pub fn parse_rep_layout(
     reader: &mut BitReader<'_>,
     sink: &mut dyn FieldSink,
 ) -> Result<(u32, u64)> {
-    let (count, remainder) = parse_rep_layout_impl(reader, sink, None, false).into_result()?;
-    Ok((count, remainder.bit_count()))
+    let (count, outcome) = parse_rep_layout_impl(reader, sink, None, false);
+    Ok((count, outcome?.bit_count()))
 }
 
 /// Parse the RepLayout prefix of a content block without consuming a valid
@@ -118,7 +103,7 @@ pub(crate) fn parse_rep_layout_content_block(
     reader: &mut BitReader<'_>,
     sink: &mut dyn FieldSink,
     ctx: Option<&mut WalkContext>,
-) -> WalkOutcome<RepLayoutRemainder> {
+) -> Walk<RepLayoutRemainder> {
     parse_rep_layout_impl(reader, sink, ctx, true)
 }
 
@@ -127,7 +112,7 @@ fn parse_rep_layout_impl(
     sink: &mut dyn FieldSink,
     mut ctx: Option<&mut WalkContext>,
     retain_class_net_cache_tail: bool,
-) -> WalkOutcome<RepLayoutRemainder> {
+) -> Walk<RepLayoutRemainder> {
     walk(|field_count| {
         // Property checksum bit -- always present, always ignored.
         reader.read_bit()?;
@@ -208,7 +193,8 @@ pub fn parse_class_net_cache(
     function_count: u32,
     sink: &mut dyn FieldSink,
 ) -> Result<(u32, u64)> {
-    parse_class_net_cache_impl(reader, function_count, sink, None).into_result()
+    let (count, outcome) = parse_class_net_cache_impl(reader, function_count, sink, None);
+    Ok((count, outcome?))
 }
 
 pub(crate) fn parse_class_net_cache_content_block(
@@ -216,7 +202,7 @@ pub(crate) fn parse_class_net_cache_content_block(
     function_count: u32,
     sink: &mut dyn FieldSink,
     ctx: Option<&mut WalkContext>,
-) -> WalkOutcome<u64> {
+) -> Walk<u64> {
     parse_class_net_cache_impl(reader, function_count, sink, ctx)
 }
 
@@ -225,7 +211,7 @@ fn parse_class_net_cache_impl(
     function_count: u32,
     sink: &mut dyn FieldSink,
     mut ctx: Option<&mut WalkContext>,
-) -> WalkOutcome<u64> {
+) -> Walk<u64> {
     walk(|rpc_count| {
         if function_count == 0 {
             // An unresolved group, not a class with no functions: the handle
@@ -484,7 +470,7 @@ mod tests {
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
         let mut context = WalkContext::default();
-        let WalkOutcome::Complete { count, remainder } =
+        let (count, Ok(remainder)) =
             parse_rep_layout_content_block(&mut reader, &mut sink, Some(&mut context))
         else {
             panic!("valid prefix and tail must complete")
@@ -511,8 +497,7 @@ mod tests {
         let data = pack(&bits);
         let mut reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
         let mut sink = RecordingSink::default();
-        let WalkOutcome::Complete { count, remainder } =
-            parse_rep_layout_content_block(&mut reader, &mut sink, None)
+        let (count, Ok(remainder)) = parse_rep_layout_content_block(&mut reader, &mut sink, None)
         else {
             panic!("valid prefix and tail must complete")
         };
