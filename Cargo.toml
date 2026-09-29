@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.86"
 license = "Apache-2.0"
@@ -11,15 +11,15 @@ repository = "https://github.com/yakisoba0728/vrfkit"
 description = "VALORANT replay (.vrf) parser and analysis toolkit"
 
 [workspace.dependencies]
-vrf-bitio = { path = "crates/vrf-bitio", version = "0.2.0" }
-vrf-transform = { path = "crates/vrf-transform", version = "0.2.0" }
-vrf-container = { path = "crates/vrf-container", version = "0.2.0" }
-vrf-schema = { path = "crates/vrf-schema", version = "0.2.0" }
-vrf-net = { path = "crates/vrf-net", version = "0.2.0" }
-vrf-export = { path = "crates/vrf-export", version = "0.2.0" }
-vrf-frame = { path = "crates/vrf-frame", version = "0.2.0" }
-vrf-movement = { path = "crates/vrf-movement", version = "0.2.0" }
-vrf-decode = { path = "crates/vrf-decode", version = "0.2.0" }
+vrf-bitio = { path = "crates/vrf-bitio", version = "0.2.1" }
+vrf-transform = { path = "crates/vrf-transform", version = "0.2.1" }
+vrf-container = { path = "crates/vrf-container", version = "0.2.1" }
+vrf-schema = { path = "crates/vrf-schema", version = "0.2.1" }
+vrf-net = { path = "crates/vrf-net", version = "0.2.1" }
+vrf-export = { path = "crates/vrf-export", version = "0.2.1" }
+vrf-frame = { path = "crates/vrf-frame", version = "0.2.1" }
+vrf-movement = { path = "crates/vrf-movement", version = "0.2.1" }
+vrf-decode = { path = "crates/vrf-decode", version = "0.2.1" }
 thiserror = "2"
 # Inlines payloads <=16 bytes (u32/u64/FVector/FString-prefix) so the 1.25 M
 # field rows per export don't each allocate a heap buffer. The `union` feature

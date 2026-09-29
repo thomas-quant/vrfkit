@@ -174,6 +174,13 @@ prerelease and build suffixes are allowed. The release job runs only after all
 checks succeed for that exact tagged commit. Only that publishing job receives
 `contents: write`; tests and builds retain read-only repository permissions.
 
+Version numbers follow the CLI, which is what a release ships. A release bumps
+the patch version unless it breaks how `vrfkit` is invoked or what it writes;
+such a break bumps the minor version. New manifest keys and new summary lines
+do not count as breaks. The library crates are not published, so their Rust
+API is internal and may change in any release. Every crate carries the
+workspace version.
+
 The Windows package job is also required on every PR and manual CI run. It
 builds and tests the optimized CLI for `x86_64-pc-windows-msvc`, creates a ZIP
 with `tools/package_release.py`, runs the extracted executable, and audits the
