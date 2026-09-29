@@ -50,7 +50,7 @@ def manifest():
                             "overlay_error_buckets", "overlay_errors_reported"), 0)
     quality.update(checkpoints_enabled=True, net=net, sink=sink,
                    checkpoints={"net": deepcopy(net), "sink": deepcopy(sink),
-                                "checkpoint_chunks": 1})
+                                "checkpoint_chunks": 1, "checkpoint_trailing_bytes": 0})
     return {"quality": quality}
 
 
@@ -190,6 +190,25 @@ class ManifestTests(unittest.TestCase):
                         del target[category][key]
                         with self.assertRaises(KeyError):
                             audit.manifest_counts(data)
+
+    def test_checkpoint_trailing_bytes_are_recorded_and_must_be_zero(self):
+        """The checkpoint twin of replay_data_trailing_bytes: reported zero
+        included, and a failure when nonzero, absent or not a count."""
+        counts, failures = audit.manifest_counts(manifest())
+        self.assertEqual((counts["checkpoint_trailing_bytes"], failures), (0, []))
+        data = manifest()
+        data["quality"]["checkpoints"]["checkpoint_trailing_bytes"] = 7
+        self.assertIn("checkpoint_trailing_bytes=7", audit.manifest_counts(data)[1])
+        for bad in (None, -1, True, "0"):
+            with self.subTest(bad=bad):
+                data = manifest()
+                data["quality"]["checkpoints"]["checkpoint_trailing_bytes"] = bad
+                with self.assertRaises(ValueError):
+                    audit.manifest_counts(data)
+        data = manifest()
+        del data["quality"]["checkpoints"]["checkpoint_trailing_bytes"]
+        with self.assertRaises(KeyError):
+            audit.manifest_counts(data)
 
     def test_lost_or_overcounted_rpc_fails(self):
         for preserved in (1, 3):
@@ -369,7 +388,8 @@ class CheckExportTests(unittest.TestCase):
             stack.enter_context(patch.dict(audit.baseline.CHECKPOINT_COUNTERS, clear=True))
             for name in ("cross_checks", "checkpoint_manifest_errors",
                          "reward_opaque_manifest_errors", "targeting_manifest_errors",
-                         "sink_tally_manifest_errors", "frame_skip_manifest_errors"):
+                         "sink_tally_manifest_errors", "frame_skip_manifest_errors",
+                         "checkpoint_trailing_manifest_errors"):
                 stack.enter_context(patch.object(
                     audit.baseline, name,
                     return_value=[f"{name} failed"] if name == failing else []))
@@ -391,6 +411,12 @@ class CheckExportTests(unittest.TestCase):
         with self.assertRaises(ValueError) as raised:
             self.run_check_export((counts, []), failing="sink_tally_manifest_errors")
         self.assertIn("sink_tally_manifest_errors failed", str(raised.exception))
+
+    def test_a_checkpoint_trailing_disagreement_fails_the_export(self):
+        counts = guid_counts(indexed_joined=7, indexed_path_equal=7)
+        with self.assertRaises(ValueError) as raised:
+            self.run_check_export((counts, []), failing="checkpoint_trailing_manifest_errors")
+        self.assertIn("checkpoint_trailing_manifest_errors failed", str(raised.exception))
 
     def test_failing_crosscheck_fails_the_export_and_keeps_its_counts(self):
         counts = guid_counts(indexed_joined=7, indexed_path_equal=5, indexed_path_differs=2)

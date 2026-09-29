@@ -134,6 +134,12 @@ def manifest_counts(manifest):
              "overlay_not_in_table", "overlay_no_field_name"))
     cp = quality["checkpoints"]
     counts["checkpoint_chunks"] = require_count(cp, "checkpoint_chunks")
+    # The checkpoint twin of replay_data_trailing_bytes: 0 in all 19,166
+    # checkpoint archives of 1,014 replays, 11.06-13.06 (vrf-container census,
+    # 2026-09-28).
+    counts["checkpoint_trailing_bytes"] = require_count(cp, "checkpoint_trailing_bytes")
+    if counts["checkpoint_trailing_bytes"]:
+        failures.append(f"checkpoint_trailing_bytes={counts['checkpoint_trailing_bytes']}")
     if not counts["main_content_blocks"]:
         failures.append("no main content blocks")
     return counts, failures
@@ -177,6 +183,7 @@ def check_export(text, directory):
     errors += baseline.targeting_manifest_errors(directory, printed, True)
     errors += baseline.sink_tally_manifest_errors(directory, printed, True)
     errors += baseline.frame_skip_manifest_errors(directory, printed, True)
+    errors += baseline.checkpoint_trailing_manifest_errors(directory, printed, True)
     guid_counts, guid_errors = baseline.checkpoint_guid_crosscheck(directory)
     if guid_errors:
         errors += guid_errors + [baseline.format_guid_crosscheck(guid_counts)]
