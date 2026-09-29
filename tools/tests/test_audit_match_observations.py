@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -200,7 +201,8 @@ class MatchObservationAuditTests(unittest.TestCase):
                 out = root / "audit.json"
                 subprocess.run([sys.executable, "-B", str(copy / "audit_match_observations.py"),
                                 "--export", str(root / "export"), "--out", str(out)],
-                               check=True, capture_output=True, text=True, encoding="utf-8")
+                               check=True, capture_output=True, text=True, encoding="utf-8",
+                               errors="strict", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
                 return json.loads(out.read_text(encoding="utf-8"))["provenance"]
 
             before = provenance()
