@@ -85,8 +85,8 @@ requires corroborating credit changes; state rows alone are not that ledger.
 Not every credit decrease is a spend: the side switch at half time and in
 overtime resets credits, and that reset replicates as an ordinary `Money`
 write 7-10 ms after `switchTeams`, before any buy phase opens.
-`extract_match_observations.py` keeps those decreases out of its purchase
-evidence (measured in [FOLLOWUP.md](FOLLOWUP.md#typing-and-data-dictionaries)).
+`extract_match_observations.py` keeps those decreases (5,616 in the 1,018-export
+corpus) out of its purchase evidence.
 
 ## Combat — kills & deaths
 
@@ -146,15 +146,12 @@ carries them -- and `MulticastNotifyHeal` and `MulticastNotifyOverhealDecay`
 name their array `LifeChangeBySection`, not `LifeChangeEvents`. A filter on the
 array's name alone silently drops more than half the calls.
 
-Four tools build on these rows, each keeping raw evidence and unresolved
-references visible: `tools/extract_healing_observations.py` (serialized heal
-amounts, not effective HP; [HEALING_OBSERVATIONS.md](HEALING_OBSERVATIONS.md)),
+Three tools build on these rows, each keeping raw evidence and unresolved
+references visible ([SECTION_OBSERVATIONS.md](SECTION_OBSERVATIONS.md)):
 `tools/extract_section_observations.py` (all five routes, parentless amounts
-and checkpoint rows; [SECTION_OBSERVATIONS.md](SECTION_OBSERVATIONS.md)),
-`tools/extract_section_timeline.py` (exact predecessors and ordering/lifetime
-gaps; [SECTION_TIMELINE.md](SECTION_TIMELINE.md)) and
-`tools/extract_section_packet_timeline.py` (packet-ordered comparisons; ties in
-one packet still prevent links; [SECTION_PACKET_TIMELINE.md](SECTION_PACKET_TIMELINE.md)).
+and checkpoint rows), `tools/extract_healing_observations.py` (serialized heal
+amounts, not effective HP) and `tools/section_timeline.py` (exact
+predecessors, time- and packet-ordered comparisons, ordering/lifetime gaps).
 None establishes a game life, player credit or a continuous health timeline,
 and the historical measurements below do not replace their raw validation.
 
