@@ -264,13 +264,9 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     Ok(verdict)
 }
 
-/// The `NOT COVERED` line for the Checkpoint chunks this oracle skips.
-///
-/// The skip stays, stated rather than implied. A checkpoint is an independent
-/// archive (its own GUID cache, export map and DemoFrame re-opening every live
-/// actor) and walking it is `export --checkpoints`'s job; folding it in here
-/// would move every counter `validate`'s pinned baselines hold and add three
-/// hard-failure paths to a command that reports rather than aborts.
+/// The `NOT COVERED` line for the Checkpoint chunks this oracle skips, stated
+/// rather than implied: walking them would move every counter `validate`'s
+/// pinned baselines hold, and `export --checkpoints` decodes them.
 fn checkpoint_scope_note(checkpoint_chunks: u64) -> Option<String> {
     (checkpoint_chunks > 0).then(|| {
         format!(
@@ -293,12 +289,10 @@ fn partial_reassembly_scope_note(partial_errors: u64) -> Option<String> {
 }
 
 /// The `ORACLE PASS RATE` line for `failed` of `total_with_content` blocks.
-///
-/// `failed` (`lost_content_blocks()`) can exceed the classified total: a block
-/// whose header or `content_bits` could not be read is lost before it is
-/// classified. So `passed` saturates at 0 (a release build would wrap it) and
-/// the rate saturates with it, still as `1 - failed / total` rather than
-/// `passed / total`, whose last bit can differ.
+/// `failed` can exceed the classified total (a block whose header could not be
+/// read is lost unclassified), so `passed` and the rate saturate at 0; the
+/// rate stays `1 - failed / total`, whose last bit can differ from
+/// `passed / total`.
 fn pass_rate_line(total_with_content: u64, failed: u64) -> String {
     let passed = total_with_content.saturating_sub(failed);
     let pass_rate = 1.0 - (failed.min(total_with_content) as f64 / total_with_content as f64);
@@ -439,8 +433,8 @@ mod tests {
         );
     }
 
-    /// It printed "-50.000000% (0 / 2 blocks passed)", which the corpus
-    /// sweeps' `([\d.]+)%` cannot read: they reported no rate at all.
+    /// A negative rate would not match the corpus sweeps' `([\d.]+)%`, so they
+    /// would report no rate at all.
     #[test]
     fn the_pass_rate_saturates_like_the_passed_count() {
         assert_eq!(
@@ -464,96 +458,47 @@ mod tests {
         assert_eq!(Verdict::decide(0, 0), Verdict::NoContentBlocks);
     }
 
+    /// Each hard-failure term alone fails a replay that otherwise passes; an
+    /// unresolved RPC whose whole payload was kept and a reassembly rejection
+    /// (reported as unscored) do not.
     #[test]
     fn every_unfinished_or_payload_failure_prevents_a_pass() {
-        let clean = NetStats {
+        let failures: [fn(&mut NetStats); 10] = [
+            |s| s.malformed_packets = 1,
+            |s| s.bunch_header_failures = 1,
+            |s| s.transform_failures = 1,
+            |s| s.field_stream_failures = 1,
+            |s| (s.class_net_cache_blocks, s.rpc_stream_failures) = (1, 1),
+            |s| s.unfinished_partials = 1,
+            |s| s.partial_resource_limit_failures = 1,
+            |s| s.channel_state_limit_failures = 1,
+            |s| s.content_block_framing_failures = 1,
+            |s| (s.bunches_on_unopened_channel, s.unopened_channel_bits) = (1, 10),
+        ];
+        let passes: [fn(&mut NetStats); 3] = [
+            |_| {},
+            |s| (s.rpc_stream_failures, s.unresolved_rpc_payloads_preserved) = (1, 1),
+            |s| s.partial_errors = 1,
+        ];
+        let clean = || NetStats {
             rep_layout_blocks: 1,
             ..NetStats::default()
         };
-        assert_eq!(verdict_from_stats(&clean, 0), Verdict::Passed);
-
-        for failed in [
-            NetStats {
-                rep_layout_blocks: 1,
-                malformed_packets: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                bunch_header_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                transform_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                field_stream_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                class_net_cache_blocks: 1,
-                rpc_stream_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                unfinished_partials: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                partial_resource_limit_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                channel_state_limit_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                content_block_framing_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                bunches_on_unopened_channel: 1,
-                unopened_channel_bits: 10,
-                ..NetStats::default()
-            },
-        ] {
-            assert_eq!(verdict_from_stats(&failed, 0), Verdict::ValidationFailed);
+        let verdict = |set: fn(&mut NetStats)| {
+            let mut stats = clean();
+            set(&mut stats);
+            verdict_from_stats(&stats, 0)
+        };
+        for (i, set) in failures.into_iter().enumerate() {
+            assert_eq!(verdict(set), Verdict::ValidationFailed, "failure {i}");
+        }
+        for (i, set) in passes.into_iter().enumerate() {
+            assert_eq!(verdict(set), Verdict::Passed, "pass {i}");
         }
         assert_eq!(
-            verdict_from_stats(&clean, 1),
+            verdict_from_stats(&clean(), 1),
             Verdict::ValidationFailed,
             "unconsumed decompressed ReplayData bytes must fail validation"
-        );
-
-        let unresolved_but_preserved = NetStats {
-            class_net_cache_blocks: 1,
-            rpc_stream_failures: 1,
-            unresolved_rpc_payloads_preserved: 1,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            verdict_from_stats(&unresolved_but_preserved, 0),
-            Verdict::Passed,
-            "an unresolved RPC whose whole decoded payload was preserved is not data loss"
-        );
-
-        let reassembly_rejection = NetStats {
-            rep_layout_blocks: 1,
-            partial_errors: 1,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            verdict_from_stats(&reassembly_rejection, 0),
-            Verdict::Passed,
-            "partial reassembly rejections are reported as unscored, not silently treated as validated blocks"
         );
     }
 
