@@ -2,6 +2,7 @@ import copy
 import json
 from pathlib import Path
 import struct
+import os
 import subprocess
 import sys
 import tempfile
@@ -197,7 +198,7 @@ class IntegrationTests(unittest.TestCase):
             root=Path(t); export=make_export(root/'export'); out=root/'ledger.json'
             command=[sys.executable,'-W','error',str(Path(tool.__file__)),
                      '--export',str(export),'--out',str(out)]
-            run=subprocess.run(command,capture_output=True,text=True)
+            run=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
             self.assertEqual(run.returncode,0,run.stderr)
             result=json.loads(out.read_text(encoding='utf-8'))
             self.assertEqual(result['counts']['matched_pairs'],1)
@@ -225,7 +226,7 @@ class IntegrationTests(unittest.TestCase):
             out=root/'ledger.json'
             run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
                                 '--export',str(export),'--out',str(out)],
-                               capture_output=True,text=True)
+                               capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
             self.assertEqual(run.returncode,1,run.stderr)
             self.assertIn('outside the measured KillData set',run.stderr)
             self.assertFalse(out.exists())
@@ -288,7 +289,7 @@ class IntegrationTests(unittest.TestCase):
                 before=output.read_bytes()
                 run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
                                     '--export',str(export),'--out',str(output),'--observations',str(cache)],
-                                   capture_output=True,text=True)
+                                   capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
                 self.assertEqual(run.returncode,1,run.stderr)
                 self.assertIn('FAILED:',run.stderr)
                 self.assertEqual(output.read_bytes(),before)

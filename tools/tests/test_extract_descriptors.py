@@ -1,4 +1,5 @@
 import re
+import os
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,8 @@ class GeneratorHarness:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="strict",
+                env=dict(os.environ, PYTHONIOENCODING="utf-8"),
             )
             output_text = output.read_text(encoding="utf-8") if output.exists() else None
             return result, output_text
