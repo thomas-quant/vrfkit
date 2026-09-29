@@ -22,7 +22,9 @@ use vrf_net::pipeline::{
 use vrf_net::types::NetworkGuid;
 
 use super::intern::put;
-use super::paths::{channel_archetype, retire_channel_archetype, set_channel_archetype};
+use super::paths::{
+    channel_archetype, combined_candidate, retire_channel_archetype, set_channel_archetype,
+};
 use super::rpc::copy_raw_bits;
 use super::{ExportSink, FieldValues, TABLE};
 
@@ -45,8 +47,15 @@ impl ExportSink<'_> {
         else {
             return;
         };
-        let evidence =
-            self.current_block_resolution_evidence(channel_index, actor_net_guid.0, header);
+        let (actor_archetype_outer_path, actor_archetype_path) = if header.is_actor {
+            let archetype = channel_archetype(self.channel_state, channel_index, actor_net_guid);
+            self.archetype_paths(archetype)
+        } else {
+            (None, None)
+        };
+        let cache = &*self.cache;
+        let guid_path = |guid: u32| cache.get_path_by_guid(guid).map(str::to_owned);
+        let object_guid = (!header.is_actor).then_some(header.object_net_guid.0);
         let block_index = block_offset + self.records.checkpoint_blocks.len() as u32;
         let field_row_start = field_offset + self.records.fields.len() as u64;
         self.records.checkpoint_blocks.push(CheckpointBlockRecord {
@@ -56,7 +65,7 @@ impl ExportSink<'_> {
             packet_id: self.packet_id,
             channel_index,
             actor_net_guid: actor_net_guid.0,
-            object_net_guid: (!header.is_actor).then_some(header.object_net_guid.0),
+            object_net_guid: object_guid,
             class_net_guid: header.has_class_net_guid.then_some(header.class_net_guid.0),
             outer_net_guid: Some(header.outer_net_guid.0),
             has_rep_layout: header.has_rep_layout,
@@ -70,24 +79,29 @@ impl ExportSink<'_> {
                 Arc::from("<not-resolved:deleted>")
             },
             group_resolution_source: if resolved {
-                evidence.group_resolution_source
+                self.current_group_resolution_source
             } else {
                 "not_resolved_deleted"
             },
-            group_declared: resolved && evidence.group_declared,
-            resolution_memo_hit: resolved && evidence.resolution_memo_hit,
+            group_declared: resolved && cache.get_group_by_path(&self.current_group_path).is_some(),
+            resolution_memo_hit: resolved && self.current_resolution_memo_hit,
             function_count,
             function_count_source: if resolved {
-                evidence.function_count_source
+                self.current_function_count_source
             } else {
                 "not_applicable_deleted"
             },
-            actor_archetype_path: evidence.actor_archetype_path,
-            actor_archetype_outer_path: evidence.actor_archetype_outer_path,
-            actor_guid_path: evidence.actor_guid_path,
-            class_guid_path: evidence.class_guid_path,
-            object_guid_path: evidence.object_guid_path,
-            object_outer_path: evidence.object_outer_path,
+            actor_archetype_path,
+            actor_archetype_outer_path,
+            actor_guid_path: guid_path(actor_net_guid.0),
+            class_guid_path: header
+                .has_class_net_guid
+                .then(|| guid_path(header.class_net_guid.0))
+                .flatten(),
+            object_guid_path: object_guid.and_then(guid_path),
+            object_outer_path: object_guid
+                .and_then(|guid| cache.get_outer_path(guid))
+                .map(str::to_owned),
             field_row_start,
             field_row_count: 0,
         });
@@ -279,12 +293,8 @@ impl ExportSink<'_> {
     /// shared by open and close so the two cannot drift into a join key that
     /// silently does not join.
     fn actor_paths(&self, archetype: Option<NetworkGuid>) -> (Option<String>, Option<String>) {
-        let Some(archetype) = archetype.filter(|g| g.is_valid()) else {
-            return (None, None);
-        };
-        let outer = self.cache.get_outer_path(archetype.0).map(str::to_owned);
-        let arch_path = self.cache.get_path_by_guid(archetype.0).map(str::to_owned);
-        let combined = self.create_combined_candidate(outer.as_deref(), arch_path.as_deref());
+        let (outer, arch_path) = self.archetype_paths(archetype);
+        let combined = combined_candidate(outer.as_deref(), arch_path.as_deref());
         (combined.or(outer), arch_path)
     }
 
