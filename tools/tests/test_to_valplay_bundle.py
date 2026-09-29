@@ -1442,7 +1442,7 @@ class DamagedBoneTests(unittest.TestCase):
 
 
 class RawGateHardeningTests(unittest.TestCase):
-    """Two more `is_raw` gates that lost a value, uncounted, once it was typed."""
+    """A typed row keeps its value through the `is_raw` gates."""
 
     def test_a_typed_container_row_does_not_replace_its_decoded_elements(self):
         """Element rows first, then the container, as stream.rs writes them."""
@@ -1458,7 +1458,7 @@ class RawGateHardeningTests(unittest.TestCase):
         self.assertEqual(tally["payload_shape_conflicts"], 0)
 
     def test_a_typed_function_row_is_carried(self):
-        """A row that IS the function carried its value only when raw."""
+        """A row that IS the function carries its value, typed or raw."""
         payload, _ = RawSourcedFieldTests.payload([{
             "time_ms": 20, "packet_id": 2, "actor": 7, "group_path": RPC_GROUP,
             "handle": 4, "field_name": "MulticastSomething", "bit_count": 8,
@@ -1467,8 +1467,7 @@ class RawGateHardeningTests(unittest.TestCase):
 
 
 class AdapterMappingTests(unittest.TestCase):
-    """The mappings to the reference's shape; before these, a mutation sweep
-    broke each with the whole tools suite still green."""
+    """The mappings to the reference's shape, each pinned."""
 
     GROUP = "/Game/Test/Holder.Holder_C"
     DAMAGE = "MulticastNotifyDamage_Point"

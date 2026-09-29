@@ -1,26 +1,14 @@
 """Player bodies from the whole `SpawnedCharacter` history, not its last value.
 
-Only `SpawnedCharacter`, the PlayerState's reference to the character it
-spawned, proves a body. `PossessedCharacter`, `Owner`, `Instigator` and a
-pawn's own `PlayerState` can name a device: Astra's `Rift_TargetingForm_PC_C`
-carries the player's PlayerState on every possession and is never a
-`SpawnedCharacter` value.
+Only `SpawnedCharacter` proves a body: `PossessedCharacter`, `Owner`,
+`Instigator` and a pawn's own `PlayerState` can name a device (Astra's
+`Rift_TargetingForm_PC_C` carries the player's PlayerState).
 
-The manifest keeps the last non-zero value and drops a pre-reconnect pawn
-(docs/DATA.md, "Player identity": 39c2bb2c, 1510 -> 0 -> 45530; the
-manifest-only join mislabelled pawn 1510's 1,854 effect records and exited
-0). The rule is as static as the manifest's: a pawn named by exactly one
-PlayerState is that player's body for the whole export. `history` keeps each
-PlayerState's writes in order, zeros included.
-
-1,018 exports (parser 259ed10, 2026-09-28): 10,426 `SpawnedCharacter` rows,
-all top-level and typed on `PLAYER_STATE_GROUPS`; 10,250 pawns, each named by
-one PlayerState that the pawn's own `PlayerState` names back (10,250 of
-10,250); 97 earlier pawns in 86 exports. A time-scoped rule was rejected: 347
-effect rows on 24 pawns share the naming write's `time_ms` but precede it by
-packet id (the spawn tick), 327 of them on pawns the manifest already
-admitted, and none on a named pawn follows its PlayerState's next write, so a
-packet-ordered scope would demote those 327 for nothing.
+The manifest keeps the last non-zero value, dropping a pre-reconnect pawn
+(docs/DATA.md, "Player identity": 1510 -> 0 -> 45530). The rule is as static:
+a pawn named by exactly one PlayerState is that player's body for the whole
+export. Not time-scoped: 347 effect rows on 24 pawns share the naming write's
+`time_ms` but precede it by packet id (the spawn tick).
 """
 
 from __future__ import annotations
@@ -41,8 +29,8 @@ PLAYER_STATE_GROUPS = (
     "Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C",
 )
 
-#: Provenance of the manifest's own `character_net_guid`. The string predates
-#: this module and must stay byte-identical: records it labelled keep it.
+#: Provenance of the manifest's own `character_net_guid`, byte-identical to
+#: what records labelled before this module carry.
 FINAL_PROVENANCE = "manifest.players.character_net_guid (SpawnedCharacter)"
 #: Provenance of a body the manifest dropped: an earlier non-zero value.
 EARLIER_PROVENANCE = "fields.SpawnedCharacter history (earlier pawn of a manifest player)"

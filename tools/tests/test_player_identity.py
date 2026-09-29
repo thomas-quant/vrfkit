@@ -112,9 +112,8 @@ class PlayerBodiesTests(unittest.TestCase):
         self.assertEqual(bodies.conflicts, {20})
 
     def test_a_player_without_a_character_contributes_no_pawn_at_all(self):
-        """The spike tool's old `{character_net_guid: subject}` held a None key
-        for such a player, so an owner with no Instigator (`.get()` -> None)
-        tested as a carrier. The 11-player exports carry one of these."""
+        """A None key would make an owner with no Instigator (`.get()` -> None)
+        test as a carrier; the 11-player exports carry such a player."""
         manifest = {"players": MANIFEST["players"] + [
             {"actor_net_guid": 300, "subject": "coach", "character_net_guid": None}]}
         bodies = self.bodies(RECONNECT, manifest)
