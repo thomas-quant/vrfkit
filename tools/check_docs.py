@@ -33,9 +33,8 @@ passes every test. So this reads the repo and the docs and compares:
      cases in the same order
  18. every `#anchor` a link in a link-checked doc names, and every
      `docs/<name>.md#<anchor>` a Rust or Python source names, is a heading
-     of its target by GitHub's slug rules (`anchor_problems`). docs/archive/
-     is a target, never a source. Setext headings are not read, so a link to
-     one is reported rather than passed.
+     of its target by GitHub's slug rules (`anchor_problems`). Setext
+     headings are not read, so a link to one is reported rather than passed.
 
 A number is guarded when something in the repo can be *run* to produce it.
 docs/DATA.md's measurements ("377,487 elements", "1,021 windows") come from
@@ -378,9 +377,7 @@ def check_feature_matrix(contributing: str, ci: str) -> list[str]:
 
 
 def link_checked_docs() -> list[Path]:
-    """Every doc whose relative links are checked: the five read above plus
-    every top-level file under docs/. docs/archive/ is dated history and keeps
-    whatever it linked to at the time."""
+    """Every doc whose relative links are checked: `ALL_DOCS` plus docs/*.md."""
     paths = {REPO / name for name in ALL_DOCS}
     paths.update((REPO / "docs").glob("*.md"))
     return sorted(paths)

@@ -288,8 +288,8 @@ Historical optimization measurement on `02d4d478` (48,215,213 bytes), August
 | `validate` | 1.42 s / 65 MB | **0.693 s / 65 MB** |
 
 Figures are wall-clock / peak memory. Output is **byte-for-byte identical**
-before and after. Detail and the optimizations measured and then rejected are
-in `docs/archive/PROJECT_STATUS.md` section 25.
+before and after. The optimizations kept and rejected are in
+[`docs/PERFORMANCE_NOTES.md`](docs/PERFORMANCE_NOTES.md).
 
 ## The Event chunk -- the server's own timeline
 
@@ -340,13 +340,7 @@ transport stages kept every payload. It is **not** a typing claim either: a
 block that cannot be assigned a `_ClassNetCache` group has inner handles
 nothing can name, so it becomes one reserved row (`handle = u32::MAX`, the
 complete decoded payload in `raw_bits`) counted under `RPC unresolved/raw` --
-uninterpreted, not lost. The earlier sweeps, from the 215-replay 13.01 run that
-first exposed unattributed blocks to the 714-replay tail preservation, are in
-[`docs/archive/CORPUS_SWEEPS.md`](docs/archive/CORPUS_SWEEPS.md).
-
-The controller's opening bunch was once framed nine bits early (the
-spawn-velocity bit and the net-player-index byte); see
-`crates/vrf-net/src/pipeline/spawn.rs` and `docs/archive/PROJECT_STATUS.md` 17-A.
+uninterpreted, not lost.
 
 ## Type overlay
 
@@ -506,10 +500,8 @@ checkpoint blobs. A machine-local corpus can rotate; the reproducible oracle is
 88 mechanically extracted golden vectors (11 staging boundaries per
 build, eight builds) plus 1,264 native-machine-code vectors for the sixteen
 recovered 11.06--12.09 builds, with a full 48-sample main/checkpoint validation
-([build support validation report](docs/LEGACY_BUILD_SUPPORT.md)). 13.06 was
-first validated on six real replays
-([record](docs/archive/DESCRIPTOR_ADOPTION_VALIDATION.md#1306-replay-validation));
-the 2026-09-28 [common audit](docs/BUILD_VERIFICATION.md) checks 38.
+([build support validation report](docs/LEGACY_BUILD_SUPPORT.md)). The
+[common audit](docs/BUILD_VERIFICATION.md) checks 38 13.06 replays.
 
 The 768-byte S-box is shared across builds, which makes it usable as a
 **signature for locating the transform function in a binary.**

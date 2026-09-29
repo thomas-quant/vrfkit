@@ -23,7 +23,7 @@ derives analytical views.
 | How do I run it, and what does each tool do? | `docs/USAGE.md` |
 | How do I build, test, and what must pass? | `CONTRIBUTING.md` |
 | Why is the code shaped this way? | the doc comment next to it |
-| What was tried and rejected? | `docs/archive/` |
+| What was tried and rejected? | `docs/PERFORMANCE_NOTES.md`, the doc comment, `git log` |
 
 `README.md` is the front page and repeats the highlights. When it disagrees
 with `docs/`, `docs/` is newer.

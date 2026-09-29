@@ -2,13 +2,7 @@
 
 The CLI, output schemas, library use, `tools/` scripts, and validation suite.
 
-Design rationale is in [`../README.md`](../README.md); work history and
-measurement records are in
-[`archive/PROJECT_STATUS.md`](archive/PROJECT_STATUS.md). The byte-level
-format of the checkpoint chunks is in
-[`archive/CHECKPOINT_SPEC.md`](archive/CHECKPOINT_SPEC.md), and finished task
-specs are in [`archive/`](archive/README.md) -- all of these are for the
-record, not things to run.
+Design rationale is in [`../README.md`](../README.md).
 
 ## Table of contents
 
@@ -241,7 +235,7 @@ what it holds.
 `TeamEconomy` / `RoundInfos`. These decoders are **additive**, so failing
 completely does not move a single other counter -- when build 13.02 shifted a
 handle, the entire summary looked healthy while the match score simply
-disappeared (archive/PROJECT_STATUS.md section 26). **`0 decoded` is an alarm
+disappeared. **`0 decoded` is an alarm
 even if `failed` is 0.** On failure, the `Struct blob err:` line prints the
 member and handle by name.
 
@@ -739,10 +733,8 @@ Those 219 corrections are the live expectation set the script re-verifies.
 `ADDITIONS` is the subset the descriptors are
 **silent on**: currently 142 of them, each admitted on wire evidence recorded
 at its entry in `apply_type_corrections.py`, under the bar stated above the
-list, which also names the fields that failed it. The first three
-(`BaseTeamState.LoadoutValue` / `AverageLoadoutValue` and
-`BombGameState.ChosenCeremonyForRound`) are archive/PROJECT_STATUS.md 26-I
-and 32. `check_docs.py` checks both figures.
+list, which also names the fields that failed it. `check_docs.py` checks both
+figures.
 
 ### Validation
 
@@ -981,7 +973,7 @@ was 1.07-1.58x faster (sum of medians 92.0 -> 76.3 s), peak working set fell
 were byte-identical. If you process multiple replays, **parallelizing is the
 biggest lever** -- each replay is fully independent, and the measurements above
 are deliberately sequential for accuracy. Timings move by +/-10% on one machine
-and commit (archive/PROJECT_STATUS.md 36-F); only an A/B says whether a slower
+and commit; only an A/B says whether a slower
 number is a regression.
 
 ### Analysis helpers
@@ -1152,9 +1144,8 @@ verdict. `identifier_redacted: true` and
 group paths, filenames, actor/object/channel identifiers, field-handle values,
 compatible checksums, payloads, or persistent hashes.
 
-The exhaustive 2026-08-31 run over 527 replays is in
-[archive/CORPUS_SWEEPS.md](archive/CORPUS_SWEEPS.md); the analyzer performs no
-type inference, so it establishes preservation and schema drift, not meaning.
+The analyzer performs no type inference, so it establishes preservation and
+schema drift, not meaning.
 
 ---
 
@@ -1305,12 +1296,6 @@ replay passes block validation and checkpoint export; all observed evidence
 values match the independent Python decoder. `Clean/checked` also requires
 zero array and array-leaf errors. The report defines each denominator.
 
-Earlier sweeps -- the 527-replay multi-build run, the 13.05 same-day sweep,
-the 714-replay tail preservation and the Ares failure shapes before it -- keep
-their dates in [archive/CORPUS_SWEEPS.md](archive/CORPUS_SWEEPS.md); the
-decoded/raw split is in [FOLLOWUP.md](FOLLOWUP.md) and the partial-header
-correction in [PARTIAL_HEADER_CORRECTION.md](PARTIAL_HEADER_CORRECTION.md).
-
 Adding a new build takes one `SeededTransform` impl -- its branch,
 `SEED_ADDEND`, `INIT_A_OFFSET`, optionally `ADD_OFFSET` and `TAIL_XOR`, and
 three word functions ([README](../README.md#supported-builds-and-the-cost-of-a-new-build)).
@@ -1358,9 +1343,9 @@ live in `%LOCALAPPDATA%\vrfkit\baseline-corpora`.
 ## 8. Known limits
 
 - **Untyped residual** -- the [`export`](#export) `Typed` is ~83.1% (denominator
-  including RPC parameters). **Untyped != lost** (`raw_bits` preserved). Typing
-  the rest needs the game binary or UE headers -- this is not a table-editing
-  problem (archive/PROJECT_STATUS.md section 24).
+  including RPC parameters). **Untyped != lost** (`raw_bits` preserved). Each
+  remaining field is typed only on its own evidence (CONTRIBUTING.md, "Type
+  corrections are conservative").
 - **`AbilitiesAndBuffsComponent`** -- the replay declares no ClassNetCache group
   for that class at all. The historical 13.01 checkpoint sweep confirmed it
   across 4,024 checkpoints. Its complete block payload is now preserved in one
@@ -1374,7 +1359,7 @@ live in `%LOCALAPPDATA%\vrfkit\baseline-corpora`.
   values require separate joins. Availability in vrfkit does not establish
   that a downstream metrics deployment consumes both schemas.
 - **Non-Bomb game modes** -- `GROUP_ALIASES` maps Swiftplay's
-  GameState/PlayerState to the Bomb classes (archive section 33); valplay
+  GameState/PlayerState to the Bomb classes; valplay
   selects them with `is_game_state` / `is_player_state`.
 - **Damage precision** -- vrfkit preserves the exact fractional wire damage.
   valplay additionally floors each final engagement segment before summing its

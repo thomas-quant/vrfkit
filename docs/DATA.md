@@ -108,6 +108,10 @@ evidence (measured in [FOLLOWUP.md](FOLLOWUP.md#typing-and-data-dictionaries)).
 | Multikill level | `MulticastNotifyKilledEnemy.MultikillLevel` | ✅ single/double/triple/quad |
 | Kill timeline | `events.characterDeath` time_ms | ✅ |
 
+Deaths count every `bDied`. After a resurrect (Clove's self-revive, Sage's
+raise) Riot's trackers drop some, so deaths can exceed theirs by up to the
+resurrection count; `Rounds[N].Reports[1]` existing marks such a round.
+
 ## Combat — damage
 
 | Data | Source | Status |

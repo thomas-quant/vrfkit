@@ -6,8 +6,7 @@ no new rows and retains every raw payload and parent. Routes are limited to
 the measured 13.01, 13.02, 13.04, and 13.05 builds and require the exact parent
 identity plus each child's declared handle, name, and checksum.
 
-Since 2026-09-23 the parser also enables these measured routes on 13.06
-([validation](archive/DESCRIPTOR_ADOPTION_VALIDATION.md#1306-replay-validation)). For
+Since 2026-09-23 the parser also enables these measured routes on 13.06. For
 `KillData` that was checked on 2026-09-28: on all 38 13.06 exports of the
 common audit,
 [`extract_kill_observations.py`](KILL_OBSERVATIONS.md#measured-builds) matched

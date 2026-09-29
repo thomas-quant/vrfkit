@@ -177,16 +177,6 @@ class AnchorTests(unittest.TestCase):
         self.assertIn("x.rs:4", problems[2])
         self.assertIn("does not exist", problems[2])
 
-    def test_the_archive_is_a_target_but_not_a_source(self):
-        sources = {p.relative_to(guard.REPO).as_posix() for p in guard.link_checked_docs()}
-        self.assertFalse(any(name.startswith("docs/archive/") for name in sources))
-        archived = guard.REPO / "docs" / "archive" / "PROJECT_STATUS.md"
-        slug = sorted(guard.anchors_of(archived.resolve()))[0]
-        text = f"[a](archive/PROJECT_STATUS.md#{slug}) [b](archive/PROJECT_STATUS.md#no-{slug})"
-        problems = guard.broken_markdown_anchors(guard.REPO / "docs" / "X.md", text)
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn(f"#no-{slug}", problems[0])
-
     def test_the_shipped_docs_and_sources_have_no_broken_anchor(self):
         checked = {}
         self.assertEqual(guard.anchor_problems(checked), [])

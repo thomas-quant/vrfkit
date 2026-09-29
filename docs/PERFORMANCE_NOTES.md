@@ -69,6 +69,14 @@ emitted asm -- but measured neutral on both `validate` and `export`, so the
 one-liner stays. A plain zip is no option either: LLVM's loop-idiom pass turns
 it straight back into the same memcpy.
 
+### BitError stays 32 bytes
+
+A throwaway build whose error was a 1-byte enum, the best case possible,
+bounded the gain at export -3.0% / validate -1.8%. A real shrink boxes the
+payload (8 bytes, worth less) and costs either `alloc` in `vrf-bitio`'s
+`no_std` build or the diagnostic fields that decide which blocks are recorded
+as malformed.
+
 ## Frame walking (vrf-frame)
 
 ### Measured shape on real replays
@@ -225,6 +233,15 @@ copies cost: 530 401 bunches on the reference replay, one `vec![0u8; n]` each
 packet for the staging list -- about 1.06 million allocate/free pairs and two
 passes over ~108 MB of payload, to hand the framing loop bits it could already
 see.
+
+### Decode stays sequential within a replay
+
+Only the payload transform is per-block pure (`(bits, seed)`), and it was 3.4%
+of an instrumented export. Decode is not: channel opens register paths in the
+`NetGuidCache`, `on_actor_open` writes the archetypes `on_content_block` reads,
+and the resolved group sets `function_count`, hence the handle read width. A
+block decoded against a stale cache misframes from its first field. Parallelise
+across replays (`VRFKIT_JOBS`), not within one.
 
 ## Export sink (vrfkit)
 
