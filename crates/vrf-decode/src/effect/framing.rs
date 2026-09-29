@@ -110,10 +110,7 @@ pub fn scan_element_handles(raw: &[u8], bit_count: u32) -> Result<Option<EffectH
             reader.skip_bits(u64::from(payload_bits))?;
             *slot = handle;
         }
-        if let Some((_, payload_bits)) = read_field_header(&mut reader)? {
-            // Consume it so the error message's position is not misleading if
-            // a caller ever reports one; the blob is rejected either way.
-            let _ = reader.skip_bits(u64::from(payload_bits));
+        if read_field_header(&mut reader)?.is_some() {
             return Err(EffectBlobError::ElementFieldCount { found: 3 });
         }
 
