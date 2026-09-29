@@ -156,9 +156,12 @@ fn trailers(result: &RpcDecodeResult) -> (u32, u64) {
 
 #[test]
 fn an_out_of_range_update_index_is_counted_not_discarded_in_silence() {
-    // Uncounted, the skipped window looks like well-formed empty updates.
+    // updateCount 1, index 2, then a well-formed update only the index check
+    // refuses; uncounted, the lost update looks like none was sent.
+    let stream = real_stream(&[build_move(true, 7, 1.0, 2.0, 3.0)], ENVELOPE_TRAILER_BITS);
     let mut array = BitWriter::new();
-    array.int_packed(1).int_packed(3).u8(0xAA); // updateCount 1, index 2
+    let update = update_with_stream(1111, &stream);
+    array.int_packed(1).int_packed(3).extend_bits(&update);
 
     let (result, moves) = decode(&wrap_updates_array(&array));
 
@@ -314,6 +317,13 @@ fn decodes_both_move_variants_in_either_component_form() {
         let variant1 = (1234, 1, 84, 3, [10.0, 11.0, 12.0], [4.0, 5.0, 6.0]);
         assert_eq!(got, [variant0, variant1], "{name}");
     }
+}
+
+#[test]
+fn bits_after_the_top_level_zero_handle_are_counted() {
+    let mut rpc = wrap_updates_array(&updates_array(&[]));
+    rpc.u16(0xBEEF);
+    assert_eq!(decode(&rpc).0.error_count, 1);
 }
 
 #[test]
