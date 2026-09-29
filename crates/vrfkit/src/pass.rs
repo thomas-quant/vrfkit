@@ -145,7 +145,7 @@ impl<'a> Pass<'a> {
             flags: replay.flags,
             cache: NetGuidCache::new(),
             reader: replication_reader(replay.branch)?,
-            channels: ChannelState::new(),
+            channels: ChannelState::default(),
             buffers: RecordBuffers::default(),
             packets: 0,
             frames: 0,

@@ -31,13 +31,9 @@ pub const MAX_SAMPLES_PER_CELL: usize = 3;
 /// `overflow`, so hostile group paths cannot grow the map without bound.
 pub const MAX_FAILURE_CELLS: usize = 4096;
 
-/// Longest payload a sample keeps, in bytes: far above the unresolved payloads
-/// worth reading, so it only stops one huge block.
+/// Longest payload a sample keeps whole, in bytes; a longer one keeps this
+/// prefix, flagged `payload_truncated`.
 pub const MAX_SAMPLE_PAYLOAD_BYTES: usize = 96;
-
-/// Payloads longer than this are not retained at all rather than truncated to
-/// a prefix that misrepresents the block.
-const MAX_SAMPLE_PAYLOAD_BLOCK_BITS: u64 = 8 * 1024;
 
 /// One aggregate cell: every failure sharing one key.
 #[derive(Debug, Default, Clone)]
@@ -59,16 +55,13 @@ impl FailureCell {
     }
 }
 
-/// One representative failure. Everything except `payload_hex` is exact for
-/// that event; `payload_hex` is the block's decoded leading bytes, present
-/// only where the caller had the payload and it fit the caps.
+/// One representative failure: its cell's key holds the consumed bits and
+/// preservation it shares; `payload_hex` is the block's decoded bytes, up to
+/// [`MAX_SAMPLE_PAYLOAD_BYTES`] (always `Some`: samples come only with one).
 #[derive(Debug, Clone)]
 pub struct FailureSample {
     pub actor_net_guid: u32,
     pub bit_count: u32,
-    pub consumed_bits: u64,
-    /// Whether the complete failed stream was retained as raw bits.
-    pub payload_preserved: bool,
     pub abandoned_bits: u64,
     pub record_offset: Option<u64>,
     pub payload_hex: Option<String>,
@@ -79,7 +72,8 @@ pub struct FailureSample {
 /// not a sum: it separates a drift that always stops at one offset (a field
 /// stream consuming 185 of 200 bits) from random offsets, which a sum would
 /// average away. A group fails at very few distinct offsets, so cells stay few.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Ordered field by field, for a deterministic tie-break.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FailureKey {
     pub kind: StreamKind,
     pub cause: StreamFailureCause,
@@ -142,11 +136,6 @@ impl FailureAggregate {
         }
     }
 
-    /// Maximum number of distinct keyed cells retained.
-    pub fn cell_limit() -> usize {
-        MAX_FAILURE_CELLS
-    }
-
     /// Count one failure. Samples come only from [`Self::note_payload`], whose
     /// callers hold the decoded bytes. Preservation is read from `failure`, so
     /// the key and the reconciled counter cannot disagree.
@@ -164,8 +153,8 @@ impl FailureAggregate {
     }
 
     /// Attach one real-payload sample to a cell, from the three payload
-    /// callbacks framing makes beside a block's `on_stream_failure` (before or
-    /// after it). Never counts: that is one [`Self::note_failure`] per failure.
+    /// callbacks framing makes after a block's `on_stream_failure`. Never
+    /// counts: that is one [`Self::note_failure`] per failure.
     pub fn note_payload(&mut self, failure: &StreamFailure, group_path: Arc<str>, payload: &[u8]) {
         if !self.retain_payloads {
             return;
@@ -176,18 +165,14 @@ impl FailureAggregate {
         if cell.samples.len() >= MAX_SAMPLES_PER_CELL {
             return;
         }
-        // Too big for an honest prefix: the event's shape without a payload.
-        let oversized = payload.len() as u64 > MAX_SAMPLE_PAYLOAD_BLOCK_BITS / 8;
         let take = payload.len().min(MAX_SAMPLE_PAYLOAD_BYTES);
         cell.samples.push(FailureSample {
             actor_net_guid: failure.actor_net_guid.0,
             bit_count: failure.bit_count,
-            consumed_bits: failure.consumed_bits,
-            payload_preserved: failure.payload_preserved,
             abandoned_bits: failure.remaining_bits,
             record_offset: failure.record_offset,
-            payload_hex: (!oversized).then(|| hex(&payload[..take])),
-            payload_truncated: !oversized && payload.len() > MAX_SAMPLE_PAYLOAD_BYTES,
+            payload_hex: Some(hex(&payload[..take])),
+            payload_truncated: payload.len() > MAX_SAMPLE_PAYLOAD_BYTES,
         });
     }
 
@@ -211,7 +196,7 @@ impl FailureAggregate {
         self.preserved_unresolved += other.preserved_unresolved;
         self.overflow.add(&other.overflow);
         let mut other_cells: Vec<_> = other.cells.drain().collect();
-        other_cells.sort_by(|(a, _), (b, _)| compare_keys(a, b));
+        other_cells.sort_by(|(a, _), (b, _)| a.cmp(b));
         for (key, mut other_cell) in other_cells {
             let Some(cell) = Self::cell(&mut self.cells, key) else {
                 self.overflow.add(&other_cell);
@@ -259,36 +244,8 @@ impl FailureAggregate {
     /// cannot shuffle between runs.
     pub fn cells_sorted(&self) -> Vec<(&FailureKey, &FailureCell)> {
         let mut cells: Vec<(&FailureKey, &FailureCell)> = self.cells.iter().collect();
-        cells.sort_by(|(a, ac), (b, bc)| bc.count.cmp(&ac.count).then_with(|| compare_keys(a, b)));
+        cells.sort_by(|(a, ac), (b, bc)| bc.count.cmp(&ac.count).then_with(|| a.cmp(b)));
         cells
-    }
-}
-
-fn compare_keys(a: &FailureKey, b: &FailureKey) -> std::cmp::Ordering {
-    kind_rank(a.kind)
-        .cmp(&kind_rank(b.kind))
-        .then_with(|| cause_rank(a.cause).cmp(&cause_rank(b.cause)))
-        .then_with(|| a.group_path.cmp(&b.group_path))
-        .then_with(|| a.function_count.cmp(&b.function_count))
-        .then_with(|| a.record_handle.cmp(&b.record_handle))
-        .then_with(|| a.consumed_bits.cmp(&b.consumed_bits))
-        .then_with(|| a.payload_preserved.cmp(&b.payload_preserved))
-}
-
-fn kind_rank(kind: StreamKind) -> u8 {
-    match kind {
-        StreamKind::RepLayout => 0,
-        StreamKind::Rpc => 1,
-    }
-}
-
-fn cause_rank(cause: StreamFailureCause) -> u8 {
-    match cause {
-        StreamFailureCause::AbandonedTail => 0,
-        StreamFailureCause::ReadError => 1,
-        StreamFailureCause::UnresolvedFunctionCount => 2,
-        StreamFailureCause::UnverifiedRepLayoutTail => 3,
-        StreamFailureCause::WindowOpenFailed => 4,
     }
 }
 
@@ -373,23 +330,22 @@ mod tests {
         assert!(cp.cells_sorted().is_empty(), "absorb drains the source");
     }
 
-    /// A payload too large to represent honestly is recorded as a shape-only
-    /// sample, never as a prefix that misrepresents the block.
+    /// A payload up to the cap is kept whole; any longer one, however long,
+    /// keeps the cap's prefix and says so.
     #[test]
-    fn an_oversized_payload_is_not_truncated_to_a_prefix() {
+    fn a_long_payload_keeps_a_flagged_prefix() {
         let mut agg = FailureAggregate::new(true);
-        let mut f = failure(
-            StreamKind::Rpc,
-            StreamFailureCause::UnresolvedFunctionCount,
-            0,
-        );
-        f.payload_preserved = true;
-        let big = vec![0x77; (MAX_SAMPLE_PAYLOAD_BLOCK_BITS / 8) as usize + 1];
-        agg.note_payload(&f, Arc::from("Big"), &big);
-        agg.note_failure(&f, Arc::from("Big"));
-        let (_, cell) = &agg.cells_sorted()[0];
-        assert_eq!(cell.count, 1);
-        assert!(cell.samples[0].payload_hex.is_none());
+        let f = failure(StreamKind::Rpc, StreamFailureCause::ReadError, 0);
+        for len in [MAX_SAMPLE_PAYLOAD_BYTES, MAX_SAMPLE_PAYLOAD_BYTES + 1, 2000] {
+            agg.note_payload(&f, Arc::from("Group"), &vec![0x7a; len]);
+        }
+        let samples = &agg.cells[&FailureKey::new(&f, Arc::from("Group"))].samples;
+        let kept: Vec<_> = (samples.iter())
+            .map(|s| (s.payload_hex.as_deref(), s.payload_truncated))
+            .collect();
+        let prefix = "7a".repeat(MAX_SAMPLE_PAYLOAD_BYTES);
+        let prefix = Some(prefix.as_str());
+        assert_eq!(kept, [(prefix, false), (prefix, true), (prefix, true)]);
     }
 
     #[test]

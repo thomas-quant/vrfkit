@@ -19,7 +19,7 @@ mod paths;
 mod rpc;
 mod stream;
 
-pub use failure_stats::FailureAggregate;
+pub use failure_stats::{FailureAggregate, MAX_FAILURE_CELLS};
 
 use std::sync::Arc;
 
@@ -81,11 +81,6 @@ pub struct ChannelState {
 }
 
 impl ChannelState {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Record one stream failure, up to the cap.
     pub fn push_stream_failure(&mut self, line: String) {
         if self.stream_failures.len() < MAX_STREAM_FAILURE_RECORDS {

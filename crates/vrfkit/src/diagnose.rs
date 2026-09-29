@@ -23,7 +23,7 @@ use vrf_schema::read_checkpoint_tables;
 
 use crate::error::CliError;
 use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
-use crate::sink::{ExportStats, FailureAggregate};
+use crate::sink::{ExportStats, FailureAggregate, MAX_FAILURE_CELLS};
 
 /// The checkpoint pass's counters and per-chunk metadata.
 #[derive(Debug, Default)]
@@ -96,7 +96,7 @@ pub fn run(path: &str, json_path: Option<&str>, include_payloads: bool) -> Resul
     let net_main = main.reader.stats().clone();
     let main_failures = main.channels.take_failure_aggregate();
     let mut json = String::with_capacity(1 << 16);
-    json.push_str("{\n  \"schema_version\": 3,\n  \"tool\": \"vrfkit diag\",\n  \"file\": ");
+    json.push_str("{\n  \"schema_version\": 4,\n  \"tool\": \"vrfkit diag\",\n  \"file\": ");
     push_json_string(&mut json, path);
     json.push_str(&format!(",\n  \"file_size\": {file_size},\n  \"branch\": "));
     push_json_string(&mut json, branch);
@@ -393,7 +393,7 @@ fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
         agg.total_failures(),
         agg.preserved_unresolved(),
         agg.real_loss(),
-        FailureAggregate::cell_limit(),
+        MAX_FAILURE_CELLS,
         overflow.count,
         overflow.bit_count_total,
         overflow.consumed_bits_total,
@@ -405,9 +405,9 @@ fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
             out.push_str(", ");
         }
         out.push_str("{\"kind\": ");
-        push_json_string(out, kind_name(key.kind));
+        push_json_string(out, &format!("{:?}", key.kind));
         out.push_str(", \"cause\": ");
-        push_json_string(out, cause_name(key.cause));
+        push_json_string(out, &format!("{:?}", key.cause));
         out.push_str(", \"group_path\": ");
         push_json_string(out, &key.group_path);
         out.push_str(&format!(
@@ -428,13 +428,10 @@ fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
                 out.push_str(", ");
             }
             out.push_str(&format!(
-                "{{\"actor_net_guid\": {}, \"bit_count\": {}, \"consumed_bits\": {}, \
-                 \"payload_preserved\": {}, \"abandoned_bits\": {}, \"record_offset\": {}, \
-                 \"payload_hex\": ",
+                "{{\"actor_net_guid\": {}, \"bit_count\": {}, \"abandoned_bits\": {}, \
+                 \"record_offset\": {}, \"payload_hex\": ",
                 sample.actor_net_guid,
                 sample.bit_count,
-                sample.consumed_bits,
-                sample.payload_preserved,
                 sample.abandoned_bits,
                 json_number_or_null(sample.record_offset),
             ));
@@ -454,23 +451,6 @@ fn push_failure_aggregate(out: &mut String, agg: &FailureAggregate) {
 
 fn json_number_or_null<T: std::fmt::Display>(value: Option<T>) -> String {
     value.map_or_else(|| "null".to_owned(), |value| value.to_string())
-}
-
-fn kind_name(kind: vrf_net::pipeline::StreamKind) -> &'static str {
-    match kind {
-        vrf_net::pipeline::StreamKind::RepLayout => "RepLayout",
-        vrf_net::pipeline::StreamKind::Rpc => "Rpc",
-    }
-}
-
-fn cause_name(cause: vrf_net::pipeline::StreamFailureCause) -> &'static str {
-    match cause {
-        vrf_net::pipeline::StreamFailureCause::AbandonedTail => "AbandonedTail",
-        vrf_net::pipeline::StreamFailureCause::ReadError => "ReadError",
-        vrf_net::pipeline::StreamFailureCause::UnresolvedFunctionCount => "UnresolvedFunctionCount",
-        vrf_net::pipeline::StreamFailureCause::UnverifiedRepLayoutTail => "UnverifiedRepLayoutTail",
-        vrf_net::pipeline::StreamFailureCause::WindowOpenFailed => "WindowOpenFailed",
-    }
 }
 
 #[cfg(test)]

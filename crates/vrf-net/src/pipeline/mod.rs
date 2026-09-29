@@ -64,7 +64,7 @@ pub struct ActorChannelState {
 }
 
 /// Which stream grammar failed to parse inside a decoded content block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StreamKind {
     /// A property (RepLayout) stream.
     RepLayout,
@@ -76,7 +76,7 @@ pub enum StreamKind {
 /// separates, per group, an unresolved group (payload preserved whole) from a
 /// stream that lost structure, which `NetStats::lost_content_blocks` does
 /// only in total.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StreamFailureCause {
     /// The walk returned `Ok` but abandoned bits mid-block (a record overran,
     /// or an RPC record was too short for its length); records before the
@@ -93,9 +93,6 @@ pub enum StreamFailureCause {
     /// strict ClassNetCache shape was not verified: uncertainty, not a failed
     /// read or a missing count.
     UnverifiedRepLayoutTail,
-    /// Never constructed: the decoded window always opens, its scratch holding
-    /// `ceil(bit_count / 8)` bytes.
-    WindowOpenFailed,
 }
 
 /// Result of handing a valid post-RepLayout tail to the sink.
