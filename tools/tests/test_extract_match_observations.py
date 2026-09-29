@@ -335,6 +335,24 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(balance["owner_controller_guid"], 42)
         self.assertEqual(balance["player_state_guid"], 600)
 
+    def test_a_cleared_owner_ends_the_round_balance_join(self):
+        """Owner 43 is cleared to 0 on both links (a disconnect), then a
+        balance is written: no controller holds it, so no player joins."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_export(root)
+            append_field_rows(root, [
+                (95, 1, 602, 0, "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C", "Owner", 0, None),
+                (95, 2, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "Owner", 0, None),
+                (100, 1, 601, 0, "/Script/ShooterGame.OwnerExclusivePlayerInfo", "RoundInfos[6].EndOfRoundMoney", 1300, None),
+            ])
+            result = observations.build(root)
+
+        balance = next(row for row in result["round_balances"] if row["round_info_slot"] == 6)
+        self.assertEqual((balance["owner_controller_guid"], balance["player_state_guid"],
+                          balance["player_join_source"]), (0, None, "unavailable"))
+        self.assertEqual(result["attribution_coverage"]["round_balance_player"]["joined"], 3)
+
     def test_packet_order_is_stable_when_source_rows_are_shuffled(self):
         samples = [
             (20, 2, 4, 28),

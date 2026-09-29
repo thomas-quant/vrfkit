@@ -257,12 +257,11 @@ def build(export_dir: Path) -> dict:
         elif integer is not None and (match := ROUND_MONEY_RE.fullmatch(name or "")):
             slot, value_kind = match.groups()
             balances[(actor, int(slot), value_kind)].append((time_ms, packet_id, row, integer))
-        elif group.endswith("OwnerExclusivePlayerInfo") and name == "Owner" and integer:
-            # The descriptor identifies Owner as the owning controller.
+        elif group.endswith("OwnerExclusivePlayerInfo") and name == "Owner" and integer is not None:
+            # The owning controller; 0 (cleared) is kept so it ends the join.
             owner_info_controllers[actor].append((time_ms, packet_id, row, integer))
-        elif group.endswith("BombPlayerState_C") and name == "Owner" and integer:
-            # BombPlayerState.Owner gives the inverse controller -> player
-            # state link needed by OwnerExclusivePlayerInfo.
+        elif group.endswith("BombPlayerState_C") and name == "Owner" and integer is not None:
+            # The inverse controller -> player state link.
             player_controllers[actor].append((time_ms, packet_id, row, integer))
         elif group.endswith("BaseTeamState") and name in ("LoadoutValue", "AverageLoadoutValue"):
             if integer is not None:
@@ -483,7 +482,7 @@ def build(export_dir: Path) -> dict:
                 )
                 players = [
                     player for player, timeline in player_controller_timelines.items()
-                    if controller is not None and _value_at(timeline, time_ms, packet_id) == controller
+                    if controller not in (None, 0) and _value_at(timeline, time_ms, packet_id) == controller
                 ]
                 player = players[0] if len(players) == 1 else None
                 join_source = (
