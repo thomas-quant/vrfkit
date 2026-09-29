@@ -362,6 +362,77 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 
+    /// Read Unreal's `QuantizedVector`: a `SerializedInt(128)` header whose
+    /// bits 0-5 give a component width and bit 6 says "scaled". Width > 0:
+    /// three signed components, divided by `scale` when scaled (whole units
+    /// divide by 1.0, which is exact); width 0: 3 x f32 unscaled, else 3 x f64.
+    /// Movement matches an independent parser to 0.0005 through this
+    /// arithmetic: do not restyle it.
+    #[inline]
+    pub fn read_quantized_vector(&mut self, scale: u32) -> Result<[f64; 3]> {
+        let info = u64::from(self.read_serialized_int(128)?);
+        let component_bits = (info & 63) as u32;
+        let extra_info = info >> 6;
+
+        if component_bits > 0 {
+            let [x, y, z] = self.read_quantized_components(component_bits)?;
+            let divisor = f64::from(if extra_info > 0 { scale } else { 1 });
+            Ok([x as f64 / divisor, y as f64 / divisor, z as f64 / divisor])
+        } else if extra_info == 0 {
+            let mut f32_component = || self.read_f32().map(f64::from);
+            Ok([f32_component()?, f32_component()?, f32_component()?])
+        } else {
+            Ok([self.read_f64()?, self.read_f64()?, self.read_f64()?])
+        }
+    }
+
+    /// Three two's-complement components of `bits` bits each: one read when
+    /// all three fit in 64 bits, one read each otherwise.
+    ///
+    /// # Panics
+    ///
+    /// When `bits` is outside `1..=63`, the widths a `QuantizedVector` header
+    /// can declare: a call-site bug, so a real assert (above 64 the shift is
+    /// out of range, and release has no debug assertions).
+    #[inline]
+    pub fn read_quantized_components(&mut self, bits: u32) -> Result<[i64; 3]> {
+        assert!(
+            (1..=63).contains(&bits),
+            "component_bits must be 1..=63, got {bits}"
+        );
+        let sign_bit = 1u64 << (bits - 1);
+        let sign_extend = |raw: u64| (raw ^ sign_bit).wrapping_sub(sign_bit) as i64;
+
+        if bits * 3 <= 64 {
+            let raw = self.read_bits(bits * 3)?;
+            let mask = (1u64 << bits) - 1;
+            Ok([
+                sign_extend(raw & mask),
+                sign_extend((raw >> bits) & mask),
+                sign_extend((raw >> (bits * 2)) & mask),
+            ])
+        } else {
+            let mut component = || self.read_bits(bits).map(sign_extend);
+            Ok([component()?, component()?, component()?])
+        }
+    }
+
+    /// Read Unreal's compressed rotator: pitch, yaw and roll, each a presence
+    /// bit and then, if set, a `width`-bit value (16 short, 8 byte) scaled to
+    /// degrees. `360 / 2^width` divides by a power of two, so it is exact in `f32`.
+    #[inline]
+    pub fn read_compressed_rotator(&mut self, width: u32) -> Result<[f32; 3]> {
+        let scale = 360.0 / (1u32 << width) as f32;
+        let mut component = || -> Result<f32> {
+            Ok(if self.read_bit()? {
+                self.read_bits(width)? as f32 * scale
+            } else {
+                0.0
+            })
+        };
+        Ok([component()?, component()?, component()?])
+    }
+
     /// Read an Unreal `FString`: a positive length counts UTF-8 bytes, a
     /// negative one UTF-16 units; `max_bytes` caps the allocation. A trailing
     /// null is stripped but not required: requiring it would prevent no wrong value.
