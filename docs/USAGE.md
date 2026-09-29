@@ -1090,6 +1090,7 @@ This measures value presence, not semantic understanding or block preservation.
 | `bench_export.py` | Times a full `export` against `tools/baselines/bench.json`. A smoke detector, not a profiler -- wall clock is noisy, so the default tolerance is 25% and it answers "did something get twice as slow", nothing finer. Reports a run *faster* than the baseline too: that means the recorded number no longer describes the code. |
 | `extract_active_effects.py` | Derives an `active_effects.parquet` view from an export -- one row per persistent ability instance (smoke/wall/molly/slow/trap/recon/orb) with class, spawn position, and open/close lifetime. A `dormant` event does NOT end an instance -- a settled smoke that stops replicating has not despawned -- so those instances stay open-ended and the summary counts them. The data already lives in `actors.parquet`; this filters and pairs it. Each row carries `actor_kind` (`projectile`/`game_object`/`zone`/`patch`/`pawn`/`other`, from the class leaf prefix): a projectile and the zone it places are two rows by design, and the kind lets a consumer count either. Weapons (`Gun_` leaves, such as Chamber's ult gun) and Breach's through-wall flash are not effects; Brimstone's orbital strike is a `damage_zone`. Every type and kind prints with its zero. |
 | `extract_spike_carrier.py` | Derives a `spike_carrier.parquet` view -- one row per spike custody interval, resolved through to the manifest `subject`. Reads `BombEquippable_C.Owner` on the spike's own channel rather than the inventory side, so it covers carrying-in-the-backpack and not just in-hand, and it follows proxy carriers (Gekko's Wingman) back through `Instigator`. A carrier is any `SpawnedCharacter` pawn of a player, including one from before a reconnect; `carrier_identity_provenance` says which. |
+| `extract_rounds.py` | Derives a `rounds.parquet` view -- one row per played round: reset, round start, buy phase end (`buy_end_ms`, the `CastTime` epoch), the unnamed post-round phase and the side switch from the `MulticastSetPhase` RPC, each checked against the named RPC of its frame (a difference exits 1 and writes nothing); `round_number` from `roundStarted`; winner, role, result and attacker team from `RoundResults` by `RoundNumber`; plant/defuse/explode times and the replicated plant site. A surrender pads `RoundResults` with awarded rounds, which are counted, never rows. A missing phase stays null. |
 
 ```bash
 python tools/extract_match_observations.py --export <export-directory> --out observations.json
@@ -1101,6 +1102,7 @@ python tools/extract_ground_volumes.py --export-dir <export-directory> --out-dir
 python tools/extract_section_observations.py --export <export-directory> --out sections.json
 python tools/section_timeline.py --export <export-directory> --out timeline.json
 python tools/extract_ability_lifecycle.py --export <export-directory> --out ability-lifecycle.json
+python tools/extract_rounds.py --export <export-directory> --out rounds.parquet
 ```
 
 Reload observations recognize `ReloadState` and `ReloadStateEmpty`. Each carries
