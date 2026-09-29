@@ -267,12 +267,12 @@ def relevant_rows(export: Path, compare_typed: bool):
             yield from batch.take(pa.array(indices, type=pa.int32())).to_pylist()
 
 
-def main() -> None:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exports", nargs="+", type=Path)
     parser.add_argument("--require-routes", action="store_true", help="fail if either route has zero rows across all exports")
     parser.add_argument("--compare-typed", action="store_true", help="compare emitted child rows to an independent decode of parent raw bits")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     failed = False
     total_rows = Counter()
     for export in args.exports:
@@ -322,9 +322,8 @@ def main() -> None:
     if args.require_routes and any(total_rows[key[1]] == 0 for key in ROUTES):
         failed = True
         print(f"missing observed route: {dict(total_rows)}")
-    if failed:
-        raise SystemExit(1)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

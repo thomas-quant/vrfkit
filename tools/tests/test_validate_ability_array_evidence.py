@@ -1,7 +1,15 @@
 """Fail-closed checks for the independent ability-array wire validator."""
 
 from collections import Counter
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
 import unittest
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from tools import validate_ability_array_evidence as evidence
 
@@ -122,6 +130,71 @@ class AbilityArrayEvidenceTests(unittest.TestCase):
         emitted[0]["value_f64"] = None
         with self.assertRaisesRegex(ValueError, "null typed value"):
             evidence.compare_children(row, expected, emitted)
+
+
+PATH_KEY = next(key for key in evidence.ROUTES if "NetworkedProjectilePath" in key[1])
+CONTEXT = {"time_ms": 1, "packet_id": 2, "channel_index": 3, "actor_net_guid": 4, "object_net_guid": 5}
+
+
+def export_rows(parent):
+    """A path parent preceded by its emitted children, as vrfkit writes them."""
+    _, _, expected = evidence.inspect(parent, evidence.ROUTES[PATH_KEY])
+    rows = []
+    for name, (_handle, width, raw, column, value) in expected.items():
+        child = {"field_name": name, "handle": 0, "compatible_checksum": None,
+                 "bit_count": width, "raw_bits": raw}
+        child[column] = "(0,0,0)" if isinstance(value, tuple) else value
+        rows.append(child)
+    return rows + [{**parent, "handle": 1, "compatible_checksum": PATH_KEY[2]}]
+
+
+def run_main(rows, declared=True):
+    """main() over one synthetic export: `(exit code, stdout)`."""
+    with tempfile.TemporaryDirectory() as directory:
+        export = Path(directory)
+        groups = [{"path": evidence.PATH_GROUP, "fields": [
+            {"handle": 0, "name": "NetworkedProjectilePath", "compatible_checksum": PATH_KEY[2]}]}]
+        (export / "manifest.json").write_text(
+            json.dumps({"net_field_export_groups": groups if declared else []}), encoding="utf-8")
+        types = {"compatible_checksum": pa.uint32(), "bit_count": pa.uint32(), "raw_bits": pa.binary(),
+                 "handle": pa.uint32(), "field_name": pa.string(), "value_i64": pa.int64(),
+                 "value_f64": pa.float64(), "value_bool": pa.bool_(), "value_str": pa.string()}
+        pq.write_table(pa.table({
+            "group_path": [PATH_KEY[0]] * len(rows),
+            **{name: [value] * len(rows) for name, value in CONTEXT.items()},
+            **{name: pa.array([row.get(name) for row in rows], kind) for name, kind in types.items()},
+        }), export / "fields.parquet")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = evidence.main([str(export), "--compare-typed", "--require-routes"])
+    return code, output.getvalue()
+
+
+class MainTests(unittest.TestCase):
+    def test_children_pair_with_the_parent_after_them(self):
+        rows = export_rows(path_point())
+        code, out = run_main(rows)
+        self.assertIn("rows={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 1} "
+                      "elements={'MulticastSetPath.NetworkedProjectilePath': 1} "
+                      "typed_children={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 3}", out)
+        self.assertIn("missing observed route", out)  # --require-routes: no ActiveBlinds row
+        self.assertEqual(code, 1)
+        self.assertNotIn("orphan", out)
+        self.assertNotIn("declaration", out)
+
+    def test_an_orphan_child_and_a_missing_declaration_fail(self):
+        rows = export_rows(path_point())
+        code, out = run_main(rows + rows[:1], declared=False)
+        self.assertEqual(code, 1)
+        self.assertIn("orphan children: {'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 1}", out)
+        self.assertIn(f"declaration mismatch: '{evidence.PATH_GROUP}'", out)
+
+    def test_children_in_the_wrong_order_are_not_counted(self):
+        rows = export_rows(path_point())
+        code, out = run_main([rows[1], rows[0], *rows[2:]])
+        self.assertEqual(code, 1)
+        self.assertIn("child path", out)
+        self.assertIn("typed_children={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 0}", out)
 
 
 if __name__ == "__main__":
