@@ -2,42 +2,50 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 
-
 def sha256_file(path: Path) -> str:
-    """Stream a file's SHA-256.
-
-    Every extractor records one of these as provenance, and several compare
-    theirs before and after a run to refuse a result produced while their own
-    source was being edited. That makes this function part of those guards, not
-    merely a utility: a tool whose integrity check already hashes `atomic_io.py`
-    keeps covering this code, and a tool whose check does not must keep its own
-    copy. `extract_kill_observations.py` records its hash without comparing it,
-    and `extract_fastarray_observations.py` does not hash this file at all, so
-    both deliberately keep theirs.
-    """
+    """Stream a file's SHA-256."""
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
-def aliases(path: Path, protected) -> bool:
-    """Whether `path` names one of `protected`: the same resolved path, or
-    the same file through a hard link (checked only when both exist)."""
-    for item in protected:
-        try:
-            if path.exists() and item.exists() and path.samefile(item):
-                return True
-        except OSError:
-            pass
-        if path.resolve() == item.resolve():
-            return True
-    return False
+
+def refuse_input_path(out: Path, protected) -> None:
+    """Refuse an output that resolves to a protected path. A hard link to an
+    input needs no check: the atomic writers replace the name, not the file."""
+    target = out.resolve()
+    if any(target == path.resolve() for path in protected):
+        raise ValueError(f"output aliases an input or implementation file: {out}")
+
+
+def run_json_cli(description, extract, summary, argv=None, *, sources=(), **dumps) -> int:
+    """The --export/--out command of a JSON extractor: write `extract(export)`
+    atomically unless --out is an export table, the manifest or one of
+    `sources`, then print the lines `summary(document, out)` yields. Bad input
+    prints FAILED and returns 1."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--export", required=True, type=Path)
+    parser.add_argument("--out", required=True, type=Path)
+    args = parser.parse_args(argv)
+    try:
+        refuse_input_path(args.out, [*sources, *args.export.glob("*.parquet"),
+                                     args.export / "manifest.json"])
+        document = extract(args.export)
+        atomic_write_text(args.out, json.dumps(document, **dumps) + "\n")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"FAILED: {exc}", file=sys.stderr)
+        return 1
+    for line in summary(document, args.out):
+        print(line)
+    return 0
 
 
 def require_descendant(path: Path, root: Path, *, allow_root: bool = False) -> Path:
@@ -62,29 +70,9 @@ def remove_tree(path: Path, root: Path) -> None:
         shutil.rmtree(resolved)
 
 
-def atomic_write_text(
-    path: Path,
-    content: str,
-    *,
-    encoding: str = "utf-8",
-) -> None:
+def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
     """Replace a text file atomically, leaving the old file on failure."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    parent = path.parent.resolve()
-    target = require_descendant(path, parent)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding=encoding, newline="") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    atomic_write_file(path, lambda handle: handle.write(content.encode(encoding)))
 
 
 def staged_output(export_dir: Path, out_dir: Path, inputs, write, *, prefix: str) -> dict:

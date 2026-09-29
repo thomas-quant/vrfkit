@@ -10,19 +10,17 @@ when an unambiguous one equals a ``SpawnedCharacter`` pawn
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import run_json_cli
     from .player_identity import FINAL_PROVENANCE, load_player_bodies
 else:
-    from atomic_io import atomic_write_text
+    from atomic_io import run_json_cli
     from player_identity import FINAL_PROVENANCE, load_player_bodies
 
 
@@ -241,26 +239,19 @@ def build(export_dir: Path) -> dict:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--export", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
-    args = parser.parse_args(argv)
-    try:
-        document = build(args.export)
-        atomic_write_text(args.out, json.dumps(document, indent=2, ensure_ascii=True) + "\n")
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
+def summary(document, out):
     totals = document["totals"]
-    print("wrote {} ({} candidate(s), {} linked, {} unresolved, {} closed, {} right-censored)".format(
-        args.out, totals["candidate_instances"], totals["linked_player_reference"],
-        totals["unresolved_player_reference"], totals["closed"], totals["right_censored"]))
+    yield "wrote {} ({} candidate(s), {} linked, {} unresolved, {} closed, {} right-censored)".format(
+        out, totals["candidate_instances"], totals["linked_player_reference"],
+        totals["unresolved_player_reference"], totals["closed"], totals["right_censored"])
     # Printed with its zero, so 0 reads as "none".
-    print("  linked via an earlier SpawnedCharacter pawn: {}; player identity: {}".format(
+    yield "  linked via an earlier SpawnedCharacter pawn: {}; player identity: {}".format(
         totals["linked_via_non_final_spawned_character"],
-        json.dumps(totals["player_identity"], sort_keys=True)))
-    return 0
+        json.dumps(totals["player_identity"], sort_keys=True))
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run_json_cli(__doc__, build, summary, argv, sources=[Path(__file__)], indent=2)
 
 
 if __name__ == "__main__":

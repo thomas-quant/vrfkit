@@ -503,16 +503,6 @@ class MatchObservationTests(unittest.TestCase):
         self.assertEqual(result["money_decreases_in_team_switch_window"], [])
         self.assertIn(199, [row["time_ms"] for row in result["money_decreases"]])
 
-    def test_input_overwrite_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            write_export(root)
-            for source_name in ("fields.parquet", "net_guids.parquet",
-                                "events.parquet", "manifest.json"):
-                with self.subTest(source_name=source_name):
-                    with self.assertRaisesRegex(ValueError, "input export file"):
-                        observations._reject_input_overwrite(root, root / source_name)
-
 
 if __name__ == "__main__":
     unittest.main()

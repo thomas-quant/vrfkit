@@ -4,12 +4,9 @@ continuity decision. Adjacency is observation order, not effective HP, game
 life or component life."""
 from __future__ import annotations
 
-import argparse
 import collections
-import json
 import math
 import struct
-import sys
 from pathlib import Path
 
 import pyarrow as pa
@@ -17,11 +14,11 @@ import pyarrow.compute as pc
 
 if __package__:
     from . import extract_section_observations
-    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
+    from .atomic_io import run_json_cli, sha256_file as sha
     from .wire_bits import iter_selected, text
 else:
     import extract_section_observations
-    from atomic_io import aliases, atomic_write_text, sha256_file as sha
+    from atomic_io import run_json_cli, sha256_file as sha
     from wire_bits import iter_selected, text
 
 RESET = "MulticastSectionLifeChange"
@@ -32,8 +29,8 @@ REMOVED_STRICT_REASONS = {"same_time_tie", "prior_tie_censor", "lifecycle_unreso
                           "prior_lifecycle_unresolved", "actor_channel_instance_changed"}
 INPUT_NAMES = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet",
                "net_guids.parquet", "actors.parquet")
-SOURCE_NAMES = ("section_timeline.py", "extract_section_observations.py", "wire_bits.py",
-                "atomic_io.py")
+SOURCES = [Path(__file__).resolve(), *(Path(__file__).with_name(n) for n in (
+    "extract_section_observations.py", "wire_bits.py", "atomic_io.py"))]
 
 
 def _traces(rows):
@@ -348,11 +345,10 @@ def extract(export):
     after = {p.name: sha(p) for p in inputs}
     if before != after:
         raise ValueError("input changed during extraction")
-    here = Path(__file__).resolve().parent
     return {"schema_version": 2, "kind": "vrfkit_section_packet_timeline",
             "export_id": export.name, "source": str(export.resolve()),
             "provenance": {"input_sha256_before": before, "input_sha256_after": after,
-                           "implementation_sha256": {n: sha(here / n) for n in SOURCE_NAMES},
+                           "implementation_sha256": {p.name: sha(p) for p in SOURCES},
                            "raw_observation_counts": raw["counts"],
                            "replay_build": raw["provenance"]["replay_build"],
                            "population": "main_only"},
@@ -360,23 +356,10 @@ def extract(export):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--export", required=True, type=Path)
-    p.add_argument("--out", required=True, type=Path)
-    a = p.parse_args(argv)
-    try:
-        here = Path(__file__).resolve().parent
-        protected = [x for x in a.export.iterdir() if x.is_file()] + [here / n for n in SOURCE_NAMES]
-        if aliases(a.out, protected):
-            raise ValueError("output aliases an input or implementation file")
-        data = extract(a.export)
-        atomic_write_text(a.out, json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
-    except (OSError, ValueError) as e:
-        print("FAILED: " + str(e), file=sys.stderr)
-        return 1
-    print("wrote %s (%d packet-eligible, %d resolved)" % (
-        a.out, data["packet_counts"]["eligible"], data["packet_counts"]["resolved_from_strict_ineligible"]))
-    return 0
+    return run_json_cli(__doc__, extract, lambda d, out: [
+        f"wrote {out} ({d['packet_counts']['eligible']} packet-eligible, "
+        f"{d['packet_counts']['resolved_from_strict_ineligible']} resolved)"],
+        argv, sources=SOURCES, indent=2, sort_keys=True, allow_nan=False)
 
 
 if __name__ == "__main__":

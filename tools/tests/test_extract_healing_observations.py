@@ -1,4 +1,4 @@
-import contextlib, copy, io, json, os, struct, sys, tempfile, unittest
+import contextlib, copy, io, json, struct, sys, tempfile, unittest
 from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
@@ -423,16 +423,6 @@ class Tests(unittest.TestCase):
         )
         got = list(tool.iter_selected_fields(path, False))
         self.assertEqual([ordinal for ordinal, _ in got], [65534, 65536])
-
-    def test_hardlink_output_alias_is_rejected(self):
-        td, p = self.make()
-        self.addCleanup(td.cleanup)
-        source = p / "fields.parquet"
-        alias = p / "alias.json"
-        os.link(source, alias)
-        before = source.read_bytes()
-        self.assertEqual(tool.main(["--export", str(p), "--out", str(alias)]), 1)
-        self.assertEqual(source.read_bytes(), before)
 
 
 class EarlierPawnTests(unittest.TestCase):

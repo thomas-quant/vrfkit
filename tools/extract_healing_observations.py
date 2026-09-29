@@ -5,7 +5,7 @@ The MulticastNotifyHeal amount and sections come from the section parser
 the heal source and recipient corroboration and the summaries."""
 
 from __future__ import annotations
-import argparse, collections, json, re, sys
+import collections, json, re
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -13,12 +13,12 @@ import pyarrow.parquet as pq
 
 if __package__:
     from . import extract_section_observations as sections
-    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
+    from .atomic_io import run_json_cli, sha256_file as sha
     from .player_identity import load_player_bodies
     from .wire_bits import InputError, iter_selected, text
 else:
     import extract_section_observations as sections
-    from atomic_io import aliases, atomic_write_text, sha256_file as sha
+    from atomic_io import run_json_cli, sha256_file as sha
     from player_identity import load_player_bodies
     from wire_bits import InputError, iter_selected, text
 IntegrityError = sections.IntegrityError
@@ -69,8 +69,8 @@ INPUT_NAMES = (
     "actors.parquet",
     "net_guids.parquet",
 )
-HELPER_NAMES = ("extract_section_observations.py", "wire_bits.py", "atomic_io.py",
-                "player_identity.py")
+SOURCES = [Path(__file__).resolve(), *(Path(__file__).with_name(n) for n in (
+    "extract_section_observations.py", "wire_bits.py", "atomic_io.py", "player_identity.py"))]
 
 
 def iter_selected_fields(path, include_references, columns=FIELD_COLS):
@@ -332,10 +332,6 @@ def parse_observation(key, items, guid_paths, actors, refs, players, segments, d
 def extract(export):
     inputs = [export / n for n in INPUT_NAMES]
     before = {p.name: sha(p) for p in inputs}
-    source_files = [
-        Path(__file__).resolve(),
-        *(Path(__file__).with_name(n) for n in HELPER_NAMES),
-    ]
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     declared = declarations(manifest)
     section_declarations = sections.declarations(manifest)
@@ -441,7 +437,7 @@ def extract(export):
             "replay_build": manifest.get("replay_build"),
             "input_sha256_before": before,
             "input_sha256_after": after,
-            "implementation_sha256": {p.name: sha(p) for p in source_files},
+            "implementation_sha256": {p.name: sha(p) for p in SOURCES},
         },
         "observations": observations,
         "checkpoint_observations": cp,
@@ -471,29 +467,15 @@ def extract(export):
     }
 
 
-def main(argv=None):
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--export", required=True, type=Path)
-    p.add_argument("--out", required=True, type=Path)
-    a = p.parse_args(argv)
-    try:
-        protected = [a.export / n for n in INPUT_NAMES] + [
-            Path(__file__),
-            *(Path(__file__).with_name(n) for n in HELPER_NAMES),
-        ]
-        if aliases(a.out, protected):
-            raise InputError("output aliases an input or implementation file")
-        d = extract(a.export)
-        atomic_write_text(
-            a.out, json.dumps(d, indent=2, sort_keys=True, allow_nan=False) + "\n"
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as e:
-        print(f"FAILED: {e}", file=sys.stderr)
-        return 1
-    print(f"wrote {a.out} ({d['counts']['main_coordinate_groups']} observations)")
+def summary(d, out):
+    yield f"wrote {out} ({d['counts']['main_coordinate_groups']} observations)"
     for key in ("source_status", "recipient_lifecycle_status", "source_edge_status"):
-        print(f"  {key}: {json.dumps(d['counts'][key], sort_keys=True)}")
-    return 0
+        yield f"  {key}: {json.dumps(d['counts'][key], sort_keys=True)}"
+
+
+def main(argv=None):
+    return run_json_cli(__doc__, extract, summary, argv, sources=SOURCES,
+                        indent=2, sort_keys=True, allow_nan=False)
 
 
 if __name__ == "__main__":

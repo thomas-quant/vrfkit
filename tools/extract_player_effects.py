@@ -10,19 +10,17 @@ effect intervals; checkpoint snapshots are excluded.
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import run_json_cli
     from .player_identity import FINAL_PROVENANCE, load_player_bodies
 else:
-    from atomic_io import atomic_write_text
+    from atomic_io import run_json_cli
     from player_identity import FINAL_PROVENANCE, load_player_bodies
 
 
@@ -135,19 +133,8 @@ def build(export_dir: Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--export", required=True, type=Path)
-    parser.add_argument("--out", required=True, type=Path)
-    args = parser.parse_args(argv)
-    try:
-        document = build(args.export)
-        atomic_write_text(args.out, json.dumps(document, indent=2, ensure_ascii=True,
-                                               allow_nan=False) + "\n")
-    except (OSError, ValueError) as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps(document["totals"], sort_keys=True))
-    return 0
+    return run_json_cli(__doc__, build, lambda d, out: [json.dumps(d["totals"], sort_keys=True)],
+                        argv, sources=[Path(__file__)], indent=2, allow_nan=False)
 
 
 if __name__ == "__main__":

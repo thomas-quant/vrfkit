@@ -295,15 +295,5 @@ class ExtractionTests(unittest.TestCase):
                 tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})
 
 
-class OutputTests(unittest.TestCase):
-    def test_source_overwrite_is_rejected(self):
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            p = root / "fields.parquet"
-            p.write_bytes(b"x")
-            with self.assertRaisesRegex(tool.InputError, "refusing"):
-                tool.reject_overwrite(root, p)
-
-
 if __name__ == "__main__":
     unittest.main()

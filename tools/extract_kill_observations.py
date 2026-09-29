@@ -5,16 +5,16 @@ members remain null and all three serialized clocks remain independent.
 """
 
 from __future__ import annotations
-import argparse, hashlib, json, math, struct, sys
+import hashlib, json, math, struct
 from pathlib import Path
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text, sha256_file as sha
+    from .atomic_io import run_json_cli, sha256_file as sha
     from .wire_bits import InputError, exact_ref, iter_selected, parse_array, text, weapon_theme
 else:
-    from atomic_io import atomic_write_text, sha256_file as sha
+    from atomic_io import run_json_cli, sha256_file as sha
     from wire_bits import InputError, exact_ref, iter_selected, parse_array, text, weapon_theme
 
 SCHEMA_VERSION = 1
@@ -417,15 +417,6 @@ def resolve(ref, known, kind):
     return f"resolved_{kind}" if ref in known else f"unresolved_{kind}"
 
 
-def reject_overwrite(export, out):
-    target = out.resolve()
-    for p in export.iterdir():
-        if p.is_file() and p.resolve() == target:
-            raise InputError(
-                f"--out aliases source export file {p}; refusing to overwrite input"
-            )
-
-
 def extract(export):
     inputs = (
         "fields",
@@ -466,27 +457,9 @@ def extract(export):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--export", type=Path, required=True)
-    ap.add_argument("--out", type=Path, required=True)
-    a = ap.parse_args(argv)
-    try:
-        if not a.export.is_dir():
-            raise InputError(f"not an export directory: {a.export}")
-        reject_overwrite(a.export, a.out)
-        result = extract(a.export)
-        atomic_write_text(
-            a.out,
-            json.dumps(
-                result, ensure_ascii=True, separators=(",", ":"), allow_nan=False
-            )
-            + "\n",
-        )
-    except (OSError, KeyError, TypeError, json.JSONDecodeError, InputError) as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
-    print(f"wrote {a.out}: {len(result['observations'])} serialized updates")
-    return 0
+    return run_json_cli(__doc__, extract, lambda d, out: [
+        f"wrote {out}: {len(d['observations'])} serialized updates"],
+        argv, sources=[Path(__file__)], ensure_ascii=True, separators=(",", ":"), allow_nan=False)
 
 
 if __name__ == "__main__":

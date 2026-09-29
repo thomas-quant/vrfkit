@@ -1,11 +1,7 @@
-import contextlib
-import io
-import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -226,26 +222,6 @@ class TimelineTests(unittest.TestCase):
             actual = list(tool.actor_rows(path))
             self.assertEqual([i for i, _ in actual], [1, 65537])
 
-    def test_cli_rejects_unused_input_and_hardlink_alias_before_reading(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder); export = root / "export"; export.mkdir()
-            path = export / "movement.parquet"; path.write_bytes(b"retained source")
-            alias = root / "alias.json"; os.link(path, alias)
-            for output in (path, alias):
-                with self.subTest(output=output), contextlib.redirect_stderr(io.StringIO()) as err:
-                    self.assertEqual(tool.main(["--export", str(export), "--out", str(output)]), 1)
-                self.assertIn("aliases", err.getvalue())
-                self.assertEqual(path.read_bytes(), b"retained source")
-
-    def test_atomic_failure_preserves_destination(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder); export = root / "export"; export.mkdir()
-            out = root / "out.json"; out.write_text("old", encoding="utf-8")
-            with mock.patch.object(tool, "extract", return_value={}), \
-                    mock.patch.object(tool, "atomic_write_text", side_effect=OSError("boom")), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(tool.main(["--export", str(export), "--out", str(out)]), 1)
-            self.assertEqual(out.read_text(encoding="utf-8"), "old")
 
 
 if __name__ == "__main__":

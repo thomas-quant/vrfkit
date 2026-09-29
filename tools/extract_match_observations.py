@@ -10,7 +10,6 @@ published as `money_decreases_in_team_switch_window`, never as purchases.
 
 from __future__ import annotations
 
-import argparse
 import bisect
 import json
 import re
@@ -22,9 +21,9 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import run_json_cli
 else:  # direct script execution
-    from atomic_io import atomic_write_text
+    from atomic_io import run_json_cli
 
 
 MAGAZINE_PATH = "MagazineAmmo"
@@ -132,16 +131,6 @@ def _value_at(timeline, time_ms: int, packet_id: int):
     keys, values = timeline
     index = bisect.bisect_right(keys, (time_ms, packet_id)) - 1
     return values[index] if index >= 0 else None
-
-
-def _reject_input_overwrite(export_dir: Path, output_path: Path) -> None:
-    """Refuse to overwrite any source Parquet or manifest with JSON output."""
-    source = export_dir.resolve()
-    output = output_path.resolve()
-    inputs = {path.resolve() for path in source.glob("*.parquet")}
-    inputs.add((source / "manifest.json").resolve())
-    if output in inputs:
-        raise ValueError(f"output path is an input export file: {output}")
 
 
 def _read_columns(path: Path, columns: list[str], *, observation_fields=False) -> dict[str, list]:
@@ -688,28 +677,24 @@ def build(export_dir: Path) -> dict:
     return observations
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--export", type=Path, required=True)
-    parser.add_argument("--out", type=Path, required=True)
-    args = parser.parse_args()
-    _reject_input_overwrite(args.export, args.out)
-    result = build(args.export)
-    atomic_write_text(args.out, json.dumps(result, indent=2) + "\n")
-    print(f"wrote {args.out}")
+def summary(result, out):
+    yield f"wrote {out}"
     for name in ("ammo_changes", "equip_intervals", "reload_intervals",
                  "defuse_progress_transitions", "defuse_completions",
                  "round_balances", "team_loadouts", "money_decreases",
                  "money_decreases_in_team_switch_window", "transaction_snapshots"):
-        print(f"  {name}: {len(result[name])}")
-    print(f"  ammo decreases by weapon RPCs within 300 ms: "
-          f"{json.dumps(result['ammo_decrease_weapon_rpc_within_300ms'])}")
+        yield f"  {name}: {len(result[name])}"
+    yield (f"  ammo decreases by weapon RPCs within 300 ms: "
+           f"{json.dumps(result['ammo_decrease_weapon_rpc_within_300ms'])}")
     windows = result["team_switch_windows"]
-    print(f"  team switch windows: {windows['switches']} "
-          f"({windows['closed_by_end_of_stream']} open to the end of the stream)")
+    yield (f"  team switch windows: {windows['switches']} "
+           f"({windows['closed_by_end_of_stream']} open to the end of the stream)")
     for gap in result["quality_gaps"]:
-        print(f"  quality gap: {gap}")
-    return 0
+        yield f"  quality gap: {gap}"
+
+
+def main(argv=None) -> int:
+    return run_json_cli(__doc__, build, summary, argv, sources=[Path(__file__)], indent=2)
 
 
 if __name__ == "__main__":
