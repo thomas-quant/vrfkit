@@ -280,12 +280,12 @@ class _Tally(dict):
         return sum(self.values())
 
     def lines(self) -> list[str]:
-        """One line per counter that fired, in REASONS order. Zeros stay off
-        the console on purpose, despite CLAUDE.md's print-zeros rule: a block
-        of zeros trains the reader to skip it. The manifest's `losses` carries
-        every counter, zeros included (docs/USAGE.md)."""
+        """One line per counter, in REASONS order, zeros included: a line
+        printed only when non-zero cannot tell "nothing was lost" from "this
+        counter stopped running". The manifest's `losses` carries the same
+        counters."""
         return [f"  {name}: {self[name]:,} -- {reason}"
-                for name, reason in self.REASONS.items() if self[name]]
+                for name, reason in self.REASONS.items()]
 
 
 def _bump(tally, name: str, n: int = 1) -> None:

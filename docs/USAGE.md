@@ -907,8 +907,8 @@ path independently recountable. `bundle_schema_version`
 names the shape; valplay's resume marker records it and rebuilds when it moves.
 
 `losses` carries every counter, zero included, so a clean conversion reads as
-zeros rather than as missing keys; the console summary prints only the ones
-that fired. `property_key_collisions` counts property values a same-named row
+zeros rather than as missing keys; the console summary prints every counter
+too. `property_key_collisions` counts property values a same-named row
 of the same event overwrote, typed values and raw blobs alike -- rows the
 export tells apart only by `handle`, so the lost value is a different property,
 not an older copy (28,845 on 02d4d478). `payload_shape_conflicts` counts only

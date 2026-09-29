@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -1740,11 +1741,29 @@ class SummaryReportingTests(TallyTestCase):
         rows = MINIMAL_FIELD_ROWS + [UNNAMED_PROPERTY_ROW]
         with tempfile.TemporaryDirectory() as tmp:
             summary = self.convert_rows(tmp, rows)
-        lines = summary["tally"].lines()
-        self.assertTrue(any("unnamed_property_rows" in ln for ln in lines), lines)
-        self.assertTrue(any("missing_manifest" in ln for ln in lines), lines)
-        # Only the non-zero counters are printed.
-        self.assertEqual(len(lines), 2, lines)
+        counts = self.printed_counts(summary["tally"].lines())
+        self.assertEqual(list(counts), list(bundle._Tally.REASONS))
+        self.assertEqual(counts["unnamed_property_rows"], "1")
+        self.assertEqual(counts["missing_manifest"], "1")
+        self.assertEqual(counts["rpc_param_collisions"], "0")
+
+    def test_a_clean_conversion_prints_every_counter_as_zero(self):
+        """A line printed only when non-zero could not tell "nothing was lost"
+        from "this counter stopped running"."""
+        printed = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(printed):
+            summary = self.convert_rows(
+                tmp, MINIMAL_FIELD_ROWS, manifest_json='{"replay_version": "x"}')
+        self.assertEqual(summary["tally"].total, 0)
+        counts = self.printed_counts(printed.getvalue().splitlines())
+        self.assertEqual(list(counts), list(bundle._Tally.REASONS))
+        self.assertEqual(set(counts.values()), {"0"})
+
+    @staticmethod
+    def printed_counts(lines) -> dict:
+        """{counter: its count as printed} from the summary's loss lines."""
+        return dict(match.groups() for match in map(
+            re.compile(r"  (\w+): ([\d,]+) -- ").match, lines) if match)
 
 
 # ---------------------------------------------------------------------------
@@ -2317,7 +2336,7 @@ class NonFiniteMovementTests(SeamTestCase):
         self.assertEqual(summary["tally"]["non_finite_movement_rows"], 3)
         self.assertEqual(
             published["adapter"]["losses"]["non_finite_movement_rows"], 3)
-        self.assertTrue(any("non_finite_movement_rows" in line
+        self.assertTrue(any(line.startswith("  non_finite_movement_rows: 3 -- ")
                             for line in summary["tally"].lines()))
 
     def test_a_row_is_counted_once_however_many_of_its_values_are_bad(self):
