@@ -25,9 +25,9 @@ use vrf_container::{
 use vrf_decode::OverlayErrorReport;
 use vrf_export::{
     ActorWriter, CheckpointActorWriter, CheckpointBlockWriter, CheckpointExportFieldWriter,
-    CheckpointExportGroupWriter, CheckpointFieldRecord, CheckpointFieldWriter,
-    CheckpointGuidEntryWriter, CheckpointNetGuidWriter, EventRecord, EventWriter, FieldRecord,
-    FieldWriter, MovementRecord, MovementWriter, NetGuidRecord, NetGuidWriter, PartialRecord,
+    CheckpointExportGroupWriter, CheckpointFieldWriter, CheckpointGuidEntryWriter,
+    CheckpointNetGuidWriter, EventRecord, EventWriter, FieldWriter, MovementWriter, NetGuidRecord,
+    NetGuidWriter, PartialRecord,
 };
 use vrf_schema::NetGuidCache;
 
@@ -86,24 +86,19 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         Ok(BufWriter::new(fs::File::create(out_path.join(name))?))
     };
 
-    let mut field_writer = FieldWriter::new(create("fields.parquet")?)?;
-    let mut movement_writer = MovementWriter::new(create("movement.parquet")?)?;
     let mut actor_writer = ActorWriter::new(create("actors.parquet")?)?;
     // A couple of hundred rows, so inline like `actors`: far below a thread's
     // worth of encoding.
     let mut event_writer = EventWriter::new(create("events.parquet")?)?;
     let mut partial_writer = vrf_export::PartialWriter::new(create("partials.parquet")?)?;
     let mut checkpoint_writer = if with_checkpoints {
-        let mut cp_fields = CheckpointFieldWriter::new(create("checkpoint_fields.parquet")?)?;
         Some(checkpoints::CheckpointWriters {
             // The one checkpoint table large enough to take off the decode
             // thread, for the reason `writers` gives for fields and movement.
-            fields: WriterThread::<CheckpointFieldRecord>::spawn("checkpoint_fields", move |rx| {
-                for batch in rx {
-                    cp_fields.push_batch(batch)?;
-                }
-                cp_fields.finish()
-            }),
+            fields: WriterThread::spawn_table(
+                "checkpoint_fields",
+                CheckpointFieldWriter::new(create("checkpoint_fields.parquet")?)?,
+            ),
             actors: CheckpointActorWriter::new(create("checkpoint_actors.parquet")?)?,
             net_guids: CheckpointNetGuidWriter::new(create("checkpoint_net_guids.parquet")?)?,
             blocks: CheckpointBlockWriter::new(create("checkpoint_blocks.parquet")?)?,
@@ -121,18 +116,12 @@ pub fn run(vrf_path: &str, out_dir: &str, with_checkpoints: bool) -> Result<(), 
         None
     };
 
-    let mut fields = WriterThread::<FieldRecord>::spawn("fields", move |rx| {
-        for batch in rx {
-            field_writer.push_batch(batch)?;
-        }
-        field_writer.finish()
-    });
-    let mut movement = WriterThread::<MovementRecord>::spawn("movement", move |rx| {
-        for batch in rx {
-            movement_writer.push_batch(batch)?;
-        }
-        movement_writer.finish()
-    });
+    let mut fields =
+        WriterThread::spawn_table("fields", FieldWriter::new(create("fields.parquet")?)?);
+    let mut movement = WriterThread::spawn_table(
+        "movement",
+        MovementWriter::new(create("movement.parquet")?)?,
+    );
 
     let mut pass = Pass::new(&replay)?;
     let mut error_report = OverlayErrorReport::default();
