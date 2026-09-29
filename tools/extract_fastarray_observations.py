@@ -201,6 +201,7 @@ def extract(export_dir: Path, out_dir: Path) -> dict:
                            for route, (group, name) in ROUTES.items()},
                 "counts": dict(counts), "rejection_reasons": dict(reasons),
                 "extractor_sha256": sha(Path(__file__)), "observations_sha256": sha(output),
+                "wire_bits_sha256": sha(Path(__file__).with_name("wire_bits.py")),
                 "scope": "Numeric FastArray boundaries; no field names, gameplay meanings, casts, or player attribution."}
     return staged_output(export_dir, out_dir, ("manifest.json", *(f"{s}.parquet" for s in STREAMS)),
                          write, prefix=".fastarray-")

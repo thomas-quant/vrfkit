@@ -133,6 +133,8 @@ class BuildScopeTests(unittest.TestCase):
                 self.assertIn("1 serialized updates", printed.getvalue())
                 result = json.loads(out.read_text(encoding="utf-8"))
                 self.assertEqual(result["provenance"]["replay_build"], branch)
+                self.assertEqual(result["provenance"]["wire_bits_sha256"],
+                                 tool.sha(Path(tool.__file__).with_name("wire_bits.py")))
                 self.assertEqual(result["counts"]["fields"]["parent_rows"], 1)
                 [record] = result["observations"]
                 self.assertTrue(record["members"]["did_kill_trigger_finisher"])

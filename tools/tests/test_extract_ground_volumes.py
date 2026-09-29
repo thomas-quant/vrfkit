@@ -539,6 +539,7 @@ class CliTests(unittest.TestCase):
                               counts["rows_bare_patch_volume"], counts["rows_declared_class"]), (1, 0, 1, 0))
             self.assertEqual(receipt["input_sha256_before"], receipt["input_sha256_after"])
             self.assertEqual(receipt["items_sha256"], gv.sha(out / "items.ndjson"))
+            self.assertEqual(receipt["wire_bits_sha256"], gv.sha(Path(gv.__file__).with_name("wire_bits.py")))
             self.assertEqual(receipt["declarations"]["cnc_declared_slots"], 2)
             item = json.loads((out / "items.ndjson").read_text())
             self.assertEqual(item["physical_row_ordinal"], 1)

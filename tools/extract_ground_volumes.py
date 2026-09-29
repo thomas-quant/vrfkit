@@ -491,6 +491,7 @@ def write(export_dir: Path, stage: Path) -> dict:
             "cnc_declared_slots": schema.cnc_slots, "schema_error": schema.error,
             "resolved_names": resolved_names(schema)},
         "extractor_sha256": sha(Path(__file__)),
+        "wire_bits_sha256": sha(Path(__file__).with_name("wire_bits.py")),
         "windows_sha256": sha(stage / "windows.ndjson"),
         "items_sha256": sha(stage / "items.ndjson"),
         "scope": ("GroundVolumeComponent FragmentInfo cells decoded with the replay's own "

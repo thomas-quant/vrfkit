@@ -306,6 +306,7 @@ class FastArrayTests(unittest.TestCase):
             self.assertEqual(receipt["counts"]["rejected"], 0)
             self.assertEqual(receipt["input_sha256_before"], receipt["input_sha256_after"])
             self.assertEqual(receipt["observations_sha256"], fast.sha(out / "observations.ndjson"))
+            self.assertEqual(receipt["wire_bits_sha256"], fast.sha(Path(fast.__file__).with_name("wire_bits.py")))
             record = json.loads((out / "observations.ndjson").read_text())
             self.assertEqual(record["physical_row_ordinal"], 1)
             self.assertEqual((record["route"], record["population"]), ("cnc_h1", "fields"))

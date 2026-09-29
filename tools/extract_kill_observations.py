@@ -448,6 +448,7 @@ def extract(export):
             "manifest_sha256": manifest_before,
             "input_sha256": input_before,
             "extractor_sha256": sha(Path(__file__)),
+            "wire_bits_sha256": sha(Path(__file__).with_name("wire_bits.py")),
         },
         "counts": counts,
         "observations": tables["fields"] + tables["checkpoint_fields"],
