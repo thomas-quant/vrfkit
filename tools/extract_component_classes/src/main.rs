@@ -1,11 +1,9 @@
-//! Read component classes out of an installed game's IoStore containers. A
-//! replay names a Blueprint component only by its instance name
-//! (`ZoomStateMachine`), and its class is not derivable from that name; the
-//! cooked game says what it is. This prints every component template's
-//! instance name, owning package and class, and is the source of
-//! `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs` (procedure
-//! and what the output establishes: docs/DATA.md, "Reading component classes
-//! out of the game").
+//! List every component template's instance name, owning package and class
+//! from an installed game's IoStore containers: a replay names a Blueprint
+//! component only by its instance name (`ZoomStateMachine`), and only the cooked
+//! game says its class. The source of `KNOWN_SUBOBJECT_CLASS_PATHS` in
+//! `crates/vrfkit/src/sink/paths.rs` (procedure: docs/DATA.md, "Reading
+//! component classes out of the game").
 //!
 //! Exit status: 0 when every package was read and every self-check held; 1 when
 //! anything could not be read or a check failed (readable rows are still

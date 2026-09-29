@@ -4,11 +4,9 @@
 //! names; the signature block if signed; the directory index; a 33-byte meta
 //! record per chunk.
 //!
-//! Only TOC version 5 is accepted: every 13.06 container is version 5 and is
-//! consumed exactly to its last byte by this layout. Any other version is an
-//! error naming it, not a best effort: version 8 changes the meta size and
-//! versions below 5 lack the overflow list, either of which would misplace the
-//! directory index without failing.
+//! Only TOC version 5 (every 13.06 container, read to its last byte) is
+//! accepted: version 8 changes the meta size and versions below 5 lack the
+//! overflow list, either of which would misplace the directory index silently.
 
 use crate::reader::{Cursor, Result, fail};
 

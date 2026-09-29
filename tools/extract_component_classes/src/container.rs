@@ -106,9 +106,7 @@ impl Container {
                 let start = out.len();
                 out.resize(start + size, 0);
                 // A fresh extractor per block (it keeps decoder state across
-                // calls), and `read` over a slice so what the codec left unread
-                // shows: both for the reasons on `inflate` in
-                // crates/vrf-container/src/oodle.rs.
+                // calls), and `read` over a slice so unread input shows.
                 let mut unread: &[u8] = &raw;
                 let n = oozextract::Extractor::new()
                     .read(&mut unread, &mut out[start..])

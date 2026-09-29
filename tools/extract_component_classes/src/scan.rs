@@ -110,13 +110,11 @@ pub fn class_ref(pkg: &PackageHeader, package_id: u64, index: u64) -> ClassRef {
 }
 
 /// A class object: its own class is native and named `*Class`, and it has a
-/// super, which the export map sets only on structs. Neither test suffices
-/// alone. Over the 2,654,770 exports of the 13.06 containers the name also
-/// admits 257 objects with no super (250 `MVVMViewClass`, 4
-/// `EnvQueryGenerator_ActorsOfClass`, 2 `BlackboardKeyType_Class`, 1
-/// `SoundClass`), and the super 21,059 public `Function` and `ScriptStruct`
-/// exports; the 73,057 that pass both are exactly the exports a class default
-/// object in their package instantiates.
+/// super (the export map sets one only on structs). Neither suffices: in 13.06
+/// the name alone also admits 257 objects with no super (mostly
+/// `MVVMViewClass`), the super alone 21,059 functions and script structs; the
+/// 73,057 passing both are exactly the exports a class default object in their
+/// package instantiates.
 fn is_class_object(script: &ScriptObjects, export: &ExportEntry) -> bool {
     if index_kind(export.class_index) != KIND_SCRIPT_IMPORT || is_null(export.super_index) {
         return false;
@@ -627,9 +625,8 @@ mod tests {
         }
     }
 
-    /// 31,594 of the 73,057 class objects in the 13.06 containers have a super
-    /// in another package. The other 41,463 have a native super; none has one
-    /// in its own package.
+    /// 31,594 of 13.06's 73,057 class objects have their super in another
+    /// package; the rest have a native one.
     #[test]
     fn a_blueprint_whose_parent_is_another_packages_blueprint_is_a_class() {
         let got = classes_of(&cooldown_child());
@@ -642,9 +639,8 @@ mod tests {
         );
     }
 
-    /// Of the 13.06 containers' 26,109 rows whose class is another package's,
-    /// 3,265 reach the native class through two to five supers and the rest
-    /// through one.
+    /// 3,265 of 13.06's 26,109 package-import rows reach the native class
+    /// through two to five supers.
     #[test]
     fn a_child_blueprint_class_resolves_up_two_supers_to_the_native_class() {
         let script = script();

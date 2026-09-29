@@ -5,9 +5,8 @@
 
 use crate::reader::{Cursor, Result, fail, latin1};
 
-/// The hash algorithm version the shipped game writes into every batch.
-/// Checked because it is the layout's one fixed value: finding it confirms the
-/// batch starts where the caller thinks (`zen.rs` tells summary widths apart by it).
+/// The hash algorithm version in every batch of the shipped game: the layout's
+/// one fixed value, so finding it confirms the batch starts where expected.
 pub const NAME_HASH_VERSION: u64 = 0xC164_0000;
 
 /// Read one name batch, consuming its string block exactly: a header that runs
@@ -34,9 +33,8 @@ pub fn read_name_batch(c: &mut Cursor<'_>) -> Result<Vec<String>> {
     for (i, h) in headers.chunks_exact(2).enumerate() {
         let wide = h[0] & 0x80 != 0;
         let len = (usize::from(h[0] & 0x7f) << 8) | usize::from(h[1]);
-        // Not aligned: a UTF-16 name starts wherever the previous one ended.
-        // Two-byte alignment misread 26 packages of the 13.06 containers, each
-        // with a Chinese texture name at an odd offset, and every later name.
+        // Not aligned: a UTF-16 name starts where the previous one ended (26
+        // packages of 13.06 have one at an odd offset).
         let (end, unit) = if wide {
             (p + len * 2, "UTF-16 units")
         } else {
@@ -93,9 +91,8 @@ impl MappedName {
     }
 
     /// The name as the wire spells it. The instance number is part of the
-    /// name: 0 means no suffix and N means `_{N-1}`. Dropping it merges
-    /// distinct names -- `AresAttributeSet_1` is `AresAttributeSet` number 2 --
-    /// which is the mistake docs/DATA.md records for `MyEquippable_0`.
+    /// name: 0 means no suffix and N means `_{N-1}`; dropping it merges
+    /// distinct names (`AresAttributeSet_1` is `AresAttributeSet` number 2).
     pub fn render(&self, names: &[String]) -> Result<String> {
         let base = self.base(names)?;
         Ok(with_number(base, self.number))
@@ -167,8 +164,8 @@ pub(crate) mod tests {
         assert_eq!(c.remaining(), 0);
     }
 
-    /// The shape that broke the first real run: a UTF-16 name right after an
-    /// odd-length ANSI one, which two-byte alignment reads one byte late.
+    /// A UTF-16 name right after an odd-length ANSI one, which two-byte
+    /// alignment would read one byte late.
     #[test]
     fn a_wide_name_at_an_odd_offset_is_read_where_it_starts() {
         let wide = "~\u{8d34}\u{56fe} #5";

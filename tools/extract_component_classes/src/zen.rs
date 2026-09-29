@@ -1,9 +1,8 @@
 //! A cooked package's header, as IoStore stores it (`FZenPackageSummary`): a
 //! 52-byte summary (versioning flag, header size, package name, package flags,
 //! cooked header size, seven region offsets), the name batch, then an `i64` bulk
-//! data map size and that many bytes. The 44-byte summary (five offsets) of
-//! engines before the dependency-bundle change is told apart by where the name
-//! batch's hash version lands: byte 52 + 8 on the shipped 13.06 containers.
+//! data map size and that many bytes. Only the 52-byte summary is accepted; a
+//! 44-byte one fails the offset-order or hash-version check.
 //! The offsets must be in order and inside the header; the name and bulk data
 //! maps must end exactly at the first region; the public-hash, import and export
 //! maps must hold whole records; the imported names must end exactly at the
@@ -327,10 +326,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// The older 44-byte summary puts the name batch eight bytes earlier. Read
-    /// with this layout, the batch's first two words become the last two
-    /// offsets and the order check refuses the package before the hash version
-    /// is read; `names::tests::a_wrong_hash_version_is_an_error` covers that.
+    /// A 44-byte summary puts the name batch eight bytes earlier: read as 52
+    /// bytes, the batch's first two words become the last two offsets, which
+    /// the order check refuses.
     #[test]
     fn a_summary_of_the_other_width_is_refused() {
         let bytes = build_package(&sample());
@@ -352,9 +350,8 @@ pub(crate) mod tests {
         assert!(parse_package_header(&bytes).is_err());
     }
 
-    /// An offset past the header end is refused by the order check. Without
-    /// it `u64_array`'s `&bytes[..end]` panics, and `std::thread::scope`
-    /// re-raises a scan worker's panic, so no row and no summary is written.
+    /// Refused by the order check, not a panic in `u64_array`: a scan worker's
+    /// panic would end the run with no row and no summary.
     #[test]
     fn an_offset_past_the_header_end_is_refused_not_a_panic() {
         let mut bytes = build_package(&sample());
