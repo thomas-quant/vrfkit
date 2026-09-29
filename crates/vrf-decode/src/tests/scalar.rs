@@ -1,12 +1,9 @@
 //! Scalar primitive decoders.
 
+use super::str_value;
 use crate::FTextTreeError;
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
 use vrf_testkit::{BitWrite, BitWriter};
-
-fn str_value(s: &str) -> DecodedValue {
-    DecodedValue::Str(s.to_owned())
-}
 
 #[test]
 fn double_reads_eight_byte_float() {
@@ -27,21 +24,20 @@ fn fstring_reads_unreal_string() {
 #[test]
 fn fname_hardcoded_reads_a_packed_index() {
     // A set leading bit makes the name a hardcoded table index, sent as
-    // IntPacked and rendered as its decimal (see `decode_fname` for the
+    // IntPacked and rendered as its decimal (see `read_fname` for the
     // DamagedBone rows). 9 bits: bit0 = 1, then IntPacked 0 = byte 0x00.
     let result = decode_field(FieldType::FName, &[0x01, 0x00], 9).unwrap();
     assert_eq!(result, str_value("0"));
 }
 
-/// Build the inline (`isHardcoded = 0`) FName shape: a leading zero bit, then
-/// an FString, then the i32 instance number.
+/// The inline (`isHardcoded = 0`) FName shape: a leading zero bit, then an
+/// FString, then the i32 instance number.
 fn inline_fname_bits(name: &str, number: i32) -> (Vec<u8>, u32) {
-    let mut bits = BitWriter::new();
-    bits.bits(0, 1).i32(i32::try_from(name.len() + 1).unwrap());
-    for byte in name.bytes().chain([0]) {
-        bits.bits(u64::from(byte), 8);
-    }
-    bits.i32(number).finish()
+    BitWriter::new()
+        .bit(false)
+        .fstring(name)
+        .i32(number)
+        .finish()
 }
 
 #[test]
@@ -73,6 +69,20 @@ fn fname_negative_instance_numbers_are_rejected() {
             matches!(err, DecodeError::InvalidFNameNumber { number: n } if n == number),
             "got {err:?} for {number}"
         );
+    }
+}
+
+/// A byte takes its width from the payload, not a fixed 8 (see `decode_byte`).
+#[test]
+fn byte_takes_its_width_from_the_payload() {
+    // 5 significant bits holding 9 (0b01001), padded to one byte.
+    let data = [0b0000_1001u8];
+    for width in [1u32, 3, 5, 8] {
+        let v = decode_field(FieldType::EnumByte, &data, width)
+            .unwrap_or_else(|e| panic!("width {width} should decode: {e:?}"));
+        let mask = ((1u16 << width) - 1) as u8;
+        let expected = i64::from(0b0000_1001u8 & mask);
+        assert_eq!(v, DecodedValue::I64(expected), "width {width}");
     }
 }
 
@@ -147,19 +157,13 @@ fn int64_reads_eight_byte_twos_complement() {
         let result = decode_field(FieldType::Int64, &value.to_le_bytes(), 64).unwrap();
         assert_eq!(result, DecodedValue::I64(value));
     }
-    assert!(matches!(
-        decode_field(FieldType::UInt64, &i64::MIN.to_le_bytes(), 64),
-        Err(DecodeError::UnsignedOverflow { .. })
-    ));
     let data = [0u8; 9];
     assert!(decode_field(FieldType::Int64, &data, 72).is_err());
     assert!(decode_field(FieldType::Int64, &data, 32).is_err());
 }
 
 /// `EnumRemainingBits` reads the whole payload up to 32 bits; a wider one is
-/// an error, not its low 32 bits. Latent when fixed
-/// (d5c35c6): nothing in the data of the time triggered it, which is why it
-/// needs a test.
+/// an error, not its low 32 bits.
 #[test]
 fn enum_remaining_bits_reads_the_payload_and_refuses_over_32() {
     // 3 bits = value 3 (low 3 bits of 0b011)

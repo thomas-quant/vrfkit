@@ -4,10 +4,11 @@
 //! three independent legs -- the 13.06 class definition, the replay's
 //! `compatible_checksum` (recomputed in
 //! `tools/tests/test_compatible_checksum_facts.py`) and an independent reader of
-//! every corpus row. The fixture carries the measurements; these tests pin each
-//! type to its full identity and a real payload to that reader's value.
+//! every corpus row. The fixture carries the measurements; these tests pin a
+//! real payload to that reader's value (`no_scoped_identity_is_shadowed_by_the_table`
+//! holds every entry to its exact identity).
 
-use super::overlay::{apply_scoped, resolve};
+use super::overlay::{BOMB_GS, SWIFT_GS, apply_scoped};
 use crate::decode::FieldType;
 use crate::overlay::OverlayStats;
 
@@ -17,8 +18,6 @@ const SHOCK_BOLT: &str = "/Game/Characters/Hunter/S0/Ability_4/\
 Projectile_Hunter_4_ExplosiveBolt.Projectile_Hunter_4_ExplosiveBolt_C";
 const POSSESSABLE: &str = "/Game/Characters/States/PossessableActorComponent.\
 PossessableActorComponent_C";
-const RIFT_POSSESSABLE: &str = "/Game/Characters/Rift/S0/Ability_X/WorldTargeting/\
-Rift_PossessableActorComponent.Rift_PossessableActorComponent_C";
 const CYPHER_CAMERA: &str = "/Game/Characters/Gumshoe/S0/Ability_E/\
 Pawn_Gumshoe_E_PossessableCamera.Pawn_Gumshoe_E_PossessableCamera_C";
 const KJ_TURRET: &str = "/Game/Characters/Killjoy/S0/Ability_E/\
@@ -27,77 +26,6 @@ const KJ_ALARMBOT: &str = "/Game/Characters/Killjoy/S0/Ability_Q/\
 Ability_Killjoy_Q_Alarmbot.Ability_Killjoy_Q_Alarmbot_C";
 const CHARGED: &str = "/Game/Characters/Global/ChargedProjectileTargeting/\
 Comp_Equippable_Charged.Comp_Equippable_Charged_C";
-const BOMB_GS: &str = "/Game/GameModes/Bomb/BombGameState.BombGameState_C";
-const SWIFT_GS: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits\
-/Swiftplay_EoRCredits_GameState.Swiftplay_EoRCredits_GameState_C";
-
-/// The 2D identities: (group, field, checksum, type).
-const TWO_D: [(&str, &str, u32, FieldType); 14] = [
-    (
-        REVEAL_BOLT,
-        "TrailPosition",
-        3_110_715_024,
-        FieldType::VectorDouble,
-    ),
-    (
-        SHOCK_BOLT,
-        "TrailPosition",
-        3_110_715_024,
-        FieldType::VectorDouble,
-    ),
-    (POSSESSABLE, "IsPossessed", 1_066_899_736, FieldType::Bool),
-    (
-        RIFT_POSSESSABLE,
-        "IsPossessed",
-        1_066_899_736,
-        FieldType::Bool,
-    ),
-    (CYPHER_CAMERA, "Possessed", 2_181_339_745, FieldType::Bool),
-    (CYPHER_CAMERA, "IsDeployed", 2_029_268_412, FieldType::Bool),
-    (
-        KJ_TURRET,
-        "DeployedActor",
-        2_740_089_937,
-        FieldType::ObjectNetGuid,
-    ),
-    (
-        KJ_ALARMBOT,
-        "DeployedActor",
-        2_740_089_937,
-        FieldType::ObjectNetGuid,
-    ),
-    (CHARGED, "CurrentCharge", 1_908_355_023, FieldType::Double),
-    (
-        BOMB_GS,
-        "CurrentLossStreak",
-        1_863_385_026,
-        FieldType::Int32,
-    ),
-    (
-        BOMB_GS,
-        "LossStreakTeam",
-        22_256_526,
-        FieldType::ObjectNetGuid,
-    ),
-    (
-        BOMB_GS,
-        "ShouldOverrideMatchTimer",
-        2_889_152_318,
-        FieldType::Bool,
-    ),
-    (
-        SWIFT_GS,
-        "LossStreakTeam",
-        22_256_526,
-        FieldType::ObjectNetGuid,
-    ),
-    (
-        SWIFT_GS,
-        "ShouldOverrideMatchTimer",
-        2_889_152_318,
-        FieldType::Bool,
-    ),
-];
 
 /// The four value columns, in `OverlayResult` order.
 type Values = (Option<i64>, Option<f64>, Option<bool>, Option<String>);
@@ -132,44 +60,18 @@ fn decode(
     raw: &[u8],
     bits: u32,
 ) -> Values {
-    let result = apply_scoped(stats, group, field, 15, checksum, raw, bits);
-    (
-        result.value_i64,
-        result.value_f64,
-        result.value_bool,
-        result.value_str,
-    )
+    apply_scoped(stats, group, field, 15, checksum, raw, bits).into_columns()
 }
 
-/// Decode every case, requiring its values and that the neighbouring checksum
-/// resolves nothing. Returns the stats for the caller's count check.
+/// Decode every case, requiring its values. Returns the stats for the
+/// caller's count check.
 fn decode_cases(cases: &[Case<'_>]) -> OverlayStats {
     let mut stats = OverlayStats::default();
     for (group, field, checksum, raw, bits, want) in cases {
-        let other = resolve(group, field, Some(checksum ^ 1));
-        assert_eq!(other, None, "{group} {field}");
         let got = decode(&mut stats, group, field, *checksum, raw, *bits);
         assert_eq!(got, *want, "{group} {field}");
     }
     stats
-}
-
-/// The name alone, a neighbouring checksum or another class resolves to
-/// nothing: a Blueprint renames, retypes or moves a property between builds,
-/// and each of those must leave the field raw, not borrow this type.
-#[test]
-fn two_d_blueprint_fields_resolve_only_at_their_exact_identity() {
-    for (group, field, checksum, field_type) in TWO_D {
-        assert_eq!(
-            resolve(group, field, Some(checksum)),
-            Some(field_type),
-            "{group} {field}"
-        );
-        for other in [None, Some(checksum ^ 1)] {
-            assert_eq!(resolve(group, field, other), None, "{field} {other:?}");
-        }
-        assert_eq!(resolve("/Unobserved", field, Some(checksum)), None);
-    }
 }
 
 /// Real 13.06 payloads, and the values an independent reader
@@ -276,8 +178,8 @@ fn two_d_blueprint_fields_refuse_another_width() {
 /// `OverrideMatchTimerText` is an `FText` (its checksum reproduces with
 /// `FText`), and what it sends is two histories: the 72-bit empty form while
 /// the timer is not overridden and a 376-bit history 4 (`AsNumber`) while it
-/// is. The legacy `FText` reader keeps only string-table keys and refuses
-/// both, so the identity is typed `FTextTree`, the full-tree reader.
+/// is. `FText` keeps only string-table keys and refuses both, so the identity
+/// is typed `FTextTree`, the full-tree reader.
 #[test]
 fn match_timer_text_decodes_both_observed_histories() {
     const CHECKSUM: u32 = 4_004_484_071;
@@ -290,11 +192,6 @@ fn match_timer_text_decodes_both_observed_histories() {
     ];
     let mut cases = Vec::new();
     for group in [BOMB_GS, SWIFT_GS] {
-        assert_eq!(
-            resolve(group, "OverrideMatchTimerText", None),
-            None,
-            "{group}"
-        );
         cases.push((
             group,
             "OverrideMatchTimerText",

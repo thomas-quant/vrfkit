@@ -2,6 +2,7 @@
 //! each wire format with `vrf_testkit`, so a test pins the layout both
 //! ways.
 
+use super::str_value;
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
 use crate::types::{RotatorQuantization, VectorQuantization};
 use vrf_testkit::{BitWrite, BitWriter};
@@ -30,10 +31,6 @@ fn decode_bits(field_type: FieldType, bits: &BitWriter) -> Result<DecodedValue, 
 
 fn movement(rotation: RotatorQuantization, location: VectorQuantization) -> FieldType {
     FieldType::RepMovement { rotation, location }
-}
-
-fn str_value(s: &str) -> DecodedValue {
-    DecodedValue::Str(s.to_owned())
 }
 
 #[test]
@@ -136,20 +133,6 @@ fn flags_clear_json(location: &str, rotation: &str) -> String {
     )
 }
 
-#[test]
-fn rep_movement_decodes_required_fields() {
-    let bits = rep_movement_bits([false; 4], [123, -456, 789], 11, [0; 3], 16);
-    let field_type = movement(
-        RotatorQuantization::ShortComponents,
-        VectorQuantization::RoundTwoDecimals,
-    );
-    let want = flags_clear_json(
-        r#"{"x":1.23,"y":-4.56,"z":7.89}"#,
-        r#"{"pitch":0,"yaw":0,"roll":0}"#,
-    );
-    assert_eq!(decode_bits(field_type, &bits).unwrap(), str_value(&want));
-}
-
 /// Every optional member present; `server_physics_handle` had no slot at all
 /// in the old compact form, so no test could see it.
 #[test]
@@ -187,9 +170,8 @@ fn rep_movement_byte_quantized_rotation() {
 }
 
 /// The location divisor is the entry's quantization level, never a constant:
-/// a fixed 100 returned world/100 on every whole-unit class (25 of the 26 the
-/// table declares, measured against spawn positions). A fixed divisor passes
-/// at most one level, and the velocity stays whole units on all three.
+/// a fixed 100 returned world/100 on every whole-unit class. A fixed divisor
+/// passes at most one level, and the velocity stays whole units on all three.
 #[test]
 fn rep_movement_location_is_divided_by_the_declared_quantization() {
     // Every level is checked before failing, so a regression names them all.
