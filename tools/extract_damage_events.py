@@ -7,11 +7,13 @@ actor, subobject and function; a parameter repeating inside the run starts the
 next one, since the export carries no invocation id. The victim is the row's
 actor -- the damaged component's owner -- never the `Character` parameter,
 which is 0 on a killing blow against utility; `victim_subject` is set only for
-a `SpawnedCharacter` pawn (player_identity.py). `NetTimestamp` -3.4028e38 and
-`RespawnNumber` -1 are sentinels and become null (210 of 632 records on 13.01).
+a `SpawnedCharacter` pawn one player claims (player_identity.py). `NetTimestamp`
+-3.4028e38 and `RespawnNumber` -1 are sentinels and become null (210 of 632
+records on 13.01).
 
-Killing blows on a player body must pair one to one, in time order per victim,
-with `events.characterDeath` (victim = word1); anything unpaired fails the run.
+Killing blows on a player body (conflicting claims included) must pair one to
+one, in time order per victim, with `events.characterDeath` (victim = word1);
+anything unpaired fails the run.
 """
 
 from __future__ import annotations
@@ -106,7 +108,8 @@ def invocations(export: Path, counts: Counter):
 def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
     counts, problems = Counter(dict.fromkeys(COUNT_KEYS, 0)), []
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
-    bodies = load_player_bodies(export, manifest).subjects
+    identity = load_player_bodies(export, manifest)
+    bodies = identity.subjects
     subject_of_state = {p.get("actor_net_guid"): p.get("subject") for p in manifest.get("players", [])}
     classes = actor_classes(export, counts)
     rows = []
@@ -149,7 +152,7 @@ def build(export: Path) -> tuple[list[dict], Counter, list[str]]:
 
     blows, deaths = defaultdict(list), defaultdict(list)
     for r in rows:
-        if r["killed"] and r["victim_subject"] is not None:
+        if r["killed"] and (r["victim_subject"] or r["victim_actor_net_guid"] in identity.conflicts):
             blows[r["victim_actor_net_guid"]].append(r["time_ms"])
     for event in pq.read_table(export / "events.parquet", columns=["group", "time1", "word1"]).to_pylist():
         if event["group"] == "characterDeath":

@@ -41,8 +41,10 @@ class ExtractDamageEventsTests(unittest.TestCase):
         self.export = Path(self._tmp.name) / "export"
         self.export.mkdir()
 
-    def write(self, rows, deaths):
-        rows = [(0, 1, STATE, "SpawnedCharacter", PAWN, None, None, None, STATE_GROUP)] + [
+    def write(self, rows, deaths, *, shared_pawn=False):
+        """`shared_pawn`: a second PlayerState names the same pawn, a conflict."""
+        states = [STATE, STATE + 1] if shared_pawn else [STATE]
+        rows = [(0, 1, state, "SpawnedCharacter", PAWN, None, None, None, STATE_GROUP) for state in states] + [
             (t, 9, actor, name, i, f, b, s, "/Script/ShooterGame.DamageableComponent_ClassNetCache")
             for t, actor, name, i, f, b, s in rows]
         names = ("time_ms", "packet_id", "actor_net_guid", "field_name", "value_i64", "value_f64",
@@ -60,8 +62,8 @@ class ExtractDamageEventsTests(unittest.TestCase):
                                  "word1": pa.array([d[1] for d in deaths], pa.uint32())}),
                        self.export / "events.parquet")
         (self.export / "manifest.json").write_text(json.dumps({"players": [
-            {"actor_net_guid": STATE, "subject": "victim-subject", "character_net_guid": PAWN}]}),
-            encoding="utf-8")
+            {"actor_net_guid": state, "subject": f"subject-{state}", "character_net_guid": PAWN}
+            for state in states]}), encoding="utf-8")
         return self.export
 
     def run_main(self):
@@ -81,9 +83,9 @@ class ExtractDamageEventsTests(unittest.TestCase):
         self.assertEqual((row["victim_actor_net_guid"], row["victim_class_path"], row["victim_subject"]),
                          (WALL, "/Game/X/Wall.Wall_C", None))
         self.assertEqual((row["damager_subject"], row["weapon_name"], row["origin_z"]),
-                         ("victim-subject", "Vandal", 3.0))
+                         (f"subject-{STATE}", "Vandal", 3.0))
         self.assertEqual(damage.build(self.write(invocation(100, PAWN), []))[0][0]["victim_subject"],
-                         "victim-subject")
+                         f"subject-{STATE}")
 
     def test_sentinels_become_null_and_are_counted(self):
         rows, counts, _ = damage.build(self.write(invocation(100, WALL, sentinel=True), []))
@@ -103,6 +105,12 @@ class ExtractDamageEventsTests(unittest.TestCase):
         self.assertEqual(self.run_main()[0], 1)
         _, counts, _ = damage.build(self.write(kills, [(100 - damage.KILL_FEED_SLACK_MS, PAWN)]))
         self.assertEqual(counts["deaths without a killing blow"], 1)
+
+    def test_a_pawn_two_players_claim_is_still_a_body_in_the_kill_feed(self):
+        rows, counts, problems = damage.build(
+            self.write(invocation(108, PAWN, killed=True), [(100, PAWN)], shared_pawn=True))
+        self.assertIsNone(rows[0]["victim_subject"])
+        self.assertEqual((counts["kill feed pairs"], problems), (1, []))
 
     def test_the_cli_writes_the_table_and_prints_every_count(self):
         self.write(invocation(100, WALL), [])
