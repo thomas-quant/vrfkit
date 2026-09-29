@@ -4,12 +4,12 @@
 
 use vrf_bitio::BitReader;
 
-use super::framing::{
-    MAX_FIELDS_PER_ELEMENT, consume_trailing_terminator, expect_width, read_array_count,
-    read_element_index, read_field_header, settle_field,
-};
+use super::framing::{MAX_ARRAY_COUNT, consume_trailing_terminator, expect_width, settle_field};
 use super::{
     EffectBlobError, EffectHandles, FLOAT_HANDLES, OBJECT_HANDLES, Result, VECTOR_HANDLES,
+};
+use crate::framing::{
+    MAX_FIELDS_PER_ELEMENT, read_array_count, read_element_index, read_field_header,
 };
 use crate::types::FVector;
 
@@ -125,7 +125,7 @@ fn decode_elements<T: EffectElement>(
     reader: &mut BitReader<'_>,
     handles: EffectHandles,
 ) -> Result<Vec<T>> {
-    let count = read_array_count(reader)?;
+    let count = read_array_count(reader, MAX_ARRAY_COUNT)?;
     let mut elements = vec![T::ABSENT; count as usize];
     // Terminators are required, not inferred; see `MissingTerminator`.
     let mut array_terminated = false;

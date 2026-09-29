@@ -7,25 +7,19 @@
 //! | `RoundInfos` | `OwnerExclusivePlayerInfo` | Per-player per-round credit | `round_infos` |
 //!
 //! All three use the RepLayout dynamic-array framing the effect arrays use
-//! (diagrammed in the `effect` module docs), read by the internal `framing`
-//! module; an FName member goes through `FieldType::FName`'s reader with a
-//! 1024-byte string cap. A replay carries a few dozen of each, so nothing here
-//! is on a hot path.
+//! (diagrammed in the `effect` module docs); an FName member goes through
+//! `FieldType::FName`'s reader with a 1024-byte string cap.
 //!
 //! # Members are selected by DECLARED NAME, not by handle number
 //!
 //! Handle numbers are a per-build layout detail: 13.02 moved `RoundResults`'
-//! members down by eight, and a decoder keyed on the old numbers decoded
-//! nothing, silently, for a whole build (docs/archive/PROJECT_STATUS.md
-//! 26-B/26-D; `framing::member_name` says why resolution runs handle -> name).
-//! So the decoders take, besides a `reader` over exactly the blob's declared
-//! bits, `declared`: the enclosing group's field export names indexed by
-//! handle (only the fixed-handle `decode_team_economy` does not). An empty
-//! declaration is an error, not a fallback to build-specific numbers that
-//! would be wrong without warning.
+//! members down by eight, which a handle-keyed decoder reads as nothing. So the
+//! decoders take, besides a `reader` over exactly the blob's declared bits,
+//! `declared`: the enclosing group's field export names indexed by handle
+//! (only the fixed-handle `decode_team_economy` does not). An empty declaration
+//! is an error, never a fallback to build-specific numbers.
 //!
-//! Members and payload types, with each build's handles as a reading aid ONLY
-//! (nothing matches on them):
+//! Members and payload types, with each build's handles as a reading aid ONLY:
 //!
 //! - RoundResults (`BombGameState`; 13.01: 93..=96, 13.02: 81..=84):
 //!   `WinningTeam` (FName), `WinningTeamRole` and `RoundResult` (enum bytes of
@@ -77,8 +71,7 @@ pub enum StructBlobError {
     #[error("field payload {bits} bits exceeds remaining {remaining}")]
     PayloadTooLarge { bits: u32, remaining: u64 },
 
-    /// An unexpected field handle was encountered. Only `team_economy` can
-    /// raise this; the other two select members by declared name.
+    /// An unexpected field handle (`decode_team_economy` only).
     #[error("unsupported field handle {handle} in {context}")]
     UnsupportedHandle { handle: u32, context: &'static str },
 
@@ -96,13 +89,12 @@ pub enum StructBlobError {
         context: &'static str,
     },
 
-    /// Too many fields in a single element (guard against infinite loops).
+    /// Too many fields in a single element.
     #[error("too many fields in element ({context})")]
     TooManyFields { context: &'static str },
 
-    /// A byte enum carried a value this decoder has no variant for. Reported:
-    /// `None` means "not sent", so a patch adding a variant would otherwise
-    /// turn the column null with every counter clean.
+    /// A byte enum carried a value this decoder has no variant for. Reported,
+    /// because `None` means "not sent".
     #[error("{enum_name} has no variant for value {value} in {context}")]
     UnknownEnumValue {
         enum_name: &'static str,
@@ -122,11 +114,8 @@ pub enum StructBlobError {
     #[error("not fully consumed: {remaining} bits left")]
     NotFullyConsumed { remaining: u64 },
 
-    /// A member did not consume the field window the wire declared for it.
-    /// The field's `sub_reader` advances the PARENT past the whole window, so
-    /// the blob stays aligned and the closing check passes whatever the member
-    /// read: a 64-bit `EndOfRoundMoney` whose first 32 bits read 1900 exported
-    /// 1900, counted as decoded.
+    /// A member did not consume its field window. The parent is aligned past
+    /// the window whatever the member read, so only this check sees it.
     #[error("{name} (handle {handle}) left {remaining} of its {declared} bits unread in {context}")]
     MemberNotFullyConsumed {
         name: String,
@@ -137,5 +126,4 @@ pub enum StructBlobError {
     },
 }
 
-/// Convenience alias.
 pub type Result<T> = core::result::Result<T, StructBlobError>;

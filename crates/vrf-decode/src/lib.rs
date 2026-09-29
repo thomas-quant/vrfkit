@@ -68,6 +68,8 @@ mod checksum_table;
 /// [`effect::decode_effect_blob_json`]. See the module docs.
 #[cfg(feature = "effect")]
 pub mod effect;
+#[cfg(any(feature = "effect", feature = "structs"))]
+mod framing;
 #[cfg(feature = "overlay")]
 mod overlay;
 #[cfg(feature = "overlay")]
