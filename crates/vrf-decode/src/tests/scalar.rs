@@ -1,5 +1,6 @@
 //! Scalar primitive decoders.
 
+use crate::FTextTreeError;
 use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
 use crate::test_bits::BitWriter;
 
@@ -211,10 +212,8 @@ fn object_net_guid_reads_int_packed() {
 
 /// `FText` (`LocalizedStat`) decodes to the statistic's name, the only
 /// machine-readable source of `EnemiesBlinded` and the other 28: the sibling
-/// `Statistic` enum is a bare integer. Confirmed on 4,341 of 4,341 rows with
-/// zero residual bits: 32 flag bits, history byte 11 and the inline-FName bit
-/// (41 bits, which the legacy reader sees as selector 5), then the string
-/// table's path as an `FString`, the `FName` number, and the key.
+/// `Statistic` enum is a bare integer. 32 flag bits, history byte 11, the
+/// inline-FName bit, the table path, the `FName` number, then the key.
 #[test]
 fn ftext_decodes_a_string_table_entry_to_its_key() {
     let vectors: [(u32, &[u8], &str); 3] = [
@@ -276,19 +275,37 @@ fn ftext_decodes_a_string_table_entry_to_its_key() {
     }
 }
 
-/// A selector other than the observed 5 means another text history with
-/// another payload, so it is refused rather than read as a plausible wrong
-/// string.
+/// Only history 11 yields a key: history 10 with the same layout, and a valid
+/// tree of another history, are refused rather than read as a plausible string.
 #[test]
-fn ftext_refuses_an_unobserved_history_type() {
-    // Zeroed except the selector (the error's `history_type`), so without
-    // the guard the rest decodes cleanly to an empty key: the guard is the
-    // only thing between this input and `Ok`.
-    let mut raw = vec![0u8; 18];
-    raw[4] = 0x0C; // shifts a history type of 6 into place, not 5
-    let err = decode_field(FieldType::FText, &raw, 137).unwrap_err();
+fn ftext_yields_only_a_string_table_key() {
+    // Flags, history, the inline-name bit, empty name, number 0, empty key.
+    let text = |history| {
+        let mut bits = BitWriter::new();
+        bits.bits(0, 32).bits(history, 8).bits(0, 1);
+        bits.i32(0).i32(0).i32(0).finish()
+    };
+    let (raw, bits) = text(11);
+    assert_eq!(
+        decode_field(FieldType::FText, &raw, bits).unwrap(),
+        str_value("")
+    );
+    let (raw, bits) = text(10);
+    let err = decode_field(FieldType::FText, &raw, bits).unwrap_err();
     assert!(
-        matches!(err, DecodeError::UnsupportedTextHistory { history_type: 6 }),
+        matches!(
+            err,
+            DecodeError::FTextTree(FTextTreeError::UnsupportedHistory { discriminator: 10 })
+        ),
+        "got {err:?}"
+    );
+    let (raw, bits) = BitWriter::new().bits(0, 32).bits(255, 8).i32(0).finish();
+    let err = decode_field(FieldType::FText, &raw, bits).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DecodeError::UnsupportedTextHistory { history_type: 255 }
+        ),
         "got {err:?}"
     );
 }

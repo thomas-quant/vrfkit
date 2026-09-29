@@ -8,6 +8,8 @@ pub(crate) mod scalar;
 
 use vrf_bitio::BitReader;
 
+use crate::ftext::{FTextTree, decode_ftext_tree_from};
+
 /// Every primitive type the overlay can decode. Parametric variants carry
 /// their configuration inline, so the overlay table needs no side data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,12 +27,11 @@ pub enum FieldType {
     Float,
     Double,
     FString,
-    /// See the internal `scalar::decode_ftext` reader: a string-table key,
-    /// and every other history refused.
+    /// The key of a string-table `FText` (history 11); any other history is
+    /// refused.
     FText,
-    /// A whole `FText` history tree ([`crate::decode_ftext_tree`]'s measured
-    /// forms) as JSON. `FText` cannot stand in: it keeps only a string-table
-    /// key and refuses the empty history 255, most of what a text property sends.
+    /// A whole `FText` history tree ([`crate::decode_ftext_tree`]) as JSON, for
+    /// properties that send histories other than 11 (the empty 255 most often).
     FTextTree,
     FName,
     ObjectNetGuid,
@@ -102,10 +103,8 @@ pub enum DecodeError {
     #[error("FName instance number must be non-negative, got {number}")]
     InvalidFNameNumber { number: i32 },
 
-    /// The legacy key-only FText reader rejected its post-33-bit selector.
-    /// Its accepted selector 5 is a shifted view of history byte 11 plus the
-    /// inline-name bit. Full history trees use `FTextTreeError` separately.
-    #[error("FText history type {history_type} is not one this decoder has seen")]
+    /// A valid `FText` tree of a history `FieldType::FText` has no key for.
+    #[error("FText history {history_type} carries no string-table key")]
     UnsupportedTextHistory { history_type: u8 },
 
     /// A `ByteArray`'s `IntPacked` count exceeded the table's `max_bytes`. It
@@ -159,8 +158,13 @@ fn dispatch_decode(
         FieldType::Float => scalar::decode_float(r),
         FieldType::Double => scalar::decode_double(r),
         FieldType::FString => scalar::decode_fstring(r),
-        FieldType::FText => scalar::decode_ftext(r),
-        FieldType::FTextTree => crate::ftext::decode_ftext_tree_from(r)
+        FieldType::FText => match decode_ftext_tree_from(r).map_err(DecodeError::FTextTree)? {
+            FTextTree::StringTable { key, .. } => Ok(DecodedValue::Str(key)),
+            tree => Err(DecodeError::UnsupportedTextHistory {
+                history_type: tree.history(),
+            }),
+        },
+        FieldType::FTextTree => decode_ftext_tree_from(r)
             .map(|tree| DecodedValue::Str(tree.to_json()))
             .map_err(DecodeError::FTextTree),
         FieldType::FName => scalar::decode_fname(r),

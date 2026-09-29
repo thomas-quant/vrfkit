@@ -316,7 +316,7 @@ fn match_timer_text_decodes_both_observed_histories() {
     }
     let mut stats = decode_cases(&cases);
     assert_eq!((stats.decoded_ok, stats.decoded_err), (4, 0));
-    // The same bits under the legacy reader: both refused.
+    // The same bits as `FText`: no string-table key, so both refused.
     for (raw, bits) in [(&empty[..], 72), (&number[..], 376)] {
         assert!(crate::decode_field(FieldType::FText, raw, bits).is_err());
     }

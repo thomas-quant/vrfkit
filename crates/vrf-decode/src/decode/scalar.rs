@@ -63,24 +63,6 @@ pub(super) fn decode_fstring(r: &mut BitReader<'_>) -> Result<DecodedValue, Deco
     Ok(DecodedValue::Str(r.read_fstring(64 * 1024)?))
 }
 
-/// Legacy FText string-table reader, returning only the key for
-/// `FieldType::FText` consumers such as `LocalizedStat` (kept so their output
-/// and errors stay as they are). The measured layout is 32 flag bits, history
-/// byte 11, an inline-FName selector bit, then FString table name, i32
-/// instance number and FString key; this reads it as a 33+8 split, so its
-/// accepted selector 5 is a shifted view, not a history value. Complete trees
-/// are [`crate::decode_ftext_tree`]'s.
-pub(super) fn decode_ftext(r: &mut BitReader<'_>) -> Result<DecodedValue, DecodeError> {
-    r.read_bits(33)?;
-    let history_type = r.read_bits(8)? as u8;
-    if history_type != 5 {
-        return Err(DecodeError::UnsupportedTextHistory { history_type });
-    }
-    let _table_path = r.read_fstring(64 * 1024)?;
-    let _number = r.read_bits(32)?;
-    Ok(DecodedValue::Str(r.read_fstring(64 * 1024)?))
-}
-
 /// FName: an `isHardcoded` bit, then either one IntPacked index into the engine's
 /// hardcoded name table (rendered as its decimal) or an inline FString plus an
 /// i32 instance number (0 renders the bare name, `N` renders `Name_{N-1}`; see

@@ -133,6 +133,16 @@ pub(crate) fn decode_ftext_tree_from(r: &mut BitReader<'_>) -> Result<FTextTree,
     decode_tree(r, 0, &mut nodes)
 }
 impl FTextTree {
+    /// The wire history byte.
+    pub(crate) fn history(&self) -> u8 {
+        match self {
+            Self::AsNumber { .. } => 4,
+            Self::StringTable { .. } => 11,
+            Self::Format { .. } => 3,
+            Self::Empty { .. } => 255,
+        }
+    }
+
     /// JSON for additive `value_str`; it retains flags, history and wire values.
     #[must_use]
     pub fn to_json(&self) -> String {

@@ -1177,9 +1177,9 @@ fn the_error_report_names_the_cause_of_each_failure() {
             "ByteArrayOverlongPrefix",
             FieldType::ByteArray { max_bytes: 8 },
         ),
+        entry("EmptyFText", FieldType::FText),
         entry("LongInt", FieldType::Int32),
         entry("LongTextString", FieldType::FTextTree),
-        entry("MistypedFText", FieldType::FText),
         entry("NaNVector", FieldType::VectorNetQuantize { scale: 100 }),
         entry("NegativeFNameNumber", FieldType::FName),
         entry("OverlongPrefix", FieldType::FString),
@@ -1279,12 +1279,10 @@ fn the_error_report_names_the_cause_of_each_failure() {
             "InvalidQuantizationScale",
             "Rejected",
         ),
-        // The 8 bits after the first 33 are not the selector this reader
-        // knows (5). A mistyped FText -- this repo's costliest bug shape --
-        // lands here, so it must not read as leftover bits.
+        // A valid empty tree: no string-table key to return.
         (
-            "MistypedFText",
-            (vec![0; 6], 41),
+            "EmptyFText",
+            bytes(&[0, 0, 0, 0, 0xff, 0, 0, 0, 0]),
             "UnsupportedTextHistory",
             "Rejected",
         ),
