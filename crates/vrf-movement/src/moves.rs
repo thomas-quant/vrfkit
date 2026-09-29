@@ -11,8 +11,8 @@ use crate::types::{MovementMove, RpcDecodeResult};
 /// Magic byte at the start of a movement section.
 pub(crate) const MOVEMENT_MAGIC: u8 = 0x52;
 
-/// With at most this many bits left after a move the section ends unread: a
-/// `000` terminator, then 8 to 23 bits that are not all zero in every stream.
+/// With at most this many bits left after a move the section ends unread: in
+/// every stream measured, a `000` terminator, then 8 to 23 bits not all zero.
 const MAX_MOVEMENT_PADDING_BITS: u64 = 31;
 
 /// Parse the movement section, returning the bits left unread at a stop the
