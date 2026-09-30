@@ -4,8 +4,6 @@ Every fixture is built bit by bit from the grammar in the tool's docstring, so
 a test names the wire property it pins and fails when the decoder stops
 enforcing it. No replay bytes or player data are used.
 """
-from contextlib import redirect_stderr, redirect_stdout
-import io
 import json
 from pathlib import Path
 import struct
@@ -16,7 +14,7 @@ from unittest.mock import patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from support import TempDirTestCase
+from support import TempDirTestCase, run_cli
 import extract_ground_volumes as gv
 from check_checksum_types import chain_checksum
 from wire_fixtures import BitWriter
@@ -619,11 +617,10 @@ class CliTests(TempDirTestCase):
         raw, count = window([(1, item_bits())], body_suffix=1)
         source = make_export(root, [{"raw_bits": raw, "bit_count": count}])
         out = root / "result"
-        argv = ["extract", "--export-dir", str(source), "--out-dir", str(out)]
-        with patch.object(gv.sys, "argv", argv), redirect_stdout(io.StringIO()) as printed,                     redirect_stderr(io.StringIO()) as errors:
-            self.assertEqual(gv.main(), 1)
-        self.assertEqual(json.loads(printed.getvalue())["rejected"], 1)
-        self.assertEqual(json.loads(errors.getvalue()), {"unconsumed_entry": 1})
+        code, printed, errors = run_cli(gv.main, "--export-dir", source, "--out-dir", out, prog="extract")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(printed)["rejected"], 1)
+        self.assertEqual(json.loads(errors), {"unconsumed_entry": 1})
         receipt = json.loads((out / "receipt.json").read_text(encoding="utf-8"))
         self.assertEqual((receipt["counts"]["rejected"], receipt["rejection_reasons"]),
                          (1, {"unconsumed_entry": 1}))
