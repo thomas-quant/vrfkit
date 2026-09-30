@@ -1434,6 +1434,456 @@
       "location_quantization": "RoundTwoDecimals",
       "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-12.02", "++Ares-Core+release-12.04", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
       "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 37 spawn joins on 9 builds, ratio p1-p99 99.9990-100.0009, every join within 0.0504 of its spawn at /100; ShortComponents consumes all 37 rows, ByteComponents fails 20."
+    },
+    {
+      "group": "/Game/Characters/BountyHunter/S0/Ability_Q/Projectile_Q_BountyHunter_TetherGrenade_SphereExpansion.Projectile_Q_BountyHunter_TetherGrenade_SphereExpansion_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 243 spawn joins on 14 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 3,122 pairs; ByteComponents consumes all 3,377 rows, ShortComponents fails 1,749."
+    },
+    {
+      "group": "/Game/Characters/Breach/S0/Ability_4/Projectile_Breach_4_FusionBlast.Projectile_Breach_4_FusionBlast_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.09", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.02", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 167 spawn joins on 15 builds, ratio p1-p99 0.9999-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 507 pairs; ByteComponents consumes all 674 rows, ShortComponents fails 407."
+    },
+    {
+      "group": "/Game/Characters/Breach/S0/Ability_Q/Projectile_Breach_Q_ThroughWalls_Flash.Projectile_Breach_Q_ThroughWalls_Flash_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.09", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 356 spawn joins on 16 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 1,131 pairs; ByteComponents consumes all 1,487 rows, ShortComponents fails 910."
+    },
+    {
+      "group": "/Game/Characters/Cable/S0/Ability_4/Projectile_Cable_4_NetToss.Projectile_Cable_4_NetToss_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 47 spawn joins on 3 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 446 pairs; ByteComponents consumes all 493 rows, ShortComponents fails 244."
+    },
+    {
+      "group": "/Game/Characters/Cable/S0/Ability_4/Projectile_NetToss.Projectile_NetToss_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.08", "++Ares-Core+release-12.01", "++Ares-Core+release-12.09"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 69 spawn joins on 3 builds, ratio p1-p99 0.9998-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 1,297 pairs; ByteComponents consumes all 1,366 rows, ShortComponents fails 884."
+    },
+    {
+      "group": "/Game/Characters/Cable/S0/Ability_E/Projectile_CableJam_InAir.Projectile_CableJam_InAir_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.08", "++Ares-Core+release-12.01", "++Ares-Core+release-12.09", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 63 spawn joins on 6 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 488 pairs; ByteComponents consumes all 551 rows, ShortComponents fails 284."
+    },
+    {
+      "group": "/Game/Characters/Cashew/S0/Ability_Q/Projectile_Cashew_Q_ShellShockGrenade.Projectile_Cashew_Q_ShellShockGrenade_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.05", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 46 spawn joins on 7 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 243 pairs; ByteComponents consumes all 289 rows, ShortComponents fails 164."
+    },
+    {
+      "group": "/Game/Characters/Cashew/S0/Ability_Q/Projectile_Cashew_Q_ShellShockGrenade_Bounce.Projectile_Cashew_Q_ShellShockGrenade_Bounce_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 18 spawn joins on 5 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 184 pairs; ByteComponents consumes all 202 rows, ShortComponents fails 130."
+    },
+    {
+      "group": "/Game/Characters/Cashew/S0/Ability_X/GameObject_Cashew_X_SegmentManager.GameObject_Cashew_X_SegmentManager_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.05", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 18 spawn joins on 6 builds, ratio p1-p99 0.9999-1.0002, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 18 rows, ShortComponents fails 18."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_ProjectilePrimary.Projectile_Clay_4_ProjectilePrimary_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 392 spawn joins on 13 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 7,728 pairs; ByteComponents consumes all 8,385 rows, ShortComponents fails 4,719."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_ProjectileSecondary.Projectile_Clay_4_ProjectileSecondary_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 1,568 spawn joins on 13 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 0.90 over 15,918 pairs; ByteComponents consumes all 23,336 rows, ShortComponents fails 11,714."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_Primary.Projectile_Clay_4_Projectile_Primary_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 323 spawn joins on 5 builds, ratio p1-p99 0.9999-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 6,169 pairs; ByteComponents consumes all 6,791 rows, ShortComponents fails 3,788."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_Secondary.Projectile_Clay_4_Projectile_Secondary_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 1,276 spawn joins on 5 builds, ratio p1-p99 0.9998-1.0002, every join within 0.5000 of its spawn at /1, speed check 0.92 over 13,682 pairs; ByteComponents consumes all 19,727 rows, ShortComponents fails 9,832."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_Projectile_SecondarySpawner.Projectile_Clay_4_Projectile_SecondarySpawner_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 319 spawn joins on 5 builds, ratio p1-p99 0.9998-1.0002, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 319 rows, ShortComponents fails 317."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_4/Projectile_Clay_4_SecondarySpawner.Projectile_Clay_4_SecondarySpawner_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 392 spawn joins on 13 builds, ratio p1-p99 0.9999-1.0002, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 392 rows, ShortComponents fails 391."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_Q/Projectile_Clay_Q_Satchel_Arming.Projectile_Clay_Q_Satchel_Arming_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 770 spawn joins on 18 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.01 over 1,946 pairs; ByteComponents consumes all 2,719 rows, ShortComponents fails 1,591."
+    },
+    {
+      "group": "/Game/Characters/Clay/S0/Ability_X/Projectile_Clay_X_Rocket.Projectile_Clay_X_Rocket_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 104 spawn joins on 18 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.13 over 639 pairs; ByteComponents consumes all 743 rows, ShortComponents fails 351."
+    },
+    {
+      "group": "/Game/Characters/Deadeye/S0/Ability_4/Projectile_Deadeye_4_Trap_Dart.Projectile_Deadeye_4_Trap_Dart_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 135 spawn joins on 19 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 32 pairs; ByteComponents consumes all 167 rows, ShortComponents fails 114."
+    },
+    {
+      "group": "/Game/Characters/Grenadier/S0/Ability_4/Projectile_C_Grenadier_Flash.Projectile_C_Grenadier_Flash_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.08", "++Ares-Core+release-11.10", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 183 spawn joins on 13 builds, ratio p1-p99 0.9998-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 2,912 pairs; ByteComponents consumes all 3,305 rows, ShortComponents fails 1,642."
+    },
+    {
+      "group": "/Game/Characters/Grenadier/S0/Ability_4/Projectile_C_Grenadier_Flash_Underhand.Projectile_C_Grenadier_Flash_Underhand_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.08", "++Ares-Core+release-11.10", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 117 spawn joins on 13 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 0.99 over 1,272 pairs; ByteComponents consumes all 1,518 rows, ShortComponents fails 776."
+    },
+    {
+      "group": "/Game/Characters/Grenadier/S0/Ability_E/Gameobject_Grenadier_E_SuppressionPulse.Gameobject_Grenadier_E_SuppressionPulse_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.08", "++Ares-Core+release-11.10", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 439 spawn joins on 13 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 439 rows, ShortComponents fails 324."
+    },
+    {
+      "group": "/Game/Characters/Grenadier/S0/Ability_E/Projectile_Grenadier_E_SuppressionBlade.Projectile_Grenadier_E_SuppressionBlade_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.08", "++Ares-Core+release-11.10", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 439 spawn joins on 13 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 5,318 pairs; ByteComponents consumes all 5,760 rows, ShortComponents fails 3,235."
+    },
+    {
+      "group": "/Game/Characters/Grenadier/S0/Ability_Q/Projectile_Grenadier_Q_SemtexBasic.Projectile_Grenadier_Q_SemtexBasic_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.08", "++Ares-Core+release-11.10", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 148 spawn joins on 13 builds, ratio p1-p99 0.9999-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 2,537 pairs; ByteComponents consumes all 2,691 rows, ShortComponents fails 1,313."
+    },
+    {
+      "group": "/Game/Characters/Gumshoe/S0/Ability_E/Projectile_Gumshoe_E_CameraTrackingDart.Projectile_Gumshoe_E_CameraTrackingDart_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 151 spawn joins on 5 builds, ratio p1-p99 0.9998-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 126 pairs; ByteComponents consumes all 277 rows, ShortComponents fails 143."
+    },
+    {
+      "group": "/Game/Characters/Gumshoe/S0/Ability_Q/Projectile_Gumshoe_Q_CameraTrackingDart.Projectile_Gumshoe_Q_CameraTrackingDart_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.02", "++Ares-Core+release-12.06", "++Ares-Core+release-12.08"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 52 spawn joins on 7 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 37 pairs; ByteComponents consumes all 89 rows, ShortComponents fails 28."
+    },
+    {
+      "group": "/Game/Characters/Gumshoe/S0/Ability_Q/Zone_Gumshoe_Q_Cage.Zone_Gumshoe_Q_Cage_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 291 spawn joins on 5 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 291 rows, ShortComponents fails 290."
+    },
+    {
+      "group": "/Game/Characters/Hunter/S0/Ability_4/AnimationUpdatePrototype/Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance.Projectile_Hunter_4_ExplosiveBolt_PrototypeBalance_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 229 spawn joins on 9 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 3,322 pairs; ByteComponents consumes all 3,607 rows, ShortComponents fails 1,949."
+    },
+    {
+      "group": "/Game/Characters/Iris/S0/Ability_4/GameObject_Thumper_Concuss.GameObject_Thumper_Concuss_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 200 spawn joins on 10 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 824 rows, ShortComponents fails 729."
+    },
+    {
+      "group": "/Game/Characters/Iris/S0/Ability_4/GameObject_Thumper_Heal.GameObject_Thumper_Heal_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 214 spawn joins on 10 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 853 rows, ShortComponents fails 733."
+    },
+    {
+      "group": "/Game/Characters/Iris/S0/Ability_4/Projectile_Thumper_Concuss.Projectile_Thumper_Concuss_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 200 spawn joins on 10 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 2,211 pairs; ByteComponents consumes all 2,416 rows, ShortComponents fails 1,291."
+    },
+    {
+      "group": "/Game/Characters/Iris/S0/Ability_4/Projectile_Thumper_Heal.Projectile_Thumper_Heal_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 214 spawn joins on 10 builds, ratio p1-p99 0.9998-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 730 pairs; ByteComponents consumes all 944 rows, ShortComponents fails 501."
+    },
+    {
+      "group": "/Game/Characters/Killjoy/S0/Ability_4/Projectile_Killjoy_4_RemoteBees_MultiDetonate.Projectile_Killjoy_4_RemoteBees_MultiDetonate_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-12.00", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 333 spawn joins on 12 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 2,312 pairs; ByteComponents consumes all 2,696 rows, ShortComponents fails 1,522."
+    },
+    {
+      "group": "/Game/Characters/Mage/S0/Ability_4/Projectile_Mage_4_SplashGrenade.Projectile_Mage_4_SplashGrenade_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.00", "++Ares-Core+release-13.01", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 43 spawn joins on 3 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 533 pairs; ByteComponents consumes all 576 rows, ShortComponents fails 432."
+    },
+    {
+      "group": "/Game/Characters/Mage/S0/Ability_E/Projectile_Mage_E_WorldSmoke.Projectile_Mage_E_WorldSmoke_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-12.00", "++Ares-Core+release-13.01", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 101 spawn joins on 3 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 568 pairs; ByteComponents consumes all 669 rows, ShortComponents fails 448."
+    },
+    {
+      "group": "/Game/Characters/Nox/S0/Ability_4/Projectile_Nox_BarbedWire.Projectile_Nox_BarbedWire_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-11.09", "++Ares-Core+release-12.01", "++Ares-Core+release-12.04", "++Ares-Core+release-12.08", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 170 spawn joins on 6 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 1,150 pairs; ByteComponents consumes all 1,321 rows, ShortComponents fails 819."
+    },
+    {
+      "group": "/Game/Characters/Pandemic/S0/Ability_4/Projectile_Pandemic_4_SmokeGrenade.Projectile_Pandemic_4_SmokeGrenade_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.09", "++Ares-Core+release-12.00", "++Ares-Core+release-12.06", "++Ares-Core+release-13.01", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 50 spawn joins on 5 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 500 pairs; ByteComponents consumes all 550 rows, ShortComponents fails 253."
+    },
+    {
+      "group": "/Game/Characters/Pandemic/S0/Ability_Q/Projectile_Pandemic_Q_AcidGrenade.Projectile_Pandemic_Q_AcidGrenade_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.09", "++Ares-Core+release-12.00", "++Ares-Core+release-12.06", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 49 spawn joins on 6 builds, ratio p1-p99 0.9999-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 585 pairs; ByteComponents consumes all 635 rows, ShortComponents fails 299."
+    },
+    {
+      "group": "/Game/Characters/Phoenix/S0/Ability_4/Production/Projectile_Phoenix_4_Molotov_Production.Projectile_Phoenix_4_Molotov_Production_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 353 spawn joins on 18 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 3,654 pairs; ByteComponents consumes all 4,023 rows, ShortComponents fails 1,982."
+    },
+    {
+      "group": "/Game/Characters/Phoenix/S0/Ability_E/Production/Projectile_Phoenix_E_FlareCurve_Synced.Projectile_Phoenix_E_FlareCurve_Synced_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 421 spawn joins on 18 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 421 rows, ShortComponents fails 220."
+    },
+    {
+      "group": "/Game/Characters/Phoenix/S0/Ability_E/Production/Projectile_Phoenix_E_FlareCurve_Synced_Right.Projectile_Phoenix_E_FlareCurve_Synced_Right_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 515 spawn joins on 18 builds, ratio p1-p99 0.9998-1.0002, every join within 0.5000 of its spawn at /1; ByteComponents consumes all 515 rows, ShortComponents fails 263."
+    },
+    {
+      "group": "/Game/Characters/Pine/S0/Ability_E/Projectile_Pine_E_RadEaterSpawner.Projectile_Pine_E_RadEaterSpawner_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-11.11", "++Ares-Core+release-12.03", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 108 spawn joins on 6 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 0.99 over 297 pairs; ByteComponents consumes all 405 rows, ShortComponents fails 214."
+    },
+    {
+      "group": "/Game/Characters/Pine/S0/Ability_Q/Projectile_Pine_Q_TrapGrenade.Projectile_Pine_Q_TrapGrenade_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-11.11", "++Ares-Core+release-12.03", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 104 spawn joins on 6 builds, ratio p1-p99 0.9997-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 560 pairs; ByteComponents consumes all 665 rows, ShortComponents fails 439."
+    },
+    {
+      "group": "/Game/Characters/Pine/S0/Ability_Q/Projectile_Pine_Q_TrapGrenadeUnderhand.Projectile_Pine_Q_TrapGrenadeUnderhand_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.11", "++Ares-Core+release-12.03", "++Ares-Core+release-13.01", "++Ares-Core+release-13.04"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 40 spawn joins on 4 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.02 over 299 pairs; ByteComponents consumes all 362 rows, ShortComponents fails 181."
+    },
+    {
+      "group": "/Game/Characters/Sarge/S0/Ability_Molotov/Projectile_Sarge_Q_Molotov_Production.Projectile_Sarge_Q_Molotov_Production_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.08", "++Ares-Core+release-11.10", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 99 spawn joins on 12 builds, ratio p1-p99 0.9999-1.0004, every join within 0.5000 of its spawn at /1, speed check 1.00 over 1,877 pairs; ByteComponents consumes all 2,034 rows, ShortComponents fails 1,085."
+    },
+    {
+      "group": "/Game/Characters/Sarge/S0/Ability_SpeedStim/Projectile_Sarge_E_SpeedStim.Projectile_Sarge_E_SpeedStim_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.08", "++Ares-Core+release-11.10", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 130 spawn joins on 12 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.01 over 636 pairs; ByteComponents consumes all 766 rows, ShortComponents fails 520."
+    },
+    {
+      "group": "/Game/Characters/Sequoia/S0/Ability_Q/Projectile_Sequoia_Q_FragileMissile.Projectile_Sequoia_Q_FragileMissile_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.08", "++Ares-Core+release-12.01", "++Ares-Core+release-12.03", "++Ares-Core+release-12.07", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 132 spawn joins on 11 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 1,848 pairs; ByteComponents consumes all 1,980 rows, ShortComponents fails 1,200."
+    },
+    {
+      "group": "/Game/Characters/Sprinter/S0/Ability_4/Projectile_Neon_C_Tunnel_Cosmetic.Projectile_Neon_C_Tunnel_Cosmetic_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 285 spawn joins on 12 builds, ratio p1-p99 0.9998-1.0001, every join within 0.5000 of its spawn at /1, speed check 0.98 over 12,817 pairs; ByteComponents consumes all 13,102 rows, ShortComponents fails 9,290."
+    },
+    {
+      "group": "/Game/Characters/Sprinter/S0/Ability_Q/Projectile_Sprinter_4_GroundStrike.Projectile_Sprinter_4_GroundStrike_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.07", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 376 spawn joins on 12 builds, ratio p1-p99 0.9999-1.0002, every join within 0.5000 of its spawn at /1, speed check 1.00 over 2,856 pairs; ByteComponents consumes all 3,232 rows, ShortComponents fails 2,128."
+    },
+    {
+      "group": "/Game/Characters/Stealth/S0/Ability_Q/Projectile_Stealth_Q_BounceFlash.Projectile_Stealth_Q_BounceFlash_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.07", "++Ares-Core+release-12.00", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 271 spawn joins on 12 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 3,145 pairs; ByteComponents consumes all 3,434 rows, ShortComponents fails 1,956."
+    },
+    {
+      "group": "/Game/Characters/Thorne/S0/Ability_4/Projectile_Thorne_4_SlowFIeld_Production.Projectile_Thorne_4_SlowFIeld_Production_C",
+      "field": "ReplicatedMovement",
+      "checksum": 2749104612,
+      "type": "RepMovementByte",
+      "location_quantization": "RoundWholeNumber",
+      "observed_builds": ["++Ares-Core+release-11.06", "++Ares-Core+release-11.08", "++Ares-Core+release-11.09", "++Ares-Core+release-11.10", "++Ares-Core+release-11.11", "++Ares-Core+release-12.00", "++Ares-Core+release-12.01", "++Ares-Core+release-12.02", "++Ares-Core+release-12.03", "++Ares-Core+release-12.04", "++Ares-Core+release-12.05", "++Ares-Core+release-12.06", "++Ares-Core+release-12.07", "++Ares-Core+release-12.08", "++Ares-Core+release-12.09", "++Ares-Core+release-13.01", "++Ares-Core+release-13.02", "++Ares-Core+release-13.04", "++Ares-Core+release-13.05", "++Ares-Core+release-13.06"],
+      "evidence": "tools/check_rep_movement_levels.py over a 123-replay sample: 998 spawn joins on 20 builds, ratio p1-p99 0.9999-1.0001, every join within 0.5000 of its spawn at /1, speed check 1.00 over 16,629 pairs; ByteComponents consumes all 17,652 rows, ShortComponents fails 10,954."
     }
   ]
 }
