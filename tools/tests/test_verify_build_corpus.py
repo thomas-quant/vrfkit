@@ -73,6 +73,16 @@ class ManifestTests(unittest.TestCase):
                         target[category][key] = 1
                         self.assertIn(f"{scope}_{key}=1", audit.manifest_counts(data)[1])
 
+    def test_package_map_export_bunches_fail_each_pass(self):
+        """Named here, not read from NET_ZERO, so dropping either term fails."""
+        for scope in ("main", "checkpoint"):
+            for key in ("package_map_exports", "rep_layout_export_bunches"):
+                with self.subTest(scope=scope, key=key):
+                    data = manifest()
+                    target = data["quality"] if scope == "main" else data["quality"]["checkpoints"]
+                    target["net"][key] = 1
+                    self.assertIn(f"{scope}_{key}=1", audit.manifest_counts(data)[1])
+
     def test_each_run_level_count_must_be_zero(self):
         for key in ("content_blocks_lost", "unknown_chunks", "overlay_errors_reported"):
             with self.subTest(key=key):

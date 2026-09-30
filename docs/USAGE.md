@@ -103,8 +103,9 @@ says how many were skipped. Use `export --checkpoints` to decode them.
 Partial reassembly rejections discard payloads before block framing and are
 also reported under `NOT COVERED`. They are excluded from the block score and
 exit verdict; a pass does not establish end-to-end preservation. Other counted
-transport failures, including unfinished partials, resource limits and
-bunches dropped because their channel had no open actor, fail the verdict.
+transport failures, including unfinished partials, resource limits,
+bunches dropped because their channel had no open actor and package-map export
+bunches (`Package map exports:`; nothing after the exports is read), fail the verdict.
 That holds even when the channel's open arrived in a rejected partial
 fragment: the fragment itself stays unscored, but the complete bunches dropped
 after it count as loss. The exception is a rejected fragment that reopened a

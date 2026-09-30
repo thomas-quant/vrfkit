@@ -46,8 +46,8 @@ reference export lacks.
   rule per discard mode inside a path the verdict leaves unscored.
 - **Counting the bits after a cleanly read package-map export list.**
   `process_complete_payload` returns after the exports, so what follows is
-  never read; with no replay carrying such a bunch, neither reading on nor a
-  counter has anything to be checked against.
+  never read. No replay carries such a bunch to check reading on or a bit
+  counter against, so the bunch fails `validate` and `verify_build_corpus.py`.
 - **Committing raw bits cut from private replays** so CI's real-bytes type
   check covers more fields: it would put private replay content in this
   public repository. The machine-local corpus sweeps cover them.
@@ -55,7 +55,8 @@ reference export lacks.
 The reopen and package-map items have no input: over the 1,018 exports of the common audit,
 `package_map_exports`, `must_be_mapped_guids`, `bunch_header_failures`,
 `channel_state_limit_failures`, `channel_reopens_while_open` and
-`partial_errors` are 0 on 563,030,549 main and 4,346,884 checkpoint bunches.
+`partial_errors` are 0 on 563,030,549 main and 4,346,884 checkpoint bunches;
+`vrfkit diag` on the same replays agrees, `rep_layout_export_bunches` included.
 
 ## The damage record only vrfkit emits
 
