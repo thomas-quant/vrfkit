@@ -236,8 +236,7 @@ class FastArrayTests(TempDirTestCase):
 
     def test_receipt_counts_every_route_and_stream_even_when_zero(self):
         raw, count = payload([1, 3], [(5, [(0, b"\x96\xab"), (18, b"")])])
-        tmp = self.tmp()
-        root = tmp; out = root / "result"
+        root = self.tmp(); out = root / "result"
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
         code, printed = run(source, out)
         self.assertEqual(code, 0)
@@ -288,8 +287,7 @@ class FastArrayTests(TempDirTestCase):
 
     def test_cli_artifact_receipts_and_physical_ordinal(self):
         raw, count = payload([1, 3])
-        tmp = self.tmp()
-        root = tmp; out = root / "result"
+        root = self.tmp(); out = root / "result"
         source = write_export(root, "++Ares-Core+release-13.05",
                               fields=[field_row(("unrelated", "x"), raw, count), field_row(CNC_H1, raw, count)])
         receipt = fast.extract(source, out)
@@ -310,8 +308,7 @@ class FastArrayTests(TempDirTestCase):
     def test_the_receipt_is_written_with_lf_line_endings(self):
         """LF on every platform, like observations.ndjson (not CRLF on Windows)."""
         raw, count = payload([1, 3])
-        tmp = self.tmp()
-        root = tmp; out = root / "result"
+        root = self.tmp(); out = root / "result"
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
         fast.extract(source, out)
         data = (out / "receipt.json").read_bytes()
@@ -320,8 +317,7 @@ class FastArrayTests(TempDirTestCase):
 
     def test_cli_rejections_retained_and_nonzero_exit(self):
         raw, count = payload([1, 3])
-        tmp = self.tmp()
-        root = tmp; out = root / "result"
+        root = self.tmp(); out = root / "result"
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count + 1)])
         code, _ = run(source, out)
         self.assertEqual(code, 1)
@@ -334,8 +330,7 @@ class FastArrayTests(TempDirTestCase):
 
     def test_changed_input_does_not_publish(self):
         raw, count = payload([1, 3])
-        tmp = self.tmp()
-        root = tmp; out = root / "result"
+        root = self.tmp(); out = root / "result"
         source = write_export(root, "++Ares-Core+release-13.05", fields=[field_row(CNC_H1, raw, count)])
         original = fast.selected_rows
         def alter(path, checkpoint):
