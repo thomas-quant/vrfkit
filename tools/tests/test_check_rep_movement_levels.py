@@ -7,10 +7,13 @@ from support import TempDirTestCase, run_cli
 from wire_fixtures import FIELD_SCHEMA, BitWriter, field_row
 import check_rep_movement_levels as levels
 
-#: Declared in table.rs: byte rotator, whole units; and Short, two decimals.
+#: table.rs: PICKUP byte rotator, whole units; SEEKER short, two decimals.
+#: scoped_types.rs: TURRET short, two decimals.
 PICKUP = "/Game/Weapons/WeaponPickups/EquippablePickupProjectile.EquippablePickupProjectile_C"
 SEEKER = ("/Game/Characters/AggroBot/S0/Ability_Q/Pawn_Aggrobot_SeekerNade."
           "Pawn_Aggrobot_SeekerNade_C")
+TURRET = ("/Game/Characters/Killjoy/S0/Ability_E/Pawn_Killjoy_E_Turret."
+          "Pawn_Killjoy_E_Turret_C")
 UNTYPED = "/Test/Projectile_Untyped.Projectile_Untyped_C"
 PAWN = "/Test/Pawn_Untyped.Pawn_Untyped_C"
 ACTORS = pa.schema([("time_ms", pa.uint32()), ("channel_index", pa.uint32()),
@@ -80,17 +83,21 @@ class LevelTests(TempDirTestCase):
         self.assertEqual(pawn[11], "untyped, RoundTwoDecimals, rotator RepMovementShort")
 
     def test_a_declared_class_must_measure_its_own_level(self):
-        spawn, whole = (1500, -700, 200), (1500, -700, 200)
-        for location, verdict, want in (
-            (whole, "typed, agrees", 0),
-            ((150000, -70000, 20000), "FAILED: declared RoundWholeNumber, measured RoundTwoDecimals", 1),
-            ((1503, -700, 200), "FAILED: declared RoundWholeNumber, measured not clean", 1),
+        spawn = (1500, -700, 200)
+        for group, payload, verdict, want in (
+            (PICKUP, movement(spawn), "typed, agrees", 0),
+            (PICKUP, movement((150000, -70000, 20000)),
+             "FAILED: declared RoundWholeNumber, measured RoundTwoDecimals", 1),
+            (PICKUP, movement((1503, -700, 200)),
+             "FAILED: declared RoundWholeNumber, measured not clean", 1),
+            # short-only: a rotator read as Byte would fail on consumption instead
+            (TURRET, movement(spawn, yaw=512),
+             "FAILED: declared RoundTwoDecimals, measured RoundWholeNumber", 1),
         ):
-            with self.subTest(location=location):
+            with self.subTest(group=group, verdict=verdict):
                 code, table, out = self.run_tool(
-                    [(100, 1, 10, PICKUP, spawn)],
-                    [(100, 1, 10, PICKUP, movement(location), "{}")])
-                self.assertEqual((code, table[PICKUP][2], table[PICKUP][11]),
+                    [(100, 1, 10, group, spawn)], [(100, 1, 10, group, payload, "{}")])
+                self.assertEqual((code, table[group][2], table[group][11]),
                                  (want, "1", verdict), out)
 
     def test_a_declared_rotator_must_consume_every_row(self):
