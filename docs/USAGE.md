@@ -764,7 +764,7 @@ script mentioned, every crate in the table, every link and `#anchor`
 resolving, and the live value of each number it can re-derive, in the
 phrasings it reads -- the overlay and handle table sizes (in Rust doc comments
 and `Cargo.toml` too), the test counts, the reference replay's printed overlay
-counters, `Typed` ratio and export rows/bytes, the build tables' clean/checked
+counters, `Typed` ratio and export rows/bytes, the build table's clean/checked
 counts, and the counts its `MEASURED_RE` names. Any other figure, DATA.md's
 measurements among them, is a measurement nothing re-runs, and nothing checks
 it. A stale sentence compiles and passes every test.
@@ -1343,7 +1343,8 @@ the private work directory. The JSON report contains build counts and input
 hashes, without source filenames or player identifiers. An unsuccessful
 strict audit still writes its results and exits nonzero. Read
 [BUILD_VERIFICATION.md](BUILD_VERIFICATION.md) for the latest measured results.
-`check_docs.py` checks both supported-build tables against that committed
-report and the Rust registry, including the same verification wording and
-clean/checked denominators. The native and golden vector counts remain
+`check_docs.py` checks README's supported-build table against that committed
+report and the Rust registry (the same verification wording and clean/checked
+denominators), and this document's `Payload transform (N builds)` count
+against the registry. The native and golden vector counts remain
 separate arithmetic evidence; they do not substitute for any replay check.

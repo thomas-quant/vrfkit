@@ -278,7 +278,7 @@ Effect blobs:  61,617
 
 The four buckets partition `Rows offered` exactly (822,185 + 24,747 + 140,814 +
 1,249 = 988,995), and `Typed` is `Decoded OK / Rows offered`. `check_docs.py`
-compares these counters and the Parquet row/byte table with that baseline.
+compares these counters and USAGE's Parquet row/byte table with that baseline.
 
 **Effect decoding is additive and does not move these buckets.** The overlay
 buckets are settled before the effect pass, so rows that gained a value from an
@@ -289,7 +289,7 @@ prints identically.
 
 Physical value coverage -- `fields.parquet` rows with a non-null `value_*` --
 is a different population from the overlay's input rows: the reference
-baseline has 939,382 typed rows out of 1,296,660 (72.45%), measured from its
+baseline has 939,474 typed rows out of 1,296,660 (72.45%), measured from its
 columns, and it is not a fraction of all game information understood.
 `Typed`, the overlay counter, the `compatible_checksum` buckets that separate
 "nobody described this" from "we missed this", and
