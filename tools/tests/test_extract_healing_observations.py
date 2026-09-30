@@ -7,6 +7,7 @@ from wire_fixtures import (
     CHECKPOINT_FIELD_SCHEMA as CHECKPOINT_SCHEMA,
     FIELD_SCHEMA as SCHEMA,
     array,
+    field_row,
     packed,
 )
 
@@ -16,25 +17,9 @@ def ref(v):
 
 
 def row(name, crc=None, raw=b"", bits=0, **kw):
-    x = {
-        "time_ms": 1000,
-        "packet_id": 2,
-        "channel_index": 3,
-        "actor_net_guid": 40,
-        "object_net_guid": 41,
-        "group_path": tool.OUTER_GROUP,
-        "handle": 6,
-        "field_name": name,
-        "compatible_checksum": crc,
-        "bit_count": bits,
-        "raw_bits": raw,
-        "value_i64": None,
-        "value_f64": None,
-        "value_bool": None,
-        "value_str": None,
-    }
-    x.update(kw)
-    return x
+    return field_row(dict(time_ms=1000, packet_id=2, channel_index=3, actor_net_guid=40, object_net_guid=41,
+                          group_path=tool.OUTER_GROUP, handle=6, field_name=name, compatible_checksum=crc,
+                          bit_count=bits, raw_bits=raw), **kw)
 
 
 def fixture(value=-0.0, causer=True):

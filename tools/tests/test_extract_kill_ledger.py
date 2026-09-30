@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 from support import TempDirTestCase
 import extract_kill_ledger as tool
 from test_extract_kill_observations import SCHEMA, array, row as field_row
+from wire_fixtures import write_empty_tables
 
 from extract_kill_ledger import (
     ActorIdentityIndex, DEATH_NAME, InputError, match_deaths, validate_death_payload,
@@ -172,16 +173,7 @@ def make_export(root, build='++Ares-Core+release-13.05'):
     rows.append(field_row(time_ms=509,actor_net_guid=20,handle=0,field_name='KillData',
                           compatible_checksum=producer.PARENT[1],raw_bits=raw,bit_count=width,value_bool=None))
     pq.write_table(pa.Table.from_pylist(rows,schema=SCHEMA),root/'fields.parquet')
-    schemas={
-        'checkpoint_fields':pa.schema([('checkpoint_index',pa.uint32()),('checkpoint_id',pa.string()),*SCHEMA]),
-        'net_guids':pa.schema([('net_guid',pa.uint32())]),
-        'checkpoint_actors':pa.schema([('checkpoint_index',pa.uint32()),('actor_net_guid',pa.uint32())]),
-        'checkpoint_net_guids':pa.schema([('checkpoint_index',pa.uint32()),('net_guid',pa.uint32())]),
-        'checkpoint_export_groups':pa.schema([('checkpoint_index',pa.uint32()),('ordinal',pa.uint32()),('group_path',pa.string())]),
-        'checkpoint_export_fields':pa.schema([('checkpoint_index',pa.uint32()),('group_ordinal',pa.uint32()),('handle',pa.uint32()),('rendered_name',pa.string()),('compatible_checksum',pa.uint32())]),
-    }
-    for name,schema in schemas.items():
-        pq.write_table(pa.Table.from_pylist([],schema=schema),root/(name+'.parquet'))
+    write_empty_tables(root)
     pq.write_table(pa.Table.from_pylist([actor(),actor(guid=200),actor(guid=20),actor(guid=21)]),root/'actors.parquet')
     name='EReplayEventGroup::RoundStart'; text=name.encode()+b'\0'
     raw=struct.pack('<IIi',2,3,len(text))+text+struct.pack('<f',0.125)
@@ -195,8 +187,7 @@ def make_export(root, build='++Ares-Core+release-13.05'):
 
 class IntegrationTests(TempDirTestCase):
     def test_real_cli_retains_physical_sources(self):
-        t = self.tmp()
-        root=t; export=make_export(root/'export'); out=root/'ledger.json'
+        root=self.tmp(); export=make_export(root/'export'); out=root/'ledger.json'
         command=[sys.executable,'-W','error',str(Path(tool.__file__)),
                  '--export',str(export),'--out',str(out)]
         run=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
@@ -218,8 +209,7 @@ class IntegrationTests(TempDirTestCase):
         self.assertEqual(got['counts']['state']['entities'],1)
 
     def test_unmeasured_build_fails_through_the_cli_without_writing(self):
-        t = self.tmp()
-        root=t; export=make_export(root/'export',build='++Ares-Core+release-13.07')
+        root=self.tmp(); export=make_export(root/'export',build='++Ares-Core+release-13.07')
         out=root/'ledger.json'
         run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
                             '--export',str(export),'--out',str(out)],
@@ -265,8 +255,7 @@ class IntegrationTests(TempDirTestCase):
         self.assertEqual(context,[{'event_row_ordinal':1,'event_killer_player_state_ref':21,'replication_lag_ms':9}])
 
     def test_cli_refuses_source_aliases_without_writing(self):
-        t = self.tmp()
-        root=t; export=make_export(root/'export')
+        root=self.tmp(); export=make_export(root/'export')
         for output in (export/'events.parquet',Path(tool.__file__),Path(tool.__file__).with_name('kill_state.py')):
             before=output.read_bytes()
             run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),

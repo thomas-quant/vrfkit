@@ -10,18 +10,10 @@ import pyarrow.parquet as pq
 
 
 from support import TOOLS, TempDirTestCase
+from wire_fixtures import pack_bits
 from validate_type_evidence import (
     check_specifications, decode_exact, exported_matches, exported_value,
     load_specifications, main, spec_rows, validate, values_match)
-
-
-def pack_bits(*fields: tuple[int, int]) -> tuple[bytes, int]:
-    """(value, width) pairs, least significant bit first, as Unreal writes them."""
-    value = position = 0
-    for field, width in fields:
-        value |= (field & ((1 << width) - 1)) << position
-        position += width
-    return value.to_bytes((position + 7) // 8, "little"), position
 
 
 def fstring_fields(text: str):

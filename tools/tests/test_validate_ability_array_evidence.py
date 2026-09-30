@@ -13,24 +13,12 @@ import pyarrow.parquet as pq
 
 import support  # puts tools/ on sys.path
 import validate_ability_array_evidence as evidence
-
-
-def packed(value):
-    result = bytearray()
-    while True:
-        more = value >> 7
-        result.append(((value & 127) << 1) | bool(more))
-        if not more:
-            return bytes(result)
-        value = more
+from wire_fixtures import array
 
 
 def path_point(fields=((1, 32), (2, 192), (3, 192))):
-    raw = bytearray(packed(1) + packed(1))
-    for handle, width in fields:
-        raw += packed(handle + 1) + packed(width) + bytes(width // 8)
-    raw += packed(0) + packed(0)
-    return {"field_name": "MulticastSetPath.NetworkedProjectilePath", "raw_bits": bytes(raw), "bit_count": len(raw) * 8}
+    raw, count = array([(0, [(handle, width, bytes(width // 8)) for handle, width in fields])])
+    return {"field_name": "MulticastSetPath.NetworkedProjectilePath", "raw_bits": raw, "bit_count": count}
 
 
 class AbilityArrayEvidenceTests(unittest.TestCase):

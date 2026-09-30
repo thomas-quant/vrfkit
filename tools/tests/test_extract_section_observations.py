@@ -4,16 +4,13 @@ import copy
 
 import support  # puts tools/ on sys.path
 import extract_section_observations as tool
-from wire_fixtures import BitWriter, packed
+from wire_fixtures import BitWriter, field_row, packed
 
 
 def row(name, raw, width, **typed):
-    return {"time_ms": 1, "packet_id": 2, "channel_index": 3,
-            "actor_net_guid": 4, "object_net_guid": 5,
-            "group_path": tool.OUTER_GROUP, "handle": 6,
-            "field_name": name, "compatible_checksum": None,
-            "bit_count": width, "raw_bits": raw, "value_i64": None,
-            "value_f64": None, "value_bool": None, "value_str": None, **typed}
+    return field_row(dict(time_ms=1, packet_id=2, channel_index=3, actor_net_guid=4, object_net_guid=5,
+                          group_path=tool.OUTER_GROUP, handle=6, field_name=name, bit_count=width,
+                          raw_bits=raw), **typed)
 
 
 RULES = {

@@ -4,29 +4,13 @@ import pyarrow as pa, pyarrow.parquet as pq
 
 from support import TempDirTestCase
 import extract_kill_observations as tool
-from wire_fixtures import FIELD_SCHEMA as SCHEMA, array
+from wire_fixtures import FIELD_SCHEMA as SCHEMA, array, field_row, write_empty_tables
 
 
 def row(**kw):
-    x = {
-        "time_ms": 1000,
-        "packet_id": 2,
-        "channel_index": 3,
-        "actor_net_guid": 4,
-        "object_net_guid": 5,
-        "group_path": tool.GROUP,
-        "handle": 15,
-        "field_name": "KillData[0].bDidKillTriggerFinisher",
-        "compatible_checksum": None,
-        "bit_count": 1,
-        "raw_bits": b"\1",
-        "value_i64": None,
-        "value_f64": None,
-        "value_bool": True,
-        "value_str": None,
-    }
-    x.update(kw)
-    return x
+    return field_row(dict(time_ms=1000, packet_id=2, channel_index=3, actor_net_guid=4, object_net_guid=5,
+                          group_path=tool.GROUP, handle=15, field_name="KillData[0].bDidKillTriggerFinisher",
+                          bit_count=1, raw_bits=b"\1", value_bool=True), **kw)
 
 
 def fixture(two=False):
@@ -83,29 +67,7 @@ def build_export(root, build):
         manifest["replay_build"] = build
     (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     pq.write_table(pa.Table.from_pylist(fixture(), schema=SCHEMA), root / "fields.parquet")
-    empty = {
-        "checkpoint_fields": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()), *SCHEMA]
-        ),
-        "net_guids": pa.schema([("net_guid", pa.uint32())]),
-        "checkpoint_actors": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("actor_net_guid", pa.uint32())]
-        ),
-        "checkpoint_net_guids": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("net_guid", pa.uint32())]
-        ),
-        "checkpoint_export_groups": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("ordinal", pa.uint32()),
-             ("group_path", pa.string())]
-        ),
-        "checkpoint_export_fields": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("group_ordinal", pa.uint32()),
-             ("handle", pa.uint32()), ("rendered_name", pa.string()),
-             ("compatible_checksum", pa.uint32())]
-        ),
-    }
-    for name, schema in empty.items():
-        pq.write_table(pa.Table.from_pylist([], schema=schema), root / f"{name}.parquet")
+    write_empty_tables(root)
     pq.write_table(
         pa.Table.from_pylist([{"actor_net_guid": 4}],
                              schema=pa.schema([("actor_net_guid", pa.uint32())])),
