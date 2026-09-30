@@ -14,9 +14,8 @@ import hashlib
 import tomllib
 import unittest
 from pathlib import Path
+from support import REPO
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 #: SHA-256 of each license's text with LF line endings, by the SPDX id the
 #: workspace declares. Apache-2.0 is apache.org's LICENSE-2.0.txt.
@@ -39,21 +38,21 @@ def lf(data: bytes) -> bytes:
 
 
 def crates() -> list[Path]:
-    return sorted(path.parent for path in (REPOSITORY_ROOT / "crates").glob("*/Cargo.toml"))
+    return sorted(path.parent for path in (REPO / "crates").glob("*/Cargo.toml"))
 
 
 class CrateLicenseTests(unittest.TestCase):
     def setUp(self):
         self.crates = crates()
         # A glob that found nothing would pass vacuously.
-        self.assertIn(REPOSITORY_ROOT / "crates" / "vrfkit", self.crates)
+        self.assertIn(REPO / "crates" / "vrfkit", self.crates)
 
     def test_every_crate_license_is_the_declared_license_text(self):
         workspace = tomllib.loads(
-            (REPOSITORY_ROOT / "Cargo.toml").read_text(encoding="utf-8-sig"))
+            (REPO / "Cargo.toml").read_text(encoding="utf-8-sig"))
         declared = workspace["workspace"]["package"]["license"]
         self.assertIn(declared, LICENSE_TEXT_SHA256)
-        text = lf((REPOSITORY_ROOT / "LICENSE").read_bytes())
+        text = lf((REPO / "LICENSE").read_bytes())
         self.assertEqual(hashlib.sha256(text).hexdigest(), LICENSE_TEXT_SHA256[declared])
         for crate in self.crates:
             with self.subTest(crate=crate.name):
@@ -64,7 +63,7 @@ class CrateLicenseTests(unittest.TestCase):
                                  f"{crate.name}/LICENSE is not the {declared} text")
 
     def test_every_crate_notice_opens_with_the_earlier_mit_notice(self):
-        notice = lf((REPOSITORY_ROOT / "NOTICE.md").read_bytes()).decode("utf-8")
+        notice = lf((REPO / "NOTICE.md").read_bytes()).decode("utf-8")
         project, heading, _ = notice.partition(THIRD_PARTY_HEADING)
         self.assertTrue(heading, "NOTICE.md has no third-party section to end the project's")
         # An emptied section would be a prefix of anything.
@@ -80,7 +79,7 @@ class CrateLicenseTests(unittest.TestCase):
                                 "project section")
 
     def test_every_derived_crate_ships_the_third_party_notice(self):
-        notice = lf((REPOSITORY_ROOT / "NOTICE.md").read_bytes()).decode("utf-8")
+        notice = lf((REPO / "NOTICE.md").read_bytes()).decode("utf-8")
         project, heading, rest = notice.partition(THIRD_PARTY_HEADING)
         third_party = heading + rest.partition(DISCLAIMER_HEADING)[0]
         # An emptied section would be a substring of anything.
@@ -88,12 +87,8 @@ class CrateLicenseTests(unittest.TestCase):
         self.assertIn("Permission is hereby granted", third_party)
         for name in DERIVED_CRATES:
             with self.subTest(crate=name):
-                path = REPOSITORY_ROOT / "crates" / name / "NOTICE.md"
+                path = REPO / "crates" / name / "NOTICE.md"
                 text = lf(path.read_bytes()).decode("utf-8")
                 self.assertEqual(text, project + third_party,
                                  f"{name}/NOTICE.md is not the root's project and "
                                  "third-party sections")
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -30,34 +30,15 @@ can repeat, and a main-stream GUID with the same number is a different scope.
 
 ## Evidence
 
-The rule was first tested on 714 replays across builds 13.01, 13.02, 13.04, and
-13.05. An independent Python oracle reconstructed the final 58,509,199-row
-checkpoint GUID cache from the original 58,509,199 raw entries and checked
-17,251,536 checkpoint blocks. Every file matched. All manifests reported zero
-frame-added or frame-exported GUIDs, which makes this raw-entry reconstruction
-sufficient for that corpus.
-
-One positive fixture checked last-entry-per-GUID replacement and
-checkpoint-local references. Eight negative fixtures changed exported Parquet
-or oracle input to represent a wrong base, a cache leak across checkpoints with
-the same ID, insertion of a reference into the literal table, a changed raw
-index, zero instead of null for an absent outer, a changed block outer path, a
-forward reference, or a nonzero frame-added GUID counter. The oracle rejected
-all eight. These fixtures test the independent comparison; they do not claim
-that eight serializer implementations were run. The six main tables and three
-raw checkpoint declaration tables stayed byte-identical across all 714
-exports.
-
-This is a measured serialization rule for the supported corpus. A matching
-path does not prove a numeric export group is a particular gameplay class, and
-the rule has not been matched to an authoritative current upstream serializer.
-The [main-stream cross-check](#cross-check-against-the-main-stream) below
-extends the measured scope to all 24 supported builds; it is agreement between
-two independent readers of the same files, not a serializer specification.
-Future files with an out-of-range index fail checkpoint parsing instead of
-silently falling back to decimal text. If a checkpoint frame adds or exports
-GUIDs, its final cache also depends on those frame operations; the manifest
-counters make that condition visible.
+An independent Python oracle rebuilt the final checkpoint GUID cache from the
+raw entries of 714 replays (13.01--13.05; 58,509,199 entries, 17,251,536
+blocks) and matched every file, and rejected each of eight negative fixtures
+(wrong base, cross-checkpoint leak, a reference appended to the table, and
+so on).
+An out-of-range index fails checkpoint parsing instead of falling back to
+decimal text. If a checkpoint frame adds or exports GUIDs, its final cache
+also depends on those frame operations; the manifest counters make that
+condition visible.
 
 ### Cross-check against the main stream
 
@@ -92,39 +73,13 @@ count, zeros included. `check_export_baseline.py --checkpoints` runs it after
 the export and exits non-zero on failure; `verify_build_corpus.py` runs it on
 every export and reports the counts per build as `guid_crosscheck_*`.
 
-Measured on 2026-09-28 over the 1,018 exports retained by the full-corpus
-`verify_build_corpus.py` run at `259ed10`: every unique replay of the 24
-supported builds, exported with `--checkpoints`. The counts come from the check
-itself and from a separately written one-off rebuild, not kept in the tree,
-which also evaluated the wrong rules below; the two agreed on every export.
+On all 1,018 exports of the common audit (every unique replay of the 24
+builds, `--checkpoints`), the check and a separately written rebuild agreed on
+every export, and every build agreed with the main stream:
 
-| Build | Exports | Indexed joined | Indexed path equal | Literal joined | Literal path equal | Literal unjoined |
-|---|---:|---:|---:|---:|---:|---:|
-| 11.06 | 3 | 61,738 | 61,738 | 214,642 | 214,642 | 240 |
-| 11.07 | 3 | 59,979 | 59,979 | 211,181 | 211,181 | 293 |
-| 11.08 | 3 | 63,188 | 63,188 | 217,150 | 217,150 | 340 |
-| 11.09 | 3 | 65,179 | 65,179 | 237,816 | 237,816 | 320 |
-| 11.10 | 3 | 56,379 | 56,379 | 196,782 | 196,782 | 274 |
-| 11.11 | 3 | 69,720 | 69,720 | 234,869 | 234,869 | 386 |
-| 12.00 | 3 | 64,758 | 64,758 | 232,203 | 232,203 | 293 |
-| 12.01 | 3 | 60,414 | 60,414 | 214,145 | 214,145 | 271 |
-| 12.02 | 3 | 64,823 | 64,823 | 228,813 | 228,813 | 343 |
-| 12.03 | 3 | 61,796 | 61,796 | 213,015 | 213,015 | 311 |
-| 12.04 | 3 | 72,094 | 72,094 | 274,661 | 274,661 | 352 |
-| 12.05 | 3 | 58,810 | 58,810 | 197,986 | 197,986 | 295 |
-| 12.06 | 3 | 49,816 | 49,816 | 171,765 | 171,765 | 223 |
-| 12.07 | 3 | 63,894 | 63,894 | 207,717 | 207,717 | 361 |
-| 12.08 | 3 | 59,120 | 59,120 | 190,158 | 190,158 | 291 |
-| 12.09 | 3 | 62,701 | 62,701 | 204,596 | 204,596 | 270 |
-| 12.10 | 1 | 539 | 539 | 3,670 | 3,670 | 6 |
-| 12.11 | 1 | 483 | 483 | 3,274 | 3,274 | 5 |
-| 13.00 | 1 | 508 | 508 | 3,324 | 3,324 | 5 |
-| 13.01 | 215 | 4,198,397 | 4,198,397 | 12,969,307 | 12,969,307 | 18,941 |
-| 13.02 | 205 | 4,291,803 | 4,291,803 | 13,371,198 | 13,371,198 | 19,678 |
-| 13.04 | 108 | 2,037,483 | 2,037,483 | 6,051,318 | 6,051,318 | 9,796 |
-| 13.05 | 401 | 7,706,687 | 7,706,687 | 22,814,208 | 22,814,208 | 34,506 |
-| 13.06 | 38 | 763,685 | 763,685 | 2,371,485 | 2,371,485 | 3,498 |
-| **All** | **1,018** | **19,993,994** | **19,993,994** | **61,035,283** | **61,035,283** | **91,298** |
+| Exports | Indexed joined | Indexed path equal | Literal joined | Literal path equal | Literal unjoined |
+|---:|---:|---:|---:|---:|---:|
+| 1,018 | 19,993,994 | 19,993,994 | 61,035,283 | 61,035,283 | 91,298 |
 
 No indexed entry was unjoined, unresolved or different, and no outer differed
 in either kind. Every joined indexed entry has an outer on both sides; the
@@ -159,28 +114,3 @@ is a snapshot. That held for every compared entry. A future difference
 therefore means either a different index rule or a GUID whose path changed
 during the replay, and needs investigating before the rule is trusted for that
 build.
-
-## Measured field expansion
-
-Against the preservation-only output at `740688d`, the full 714-replay run
-resolved 14,403,610 indexed GUID path entries and changed the group path or
-resolution source of 9,441,882 blocks. Checkpoint fields grew from 205,866,627
-to 212,099,080 rows (+6,232,453, exactly the new indexed array children), with
-11,975,340 more rows typed and 20,113,218 more named -- overlapping counts,
-since existing rows can gain names and types without a new row. Typed presence
-was then 70.6364% main (713,488,311 of 1,010,086,119 rows), 81.3258%
-checkpoint (172,491,241) and 72.4914% combined, before the
-[structured-array expansion](STRUCTURED_ARRAY_EXPANSION.md); neither the share
-of bytes decoded nor of meaning understood.
-
-Of 198,461,491 previous raw checkpoint rows, 198,344,356 kept their handle, bit
-count and raw bytes within the same block. The other 117,135 tails split into
-2,576,970 header and 47,352,050 body bits, each body matching the candidate
-output; those `__vrfkit_chained_cnc_h1__` bodies stay raw, and the compatible
-capacity 34 is not an established function count or body decoder.
-
-For the 7,809,654 blocks with unchanged group paths and resolution sources,
-all 189,991,214 field rows matched across every column, comparing valid
-floating-point values by their IEEE bits. Signed zero and NaN payloads were
-included in the comparator's mutation controls. All six main tables, all
-three raw declaration tables and checkpoint actor output stayed byte-identical.

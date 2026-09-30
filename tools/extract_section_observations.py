@@ -7,19 +7,17 @@ pools, death, or player credit.
 """
 from __future__ import annotations
 
-import argparse, collections, json, math, re, struct, sys
+import collections, json, math, re, struct
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from .extract_kill_observations import InputError, exact_ref, parse_array
+    from .atomic_io import run_json_cli, sha256_file as sha
+    from .wire_bits import InputError, exact_ref, iter_selected, load_net_guids, parse_array, text
 else:
-    from atomic_io import aliases, atomic_write_text, sha256_file as sha
-    from extract_kill_observations import InputError, exact_ref, parse_array
+    from atomic_io import run_json_cli, sha256_file as sha
+    from wire_bits import InputError, exact_ref, iter_selected, load_net_guids, parse_array, text
 
 SCHEMA_VERSION = 1
 OUTER_GROUP = "/Script/ShooterGame.DamageableComponent_ClassNetCache"
@@ -30,9 +28,9 @@ ROUTES = {
     "MulticastNotifyOverhealDecay": (7, 1072798296, "LifeChangeBySection", 1, "DecayApplied", 0, {2: "ChangedComponent", 3: "LifeResult", 4: "DeltaLife", 5: "bAliveAfterChange"}, "positive"),
     "MulticastSectionLifeChange": (8, 1280092974, "LifeChangeEvents", 0, None, None, {1: "ChangedComponent", 2: "LifeResult", 3: "DeltaLife", 4: "bAliveAfterChange"}, "reset"),
 }
-# Measured main declaration identities on builds 13.01/02/04/05. A matching
-# name in a changed schema cannot authorize interpreting a member as f32/ref.
-# Optional parameters outside this map remain uninterpreted raw evidence.
+# Measured main declaration identities (13.01-13.05): a matching name in a
+# changed schema does not authorize reading a member as f32/ref, and parameters
+# outside this map stay raw.
 VALUE_CHECKSUMS = {
     "MulticastNotifyDamage_Point": {0: 373546733, 9: 314962236, 10: 1435614478, 11: 3234979, 12: 3709621854, 13: 3155865075},
     "MulticastNotifyDamage_Base": {0: 2316259323, 9: 771135212, 10: 1477578271, 11: 1537455328, 12: 4098809706, 13: 3883502598},
@@ -45,7 +43,7 @@ FIELDS = ["time_ms", "packet_id", "channel_index", "actor_net_guid", "object_net
 CP_FIELDS = ["checkpoint_index", "checkpoint_id", *FIELDS]
 HEALTH_SECTION_PATH = "HealthDamageSection"
 INPUT_NAMES = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "net_guids.parquet")
-HELPER_NAMES = ("extract_kill_observations.py", "atomic_io.py")
+SOURCES = [Path(__file__).resolve(), *(Path(__file__).with_name(n) for n in ("wire_bits.py", "atomic_io.py"))]
 
 
 class IntegrityError(InputError):
@@ -95,21 +93,12 @@ def route_name(field):
 
 
 def selected_rows(path, columns):
-    """Arrow-filter route rows before materializing Python dictionaries."""
-    base = 0
-    for batch in pq.ParquetFile(path).iter_batches(batch_size=65536, columns=columns, use_threads=False):
-        names = pc.cast(batch.column(batch.schema.get_field_index("field_name")), pa.string())
-        mask = None
-        for route in ROUTES:
-            item = pc.starts_with(names, pattern=route + ".")
-            mask = item if mask is None else pc.or_(mask, item)
-        indices = pc.indices_nonzero(pc.fill_null(mask, False))
-        for offset, row in zip(indices.to_pylist(), batch.take(indices).to_pylist()):
-            yield base + offset, row
-        base += batch.num_rows
+    """Rows whose field name is `<route>.` for any route."""
+    pattern = "^(?:" + "|".join(ROUTES) + r")\."
+    return iter_selected(path, columns, lambda b: pc.match_substring_regex(text(b, "field_name"), pattern))
 
 
-def declarations(manifest):
+def declarations(manifest, routes=ROUTES):
     groups = collections.defaultdict(list)
     for group in manifest.get("net_field_export_groups", []): groups[group.get("path")].append(group)
     if len(groups[OUTER_GROUP]) != 1: raise InputError("outer declaration missing or duplicate")
@@ -119,9 +108,10 @@ def declarations(manifest):
         if h in outer: raise InputError("duplicate outer declaration handle")
         outer[h] = (x.get("name"), x.get("compatible_checksum"))
     result = {}
-    for route, (handle, crc, parent, parent_handle, scalar, scalar_handle, members, relation) in ROUTES.items():
+    for route in routes:
         # A route, or its parameter group, can be absent from an export: an
         # error only if a selected row claims it or a different outer entry.
+        handle = ROUTES[route][0]
         outer_entry = outer.get(handle)
         path = "/Script/ShooterGame.DamageableComponent:" + route
         if len(groups[path]) > 1: raise InputError("duplicate route declaration group: " + route)
@@ -269,16 +259,11 @@ def result(route, key, rows, errors, reasons, report):
 def extract(export):
     inputs = [export / n for n in INPUT_NAMES]
     before = {p.name: sha(p) for p in inputs}
-    source_files = [Path(__file__).resolve(), *(Path(__file__).with_name(n) for n in HELPER_NAMES)]
-    impl_before = {p.name: sha(p) for p in source_files}
     manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
     decl = declarations(manifest)
-    path_sets = collections.defaultdict(set)
-    for r in pq.read_table(export / "net_guids.parquet", columns=["net_guid","path"], use_threads=False).to_pylist(): path_sets[r["net_guid"]].add(r["path"])
-    paths = {guid: next(iter(values)) if len(values) == 1 else None for guid, values in path_sets.items()}
+    paths = load_net_guids(export, "path")
     groups = {}; segments = collections.Counter(); selected = []; last = None; last_o = None
     for o, r in selected_rows(export / "fields.parquet", FIELDS):
-        # selected_rows yields only rows named `<route>.`, so this is a route.
         route = route_name(r.get("field_name"))
         key = (r["time_ms"],r["packet_id"],r["channel_index"],r["actor_net_guid"],r["object_net_guid"],r["group_path"],r["handle"])
         groups.setdefault((route,key), []).append((o,r)); selected.append((o,r))
@@ -288,9 +273,8 @@ def extract(export):
     for o,r in selected_rows(export / "checkpoint_fields.parquet", CP_FIELDS):
         x=raw(r,o,"checkpoint"); x["state_interpretation"]="checkpoint state-only row; not a main event"; checkpoint.append(x)
     observations=[parse_group(route,key,rows,paths,segments[(route,key)],decl) for (route,key),rows in groups.items()]
-    after={p.name:sha(p) for p in inputs}; impl_after={p.name:sha(p) for p in source_files}
+    after={p.name:sha(p) for p in inputs}
     if before != after: raise IntegrityError("input changed during extraction")
-    if impl_before != impl_after: raise IntegrityError("implementation changed during extraction")
     public_decl={k:{n:v for n,v in x.items() if n != "_fields"} for k,x in decl.items()}
     def tally(obs, ambiguous_key):
         status = collections.Counter(x["section_state"]["status"] for x in obs)
@@ -300,20 +284,12 @@ def extract(export):
         route_rows = [x for x in observations if x["route"] == route]
         by_route[route] = {"coordinate_groups": len(route_rows), "selected_rows": sum(len(x["source_rows"]) for x in route_rows), **tally(route_rows, "ambiguous")}
     counts = {"main_coordinate_groups": len(observations), "main_selected_rows": len(selected), "checkpoint_selected_rows": len(checkpoint), **tally(observations, "ambiguous_groups"), "by_route": by_route}
-    return {"schema_version":SCHEMA_VERSION,"kind":"vrfkit_section_observations","export_id":export.name,"source":str(export.resolve()),"route_declarations":public_decl,"provenance":{"replay_build":manifest.get("replay_build"),"input_sha256_before":before,"input_sha256_after":after,"implementation_sha256_before":impl_before,"implementation_sha256_after":impl_after},"observations":observations,"checkpoint_observations":checkpoint,"counts":counts}
+    return {"schema_version":SCHEMA_VERSION,"kind":"vrfkit_section_observations","export_id":export.name,"source":str(export.resolve()),"route_declarations":public_decl,"provenance":{"replay_build":manifest.get("replay_build"),"input_sha256_before":before,"input_sha256_after":after,"implementation_sha256":{p.name:sha(p) for p in SOURCES}},"observations":observations,"checkpoint_observations":checkpoint,"counts":counts}
 
 
 def main(argv=None):
-    p=argparse.ArgumentParser(description=__doc__); p.add_argument("--export",required=True,type=Path); p.add_argument("--out",required=True,type=Path); a=p.parse_args(argv)
-    protected=[a.export/n for n in INPUT_NAMES]+[Path(__file__),*(Path(__file__).with_name(n) for n in HELPER_NAMES)]
-    try:
-        if a.export.is_dir():
-            protected.extend(p for p in a.export.iterdir() if p.is_file())
-        if aliases(a.out, protected): raise InputError("output aliases an input or implementation file")
-        data=extract(a.export); atomic_write_text(a.out,json.dumps(data,indent=2,sort_keys=True,allow_nan=False)+"\n")
-    except (OSError, ValueError, json.JSONDecodeError) as e:
-        print("FAILED: " + str(e),file=sys.stderr); return 1
-    print("wrote %s (%d observations)" % (a.out,data["counts"]["main_coordinate_groups"])); return 0
+    return run_json_cli(__doc__, extract, lambda d, out: [f"wrote {out} ({d['counts']['main_coordinate_groups']} observations)"],
+                        argv, sources=SOURCES, indent=2, sort_keys=True, allow_nan=False)
 
 
 if __name__ == "__main__": raise SystemExit(main())

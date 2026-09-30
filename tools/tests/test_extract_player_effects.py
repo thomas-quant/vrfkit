@@ -1,21 +1,15 @@
 import json
-import sys
-import tempfile
-import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
+from support import TempDirTestCase
 import extract_player_effects as effects
 
 
-class PlayerEffectTests(unittest.TestCase):
+class PlayerEffectTests(TempDirTestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = self.tmp()
 
     def export(self, fields, players=None):
         if players is None:
@@ -101,8 +95,8 @@ class PlayerEffectTests(unittest.TestCase):
                 "group_path": group, "field_name": name, "value_i64": value}
 
     def reconnect(self, extra=()):
-        """39c2bb2c (13.05): PlayerState 256 is given 1510, loses it on a
-        disconnect, and reconnects as 45530 -- the manifest keeps 45530."""
+        """PlayerState 256 is given 1510, loses it on a disconnect, and
+        reconnects as 45530 -- the manifest keeps 45530."""
         players = [{"actor_net_guid": 256, "subject": "reconnected",
                     "character_net_guid": 45530}]
         fields = [self.spawned(256, 1510, 66), self.spawned(256, 0, 1851838),
@@ -150,7 +144,3 @@ class PlayerEffectTests(unittest.TestCase):
         self.assertIsNone(doc["records"][0]["values"]["InitialDuration"])
         self.assertNotIn("EffectID", doc["records"][0]["values"])
         self.assertEqual(doc["totals"]["untyped_members"], 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -2,20 +2,16 @@
 //! without a `Default__` leaf prefix, `/_Core/` under `/Game/Characters/`, and
 //! the `_ClassNetCache` suffix. Matching is ordinal and exact.
 
-/// The suffix that marks an export group as an RPC (ClassNetCache) group: a
-/// wire discriminator, public for that reason. The Python adapter under
-/// `tools/` keeps a copy, and `crates/vrfkit/tests/adapter_contract.rs` pins
-/// the two, so changing the value fails the suite instead of silently
-/// reclassifying every RPC as a replicated property.
+/// Marks an export group as an RPC (ClassNetCache) group. The Python adapter
+/// under `tools/` keeps a copy that `crates/vrfkit/tests/adapter_contract.rs` pins.
 pub const CLASS_NET_CACHE_SUFFIX: &str = "_ClassNetCache";
 const CORE_SEGMENT: &str = "/_Core/";
 const CHARACTERS_ROOT: &str = "/Game/Characters/";
 const DEFAULT_OBJECT_PREFIX: &str = "Default__";
 
 /// Visit every lookup key for an export-group path: `path` itself, then its
-/// `Default__` and `/_Core/` aliases. The order decides which spelling wins.
-/// A visitor, not a `Vec<String>`:
-/// docs/PERFORMANCE_NOTES.md#path-alias-enumeration.
+/// `Default__` and `/_Core/` aliases; the order decides which spelling wins
+/// (a visitor: docs/PERFORMANCE_NOTES.md#path-alias-enumeration).
 pub fn for_each_replay_path_key(path: &str, mut visit: impl FnMut(&str)) {
     find_replay_path_key::<()>(path, |key| {
         visit(key);
@@ -32,9 +28,7 @@ pub fn find_replay_path_key<T>(path: &str, mut probe: impl FnMut(&str) -> Option
 }
 
 /// Like [`find_replay_path_key`], but each base key is followed by its
-/// `_ClassNetCache` toggle (suffix removed if present, appended if absent),
-/// mirroring `ReplayPath.ClassNetCacheLookupKeys`. One scratch buffer serves
-/// every toggled spelling.
+/// `_ClassNetCache` toggle (suffix removed if present, appended if absent).
 pub fn find_class_net_cache_key<T>(
     path: &str,
     mut probe: impl FnMut(&str) -> Option<T>,
@@ -58,13 +52,20 @@ pub fn find_class_net_cache_key<T>(
     })
 }
 
-/// Toggle the `Default__` prefix: strip it, or add it to a bare leaf (no `/`,
-/// `.` or `:`).
+/// Whether a name is a qualified path rather than a bare leaf: one byte pass
+/// (`unique_leaf_match` alone makes 174,485 calls on the reference replay), safe
+/// because UTF-8 never encodes an ASCII byte inside a multi-byte sequence.
+#[inline]
+pub fn has_path_separator(name: &str) -> bool {
+    name.bytes().any(|b| matches!(b, b'/' | b'.' | b':'))
+}
+
+/// Toggle the `Default__` prefix: strip it, or add it to a bare leaf.
 fn default_object_alias(path: &str) -> Option<String> {
     if let Some(rest) = path.strip_prefix(DEFAULT_OBJECT_PREFIX) {
         return Some(rest.to_owned());
     }
-    if !path.contains('/') && !path.contains('.') && !path.contains(':') {
+    if !has_path_separator(path) {
         let mut prefixed = String::with_capacity(DEFAULT_OBJECT_PREFIX.len() + path.len());
         prefixed.push_str(DEFAULT_OBJECT_PREFIX);
         prefixed.push_str(path);
@@ -74,7 +75,7 @@ fn default_object_alias(path: &str) -> Option<String> {
 }
 
 /// Replace the first `/_Core/` with `/`, or insert `_Core/` after
-/// `/Game/Characters/`; mirrors `ReplayPath.TryGetAlias`.
+/// `/Game/Characters/`.
 fn core_alias(path: &str) -> Option<String> {
     if let Some(idx) = path.find(CORE_SEGMENT) {
         let mut alias = String::with_capacity(path.len());
@@ -97,16 +98,14 @@ fn core_alias(path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// What the visitor emits, in order: the order is the contract, so the
-    /// tests assert exact sequences.
+    /// What the visitor emits, in order: the order is the contract.
     fn replay_keys(path: &str) -> Vec<String> {
         let mut out = Vec::new();
         for_each_replay_path_key(path, |k| out.push(k.to_owned()));
         out
     }
 
-    /// The same for the ClassNetCache generator, via a probe that never
-    /// accepts.
+    /// The same for the ClassNetCache generator, via a probe that never accepts.
     fn cnc_keys(path: &str) -> Vec<String> {
         let mut out = Vec::new();
         let hit: Option<()> = find_class_net_cache_key(path, |k| {
@@ -159,8 +158,7 @@ mod tests {
 
     #[test]
     fn class_net_cache_suffix_toggled_after_each_base_key() {
-        // A bare leaf also produces the Default__ alias, and each base key is
-        // immediately followed by its toggled spelling.
+        // A bare leaf also has the Default__ alias; each base key precedes its toggle.
         assert_eq!(
             cnc_keys("Test_ClassNetCache"),
             [

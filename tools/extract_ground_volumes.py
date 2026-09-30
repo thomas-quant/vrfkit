@@ -1,17 +1,11 @@
 """Decode ground-area volume cells (GroundVolumeComponent FragmentInfo items)
 with the item schema each replay declares.
 
-A `Patch_*` actor's `/Script/DynamicVolume.GroundVolumeComponent` replicates
-its cells as the FastArray `FragmentInfo` (handle 0 of
-`GroundVolumeComponent_ClassNetCache`), a custom delta the parser preserves
-raw on two routes (ROUTES). This reads them back with the replay's own
-declared names and checksums and writes one record per changed item: its
-polygon in world coordinates, floor, ceiling, grid coordinates and state,
-plus the owning actor's class. Evidence, counts and what is not established:
-docs/GROUND_VOLUMES.md.
-
-Wire grammar, measured on every window of the 2026-09-28 corpus (see
-docs/GROUND_VOLUMES.md for the counts):
+A `Patch_*` actor's GroundVolumeComponent replicates its cells as the
+FastArray `FragmentInfo` (handle 0 of its ClassNetCache), which the parser
+keeps raw on two routes (ROUTES). One record per changed item: polygon in
+world coordinates, floor, ceiling, grid cell, state and the owner's class.
+Evidence: docs/GROUND_VOLUMES.md. Wire grammar:
 
     window  := entry+                      -- until the window's last bit
     entry   := handle:SerializeInt(max(slots, 2)) width:packed body[width]
@@ -22,51 +16,46 @@ docs/GROUND_VOLUMES.md for the counts):
     array   := count:packed (index+1:packed members)* 0:packed
 
 `slots` is the ClassNetCache group's declared slot count. A `members` handle
-is a RepLayout command index, mapped to the (name, compatible_checksum) the
-SAME replay declares for it: handles move between builds, identities do not.
-MEMBERS then gives the type. Anything that does not close exactly, including
-never-observed shapes (an element out of order or missing a member, a partial
-array, a non-finite float), is a counted rejection with the raw window kept:
-decoding it would be a guess. Item `fields` keep the declared names;
-RESOLVED_NAMES and STATUS_NAMES add the game's names where established.
+maps to the (name, compatible_checksum) the same replay declares (handles move
+between builds, identities do not); MEMBERS gives the type. A window that does
+not close exactly is a counted rejection with its raw bits kept.
 """
 from __future__ import annotations
 
 import argparse
 from collections import Counter
 from dataclasses import dataclass
-import hashlib
 import json
 import math
-import os
 from pathlib import Path
-import shutil
 import struct
 import sys
-import tempfile
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-#: 2: items gained `status_name`, the receipt `declarations.resolved_names`.
+if __package__:
+    from .atomic_io import sha256_file as sha, staged_output
+    from .wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
+else:
+    from atomic_io import sha256_file as sha, staged_output
+    from wire_bits import Bits, WireError, fastarray_header, iter_selected, load_net_guids, text
+
 SCHEMA_VERSION = 2
 CLASS_GROUP = "/Script/DynamicVolume.GroundVolumeComponent"
 CNC_GROUP = CLASS_GROUP + "_ClassNetCache"
 UNRESOLVED_CNC = "__vrfkit_unresolved_class_net_cache_payload__"
 REP_LAYOUT_TAIL = "__vrfkit_unparsed_rep_layout_tail__"
-#: field_name -> window kind. Both start at the first ClassNetCache field
-#: header: a ClassNetCache-only block's whole payload, or a block's rest after
-#: its RepLayout terminator.
+#: field_name -> window kind; both start at a ClassNetCache field header.
 WINDOW_KINDS = {UNRESOLVED_CNC: "unresolved_cnc_payload", REP_LAYOUT_TAIL: "rep_layout_tail"}
-#: route -> the exact group_path the parser exports. `PatchVolume` is the
-#: component's subobject name, whose class the parser cannot resolve. Its
-#: windows decode exactly under the replay's GroundVolumeComponent
-#: declaration (docs/GROUND_VOLUMES.md), re-checked on every window: a member
-#: identity outside MEMBERS rejects it.
+#: route -> exported group_path. `PatchVolume` is the component's unresolved
+#: subobject name; each window is checked against the declared class.
 ROUTES = {"bare_patch_volume": "PatchVolume", "declared_class": CLASS_GROUP}
 ROUTE_BY_GROUP = {group: route for route, group in ROUTES.items()}
 STREAMS = ("fields", "checkpoint_fields")
+INPUTS = ("manifest.json", "fields.parquet", "checkpoint_fields.parquet", "actors.parquet",
+          "net_guids.parquet", "checkpoint_export_groups.parquet", "checkpoint_export_fields.parquet")
 #: The CNC field that carries the items, by its declared identity.
 FRAGMENT_INFO = ("FragmentInfo", 2225407835)
 
@@ -75,11 +64,9 @@ def _builds(*versions: str) -> frozenset[str]:
     return frozenset(f"++Ares-Core+release-{v}" for v in versions)
 
 
-#: (route, stream) -> builds whose windows all decoded exactly AND passed the
-#: independent checks in docs/GROUND_VOLUMES.md. Measured, not supported:
-#: another build rejects as `unvalidated_build`, an empty set as
-#: `unvalidated_checkpoint_route`. 12.10, 12.11 and 13.00 have no windows in
-#: the corpus, and no checkpoint row carries either route.
+#: (route, stream) -> builds whose windows all decoded exactly and passed the
+#: independent checks: measured, not supported. Another build rejects as
+#: `unvalidated_build`, an empty set as `unvalidated_checkpoint_route`.
 ACCEPTED_BUILDS = {
     ("bare_patch_volume", "fields"): _builds(
         "11.06", "11.07", "11.08", "11.09", "11.10", "11.11",
@@ -92,8 +79,7 @@ ACCEPTED_BUILDS = {
 COLUMNS = ["time_ms", "packet_id", "channel_index", "actor_net_guid",
            "object_net_guid", "group_path", "handle", "field_name",
            "compatible_checksum", "bit_count", "raw_bits"]
-#: Arrays larger than this are rejected before any element is read. The
-#: largest measured hull has 8 points and the largest segment list 4.
+#: Larger arrays reject before any element is read (measured maximum: 8).
 MAX_ARRAY_COUNT = 4096
 
 
@@ -119,13 +105,9 @@ class Untyped:
 
 
 #: Declared (name, compatible_checksum) -> type. Each checksum reproduces from
-#: its parent chain in the 13.06 executable's reflection data as the C++ type
-#: read here (docs/GROUND_VOLUMES.md, Types; the tests recompute each), except
-#: `Status` (an enum) and `Begin`/`End`, which rest on measured widths, exact
-#: consumption and the relations there. `253` (a hardcoded engine name index)
-#: reproduces as `ID : int32`, so it is read signed. TJunctions (11.10 to
-#: 12.02) reproduces as a TArray but was 16 zero bits on every item, an empty
-#: array's count and terminator with no element ever sent: it stays Untyped.
+#: its struct chain as the C++ type read here (the tests recompute each),
+#: except `Status` (an enum) and `Begin`/`End` (measured widths). `253` is
+#: `ID : int32`. TJunctions is a TArray only ever sent empty (16 bits): Untyped.
 MEMBERS = {
     ("253", 1175316786): Scalar("int32", 32),
     ("bIsActive", 518428974): Scalar("bool", 1),
@@ -149,18 +131,16 @@ MEMBERS = {
 #: Identities that belong inside an array element, never directly in an item.
 ELEMENT_IDENTITIES = frozenset(i for spec in MEMBERS.values() if isinstance(spec, Array)
                                for i in spec.elements)
-#: Declared identity -> the game's member path, keyed by the whole (name,
-#: checksum) pair, which reproduces from that path: a differing checksum is
-#: not relabelled (docs/GROUND_VOLUMES.md, Names). Receipt only.
+#: Declared identity -> the game's member path, by the whole (name, checksum)
+#: pair; receipt only.
 RESOLVED_NAMES = {
     ("253", 1175316786): "ID",
     ("X", 2123226522): "GridPos.X",
     ("Y", 2134384775): "GridPos.Y",
 }
-#: `Status` names: EGroundVolumeFragmentStatus in the 13.06 executable (read
-#: statically, 2026-09-28): AllInside 0 .. Invalid 3; 4 is the Count sentinel,
-#: left unnamed like 5-7. A checksum does not encode enum values, so only that
-#: build AND identity are named. Measured values are 0-3.
+#: EGroundVolumeFragmentStatus as the 13.06 executable names it (4 is the Count
+#: sentinel). A checksum does not encode enum values, so only that build and
+#: identity are named.
 STATUS_NAMES_BUILD = "++Ares-Core+release-13.06"
 STATUS_IDENTITY = ("Status", 2380676387)
 STATUS_NAMES = {0: "AllInside", 1: "PartiallyOutside", 2: "PartiallyBlocked", 3: "Invalid"}
@@ -176,70 +156,6 @@ COUNTERS = (
     "owner_class_resolved", "owner_class_missing", "owner_class_ambiguous",
     "object_outer_is_actor", "object_outer_not_actor", "object_guid_unresolved",
 )
-
-
-class WireError(ValueError):
-    """This window cannot be decoded exactly with the declared schema."""
-
-
-class Bits:
-    """LSB-first reader over a window, bounded to [pos, end)."""
-
-    __slots__ = ("raw", "pos", "end")
-
-    def __init__(self, raw: bytes, bit_count: int):
-        if (not isinstance(raw, bytes) or type(bit_count) is not int or bit_count < 0
-                or len(raw) != (bit_count + 7) // 8):
-            raise WireError("invalid_window")
-        self.raw, self.pos, self.end = raw, 0, bit_count
-
-    def remaining(self) -> int:
-        return self.end - self.pos
-
-    def take(self, width: int) -> "Bits":
-        """A reader over exactly the next `width` bits, which this one skips."""
-        if width < 0 or width > self.remaining():
-            raise WireError("payload_overrun")
-        sub = Bits.__new__(Bits)
-        sub.raw, sub.pos, sub.end = self.raw, self.pos, self.pos + width
-        self.pos += width
-        return sub
-
-    def read(self, width: int) -> int:
-        if width < 0 or width > 64 or width > self.remaining():
-            raise WireError("truncated")
-        start, shift = divmod(self.pos, 8)
-        value = int.from_bytes(self.raw[start:(self.pos + width + 7) // 8], "little")
-        self.pos += width
-        return (value >> shift) & ((1 << width) - 1)
-
-    def i32(self) -> int:
-        value = self.read(32)
-        return value - (1 << 32) if value >= 1 << 31 else value
-
-    def packed(self) -> int:
-        """Unreal SerializeIntPacked: 7 value bits and a continue bit per byte."""
-        value = 0
-        for index in range(5):
-            byte = self.read(8)
-            if index == 4 and byte >> 1 > 15:
-                raise WireError("packed_overflow")
-            value |= (byte >> 1) << (7 * index)
-            if not byte & 1:
-                return value
-        raise WireError("packed_unterminated")
-
-    def serialize_int(self, value_max: int) -> int:
-        """Unreal FBitReader::SerializeInt: bits LSB first while
-        value + mask < value_max, so the width depends on the bits read."""
-        if value_max < 2:
-            raise WireError("serialize_int_max")
-        value, mask = 0, 1
-        while value + mask < value_max:
-            if self.read(1):
-                value |= mask
-            mask <<= 1
-        return value
 
 
 @dataclass(frozen=True)
@@ -262,8 +178,7 @@ def resolved_names(schema: ReplaySchema) -> dict:
 
 
 def status_label(build: str, identity, value: int) -> tuple:
-    """(enumerator name or None, the counter it is tallied under). The
-    identity test keeps a Status identity added to MEMBERS later unnamed."""
+    """(enumerator name or None, the counter it is tallied under)."""
     if build != STATUS_NAMES_BUILD or identity != STATUS_IDENTITY:
         return None, "status_unnamed_declaration"
     name = STATUS_NAMES.get(value)
@@ -375,15 +290,7 @@ def decode_window(raw: bytes, bit_count: int, schema: ReplaySchema) -> tuple[lis
         width = bits.packed()
         offset = bits.pos
         body = bits.take(width)
-        if body.read(1) != 1:
-            raise WireError("unsupported_support_bit")
-        array_key, base_key, deletes, changed = [body.i32() for _ in range(4)]
-        if min(deletes, changed) < 0:
-            raise WireError("negative_count")
-        # A deleted ID is 32 bits; a changed item at least 32 + 8.
-        if deletes * 32 + changed * 40 > body.remaining():
-            raise WireError("count_bounds")
-        deleted = [body.i32() for _ in range(deletes)]
+        array_key, base_key, deleted, changed = fastarray_header(body)
         entry_index = len(entries)
         for item_index in range(changed):
             item_id = body.i32()
@@ -450,24 +357,12 @@ def load_schema(export_dir: Path, manifest: dict) -> ReplaySchema:
                         next(iter(slots)) if len(slots) == 1 else None, error)
 
 
-def sha(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
 def selected_rows(path: Path, checkpoint: bool):
     """(physical row ordinal, row) for every row on a route, any handle."""
     columns = [*COLUMNS, *(["checkpoint_index", "checkpoint_id"] if checkpoint else [])]
-    ordinal = 0
-    for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=65536, use_threads=False):
-        groups = pc.cast(batch.column("group_path"), pa.string())
-        names = pc.cast(batch.column("field_name"), pa.string())
-        mask = pc.and_(pc.is_in(groups, value_set=pa.array(list(ROUTE_BY_GROUP))),
-                       pc.is_in(names, value_set=pa.array(list(WINDOW_KINDS))))
-        positions = pc.indices_nonzero(pc.fill_null(mask, False))
-        for index, row in zip(positions.to_pylist(), batch.take(positions).to_pylist()):
-            yield ordinal + index, row
-        ordinal += batch.num_rows
+    return iter_selected(path, columns, lambda b: pc.and_(
+        pc.is_in(text(b, "group_path"), value_set=pa.array(list(ROUTE_BY_GROUP))),
+        pc.is_in(text(b, "field_name"), value_set=pa.array(list(WINDOW_KINDS)))))
 
 
 def owner_classes(export_dir: Path) -> dict:
@@ -478,11 +373,6 @@ def owner_classes(export_dir: Path) -> dict:
         if row["event"] == "open":
             owners.setdefault(row["actor_net_guid"], set()).add(row["class_path"])
     return owners
-
-
-def object_paths(export_dir: Path) -> dict:
-    table = pq.read_table(export_dir / "net_guids.parquet", columns=["net_guid", "path", "outer_net_guid"])
-    return {row["net_guid"]: (row["path"], row["outer_net_guid"]) for row in table.to_pylist()}
 
 
 def window_record(row: dict, ordinal: int, population: str, build: str, schema: ReplaySchema):
@@ -557,75 +447,58 @@ def item_record(window: dict, item: dict, owners: dict, objects: dict,
 
 
 def extract(export_dir: Path, out_dir: Path) -> dict:
-    export_dir, out_dir = export_dir.resolve(), out_dir.resolve()
-    if out_dir == export_dir or out_dir.is_relative_to(export_dir):
-        raise ValueError("output must be outside the source export")
-    if out_dir.exists():
-        raise ValueError("output directory already exists")
-    inputs = [export_dir / n for n in (
-        "manifest.json", "fields.parquet", "checkpoint_fields.parquet", "actors.parquet",
-        "net_guids.parquet", "checkpoint_export_groups.parquet", "checkpoint_export_fields.parquet")]
-    before = {path.name: sha(path) for path in inputs}
-    script_hash = sha(Path(__file__))
-    manifest = json.loads(inputs[0].read_text(encoding="utf-8"))
+    return staged_output(export_dir, out_dir, INPUTS, lambda stage: write(export_dir, stage),
+                         prefix=".ground-volumes-")
+
+
+def write(export_dir: Path, stage: Path) -> dict:
+    """Write items and windows into `stage`; return the receipt."""
+    manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
     build = manifest["replay_build"]
     schema = load_schema(export_dir, manifest)
-    owners, objects = owner_classes(export_dir), object_paths(export_dir)
+    owners, objects = owner_classes(export_dir), load_net_guids(export_dir, "path", "outer_net_guid")
     declared_items = schema.item_identities()
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=".ground-volumes-", dir=out_dir.parent))
     counts = Counter({k: 0 for k in COUNTERS})
     reasons = Counter()
-    try:
-        with (stage / "windows.ndjson").open("w", encoding="utf-8", newline="\n") as windows, \
-                (stage / "items.ndjson").open("w", encoding="utf-8", newline="\n") as items_out:
-            for stream in STREAMS:
-                for ordinal, row in selected_rows(export_dir / f"{stream}.parquet", stream != "fields"):
-                    record, items, window_counts = window_record(row, ordinal, stream, build, schema)
-                    counts["rows"] += 1
-                    counts[f"rows_{stream}"] += 1
-                    counts[f"rows_{record['route']}"] += 1
-                    counts[f"rows_{record['window_kind']}"] += 1
-                    if record["status"] == "decoded_exact":
-                        counts["windows_exact"] += 1
-                        counts.update(window_counts)
-                        counts["entries"] += len(record["entries"])
-                        counts["deleted_items"] += sum(len(e["deleted_item_ids"]) for e in record["entries"])
-                        counts["changed_items"] += len(items)
-                        for item in items:
-                            out = item_record(record, item, owners, objects, declared_items, counts, build)
-                            items_out.write(json.dumps(out, separators=(",", ":"), allow_nan=False) + "\n")
-                    else:
-                        counts["rejected"] += 1
-                        reasons[record["status"]] += 1
-                    windows.write(json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n")
-        after = {path.name: sha(path) for path in inputs}
-        if before != after or sha(Path(__file__)) != script_hash:
-            raise ValueError("input or extractor changed during read")
-        receipt = {
-            "schema_version": SCHEMA_VERSION, "replay_build": build,
-            "counts": dict(counts), "rejection_reasons": dict(reasons),
-            "declarations": {
-                "class_group": {str(h): list(i) for h, i in sorted(schema.members.items())},
-                "cnc_group": {str(h): list(i) for h, i in sorted(schema.cnc.items())},
-                "cnc_declared_slots": schema.cnc_slots, "schema_error": schema.error,
-                "resolved_names": resolved_names(schema)},
-            "input_sha256_before": before, "input_sha256_after": after,
-            "extractor_sha256": script_hash,
-            "windows_sha256": sha(stage / "windows.ndjson"),
-            "items_sha256": sha(stage / "items.ndjson"),
-            "scope": ("GroundVolumeComponent FragmentInfo cells decoded with the replay's own "
-                      "declared names; resolved_names by exact (name, checksum); Status "
-                      "enumerator names for the 13.06 declaration only; no ability or player "
-                      "semantics."),
-        }
-        (stage / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n",
-                                            encoding="utf-8", newline="\n")
-        os.rename(stage, out_dir)
-        return receipt
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+    with (stage / "windows.ndjson").open("w", encoding="utf-8", newline="\n") as windows, \
+            (stage / "items.ndjson").open("w", encoding="utf-8", newline="\n") as items_out:
+        for stream in STREAMS:
+            for ordinal, row in selected_rows(export_dir / f"{stream}.parquet", stream != "fields"):
+                record, items, window_counts = window_record(row, ordinal, stream, build, schema)
+                counts["rows"] += 1
+                counts[f"rows_{stream}"] += 1
+                counts[f"rows_{record['route']}"] += 1
+                counts[f"rows_{record['window_kind']}"] += 1
+                if record["status"] == "decoded_exact":
+                    counts["windows_exact"] += 1
+                    counts.update(window_counts)
+                    counts["entries"] += len(record["entries"])
+                    counts["deleted_items"] += sum(len(e["deleted_item_ids"]) for e in record["entries"])
+                    counts["changed_items"] += len(items)
+                    for item in items:
+                        out = item_record(record, item, owners, objects, declared_items, counts, build)
+                        items_out.write(json.dumps(out, separators=(",", ":"), allow_nan=False) + "\n")
+                else:
+                    counts["rejected"] += 1
+                    reasons[record["status"]] += 1
+                windows.write(json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n")
+    return {
+        "schema_version": SCHEMA_VERSION, "replay_build": build,
+        "counts": dict(counts), "rejection_reasons": dict(reasons),
+        "declarations": {
+            "class_group": {str(h): list(i) for h, i in sorted(schema.members.items())},
+            "cnc_group": {str(h): list(i) for h, i in sorted(schema.cnc.items())},
+            "cnc_declared_slots": schema.cnc_slots, "schema_error": schema.error,
+            "resolved_names": resolved_names(schema)},
+        "extractor_sha256": sha(Path(__file__)),
+        "wire_bits_sha256": sha(Path(__file__).with_name("wire_bits.py")),
+        "windows_sha256": sha(stage / "windows.ndjson"),
+        "items_sha256": sha(stage / "items.ndjson"),
+        "scope": ("GroundVolumeComponent FragmentInfo cells decoded with the replay's own "
+                  "declared names; resolved_names by exact (name, checksum); Status "
+                  "enumerator names for the 13.06 declaration only; no ability or player "
+                  "semantics."),
+    }
 
 
 def main() -> int:

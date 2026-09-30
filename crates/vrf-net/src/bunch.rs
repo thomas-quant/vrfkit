@@ -5,10 +5,7 @@ use crate::types::ChannelCloseReason;
 
 /// Maximum simultaneously active partial-bunch assemblies.
 ///
-/// Bounds a stream that sends one initial fragment on each new channel
-/// forever, with ample headroom: Unreal advances each assembly only by
-/// packet-sized fragments. For scale, 02d4d478 completes 56 assemblies from
-/// 131 fragments (`validate` at 061155a); its simultaneous peak is not measured.
+/// Bounds a stream that starts an assembly on each new channel forever.
 pub const MAX_ACTIVE_PARTIAL_BUNCHES: usize = 4_096;
 
 /// Maximum raw bits retained across all partial-bunch assemblies (64 MiB).
@@ -55,7 +52,7 @@ pub struct RawBunchHeader {
 /// concatenated and the stitched payload is handed back for framing. Every
 /// non-final fragment must be byte-aligned.
 pub struct PartialBunchAccumulator {
-    fragments: std::collections::HashMap<u32, AccumulatorState>,
+    fragments: vrf_schema::FxHashMap<u32, AccumulatorState>,
     total_buffered_bits: usize,
     max_active: usize,
     max_buffered_bits: usize,
@@ -65,9 +62,8 @@ struct AccumulatorState {
     ch_sequence: i32,
     reliable: bool,
     is_complete: bool,
-    stored_header: RawBunchHeader,
-    buffer: Vec<u8>,
-    bit_count: usize,
+    /// The initial fragment's header and the bytes appended so far.
+    partial: PreservedPartial,
 }
 
 /// Raw partial payload removed from reassembly without being decoded.
@@ -84,6 +80,7 @@ pub enum PartialDiscardCause {
 }
 
 /// Result of adding a fragment to the accumulator.
+#[derive(Default)]
 pub struct PartialBunchResult {
     /// Updated header (may have error flags set).
     pub header: RawBunchHeader,
@@ -121,7 +118,7 @@ impl PartialBunchAccumulator {
 
     fn with_limits(max_active: usize, max_buffered_bits: usize) -> Self {
         Self {
-            fragments: std::collections::HashMap::new(),
+            fragments: vrf_schema::FxHashMap::default(),
             total_buffered_bits: 0,
             max_active,
             max_buffered_bits,
@@ -160,13 +157,10 @@ impl PartialBunchAccumulator {
             *stats_partial_errors += 1;
             header.has_partial_error = true;
             return PartialBunchResult {
-                should_process: false,
                 header,
                 resource_limit: Some(PartialResourceLimit::ActiveStates),
                 discarded_bits: payload_bit_count,
-                error_kind: None,
-                overlapping_initial: false,
-                displaced: Vec::new(),
+                ..Default::default()
             };
         }
         let (sequence_valid, mut displaced) =
@@ -175,49 +169,37 @@ impl PartialBunchAccumulator {
         let overlapping_initial =
             header.partial_error_kind == Some(PartialSequenceKind::OverlappingInitial);
         if !sequence_valid {
-            let error_kind = header.partial_error_kind;
             return PartialBunchResult {
-                should_process: false,
+                error_kind: header.partial_error_kind,
                 header,
-                resource_limit: None,
                 discarded_bits: sequence_discarded_bits.saturating_add(payload_bit_count),
-                error_kind,
                 overlapping_initial,
                 displaced,
+                ..Default::default()
             };
         }
 
         if payload_bit_count == 0 {
             // Still a fragment that arrived, counted as the non-empty path does.
             *stats_partial_fragments += 1;
-            if !header.b_partial_final {
-                return PartialBunchResult {
-                    should_process: false,
-                    header,
-                    resource_limit: None,
-                    discarded_bits: sequence_discarded_bits,
-                    error_kind: None,
-                    overlapping_initial,
-                    displaced,
-                };
-            }
             // An errored final is not a completion (see the non-empty path).
             // The assembly it just started holds no bits: retiring loses none.
-            if header.has_partial_error {
+            if header.b_partial_final && header.has_partial_error {
                 self.retire_channel(ch_index);
-            } else if let Some(state) = self.fragments.get_mut(&ch_index) {
-                state.is_complete = true;
-                header.is_partial_completed = true;
-                *stats_partial_completed += 1;
+            } else if header.b_partial_final {
+                if let Some(state) = self.fragments.get_mut(&ch_index) {
+                    state.is_complete = true;
+                    header.is_partial_completed = true;
+                    *stats_partial_completed += 1;
+                }
             }
             return PartialBunchResult {
                 should_process: header.b_partial_final && !header.has_partial_error,
                 header,
-                resource_limit: None,
                 discarded_bits: sequence_discarded_bits,
-                error_kind: None,
                 overlapping_initial,
                 displaced,
+                ..Default::default()
             };
         }
 
@@ -244,13 +226,13 @@ impl PartialBunchAccumulator {
                 PartialDiscardCause::Resource(limit) => (None, Some(limit)),
             };
             PartialBunchResult {
-                should_process: false,
                 header,
                 resource_limit,
                 discarded_bits,
                 error_kind,
                 overlapping_initial,
                 displaced,
+                ..Default::default()
             }
         };
 
@@ -261,7 +243,7 @@ impl PartialBunchAccumulator {
         }
 
         if let Some(state) = self.fragments.get(&ch_index) {
-            let new_state_bits = state.bit_count.checked_add(payload_bit_count);
+            let new_state_bits = state.partial.bit_count.checked_add(payload_bit_count);
             let new_total_bits = self.total_buffered_bits.checked_add(payload_bit_count);
             if new_state_bits.is_none()
                 || new_total_bits.is_none_or(|bits| bits > self.max_buffered_bits)
@@ -271,16 +253,13 @@ impl PartialBunchAccumulator {
             }
         }
         if let Some(state) = self.fragments.get_mut(&ch_index) {
-            if !append_bits(
-                &mut state.buffer,
-                state.bit_count,
-                payload_data,
-                payload_bit_count,
-            ) {
+            let partial = &mut state.partial;
+            debug_assert!(partial.bit_count % 8 == 0, "appending after a final");
+            if !append_bytes(&mut partial.buffer, payload_data, payload_bit_count) {
                 let cause = PartialDiscardCause::Resource(PartialResourceLimit::Allocation);
                 return refuse(self, header, displaced, cause);
             }
-            state.bit_count = state
+            partial.bit_count = partial
                 .bit_count
                 .checked_add(payload_bit_count)
                 .expect("checked above");
@@ -288,15 +267,11 @@ impl PartialBunchAccumulator {
                 .total_buffered_bits
                 .checked_add(payload_bit_count)
                 .expect("checked above");
-            state.ch_sequence = header.ch_sequence;
-
             *stats_partial_fragments += 1;
 
-            // Not `b_partial_final` alone: an overlapping initial that is also
-            // final arrives here already errored. Marked complete, it would be
-            // neither taken (`should_process` is false, so no `take_completed`)
-            // nor drained (`drain_unfinished` skips complete entries): its bits
-            // would reach no counter while `partial_completed` claimed success.
+            // An overlapping initial that is also final arrives here errored:
+            // marked complete it would be neither taken nor drained, its bits
+            // in no counter while `partial_completed` claimed success.
             if header.b_partial_final && !header.has_partial_error {
                 state.is_complete = true;
                 header.is_partial_completed = true;
@@ -318,21 +293,18 @@ impl PartialBunchAccumulator {
             0
         };
 
-        let error_kind = header.partial_error_kind;
         PartialBunchResult {
             should_process: header.b_partial_final && !header.has_partial_error,
+            error_kind: header.partial_error_kind,
             header,
-            resource_limit: None,
             discarded_bits: sequence_discarded_bits.saturating_add(error_final_bits),
-            error_kind,
             overlapping_initial,
             displaced,
+            ..Default::default()
         }
     }
 
-    /// Take the completed payload for a channel, if available.
-    ///
-    /// Returns `(buffer, bit_count, stored_header)`.
+    /// The channel's completed payload: `(buffer, bit_count, stored_header)`.
     pub fn take_completed(&mut self, ch_index: u32) -> Option<(Vec<u8>, usize, RawBunchHeader)> {
         if !self.fragments.get(&ch_index)?.is_complete {
             return None;
@@ -341,22 +313,15 @@ impl PartialBunchAccumulator {
             .map(|taken| (taken.buffer, taken.bit_count, taken.header))
     }
 
-    /// Drop every partial bunch still awaiting fragments and return them.
-    ///
-    /// Called once at end of stream: until then an abandoned assembly cannot
-    /// be told from one in progress, and no sequence rule was broken, so no
-    /// earlier counter covers it. A complete but untaken entry is the
-    /// caller's choice ([`Self::take_completed`]), not a loss, and is skipped.
+    /// Drop and return every assembly still awaiting fragments, at end of
+    /// stream (until then an abandoned one looks in progress). A complete but
+    /// untaken entry is not a loss and is skipped.
     pub fn drain_unfinished(&mut self) -> Vec<PreservedPartial> {
         self.total_buffered_bits = 0;
         self.fragments
             .drain()
             .filter(|(_, state)| !state.is_complete)
-            .map(|(_, state)| PreservedPartial {
-                header: state.stored_header,
-                buffer: state.buffer,
-                bit_count: state.bit_count,
-            })
+            .map(|(_, state)| state.partial)
             .collect()
     }
 
@@ -365,12 +330,10 @@ impl PartialBunchAccumulator {
     /// the channel.
     pub fn retire_channel(&mut self, ch_index: u32) -> Option<PreservedPartial> {
         let state = self.fragments.remove(&ch_index)?;
-        self.total_buffered_bits = self.total_buffered_bits.saturating_sub(state.bit_count);
-        Some(PreservedPartial {
-            header: state.stored_header,
-            buffer: state.buffer,
-            bit_count: state.bit_count,
-        })
+        self.total_buffered_bits = self
+            .total_buffered_bits
+            .saturating_sub(state.partial.bit_count);
+        Some(state.partial)
     }
 
     fn validate_sequence(
@@ -397,9 +360,11 @@ impl PartialBunchAccumulator {
                     ch_sequence: header.ch_sequence,
                     reliable: header.b_reliable,
                     is_complete: false,
-                    stored_header: header.clone(),
-                    buffer: Vec::new(),
-                    bit_count: 0,
+                    partial: PreservedPartial {
+                        header: header.clone(),
+                        buffer: Vec::new(),
+                        bit_count: 0,
+                    },
                 },
             );
             return (true, displaced);
@@ -414,15 +379,8 @@ impl PartialBunchAccumulator {
             Some(state) if state.reliable != header.b_reliable => {
                 Some(PartialSequenceKind::MismatchedContinuation)
             }
-            Some(state) => {
-                let seq_ok = if state.reliable {
-                    header.ch_sequence == state.ch_sequence + 1
-                } else {
-                    header.ch_sequence == state.ch_sequence + 1
-                        || header.ch_sequence == state.ch_sequence
-                };
-                (!seq_ok).then_some(PartialSequenceKind::MismatchedContinuation)
-            }
+            Some(state) => (!continues(state.reliable, state.ch_sequence, header.ch_sequence))
+                .then_some(PartialSequenceKind::MismatchedContinuation),
         };
         if let Some(kind) = error {
             *stats_partial_errors += 1;
@@ -459,43 +417,24 @@ impl Default for PartialBunchAccumulator {
     }
 }
 
-/// Append `src_bit_count` bits from `src` at bit offset `dst_bit_offset` in `dst`.
-fn append_bits(dst: &mut Vec<u8>, dst_bit_offset: usize, src: &[u8], src_bit_count: usize) -> bool {
-    let Some(new_total) = dst_bit_offset.checked_add(src_bit_count) else {
-        return false;
-    };
-    let new_byte_count = new_total.div_ceil(8);
-    if new_byte_count > dst.len()
-        && dst
-            .try_reserve_exact(new_byte_count.saturating_sub(dst.len()))
-            .is_err()
-    {
+/// Whether a continuation at sequence `next` follows an assembly last at
+/// `prev`: the next number, or for an unreliable one also a repeat.
+pub(crate) fn continues(reliable: bool, prev: i32, next: i32) -> bool {
+    prev.checked_add(1) == Some(next) || (!reliable && next == prev)
+}
+
+/// Append `bit_count` bits of `src` to `dst`, which ends on a byte boundary
+/// (only a final fragment is unaligned, and nothing follows it), clearing the
+/// last byte's unused high bits. `false` when the reservation fails.
+fn append_bytes(dst: &mut Vec<u8>, src: &[u8], bit_count: usize) -> bool {
+    let byte_count = bit_count.div_ceil(8);
+    if dst.try_reserve_exact(byte_count).is_err() {
         return false;
     }
-
-    if dst_bit_offset % 8 == 0 {
-        // Every `add_fragment` append lands here (it refuses unaligned
-        // non-final fragments; nothing follows a final): copy whole bytes and
-        // clear the last one's unused high bits, as the bit loop leaves them.
-        dst.resize(dst_bit_offset / 8, 0);
-        dst.extend_from_slice(&src[..src_bit_count.div_ceil(8)]);
-        let tail_bits = src_bit_count % 8;
-        if tail_bits != 0 {
-            let last = dst.len() - 1;
-            dst[last] &= (1 << tail_bits) - 1;
-        }
-        return true;
-    }
-
-    dst.resize(new_byte_count, 0);
-
-    for i in 0..src_bit_count {
-        let src_bit = (src[i >> 3] >> (i & 7)) & 1;
-        let dest_bit = dst_bit_offset + i;
-        if src_bit != 0 {
-            dst[dest_bit >> 3] |= 1 << (dest_bit & 7);
-        }
-        // dst is already zeroed from resize, so no need to clear bits.
+    dst.extend_from_slice(&src[..byte_count]);
+    if bit_count % 8 != 0 {
+        let last = dst.len() - 1;
+        dst[last] &= (1 << (bit_count % 8)) - 1;
     }
     true
 }
@@ -505,21 +444,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn append_bits_byte_aligned() {
+    fn append_bytes_keeps_only_the_declared_bits() {
         let mut dst = vec![0xAA];
-        assert!(append_bits(&mut dst, 8, &[0x55], 8));
-        assert_eq!(dst, vec![0xAA, 0x55]);
-        // A partial last byte keeps only its own bits.
-        assert!(append_bits(&mut dst, 16, &[0xFF], 5));
+        assert!(append_bytes(&mut dst, &[0x55], 8));
+        assert!(append_bytes(&mut dst, &[0xFF], 5));
         assert_eq!(dst, vec![0xAA, 0x55, 0x1F]);
-    }
-
-    #[test]
-    fn append_bits_unaligned() {
-        let mut dst = vec![0x0F]; // bits 0..3 = 1, bits 4..7 = 0
-        assert!(append_bits(&mut dst, 4, &[0x03], 4)); // add 4 bits: 1100 -> 0x03 reversed
-        // dst should be: low nibble 0x0F, high nibble 0x30 = 0x3F
-        assert_eq!(dst[0], 0x3F);
     }
 
     /// The three counters `add_fragment` moves, threaded through every call.
@@ -662,6 +591,33 @@ mod tests {
         );
     }
 
+    /// An unreliable continuation may repeat the largest sequence number: no
+    /// `+ 1` overflow.
+    #[test]
+    fn a_continuation_at_the_largest_sequence_does_not_overflow() {
+        let mut acc = PartialBunchAccumulator::new();
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, i32::MAX, false), &[0xAA], 8);
+        let last = c.add(&mut acc, continuation(1, i32::MAX, true), &[0xBB], 8);
+        assert!(last.should_process);
+        assert_eq!(c.errs, 0);
+    }
+
+    #[test]
+    fn a_reliable_continuation_may_not_repeat_its_sequence() {
+        let mut acc = PartialBunchAccumulator::new();
+        let mut c = Counters::default();
+        c.add(&mut acc, initial(1, 5, true), &[0xAA], 8);
+        let mut repeat = continuation(1, 5, true);
+        repeat.b_reliable = true;
+        let last = c.add(&mut acc, repeat, &[0xBB], 8);
+        assert_eq!(
+            last.error_kind,
+            Some(PartialSequenceKind::MismatchedContinuation)
+        );
+        assert_eq!(c.errs, 1);
+    }
+
     #[test]
     fn partial_reassembly_refuses_more_active_states_than_its_budget() {
         let mut acc = PartialBunchAccumulator::with_limits(1, 64);
@@ -802,49 +758,44 @@ mod tests {
         assert_eq!(c.errs, 1);
     }
 
+    /// An overlapping initial that is also refused on its own (unaligned, or
+    /// over the buffered-bits budget) keeps both causes and counts two
+    /// errors; only the replaced 8-bit assembly is a displaced payload, not
+    /// the empty one started for the refused initial.
     #[test]
-    fn overlapping_unaligned_initial_reports_both_errors() {
-        let mut acc = PartialBunchAccumulator::new();
-        let mut c = Counters::default();
-        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
-        let result = c.add(&mut acc, initial(1, 0, false), &[0x07], 3);
-        assert!(result.overlapping_initial);
-        assert_eq!(
-            result.error_kind,
-            Some(PartialSequenceKind::NonByteAlignedFragment)
-        );
-        // Both causes stand, two errors counted. The one displaced payload is
-        // the 8-bit assembly replaced; the empty one started is not a payload.
-        assert_eq!(result.displaced.len(), 1);
-        assert_eq!(
-            result.displaced[0].1,
-            PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
-        );
-        assert_eq!(result.displaced[0].0.bit_count, 8);
-        assert_eq!(result.discarded_bits, 11, "8 replaced + 3 current");
-        assert_eq!(c.errs, 2);
-    }
-
-    #[test]
-    fn overlapping_initial_over_resource_limit_retains_both_causes() {
-        let mut acc = PartialBunchAccumulator::with_limits(2, 12);
-        let mut c = Counters::default();
-        c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
-        let result = c.add(&mut acc, initial(1, 0, false), &[0xBB, 0xCC], 16);
-        assert!(result.overlapping_initial);
-        assert_eq!(
-            result.resource_limit,
-            Some(PartialResourceLimit::BufferedBits)
-        );
-        // Both causes stand, two errors counted; only the replaced 8-bit
-        // assembly is a displaced payload.
-        assert_eq!(result.displaced.len(), 1);
-        assert_eq!(
-            result.displaced[0].1,
-            PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
-        );
-        assert_eq!(result.displaced[0].0.bit_count, 8);
-        assert_eq!(result.discarded_bits, 24, "8 replaced + 16 current");
-        assert_eq!(c.errs, 2);
+    fn an_overlapping_initial_refused_on_its_own_keeps_both_causes() {
+        let unaligned = Some(PartialSequenceKind::NonByteAlignedFragment);
+        let over_budget = Some(PartialResourceLimit::BufferedBits);
+        for (mut acc, data, bits, error_kind, resource_limit) in [
+            (
+                PartialBunchAccumulator::new(),
+                &[0x07][..],
+                3,
+                unaligned,
+                None,
+            ),
+            (
+                PartialBunchAccumulator::with_limits(2, 12),
+                &[0xBB, 0xCC][..],
+                16,
+                None,
+                over_budget,
+            ),
+        ] {
+            let mut c = Counters::default();
+            c.add(&mut acc, initial(1, 0, false), &[0xAA], 8);
+            let result = c.add(&mut acc, initial(1, 0, false), data, bits);
+            assert!(result.overlapping_initial);
+            assert_eq!(result.error_kind, error_kind);
+            assert_eq!(result.resource_limit, resource_limit);
+            assert_eq!(result.displaced.len(), 1);
+            assert_eq!(
+                result.displaced[0].1,
+                PartialDiscardCause::Sequence(PartialSequenceKind::OverlappingInitial)
+            );
+            assert_eq!(result.displaced[0].0.bit_count, 8);
+            assert_eq!(result.discarded_bits, 8 + bits, "replaced + current");
+            assert_eq!(c.errs, 2);
+        }
     }
 }

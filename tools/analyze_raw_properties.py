@@ -7,7 +7,8 @@ recurs, not what the property means.
 One replay at a time is exported into a private temporary directory, its
 ``fields.parquet`` columns streamed into the aggregate and the directory
 removed, so peak temporary storage is one export. The default is a
-deterministic size-stratified sample; ``--all`` is the exhaustive sweep.
+deterministic size-stratified sample of the newest three builds found;
+``--all`` is the exhaustive sweep.
 
 Output is identifier-redacted by construction: build labels, counts, bit
 widths and anonymous ranks only, never replay paths or filenames, friendly
@@ -40,7 +41,8 @@ import corpus_scan
 
 
 CLASS_NET_CACHE_SUFFIX = "_ClassNetCache"
-DEFAULT_BUILDS = ("13.02", "13.04", "13.05")
+#: A run without --build samples the newest this many builds found.
+DEFAULT_BUILD_COUNT = 3
 BUILD_PATTERN = re.compile(r"(?:release-)(\d+\.\d+)")
 FIELD_COLUMNS = (
     "packet_id",
@@ -152,6 +154,11 @@ def parse_build(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def newest_builds(labels: Iterable[str], count: int = DEFAULT_BUILD_COUNT) -> tuple[str, ...]:
+    """The `count` highest release labels, oldest first, compared as numbers."""
+    return tuple(sorted(set(labels), key=lambda label: tuple(map(int, label.split("."))))[-count:])
+
+
 def inspect_build(vrfkit: Path, replay: Path) -> str | None:
     """Inspect one header without allowing a private path into diagnostics."""
     # Strict: the build label is parsed out of this text, and vrfkit writes
@@ -221,10 +228,7 @@ def analyze_export(
     ] = defaultdict(list)
 
     def add(counter: Counter[str], mask) -> None:
-        # Only a nonzero count creates the build's key, as a per-row += 1 did.
-        count = pc.sum(pc.cast(mask, pa.int64())).as_py() or 0
-        if count:
-            counter[build] += count
+        counter[build] += pc.sum(pc.cast(mask, pa.int64())).as_py() or 0
 
     def present(column):
         # Decoded first: a dictionary column's null can sit in its values.
@@ -232,16 +236,13 @@ def analyze_export(
             column = pc.cast(column, pa.string())
         return pc.is_valid(column)
 
-    # Only unnamed replicated-property rows with a payload need per-row work
-    # (1,623 of 1,648,356 rows on a 13.06 export), so the other counters are
-    # Arrow mask sums and only those rows reach Python, in physical order.
+    # Only unnamed property rows with a payload (under 0.2% of a 13.06 export)
+    # reach Python, in physical order; every other counter is an Arrow mask sum.
     for batch in parquet.iter_batches(columns=list(FIELD_COLUMNS)):
         group_paths = pc.cast(batch.column("group_path"), pa.string())
         if group_paths.null_count:
-            # What `CLASS_NET_CACHE_SUFFIX in None` raised row by row.
-            raise TypeError("argument of type 'NoneType' is not iterable")
-        if batch.num_rows:
-            inventory.field_rows[build] += batch.num_rows
+            raise ValueError("fields.parquet: null group_path")
+        inventory.field_rows[build] += batch.num_rows
         prop = pc.invert(pc.match_substring(group_paths, CLASS_NET_CACHE_SUFFIX))
         typed = present(batch.column(TYPED_COLUMNS[0]))
         for name in TYPED_COLUMNS[1:]:
@@ -470,6 +471,7 @@ def render_report(
     recursive: bool,
 ) -> str:
     """Render aggregate-only output; structural keys never leave this function."""
+    document = summary_document(inventory, eligible_by_build, selected_by_build, excluded, recursive)
     lines = [
         "=== Raw replicated-property inventory (identifier-redacted) ===",
         (
@@ -487,62 +489,33 @@ def render_report(
 
     lines.append("")
     for build in sorted(selected_by_build):
-        rows = inventory.property_rows[build]
-        raw = inventory.property_raw_only_rows[build]
-        unnamed = inventory.unnamed_rows[build]
-        preserved = inventory.unnamed_raw_rows[build]
-        zero = inventory.unnamed_zero_rows[build]
-        aligned = inventory.unnamed_byte_aligned_rows[build]
-        widths = inventory.unnamed_widths[build]
-        lines.extend(
-            [
-                f"=== release-{build} aggregate ===",
-                f"replays: {inventory.build_replays[build]}",
-                f"field rows: {inventory.field_rows[build]}",
-                f"replicated-property rows: {rows}",
-                f"raw-only property rows: {raw} ({_percent(raw, rows)})",
-                (
-                    f"named raw-only / unnamed rows: "
-                    f"{inventory.named_raw_only_rows[build]} / {unnamed}"
-                ),
-                (
-                    f"unnamed rows preserving raw_bits: {preserved} "
-                    f"({_percent(preserved, unnamed)})"
-                ),
-                (
-                    f"unnamed typed / missing raw_bits: "
-                    f"{inventory.unnamed_typed_rows[build]} / "
-                    f"{inventory.unnamed_without_raw_rows[build]}"
-                ),
-                (
-                    f"unnamed raw_bits with wrong byte length: "
-                    f"{inventory.unnamed_wrong_length_rows[build]}"
-                ),
-                (
-                    f"unnamed rows with compatible checksum / sentinel handle: "
-                    f"{inventory.unnamed_checksum_rows[build]} / "
-                    f"{inventory.unnamed_sentinel_handle_rows[build]}"
-                ),
-                (
-                    f"unnamed zero / nonzero payload rows: {zero} / "
-                    f"{preserved - zero}"
-                ),
-                (
-                    f"unnamed byte-aligned / non-byte-aligned rows: {aligned} / "
-                    f"{preserved - aligned}"
-                ),
-                "top unnamed widths (bits:rows): "
-                + (", ".join(f"{bits}:{count}" for bits, count in widths.most_common(12))
-                   or "none"),
-                "",
-            ]
-        )
+        d = document["builds"][build]
+        # The widths rank by count, ties in the inventory's insertion order.
+        widths = inventory.unnamed_widths[build].most_common(12)
+        lines.extend([
+            f"=== release-{build} aggregate ===",
+            f"replays: {inventory.build_replays[build]}",
+            f"field rows: {d['field_rows']}",
+            f"replicated-property rows: {d['replicated_property_rows']}",
+            f"raw-only property rows: {d['raw_only_property_rows']} "
+            f"({_percent(d['raw_only_property_rows'], d['replicated_property_rows'])})",
+            f"named raw-only / unnamed rows: {d['named_raw_only_rows']} / {d['unnamed_rows']}",
+            f"unnamed rows preserving raw_bits: {d['unnamed_raw_rows']} "
+            f"({_percent(d['unnamed_raw_rows'], d['unnamed_rows'])})",
+            f"unnamed typed / missing raw_bits: {d['unnamed_typed_rows']} / {d['unnamed_missing_raw_rows']}",
+            f"unnamed raw_bits with wrong byte length: {d['unnamed_wrong_raw_length_rows']}",
+            "unnamed rows with compatible checksum / sentinel handle: "
+            f"{d['unnamed_checksum_rows']} / {d['unnamed_sentinel_handle_rows']}",
+            "unnamed zero / nonzero payload rows: "
+            f"{d['unnamed_zero_payload_rows']} / {d['unnamed_nonzero_payload_rows']}",
+            "unnamed byte-aligned / non-byte-aligned rows: "
+            f"{d['unnamed_byte_aligned_rows']} / {d['unnamed_non_byte_aligned_rows']}",
+            "top unnamed widths (bits:rows): "
+            + (", ".join(f"{bits}:{count}" for bits, count in widths) or "none"),
+            "",
+        ])
 
-    # The recurrence figures are the JSON document's; only the per-build
-    # aggregates above read the inventory, so ties keep its insertion order.
-    recurrence = summary_document(
-        inventory, eligible_by_build, selected_by_build, excluded, recursive
-    )["structural_recurrence"]
+    recurrence = document["structural_recurrence"]
     layouts = recurrence["top_anonymous_layouts"]
     lines.extend(
         [
@@ -619,7 +592,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--build",
         action="append",
         dest="builds",
-        help=f"release label to include; repeatable (default: {', '.join(DEFAULT_BUILDS)})",
+        help=f"release label to include; repeatable (default: the newest {DEFAULT_BUILD_COUNT} builds found)",
     )
     parser.add_argument("--recursive", action="store_true")
     selection = parser.add_mutually_exclusive_group()
@@ -650,7 +623,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    builds = tuple(dict.fromkeys(args.builds or DEFAULT_BUILDS))
+    requested = set(args.builds or ())
     if not args.vrfkit.is_file():
         print("ERROR: vrfkit executable not found", file=sys.stderr)
         return 2
@@ -666,11 +639,12 @@ def main(argv: list[str] | None = None) -> int:
         if build is None:
             unreadable += 1
             continue
-        if build in builds:
+        if build in requested or not requested:
             candidates[build].append(
                 ReplayCandidate(replay, build, replay.stat().st_size)
             )
 
+    builds = tuple(dict.fromkeys(args.builds)) if requested else newest_builds(candidates)
     eligible = Counter({build: len(candidates[build]) for build in builds})
     selected: list[ReplayCandidate] = []
     for build in builds:

@@ -67,6 +67,7 @@ pub fn run(path: &str, redact_identifiers: bool) -> Result<(), CliError> {
     let mut checkpoint_count = 0u32;
     let mut event_count = 0u32;
     let mut unknown_count = 0u32;
+    let mut header_count = 0u32;
     let mut total_replay_data_bytes: u64 = 0;
 
     while let Some(chunk) = iter.next_chunk()? {
@@ -78,8 +79,8 @@ pub fn run(path: &str, redact_identifiers: bool) -> Result<(), CliError> {
             ChunkType::Checkpoint => checkpoint_count += 1,
             ChunkType::Event => event_count += 1,
             ChunkType::Unknown(_) => unknown_count += 1,
-            // `parse_preamble` consumed the first Header; a second is not counted.
-            ChunkType::Header => {}
+            // After the one `parse_preamble` read: no reader reads these.
+            ChunkType::Header => header_count += 1,
         }
     }
 
@@ -88,6 +89,7 @@ pub fn run(path: &str, redact_identifiers: bool) -> Result<(), CliError> {
     println!("  Event:        {event_count:>6} chunks");
     // Zero included, so a `ChunkType::from_raw` regression cannot hide.
     println!("  Unknown:      {unknown_count:>6} chunks");
+    println!("  Header (extra):{header_count:>5} chunks");
 
     Ok(())
 }

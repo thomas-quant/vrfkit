@@ -1,30 +1,10 @@
 //! `.vrf` container parser: replay info, header, chunk stream, and Oodle decompression.
 //!
-//! # Container layout
-//!
-//! A VALORANT replay file (`.vrf`) uses Unreal Engine's local-file replay format.
-//! It starts with a fixed **replay info** section, followed by a stream of typed
-//! **chunks**. The first chunk must always be a **Header** chunk.
-//!
-//! ```text
-//! +-------------------------------------------+
-//! | ReplayInfo                                |
-//! |  +- FileMagic (0x43F4EFDD)                |
-//! |  +- LegacyFileVersion (7)                 |
-//! |  +- CustomVersionContainer                |
-//! |  +- Summary (LengthInMs ... EncryptionKey)|
-//! +-------------------------------------------+
-//! | Chunk 0 (Header)                          |
-//! |  +- ChunkType (u32) + SizeInBytes (i32)   |
-//! |  +- Header payload                        |
-//! +-------------------------------------------+
-//! | Chunk 1..N (ReplayData/Checkpoint/Event)  |
-//! |  +- ChunkType (u32) + SizeInBytes (i32)   |
-//! |  +- Payload (possibly Oodle-compressed)   |
-//! +-------------------------------------------+
-//! ```
-//!
-//! # Entry points
+//! A `.vrf` file is Unreal Engine's local-file replay format: a fixed replay
+//! info section (file magic `0x43F4EFDD`, legacy file version 7, custom
+//! versions, summary), then chunks of `u32` type, `i32` size and payload. The
+//! Header chunk comes first; ReplayData, Checkpoint and Event chunks follow,
+//! their payloads possibly Oodle-compressed.
 //!
 //! [`parse_preamble`] reads the info and the Header chunk and returns the offset
 //! where the chunk stream resumes; [`ChunkIterator`] walks it lazily from there.

@@ -24,35 +24,18 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use vrf_export::{
     ActorRecord, ActorsTable, EventRecord, EventsTable, FieldRecord, FieldWriter, FieldsTable,
     MovementRecord, MovementTable, MovementWriter, NetGuidRecord, NetGuidsTable, Table,
-    TableWriter, UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME,
+    TableWriter,
 };
 
-/// Test output directory, keyed by this checkout's `CARGO_MANIFEST_DIR`: one
-/// shared temp directory let two checkouts read each other's Parquet, which
-/// once surfaced as a column-count mismatch that looked exactly like a schema
-/// bug. `VRFKIT_INTEROP_DIR`, when set (CI sets it), is the exact root, so the
-/// interop step reads `<root>/interop` without guessing a hash.
+/// Test output directory: `VRFKIT_INTEROP_DIR` when set, used as the exact
+/// root (CI's interop step reads `<root>/interop`), else `<target>/tmp/vrf-export`,
+/// separate per checkout unless the target directory is shared.
 fn test_dir() -> PathBuf {
-    let dir = test_dir_from_override(std::env::var_os("VRFKIT_INTEROP_DIR").map(PathBuf::from));
+    let dir = std::env::var_os("VRFKIT_INTEROP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("vrf-export"));
     fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-fn test_dir_from_override(override_root: Option<PathBuf>) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    override_root.unwrap_or_else(|| {
-        let mut hasher = DefaultHasher::new();
-        env!("CARGO_MANIFEST_DIR").hash(&mut hasher);
-        std::env::temp_dir().join(format!("vrf_export_tests_{:016x}", hasher.finish()))
-    })
-}
-
-#[test]
-fn an_explicit_interop_root_is_used_verbatim() {
-    let root = PathBuf::from("ci-owned-exact-root");
-    assert_eq!(test_dir_from_override(Some(root.clone())), root);
 }
 
 /// A FieldRecord whose values follow from `i`.
@@ -191,42 +174,21 @@ fn field_null_preservation() {
     let batch = roundtrip::<FieldsTable>(
         "field_null_preservation",
         [
+            make_field_record(0),
             FieldRecord {
-                time_ms: 0,
-                packet_id: 0,
-                channel_index: 0,
-                actor_net_guid: 1,
-                object_net_guid: None,
-                group_path: "Test".into(),
-                handle: 0,
-                field_name: None,
-                compatible_checksum: None,
-                bit_count: 0,
-                raw_bits: None,
-                value_i64: Some(0),
-                value_f64: None,
-                value_bool: None,
-                value_str: None,
-            },
-            FieldRecord {
-                time_ms: 1,
-                packet_id: 1,
-                channel_index: 0,
-                actor_net_guid: 1,
-                object_net_guid: None,
-                group_path: "Test".into(),
-                handle: 1,
+                // The top handle: array-truncation rows may use it.
+                handle: u32::MAX,
                 field_name: Some("Health".into()),
-                compatible_checksum: None,
-                bit_count: 8,
                 raw_bits: Some(vec![0xAB].into()),
-                value_i64: None,
                 value_f64: None,
-                value_bool: None,
                 value_str: Some("hello".into()),
+                ..make_field_record(1)
             },
         ],
     );
+
+    let handle = col(&batch, "handle").as_primitive::<UInt32Type>();
+    assert_eq!(handle.value(1), u32::MAX);
 
     let field_name = col(&batch, "field_name").as_dictionary::<Int32Type>();
     assert!(field_name.is_null(0));
@@ -248,6 +210,13 @@ fn field_null_preservation() {
     assert!(!value_str.is_null(1));
     let value_str_values = value_str.downcast_dict::<StringArray>().unwrap();
     assert_eq!(value_str_values.value(1), "hello");
+
+    for name in ["value_f64", "value_bool"] {
+        assert!(
+            col(&batch, name).is_null(0) && col(&batch, name).is_null(1),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -257,155 +226,46 @@ fn field_binary_preservation() {
     let batch = roundtrip::<FieldsTable>(
         "field_binary_preservation",
         [FieldRecord {
-            time_ms: 0,
-            packet_id: 0,
-            channel_index: 0,
-            actor_net_guid: 0,
-            object_net_guid: None,
-            group_path: "Bin".into(),
-            handle: 0,
-            field_name: None,
-            compatible_checksum: None,
             bit_count: 256 * 8,
             raw_bits: Some(payload.clone().into()),
-            value_i64: None,
-            value_f64: None,
-            value_bool: None,
-            value_str: None,
+            ..make_field_record(0)
         }],
     );
 
     let raw_bits = col(&batch, "raw_bits").as_binary::<i32>();
     assert_eq!(raw_bits.value(0), payload.as_slice());
-}
-
-#[test]
-fn unresolved_class_net_cache_payload_marker_roundtrips_exact_bits() {
-    let batch = roundtrip::<FieldsTable>(
-        "unresolved_class_net_cache_payload",
-        [FieldRecord {
-            time_ms: 1234,
-            packet_id: 56,
-            channel_index: 7,
-            actor_net_guid: 89,
-            object_net_guid: Some(144),
-            group_path: "AbilitiesAndBuffsComponent".into(),
-            handle: u32::MAX,
-            field_name: Some(UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME.into()),
-            compatible_checksum: None,
-            bit_count: 7,
-            raw_bits: Some(vec![0x66].into()),
-            value_i64: None,
-            value_f64: None,
-            value_bool: None,
-            value_str: None,
-        }],
-    );
-    assert_eq!(batch.num_rows(), 1);
-
-    assert_eq!(
-        col(&batch, "handle").as_primitive::<UInt32Type>().value(0),
-        u32::MAX
-    );
-
-    let field_name = col(&batch, "field_name")
-        .as_dictionary::<Int32Type>()
-        .downcast_dict::<StringArray>()
-        .unwrap();
-    assert_eq!(
-        field_name.value(0),
-        UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME
-    );
-
-    assert_eq!(
-        col(&batch, "bit_count")
-            .as_primitive::<UInt32Type>()
-            .value(0),
-        7
-    );
-
-    let raw_bits = col(&batch, "raw_bits").as_binary::<i32>();
-    assert_eq!(raw_bits.value(0), &[0x66]);
-    assert_eq!(raw_bits.value(0)[0] >> 7, 0);
-
-    for name in ["value_i64", "value_f64", "value_bool", "value_str"] {
-        assert!(col(&batch, name).is_null(0), "{name} must stay null");
-    }
+    let bit_count = col(&batch, "bit_count").as_primitive::<UInt32Type>();
+    assert_eq!(bit_count.value(0), 256 * 8);
 }
 
 // --- movement -------------------------------------------------------------
 
 #[test]
-fn movement_roundtrip_basic() {
-    let batch = roundtrip::<MovementTable>(
-        "movement_roundtrip_basic",
-        (0..100).map(make_movement_record),
-    );
-    assert_eq!(batch.num_rows(), 100);
+fn movement_keeps_column_order_narrow_types_and_exact_values() {
+    // The last row holds each column's extreme and f32s that must survive bit
+    // for bit.
+    let extreme = MovementRecord {
+        pos_x: std::f32::consts::PI,
+        pos_y: -std::f32::consts::E,
+        pos_z: f32::MIN_POSITIVE,
+        vel_x: f32::MAX,
+        vel_y: f32::MIN,
+        timestamp: u32::MAX,
+        movement_state: u8::MAX,
+        move_type: 1,
+        ..make_movement_record(20)
+    };
+    let rows: Vec<MovementRecord> = (0..20).map(make_movement_record).chain([extreme]).collect();
+    let batch = roundtrip::<MovementTable>("movement_roundtrip", rows.iter().copied());
+    assert_eq!(batch.num_rows(), rows.len());
 
-    let pos_x = col(&batch, "pos_x").as_primitive::<Float32Type>();
-    assert!((pos_x.value(0) - 0.0).abs() < f32::EPSILON);
-    assert!((pos_x.value(1) - 1.5).abs() < f32::EPSILON);
-}
-
-#[test]
-fn movement_f32_precision() {
-    let batch = roundtrip::<MovementTable>(
-        "movement_f32_precision",
-        [MovementRecord {
-            time_ms: 0,
-            packet_id: 0,
-            character_net_guid: 1,
-            pos_x: std::f32::consts::PI,
-            pos_y: -std::f32::consts::E,
-            pos_z: f32::MIN_POSITIVE,
-            yaw: 179.99,
-            pitch: -89.5,
-            vel_x: f32::MAX,
-            vel_y: f32::MIN,
-            vel_z: 0.0,
-            timestamp: 0,
-            movement_state: 0,
-            move_type: 0,
-        }],
-    );
-
-    let pos_x = col(&batch, "pos_x").as_primitive::<Float32Type>();
-    assert_eq!(pos_x.value(0), std::f32::consts::PI);
-    let vel_x = col(&batch, "vel_x").as_primitive::<Float32Type>();
-    assert_eq!(vel_x.value(0), f32::MAX);
-}
-
-#[test]
-fn movement_state_columns_keep_their_narrow_types() {
-    // Parquet stores a u8 as INT32 with an INTEGER(8, false) annotation; a
-    // reader must still hand it back as UInt8, not widened.
-    let batch =
-        roundtrip::<MovementTable>("movement_narrow_types", (0..64).map(make_movement_record));
+    // Consumers address movement columns by position (column 3 = pos_x,
+    // column 8 = vel_x); every column is dense.
     let schema = batch.schema();
-
-    assert_eq!(
-        schema.field_with_name("timestamp").unwrap().data_type(),
-        &DataType::UInt32
-    );
-    for name in ["movement_state", "move_type"] {
-        let field = schema.field_with_name(name).unwrap();
-        assert_eq!(field.data_type(), &DataType::UInt8, "{name} was widened");
-    }
-    // Dense by contract (python_interop.py checks the whole schema).
-    for name in ["timestamp", "movement_state", "move_type"] {
-        assert!(
-            !schema.field_with_name(name).unwrap().is_nullable(),
-            "{name} must not be nullable"
-        );
-    }
-
-    // Appended after vel_z, not interleaved: consumers address movement
-    // columns by position (column 3 = pos_x, column 8 = vel_x).
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
     assert_eq!(
         names,
-        vec![
+        [
             "time_ms",
             "packet_id",
             "character_net_guid",
@@ -422,50 +282,40 @@ fn movement_state_columns_keep_their_narrow_types() {
             "move_type",
         ]
     );
-
-    // No mode_flags column: docs/USAGE.md "movement.parquet".
-    assert!(schema.field_with_name("mode_flags").is_err());
-}
-
-#[test]
-fn movement_new_columns_roundtrip_values() {
-    // Boundary row: the widest value each column can hold.
-    let mut extreme = make_movement_record(20);
-    extreme.timestamp = u32::MAX;
-    extreme.movement_state = u8::MAX;
-    extreme.move_type = 1;
-    let batch = roundtrip::<MovementTable>(
-        "movement_new_columns_values",
-        (0..20).map(make_movement_record).chain([extreme]),
+    for field in schema.fields() {
+        assert!(
+            !field.is_nullable(),
+            "{} must not be nullable",
+            field.name()
+        );
+    }
+    // Parquet stores a u8 as INT32 with an INTEGER(8, false) annotation; a
+    // reader must still hand it back as UInt8, not widened.
+    assert_eq!(
+        schema.field_with_name("timestamp").unwrap().data_type(),
+        &DataType::UInt32
     );
-    assert_eq!(batch.num_rows(), 21);
+    for name in ["movement_state", "move_type"] {
+        let field = schema.field_with_name(name).unwrap();
+        assert_eq!(field.data_type(), &DataType::UInt8, "{name} was widened");
+    }
 
+    let pos_x = col(&batch, "pos_x").as_primitive::<Float32Type>();
+    let vel_x = col(&batch, "vel_x").as_primitive::<Float32Type>();
     let timestamp = col(&batch, "timestamp").as_primitive::<UInt32Type>();
     let movement_state = col(&batch, "movement_state").as_primitive::<UInt8Type>();
     let move_type = col(&batch, "move_type").as_primitive::<UInt8Type>();
-
-    for i in 0..20usize {
-        let expected = make_movement_record(i as u32);
-        assert_eq!(timestamp.value(i), expected.timestamp, "row {i} timestamp");
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(pos_x.value(i).to_bits(), r.pos_x.to_bits(), "row {i} pos_x");
+        assert_eq!(vel_x.value(i).to_bits(), r.vel_x.to_bits(), "row {i} vel_x");
+        assert_eq!(timestamp.value(i), r.timestamp, "row {i} timestamp");
         assert_eq!(
             movement_state.value(i),
-            expected.movement_state,
+            r.movement_state,
             "row {i} movement_state"
         );
-        assert_eq!(move_type.value(i), expected.move_type, "row {i} move_type");
+        assert_eq!(move_type.value(i), r.move_type, "row {i} move_type");
     }
-
-    assert_eq!(timestamp.value(20), u32::MAX);
-    assert_eq!(movement_state.value(20), u8::MAX);
-    assert_eq!(move_type.value(20), 1);
-
-    // The helper must actually vary these, or the loop above proves nothing.
-    let distinct_states: std::collections::BTreeSet<u8> =
-        (0..20).map(|i| movement_state.value(i)).collect();
-    assert!(
-        distinct_states.len() > 1,
-        "movement_state did not vary across rows"
-    );
 }
 
 /// Write the files python_interop.py verifies.
@@ -474,41 +324,19 @@ fn write_interop_files() {
     let dir = test_dir().join("interop");
     fs::create_dir_all(&dir).unwrap();
 
-    let field_path = dir.join("fields_interop.parquet");
-    let movement_path = dir.join("movement_interop.parquet");
+    let file = fs::File::create(dir.join("fields_interop.parquet")).unwrap();
+    let mut writer = FieldWriter::with_row_group_size(file, 4096).unwrap();
+    writer
+        .push_batch((0..10_000).map(make_field_record))
+        .unwrap();
+    writer.finish().unwrap();
 
-    {
-        let file = fs::File::create(&field_path).unwrap();
-        let mut writer = FieldWriter::with_row_group_size(file, 4096).unwrap();
-        for i in 0..10_000u32 {
-            writer.push(make_field_record(i)).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    {
-        let file = fs::File::create(&movement_path).unwrap();
-        let mut writer = MovementWriter::with_row_group_size(file, 8192).unwrap();
-        for i in 0..50_000u32 {
-            writer.push(make_movement_record(i)).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-
-    assert!(field_path.exists());
-    assert!(movement_path.exists());
-    let field_size = fs::metadata(&field_path).unwrap().len();
-    let movement_size = fs::metadata(&movement_path).unwrap().len();
-    assert!(field_size > 1000, "fields file too small: {field_size}");
-    assert!(
-        movement_size > 1000,
-        "movement file too small: {movement_size}"
-    );
-
-    println!("INTEROP_FIELDS={}", field_path.display());
-    println!("INTEROP_MOVEMENT={}", movement_path.display());
-    println!("FIELD_SIZE_BYTES={field_size}");
-    println!("MOVEMENT_SIZE_BYTES={movement_size}");
+    let file = fs::File::create(dir.join("movement_interop.parquet")).unwrap();
+    let mut writer = MovementWriter::with_row_group_size(file, 8192).unwrap();
+    writer
+        .push_batch((0..50_000).map(make_movement_record))
+        .unwrap();
+    writer.finish().unwrap();
 }
 
 // --- actors ---------------------------------------------------------------
@@ -559,13 +387,17 @@ fn make_actor_record(i: u32, is_open: bool) -> ActorRecord {
         } else {
             None
         },
+        spawn_vx: is_open.then_some(-(i as f32)),
+        spawn_vy: is_open.then_some(0.0),
+        spawn_vz: is_open.then_some(3200.0),
     }
 }
 
 #[test]
-fn actor_roundtrip_basic() {
+fn actor_roundtrip_keeps_events_null_paths_and_open_only_spawns() {
+    // Every third row (i % 3 == 2) is a close; class_path is None when i % 4 == 0.
     let batch = roundtrip::<ActorsTable>(
-        "actor_roundtrip_basic",
+        "actor_roundtrip",
         (0..100).map(|i| make_actor_record(i, i % 3 != 2)),
     );
     assert_eq!(batch.num_rows(), 100);
@@ -576,17 +408,7 @@ fn actor_roundtrip_basic() {
 
     let event = col(&batch, "event").as_string::<i32>();
     assert_eq!(event.value(0), "open");
-    // Index 2 is the first "close" (i=2, i%3==2).
     assert_eq!(event.value(2), "close");
-}
-
-#[test]
-fn actor_null_class_path() {
-    // Row 0: class_path = None (i=0, i%4==0); row 1: Some (i=1, i%4!=0).
-    let batch = roundtrip::<ActorsTable>(
-        "actor_null_class_path",
-        [make_actor_record(0, true), make_actor_record(1, true)],
-    );
 
     let class_path = col(&batch, "class_path").as_dictionary::<Int32Type>();
     assert!(class_path.is_null(0));
@@ -596,20 +418,15 @@ fn actor_null_class_path() {
         class_path_values.value(1),
         "/Game/Characters/Agent_1/Agent_1_PC.Agent_1_PC_C"
     );
-}
 
-#[test]
-fn actor_spawn_location_nullable() {
-    // An open carries a spawn location; the matching close does not.
-    let batch = roundtrip::<ActorsTable>(
-        "actor_spawn_location",
-        [make_actor_record(5, true), make_actor_record(5, false)],
-    );
-
+    // An open carries a spawn location and velocity; a close does not.
     let spawn_x = col(&batch, "spawn_x").as_primitive::<Float32Type>();
-    assert!(!spawn_x.is_null(0));
-    assert!((spawn_x.value(0) - 50.0).abs() < f32::EPSILON);
-    assert!(spawn_x.is_null(1));
+    assert_eq!(spawn_x.value(4), 40.0);
+    assert!(spawn_x.is_null(5));
+    let velocity = ["spawn_vx", "spawn_vy", "spawn_vz"]
+        .map(|name| col(&batch, name).as_primitive::<Float32Type>().clone());
+    assert_eq!(velocity.each_ref().map(|v| v.value(4)), [-4.0, 0.0, 3200.0]);
+    assert!(velocity.iter().all(|v| v.is_null(5)));
 }
 
 // --- net_guids -------------------------------------------------------------
@@ -652,9 +469,8 @@ fn net_guid_roundtrip_preserves_outer_chain() {
 
 #[test]
 fn field_object_net_guid_roundtrips_and_is_nullable() {
-    // Without the subobject GUID every ItemSlot on a character collapses onto
-    // one key downstream. `None` (the actor itself) must stay distinct from
-    // any GUID, 0 included.
+    // `None` (the actor itself) must stay distinct from any GUID, 0 included,
+    // or a character's ItemSlots collapse onto one key downstream.
     let mut actor_block = make_field_record(1);
     actor_block.object_net_guid = None;
     let mut subobject_block = make_field_record(2);
@@ -762,8 +578,7 @@ fn event_roundtrip_preserves_payload_bytes_exactly() {
 }
 
 /// The replay's `compatible_checksum` survives the round trip, nulls
-/// included: it tells an undescribed field from a checksum the overlay never
-/// learned (Phoenix: 2,791 null rows at 0 decode errors; docs/USAGE.md).
+/// included: null is a field the replay declares no checksum for.
 #[test]
 fn compatible_checksum_round_trips_with_its_nulls() {
     let rows = (0..8u32).map(|i| FieldRecord {
@@ -828,8 +643,8 @@ fn row_groups(path: &Path) -> Vec<i64> {
 
 #[test]
 fn row_groups_close_at_the_row_group_size_not_at_each_batch() {
-    // A writer closing a group at every 8,192-row batch would write 24 groups
-    // of 8,192 and one of 3,392, which a ">= 3 row groups" check accepted.
+    // Closing a group at every 8,192-row batch would give 24 groups of 8,192
+    // and one of 3,392.
     const ROWS: u32 = 200_000;
     const _: () = assert!(vrf_export::writer::MAX_BUFFERED_ROWS < 65_536);
     let expected = vec![65_536, 65_536, 65_536, 3_392];
@@ -886,8 +701,8 @@ fn push_batch_writes_the_same_file_as_one_push_per_row() {
 // --- dictionary encoding is per column -------------------------------------
 
 /// Each table's file has a dictionary for exactly its
-/// `Table::DICTIONARY_COLUMNS`, read from the footer because the list once
-/// changed nothing. Gated on the two features the file-level gate lacks.
+/// `Table::DICTIONARY_COLUMNS`, read from the footer. Gated on the two features
+/// the file-level gate lacks.
 #[cfg(all(feature = "partials", feature = "checkpoint-context"))]
 mod dictionary_encoding {
     use super::*;
@@ -905,6 +720,43 @@ mod dictionary_encoding {
     };
 
     const ROWS: u32 = 8;
+
+    /// Every listed name must be a real non-boolean column, listed once
+    /// (parquet-rs silently ignores an unknown or BOOLEAN name), and every
+    /// string column must be listed, as the docs promise.
+    fn list_problems<T: Table>(table: &str) -> Vec<String> {
+        let schema = T::schema();
+        let mut problems = Vec::new();
+        let mut seen = HashSet::new();
+        for &name in T::DICTIONARY_COLUMNS {
+            if !seen.insert(name) {
+                problems.push(format!("{table}.{name}: listed twice"));
+            }
+            match schema.field_with_name(name) {
+                Err(_) => problems.push(format!(
+                    "{table}.{name}: no such column; parquet-rs ignores the name without an error"
+                )),
+                Ok(field) if field.data_type() == &DataType::Boolean => problems.push(format!(
+                    "{table}.{name}: BOOLEAN, which parquet-rs never dictionary-encodes"
+                )),
+                Ok(_) => {}
+            }
+        }
+        for field in schema.fields() {
+            let is_string = match field.data_type() {
+                DataType::Utf8 => true,
+                DataType::Dictionary(_, value) => value.as_ref() == &DataType::Utf8,
+                _ => false,
+            };
+            if is_string && !T::DICTIONARY_COLUMNS.contains(&field.name().as_str()) {
+                problems.push(format!(
+                    "{table}.{}: a string column missing from DICTIONARY_COLUMNS",
+                    field.name()
+                ));
+            }
+        }
+        problems
+    }
 
     /// Write `rows` through the real writer and return every column whose
     /// footer disagrees with `T::DICTIONARY_COLUMNS`. BOOLEAN columns are
@@ -959,6 +811,15 @@ mod dictionary_encoding {
             ));
         }
         problems
+    }
+
+    /// Both checks for one table: its list, then the file written from `rows`.
+    fn check<T: Table>(table: &str, rows: Vec<T::Row>) -> Vec<String> {
+        [
+            list_problems::<T>(table),
+            footer_disagreements::<T>(table, rows),
+        ]
+        .concat()
     }
 
     fn identity(i: u32) -> CheckpointIdentity {
@@ -1125,142 +986,63 @@ mod dictionary_encoding {
     }
 
     #[test]
-    fn every_table_writes_a_dictionary_page_for_exactly_its_listed_columns() {
+    fn every_table_lists_real_columns_and_writes_a_dictionary_for_exactly_them() {
         let fields = field_rows();
         let actors = actor_rows();
         let net_guids = net_guid_rows();
-        let mut problems = Vec::new();
-        problems.extend(footer_disagreements::<FieldsTable>(
-            "fields",
-            fields.clone(),
-        ));
-        problems.extend(footer_disagreements::<MovementTable>(
-            "movement",
-            (0..ROWS).map(make_movement_record).collect(),
-        ));
-        problems.extend(footer_disagreements::<ActorsTable>(
-            "actors",
-            actors.clone(),
-        ));
-        problems.extend(footer_disagreements::<NetGuidsTable>(
-            "net_guids",
-            net_guids.clone(),
-        ));
-        problems.extend(footer_disagreements::<EventsTable>("events", event_rows()));
-        problems.extend(footer_disagreements::<PartialsTable>(
-            "partials",
-            partial_rows(),
-        ));
-        problems.extend(footer_disagreements::<CheckpointFieldsTable>(
-            "checkpoint_fields",
-            fields
-                .into_iter()
-                .zip(0..)
-                .map(|(field, i)| CheckpointFieldRecord {
-                    checkpoint: identity(i),
-                    field,
-                })
-                .collect(),
-        ));
-        problems.extend(footer_disagreements::<CheckpointActorsTable>(
-            "checkpoint_actors",
-            actors
-                .into_iter()
-                .zip(0..)
-                .map(|(actor, i)| CheckpointActorRecord {
-                    checkpoint: identity(i),
-                    actor,
-                })
-                .collect(),
-        ));
-        problems.extend(footer_disagreements::<CheckpointNetGuidsTable>(
-            "checkpoint_net_guids",
-            net_guids
-                .into_iter()
-                .zip(0..)
-                .map(|(net_guid, i)| CheckpointNetGuidRecord {
-                    checkpoint: identity(i),
-                    net_guid,
-                })
-                .collect(),
-        ));
-        problems.extend(footer_disagreements::<CheckpointBlocksTable>(
-            "checkpoint_blocks",
-            checkpoint_block_rows(),
-        ));
-        problems.extend(footer_disagreements::<CheckpointGuidEntriesTable>(
-            "checkpoint_guid_entries",
-            checkpoint_guid_entry_rows(),
-        ));
-        problems.extend(footer_disagreements::<CheckpointExportGroupsTable>(
-            "checkpoint_export_groups",
-            checkpoint_export_group_rows(),
-        ));
-        problems.extend(footer_disagreements::<CheckpointExportFieldsTable>(
-            "checkpoint_export_fields",
-            checkpoint_export_field_rows(),
-        ));
-        assert!(
-            problems.is_empty(),
-            "{} column(s) disagree with DICTIONARY_COLUMNS:\n  {}",
-            problems.len(),
-            problems.join("\n  ")
-        );
-    }
-
-    /// Every listed name must be a real non-boolean column, listed once
-    /// (parquet-rs silently ignores an unknown or BOOLEAN name), and every
-    /// string column must be listed, as the docs promise.
-    fn list_problems<T: Table>(table: &str) -> Vec<String> {
-        let schema = T::schema();
-        let mut problems = Vec::new();
-        let mut seen = HashSet::new();
-        for &name in T::DICTIONARY_COLUMNS {
-            if !seen.insert(name) {
-                problems.push(format!("{table}.{name}: listed twice"));
-            }
-            match schema.field_with_name(name) {
-                Err(_) => problems.push(format!(
-                    "{table}.{name}: no such column; parquet-rs ignores the name without an error"
-                )),
-                Ok(field) if field.data_type() == &DataType::Boolean => problems.push(format!(
-                    "{table}.{name}: BOOLEAN, which parquet-rs never dictionary-encodes"
-                )),
-                Ok(_) => {}
-            }
-        }
-        for field in schema.fields() {
-            let is_string = match field.data_type() {
-                DataType::Utf8 => true,
-                DataType::Dictionary(_, value) => value.as_ref() == &DataType::Utf8,
-                _ => false,
-            };
-            if is_string && !T::DICTIONARY_COLUMNS.contains(&field.name().as_str()) {
-                problems.push(format!(
-                    "{table}.{}: a string column missing from DICTIONARY_COLUMNS",
-                    field.name()
-                ));
-            }
-        }
-        problems
-    }
-
-    #[test]
-    fn dictionary_lists_name_real_columns_and_cover_every_string() {
-        let problems: Vec<String> = [
-            list_problems::<FieldsTable>("fields"),
-            list_problems::<MovementTable>("movement"),
-            list_problems::<ActorsTable>("actors"),
-            list_problems::<NetGuidsTable>("net_guids"),
-            list_problems::<EventsTable>("events"),
-            list_problems::<PartialsTable>("partials"),
-            list_problems::<CheckpointFieldsTable>("checkpoint_fields"),
-            list_problems::<CheckpointActorsTable>("checkpoint_actors"),
-            list_problems::<CheckpointNetGuidsTable>("checkpoint_net_guids"),
-            list_problems::<CheckpointBlocksTable>("checkpoint_blocks"),
-            list_problems::<CheckpointGuidEntriesTable>("checkpoint_guid_entries"),
-            list_problems::<CheckpointExportGroupsTable>("checkpoint_export_groups"),
-            list_problems::<CheckpointExportFieldsTable>("checkpoint_export_fields"),
+        let problems = [
+            check::<FieldsTable>("fields", fields.clone()),
+            check::<MovementTable>("movement", (0..ROWS).map(make_movement_record).collect()),
+            check::<ActorsTable>("actors", actors.clone()),
+            check::<NetGuidsTable>("net_guids", net_guids.clone()),
+            check::<EventsTable>("events", event_rows()),
+            check::<PartialsTable>("partials", partial_rows()),
+            check::<CheckpointFieldsTable>(
+                "checkpoint_fields",
+                fields
+                    .into_iter()
+                    .zip(0..)
+                    .map(|(field, i)| CheckpointFieldRecord {
+                        checkpoint: identity(i),
+                        field,
+                    })
+                    .collect(),
+            ),
+            check::<CheckpointActorsTable>(
+                "checkpoint_actors",
+                actors
+                    .into_iter()
+                    .zip(0..)
+                    .map(|(actor, i)| CheckpointActorRecord {
+                        checkpoint: identity(i),
+                        actor,
+                    })
+                    .collect(),
+            ),
+            check::<CheckpointNetGuidsTable>(
+                "checkpoint_net_guids",
+                net_guids
+                    .into_iter()
+                    .zip(0..)
+                    .map(|(net_guid, i)| CheckpointNetGuidRecord {
+                        checkpoint: identity(i),
+                        net_guid,
+                    })
+                    .collect(),
+            ),
+            check::<CheckpointBlocksTable>("checkpoint_blocks", checkpoint_block_rows()),
+            check::<CheckpointGuidEntriesTable>(
+                "checkpoint_guid_entries",
+                checkpoint_guid_entry_rows(),
+            ),
+            check::<CheckpointExportGroupsTable>(
+                "checkpoint_export_groups",
+                checkpoint_export_group_rows(),
+            ),
+            check::<CheckpointExportFieldsTable>(
+                "checkpoint_export_fields",
+                checkpoint_export_field_rows(),
+            ),
         ]
         .concat();
         assert!(

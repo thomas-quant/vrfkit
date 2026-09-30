@@ -1,20 +1,13 @@
-//! The RepLayout dynamic-array framing every effect blob shares, and the
-//! structural scan that derives an array's element handle pair from it.
+//! The effect blobs' reader and terminator checks, and the structural scan
+//! that derives an array's element handle pair.
 
 use vrf_bitio::BitReader;
 
 use super::{EffectBlobError, EffectHandles, Result};
+use crate::framing::{read_array_count, read_element_index, read_field_header};
 
-/// Maximum array element count. Observed: FloatValues ~6, ObjectValues ~4,
-/// VectorValues up to ~15 (shotgun pellets); 256 is headroom without runaway
-/// allocation.
+/// Maximum element count: observed up to ~15 (shotgun pellets).
 pub(super) const MAX_ARRAY_COUNT: u32 = 256;
-
-/// Maximum fields per element; `FEffectData*` elements carry two.
-pub(super) const MAX_FIELDS_PER_ELEMENT: u32 = 8;
-
-/// Maximum bits in a single field payload. Prevents runaway on corrupt data.
-const MAX_FIELD_PAYLOAD_BITS: u32 = 64 * 1024;
 
 /// Build a reader over an exact bit window.
 pub(super) fn new_blob_reader(raw: &[u8], bit_count: u32) -> Result<BitReader<'_>> {
@@ -26,54 +19,6 @@ pub(super) fn new_blob_reader(raw: &[u8], bit_count: u32) -> Result<BitReader<'_
         });
     }
     Ok(BitReader::with_bit_len(raw, u64::from(bit_count))?)
-}
-
-/// Read the declared element count from the stream.
-pub(super) fn read_array_count(reader: &mut BitReader<'_>) -> Result<u32> {
-    let count = reader.read_int_packed()?;
-    if count > MAX_ARRAY_COUNT {
-        return Err(EffectBlobError::ArrayCountTooLarge {
-            count,
-            max: MAX_ARRAY_COUNT,
-        });
-    }
-    Ok(count)
-}
-
-/// Read the next element index. Returns `None` if the terminator (0) is read.
-pub(super) fn read_element_index(
-    reader: &mut BitReader<'_>,
-    declared_count: u32,
-) -> Result<Option<u32>> {
-    let encoded = reader.read_int_packed()?;
-    if encoded == 0 {
-        return Ok(None);
-    }
-    let index = encoded - 1;
-    if index >= declared_count {
-        return Err(EffectBlobError::IndexOutOfBounds {
-            index,
-            count: declared_count,
-        });
-    }
-    Ok(Some(index))
-}
-
-/// Read the next field handle + payload bit count. Returns `None` on terminator.
-pub(super) fn read_field_header(reader: &mut BitReader<'_>) -> Result<Option<(u32, u32)>> {
-    let encoded_handle = reader.read_int_packed()?;
-    if encoded_handle == 0 {
-        return Ok(None);
-    }
-    let handle = encoded_handle - 1;
-    let payload_bits = reader.read_int_packed()?;
-    if payload_bits > MAX_FIELD_PAYLOAD_BITS || u64::from(payload_bits) > reader.bits_remaining() {
-        return Err(EffectBlobError::PayloadTooLarge {
-            bits: payload_bits,
-            remaining: reader.bits_remaining(),
-        });
-    }
-    Ok(Some((handle, payload_bits)))
 }
 
 /// When exactly 8 bits remain after the zero terminator, one more IntPacked
@@ -146,7 +91,7 @@ pub(super) fn settle_field(
 /// elements on `02d4d478`, and what makes the pair derivable at all.
 pub fn scan_element_handles(raw: &[u8], bit_count: u32) -> Result<Option<EffectHandles>> {
     let mut reader = new_blob_reader(raw, bit_count)?;
-    let count = read_array_count(&mut reader)?;
+    let count = read_array_count(&mut reader, MAX_ARRAY_COUNT)?;
     let mut base: Option<u32> = None;
 
     while !reader.at_end() {
@@ -165,10 +110,7 @@ pub fn scan_element_handles(raw: &[u8], bit_count: u32) -> Result<Option<EffectH
             reader.skip_bits(u64::from(payload_bits))?;
             *slot = handle;
         }
-        if let Some((_, payload_bits)) = read_field_header(&mut reader)? {
-            // Consume it so the error message's position is not misleading if
-            // a caller ever reports one; the blob is rejected either way.
-            let _ = reader.skip_bits(u64::from(payload_bits));
+        if read_field_header(&mut reader)?.is_some() {
             return Err(EffectBlobError::ElementFieldCount { found: 3 });
         }
 

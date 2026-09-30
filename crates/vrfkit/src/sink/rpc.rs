@@ -20,12 +20,10 @@ use super::intern::put;
 use super::{ExportSink, FieldValues, MeasuredArrayRoute, TABLE};
 
 /// Memo for [`ExportSink::find_rpc_param_group_path`], a pure function of (block
-/// group path, function name, declared group paths). The last is what
-/// `NetGuidCache::schema_generation` tracks, so a stamp that clears the memo on
-/// a change keeps it exactly equivalent to recomputing. The fallback scans every
-/// declared group (475 on 02d4d478) with `ends_with` per RPC, 342,735 of them,
-/// for a few hundred distinct pairs. Two levels, the outer keyed by the interned
-/// `Arc<str>` the sink already holds, so a hit allocates nothing.
+/// group path, function name, declared group paths); clearing it when
+/// `NetGuidCache::schema_generation` moves keeps it exact. It spares a scan of
+/// every declared group per RPC. The outer key is the interned group path, so a
+/// hit allocates nothing.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RpcParamGroupMemo {
     generation: u64,
@@ -71,10 +69,10 @@ impl ExportSink<'_> {
         let param_group_path = self.find_rpc_param_group_path(func_name);
         let mut rpc_reader = reader;
 
-        // Property checksum bit (1 bit) -- always present for FunctionParameters.
         if rpc_reader.read_bit().is_err() {
             return false;
         }
+        self.stats.rpc_param_walks += 1;
 
         let mut emitted_any = false;
         // Set only on the three malformed-read breaks below, never on the
@@ -88,7 +86,6 @@ impl ExportSink<'_> {
                 break;
             }
 
-            // FunctionParameters grammar: if exactly 1 bit remains, skip it.
             if rpc_reader.bits_remaining() == 1 {
                 let _ = rpc_reader.read_bit();
                 break;
@@ -123,9 +120,7 @@ impl ExportSink<'_> {
                 break;
             };
 
-            // Borrowed, not cloned: the name only builds `full_field_name` and
-            // keys the overlay before `self` is next mutated. The same schema
-            // walk yields the checksum for the overlay's last-resort lookup.
+            // One schema walk for the name and the overlay's last-resort checksum.
             let param_export = param_group_path_ref.and_then(|gp| {
                 self.cache
                     .get_group_by_path(gp)
@@ -134,16 +129,12 @@ impl ExportSink<'_> {
             let param_name: Option<&str> = param_export.map(|f| f.name.as_str());
             let param_checksum: Option<u32> = param_export.map(|f| f.compatible_checksum);
 
-            // "Function.Param", or "Function._h{N}" unnamed. A dot, as in
-            // `Rounds[0].X`, because group paths already use ':'; downstream
-            // splits on the first '.'. Interned, not `format!`-ed: a few hundred
-            // distinct names against 559,346 iterations on the reference replay.
-            let full_field_name = match param_name {
-                Some(pn) => self.channel_state.names.intern_join(func_name, '.', pn),
-                None => self.channel_state.names.intern_fmt(|out| {
-                    put(out, format_args!("{func_name}._h{param_handle}"));
-                }),
-            };
+            // "Function.Param", or "Function._h{N}" unnamed: a dot, because group
+            // paths already use ':' and downstream splits on the first '.'.
+            let full_field_name = self.channel_state.names.intern_fmt(|out| match param_name {
+                Some(pn) => put(out, format_args!("{func_name}.{pn}")),
+                None => put(out, format_args!("{func_name}._h{param_handle}")),
+            });
 
             let raw_bits = copy_raw_bits(sub, payload_bits);
 
@@ -158,55 +149,43 @@ impl ExportSink<'_> {
             // is no wire-declared name, and passed as one it would trip
             // `resolve_in_group`'s conflict guard against its own placeholder,
             // refusing the handle fallback that guard exists to allow.
-            let (value_i64, value_f64, value_bool, mut value_str) =
-                match apply_overlay_with_checksum(
-                    &TABLE,
-                    overlay_group,
-                    group_state,
-                    param_name,
-                    param_handle,
-                    param_checksum,
-                    raw_bits.as_deref(),
-                    payload_bits,
-                    &mut self.stats.overlay,
-                ) {
-                    Some(result) => (
-                        result.value_i64,
-                        result.value_f64,
-                        result.value_bool,
-                        result.value_str,
-                    ),
-                    None => (None, None, None, None),
-                };
+            let (value_i64, value_f64, value_bool, mut value_str) = apply_overlay_with_checksum(
+                &TABLE,
+                overlay_group,
+                group_state,
+                param_name,
+                param_handle,
+                param_checksum,
+                raw_bits.as_deref(),
+                payload_bits,
+                &mut self.stats.overlay,
+            )
+            .map(|result| result.into_columns())
+            .unwrap_or_default();
 
-            // Additive pass: the EffectContainer arrays, `Raw` or unknown to the
-            // overlay -- 45.8% of the still-untyped bits on 02d4d478 -- become a
-            // JSON `value_str`, `raw_bits` kept. Only when the overlay produced
-            // nothing: a declared type that decoded outranks a name-driven decode.
+            // Additive pass: an EffectContainer array the overlay left untyped
+            // becomes a JSON `value_str`, `raw_bits` kept. A declared type that
+            // decoded outranks this name-driven decode. The match is on the
+            // parameter name: a `_h{N}` handle does not identify the element type.
             if value_i64.is_none()
                 && value_f64.is_none()
                 && value_bool.is_none()
                 && value_str.is_none()
             {
-                if let (Some(kind), Some(raw)) =
-                    (effect_array_kind_for_param(param_name), raw_bits.as_deref())
-                {
-                    // `payload_bits`, not `raw.len() * 8`: the padding is not
-                    // data (the bug docs/archive/PROJECT_STATUS.md 12-D pins on
-                    // the Python side of this format).
+                if let (Some(kind), Some(raw)) = (
+                    param_name.and_then(EffectArrayKind::from_param_name),
+                    raw_bits.as_deref(),
+                ) {
+                    // `payload_bits`, not `raw.len() * 8`: the padding is not data.
                     match decode_effect_blob_json(kind, raw, payload_bits) {
                         Ok(json) => {
                             value_str = Some(json);
                             self.stats.effect_blobs_decoded += 1;
                         }
                         Err(err) => {
-                            // Loud: the bits stay, `value_str` stays null, and
-                            // the row reaches the summary's "Decode errors" and
-                            // its breakdown. `stats.overlay` is the only channel
-                            // that survives the packet, so a failure counts in
-                            // two buckets and "Rows offered" (a diagnostic
-                            // denominator) over-reports by the failure count;
-                            // 0 failures across all 61,617 blobs measured.
+                            // Reaches "Decode errors": `stats.overlay` is the only
+                            // channel that survives the packet, so "Rows offered"
+                            // over-reports by the failure count (0 measured).
                             self.stats.overlay.decoded_err += 1;
                             self.stats.overlay.error_report.record(
                                 overlay_group,
@@ -262,32 +241,41 @@ impl ExportSink<'_> {
                 );
             }
 
-            // The multi-click RPC's flat RepLayout array has one 192-bit
-            // world-location leaf. Every identity is the replay's declaration,
-            // so a similarly named parameter or child stays raw.
-            if targeting_world_location_array {
-                if let Some(raw) = raw_bits.as_deref() {
-                    self.emit_targeting_world_location_array(
-                        &full_field_name,
-                        rpc_handle,
-                        raw,
-                        payload_bits,
-                    );
-                }
+            // The multi-click RPC's flat array of 192-bit world locations. Every
+            // identity is the replay's declaration, so a lookalike stays raw.
+            if let (true, Some(raw)) = (targeting_world_location_array, raw_bits.as_deref()) {
+                self.stats.targeting_world_locations_decoded += self.emit_exact_array_leaves(
+                    &full_field_name,
+                    rpc_handle,
+                    (raw, payload_bits),
+                    &[None, Some("WorldLocation")],
+                    &[(1, 192, ".WorldLocation", FieldType::VectorDouble)],
+                );
             }
 
-            // The projectile path is a RepLayout struct array. The replay's
-            // declarations for handles 1-3 are unrelated siblings; the element
-            // handles come from the PathPoint descriptor, so the route is
-            // scoped to the observed parent identity, and that parent is kept.
-            if projectile_path_array {
-                if let Some(raw) = raw_bits.as_deref() {
-                    self.emit_projectile_path_array(
+            // The projectile path's element handles come from the PathPoint
+            // descriptor (the replay's handles 1-3 are unrelated siblings), so
+            // the route is scoped to the observed parent identity.
+            if let (true, Some(raw)) = (projectile_path_array, raw_bits.as_deref()) {
+                if super::blobs::strict_nested_array_preflight(raw, payload_bits, &[1, 2, 3]) {
+                    self.stats.route_children_projectile_path += self.emit_exact_array_leaves(
                         &full_field_name,
                         rpc_handle,
-                        raw,
-                        payload_bits,
+                        (raw, payload_bits),
+                        &[
+                            None,
+                            Some("ElapsedSeconds"),
+                            Some("Location"),
+                            Some("Velocity"),
+                        ],
+                        &[
+                            (1, 32, ".ElapsedSeconds", FieldType::Float),
+                            (2, 192, ".Location", FieldType::VectorDouble),
+                            (3, 192, ".Velocity", FieldType::VectorDouble),
+                        ],
                     );
+                } else {
+                    self.stats.array.errors += 1;
                 }
             }
 
@@ -302,7 +290,6 @@ impl ExportSink<'_> {
                 value_bool,
                 value_str,
             });
-            self.stats.fields_emitted += 1;
 
             emitted_any = true;
         }
@@ -323,7 +310,6 @@ impl ExportSink<'_> {
                 raw_bits: copy_raw_bits(whole_reader, whole_bit_count),
                 ..FieldValues::default()
             });
-            self.stats.fields_emitted += 1;
         }
 
         emitted_any
@@ -332,9 +318,8 @@ impl ExportSink<'_> {
     /// Emit one row per member of a life-change array element; additive, the
     /// caller pushes the parent row either way. The rows carry `rpc_handle`, not
     /// the member's own handle: `tools/to_valplay_bundle.py` groups a call's
-    /// parameters by `(packet, actor, group, handle)`, and two child rows
-    /// injected under their struct handles measured as two bundle events where
-    /// the RPC handle gave one.
+    /// parameters by `(packet, actor, group, handle)`, so member handles would
+    /// split one call into several events.
     fn emit_life_change_array(
         &mut self,
         schema: &'static ArrayFieldSchema,
@@ -362,163 +347,78 @@ impl ExportSink<'_> {
                 &field.raw_bits,
                 columns,
             );
-            self.stats.fields_emitted += 1;
         }
     }
 
-    /// Decode complete path points only. A changed handle, width, non-finite
-    /// number, duplicated point member, or incomplete array leaves every child
-    /// un-emitted and leaves the parent RPC parameter's raw_bits untouched.
-    fn emit_projectile_path_array(
+    /// Emit an RPC struct array's leaves when every element holds exactly
+    /// `members` (handle, width, path suffix, type), else none: a walker
+    /// diagnostic, a short element (the walker calls a missing member clean), an
+    /// unexpected leaf, a duplicate path or a non-finite number keeps only the
+    /// raw parent. A refused clean walk counts once in
+    /// `array_leaf_decode_errors`. Returns the children pushed.
+    fn emit_exact_array_leaves(
         &mut self,
         prefix: &str,
         rpc_handle: u32,
-        raw: &[u8],
-        bit_count: u32,
-    ) {
-        if !super::blobs::strict_nested_array_preflight(raw, bit_count, &[1, 2, 3]) {
-            self.stats.array.errors += 1;
-            return;
-        }
-        let declared = [
-            None,
-            Some("ElapsedSeconds"),
-            Some("Location"),
-            Some("Velocity"),
-        ];
+        (raw, bit_count): (&[u8], u32),
+        declared: &[Option<&str>],
+        members: &[(u32, u32, &str, FieldType)],
+    ) -> u64 {
         let mut isolated = vrf_decode::ArrayDecodeStats::default();
-        let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut isolated);
-        let walker_clean = isolated.is_clean();
-        let complete_points = isolated.fields_emitted == flattened.len() as u64
-            && isolated.elements_decoded.saturating_mul(3) == flattened.len() as u64;
+        let flattened = decode_struct_array_exact(raw, bit_count, declared, &mut isolated);
         self.stats.array.merge_from(&isolated);
-        // The generic walker reports a clean frame even when a path point
-        // omits one of its three members. Count that separate shape refusal;
-        // malformed framing already moved a walker diagnostic above.
-        if walker_clean && !complete_points {
-            self.stats.array_leaf_decode_errors += 1;
+        if !isolated.is_clean() {
+            return 0;
         }
-        if !walker_clean || !complete_points {
-            return;
-        }
-
+        let len = flattened.len() as u64;
+        let complete = isolated.fields_emitted == len
+            && isolated
+                .elements_decoded
+                .saturating_mul(members.len() as u64)
+                == len;
+        let prior_errors = self.stats.array_leaf_decode_errors;
         let mut paths = HashSet::new();
-        let mut decoded = Vec::with_capacity(flattened.len());
-        for field in flattened {
-            let kind = match field.handle {
-                1 if field.bit_count == 32 && field.path.ends_with(".ElapsedSeconds") => {
-                    FieldType::Float
-                }
-                2 if field.bit_count == 192 && field.path.ends_with(".Location") => {
-                    FieldType::VectorDouble
-                }
-                3 if field.bit_count == 192 && field.path.ends_with(".Velocity") => {
-                    FieldType::VectorDouble
-                }
-                _ => {
-                    self.stats.array_leaf_decode_errors += 1;
-                    return;
-                }
-            };
-            if !paths.insert(field.path.clone())
-                || (kind == FieldType::VectorDouble
-                    && !field.raw_bits.chunks_exact(8).all(|chunk| {
-                        f64::from_le_bytes(chunk.try_into().expect("eight-byte chunk")).is_finite()
-                    }))
-            {
-                self.stats.array_leaf_decode_errors += 1;
-                return;
-            }
-            let prior_leaf_errors = self.stats.array_leaf_decode_errors;
-            let columns = super::blobs::decode_leaf_with_stats(
-                kind,
-                &field.raw_bits,
-                field.bit_count,
-                &mut self.stats.array_leaf_decode_errors,
-            );
-            if !(match kind {
-                FieldType::Float => columns.1.is_some_and(f64::is_finite),
-                FieldType::VectorDouble => columns.3.is_some(),
-                _ => false,
-            }) {
-                if self.stats.array_leaf_decode_errors == prior_leaf_errors {
-                    self.stats.array_leaf_decode_errors += 1;
-                }
-                return;
-            }
-            decoded.push((field, columns));
-        }
-        for (field, columns) in decoded {
-            self.push_child(
-                rpc_handle,
-                &[prefix, &field.path],
-                field.bit_count,
-                &field.raw_bits,
-                columns,
-            );
-            self.stats.fields_emitted += 1;
-        }
-    }
-
-    /// Emit fully validated `WorldLocation` leaves while retaining the raw parent.
-    fn emit_targeting_world_location_array(
-        &mut self,
-        prefix: &str,
-        rpc_handle: u32,
-        raw: &[u8],
-        bit_count: u32,
-    ) {
-        let declared = [None, Some("WorldLocation")];
-        let mut isolated = vrf_decode::ArrayDecodeStats::default();
-        let flattened = decode_struct_array_exact(raw, bit_count, &declared, &mut isolated);
-        // Folded in before anything else reads the running total, so every
-        // walk is counted whether or not its children are accepted below.
-        self.stats.array.merge_from(&isolated);
-        let diagnostics_clean = isolated.is_clean();
-        let decoded_elements = isolated.elements_decoded;
-        let decoded_fields = isolated.fields_emitted;
-        let unique_paths = flattened
-            .iter()
-            .map(|field| field.path.as_str())
-            .collect::<HashSet<_>>()
-            .len()
-            == flattened.len();
-        if !diagnostics_clean
-            || decoded_elements != flattened.len() as u64
-            || decoded_fields != flattened.len() as u64
-            || !unique_paths
-            || flattened.iter().any(|field| {
-                field.handle != 1
-                    || field.bit_count != 192
-                    || !field.path.ends_with(".WorldLocation")
-                    || !field.raw_bits.chunks_exact(8).all(|chunk| {
-                        f64::from_le_bytes(chunk.try_into().expect("eight-byte chunk")).is_finite()
+        let children: Option<Vec<_>> = complete
+            .then(|| {
+                flattened
+                    .into_iter()
+                    .map(|field| {
+                        let &(.., kind) = members.iter().find(|&&(handle, width, suffix, _)| {
+                            field.handle == handle
+                                && field.bit_count == width
+                                && field.path.ends_with(suffix)
+                        })?;
+                        let finite = kind != FieldType::VectorDouble
+                            || field.raw_bits.chunks_exact(8).all(|chunk| {
+                                f64::from_le_bytes(chunk.try_into().expect("eight-byte chunk"))
+                                    .is_finite()
+                            });
+                        if !finite || !paths.insert(field.path.clone()) {
+                            return None;
+                        }
+                        let columns = super::blobs::decode_leaf_with_stats(
+                            kind,
+                            &field.raw_bits,
+                            field.bit_count,
+                            &mut self.stats.array_leaf_decode_errors,
+                        );
+                        let typed = match kind {
+                            FieldType::Float => columns.1.is_some_and(f64::is_finite),
+                            _ => columns.3.is_some(),
+                        };
+                        typed.then_some((field, columns))
                     })
+                    .collect()
             })
-        {
-            if diagnostics_clean {
-                self.stats.array_leaf_decode_errors =
-                    self.stats.array_leaf_decode_errors.saturating_add(1);
+            .flatten();
+        let Some(children) = children else {
+            if self.stats.array_leaf_decode_errors == prior_errors {
+                self.stats.array_leaf_decode_errors += 1;
             }
-            return;
-        }
-        let decoded: Option<Vec<_>> = flattened
-            .into_iter()
-            .map(|field| {
-                let columns = super::blobs::decode_leaf_with_stats(
-                    FieldType::VectorDouble,
-                    &field.raw_bits,
-                    field.bit_count,
-                    &mut self.stats.array_leaf_decode_errors,
-                );
-                columns.3.as_ref()?;
-                Some((field, columns))
-            })
-            .collect();
-        let Some(decoded) = decoded else {
-            return;
+            return 0;
         };
-        for (field, columns) in decoded {
+        let pushed = children.len() as u64;
+        for (field, columns) in children {
             self.push_child(
                 rpc_handle,
                 &[prefix, &field.path],
@@ -526,11 +426,8 @@ impl ExportSink<'_> {
                 &field.raw_bits,
                 columns,
             );
-            self.stats.targeting_world_locations_decoded = self
-                .stats
-                .targeting_world_locations_decoded
-                .saturating_add(1);
         }
+        pushed
     }
 
     /// [`Self::compute_rpc_param_group_path`], memoised in [`RpcParamGroupMemo`].
@@ -655,18 +552,6 @@ fn life_change_member_type(path: &str) -> Option<FieldType> {
     }
 }
 
-/// Whether an RPC parameter is an effect-array blob. On 02d4d478 eleven
-/// functions declare a `FloatValues`, `ObjectValues` or `VectorValues`
-/// parameter, all 61,617 payloads decode as this format with an exact window,
-/// and no other name does -- so the match is on the name, not the function.
-/// Shot RPC arrays take the same additive path; the Python adapter reads its
-/// shot inputs and wire payload from the preserved `raw_bits` either way.
-fn effect_array_kind_for_param(param_name: Option<&str>) -> Option<EffectArrayKind> {
-    // A parameter whose name the group did not resolve is emitted as `_h{N}`,
-    // and a handle does not identify the element type across functions.
-    EffectArrayKind::from_param_name(param_name?)
-}
-
 /// Map an effect-blob failure onto the overlay report's error kinds, which must
 /// mean the same here as for overlay failures: the kind is the report's only
 /// "why" column. No wildcard, so a new `EffectBlobError` does not compile until
@@ -696,6 +581,7 @@ fn effect_error_kind(err: &EffectBlobError) -> DecodeErrorKind {
         // overlay string or byte array too, not a reader running out.
         EffectBlobError::PayloadTooLarge { .. }
         | EffectBlobError::IndexOutOfBounds { .. }
+        | EffectBlobError::NonAscendingIndex { .. }
         | EffectBlobError::TooManyFields { .. }
         | EffectBlobError::BitLengthExceedsBuffer { .. }
         | EffectBlobError::UnexpectedPayloadWidth { .. }
@@ -738,6 +624,7 @@ mod tests {
             BitIo,
             ArrayCountTooLarge,
             IndexOutOfBounds,
+            NonAscendingIndex,
             PayloadTooLarge,
             TooManyFields,
             BitLengthExceedsBuffer,
@@ -809,6 +696,13 @@ mod tests {
             ),
             (
                 EffectBlobError::IndexOutOfBounds { index: 2, count: 2 },
+                "Malformed",
+            ),
+            (
+                EffectBlobError::NonAscendingIndex {
+                    index: 0,
+                    previous: 0,
+                },
                 "Malformed",
             ),
             (

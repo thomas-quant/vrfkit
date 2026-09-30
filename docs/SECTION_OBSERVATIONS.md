@@ -1,10 +1,12 @@
-# Serialized section observations
+# Section, healing and timeline observations
 
-`tools/extract_section_observations.py` retains and validates the five measured
-DamageableComponent routes from one Parquet export:
+Three commands derive views of the five measured `DamageableComponent` routes
+from one export:
 
 ```powershell
 python tools/extract_section_observations.py --export out/replay --out out/sections.json
+python tools/extract_healing_observations.py --export out/replay --out out/healing.json
+python tools/section_timeline.py --export out/replay --out out/timeline.json
 ```
 
 | Route | Array | Serialized amount |
@@ -15,117 +17,102 @@ python tools/extract_section_observations.py --export out/replay --out out/secti
 | MulticastNotifyOverhealDecay | LifeChangeBySection | DecayApplied |
 | MulticastSectionLifeChange | LifeChangeEvents | No amount relation assigned |
 
-Each section records ChangedComponent, LifeResult, DeltaLife and
-bAliveAfterChange. The tool checks the complete raw array window and compares
-every emitted member with its corresponding raw parent bits and wire order.
-The declarations used to interpret these members have measured handle/name/
-checksum identities from builds 13.01, 13.02, 13.04 and 13.05. Other RPC fields
-remain available as raw source evidence without new semantic interpretation.
+## Shared contract
 
-## Observation identity and missing information
+Each section records `ChangedComponent`, `LifeResult`, `DeltaLife` and
+`bAliveAfterChange`; the tools check the complete raw array window and compare
+every emitted member with its raw parent bits and wire order, against the
+measured handle/name/checksum declarations. An observation groups rows by
+time, packet, channel, actor, object, export group and outer RPC handle. That
+is not an RPC invocation ID, so group counts are not unique gameplay actions.
 
-A record groups rows by time, packet, channel, actor, object, export group and
-outer RPC handle. Groups retain physical Parquet order. These coordinates are
-not an independently proven RPC invocation identifier; group counts must not
-be presented as unique gameplay actions.
+`LifeResult` is reported section state. The amount comparison sums section
+deltas in f64, rounds once to f32 and compares exact f32 bits, signed zero
+included (iterative f32 accumulation is reported beside it, never
+substituted): DamageTaken against the negative sum, HealTaken and
+DecayApplied against the positive sum. A missing value is never filled with
+100, zero or a prior state; values above 100 and zero with a true alive flag
+stay as sent. None of this is effective HP, armour absorption, death or
+healing credit. Checkpoint rows stay separate state evidence, never appended
+to main observations or counted as actions.
 
-The output distinguishes a parentless RPC, malformed or orphan array children,
-an array with resolved non-health sections, and unresolved section references.
-A missing HealthDamageSection match is not evidence of absence when another
-section's identity remains unknown. Multiple health references are labelled
-separately. No missing value is filled with 100, zero or a preceding state.
+Every tool hashes its input tables before and after reading and fails if one
+changed; `provenance.implementation_sha256` records its own sources once.
+Raw/typed integrity conflicts fail before any output; other malformed or
+unsupported observations stay labelled with their source rows. The JSON write
+is atomic, and `--out` is refused when it names an export table, the manifest
+or one of the tool's sources.
 
-An amount can remain readable when its array is absent. The scalar is retained
-independently, while the parentless observation supplies no section state.
-RespawnNumber, VictimRespawnNumber and LifeChangeEventIndex remain separate raw
-tokens. In particular, reset words are not assigned signedness from their
-names, and inventory properties are not substituted for component lifetimes.
+## Sections
 
-## What the values establish
+`extract_section_observations.py` writes `route_declarations`,
+`observations`, `checkpoint_observations`, `counts` and `provenance` (schema
+1). `source_rows` keeps every selected row, raw window, typed columns and
+physical ordinal. Check `section_state.eligible_for_state_comparison`,
+`schema_errors` and `ambiguity_reasons` before using the interpreted members;
+`section_state.relation` shows a disagreeing amount rather than zeroing it.
+Parentless RPCs, orphan children, non-health sections and unresolved section
+references are distinguished, and `RespawnNumber`, `VictimRespawnNumber` and
+`LifeChangeEventIndex` stay raw tokens. Counts include every route and zero
+bucket.
 
-LifeResult is reported section state. DeltaLife is a serialized member whose
-relationship to that state depends on the route and preceding observations.
-The amount comparison sums section deltas in f64, rounds once to f32 and
-compares exact f32 bits, including signed zero. Iterative f32 accumulation is
-also reported; it can produce a different result and is not silently substituted.
+## Healing
 
-DamageTaken is compared with the negative of the section delta sum. HealTaken
-and DecayApplied are compared with the positive sum. This scalar comparison
-does not establish a continuous state transition. DecayApplied has positive
-magnitude while the corresponding section can decrease. Reset observations
-have no assigned delta-edge relation.
+`extract_healing_observations.py` reads `MulticastNotifyHeal` through the
+section parser and adds the declaration and heal-name gates, source and
+recipient corroboration, and summaries of validated, unambiguous main
+observations only (check `amount.status` and `ambiguity_reasons`). A missing
+`HealCauser` does not invalidate a verified amount. `EventInstigatorPawn` names
+an open character pawn; `EventInstigator` is that pawn's PlayerController and
+never joins to `actors.parquet` -- join through the pawn's `Controller` or
+`Owner`. Each of `HealCauser`, `EventInstigator` and `EventInstigatorPawn`
+must carry a typed `value_i64` equal to its raw window, so an export older than
+that typing fails with `untyped reference`: re-export it.
+`counts.source_edge_status` tallies every edge status with zeros, because an
+`invalid` edge keeps its amount validated. Recipient membership covers every
+pawn a manifest player's `SpawnedCharacter` named (`tools/player_identity.py`).
 
-Values above 100 and zero values with a true alive flag remain unchanged.
-They do not establish pool maxima, death, effective HP restored, armour
-absorption, or healing credit. Actor lifetimes, respawns and ambiguous event
-ordering need a separate validated join before such conclusions are possible.
+## Timeline
 
-## Output contract
+`section_timeline.py` writes one document of main-stream `nodes`, `barriers`,
+`scalar_warnings` and counts. Each node keeps its source observation, section
+index, identity, values and its observed same-reference predecessor with the
+numerical difference. `scalar_relation` is the extractor's amount comparison;
+`route_arithmetic` tests f32(previous + DeltaLife) for damage and healing and
+f32(previous - DeltaLife) for overheal decay, and resets have no incoming
+edge. Mismatches and missing predecessors stay visible.
 
-The schema-version-1 JSON contains `route_declarations`, `observations`,
-`checkpoint_observations`, `counts` and `provenance`.
+Two ordering policies decide `continuity.eligible` (time order) and
+`packet_view.eligible` (packet order); `continuity.game_life` and
+`component_life` are always `unproved`. Both need matching active actor and
+channel open records (dormancy is not destruction); ties, regressed clocks,
+actor/object and scope changes, resets, malformed observations and missing or
+changed opaque tokens censor a link. Packet order also orders distinct
+packets within one millisecond, but same-packet observations stay tied, and
+checkpoint packet IDs are a separate counter never spliced in
+(`provenance.population` is `main_only`).
 
-- `source_rows` preserves every selected row, its raw window, typed columns,
-  coordinates and physical ordinal. Parent and child evidence is not extra
-  gameplay activity.
-- `section_state.status` describes raw-array validation. Check
-  `eligible_for_state_comparison`, `schema_errors` and `ambiguity_reasons`
-  before using its interpreted members. Eligibility means the local serialized
-  observation passed these checks; it does not prove continuity with another
-  observation or a player identity.
-- `section_state.relation` records the scalar comparison where applicable.
-  Disagreement is visible, and does not become a zero amount.
-- Checkpoint rows retain checkpoint index and ID and remain separate state
-  evidence. They are not appended to main observations or counted as actions.
-- Counts include explicit zero buckets and each of the five routes, including
-  routes absent from a file. Missing unused declarations do not invalidate
-  unrelated observed routes.
+## Measured corpus
 
-Input tables and implementation sources are hashed before and after extraction.
-Raw/typed integrity conflicts fail before publishing output. Other malformed
-or unsupported observations remain labelled with their source evidence. The
-JSON write is atomic, and existing export files and implementation files are
-protected from output aliases, including hardlinks.
+All 714 exports of builds 13.01, 13.02, 13.04 and 13.05 were compared with
+independent readers:
 
-The existing [healing extractor](HEALING_OBSERVATIONS.md) additionally resolves
-causer and recipient corroboration. Its results remain separate; this broader
-section view does not replace those checks or add player-credit semantics.
+| Population | Count |
+|---|---:|
+| Coordinate groups / sections / source rows | 2,883,168 / 4,153,928 / 49,626,044 |
+| Observations: Damage Base / Point / Heal / Overheal Decay / Section Life Change | 220,823 / 447,688 / 1,526,040 / 387,660 / 300,957 |
+| Parentless observations (Damage Base / Point) | 1,536 / 99 |
+| Heal groups without `HealCauser` | 7,833 |
+| Timeline barriers / scalar warnings | 1,635 / 46 |
+| Eligible comparisons, time / packet order | 1,874,166 / 1,892,315 |
+| Eligible comparisons disagreeing with the route arithmetic, time / packet | 13 / 15 |
 
-## Measured corpus and verification
-
-The producer and an independent raw-array reader were compared over all 714
-accepted exports: 215 on build 13.01, 204 on 13.02, 108 on 13.04 and 187 on
-13.05. Every observation's source rows, coordinates, raw/typed values, section
-references, scalar comparisons, tokens, declaration evidence and aggregates
-matched. The results retain 2,883,168 coordinate groups, 4,153,928 sections and
-49,626,044 source rows in 714 JSON files (39,397,631,405 bytes).
-
-| Route | Observations | Raw-validated arrays | Parentless observations |
-|---|---:|---:|---:|
-| Damage Base | 220,823 | 219,287 | 1,536 |
-| Damage Point | 447,688 | 447,589 | 99 |
-| Heal | 1,526,040 | 1,526,040 | 0 |
-| Overheal Decay | 387,660 | 387,660 | 0 |
-| Section Life Change | 300,957 | 300,957 | 0 |
-
-Schema-invalid and invalid-array counts are zero. No matching checkpoint rows
-were observed. This does not establish future checkpoint schemas or justify
-merging checkpoint state into main observations.
-
-There are 46 scalar-comparison disagreements in 45 exports, all on Damage
-Point. Every difference is one positive f32 ULP, at most 0.0000152587890625.
-Those 46 scalars agree with iterative f32 accumulation. However, iterative
-accumulation disagreed on 1,297 observations in the 11-file pilot, where
-rounding once agreed. Neither rule is promoted to a universal game algorithm.
-The exact values and both calculations remain available, and all 46 warnings
-and their excluded comparison eligibility are independently verified.
-
-All input and implementation hashes matched before and after processing.
-
-Focused behavioral checks cover complete arrays across all five routes,
-declaration changes, parent/child disagreement, strict values, ordering,
-missing records, section identity and output aliases. Removing each of four
-production guards makes its targeted check fail. The independent comparison
-rejects eleven altered outputs and three altered exception reports; normal
-JSON reserialization passes. This derived view does not increase typed-row
-coverage or establish a new percentage of semantic completeness.
+No checkpoint rows matched these routes. The 46 scalar warnings are all Damage
+Point, each one positive f32 ULP; they agree with iterative accumulation,
+which disagreed on 1,297 observations of an 11-file pilot, so neither rule is
+a game algorithm. The 13 time-order disagreements are OverhealDecay ending at
+a `LifeResult` of zero with a small positive one-step residual; the packet
+view adds two more of the same shape. The values stay as sent. The heal edge
+typing came later: on three fresh exports (13.01, 13.05, 13.06) all 7,711
+heal observations validated, with zero `invalid`, `null` or `duplicate`
+edges.

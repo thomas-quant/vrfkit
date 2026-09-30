@@ -33,7 +33,7 @@
 //! ```
 //!
 //! `PathIsString`'s polarity is the opposite of an FName's leading byte, where
-//! nonzero means "hardcoded index"; neither FName reader may be pointed at it.
+//! nonzero means "hardcoded index"; the FName reader must not be pointed at it.
 //!
 //! # NetFieldExportGroup
 //!
@@ -50,77 +50,85 @@
 //!         ExportName         : FName
 //! ```
 //!
-//! `NumNetFieldExports` is IntPacked while the section count is a u32. Read as
-//! a u32 it doubles small counts (IntPacked shifts left by one) and overruns
-//! into plausible garbage, which is why [`read_checkpoint_tables`] ends by
-//! asserting the prologue's frame offset.
+//! Read as a u32, `NumNetFieldExports` doubles small counts and overruns into
+//! plausible garbage, which is why [`read_checkpoint_tables`] ends by asserting
+//! the prologue's frame offset.
 
 use vrf_bitio::{BitError, BitReader};
 
 use crate::cache::NetGuidCache;
 use crate::error::{Result, SchemaError};
-use crate::export::{NetFieldExport, NetFieldExportGroup, render_fname};
+use crate::export::{NetFieldExport, NetFieldExportGroup};
 use crate::guid::NetworkGuid;
-use crate::reader::{MAX_FIELDS_PER_GROUP, MAX_FSTRING_BYTES};
+use crate::reader::{MAX_FIELDS_PER_GROUP, MAX_FSTRING_BYTES, read_fname};
 
 /// Streaming observer for checkpoint schema records. Borrowed strings are valid
 /// only for the callback; the cache receives its own owned copy afterwards.
+/// Every method defaults to a no-op.
 pub trait CheckpointTableSink {
     type Error;
 
     #[allow(clippy::too_many_arguments)]
     fn on_guid_entry(
         &mut self,
-        ordinal: u32,
-        guid: u32,
-        outer: u32,
-        path_is_string: bool,
-        literal_path: Option<&str>,
-        name_index: Option<u32>,
-        flags: u8,
-    ) -> core::result::Result<(), Self::Error>;
+        _ordinal: u32,
+        _guid: u32,
+        _outer: u32,
+        _path_is_string: bool,
+        _literal_path: Option<&str>,
+        _name_index: Option<u32>,
+        _flags: u8,
+    ) -> core::result::Result<(), Self::Error> {
+        Ok(())
+    }
 
     fn on_export_group(
         &mut self,
-        ordinal: u32,
-        path_name_index: u32,
-        group_path: &str,
-        declared_slots: u32,
-    ) -> core::result::Result<(), Self::Error>;
+        _ordinal: u32,
+        _path_name_index: u32,
+        _group_path: &str,
+        _declared_slots: u32,
+    ) -> core::result::Result<(), Self::Error> {
+        Ok(())
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn on_export_field(
         &mut self,
-        group_ordinal: u32,
-        path_name_index: u32,
-        slot: u32,
-        handle: u32,
-        checksum: u32,
-        rendered_name: &str,
-        exported_flag: u8,
-        fname_kind: u8,
-        base: Option<&str>,
-        index: Option<u32>,
-        number: Option<i32>,
-    ) -> core::result::Result<(), Self::Error>;
+        _group_ordinal: u32,
+        _path_name_index: u32,
+        _slot: u32,
+        _handle: u32,
+        _checksum: u32,
+        _rendered_name: &str,
+        _exported_flag: u8,
+        _fname_kind: u8,
+        _base: Option<&str>,
+        _index: Option<u32>,
+        _number: Option<i32>,
+    ) -> core::result::Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointReadError<E> {
     #[error(transparent)]
     Schema(#[from] SchemaError),
-    #[error(transparent)]
-    Bit(#[from] BitError),
     #[error("checkpoint table observer failed")]
     Sink(E),
 }
 
-/// Sanity bound on the guid-cache entry count; the largest corpus checkpoint
-/// carries about 12,000.
+impl<E> From<BitError> for CheckpointReadError<E> {
+    fn from(error: BitError) -> Self {
+        Self::Schema(error.into())
+    }
+}
+
+/// The largest corpus checkpoint carries about 12,000 guid entries.
 const MAX_GUID_ENTRIES: u32 = 1_000_000;
 
-/// Sanity bound on the export-group count; the largest corpus checkpoint
-/// declares 543.
+/// The largest corpus checkpoint declares 543 export groups.
 const MAX_GROUPS: u32 = 100_000;
 
 /// What [`read_checkpoint_tables`] consumed, for the caller to report.
@@ -134,25 +142,20 @@ pub struct CheckpointTables {
     pub exported_fields: u32,
     /// Byte offset where the DemoFrame begins.
     pub frame_offset: usize,
-    /// Entries whose path arrived as a GUID-path table index, not a string.
-    /// The name is historical: these are not hardcoded Unreal EName values.
-    pub hardcoded_paths: u32,
+    /// Entries whose path arrived as an index into the literal paths (not an EName).
+    pub indexed_paths: u32,
     /// Literal GUID-path entries read, in either mode.
     pub literal_paths: u32,
     /// Wire indices resolved through preceding literal paths.
     pub resolved_path_indices: u32,
-    /// Always zero on success: a collision returns
-    /// [`SchemaError::CheckpointGroupCollision`] before frame decode.
-    pub group_collisions: u32,
 }
 
 /// Interpretation of checkpoint GUID path indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointPathMode {
-    /// Retain the former decimal rendering for callers comparing legacy output.
+    /// The index in decimal, for comparing with legacy output.
     LegacyDecimal,
-    /// Resolve zero-based indices into this checkpoint's preceding literal GUID
-    /// paths: the default, measured as described at [`read_checkpoint_tables`].
+    /// Resolve an index into this checkpoint's preceding literal paths (the default).
     LiteralPathTable,
 }
 
@@ -167,12 +170,10 @@ pub enum CheckpointPathMode {
 ///
 /// An indexed path is a zero-based position among the literal paths before it
 /// in this checkpoint; references are not appended, and the table resets per
-/// call. Measured on 714 replays of 13.01-13.05 (2026-09-08), then matched
-/// against the main stream's own paths on 1,018 replays of all 24 builds
-/// (2026-09-28); counts and method are in docs/CHECKPOINT_PATH_RESOLUTION.md,
-/// and the export guards repeat the comparison. That is agreement between two
-/// readers, not an engine specification. An index past the preceding literals
-/// is rejected before the frame; raw indices stay available to
+/// call. It matches the main stream's own paths on 1,018 replays of 24 builds
+/// (docs/CHECKPOINT_PATH_RESOLUTION.md; the export guards repeat the check):
+/// agreement between two readers, not an engine specification. An index past
+/// the preceding literals is rejected; raw indices stay available to
 /// [`CheckpointTableSink`], and [`CheckpointPathMode::LegacyDecimal`] (via
 /// [`read_checkpoint_tables_with_sink_mode`]) reproduces legacy paths.
 ///
@@ -180,14 +181,12 @@ pub enum CheckpointPathMode {
 ///
 /// Beyond truncation, each `Checkpoint*` [`SchemaError`] is a check that the
 /// cursor is still aligned. `PathIsString` accepts only 0 and 1; the FName
-/// kind and exported-slot flag accept any nonzero byte, as the legacy reader
-/// did.
+/// kind and exported-slot flag accept any nonzero byte.
 pub fn read_checkpoint_tables(data: &[u8], cache: &mut NetGuidCache) -> Result<CheckpointTables> {
     let mut sink = NoopCheckpointTableSink;
     match read_checkpoint_tables_with_sink(data, cache, &mut sink) {
         Ok(tables) => Ok(tables),
         Err(CheckpointReadError::Schema(error)) => Err(error),
-        Err(CheckpointReadError::Bit(error)) => Err(SchemaError::Bitio(error)),
         Err(CheckpointReadError::Sink(never)) => match never {},
     }
 }
@@ -196,46 +195,6 @@ struct NoopCheckpointTableSink;
 
 impl CheckpointTableSink for NoopCheckpointTableSink {
     type Error = core::convert::Infallible;
-
-    fn on_guid_entry(
-        &mut self,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: bool,
-        _: Option<&str>,
-        _: Option<u32>,
-        _: u8,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn on_export_group(
-        &mut self,
-        _: u32,
-        _: u32,
-        _: &str,
-        _: u32,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn on_export_field(
-        &mut self,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: u32,
-        _: &str,
-        _: u8,
-        _: u8,
-        _: Option<&str>,
-        _: Option<u32>,
-        _: Option<i32>,
-    ) -> core::result::Result<(), Self::Error> {
-        Ok(())
-    }
 }
 
 /// [`read_checkpoint_tables`], delivering each record to `sink` after its wire
@@ -275,7 +234,7 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         .into());
     }
 
-    let mut hardcoded_paths = 0u32;
+    let mut indexed_paths = 0u32;
     let mut literal_paths = Vec::new();
     let mut literal_count = 0u32;
     let mut resolved_path_indices = 0u32;
@@ -293,7 +252,7 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
                 (true, path, None)
             }
             0 => {
-                hardcoded_paths += 1;
+                indexed_paths += 1;
                 let index = reader.read_int_packed()?;
                 let path = match mode {
                     CheckpointPathMode::LegacyDecimal => index.to_string(),
@@ -356,13 +315,8 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
             .into());
         }
 
-        sink.on_export_group(group_ordinal, path_name_index, &path, declared)
-            .map_err(CheckpointReadError::Sink)?;
-
-        // Exactly the two lookups `add_export_group` merges on: `by_path`
-        // (aliases included) and `by_index`. The cache is fresh, so a hit
-        // means this checkpoint declared the group twice; refuse it before an
-        // ambiguous cache reaches frame decode.
+        // The two lookups `add_export_group` merges on (`by_path` with aliases,
+        // `by_index`): in a fresh cache, a hit means a group declared twice.
         if cache.get_group_by_index(path_name_index).is_some()
             || cache.get_group_by_path(&path).is_some()
         {
@@ -372,6 +326,9 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
             }
             .into());
         }
+
+        sink.on_export_group(group_ordinal, path_name_index, &path, declared)
+            .map_err(CheckpointReadError::Sink)?;
 
         cache.add_export_group(NetFieldExportGroup::new(
             path.clone(),
@@ -394,19 +351,19 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
                 .into());
             }
             let compatible_checksum = reader.read_u32()?;
-            let observed_name = read_observed_fname(&mut reader)?;
+            let name = read_fname(&mut reader)?;
             sink.on_export_field(
                 group_ordinal,
                 path_name_index,
                 slot,
                 handle,
                 compatible_checksum,
-                &observed_name.rendered,
+                &name.rendered,
                 exported_flag,
-                observed_name.kind,
-                observed_name.base.as_deref(),
-                observed_name.index,
-                observed_name.number,
+                name.kind,
+                name.base.as_deref(),
+                name.index,
+                name.number,
             )
             .map_err(CheckpointReadError::Sink)?;
             cache.set_field_on_group(
@@ -414,14 +371,14 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
                 NetFieldExport {
                     handle,
                     compatible_checksum,
-                    name: observed_name.rendered,
+                    name: name.rendered,
                 },
             );
             exported_fields += 1;
         }
     }
 
-    // -- The one end-to-end check -----------------------------------------
+    // The one end-to-end check.
     let map_end = (reader.position() / 8) as usize;
     let expected = frame_offset_word as usize + 8;
     if map_end != expected {
@@ -433,59 +390,21 @@ pub fn read_checkpoint_tables_with_sink_mode<S: CheckpointTableSink>(
         group_count,
         exported_fields,
         frame_offset: map_end,
-        hardcoded_paths,
+        indexed_paths,
         literal_paths: literal_count,
         resolved_path_indices,
-        group_collisions: 0,
     })
-}
-
-/// A checkpoint field's FName: the rendered name plus the raw parts the sink
-/// reports.
-struct ObservedFName {
-    rendered: String,
-    kind: u8,
-    base: Option<String>,
-    index: Option<u32>,
-    number: Option<i32>,
-}
-
-/// The FName encoding `reader.rs`'s `read_fname` reads (a kind byte, then an
-/// IntPacked index or an FString and i32 number), keeping the raw parts; both
-/// render through [`render_fname`].
-fn read_observed_fname(reader: &mut BitReader<'_>) -> Result<ObservedFName> {
-    let kind = reader.read_u8()?;
-    if kind != 0 {
-        let index = reader.read_int_packed()?;
-        Ok(ObservedFName {
-            rendered: index.to_string(),
-            kind,
-            base: None,
-            index: Some(index),
-            number: None,
-        })
-    } else {
-        let base = reader.read_fstring(MAX_FSTRING_BYTES)?;
-        let number = reader.read_i32()?;
-        Ok(ObservedFName {
-            rendered: render_fname(base.clone(), number),
-            kind,
-            base: Some(base),
-            index: None,
-            number: Some(number),
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::wire::int_packed;
+    use vrf_testkit::{add_fstring_utf16, add_i32, add_int_packed, add_u32};
 
     /// `(net_guid, outer_guid, path or None for a hardcoded name, name index)`.
     type GuidSpec<'a> = (u32, u32, Option<&'a str>, u32);
-    /// `(group path, declared slot count, exported (handle, name) pairs)`.
-    type GroupSpec<'a> = (&'a str, u32, &'a [(u32, &'a str)]);
+    /// `(path, path name index, declared slots, exported (handle, name, FName number))`.
+    type GroupSpec<'a> = (&'a str, u32, u32, &'a [(u32, &'a str, i32)]);
     type GuidEvent = (u32, bool, Option<String>, Option<u32>, u8);
     type FieldEvent = (
         u32,
@@ -515,64 +434,41 @@ mod tests {
     /// Build an archive: prologue, guid entries, group map, then `frame`.
     fn build(guids: &[GuidSpec<'_>], groups: &[GroupSpec<'_>], frame: &[u8]) -> Vec<u8> {
         let mut body = Vec::new();
-        for (guid, outer, path, name_index) in guids {
-            body.extend(int_packed(*guid));
-            body.extend(int_packed(*outer));
+        for &(guid, outer, path, name_index) in guids {
+            add_int_packed(&mut body, guid);
+            add_int_packed(&mut body, outer);
             match path {
                 Some(p) => {
                     body.push(1);
-                    body.extend(fstring_utf16(p));
+                    add_fstring_utf16(&mut body, p);
                 }
                 None => {
                     body.push(0);
-                    body.extend(int_packed(*name_index));
+                    add_int_packed(&mut body, name_index);
                 }
             }
             body.push(0x03);
         }
-        body.extend_from_slice(&(groups.len() as u32).to_le_bytes());
-        for (path, declared, fields) in groups {
-            body.extend(fstring_utf16(path));
-            body.extend(int_packed(7));
-            body.extend(int_packed(*declared));
-            for slot in 0..*declared {
-                match fields.iter().find(|(h, _)| *h == slot) {
-                    Some((h, name)) => {
+        add_u32(&mut body, groups.len() as u32);
+        for &(path, index, declared, fields) in groups {
+            add_fstring_utf16(&mut body, path);
+            add_int_packed(&mut body, index);
+            add_int_packed(&mut body, declared);
+            for slot in 0..declared {
+                match fields.iter().find(|field| field.0 == slot) {
+                    Some(&(handle, name, number)) => {
                         body.push(1);
-                        body.extend(int_packed(*h));
-                        body.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+                        add_int_packed(&mut body, handle);
+                        add_u32(&mut body, 0xdead_beef);
                         body.push(0); // FName: not hardcoded
-                        body.extend(fstring_utf16(name));
-                        body.extend_from_slice(&0i32.to_le_bytes());
+                        add_fstring_utf16(&mut body, name);
+                        add_i32(&mut body, number);
                     }
                     None => body.push(0),
                 }
             }
         }
         archive(guids.len() as u32, &body, frame)
-    }
-
-    /// UTF-16LE with a negative length, which is how every corpus string
-    /// arrives.
-    fn fstring_utf16(s: &str) -> Vec<u8> {
-        let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut out = (-(units.len() as i32)).to_le_bytes().to_vec();
-        for u in units {
-            out.extend_from_slice(&u.to_le_bytes());
-        }
-        out
-    }
-
-    /// An archive with no GUID entries and one slotless group per
-    /// `(path, path_name_index)`; `build` writes index 7 for every group.
-    fn groups_at(groups: &[(&str, u32)]) -> Vec<u8> {
-        let mut body = (groups.len() as u32).to_le_bytes().to_vec();
-        for (path, index) in groups {
-            body.extend(fstring_utf16(path));
-            body.extend(int_packed(*index));
-            body.extend(int_packed(0)); // no field slots
-        }
-        archive(0, &body, &[])
     }
 
     #[derive(Default)]
@@ -656,7 +552,7 @@ mod tests {
     fn observer_reports_raw_variants_before_cache_storage() {
         let archive = build(
             &[(7, 0, Some("/Game/X"), 0), (8, 7, None, 0)],
-            &[("/Script/G.Thing", 2, &[(1, "Value")])],
+            &[("/Script/G.Thing", 7, 2, &[(1, "Value", 1)])],
             &[],
         );
         let mut cache = NetGuidCache::new();
@@ -674,12 +570,12 @@ mod tests {
                 7,
                 1,
                 1,
-                "Value".into(),
+                "Value_0".into(),
                 1,
                 0,
                 Some("Value".into()),
                 None,
-                Some(0),
+                Some(1),
             )]
         );
         assert_eq!(cache.get_path_by_guid(7), Some("/Game/X"));
@@ -739,7 +635,7 @@ mod tests {
                 (7, 0, Some("/Game/First"), 0),
                 (8, 0, Some("/Game/Second"), 0),
             ],
-            &[("/Script/G.Thing", 0, &[])],
+            &[("/Script/G.Thing", 7, 0, &[])],
             &[0xA5],
         );
         let mut cache = NetGuidCache::new();
@@ -755,7 +651,7 @@ mod tests {
 
     #[test]
     fn observer_sees_zero_slot_group() {
-        let archive = build(&[], &[("/Script/G.Empty", 0, &[])], &[0xA5]);
+        let archive = build(&[], &[("/Script/G.Empty", 7, 0, &[])], &[0xA5]);
         let mut cache = NetGuidCache::new();
         let mut sink = RecordingSink::default();
         read_checkpoint_tables_with_sink(&archive, &mut cache, &mut sink).unwrap();
@@ -767,14 +663,14 @@ mod tests {
     #[test]
     fn observer_preserves_nonzero_wire_flags_and_hardcoded_fname_index() {
         let mut body = 1u32.to_le_bytes().to_vec(); // one group
-        body.extend(fstring_utf16("/Script/G.Raw"));
-        body.extend(int_packed(42));
-        body.extend(int_packed(1));
+        add_fstring_utf16(&mut body, "/Script/G.Raw");
+        add_int_packed(&mut body, 42);
+        add_int_packed(&mut body, 1);
         body.push(9); // nonzero bExported is accepted verbatim
-        body.extend(int_packed(0));
-        body.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+        add_int_packed(&mut body, 0);
+        add_u32(&mut body, 0xdead_beef);
         body.push(2); // nonzero FName kind is a hardcoded index, verbatim
-        body.extend(int_packed(216));
+        add_int_packed(&mut body, 216);
 
         let mut cache = NetGuidCache::new();
         let mut sink = RecordingSink::default();
@@ -804,7 +700,7 @@ mod tests {
                 (9, 7, None, 0),
                 (10, 8, None, 1),
             ],
-            &[("/Script/G.Thing", 2, &[(1, "Value")])],
+            &[("/Script/G.Thing", 7, 2, &[(1, "Value", 0)])],
             &[0xa5],
         );
         let mut legacy_cache = NetGuidCache::new();
@@ -826,7 +722,7 @@ mod tests {
         assert_eq!(measured.frame_offset, legacy.frame_offset);
         assert_eq!(measured.guid_count, legacy.guid_count);
         assert_eq!(measured.exported_fields, legacy.exported_fields);
-        assert_eq!(measured.hardcoded_paths, 2);
+        assert_eq!(measured.indexed_paths, 2);
         assert_eq!(measured.literal_paths, 2);
         assert_eq!(legacy.literal_paths, 2);
         assert_eq!(measured.resolved_path_indices, 2);
@@ -953,8 +849,9 @@ mod tests {
             &[(7, 0, Some("/Game/Maps/Ascent/Ascent"), 0), (5, 7, None, 0)],
             &[(
                 "/Script/ShooterGame.Thing",
+                7,
                 4,
-                &[(1, "Health"), (3, "Armor")],
+                &[(1, "Health", 0), (3, "Armor", 2)],
             )],
             &[0xAB; 32],
         );
@@ -964,7 +861,7 @@ mod tests {
         assert_eq!(t.guid_count, 2);
         assert_eq!(t.group_count, 1);
         assert_eq!(t.exported_fields, 2);
-        assert_eq!(t.hardcoded_paths, 1);
+        assert_eq!(t.indexed_paths, 1);
         assert_eq!(t.frame_offset, archive.len() - 32);
         assert_eq!(cache.get_path_by_guid(7), Some("/Game/Maps/Ascent/Ascent"));
         // The non-observer wrapper also uses the checkpoint-local path table.
@@ -974,7 +871,7 @@ mod tests {
             .get_group_by_path("/Script/ShooterGame.Thing")
             .unwrap();
         assert_eq!(g.get_field(1).map(|f| f.name.as_str()), Some("Health"));
-        assert_eq!(g.get_field(3).map(|f| f.name.as_str()), Some("Armor"));
+        assert_eq!(g.get_field(3).map(|f| f.name.as_str()), Some("Armor_1"));
         assert!(g.get_field(0).is_none(), "unexported slot must stay empty");
     }
 
@@ -984,7 +881,7 @@ mod tests {
     fn a_desynced_table_is_rejected_not_silently_accepted() {
         let mut archive = build(
             &[(7, 0, Some("/Game/X"), 0)],
-            &[("/Script/G.Thing", 2, &[(0, "A")])],
+            &[("/Script/G.Thing", 7, 2, &[(0, "A", 0)])],
             &[0u8; 16],
         );
         // Move the declared frame offset one byte on: the tables still parse,
@@ -999,54 +896,30 @@ mod tests {
         );
     }
 
-    /// FName numbers render as in the ReplayData reader: 0 bare, N as
-    /// `_{N-1}`.
-    #[test]
-    fn fname_numbers_survive_into_the_checkpoint_field_names() {
-        // Hand-built: the shared `build` helper always writes number 0.
-        let mut body = 1u32.to_le_bytes().to_vec(); // one group
-        body.extend(fstring_utf16("/Script/G.Thing"));
-        body.extend(int_packed(7));
-        body.extend(int_packed(2)); // two slots
-        for (slot, number) in [(0u32, 0i32), (1, 1)] {
-            body.push(1); // exported
-            body.extend(int_packed(slot));
-            body.extend_from_slice(&0u32.to_le_bytes()); // checksum
-            body.push(0); // FName: not hardcoded
-            body.extend(fstring_utf16("Value"));
-            body.extend_from_slice(&number.to_le_bytes());
-        }
-
-        let mut cache = NetGuidCache::new();
-        read_checkpoint_tables(&archive(0, &body, &[]), &mut cache).unwrap();
-
-        let g = cache.get_group_by_path("/Script/G.Thing").unwrap();
-        assert_eq!(g.get_field(0).map(|f| f.name.as_str()), Some("Value"));
-        assert_eq!(g.get_field(1).map(|f| f.name.as_str()), Some("Value_0"));
-    }
-
     /// Within one checkpoint (a fresh cache), two paths at one index are a
     /// collision, not the re-export `add_export_group` merges; so is one path,
-    /// or an alias spelling of it, declared again at another index.
+    /// or an alias spelling of it, declared again at another index. The
+    /// rejected group never reaches the sink.
     #[test]
     fn two_groups_at_one_index_fail_before_returning_an_untrusted_cache() {
-        // `build` writes path_name_index 7 for every group, so two groups is
-        // exactly the collision.
         let archive = build(
             &[],
-            &[("/Script/G.A", 0, &[]), ("/Script/G.B", 0, &[])],
+            &[("/Script/G.A", 7, 0, &[]), ("/Script/G.B", 7, 0, &[])],
             &[0u8; 8],
         );
-        let mut cache = NetGuidCache::new();
-        let err = read_checkpoint_tables(&archive, &mut cache).unwrap_err();
+        let mut sink = RecordingSink::default();
+        let err = read_checkpoint_tables_with_sink(&archive, &mut NetGuidCache::new(), &mut sink);
 
         assert!(matches!(
             err,
-            SchemaError::CheckpointGroupCollision {
-                path_name_index: 7,
-                ..
-            }
+            Err(CheckpointReadError::Schema(
+                SchemaError::CheckpointGroupCollision {
+                    path_name_index: 7,
+                    ..
+                }
+            ))
         ));
+        assert_eq!(sink.groups.len(), 1, "the rejected group reached the sink");
 
         for (first, second) in [
             ("/Script/G.A", "/Script/G.A"),
@@ -1055,7 +928,7 @@ mod tests {
                 "/Game/Characters/_Core/Jett/Jett_C",
             ),
         ] {
-            let archive = groups_at(&[(first, 7), (second, 8)]);
+            let archive = build(&[], &[(first, 7, 0, &[]), (second, 8, 0, &[])], &[]);
             match read_checkpoint_tables(&archive, &mut NetGuidCache::new()) {
                 Err(SchemaError::CheckpointGroupCollision {
                     path,
@@ -1070,15 +943,17 @@ mod tests {
         }
     }
 
-    /// Two groups at different indices are the ordinary case and must not be
-    /// counted.
+    /// The control for the collision test: two groups at different indices.
     #[test]
     fn two_groups_at_different_indices_are_not_a_collision() {
-        let archive = groups_at(&[("/Script/G.A", 7), ("/Script/G.B", 8)]);
+        let archive = build(
+            &[],
+            &[("/Script/G.A", 7, 0, &[]), ("/Script/G.B", 8, 0, &[])],
+            &[],
+        );
         let mut cache = NetGuidCache::new();
         let t = read_checkpoint_tables(&archive, &mut cache).unwrap();
         assert_eq!(t.group_count, 2);
-        assert_eq!(t.group_collisions, 0);
         assert_eq!(cache.group_count(), 2);
     }
 
@@ -1120,15 +995,15 @@ mod tests {
         // One exported slot that lies about its handle: a real name on the
         // wrong handle would read as valid data.
         let mut body = 1u32.to_le_bytes().to_vec(); // one group
-        body.extend(fstring_utf16("/Script/G.Thing"));
-        body.extend(int_packed(7));
-        body.extend(int_packed(2)); // two slots
+        add_fstring_utf16(&mut body, "/Script/G.Thing");
+        add_int_packed(&mut body, 7);
+        add_int_packed(&mut body, 2); // two slots
         body.push(0); // slot 0 not exported
         body.push(1); // slot 1 exported
-        body.extend(int_packed(9)); // ... but claims handle 9
-        body.extend_from_slice(&0u32.to_le_bytes());
+        add_int_packed(&mut body, 9); // ... but claims handle 9
+        add_u32(&mut body, 0);
         body.push(1);
-        body.extend(int_packed(216));
+        add_int_packed(&mut body, 216);
 
         let mut cache = NetGuidCache::new();
         let err = read_checkpoint_tables(&archive(0, &body, &[]), &mut cache).unwrap_err();

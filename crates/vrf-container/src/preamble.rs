@@ -1,7 +1,5 @@
-//! The replay info plus the mandatory first (Header) chunk, parsed together
-//! because a caller needs both before it can read one packet: the info says
-//! whether payloads are compressed, the header which build recorded the replay
-//! and which DemoFrame sections are present.
+//! The replay info and the first (Header) chunk: a caller needs both before one
+//! packet, for the compression flag, the build and the DemoFrame sections.
 
 use crate::chunk::{ChunkIterator, ChunkType};
 use crate::error::ContainerError;
@@ -17,8 +15,7 @@ pub struct Preamble {
     pub remaining_offset: usize,
 }
 
-/// Parse the replay info and the Header chunk: the entry point for reading a
-/// `.vrf` file.
+/// The entry point for reading a `.vrf` file.
 pub fn parse_preamble(data: &[u8]) -> Result<Preamble, ContainerError> {
     let (replay_info, info_end) = info::parse_replay_info(data)?;
 

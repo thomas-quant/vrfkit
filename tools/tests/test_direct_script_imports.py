@@ -2,13 +2,10 @@ import os
 import subprocess
 import sys
 import unittest
-from pathlib import Path
+from support import TOOLS
 
 
-TOOLS = Path(__file__).resolve().parents[1]
 SCRIPTS = {
-    # This hand-written CLI rejects --help as missing positional input.
-    "extract_golden.py": 1,
     # These two use argparse and accept --help.
     "extract_match_observations.py": 0,
     "validate_metrics_corpus.py": 0,
@@ -34,7 +31,3 @@ class DirectScriptImportTests(unittest.TestCase):
                 self.assertNotIn("ImportWarning", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertIn("usage:", (result.stdout + result.stderr).lower())
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -4,16 +4,13 @@ carrying the spike, nobody, or a proxy walked back through its `Instigator`);
 the plant-time carrier lookup; the failure conditions; and the whole join on a
 synthetic export whose carrier is a reconnected player's earlier pawn."""
 import json
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_spike_carrier as spike  # noqa: E402
+from support import TempDirTestCase
+import extract_spike_carrier as spike
 
 
 PAWNS = {576: "gekko-uuid", 870: "other-uuid"}
@@ -120,18 +117,15 @@ PLAYER_STATE = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C"
 WRAITH = "/Game/Characters/Wraith/Wraith_PC.Wraith_PC_C"
 
 
-class ReconnectedCarrierTests(unittest.TestCase):
+class ReconnectedCarrierTests(TempDirTestCase):
     """39c2bb2c (13.05): PlayerState 256's SpawnedCharacter goes 1510 -> 0 ->
     45530 and the manifest keeps 45530. Pawn 1510 carried and planted the
-    spike in round 5; the join on the manifest alone called that custody
-    `unknown` and the plant `NO CARRIER`."""
+    spike in round 5; a join on the manifest's last pawn alone reads that
+    custody as `unknown` and the plant as `NO CARRIER`."""
 
     def build(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
-        # PlayerState 300 has a subject and no character, as the eleventh
-        # PlayerState of 4b8191e8 and 8cda0666 does.
+        root = self.tmp()
+        # PlayerState 300 has a subject and no character, as some real ones do.
         (root / "manifest.json").write_text(json.dumps({"players": [
             {"actor_net_guid": 256, "subject": "reconnected", "character_net_guid": 45530},
             {"actor_net_guid": 300, "subject": "no-character", "character_net_guid": None}]}),
@@ -195,7 +189,3 @@ class LeafTests(unittest.TestCase):
 
     def test_an_absent_class_is_the_empty_string(self):
         self.assertEqual(spike.leaf(None), "")
-
-
-if __name__ == "__main__":
-    unittest.main()

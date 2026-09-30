@@ -15,7 +15,7 @@
 //! | `resolve` | Bare-name resolution over the leaf index |
 //! | `path` | Alias generation (`Default__`, `/_Core/`, `_ClassNetCache`) |
 //! | `hash` | The hasher the cache's maps use, and why it is not the default |
-//! | `reader` | The ReplayData wire format for exports and export GUIDs |
+//! | `reader` | The ReplayData wire format for exports and export GUIDs, and [`load_object`] (vrf-net's too) |
 //! | `checkpoint` | The two tables a Checkpoint archive carries |
 //!
 //! # Cargo features
@@ -24,8 +24,7 @@
 //! |---------|---------|--------|
 //! | `checkpoint` | on | [`read_checkpoint_tables`] and [`CheckpointTables`]. A consumer reading only the ReplayData stream never calls them |
 //!
-//! The cache, the export types and the ReplayData readers are ungated: every
-//! consumer needs them.
+//! The cache, the export types and the ReplayData readers are ungated.
 
 #![forbid(unsafe_code)]
 
@@ -48,9 +47,9 @@ pub use guid::{ExportFlags, NetGuidEntry, NetworkGuid};
 pub use hash::{FxHashMap, FxHashSet};
 pub use path::{
     CLASS_NET_CACHE_SUFFIX, find_class_net_cache_key, find_replay_path_key,
-    for_each_replay_path_key,
+    for_each_replay_path_key, has_path_separator,
 };
-pub use reader::{read_export_guids, read_net_field_exports};
+pub use reader::{load_object, read_export_guids, read_net_field_exports};
 
 #[cfg(feature = "checkpoint")]
 pub use checkpoint::{

@@ -1,11 +1,9 @@
-//! Read component classes out of an installed game's IoStore containers. A
-//! replay names a Blueprint component only by its instance name
-//! (`ZoomStateMachine`), and its class is not derivable from that name; the
-//! cooked game says what it is. This prints every component template's
-//! instance name, owning package and class, and is the source of
-//! `KNOWN_SUBOBJECT_CLASS_PATHS` in `crates/vrfkit/src/sink/paths.rs` (procedure
-//! and what the output establishes: docs/DATA.md, "Reading component classes
-//! out of the game").
+//! List every component template's instance name, owning package and class
+//! from an installed game's IoStore containers: a replay names a Blueprint
+//! component only by its instance name (`ZoomStateMachine`), and only the cooked
+//! game says its class. The source of `KNOWN_SUBOBJECT_CLASS_PATHS` in
+//! `crates/vrfkit/src/sink/paths.rs` (procedure: docs/DATA.md, "Reading
+//! component classes out of the game").
 //!
 //! Exit status: 0 when every package was read and every self-check held; 1 when
 //! anything could not be read or a check failed (readable rows are still
@@ -29,11 +27,11 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use container::Container;
-use scan::{ClassTable, Job, PackageScan, Resolved, resolve, scan_package};
-use script::{ScriptCheck, ScriptObjects, parse_script_objects};
+use scan::{CLASS_KINDS, ClassTable, Job, PackageScan, Resolved, resolve, scan_package};
+use script::{ScriptObjects, parse_script_objects};
 use toc::{CHUNK_EXPORT_BUNDLE_DATA, CHUNK_SCRIPT_OBJECTS};
 
 const USAGE: &str = "usage: extract-component-classes <PAKS_DIR> [--format tsv|json] \
@@ -129,33 +127,58 @@ struct Row {
     container: String,
 }
 
-/// Every counter the run keeps; all are printed, zeros included.
-#[derive(Debug, Default)]
-struct Counts {
-    containers: usize,
-    legacy_paks_not_read: usize,
-    toc_entries: usize,
-    indexed_files: usize,
-    /// Directory-index files naming a TOC entry past the end of the TOC, or
-    /// one a later file also names: neither can be attached to a chunk.
-    indexed_files_dropped: usize,
-    package_chunks: usize,
-    package_chunks_unindexed: usize,
-    package_files_not_package_chunks: usize,
-    packages_read: usize,
-    packages_failed: usize,
-    package_id_matches: usize,
-    package_id_mismatches: usize,
-    file_stem_matches: usize,
-    file_stem_mismatches: usize,
-    exports: usize,
-    class_objects: usize,
-    duplicate_class_keys: usize,
-    gen_variable: usize,
-    gen_variable_numbered: usize,
-    cdo_subobject: usize,
-    class_kinds: BTreeMap<&'static str, usize>,
-    script: ScriptCheck,
+/// `Counts` with one `usize` per name, and `Counts::pairs`, every counter in
+/// this order and then each `class_kind.*`: all printed, zeros included.
+macro_rules! counters {
+    ($($name:ident),* $(,)?) => {
+        #[derive(Debug, Default)]
+        struct Counts {
+            $($name: usize,)*
+            class_kinds: BTreeMap<&'static str, usize>,
+        }
+
+        impl Counts {
+            fn pairs(&self) -> Vec<(String, usize)> {
+                let mut v = vec![$((stringify!($name).to_owned(), self.$name)),*];
+                // A kind missing from `CLASS_KINDS` still prints, after the rest.
+                let stray = self.class_kinds.keys().filter(|k| !CLASS_KINDS.contains(*k));
+                for kind in CLASS_KINDS.iter().chain(stray) {
+                    let n = self.class_kinds.get(kind).copied().unwrap_or(0);
+                    v.push((format!("class_kind.{kind}"), n));
+                }
+                v
+            }
+        }
+    };
+}
+
+counters! {
+    containers,
+    legacy_paks_not_read,
+    toc_entries,
+    indexed_files,
+    // Directory-index files naming a TOC entry past the end of the TOC, or one
+    // a later file also names: neither can be attached to a chunk.
+    indexed_files_dropped,
+    package_chunks,
+    package_chunks_unindexed,
+    package_files_not_package_chunks,
+    packages_read,
+    packages_failed,
+    package_id_matches,
+    package_id_mismatches,
+    file_stem_matches,
+    file_stem_mismatches,
+    exports,
+    class_objects,
+    duplicate_class_keys,
+    script_objects,
+    script_paths_resolved,
+    script_hash_matches,
+    script_hash_mismatches,
+    gen_variable,
+    gen_variable_numbered,
+    cdo_subobject,
 }
 
 struct Provenance {
@@ -165,7 +188,7 @@ struct Provenance {
     package_chunks: usize,
     utoc_bytes: Option<u64>,
     ucas_bytes: Option<u64>,
-    ucas_modified: String,
+    ucas_modified_unix: Option<u64>,
 }
 
 fn main() {
@@ -198,7 +221,11 @@ fn run(args: &Args) -> Result<i32, String> {
         return Err(format!("{}: not found", global_path.display()));
     }
     let (script, global) = load_script_objects(&global_path)?;
-    counts.script = script.verify();
+    let check = script.verify();
+    counts.script_objects = check.objects;
+    counts.script_paths_resolved = check.paths_resolved;
+    counts.script_hash_matches = check.hash_matches;
+    counts.script_hash_mismatches = check.hash_mismatches;
 
     let mut containers = Vec::new();
     // Listed although it holds no package this tool reads: every `/Script`
@@ -359,8 +386,8 @@ fn run(args: &Args) -> Result<i32, String> {
     report(&counts, &provenance, &legacy, &failure_lines, &rows, args);
     let failed = counts.packages_failed > 0
         || counts.package_id_mismatches > 0
-        || counts.script.hash_mismatches > 0
-        || counts.script.paths_resolved != counts.script.objects
+        || counts.script_hash_mismatches > 0
+        || counts.script_paths_resolved != counts.script_objects
         || counts.packages_read == 0;
     if failed {
         eprintln!(
@@ -413,7 +440,7 @@ fn provenance_of(container: &Container, utoc: &Path, package_chunks: usize) -> P
         package_chunks,
         utoc_bytes: file_len(utoc),
         ucas_bytes: file_len(&container.ucas_path),
-        ucas_modified: modified(&container.ucas_path),
+        ucas_modified_unix: modified(&container.ucas_path),
     }
 }
 
@@ -495,54 +522,23 @@ fn scan_all(
 }
 
 /// A file's size, `None` when its metadata cannot be read: printed as `?` and
-/// as JSON `null`, never as a plausible 0.
+/// as JSON `null`, never as a plausible 0. So is `modified`.
 fn file_len(path: &Path) -> Option<u64> {
     std::fs::metadata(path).map(|m| m.len()).ok()
 }
 
-fn size_text(bytes: Option<u64>) -> String {
-    bytes.map_or_else(|| "?".to_owned(), |n| n.to_string())
+/// Modification time in seconds since the Unix epoch.
+fn modified(path: &Path) -> Option<u64> {
+    let time = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
-fn json_size(bytes: Option<u64>) -> String {
-    bytes.map_or_else(|| "null".to_owned(), |n| n.to_string())
+fn text_or_absent(n: Option<u64>) -> String {
+    n.map_or_else(|| "?".to_owned(), |n| n.to_string())
 }
 
-fn modified(path: &Path) -> String {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(utc_timestamp)
-        .unwrap_or_else(|_| "?".to_owned())
-}
-
-/// `YYYY-MM-DDTHH:MM:SSZ` for a file time, without a date crate.
-fn utc_timestamp(t: SystemTime) -> String {
-    let Ok(since) = t.duration_since(UNIX_EPOCH) else {
-        return "?".to_owned();
-    };
-    let secs = since.as_secs();
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let (y, m, d) = civil_from_days(days as i64);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60
-    )
-}
-
-/// Howard Hinnant's days-to-civil conversion.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+fn json_or_null(n: Option<u64>) -> String {
+    n.map_or_else(|| "null".to_owned(), |n| n.to_string())
 }
 
 const COLUMNS: [&str; 10] = [
@@ -631,19 +627,17 @@ fn render_json(rows: &[Row], counts: &Counts, provenance: &[Provenance], paks: &
         let _ = write!(
             out,
             ", \"container_id\": \"{:#018x}\", \"toc_entries\": {}, \"package_chunks\": {}, \
-             \"utoc_bytes\": {}, \"ucas_bytes\": {}, \"ucas_modified\": ",
+             \"utoc_bytes\": {}, \"ucas_bytes\": {}, \"ucas_modified_unix\": {}}}",
             p.container_id,
             p.toc_entries,
             p.package_chunks,
-            json_size(p.utoc_bytes),
-            json_size(p.ucas_bytes)
+            json_or_null(p.utoc_bytes),
+            json_or_null(p.ucas_bytes),
+            json_or_null(p.ucas_modified_unix)
         );
-        json_string(&mut out, &p.ucas_modified);
-        out.push('}');
     }
     out.push_str("\n  ],\n  \"counts\": {");
-    let pairs = count_pairs(counts);
-    for (i, (k, v)) in pairs.iter().enumerate() {
+    for (i, (k, v)) in counts.pairs().iter().enumerate() {
         out.push_str(if i == 0 { "\n    " } else { ",\n    " });
         json_string(&mut out, k);
         let _ = write!(out, ": {v}");
@@ -665,57 +659,6 @@ fn render_json(rows: &[Row], counts: &Counts, provenance: &[Provenance], paks: &
     out
 }
 
-fn count_pairs(c: &Counts) -> Vec<(String, usize)> {
-    let mut v: Vec<(String, usize)> = vec![
-        ("containers".into(), c.containers),
-        ("legacy_paks_not_read".into(), c.legacy_paks_not_read),
-        ("toc_entries".into(), c.toc_entries),
-        ("indexed_files".into(), c.indexed_files),
-        ("indexed_files_dropped".into(), c.indexed_files_dropped),
-        ("package_chunks".into(), c.package_chunks),
-        (
-            "package_chunks_unindexed".into(),
-            c.package_chunks_unindexed,
-        ),
-        (
-            "package_files_not_package_chunks".into(),
-            c.package_files_not_package_chunks,
-        ),
-        ("packages_read".into(), c.packages_read),
-        ("packages_failed".into(), c.packages_failed),
-        ("package_id_matches".into(), c.package_id_matches),
-        ("package_id_mismatches".into(), c.package_id_mismatches),
-        ("file_stem_matches".into(), c.file_stem_matches),
-        ("file_stem_mismatches".into(), c.file_stem_mismatches),
-        ("exports".into(), c.exports),
-        ("class_objects".into(), c.class_objects),
-        ("duplicate_class_keys".into(), c.duplicate_class_keys),
-        ("script_objects".into(), c.script.objects),
-        ("script_paths_resolved".into(), c.script.paths_resolved),
-        ("script_hash_matches".into(), c.script.hash_matches),
-        ("script_hash_mismatches".into(), c.script.hash_mismatches),
-        ("gen_variable".into(), c.gen_variable),
-        ("gen_variable_numbered".into(), c.gen_variable_numbered),
-        ("cdo_subobject".into(), c.cdo_subobject),
-    ];
-    for kind in [
-        "script_import",
-        "script_import_unresolved",
-        "package_import",
-        "package_import_unresolved",
-        "export",
-        "export_unresolved",
-        "null",
-        "bad_index",
-    ] {
-        v.push((
-            format!("class_kind.{kind}"),
-            c.class_kinds.get(kind).copied().unwrap_or(0),
-        ));
-    }
-    v
-}
-
 fn report(
     counts: &Counts,
     provenance: &[Provenance],
@@ -734,8 +677,8 @@ fn report(
             p.container_id,
             p.toc_entries,
             p.package_chunks,
-            size_text(p.ucas_bytes),
-            p.ucas_modified
+            text_or_absent(p.ucas_bytes),
+            text_or_absent(p.ucas_modified_unix)
         );
     }
     for pak in legacy {
@@ -747,7 +690,7 @@ fn report(
                 .unwrap_or_default()
         );
     }
-    for (k, v) in count_pairs(counts) {
+    for (k, v) in counts.pairs() {
         let _ = writeln!(err, "  {k:<36} {v}");
     }
     let _ = writeln!(err, "  rows written                         {}", rows.len());
@@ -778,37 +721,13 @@ fn report(
 mod tests {
     use super::*;
 
-    #[test]
-    fn timestamps_render_in_utc() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_354), (2025, 9, 23));
-        let t = UNIX_EPOCH + std::time::Duration::from_secs(1_758_591_394);
-        assert_eq!(utc_timestamp(t), "2025-09-23T01:36:34Z");
-    }
-
     /// A one-chunk TOC over stored (uncompressed) bytes.
     fn stored_toc(len: usize, chunk_type: u8, directory_index: Vec<u8>) -> Vec<u8> {
-        use crate::toc::tests::{TocSpec, build_toc};
-        use crate::toc::{ChunkId, CompressedBlock, FLAG_INDEXED, OffsetLength};
+        use crate::toc::tests::{TocSpec, build_toc, one_chunk_toc};
+        let (l, n) = (len as u64, len as u32);
         build_toc(&TocSpec {
-            flags: FLAG_INDEXED,
-            block_size: 0x10000,
-            methods: vec![],
-            chunks: vec![(
-                ChunkId { id: 1, chunk_type },
-                OffsetLength {
-                    offset: 0,
-                    length: len as u64,
-                },
-            )],
-            blocks: vec![CompressedBlock {
-                offset: 0,
-                compressed_size: len as u32,
-                uncompressed_size: len as u32,
-                method: 0,
-            }],
             directory_index,
-            ..crate::toc::tests::TocSpec::default()
+            ..one_chunk_toc(chunk_type, (0, l), 0x10000, vec![], &[(0, n, n, 0)])
         })
     }
 
@@ -816,11 +735,11 @@ mod tests {
     /// global container and one `other` whose single chunk is not a package,
     /// so the run fails but still reports. Returns the exit code and the JSON.
     fn run_synthetic(test: &str, other_index: Vec<u8>) -> (Result<i32, String>, String) {
-        use crate::script::tests::build_script_objects;
+        use crate::script::tests::script_from_paths;
         let dir = std::env::temp_dir().join(format!("ecc-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let script = build_script_objects(&["/Script/A"], &[(0, 0, "/Script/A", None)]);
+        let script = script_from_paths(&["/Script/A"]);
         let global = stored_toc(script.len(), CHUNK_SCRIPT_OBJECTS, Vec::new());
         std::fs::write(dir.join("global.utoc"), global).unwrap();
         std::fs::write(dir.join("global.ucas"), &script).unwrap();
@@ -876,15 +795,30 @@ mod tests {
     }
 
     #[test]
-    fn a_size_that_cannot_be_read_is_absent_not_zero() {
+    fn a_size_or_time_that_cannot_be_read_is_absent_not_zero() {
         let missing = Path::new("no such dir/no such file.ucas");
-        assert_eq!(file_len(missing), None);
-        assert_eq!(size_text(file_len(missing)), "?");
-        assert_eq!(json_size(file_len(missing)), "null");
+        assert_eq!((file_len(missing), modified(missing)), (None, None));
+        assert_eq!(text_or_absent(file_len(missing)), "?");
+        assert_eq!(json_or_null(modified(missing)), "null");
         // Tests run from the package root.
         let here = Path::new("Cargo.toml");
         let len = std::fs::metadata(here).unwrap().len();
-        assert_eq!(size_text(file_len(here)), len.to_string());
+        assert_eq!(text_or_absent(file_len(here)), len.to_string());
+        assert!(modified(here).is_some_and(|t| t > 1_700_000_000));
+    }
+
+    #[test]
+    fn every_class_kind_prints_zeros_and_strays_included() {
+        let mut counts = Counts::default();
+        counts.class_kinds.insert("cycle", 2);
+        let pairs = counts.pairs();
+        let kinds: Vec<(&str, usize)> = pairs
+            .iter()
+            .filter_map(|(k, n)| Some((k.strip_prefix("class_kind.")?, *n)))
+            .collect();
+        let known: Vec<(&str, usize)> = CLASS_KINDS.iter().map(|k| (*k, 0)).collect();
+        assert_eq!(kinds[..8], known);
+        assert_eq!(kinds[8..], [("cycle", 2)]);
     }
 
     #[test]

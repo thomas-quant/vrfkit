@@ -10,10 +10,12 @@ import unittest
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from tools import extract_kill_ledger as tool
-from tools.tests.test_extract_kill_observations import SCHEMA, array, row as field_row
+from support import TempDirTestCase
+import extract_kill_ledger as tool
+from test_extract_kill_observations import SCHEMA, array, row as field_row
+from wire_fixtures import write_empty_tables
 
-from tools.extract_kill_ledger import (
+from extract_kill_ledger import (
     ActorIdentityIndex, DEATH_NAME, InputError, match_deaths, validate_death_payload,
 )
 
@@ -171,16 +173,7 @@ def make_export(root, build='++Ares-Core+release-13.05'):
     rows.append(field_row(time_ms=509,actor_net_guid=20,handle=0,field_name='KillData',
                           compatible_checksum=producer.PARENT[1],raw_bits=raw,bit_count=width,value_bool=None))
     pq.write_table(pa.Table.from_pylist(rows,schema=SCHEMA),root/'fields.parquet')
-    schemas={
-        'checkpoint_fields':pa.schema([('checkpoint_index',pa.uint32()),('checkpoint_id',pa.string()),*SCHEMA]),
-        'net_guids':pa.schema([('net_guid',pa.uint32())]),
-        'checkpoint_actors':pa.schema([('checkpoint_index',pa.uint32()),('actor_net_guid',pa.uint32())]),
-        'checkpoint_net_guids':pa.schema([('checkpoint_index',pa.uint32()),('net_guid',pa.uint32())]),
-        'checkpoint_export_groups':pa.schema([('checkpoint_index',pa.uint32()),('ordinal',pa.uint32()),('group_path',pa.string())]),
-        'checkpoint_export_fields':pa.schema([('checkpoint_index',pa.uint32()),('group_ordinal',pa.uint32()),('handle',pa.uint32()),('rendered_name',pa.string()),('compatible_checksum',pa.uint32())]),
-    }
-    for name,schema in schemas.items():
-        pq.write_table(pa.Table.from_pylist([],schema=schema),root/(name+'.parquet'))
+    write_empty_tables(root)
     pq.write_table(pa.Table.from_pylist([actor(),actor(guid=200),actor(guid=20),actor(guid=21)]),root/'actors.parquet')
     name='EReplayEventGroup::RoundStart'; text=name.encode()+b'\0'
     raw=struct.pack('<IIi',2,3,len(text))+text+struct.pack('<f',0.125)
@@ -192,69 +185,49 @@ def make_export(root, build='++Ares-Core+release-13.05'):
     return root
 
 
-class IntegrationTests(unittest.TestCase):
-    def test_real_cli_and_cache_retain_physical_sources(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export'); out=root/'ledger.json'
-            command=[sys.executable,'-W','error',str(Path(tool.__file__)),
-                     '--export',str(export),'--out',str(out)]
-            run=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
-            self.assertEqual(run.returncode,0,run.stderr)
-            result=json.loads(out.read_text(encoding='utf-8'))
-            self.assertEqual(result['counts']['matched_pairs'],1)
-            self.assertEqual(result['death_events'][0]['event_row_ordinal'],1)
-            self.assertEqual(result['death_events'][0]['killer_identity']['mapping_field_rows'],[0])
-            self.assertEqual(result['death_events'][0]['victim_identity']['mapping_field_rows'],[1])
-            self.assertEqual(result['death_events'][0]['round_identity']['round_event_row_ordinal'],0)
-            self.assertEqual(result['state_projection']['entities'][0]['base']['source']['physical_parent_row_ordinal'],12)
-            cache=root/'observations.json'; cache.write_text(json.dumps(result['source_observations']),encoding='utf-8')
-            cached=tool.extract(export,cache)
-            self.assertEqual(cached['death_events'],result['death_events'])
-            self.assertEqual(cached['provenance']['observation_cache_sha256'],tool.file_sha(cache))
+class IntegrationTests(TempDirTestCase):
+    def test_real_cli_retains_physical_sources(self):
+        root=self.tmp(); export=make_export(root/'export'); out=root/'ledger.json'
+        command=[sys.executable,'-W','error',str(Path(tool.__file__)),
+                 '--export',str(export),'--out',str(out)]
+        run=subprocess.run(command,capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
+        self.assertEqual(run.returncode,0,run.stderr)
+        result=json.loads(out.read_text(encoding='utf-8'))
+        self.assertEqual(result['counts']['matched_pairs'],1)
+        self.assertEqual(result['death_events'][0]['event_row_ordinal'],1)
+        self.assertEqual(result['death_events'][0]['killer_identity']['mapping_field_rows'],[0])
+        self.assertEqual(result['death_events'][0]['victim_identity']['mapping_field_rows'],[1])
+        self.assertEqual(result['death_events'][0]['round_identity']['round_event_row_ordinal'],0)
+        self.assertEqual(result['state_projection']['entities'][0]['base']['source']['physical_parent_row_ordinal'],12)
 
     def test_measured_13_06_export_is_joined(self):
-        with tempfile.TemporaryDirectory() as t:
-            export=make_export(Path(t)/'export',build='++Ares-Core+release-13.06')
-            got=tool.extract(export)
-            self.assertEqual(got['provenance']['replay_build'],'++Ares-Core+release-13.06')
-            self.assertEqual(got['counts']['matched_pairs'],1)
-            self.assertEqual(got['counts']['state']['entities'],1)
+        t = self.tmp()
+        export=make_export(t/'export',build='++Ares-Core+release-13.06')
+        got=tool.extract(export)
+        self.assertEqual(got['provenance']['replay_build'],'++Ares-Core+release-13.06')
+        self.assertEqual(got['counts']['matched_pairs'],1)
+        self.assertEqual(got['counts']['state']['entities'],1)
 
     def test_unmeasured_build_fails_through_the_cli_without_writing(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export',build='++Ares-Core+release-13.07')
-            out=root/'ledger.json'
-            run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
-                                '--export',str(export),'--out',str(out)],
-                               capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
-            self.assertEqual(run.returncode,1,run.stderr)
-            self.assertIn('outside the measured KillData set',run.stderr)
-            self.assertFalse(out.exists())
-
-    def test_cache_cannot_forge_values_or_receipts(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export'); cache=root/'observations.json'
-            original=tool.observation_extractor.extract(export)
-            for kind in ('value','receipt'):
-                changed=copy.deepcopy(original)
-                if kind=='value':
-                    changed['observations'][0]['actor_net_guid']=99
-                else:
-                    changed['provenance']['manifest_sha256']='0'*64
-                cache.write_text(json.dumps(changed),encoding='utf-8')
-                with self.assertRaisesRegex(InputError,'cache content|provenance'):
-                    tool.extract(export,cache)
+        root=self.tmp(); export=make_export(root/'export',build='++Ares-Core+release-13.07')
+        out=root/'ledger.json'
+        run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
+                            '--export',str(export),'--out',str(out)],
+                           capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
+        self.assertEqual(run.returncode,1,run.stderr)
+        self.assertIn('outside the measured KillData set',run.stderr)
+        self.assertFalse(out.exists())
 
     def test_missing_raw_event_is_retained_unjoined(self):
-        with tempfile.TemporaryDirectory() as t:
-            export=make_export(Path(t)/'export'); path=export/'events.parquet'
-            table=pq.read_table(path); rows=table.to_pylist(); rows[1]['raw_payload']=None
-            pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
-            got=tool.extract(export)
-            self.assertEqual(got['counts']['matched_pairs'],0)
-            self.assertEqual(got['death_events'][0]['payload_issue'],'payload_size')
-            self.assertIsNone(got['death_events'][0]['raw_payload_hex'])
-            self.assertEqual(len(got['unmatched_main_observations']),1)
+        t = self.tmp()
+        export=make_export(t/'export'); path=export/'events.parquet'
+        table=pq.read_table(path); rows=table.to_pylist(); rows[1]['raw_payload']=None
+        pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
+        got=tool.extract(export)
+        self.assertEqual(got['counts']['matched_pairs'],0)
+        self.assertEqual(got['death_events'][0]['payload_issue'],'payload_size')
+        self.assertIsNone(got['death_events'][0]['raw_payload_hex'])
+        self.assertEqual(len(got['unmatched_main_observations']),1)
 
     def test_nullable_event_and_round_times_are_retained_unresolved(self):
         for event_index,issue,round_status in ((1,'payload_time','invalid_event_time'),
@@ -270,30 +243,24 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(got['death_events'][0]['raw_payload_hex'],rows[1]['raw_payload'].hex())
 
     def test_different_killer_context_remains_unjoined(self):
-        with tempfile.TemporaryDirectory() as t:
-            export=make_export(Path(t)/'export'); path=export/'fields.parquet'
-            table=pq.read_table(path); rows=table.to_pylist()
-            rows[0].update(value_i64=21,raw_bits=b'\x2a')
-            pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
-            got=tool.extract(export)
-            self.assertEqual(got['counts']['matched_pairs'],0)
-            self.assertEqual(got['counts']['unmatched_with_different_killer_context'],1)
-            context=got['unmatched_main_observations'][0]['different_killer_same_victim_context']
-            self.assertEqual(context,[{'event_row_ordinal':1,'event_killer_player_state_ref':21,'replication_lag_ms':9}])
+        t = self.tmp()
+        export=make_export(t/'export'); path=export/'fields.parquet'
+        table=pq.read_table(path); rows=table.to_pylist()
+        rows[0].update(value_i64=21,raw_bits=b'\x2a')
+        pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
+        got=tool.extract(export)
+        self.assertEqual(got['counts']['matched_pairs'],0)
+        self.assertEqual(got['counts']['unmatched_with_different_killer_context'],1)
+        context=got['unmatched_main_observations'][0]['different_killer_same_victim_context']
+        self.assertEqual(context,[{'event_row_ordinal':1,'event_killer_player_state_ref':21,'replication_lag_ms':9}])
 
     def test_cli_refuses_source_aliases_without_writing(self):
-        with tempfile.TemporaryDirectory() as t:
-            root=Path(t); export=make_export(root/'export'); cache=root/'cache.json'
-            cache.write_text('{}',encoding='utf-8')
-            for output in (export/'events.parquet',cache,Path(tool.__file__),Path(tool.__file__).with_name('kill_state.py')):
-                before=output.read_bytes()
-                run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
-                                    '--export',str(export),'--out',str(output),'--observations',str(cache)],
-                                   capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
-                self.assertEqual(run.returncode,1,run.stderr)
-                self.assertIn('FAILED:',run.stderr)
-                self.assertEqual(output.read_bytes(),before)
-
-
-if __name__=='__main__':
-    unittest.main()
+        root=self.tmp(); export=make_export(root/'export')
+        for output in (export/'events.parquet',Path(tool.__file__),Path(tool.__file__).with_name('kill_state.py')):
+            before=output.read_bytes()
+            run=subprocess.run([sys.executable,'-W','error',str(Path(tool.__file__)),
+                                '--export',str(export),'--out',str(output)],
+                               capture_output=True,text=True,encoding='utf-8',errors='strict',env=dict(os.environ,PYTHONIOENCODING='utf-8'))
+            self.assertEqual(run.returncode,1,run.stderr)
+            self.assertIn('FAILED:',run.stderr)
+            self.assertEqual(output.read_bytes(),before)

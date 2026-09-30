@@ -8,3 +8,7 @@ mod blueprint_fields;
 mod overlay;
 mod scalar;
 mod vector;
+
+fn str_value(s: &str) -> crate::DecodedValue {
+    crate::DecodedValue::Str(s.to_owned())
+}

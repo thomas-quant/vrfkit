@@ -1,41 +1,24 @@
 """Assert that each BUILD's preserved replay still produces sane MATCH METRICS.
 
-Every other check reads counters that describe the FRAMING -- blocks, fields,
-RPCs, malformed packets, skipped bits -- or compares bytes against a frozen
-export, and a decoder that stops producing values emits no rows and moves no
-framing counter. Build 13.02 shifted `RoundResults` from handle 93 to 81, the
-match score stopped being written, and every framing guard stayed green. The
-break shows one layer up, where the rows become a scoreboard, so this guard
-runs that layer:
+Framing counters cannot see a decoder that stops producing values: 13.02
+moved `RoundResults` from handle 93 to 81, the match score stopped being
+written, and every framing guard stayed green. This runs the layer where rows
+become a scoreboard:
 
     vrfkit export -> tools/to_valplay_bundle.py -> valplay compute_metrics.py
 
-Before bcc7d70 the 13.02 fixture failed it: `objective.round_count` was 0
-while `rounds.round_count` was 21 (invariants R1 and R2 below).
+**Invariants** (`invariants`) hold for any replay of any build and need no
+baseline; they survive legitimate changes that move counts. **Pinned values**
+catch drift in everything else, all builds in ONE file, so a build leaving the
+set is itself a failure.
 
-Two kinds of check, and the first matters more
----------------------------------------------
+`kills == deaths` is NOT an invariant: a resurrected player who dies again in
+the same round is two `bDied` reports but one DidKill per (round, subject).
+Across five Swiftplay replays the gap was exactly 1 in each of the two with a
+resurrection, 0 otherwise.
 
-**Invariants** hold for any replay of any build and need no baseline. They
-survive legitimate changes that move counts, which pinned numbers do not, and
-they are the ones that encode the section-26 failure directly.
-
-**Pinned values** are drift detection for everything else. They live in ONE
-file covering every build, so a build disappearing from the set is itself a
-failure, which per-file baselines cannot see.
-
-`kills == deaths` is deliberately NOT an invariant: a resurrected player who
-dies again in the same round gets two `bDied` reports, so `deaths` counts both,
-while `kills` counts DidKill per (round, subject) interaction and collapses
-them. Across five Swiftplay replays the gap was 0 without a resurrection and
-exactly 1 in each of the two with one. It is pinned instead.
-
-Cost
-----
-
-This is the slowest check in the repo: it exports, re-nests and recomputes five
-full 44-65 MB matches (13.01, 13.02, 13.04, 13.05, 13.06) besides three sub-MB
-public fixtures. Run it after a non-trivial change, not in a fast sweep.
+The slowest check here: five full 44-65 MB matches plus three sub-MB public
+fixtures. Run it after a non-trivial change, not in a fast sweep.
 
 Usage:
     python tools/check_metrics_baseline.py
@@ -57,8 +40,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 if __package__:
+    from . import summary_counters as sc
     from .atomic_io import atomic_write_text
 else:  # direct script execution
+    import summary_counters as sc
     from atomic_io import atomic_write_text
 
 REPO = Path(__file__).resolve().parent.parent
@@ -66,52 +51,45 @@ DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
 BUNDLE_TOOL = REPO / "tools" / "to_valplay_bundle.py"
 DEFAULT_BASELINE = REPO / "tools" / "baselines" / "metrics_builds.json"
 
-#: valplay is NEVER modified; it is only ever invoked by absolute path.
-#: Set VRFKIT_VALPLAY_DIR to the valplay checkout root.
+#: valplay is never modified, only invoked; VRFKIT_VALPLAY_DIR is its checkout.
 COMPUTE_METRICS = Path(
     os.environ.get("VRFKIT_VALPLAY_DIR", "")
 ) / "pipeline" / "metrics" / "compute_metrics.py"
 
-#: One replay per build. 13.01 is the reference replay, which lives in the
-#: read-only valplay corpus. Never point one at the game's own Saved\Demos:
-#: the game rotates it, and on 2026-08-02 all four replays pinned there were
-#: gone. 13.06's fixture was chosen from six preserved replays run through this
-#: pipeline (all pass R1-R5): 2a7d2c4c is a full match (22 rounds, 13-9, 10
-#: players, 170 kills = 170 deaths, 59.6 MB); abf07066 (7-0) and ee4c3f26
-#: (8-2) are not, and 57881928, a4b7406f and e02e6230 are the alternatives.
-REPLAYS = {
-    "12.10": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1210"
-             r"\9f8b32c5-c243-41ec-bbbb-832582edf652.12_10.vrf",
-    "12.11": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1211"
-             r"\5c673443-5bdc-4576-b416-aab3f62471a5.12_11.vrf",
-    "13.00": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1300"
-             r"\12974d2b-848f-490d-80ba-5f03a033c2d5.13_00.vrf",
-    "13.01": "02d4d478-1dfb-4412-9a77-29ca29105a9d.vrf",
-    "13.02": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1302\1.vrf",
-    "13.04": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1304"
-             r"\01e0979f-660f-4121-b3ce-84911860df8e.vrf",
-    "13.05": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1305"
-             r"\005f5193-35ef-4ade-8539-e9e8dd0d5ed7.vrf",
-    "13.06": r"%LOCALAPPDATA%\vrfkit\baseline-corpora\build_1306"
-             r"\2a7d2c4c-952b-444e-9e45-c45c5ae77610.vrf",
-}
+#: One replay per build, as the baseline pins it (check_baseline_schemas.py
+#: checks each against its build's corpus). Never the game's own Saved\Demos:
+#: the game rotates it.
+REPLAYS = json.loads(DEFAULT_BASELINE.read_text(encoding="utf-8"))["replays"]
 
 
-def _resolve_replay(raw: str) -> Path:
-    """Expand env vars in a REPLAYS entry; anchor a bare filename in
-    VRFKIT_CORPUS_DIR so a portable baseline still finds the replay."""
-    p = Path(os.path.expandvars(raw))
-    if not p.is_absolute():
-        corpus_dir = os.environ.get("VRFKIT_CORPUS_DIR", "")
-        if corpus_dir:
-            p = Path(corpus_dir) / p
-    return p
+def run_pipeline(exe: Path, replay: Path, export_dir: Path, bundle_dir: Path,
+                 metrics_out: Path | None = None) -> tuple[dict | None, str, str]:
+    """export -> bundle -> compute_metrics: `(metrics.json, "ok", "")`, or
+    `(None, stage, why)` for the stage that failed."""
+    metrics = metrics_out or bundle_dir / "metrics.json"
+    for stage, cmd in (
+            ("export", [exe, "export", replay, "--out", export_dir]),
+            ("bundle", [sys.executable, BUNDLE_TOOL, export_dir, "-o", bundle_dir]),
+            ("metrics", [sys.executable, COMPUTE_METRICS, bundle_dir,
+                         *(("-o", metrics_out) if metrics_out else ())])):
+        try:
+            code, text = sc.run(cmd, timeout=1800)
+        except subprocess.TimeoutExpired:
+            return None, stage, "timeout after 1800 seconds"
+        except OSError as exc:
+            return None, stage, f"could not start process: {exc}"
+        if code != 0:
+            return None, stage, f"rc={code}: {sc.tail(text, 3, 300) or 'no output'}"
+    try:
+        return json.loads(metrics.read_text(encoding="utf-8")), "ok", ""
+    except (OSError, ValueError) as exc:
+        return None, "metrics", f"metrics.json: {exc}"
 
 
 def _sum(d: dict, field: str) -> int:
     """One per-player counter summed over `d`'s players. A player without the
-    key, or with a value that is not a count, raises: `.get(field) or 0` read a
-    counter valplay renamed as a plausible 0. A present 0 stays 0."""
+    key, or with a value that is not a count, raises: a counter valplay
+    renamed must not read as a plausible 0."""
     total = 0
     for player, values in d.items():
         if field not in values:
@@ -156,18 +134,15 @@ def extract(m: dict) -> dict:
 
 
 def invariants(v: dict) -> list[str]:
-    """Checks that need no baseline. Each returns a message when it FAILS.
-
-    R1 and R2 catch the 13.02 break: before bcc7d70 the 13.02 fixture violated
-    both (objective 0 vs rpc 21). R3, a round with no recorded winner, does
-    not fire on it.
-    """
+    """Checks that need no baseline, one message per check that fails. R1 and
+    R2 catch the 13.02 RoundResults shift (objective 0 vs rpc 21); R3, a
+    round with no recorded winner, cannot."""
     bad = []
     if v["rounds_objective"] <= 0:
         bad.append(
             f"R1 objective.round_count is {v['rounds_objective']}: the "
             f"BombGameState round results produced nothing. This is the exact "
-            f"shape of the 13.02 RoundResults handle shift (section 26)."
+            f"shape of the 13.02 RoundResults handle shift."
         )
     if v["rounds_rpc"] != v["rounds_objective"]:
         bad.append(
@@ -193,61 +168,35 @@ def invariants(v: dict) -> list[str]:
 
 
 def invariant_count() -> int:
-    """How many checks `invariants()` runs, for the pass-message at the end:
-    the distinct `R<n>` labels in its source, since it returns only failures
-    and a literal would not move when a check is added or dropped."""
+    """How many checks `invariants()` runs: the distinct `R<n>` labels in its
+    source, so the pass message cannot state a stale literal."""
     import inspect
     return len(set(re.findall(r"\bR\d+\b", inspect.getsource(invariants))))
 
 
-def pipeline_paths(root: Path) -> tuple[Path, Path, Path]:
-    """Return sibling paths so the adapter input and output never overlap."""
-    return root / "export", root / "bundle", root / "metrics.json"
-
-
 def run_one(build: str, replay: Path, exe: Path) -> tuple[str, dict | None, str]:
-    """export -> bundle -> compute_metrics, into a scratch dir that is removed."""
+    """`(build, extract(metrics), error)` from the pipeline, run in sibling
+    scratch directories (the adapter's input and output never overlap) that
+    are removed afterwards."""
     if not replay.is_file():
         return build, None, f"replay not found: {replay}"
     out = Path(tempfile.mkdtemp(prefix=f"vrfkit-metrics-{build.replace('.', '_')}-"))
     try:
-        export_dir, bundle_dir, metrics_path = pipeline_paths(out)
-        steps = (
-            ("export", [str(exe), "export", str(replay), "--out", str(export_dir)]),
-            ("bundle", [sys.executable, str(BUNDLE_TOOL), str(export_dir),
-                        "-o", str(bundle_dir)]),
-            ("metrics", [sys.executable, str(COMPUTE_METRICS), str(bundle_dir),
-                         "-o", str(metrics_path)]),
-        )
-        for name, cmd in steps:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=1800)
-            if r.returncode != 0:
-                tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
-                return build, None, f"{name} failed rc={r.returncode}: " + (
-                    " | ".join(tail[-3:])[:300] if tail else "no output")
-        mj = metrics_path
-        if not mj.exists():
-            return build, None, "metrics.json was not written"
-        try:
-            values = extract(json.loads(mj.read_text(encoding="utf-8")))
-        except ValueError as exc:
-            return build, None, f"metrics.json: {exc}"
-        return build, values, ""
-    except subprocess.TimeoutExpired:
-        return build, None, "timeout"
+        metrics, stage, why = run_pipeline(exe, replay, out / "export", out / "bundle",
+                                           out / "metrics.json")
+        if metrics is None:
+            return build, None, f"{stage} failed: {why}"
+        return build, extract(metrics), ""
+    except ValueError as exc:
+        return build, None, f"metrics.json: {exc}"
     finally:
         shutil.rmtree(out, ignore_errors=True)
 
 
 def merged_metrics(stored: dict, fresh: dict, only) -> dict:
-    """The metrics to write on `--update`, given what was already pinned.
-
-    A scoped run (`--only 13.02`) knows nothing about the other builds, so it
-    keeps them. An unscoped run looked at every build in REPLAYS, so it alone
-    may retire one: merging there would keep a build pinned after it left
-    REPLAYS and fail every later run with "MISSING from this run".
-    """
+    """The metrics `--update` writes. A scoped run (`--only 13.02`) keeps the
+    builds it did not look at; only an unscoped one may retire a build, or a
+    build that left REPLAYS stays pinned and every later run fails on it."""
     return dict(fresh) if only is None else {**stored, **fresh}
 
 
@@ -293,7 +242,7 @@ def main() -> int:
     results, failures = {}, []
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         for build, values, err in pool.map(
-            lambda kv: run_one(kv[0], _resolve_replay(kv[1]), args.exe),
+            lambda kv: run_one(kv[0], sc.baseline_input(None, kv[1]), args.exe),
             sorted(builds.items()),
         ):
             if values is None:

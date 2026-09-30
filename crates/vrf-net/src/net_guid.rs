@@ -1,45 +1,28 @@
-//! Net GUID loading -- `InternalLoadObject` recursive reader.
-//!
-//! Unreal's wire form of an object reference: a GUID, then, when its export
-//! flags carry a path, that path and possibly an outer GUID, recursively. The
-//! paths go to the caller's [`GuidPathSink`], which owns the NetGuidCache.
+//! Net GUID references (`InternalLoadObject`), read by vrf-schema's
+//! [`load_object`](vrf_schema::load_object). The paths go to the caller's
+//! [`GuidPathSink`], which owns the NetGuidCache.
 
 use vrf_bitio::BitReader;
+use vrf_schema::SchemaError;
 
 use crate::error::{NetError, Result};
-use crate::types::{ExportFlags, MAX_NET_GUID_RECURSION, NetworkGuid};
+use crate::types::NetworkGuid;
 
 /// Callback invoked when a net GUID's path is decoded from the stream.
 pub trait GuidPathSink {
     /// A GUID path was read from the wire.
     fn register_path(&mut self, guid: u32, path: &str, outer_guid: NetworkGuid);
 
-    /// The path this GUID is known by, if the receiver keeps one.
-    ///
-    /// Decides the net-player-index byte: resolve the channel's archetype and
-    /// actor paths and ask whether either
-    /// names a PlayerController. Answer from the receiver's cache, not from a
-    /// set of `register_path` calls: paths reach the cache by more routes than
-    /// pass through here. The default `None` (no cache) never consumes that byte.
+    /// The path this GUID is known by in the receiver's NetGuidCache, which
+    /// decides the net-player-index byte. Answer from the cache, not from
+    /// `register_path` calls: paths reach it by more routes. The default
+    /// `None` never consumes that byte.
     fn path_for_guid(&self, _guid: u32) -> Option<&str> {
         None
     }
 }
 
-/// Read a net GUID reference (and any associated export data) from the stream.
-///
-/// ```text
-/// Wire layout:
-///   net_guid           : IntPacked (u32)
-///   if guid == default || is_exporting:
-///     export_flags     : u8
-///   if HasPath in export_flags:
-///     outer_guid       : InternalLoadObject (recursive)
-///     path_name        : FString
-///     if HasNetworkChecksum:
-///       checksum       : u32
-/// ```
-///
+/// Read a net GUID reference, path cap 4096 bytes, and register its paths.
 /// `is_exporting` is true inside a package-map export bunch; in content-block
 /// headers only the default GUID (1) carries inline path data.
 pub fn internal_load_object(
@@ -48,109 +31,72 @@ pub fn internal_load_object(
     depth: u32,
     sink: &mut dyn GuidPathSink,
 ) -> Result<NetworkGuid> {
-    if depth >= MAX_NET_GUID_RECURSION {
-        return Err(NetError::GuidRecursionLimit { depth });
-    }
-
-    let guid = NetworkGuid(reader.read_int_packed()?);
-    if !guid.is_valid() {
-        return Ok(guid);
-    }
-
-    let flags = if guid.is_default() || is_exporting {
-        ExportFlags(reader.read_u8()?)
-    } else {
-        ExportFlags(0)
-    };
-
-    if !flags.has_path() {
-        return Ok(guid);
-    }
-
-    let outer_guid = internal_load_object(reader, is_exporting, depth + 1, sink)?;
-
-    // Cap the FString at 4096 bytes to reject a corrupt length early.
-    let path = reader.read_fstring(4096)?;
-
-    if flags.has_network_checksum() {
-        let _checksum = reader.read_u32()?;
-    }
-
-    sink.register_path(guid.0, &path, outer_guid);
-    Ok(guid)
+    let mut register = |guid, path: String, outer| sink.register_path(guid, &path, outer);
+    vrf_schema::load_object(reader, is_exporting, 4096, depth, &mut register).map_err(|e| match e {
+        SchemaError::Bitio(e) => NetError::Bit(e),
+        SchemaError::RecursionLimitExceeded { limit } => NetError::GuidRecursionLimit {
+            depth: limit.max(depth),
+        },
+        e => unreachable!("load_object fails only on a read or its depth limit, not {e}"),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_bits::{pack, write_byte, write_int_packed};
+    use crate::test_bits::{BitWrite, pack};
 
-    #[derive(Default)]
-    struct VecSink(Vec<(u32, String, NetworkGuid)>);
+    type Paths = Vec<(u32, String, NetworkGuid)>;
 
-    impl GuidPathSink for VecSink {
+    impl GuidPathSink for Paths {
         fn register_path(&mut self, guid: u32, path: &str, outer: NetworkGuid) {
-            self.0.push((guid, path.to_owned(), outer));
+            self.push((guid, path.to_owned(), outer));
         }
     }
 
-    /// Build a minimal InternalLoadObject payload for a non-exporting read.
-    fn build_simple_guid(guid: u32) -> Vec<u8> {
-        let mut bits: Vec<bool> = Vec::new();
-        write_int_packed(&mut bits, guid);
-        pack(&bits)
+    /// Read `bits` from depth 0: the result and every path registered.
+    fn load(bits: &[bool], is_exporting: bool) -> (Result<NetworkGuid>, Paths) {
+        let mut paths = Paths::new();
+        let data = pack(bits);
+        let result = internal_load_object(&mut BitReader::new(&data), is_exporting, 0, &mut paths);
+        (result, paths)
     }
 
-    /// Build an InternalLoadObject with path export.
-    fn build_export_guid(guid: u32, path: &str, outer_guid: u32) -> Vec<u8> {
-        let mut bits: Vec<bool> = Vec::new();
-        write_int_packed(&mut bits, guid);
-        // export flags = HasPath (0x01)
-        write_byte(&mut bits, 0x01);
-        // outer guid (simple, no path)
-        write_int_packed(&mut bits, outer_guid);
-        // FString: length (i32) + bytes + null
-        let path_bytes = format!("{}\0", path);
-        let len = path_bytes.len() as i32;
-        for b in len.to_le_bytes() {
-            write_byte(&mut bits, b);
+    /// GUID 0 is no object even in an export, and outside one only the
+    /// default GUID (1) carries flags: each payload is its IntPacked byte.
+    #[test]
+    fn a_guid_without_flags_reads_nothing_more() {
+        for (guid, is_exporting) in [(0, true), (42, false)] {
+            let mut bits = Vec::new();
+            bits.int_packed(guid);
+            assert_eq!(load(&bits, is_exporting), (Ok(NetworkGuid(guid)), vec![]));
         }
-        for b in path_bytes.bytes() {
-            write_byte(&mut bits, b);
+    }
+
+    /// Any GUID in an export, and the default GUID (1) outside one, reads flags.
+    #[test]
+    fn an_exporting_or_default_guid_reads_its_path() {
+        for (guid, is_exporting) in [(18, true), (1, false)] {
+            let mut bits = Vec::new();
+            // Flags HasPath, then outer GUID 0 (no object) and the path.
+            bits.int_packed(guid)
+                .u8(0x01)
+                .int_packed(0)
+                .fstring("/Game/Test.Test_C");
+            let registered = (guid, "/Game/Test.Test_C".to_owned(), NetworkGuid(0));
+            let expected = (Ok(NetworkGuid(guid)), vec![registered]);
+            assert_eq!(load(&bits, is_exporting), expected, "{guid}");
         }
-        pack(&bits)
     }
 
+    /// Sixteen nested HasPath GUIDs reach the limit before a 17th is read.
     #[test]
-    fn zero_guid_is_invalid_and_consumed() {
-        let data = build_simple_guid(0);
-        let mut reader = BitReader::new(&data);
-        let mut sink = VecSink::default();
-        let guid = internal_load_object(&mut reader, false, 0, &mut sink).unwrap();
-        assert!(!guid.is_valid());
-        assert!(sink.0.is_empty());
-    }
-
-    #[test]
-    fn simple_guid_no_path() {
-        let data = build_simple_guid(42);
-        let mut reader = BitReader::new(&data);
-        let mut sink = VecSink::default();
-        let guid = internal_load_object(&mut reader, false, 0, &mut sink).unwrap();
-        assert_eq!(guid.0, 42);
-        assert!(sink.0.is_empty()); // No path since not default and not exporting
-    }
-
-    #[test]
-    fn exporting_guid_with_path() {
-        let data = build_export_guid(18, "/Game/Test.Test_C", 0);
-        let mut reader = BitReader::new(&data);
-        let mut sink = VecSink::default();
-        let guid = internal_load_object(&mut reader, true, 0, &mut sink).unwrap();
-        assert_eq!(guid.0, 18);
-        assert_eq!(sink.0.len(), 1);
-        assert_eq!(sink.0[0].0, 18);
-        assert_eq!(sink.0[0].1, "/Game/Test.Test_C");
-        assert_eq!(sink.0[0].2, NetworkGuid(0));
+    fn nesting_to_the_depth_limit_is_an_error() {
+        let mut bits = Vec::new();
+        for _ in 0..16 {
+            bits.int_packed(2).u8(0x01);
+        }
+        let limit = Err(NetError::GuidRecursionLimit { depth: 16 });
+        assert_eq!(load(&bits, true), (limit, vec![]));
     }
 }

@@ -1,19 +1,16 @@
 //! Cross-language pins for the constants `tools/to_valplay_bundle.py` shares
-//! with this workspace.
-//!
-//! The adapter must agree with Rust on values, not symbols, and
-//! `crates/vrf-export/tests/roundtrip.rs` uses the Rust symbol, so a value
-//! drift leaves the Rust suite green. Two constants classify every row: a
-//! drifted `UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME` publishes preserved
+//! with this workspace: the adapter must agree with Rust on values, and Rust
+//! tests use the symbols, so a value drift leaves the Rust suite green. Two
+//! constants classify every row: a drifted
+//! `UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME` publishes preserved
 //! ClassNetCache blobs as decoded fields, and a drifted
 //! `CLASS_NET_CACHE_SUFFIX` reclassifies every RPC as a replicated property:
 //! a complete-looking bundle with no kills, damage or abilities.
 //!
-//! Both values also appear in the adapter's docstring, where a substring
-//! search would find them after the code changed, so the assignment is found
-//! by name and only its literals are compared. The Event allowlists are
-//! compared whole against `vrf_container::KNOWN_EVENT_GROUPS`, the parser's
-//! own table, so a group missing on either side fails.
+//! Constants are found by assignment name, not substring, because the values
+//! also occur in prose (e.g. the docstring); the Event allowlists are compared
+//! whole against `vrf_container::KNOWN_EVENT_GROUPS`, so a group missing on
+//! either side fails.
 
 use std::fs;
 use std::path::PathBuf;
@@ -40,13 +37,18 @@ fn adapter_path() -> PathBuf {
         .join("to_valplay_bundle.py")
 }
 
+/// The index of the line holding the top-level `name = ...` assignment.
+fn assignment_line(source: &str, name: &str) -> Option<usize> {
+    source.lines().position(|line| {
+        (line.strip_prefix(name)).is_some_and(|rest| rest.trim_start().starts_with('='))
+    })
+}
+
 /// Every string literal in the top-level `name = ...` assignment, joined, as
 /// Python joins adjacent literals. `None` when there is no such assignment,
 /// which the call site treats as a failure.
 fn python_constant(source: &str, name: &str) -> Option<String> {
-    let start = source.lines().position(|line| {
-        line.starts_with(name) && line[name.len()..].trim_start().starts_with('=')
-    })?;
+    let start = assignment_line(source, name)?;
 
     // The first line, plus continuation lines while brackets remain open.
     let mut statement = String::new();
@@ -91,19 +93,14 @@ fn python_constant(source: &str, name: &str) -> Option<String> {
 
 /// Parse one top-level numeric assignment used by both languages.
 fn python_f64_constant(source: &str, name: &str) -> Option<f64> {
-    source.lines().find_map(|line| {
-        let rest = line.strip_prefix(name)?.trim_start();
-        let value = rest.strip_prefix('=')?.trim();
-        value.parse().ok()
-    })
+    let line = source.lines().nth(assignment_line(source, name)?)?;
+    line[name.len()..].trim_start()[1..].trim().parse().ok()
 }
 
 /// The Event allowlist dictionaries, which the adapter keeps one entry per
 /// line; any other syntax fails closed rather than being parsed as Python.
 fn python_string_dict(source: &str, name: &str) -> Option<Vec<(String, String)>> {
-    let start = source.lines().position(|line| {
-        line.starts_with(name) && line[name.len()..].trim_start().starts_with('=')
-    })?;
+    let start = assignment_line(source, name)?;
     let mut rows = Vec::new();
     for line in source.lines().skip(start + 1) {
         let line = line.trim();
@@ -119,10 +116,26 @@ fn python_string_dict(source: &str, name: &str) -> Option<Vec<(String, String)>>
     None
 }
 
-/// One Event allowlist as the parser sees it, through the accessor it calls,
-/// rendered as the adapter's dictionary literal spells it.
-fn rust_event_rows(render: fn(&str) -> Option<String>) -> Vec<(String, String)> {
-    let mut rows = vrf_container::KNOWN_EVENT_GROUPS
+const WORD_COUNTS: &str = "_SERVER_TIMELINE_WORD_COUNTS";
+
+/// The adapter's Event allowlist `dictionary` against the parser's table,
+/// read through the accessor the parser calls and rendered as the dictionary
+/// literal spells it.
+fn assert_event_contract(source: &str, dictionary: &str) {
+    use vrf_container::{
+        known_event_payload_name, known_event_payload_tag, known_event_word_count,
+    };
+    let render: fn(&str) -> Option<String> = match dictionary {
+        WORD_COUNTS => |group| known_event_word_count(group).map(|n| n.to_string()),
+        "_SERVER_TIMELINE_PAYLOAD_TAGS" => {
+            |group| known_event_payload_tag(group).map(|t| t.to_string())
+        }
+        "_SERVER_TIMELINE_PAYLOAD_NAMES" => {
+            |group| known_event_payload_name(group).map(|n| format!("\"{n}\""))
+        }
+        other => panic!("no parser accessor for {other}"),
+    };
+    let mut rust = vrf_container::KNOWN_EVENT_GROUPS
         .iter()
         .map(|known| {
             let value = render(known.group).unwrap_or_else(|| {
@@ -134,43 +147,16 @@ fn rust_event_rows(render: fn(&str) -> Option<String>) -> Vec<(String, String)> 
             (known.group.to_string(), value)
         })
         .collect::<Vec<_>>();
-    rows.sort();
-    rows
-}
-
-fn rust_event_word_counts() -> Vec<(String, String)> {
-    rust_event_rows(|group| vrf_container::known_event_word_count(group).map(|n| n.to_string()))
-}
-
-fn rust_event_tags() -> Vec<(String, String)> {
-    rust_event_rows(|group| vrf_container::known_event_payload_tag(group).map(|t| t.to_string()))
-}
-
-fn rust_event_names() -> Vec<(String, String)> {
-    rust_event_rows(|group| {
-        vrf_container::known_event_payload_name(group).map(|name| format!("\"{name}\""))
-    })
-}
-
-fn assert_event_contract(source: &str, dictionary: &str, rust: &[(String, String)], drift: &str) {
+    rust.sort();
     let python = python_string_dict(source, dictionary)
         .unwrap_or_else(|| panic!("the adapter must assign a simple {dictionary} dictionary"));
-    assert_eq!(python, rust, "{drift}");
-}
-
-fn assert_event_word_count_contract(source: &str) {
-    assert_event_contract(
-        source,
-        "_SERVER_TIMELINE_WORD_COUNTS",
-        &rust_event_word_counts(),
-        "the adapter's Event word-count allowlist drifted",
-    );
+    assert_eq!(python, rust, "the adapter's {dictionary} allowlist drifted");
 }
 
 /// `_SERVER_TIMELINE_WORD_COUNTS` from the parser's table, minus `skip` and
 /// plus `extra`: differing from the parser by at most one group.
 fn word_count_dictionary(skip: Option<&str>, extra: Option<(&str, usize)>) -> String {
-    let mut source = String::from("_SERVER_TIMELINE_WORD_COUNTS = {\n");
+    let mut source = format!("{WORD_COUNTS} = {{\n");
     for known in vrf_container::KNOWN_EVENT_GROUPS {
         if Some(known.group) != skip {
             source.push_str(&format!("    \"{}\": {},\n", known.group, known.word_count));
@@ -223,13 +209,13 @@ fn adapter_pins_the_event_payload_time_tolerance() {
 
 #[test]
 fn adapter_pins_the_event_payload_word_counts() {
-    assert_event_word_count_contract(&adapter_source());
+    assert_event_contract(&adapter_source(), WORD_COUNTS);
 }
 
 /// A one-value drift must reach the assertion. Built from the parser's table,
 /// so it stays complete as the table grows and fails on the value alone.
 #[test]
-#[should_panic(expected = "the adapter's Event word-count allowlist drifted")]
+#[should_panic(expected = "the adapter's _SERVER_TIMELINE_WORD_COUNTS allowlist drifted")]
 fn event_word_count_contract_rejects_one_drifted_value() {
     let complete = word_count_dictionary(None, None);
     let drifted = complete.replacen("\"characterDeath\": 2,", "\"characterDeath\": 1,", 1);
@@ -237,49 +223,40 @@ fn event_word_count_contract_rejects_one_drifted_value() {
         drifted, complete,
         "the fixture must change exactly one value"
     );
-    assert_event_word_count_contract(&drifted);
+    assert_event_contract(&drifted, WORD_COUNTS);
 }
 
 /// The parser's own table passes, so the two tests below fail for the one
 /// group they change, not for how the dictionary is written.
 #[test]
 fn event_word_count_contract_accepts_the_parsers_own_table() {
-    assert_event_word_count_contract(&word_count_dictionary(None, None));
+    assert_event_contract(&word_count_dictionary(None, None), WORD_COUNTS);
 }
 
 /// A group the parser knows and the adapter would publish without its words.
 #[test]
-#[should_panic(expected = "the adapter's Event word-count allowlist drifted")]
+#[should_panic(expected = "the adapter's _SERVER_TIMELINE_WORD_COUNTS allowlist drifted")]
 fn event_word_count_contract_rejects_a_group_the_adapter_lacks() {
     let first = vrf_container::KNOWN_EVENT_GROUPS[0].group;
-    assert_event_word_count_contract(&word_count_dictionary(Some(first), None));
+    assert_event_contract(&word_count_dictionary(Some(first), None), WORD_COUNTS);
 }
 
 /// The adapter assigns words to a group the parser never decodes.
 #[test]
-#[should_panic(expected = "the adapter's Event word-count allowlist drifted")]
+#[should_panic(expected = "the adapter's _SERVER_TIMELINE_WORD_COUNTS allowlist drifted")]
 fn event_word_count_contract_rejects_a_group_the_parser_lacks() {
-    assert_event_word_count_contract(&word_count_dictionary(None, Some(("spikeDropped", 0))));
+    let extra = word_count_dictionary(None, Some(("spikeDropped", 0)));
+    assert_event_contract(&extra, WORD_COUNTS);
 }
 
 #[test]
 fn adapter_pins_the_event_payload_tags() {
-    assert_event_contract(
-        &adapter_source(),
-        "_SERVER_TIMELINE_PAYLOAD_TAGS",
-        &rust_event_tags(),
-        "the adapter's Event tag allowlist drifted",
-    );
+    assert_event_contract(&adapter_source(), "_SERVER_TIMELINE_PAYLOAD_TAGS");
 }
 
 #[test]
 fn adapter_pins_the_event_payload_names() {
-    assert_event_contract(
-        &adapter_source(),
-        "_SERVER_TIMELINE_PAYLOAD_NAMES",
-        &rust_event_names(),
-        "the adapter's public Event-name allowlist drifted",
-    );
+    assert_event_contract(&adapter_source(), "_SERVER_TIMELINE_PAYLOAD_NAMES");
 }
 
 /// A scanner that returned the Rust value, or the first quoted text in the

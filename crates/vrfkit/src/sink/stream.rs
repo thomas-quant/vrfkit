@@ -8,7 +8,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 use vrf_bitio::BitReader;
 use vrf_decode::apply_overlay_with_checksum;
-use vrf_decode::cnc::decode_cnc_payload;
+use vrf_decode::cnc::{CncRpc, decode_cnc_payload};
 use vrf_export::{
     ActorRecord, CheckpointBlockRecord, MovementRecord, PartialRecord,
     UNRESOLVED_CLASS_NET_CACHE_PAYLOAD_FIELD_NAME,
@@ -19,10 +19,12 @@ use vrf_net::pipeline::{
     ActorChannelState, PartialPayloadReason, RejectedPartialFragment, RepLayoutTailOutcome,
     ReplicationSink, StreamFailure, StreamFailureCause,
 };
-use vrf_net::types::NetworkGuid;
+use vrf_net::types::{FVector, NetworkGuid};
 
 use super::intern::put;
-use super::paths::{channel_archetype, retire_channel_archetype, set_channel_archetype};
+use super::paths::{
+    channel_archetype, combined_candidate, retire_channel_archetype, set_channel_archetype,
+};
 use super::rpc::copy_raw_bits;
 use super::{ExportSink, FieldValues, TABLE};
 
@@ -45,8 +47,15 @@ impl ExportSink<'_> {
         else {
             return;
         };
-        let evidence =
-            self.current_block_resolution_evidence(channel_index, actor_net_guid.0, header);
+        let (actor_archetype_outer_path, actor_archetype_path) = if header.is_actor {
+            let archetype = channel_archetype(self.channel_state, channel_index, actor_net_guid);
+            self.archetype_paths(archetype)
+        } else {
+            (None, None)
+        };
+        let cache = &*self.cache;
+        let guid_path = |guid: u32| cache.get_path_by_guid(guid).map(str::to_owned);
+        let object_guid = (!header.is_actor).then_some(header.object_net_guid.0);
         let block_index = block_offset + self.records.checkpoint_blocks.len() as u32;
         let field_row_start = field_offset + self.records.fields.len() as u64;
         self.records.checkpoint_blocks.push(CheckpointBlockRecord {
@@ -56,7 +65,7 @@ impl ExportSink<'_> {
             packet_id: self.packet_id,
             channel_index,
             actor_net_guid: actor_net_guid.0,
-            object_net_guid: (!header.is_actor).then_some(header.object_net_guid.0),
+            object_net_guid: object_guid,
             class_net_guid: header.has_class_net_guid.then_some(header.class_net_guid.0),
             outer_net_guid: Some(header.outer_net_guid.0),
             has_rep_layout: header.has_rep_layout,
@@ -70,24 +79,29 @@ impl ExportSink<'_> {
                 Arc::from("<not-resolved:deleted>")
             },
             group_resolution_source: if resolved {
-                evidence.group_resolution_source
+                self.current_group_resolution_source
             } else {
                 "not_resolved_deleted"
             },
-            group_declared: resolved && evidence.group_declared,
-            resolution_memo_hit: resolved && evidence.resolution_memo_hit,
+            group_declared: resolved && cache.get_group_by_path(&self.current_group_path).is_some(),
+            resolution_memo_hit: resolved && self.current_resolution_memo_hit,
             function_count,
             function_count_source: if resolved {
-                evidence.function_count_source
+                self.current_function_count_source
             } else {
                 "not_applicable_deleted"
             },
-            actor_archetype_path: evidence.actor_archetype_path,
-            actor_archetype_outer_path: evidence.actor_archetype_outer_path,
-            actor_guid_path: evidence.actor_guid_path,
-            class_guid_path: evidence.class_guid_path,
-            object_guid_path: evidence.object_guid_path,
-            object_outer_path: evidence.object_outer_path,
+            actor_archetype_path,
+            actor_archetype_outer_path,
+            actor_guid_path: guid_path(actor_net_guid.0),
+            class_guid_path: header
+                .has_class_net_guid
+                .then(|| guid_path(header.class_net_guid.0))
+                .flatten(),
+            object_guid_path: object_guid.and_then(guid_path),
+            object_outer_path: object_guid
+                .and_then(|guid| cache.get_outer_path(guid))
+                .map(str::to_owned),
             field_row_start,
             field_row_count: 0,
         });
@@ -95,12 +109,8 @@ impl ExportSink<'_> {
 
     /// The current group's name and `compatible_checksum` for `handle`, from one
     /// schema walk (the checksum feeds the overlay's last-resort lookup; asking
-    /// separately would double the hottest loop's cost). Interned: 429,637
-    /// property rows and 342,735 RPC rows on the reference replay each cloned
-    /// the group's `String` name before.
+    /// separately would double the hottest loop's cost). The name is interned.
     fn resolve_field_name_and_checksum(&mut self, handle: u32) -> (Option<Arc<str>>, Option<u32>) {
-        // Destructured: borrowing `cache` and pooling into `channel_state` are
-        // disjoint field borrows.
         let Self {
             cache,
             channel_state,
@@ -129,31 +139,16 @@ impl FieldSink for ExportSink<'_> {
         let (field_name, field_checksum) = self.resolve_field_name_and_checksum(handle);
         let raw_bits = copy_raw_bits(reader, bit_count);
 
-        // Additive passes; the parent row with the whole payload is still
-        // emitted below. 1: a known DynamicArray, one row per leaf.
-        if self.is_known_array_field(field_name.as_deref(), field_checksum) {
-            if let Some(ref raw) = raw_bits {
-                self.emit_flattened_array(field_name.as_deref(), field_checksum, raw, bit_count);
-            }
+        // Additive passes, each a no-op unless it owns the field; the parent row
+        // with the whole payload is still emitted below.
+        if let Some(raw) = raw_bits.as_deref() {
+            let name = field_name.as_deref();
+            self.emit_flattened_array(name, field_checksum, raw, bit_count);
+            self.decode_struct_blob(name, raw, bit_count);
+            self.emit_multi_contents(name, raw, bit_count);
         }
 
-        // 2: a struct blob with a dedicated decoder.
-        if self.is_struct_blob_field(field_name.as_deref()) {
-            // The `Arc` is cloned, not the string: `decode_struct_blob` takes
-            // `&mut self` while the name is still borrowed.
-            if let (Some(raw), Some(name)) = (raw_bits.as_deref(), field_name.clone()) {
-                self.decode_struct_blob(&name, raw, bit_count);
-            }
-        }
-
-        // 3: `MultiItemSlot.MultiContents`, one row per item NetGUID.
-        if self.is_multi_contents_field(field_name.as_deref()) {
-            if let Some(raw) = raw_bits.as_deref() {
-                self.emit_multi_contents(raw, bit_count);
-            }
-        }
-
-        let (value_i64, value_f64, value_bool, value_str) = match apply_overlay_with_checksum(
+        let (value_i64, value_f64, value_bool, value_str) = apply_overlay_with_checksum(
             &TABLE,
             &self.current_group_path,
             self.current_group_hash,
@@ -163,15 +158,9 @@ impl FieldSink for ExportSink<'_> {
             raw_bits.as_deref(),
             bit_count,
             &mut self.stats.overlay,
-        ) {
-            Some(result) => (
-                result.value_i64,
-                result.value_f64,
-                result.value_bool,
-                result.value_str,
-            ),
-            None => (None, None, None, None),
-        };
+        )
+        .map(|result| result.into_columns())
+        .unwrap_or_default();
 
         self.record_player_identity(field_name.as_deref(), value_str.as_deref(), value_i64);
 
@@ -186,7 +175,6 @@ impl FieldSink for ExportSink<'_> {
             value_bool,
             value_str,
         });
-        self.stats.fields_emitted += 1;
     }
 
     fn on_rpc(&mut self, handle: u32, bit_count: u32, reader: BitReader<'_>) {
@@ -196,10 +184,9 @@ impl FieldSink for ExportSink<'_> {
             let fallback_reader = reader.clone();
             let failed = self.decode_movement_rpc(reader);
             // A clean batch is movement.parquet row for row; a failed or partial
-            // one cannot reproduce its input, so the whole payload is kept here.
-            // Bits a section leaves unread in a "clean" batch reach no row: they
-            // are only tallied (`movement_*_section_tail*`) until measurement
-            // says whether they are loss (`RpcDecodeResult::sized_section_tails`).
+            // one cannot reproduce its input, so the whole payload is kept. Bits
+            // a section leaves unread in a clean batch are only tallied
+            // (`movement_*_section_tail*`).
             self.push_field(FieldValues {
                 handle,
                 field_name,
@@ -240,19 +227,13 @@ impl FieldSink for ExportSink<'_> {
 const BOMB_PLAYER_STATE: &str = "/Game/GameModes/Bomb/BombPlayerState.BombPlayerState_C";
 
 /// The ClassNetCache function count for `AbilitiesAndBuffsComponent`, whose
-/// `_ClassNetCache` group no VALORANT replay declares.
-///
-/// Brute-forced over fc 2-256 against 9,274 payloads of a reference replay: 34
-/// is the minimum that walks every payload cleanly (9,274/9,274), each one RPC
-/// at handle 1, and every fc in 34-65 gives handle 1 the same 6-bit width and
-/// so the same walk. One constant for all payloads, not a per-payload search:
-/// simple payloads also walk under smaller fc values, with garbage handles. A
-/// clean outer walk proves neither the width nor the undeclared group; the
-/// stronger evidence is the inner FastArray custom-delta framing, validated on
-/// 2,882,152 inner windows over 714 accepted exports (the separate
-/// `extract_fastarray_observations.py` recovers replication keys, item IDs and
-/// field boundaries). An update can fail or accidentally fit this walk, so
-/// consumers must keep the raw parent and validate the inner structure.
+/// `_ClassNetCache` group no VALORANT replay declares: the minimum fc that walks
+/// all 9,274 payloads of a reference replay as one handle-1 RPC (every fc in
+/// 34-65 gives handle 1 the same 6-bit width). One constant, not a per-payload
+/// search: smaller fc values also walk simple payloads, with garbage handles.
+/// A clean walk proves neither the width nor the group (the inner FastArray
+/// framing is the stronger evidence: `tools/extract_fastarray_observations.py`),
+/// so consumers keep the raw parent and validate the inner structure.
 const ABILITIES_AND_BUFFS_FC: u32 = 34;
 
 impl ExportSink<'_> {
@@ -295,12 +276,8 @@ impl ExportSink<'_> {
     /// shared by open and close so the two cannot drift into a join key that
     /// silently does not join.
     fn actor_paths(&self, archetype: Option<NetworkGuid>) -> (Option<String>, Option<String>) {
-        let Some(archetype) = archetype.filter(|g| g.is_valid()) else {
-            return (None, None);
-        };
-        let outer = self.cache.get_outer_path(archetype.0).map(str::to_owned);
-        let arch_path = self.cache.get_path_by_guid(archetype.0).map(str::to_owned);
-        let combined = self.create_combined_candidate(outer.as_deref(), arch_path.as_deref());
+        let (outer, arch_path) = self.archetype_paths(archetype);
+        let combined = combined_candidate(outer.as_deref(), arch_path.as_deref());
         (combined.or(outer), arch_path)
     }
 
@@ -312,9 +289,7 @@ impl ExportSink<'_> {
         character: Option<i64>,
     ) {
         // Through `canonical_group`: Swiftplay replicates these fields under
-        // `Swiftplay_EoRCredits_PlayerState_C`, and the raw path left
-        // `manifest.players` empty on 4 of 64 demo replays whose `Subject` was
-        // present on all ten actors.
+        // `Swiftplay_EoRCredits_PlayerState_C`.
         if vrf_decode::canonical_group(&self.current_group_path) != BOMB_PLAYER_STATE {
             return;
         }
@@ -332,12 +307,11 @@ impl ExportSink<'_> {
                     entry.subject = Some(s.to_owned());
                 }
             }
-            // Last *non-zero* write wins: a disconnect replicates it again as
-            // 0, which is not a NetGUID, and last-write-wins lost the real GUID
-            // for 9 players across 5 of 69 demos.
+            // A disconnect replicates it again as 0, which is not a NetGUID.
             "SpawnedCharacter" => {
-                if let Some(c) = character.filter(|c| *c != 0) {
-                    entry.character_net_guid = Some(c as u32);
+                if let Some(c) = character.filter(|c| *c != 0).map(|c| c as u32) {
+                    entry.character_net_guids.retain(|&g| g != c);
+                    entry.character_net_guids.push(c);
                 }
             }
             // PossessedCharacter can be a camera, drone or other ability pawn.
@@ -367,22 +341,15 @@ impl ExportSink<'_> {
             return;
         };
 
-        let total_len = u64::from(bit_count);
         for rpc in &rpcs {
-            // The walk validated that each payload fits; on a malformed tail the
-            // payload is dropped (the preservation row keeps the blob). A
-            // zero-bit RPC keeps an empty blob here, where `copy_raw_bits` gives
-            // null; none has been observed, and switching would change output.
-            let raw_bits =
-                BitReader::with_bit_len(payload, total_len)
-                    .ok()
-                    .and_then(|mut reader| {
-                        reader.skip_bits(rpc.payload_offset).ok()?;
-                        if rpc.payload_bits == 0 {
-                            return Some(SmallVec::new());
-                        }
-                        copy_raw_bits(reader, rpc.payload_bits)
-                    });
+            // A zero-bit RPC keeps an empty blob here, where `copy_raw_bits`
+            // gives null; none has been observed, and switching changes output.
+            let raw_bits = cnc_body(payload, bit_count, rpc).and_then(|body| {
+                if rpc.payload_bits == 0 {
+                    return Some(SmallVec::new());
+                }
+                copy_raw_bits(body, rpc.payload_bits)
+            });
 
             let field_name = self.channel_state.names.intern_fmt(|out| {
                 put(out, format_args!("_cnc_h{}", rpc.handle));
@@ -395,10 +362,21 @@ impl ExportSink<'_> {
                 raw_bits,
                 ..FieldValues::default()
             });
-            self.stats.fields_emitted += 1;
             self.stats.cnc_rpcs_emitted += 1;
         }
     }
+}
+
+/// Three optional spawn components from one optional vector: all or none.
+fn transpose(v: Option<[f32; 3]>) -> [Option<f32>; 3] {
+    v.map_or([None; 3], |v| v.map(Some))
+}
+
+/// One walked CNC RPC's body: a reader over its `payload_bits` bits.
+fn cnc_body<'p>(payload: &'p [u8], bit_count: u32, rpc: &CncRpc) -> Option<BitReader<'p>> {
+    let mut reader = BitReader::with_bit_len(payload, u64::from(bit_count)).ok()?;
+    reader.skip_bits(rpc.payload_offset).ok()?;
+    reader.sub_reader(u64::from(rpc.payload_bits)).ok()
 }
 
 impl ReplicationSink for ExportSink<'_> {
@@ -461,23 +439,16 @@ impl ReplicationSink for ExportSink<'_> {
             );
         }
 
-        // A static actor has no archetype, so no class_path: it has no spawn
-        // block, and its class and archetype paths stay null. Its GUID path is
-        // the level's instance name, not a class: as a fallback it put
-        // `Ascent_C_0`, `AresWorldSettings` and the like on 27 opens of
-        // 02d4d478, each
-        // byte-identical to net_guids.parquet's `path` for the same GUID.
+        // A static actor has no archetype, so its class and archetype paths
+        // stay null: its GUID path is the level's instance name
+        // (`Ascent_C_0`), not a class.
         let (class_path, archetype_path) = self.actor_paths(Some(state.archetype_net_guid));
 
-        let (spawn_x, spawn_y, spawn_z) = match state.spawn_location {
-            Some(loc) => (Some(loc.x as f32), Some(loc.y as f32), Some(loc.z as f32)),
-            None => (None, None, None),
-        };
-
-        let (spawn_pitch, spawn_yaw, spawn_roll) = match state.spawn_rotation {
-            Some(rot) => (Some(rot.pitch), Some(rot.yaw), Some(rot.roll)),
-            None => (None, None, None),
-        };
+        let xyz = |v: Option<FVector>| v.map(|v| [v.x, v.y, v.z].map(|c| c as f32));
+        let [spawn_x, spawn_y, spawn_z] = transpose(xyz(state.spawn_location));
+        let [spawn_vx, spawn_vy, spawn_vz] = transpose(xyz(state.spawn_velocity));
+        let rotation = state.spawn_rotation.map(|r| [r.pitch, r.yaw, r.roll]);
+        let [spawn_pitch, spawn_yaw, spawn_roll] = transpose(rotation);
 
         self.records.actors.push(ActorRecord {
             time_ms: self.time_ms,
@@ -493,6 +464,9 @@ impl ReplicationSink for ExportSink<'_> {
             spawn_pitch,
             spawn_yaw,
             spawn_roll,
+            spawn_vx,
+            spawn_vy,
+            spawn_vz,
         });
     }
 
@@ -506,9 +480,7 @@ impl ReplicationSink for ExportSink<'_> {
 
         // `ChannelCloseReason::Dormancy` (vrf-net's `b_dormant`) stops
         // replication of a live actor; every other reason is the actor going
-        // away. As "close", a settling persistent effect read as a despawn and
-        // its wake-up as a second spawn. Both still emit a row; only the label
-        // differs.
+        // away. Both emit a row; only the label differs.
         let event = if dormant { "dormant" } else { "close" };
 
         self.records.actors.push(ActorRecord {
@@ -519,12 +491,7 @@ impl ReplicationSink for ExportSink<'_> {
             event,
             class_path,
             archetype_path,
-            spawn_x: None,
-            spawn_y: None,
-            spawn_z: None,
-            spawn_pitch: None,
-            spawn_yaw: None,
-            spawn_roll: None,
+            ..ActorRecord::default()
         });
         if !dormant {
             retire_channel_archetype(self.channel_state, channel_index);
@@ -541,10 +508,8 @@ impl ReplicationSink for ExportSink<'_> {
         self.current_actor_guid = actor_net_guid.0;
         // An actor block carries no subobject GUID; a subobject block's GUID
         // tells a character's inventory slots apart (merged, a player seems to
-        // hold one item). A GUID of 0 stays `Some(0)`: it is read
-        // unconditionally and branched on by validity, while downstream `None`
-        // means "actor block", the adapter substitutes the actor GUID, and the
-        // block collapses onto the actor -- the merge cf97ecf undid.
+        // hold one item). A GUID of 0 stays `Some(0)`: downstream `None` means
+        // "actor block", and the block would collapse onto the actor.
         self.current_object_guid = if header.is_actor {
             None
         } else {
@@ -576,37 +541,24 @@ impl ReplicationSink for ExportSink<'_> {
             // count: safe only with the direct pre-remap component identity
             // above and the strict checks below (one handle-1 RPC, exact end,
             // set body flag).
-            if let Some(rpcs) = decode_cnc_payload(&raw_tail, bit_count, ABILITIES_AND_BUFFS_FC) {
-                if let [rpc] = rpcs.as_slice() {
-                    let raw_body = (|| {
-                        if rpc.handle != 1 || rpc.payload_bits == 0 {
-                            return None;
-                        }
-                        let mut body =
-                            BitReader::with_bit_len(&raw_tail, u64::from(bit_count)).ok()?;
-                        body.skip_bits(rpc.payload_offset).ok()?;
-                        let body = body.sub_reader(u64::from(rpc.payload_bits)).ok()?;
-                        let mut flag = body.clone();
-                        if !flag.read_bit().ok()? {
-                            return None;
-                        }
-                        copy_raw_bits(body, rpc.payload_bits)
-                    })();
-                    if let Some(raw_body) = raw_body {
-                        let field_name = self.channel_state.names.intern(CHAINED_CNC_H1_FIELD_NAME);
-                        self.push_field(FieldValues {
-                            handle: rpc.handle,
-                            field_name: Some(field_name),
-                            bit_count: rpc.payload_bits,
-                            raw_bits: Some(raw_body),
-                            ..FieldValues::default()
-                        });
-                        self.stats.fields_emitted += 1;
-                        self.stats.rpcs_emitted += 1;
-                        self.stats.cnc_rpcs_emitted += 1;
-                        self.stats.rep_layout_cnc_tails_decoded += 1;
-                        return RepLayoutTailOutcome::Decoded { rpc_count: 1 };
-                    }
+            let rpcs = decode_cnc_payload(&raw_tail, bit_count, ABILITIES_AND_BUFFS_FC);
+            if let Some([rpc]) = rpcs.as_deref() {
+                let body = cnc_body(&raw_tail, bit_count, rpc)
+                    .filter(|body| rpc.handle == 1 && body.clone().read_bit().is_ok_and(|bit| bit));
+                if let Some(raw_body) = body.and_then(|body| copy_raw_bits(body, rpc.payload_bits))
+                {
+                    let field_name = self.channel_state.names.intern(CHAINED_CNC_H1_FIELD_NAME);
+                    self.push_field(FieldValues {
+                        handle: rpc.handle,
+                        field_name: Some(field_name),
+                        bit_count: rpc.payload_bits,
+                        raw_bits: Some(raw_body),
+                        ..FieldValues::default()
+                    });
+                    self.stats.rpcs_emitted += 1;
+                    self.stats.cnc_rpcs_emitted += 1;
+                    self.stats.rep_layout_cnc_tails_decoded += 1;
+                    return RepLayoutTailOutcome::Decoded { rpc_count: 1 };
                 }
             }
         }
@@ -621,7 +573,6 @@ impl ReplicationSink for ExportSink<'_> {
             raw_bits: Some(raw_tail),
             ..FieldValues::default()
         });
-        self.stats.fields_emitted += 1;
         self.stats.rep_layout_cnc_tails_preserved += 1;
         RepLayoutTailOutcome::Preserved {
             cause: StreamFailureCause::UnverifiedRepLayoutTail,
@@ -673,7 +624,7 @@ impl ReplicationSink for ExportSink<'_> {
     }
 
     /// Sample the payload of a block whose inner stream failed to walk; framing
-    /// calls it beside that block's `on_stream_failure` (before or after it).
+    /// calls it after that block's `on_stream_failure`.
     fn on_stream_failure_payload(&mut self, failure: StreamFailure, payload: &[u8]) {
         if let Some(failures) = self.channel_state.failures.as_mut() {
             failures.note_payload(&failure, Arc::clone(&self.current_group_path), payload);
@@ -681,18 +632,15 @@ impl ReplicationSink for ExportSink<'_> {
     }
 
     fn wants_stream_failure_details(&self) -> bool {
-        self.channel_state.failure_aggregate_enabled()
+        self.channel_state.failures.is_some()
     }
 
     /// Attach the resolved group path to a stream failure: the only place both
     /// the bit offsets and the class to investigate are known. `function_count`
-    /// 0 names an unresolved group, a wrong non-zero count can still pick the
-    /// wrong handle width, and 1 and 2 both read at the parser's minimum of 2,
-    /// so this diagnostic cannot tell them apart. With diagnostics on, the
+    /// 0 names an unresolved group; 1 and 2 both read at the parser's minimum
+    /// of 2, so this line cannot tell them apart. With diagnostics on, the
     /// failure also goes to the bounded
-    /// [`FailureAggregate`](super::failure_stats::FailureAggregate) for per-group
-    /// population counts; `failure.payload_preserved` says whether the stream
-    /// reached a whole-payload raw row.
+    /// [`FailureAggregate`](super::failure_stats::FailureAggregate).
     fn on_stream_failure(&mut self, failure: StreamFailure) {
         let line = format!(
             "{:?} actor={} bits={} function_count={} consumed={} skipped={} group={}",
@@ -714,51 +662,30 @@ impl ReplicationSink for ExportSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::test_fixtures::{bits_from_bytes, bytes, channel_open, packed};
-    use crate::sink::{ChannelState, ExportStats, RecordBuffers};
-    use vrf_schema::NetGuidCache;
+    use crate::sink::test_fixtures::{Rig, actor_block, channel_open, subobject_block};
+    use crate::sink::{ExportStats, RecordBuffers};
+    use vrf_testkit::{BitWrite, pack, unpack};
 
-    /// Run one content block through the sink and report the subobject GUID it
-    /// recorded for the fields that would follow.
-    fn object_guid_for(is_actor: bool, object_net_guid: u32) -> Option<u32> {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-        let header = ContentBlockHeader {
-            // RepLayout, so the block needs no ClassNetCache function count.
-            has_rep_layout: true,
-            is_actor,
-            object_net_guid: NetworkGuid(object_net_guid),
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(7, NetworkGuid(1234), &header);
-        sink.current_object_guid
-    }
-
-    /// A subobject block whose object GUID is 0 records `Some(0)`, not `None`;
-    /// see `on_content_block` and `FieldRecord::object_net_guid`.
+    /// The subobject GUID a block records for its fields: `None` for an actor
+    /// block whatever the header says, `Some(0)` for a subobject whose GUID is
+    /// the invalid 0 (see `on_content_block` and `FieldRecord::object_net_guid`).
     #[test]
-    fn a_subobject_block_keeps_a_zero_object_guid_distinct_from_none() {
-        assert_eq!(
-            object_guid_for(false, 0),
-            Some(0),
-            "zero is the invalid-GUID sentinel, not the absence of a subobject"
-        );
-    }
-
-    /// The two cases that must keep working: an actor block carries no
-    /// subobject GUID at all, and a real subobject GUID passes through.
-    #[test]
-    fn an_actor_block_has_no_object_guid_and_subobjects_keep_theirs() {
-        assert_eq!(object_guid_for(true, 0), None, "actor block");
-        assert_eq!(
-            object_guid_for(true, 99),
-            None,
-            "an actor block ignores the GUID"
-        );
-        assert_eq!(object_guid_for(false, 99), Some(99), "subobject block");
+    fn only_subobject_blocks_record_an_object_guid_zero_included() {
+        for (is_actor, guid, want) in [
+            (true, 0, None),
+            (true, 99, None),
+            (false, 0, Some(0)),
+            (false, 99, Some(99)),
+        ] {
+            let mut rig = Rig::default();
+            let mut sink = rig.sink();
+            let header = ContentBlockHeader {
+                is_actor,
+                ..subobject_block(guid, true)
+            };
+            sink.on_content_block(7, NetworkGuid(1234), &header);
+            assert_eq!(sink.current_object_guid, want, "{is_actor} {guid}");
+        }
     }
 
     fn rejected_partial_row(
@@ -766,11 +693,9 @@ mod tests {
         bit_count: usize,
         payload: &[u8],
     ) -> PartialRecord {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
+        let mut rig = Rig::default();
         {
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+            let mut sink = rig.sink();
             let header = vrf_net::bunch::RawBunchHeader {
                 packet_id: 41,
                 ch_index: 7,
@@ -791,8 +716,8 @@ mod tests {
                 rejection_packet_id: Some(44),
             });
         }
-        assert_eq!(records.partials.len(), 1);
-        records.partials.remove(0)
+        assert_eq!(rig.records.partials.len(), 1);
+        rig.records.partials.remove(0)
     }
 
     /// A rejected partial keeps the bits it declares and no more: bits past
@@ -832,51 +757,38 @@ mod tests {
         );
     }
 
-    /// Every rejection cause reaches the table under its own name. A relabelled
-    /// cause is a plausible wrong value: the row still looks well-formed.
+    /// Every rejection cause reaches the table under its own name, the
+    /// variant's in snake case. A relabelled cause is a plausible wrong value:
+    /// the row still looks well-formed.
     #[test]
     fn every_rejected_partial_reason_has_a_distinct_name() {
-        let reasons = [
-            (PartialPayloadReason::MissingInitial, "missing_initial"),
-            (
-                PartialPayloadReason::OverlappingInitial,
-                "overlapping_initial",
-            ),
-            (
-                PartialPayloadReason::MismatchedContinuation,
-                "mismatched_continuation",
-            ),
-            (
-                PartialPayloadReason::NonByteAlignedFragment,
-                "non_byte_aligned_fragment",
-            ),
-            (PartialPayloadReason::ActiveStateLimit, "active_state_limit"),
-            (
-                PartialPayloadReason::BufferedBitsLimit,
-                "buffered_bits_limit",
-            ),
-            (
-                PartialPayloadReason::AllocationFailure,
-                "allocation_failure",
-            ),
-            (
-                PartialPayloadReason::ChannelStateLimit,
-                "channel_state_limit",
-            ),
-            (PartialPayloadReason::ChannelClosed, "channel_closed"),
-            (PartialPayloadReason::EndOfStream, "end_of_stream"),
-        ];
-        for (reason, name) in reasons {
-            assert_eq!(rejected_partial_row(reason, 8, &[0]).reason, name);
+        use PartialPayloadReason::*;
+        for reason in [
+            MissingInitial,
+            OverlappingInitial,
+            MismatchedContinuation,
+            NonByteAlignedFragment,
+            ActiveStateLimit,
+            BufferedBitsLimit,
+            AllocationFailure,
+            ChannelStateLimit,
+            ChannelClosed,
+            EndOfStream,
+        ] {
+            let mut snake = String::new();
+            for (i, c) in format!("{reason:?}").char_indices() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    snake.push('_');
+                }
+                snake.push(c.to_ascii_lowercase());
+            }
+            assert_eq!(rejected_partial_row(reason, 8, &[0]).reason, snake);
         }
     }
-
     #[test]
     fn on_field_keeps_exact_parent_raw_bits_for_unknown_and_typed_failures() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
         let payload = [0b1110_1101];
 
         sink.on_field(
@@ -942,27 +854,34 @@ mod tests {
         }
     }
 
+    fn assert_untyped(row: &vrf_export::FieldRecord) {
+        assert!(row.compatible_checksum.is_none());
+        assert!(row.value_i64.is_none() && row.value_f64.is_none());
+        assert!(row.value_bool.is_none() && row.value_str.is_none());
+    }
+
+    /// A sink inside an `AbilitiesAndBuffsComponent` block (object 144,
+    /// actor 89, channel 3).
+    fn abilities_block(rig: &mut Rig, has_rep_layout: bool) -> ExportSink<'_> {
+        rig.cache
+            .set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT, None);
+        let mut sink = rig.sink();
+        sink.on_content_block(3, NetworkGuid(89), &subobject_block(144, has_rep_layout));
+        sink
+    }
+
     /// A whole unresolved block is one preservation row, not an RPC or a set
     /// of invented fields. The reserved field name is its sole discriminator.
     #[test]
     fn unresolved_class_net_cache_payload_emits_one_distinguished_row() {
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, false);
+        assert_eq!(
+            sink.current_function_count_source,
+            "unresolved_class_net_cache"
+        );
         sink.time_ms = 1234;
         sink.packet_id = 56;
-
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
-        let function_count = sink.on_content_block(7, NetworkGuid(89), &header);
-        assert_eq!(function_count, 0);
 
         let failure = unresolved_failure(89, 7);
         sink.on_unresolved_class_net_cache_payload(failure, &[0x66]);
@@ -971,7 +890,7 @@ mod tests {
         let row = &sink.records.fields[0];
         assert_eq!(row.time_ms, 1234);
         assert_eq!(row.packet_id, 56);
-        assert_eq!(row.channel_index, 7);
+        assert_eq!(row.channel_index, 3);
         assert_eq!(row.actor_net_guid, 89);
         assert_eq!(row.object_net_guid, Some(144));
         assert_eq!(&*row.group_path, "AbilitiesAndBuffsComponent");
@@ -982,11 +901,8 @@ mod tests {
         );
         assert_eq!(row.bit_count, 7);
         assert_eq!(row.raw_bits.as_deref(), Some(&[0x66][..]));
-        assert!(row.value_i64.is_none());
-        assert!(row.value_f64.is_none());
-        assert!(row.value_bool.is_none());
-        assert!(row.value_str.is_none());
-        assert_eq!(sink.stats.fields_emitted, 0);
+        assert_untyped(row);
+        assert_eq!(sink.stats.fields_emitted, 1);
         assert_eq!(sink.stats.rpcs_emitted, 0);
         assert_eq!(sink.stats.overlay.decoded_ok, 0);
         assert_eq!(sink.stats.overlay.decoded_err, 0);
@@ -997,8 +913,8 @@ mod tests {
 
     fn one_h1_cnc_tail(body: &[bool]) -> Vec<bool> {
         let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 1, ABILITIES_AND_BUFFS_FC);
-        packed(&mut bits, body.len() as u32);
+        bits.serialized_int(1, ABILITIES_AND_BUFFS_FC);
+        bits.int_packed(body.len() as u32);
         bits.extend_from_slice(body);
         bits
     }
@@ -1007,19 +923,9 @@ mod tests {
     fn verified_abilities_tail_emits_one_raw_structural_h1_row() {
         let body = [true, false, true, false, true, false, true, false, true];
         let tail = one_h1_cnc_tail(&body);
-        let tail_bytes = bytes(&tail);
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
+        let tail_bytes = pack(&tail);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, true);
 
         let outcome = sink.on_rep_layout_tail(
             NetworkGuid(89),
@@ -1033,12 +939,8 @@ mod tests {
         assert_eq!(row.handle, 1);
         assert_eq!(row.field_name.as_deref(), Some(CHAINED_CNC_H1_FIELD_NAME));
         assert_eq!(row.bit_count, body.len() as u32);
-        assert_eq!(row.raw_bits.as_deref(), Some(bytes(&body).as_slice()));
-        assert!(row.compatible_checksum.is_none());
-        assert!(row.value_i64.is_none());
-        assert!(row.value_f64.is_none());
-        assert!(row.value_bool.is_none());
-        assert!(row.value_str.is_none());
+        assert_eq!(row.raw_bits.as_deref(), Some(pack(&body).as_slice()));
+        assert_untyped(row);
         assert_eq!(sink.stats.rep_layout_cnc_tails_decoded, 1);
         assert_eq!(sink.stats.rep_layout_cnc_tails_preserved, 0);
     }
@@ -1047,27 +949,16 @@ mod tests {
     fn matching_tail_shape_without_raw_component_provenance_stays_whole_and_raw() {
         let body = [true, false, true, false, true, false, true, false, true];
         let tail = one_h1_cnc_tail(&body);
-        let tail_bytes = bytes(&tail);
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(145, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let known_header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(145),
-            ..ContentBlockHeader::default()
-        };
+        let tail_bytes = pack(&tail);
+        let mut rig = Rig::default();
+        rig.cache
+            .set_net_guid_path(145, ABILITIES_AND_BUFFS_COMPONENT, None);
+        let mut sink = rig.sink();
+        let known_header = subobject_block(145, true);
         sink.on_content_block(3, NetworkGuid(89), &known_header);
         assert!(sink.current_is_abilities_and_buffs);
 
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            ..ContentBlockHeader::default()
-        };
+        let header = subobject_block(144, true);
         sink.on_content_block(3, NetworkGuid(89), &header);
         assert!(
             !sink.current_is_abilities_and_buffs,
@@ -1094,11 +985,7 @@ mod tests {
         );
         assert_eq!(row.bit_count, tail.len() as u32);
         assert_eq!(row.raw_bits.as_deref(), Some(tail_bytes.as_slice()));
-        assert!(row.compatible_checksum.is_none());
-        assert!(row.value_i64.is_none());
-        assert!(row.value_f64.is_none());
-        assert!(row.value_bool.is_none());
-        assert!(row.value_str.is_none());
+        assert_untyped(row);
         assert_eq!(sink.stats.rep_layout_cnc_tails_decoded, 0);
         assert_eq!(sink.stats.rep_layout_cnc_tails_preserved, 1);
     }
@@ -1110,21 +997,11 @@ mod tests {
         two_rpcs.extend(one_h1_cnc_tail(&[true, true, false]));
         let false_flag = one_h1_cnc_tail(&[false, true, true]);
 
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, ABILITIES_AND_BUFFS_COMPONENT.to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, true);
 
         for tail in [&two_rpcs, &false_flag] {
-            let raw = bytes(tail);
+            let raw = pack(tail);
             let outcome = sink.on_rep_layout_tail(
                 NetworkGuid(89),
                 tail.len() as u32,
@@ -1150,48 +1027,27 @@ mod tests {
 
     /// A first parameter declaring more bits than remain bumps `truncated_rpcs`:
     /// no row lands, so the counter alone tells this from a payload with no
-    /// parameters.
+    /// parameters. `rpc_param_walks` counts the walks that could set it, and
+    /// not a payload with no function name, which never starts one.
     #[test]
     fn a_truncated_rpc_payload_increments_truncated_rpcs() {
         let mut bits = Vec::new();
         bits.push(false); // property checksum
-        packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
-        packed(&mut bits, 100); // payload_bits = 100 (exceeds remaining)
+        bits.int_packed(1); // encodedHandle = 1 -> handle 0
+        bits.int_packed(100); // payload_bits = 100 (exceeds remaining)
         // No payload data follows: the walker breaks here.
-        let data = bytes(&bits);
+        let data = pack(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
+        assert!(!sink.try_parse_rpc_params(7, reader.clone(), None));
+        assert_eq!(sink.stats.rpc_param_walks, 0);
         let emitted = sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
         assert!(!emitted, "no parameter rows are emitted before the break");
         assert_eq!(sink.stats.truncated_rpcs, 1);
-    }
-
-    /// One parameter then the zero-handle terminator leaves `truncated_rpcs` at
-    /// zero.
-    #[test]
-    fn a_completed_rpc_payload_leaves_truncated_rpcs_at_zero() {
-        let mut bits = Vec::new();
-        bits.push(false); // property checksum
-        packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
-        packed(&mut bits, 8); // payload_bits = 8
-        bits.extend(std::iter::repeat_n(false, 8)); // 8 bits of payload data
-        packed(&mut bits, 0); // terminator handle
-        let data = bytes(&bits);
-        let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-        let emitted = sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
-        assert!(emitted, "one parameter row is emitted");
-        assert_eq!(sink.stats.truncated_rpcs, 0);
+        assert_eq!(sink.stats.rpc_param_walks, 1);
     }
 
     fn targeting_rpc(
@@ -1203,15 +1059,15 @@ mod tests {
         child_checksum: u32,
         array_bits: &[bool],
     ) -> (RecordBuffers, ExportStats) {
-        let mut cache = NetGuidCache::new();
-        cache
+        let mut rig = Rig::default();
+        rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(group.into(), 7, 3))
             .unwrap();
         for (handle, name, checksum) in [
             (parent_handle, parent_name, parent_checksum),
             (1, child_name, child_checksum),
         ] {
-            assert!(cache.set_field_on_group(
+            assert!(rig.cache.set_field_on_group(
                 7,
                 vrf_schema::NetFieldExport {
                     handle,
@@ -1221,22 +1077,19 @@ mod tests {
             ));
         }
         let mut rpc_bits = vec![false];
-        packed(&mut rpc_bits, parent_handle + 1);
-        packed(&mut rpc_bits, array_bits.len() as u32);
+        rpc_bits.int_packed(parent_handle + 1);
+        rpc_bits.int_packed(array_bits.len() as u32);
         rpc_bits.extend_from_slice(array_bits);
-        packed(&mut rpc_bits, 0);
-        let raw = bytes(&rpc_bits);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        rpc_bits.int_packed(0);
+        let raw = pack(&rpc_bits);
+        let mut sink = rig.sink();
         assert!(sink.try_parse_rpc_params(
             3,
             BitReader::with_bit_len(&raw, rpc_bits.len() as u64).unwrap(),
             Some("MulticastRespondToValidMapClick"),
         ));
         let stats = sink.stats.clone();
-        drop(sink);
-        (records, stats)
+        (rig.records, stats)
     }
 
     const TARGETING_GROUP: &str =
@@ -1256,22 +1109,22 @@ mod tests {
     }
 
     fn append_world_location(bits: &mut Vec<bool>, values: [f64; 3]) {
-        packed(bits, 2);
-        packed(bits, 192);
+        bits.int_packed(2);
+        bits.int_packed(192);
         for value in values {
-            bits.extend(bits_from_bytes(&value.to_le_bytes()));
+            bits.extend(unpack(&value.to_le_bytes()));
         }
     }
 
     fn world_locations(values: &[[f64; 3]]) -> Vec<bool> {
         let mut bits = Vec::new();
-        packed(&mut bits, values.len() as u32);
+        bits.int_packed(values.len() as u32);
         for (index, values) in values.iter().copied().enumerate() {
-            packed(&mut bits, index as u32 + 1);
+            bits.int_packed(index as u32 + 1);
             append_world_location(&mut bits, values);
-            packed(&mut bits, 0);
+            bits.int_packed(0);
         }
-        packed(&mut bits, 0);
+        bits.int_packed(0);
         bits
     }
 
@@ -1304,9 +1157,10 @@ mod tests {
         );
         assert_eq!(
             records.fields[1].raw_bits.as_deref(),
-            Some(bytes(&array).as_slice())
+            Some(pack(&array).as_slice())
         );
         assert_eq!(stats.targeting_world_locations_decoded, 1);
+        assert_eq!(stats.fields_emitted, 2, "the child row is counted");
 
         let signed_zero = one_world_location([-0.0, 0.0, -0.0]);
         let (records, stats) = valid_targeting(&signed_zero);
@@ -1385,11 +1239,11 @@ mod tests {
         let wrong_handle = {
             let mut bits = Vec::new();
             for value in [1, 1, 3, 192] {
-                packed(&mut bits, value);
+                bits.int_packed(value);
             }
             bits.extend(std::iter::repeat_n(false, 192));
-            packed(&mut bits, 0);
-            packed(&mut bits, 0);
+            bits.int_packed(0);
+            bits.int_packed(0);
             bits
         };
         let (records, stats) = valid_targeting(&wrong_handle);
@@ -1399,11 +1253,11 @@ mod tests {
         let wrong_width = {
             let mut bits = Vec::new();
             for value in [1, 1, 2, 191] {
-                packed(&mut bits, value);
+                bits.int_packed(value);
             }
             bits.extend(std::iter::repeat_n(false, 191));
-            packed(&mut bits, 0);
-            packed(&mut bits, 0);
+            bits.int_packed(0);
+            bits.int_packed(0);
             bits
         };
         let (records, stats) = valid_targeting(&wrong_width);
@@ -1416,12 +1270,12 @@ mod tests {
         assert!(stats.array_leaf_decode_errors > 0);
 
         let mut duplicate_member = Vec::new();
-        packed(&mut duplicate_member, 1);
-        packed(&mut duplicate_member, 1);
+        duplicate_member.int_packed(1);
+        duplicate_member.int_packed(1);
         append_world_location(&mut duplicate_member, [1.0, 2.0, 3.0]);
         append_world_location(&mut duplicate_member, [4.0, 5.0, 6.0]);
-        packed(&mut duplicate_member, 0);
-        packed(&mut duplicate_member, 0);
+        duplicate_member.int_packed(0);
+        duplicate_member.int_packed(0);
         let (records, stats) = valid_targeting(&duplicate_member);
         assert_eq!(records.fields.len(), 1);
         assert!(stats.array_leaf_decode_errors > 0);
@@ -1441,10 +1295,10 @@ mod tests {
     fn rpc_payload_with_suffix(suffix_bits: usize) -> Vec<bool> {
         let mut bits = Vec::new();
         bits.push(false); // property checksum
-        packed(&mut bits, 1); // encodedHandle = 1 -> handle 0
-        packed(&mut bits, 8); // payload_bits = 8
+        bits.int_packed(1); // encodedHandle = 1 -> handle 0
+        bits.int_packed(8); // payload_bits = 8
         bits.extend(std::iter::repeat_n(false, 8)); // payload
-        packed(&mut bits, 0); // terminator handle
+        bits.int_packed(0); // terminator handle
         bits.extend(std::iter::repeat_n(true, suffix_bits));
         bits
     }
@@ -1454,13 +1308,11 @@ mod tests {
     #[test]
     fn bits_after_the_rpc_terminator_are_counted_not_discarded() {
         let bits = rpc_payload_with_suffix(16);
-        let data = bytes(&bits);
+        let data = pack(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         let emitted = sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
         assert!(emitted, "the parameter that did parse is still emitted");
@@ -1470,9 +1322,12 @@ mod tests {
         );
         // Not a truncation: the walk ended where the wire told it to.
         assert_eq!(sink.stats.truncated_rpcs, 0);
-        drop(sink);
-        assert_eq!(records.fields.len(), 2, "parameter plus whole raw fallback");
-        let fallback = records.fields.last().unwrap();
+        assert_eq!(
+            rig.records.fields.len(),
+            2,
+            "parameter plus whole raw fallback"
+        );
+        let fallback = rig.records.fields.last().unwrap();
         assert_eq!(fallback.bit_count, bits.len() as u32);
         assert_eq!(fallback.raw_bits.as_deref(), Some(data.as_slice()));
     }
@@ -1481,24 +1336,25 @@ mod tests {
     fn a_partially_parsed_truncated_rpc_retains_the_whole_payload() {
         let mut bits = Vec::new();
         bits.push(false); // property checksum
-        packed(&mut bits, 1);
-        packed(&mut bits, 8);
+        bits.int_packed(1);
+        bits.int_packed(8);
         bits.extend(std::iter::repeat_n(false, 8)); // one complete parameter
-        packed(&mut bits, 2);
-        packed(&mut bits, 100); // second parameter overruns
+        bits.int_packed(2);
+        bits.int_packed(100); // second parameter overruns
         bits.extend(std::iter::repeat_n(true, 8));
-        let data = bytes(&bits);
+        let data = pack(&bits);
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         assert!(sink.try_parse_rpc_params(7, reader, Some("SomeFunction")));
         assert_eq!(sink.stats.truncated_rpcs, 1);
-        drop(sink);
-        assert_eq!(records.fields.len(), 2, "parameter plus whole raw fallback");
-        let fallback = records.fields.last().unwrap();
+        assert_eq!(
+            rig.records.fields.len(),
+            2,
+            "parameter plus whole raw fallback"
+        );
+        let fallback = rig.records.fields.last().unwrap();
         assert_eq!(fallback.bit_count, bits.len() as u32);
         assert_eq!(fallback.raw_bits.as_deref(), Some(data.as_slice()));
     }
@@ -1506,35 +1362,35 @@ mod tests {
     #[test]
     fn a_failed_movement_decode_retains_the_whole_rpc_payload() {
         let mut update = Vec::new();
-        packed(&mut update, 3); // shooter GUID handle 2
-        packed(&mut update, 32);
+        update.int_packed(3); // shooter GUID handle 2
+        update.int_packed(32);
         for bit in 0..32 {
             update.push((4321u32 & (1 << bit)) != 0);
         }
-        packed(&mut update, 4); // component stream handle 3
-        packed(&mut update, 8);
+        update.int_packed(4); // component stream handle 3
+        update.int_packed(8);
         update.extend(std::iter::repeat_n(false, 8)); // short u16 header
-        packed(&mut update, 0);
+        update.int_packed(0);
 
         let mut array = Vec::new();
-        packed(&mut array, 1);
-        packed(&mut array, 1);
+        array.int_packed(1);
+        array.int_packed(1);
         array.extend(update);
-        packed(&mut array, 0);
+        array.int_packed(0);
 
         let mut bits = vec![false]; // top-level ignored bit
-        packed(&mut bits, 2); // updates-array handle 1
-        packed(&mut bits, array.len() as u32);
+        bits.int_packed(2); // updates-array handle 1
+        bits.int_packed(array.len() as u32);
         bits.extend(array);
-        packed(&mut bits, 0);
-        let data = bytes(&bits);
+        bits.int_packed(0);
+        let data = pack(&bits);
 
         let path = "/Script/Test.Movement_ClassNetCache";
-        let mut cache = NetGuidCache::new();
-        cache
+        let mut rig = Rig::default();
+        rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(path.into(), 7, 1))
             .unwrap();
-        assert!(cache.set_field_on_group(
+        assert!(rig.cache.set_field_on_group(
             7,
             vrf_schema::NetFieldExport {
                 handle: 0,
@@ -1542,19 +1398,19 @@ mod tests {
                 name: MOVEMENT_RPC.into(),
             },
         ));
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from(path));
         let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
 
         sink.on_rpc(0, bits.len() as u32, reader);
 
         assert_eq!(sink.stats.movement_rpc_errors, 1);
-        drop(sink);
-        assert_eq!(records.fields.len(), 1);
-        assert_eq!(records.fields[0].bit_count, bits.len() as u32);
-        assert_eq!(records.fields[0].raw_bits.as_deref(), Some(data.as_slice()));
+        assert_eq!(rig.records.fields.len(), 1);
+        assert_eq!(rig.records.fields[0].bit_count, bits.len() as u32);
+        assert_eq!(
+            rig.records.fields[0].raw_bits.as_deref(),
+            Some(data.as_slice())
+        );
     }
 
     const PROJECTILE_CNC: &str =
@@ -1567,8 +1423,8 @@ mod tests {
     /// optionally without the velocity or with an unknown zero-width member.
     fn path_point_array(elapsed: f32, omit_velocity: bool, extra_zero_width: bool) -> Vec<bool> {
         let mut array = Vec::new();
-        packed(&mut array, 1); // one path point
-        packed(&mut array, 1); // index zero
+        array.int_packed(1); // one path point
+        array.int_packed(1); // index zero
         for (handle, payload) in [
             (1, elapsed.to_le_bytes().to_vec()),
             (2, vec![0; 24]),
@@ -1577,16 +1433,16 @@ mod tests {
             if omit_velocity && handle == 3 {
                 continue;
             }
-            packed(&mut array, handle + 1);
-            packed(&mut array, (payload.len() * 8) as u32);
-            array.extend(bits_from_bytes(&payload));
+            array.int_packed(handle + 1);
+            array.int_packed((payload.len() * 8) as u32);
+            array.extend(unpack(&payload));
         }
         if extra_zero_width {
-            packed(&mut array, 5); // unknown handle 4
-            packed(&mut array, 0);
+            array.int_packed(5); // unknown handle 4
+            array.int_packed(0);
         }
-        packed(&mut array, 0); // element terminator
-        packed(&mut array, 0); // array terminator
+        array.int_packed(0); // element terminator
+        array.int_packed(0); // array terminator
         array
     }
 
@@ -1594,15 +1450,15 @@ mod tests {
     /// with the measured routes of `branch` admitted.
     fn projectile_path_rpc(array: &[bool], branch: &str) -> (RecordBuffers, ExportStats) {
         let mut rpc = vec![false]; // FunctionParameters checksum bit
-        packed(&mut rpc, 1); // parameter handle zero
-        packed(&mut rpc, array.len() as u32);
+        rpc.int_packed(1); // parameter handle zero
+        rpc.int_packed(array.len() as u32);
         rpc.extend_from_slice(array);
-        packed(&mut rpc, 0); // parameter terminator
-        let rpc_raw = bytes(&rpc);
+        rpc.int_packed(0); // parameter terminator
+        let rpc_raw = pack(&rpc);
 
-        let mut cache = NetGuidCache::new();
+        let mut rig = Rig::default();
         for (index, path) in [(7, PROJECTILE_CNC), (8, PROJECTILE_PARAMS)] {
-            cache
+            rig.cache
                 .add_export_group(vrf_schema::NetFieldExportGroup::new(path.into(), index, 1))
                 .unwrap();
         }
@@ -1610,7 +1466,7 @@ mod tests {
             (7, 2_336_552_129, "MulticastSetPath"),
             (8, 2_930_105_559, "NetworkedProjectilePath"),
         ] {
-            assert!(cache.set_field_on_group(
+            assert!(rig.cache.set_field_on_group(
                 index,
                 vrf_schema::NetFieldExport {
                     handle: 0,
@@ -1619,9 +1475,7 @@ mod tests {
                 }
             ));
         }
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from(PROJECTILE_CNC));
         sink.enable_measured_array_routes(branch);
         sink.on_rpc(
@@ -1630,8 +1484,7 @@ mod tests {
             BitReader::with_bit_len(&rpc_raw, rpc.len() as u64).unwrap(),
         );
         let stats = sink.stats.clone();
-        drop(sink);
-        (records, stats)
+        (rig.records, stats)
     }
 
     #[test]
@@ -1664,7 +1517,7 @@ mod tests {
             assert_eq!(parent.bit_count, array.len() as u32, "{case}");
             assert_eq!(
                 parent.raw_bits.as_deref(),
-                Some(bytes(&array).as_slice()),
+                Some(pack(&array).as_slice()),
                 "{case}"
             );
             assert!(
@@ -1693,6 +1546,7 @@ mod tests {
             ("++Ares-Core+release-13.05", 3),
         ] {
             let (records, stats) = projectile_path_rpc(&array, branch);
+            assert_eq!(stats.route_children_projectile_path, want_children as u64);
             assert_eq!(stats.array.errors, 0, "{branch}");
             assert_eq!(stats.array_leaf_decode_errors, 0, "{branch}");
             assert_eq!(records.fields.len(), want_children + 1, "{branch}");
@@ -1709,102 +1563,35 @@ mod tests {
         }
     }
 
-    /// The one trailing alignment bit the grammar allows stays uncounted, or
-    /// the counter would fire on every well-formed payload.
+    /// A completed walk, with or without the one trailing alignment bit the
+    /// grammar allows, is neither a truncation nor a dropped suffix: either
+    /// counter firing on it would fire on every well-formed payload.
     #[test]
-    fn a_single_alignment_bit_after_the_rpc_terminator_is_not_a_drop() {
+    fn a_completed_rpc_payload_is_neither_truncated_nor_a_drop() {
         for suffix in [0, 1] {
             let bits = rpc_payload_with_suffix(suffix);
-            let data = bytes(&bits);
+            let data = pack(&bits);
             let reader = BitReader::with_bit_len(&data, bits.len() as u64).unwrap();
-
-            let mut cache = NetGuidCache::new();
-            let mut channel_state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-            sink.try_parse_rpc_params(7, reader, Some("SomeFunction"));
-            assert_eq!(
-                sink.stats.rpc_suffix_bits_dropped, 0,
-                "{suffix} trailing bit(s) is within the grammar"
-            );
+            let mut rig = Rig::default();
+            let mut sink = rig.sink();
+            assert!(sink.try_parse_rpc_params(7, reader, Some("SomeFunction")));
+            assert_eq!(sink.stats.truncated_rpcs, 0, "{suffix}");
+            assert_eq!(sink.stats.rpc_suffix_bits_dropped, 0, "{suffix}");
         }
     }
-
-    /// Write a SerializedInt value with a given max (same encoding as
-    /// `vrf-bitio`'s `read_serialized_int`).
-    fn write_serialized_int(bits: &mut Vec<bool>, value: u32, max: u32) {
-        let mut written = 0u32;
-        let mut mask = 1u32;
-        while written.saturating_add(mask) < max {
-            let bit = (value & mask) != 0;
-            bits.push(bit);
-            if bit {
-                written |= mask;
-            }
-            mask <<= 1;
-        }
-    }
-
-    /// `AbilityCastsThisRound` must be recognised as a flattenable array
-    /// under the `AbilityStatisticsReplicator` group, and NOT under other
-    /// groups (where handle 2 means something else).
-    #[test]
-    fn ability_casts_this_round_is_known_array_under_correct_group() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-
-        // Under the correct group: is_known_array_field returns true.
-        sink.set_current_group_path(Arc::from(
-            "/Game/Characters/_Core/Comp_AbilityStatisticsReplicator.Comp_AbilityStatisticsReplicator_C",
-        ));
-        assert!(
-            sink.is_known_array_field(Some("AbilityCastsThisRound"), None),
-            "should be known under AbilityStatisticsReplicator"
-        );
-
-        // Under an unrelated group: returns false.
-        sink.set_current_group_path(Arc::from("/Script/ShooterGame.SomeOtherComponent"));
-        assert!(
-            !sink.is_known_array_field(Some("AbilityCastsThisRound"), None),
-            "should NOT be known under an unrelated group"
-        );
-    }
-
     /// An unresolved `AbilitiesAndBuffsComponent` payload that walks cleanly
     /// under fc=34 must emit one additive `_cnc_h1` row alongside the
     /// preservation row. The RPC handle and payload bits must be correct.
     #[test]
     fn unresolved_abilities_and_buffs_emits_cnc_rpc_row() {
-        // Build a minimal CNC stream with fc=34, handle=1, 32-bit payload
-        // of all 1s (to prevent false-positive walks at lower fc values).
-        let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 1, 34); // handle=1, 6 bits
-        packed(&mut bits, 32); // payload_bits=32
-        bits.extend(std::iter::repeat_n(true, 32)); // 32 bits of 1s payload
+        // fc=34, handle 1, a 32-bit payload of 1s (no walk at lower fc values).
+        let bits = one_h1_cnc_tail(&[true; 32]);
 
-        let data = bytes(&bits);
+        let data = pack(&bits);
         let bit_count = bits.len() as u32;
 
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        sink.time_ms = 100;
-        sink.packet_id = 7;
-
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
-
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, false);
         let failure = unresolved_failure(89, bit_count);
         sink.on_unresolved_class_net_cache_payload(failure, &data);
 
@@ -1844,29 +1631,18 @@ mod tests {
     #[test]
     fn unresolved_abilities_and_buffs_that_does_not_walk_is_counted() {
         let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 1, 34); // handle=1, 6 bits
-        packed(&mut bits, 64); // declares 64 payload bits ...
+        bits.serialized_int(1, 34); // handle=1, 6 bits
+        bits.int_packed(64); // declares 64 payload bits ...
         bits.extend(std::iter::repeat_n(true, 32)); // ... but carries 32
-        let data = bytes(&bits);
+        let data = pack(&bits);
         let bit_count = bits.len() as u32;
         assert!(
             decode_cnc_payload(&data, bit_count, ABILITIES_AND_BUFFS_FC).is_none(),
             "the fixture must not walk under fc=34, or this tests nothing"
         );
 
-        let mut cache = NetGuidCache::new();
-        cache.set_net_guid_path(144, "AbilitiesAndBuffsComponent".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(144),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
-        sink.on_content_block(3, NetworkGuid(89), &header);
+        let mut rig = Rig::default();
+        let mut sink = abilities_block(&mut rig, false);
         let failure = unresolved_failure(89, bit_count);
         sink.on_unresolved_class_net_cache_payload(failure, &data);
 
@@ -1883,33 +1659,19 @@ mod tests {
     }
 
     /// An unresolved payload for a group OTHER than AbilitiesAndBuffsComponent
-    /// produces no CNC rows: the brute force is gated. The payload is the one
-    /// `unresolved_abilities_and_buffs_emits_cnc_rpc_row` proves walks under
-    /// fc=34, not `[0xFF; 8]`, which `decode_cnc_payload` refuses by itself --
-    /// with that, deleting the group-path guard would leave this test green.
+    /// produces no CNC rows: the brute force is gated. The payload walks under
+    /// fc=34 (`unresolved_abilities_and_buffs_emits_cnc_rpc_row`), so only the
+    /// group-path guard can stop it.
     #[test]
     fn unresolved_payload_for_other_group_emits_no_cnc_rows() {
-        // Same construction as the fc=34 walking test: handle=1, 6 bits;
-        // payload_bits=32; 32 bits of 1s.
-        let mut bits = Vec::new();
-        write_serialized_int(&mut bits, 1, 34);
-        packed(&mut bits, 32);
-        bits.extend(std::iter::repeat_n(true, 32));
-        let data = bytes(&bits);
+        let bits = one_h1_cnc_tail(&[true; 32]);
+        let data = pack(&bits);
         let bit_count = bits.len() as u32;
 
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
-        let header = ContentBlockHeader {
-            has_rep_layout: false,
-            is_actor: false,
-            object_net_guid: NetworkGuid(200),
-            is_stably_named: true,
-            ..ContentBlockHeader::default()
-        };
+        let header = subobject_block(200, false);
         sink.on_content_block(3, NetworkGuid(89), &header);
         // current_group_path resolves to a bare name that is NOT
         // AbilitiesAndBuffsComponent.
@@ -1930,10 +1692,8 @@ mod tests {
     /// emit a row and count as closes.
     #[test]
     fn a_dormancy_close_is_not_recorded_as_a_despawn() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         sink.on_actor_close(3, NetworkGuid(42), false);
         sink.on_actor_close(4, NetworkGuid(43), true);
@@ -1953,20 +1713,13 @@ mod tests {
 
     /// Deleted and live blocks are both content blocks, as in vrf-net's
     /// `NetStats::content_blocks`, which `tools/verify_build_corpus.py` checks
-    /// `sink_content_blocks` against. Pinned here because a replay without
-    /// deleted blocks (the 13.06 one first measured has none) cannot notice
-    /// `on_deleted_block` forgetting its count.
+    /// `sink_content_blocks` against: a replay without deleted blocks cannot
+    /// notice `on_deleted_block` forgetting its count.
     #[test]
     fn deleted_and_live_blocks_both_advance_the_sink_block_tally() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..ContentBlockHeader::default()
-        };
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
+        let header = actor_block(true);
 
         sink.on_content_block(7, NetworkGuid(1234), &header);
         assert_eq!(sink.stats.content_blocks, 1);
@@ -1980,10 +1733,8 @@ mod tests {
     /// would most easily skip.
     #[test]
     fn every_rpc_shape_advances_the_sink_rpc_tally_once() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         sink.on_rpc(5, 0, BitReader::with_bit_len(&[], 0).unwrap());
         assert_eq!(sink.stats.rpcs_emitted, 1, "zero-bit marker row");
@@ -1992,17 +1743,54 @@ mod tests {
         assert_eq!(sink.records.fields.len(), 2);
     }
 
+    /// A dynamic open carries its spawn location, rotation and velocity, each
+    /// in its own columns; a static open and every close carry none.
+    #[test]
+    fn spawn_vectors_reach_their_own_columns_on_opens_only() {
+        use vrf_net::types::FRotator;
+        let v = |x, y, z| Some(FVector { x, y, z });
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
+        sink.on_actor_open(&ActorChannelState {
+            spawn_location: v(1.5, -2.0, 3.0),
+            spawn_rotation: Some(FRotator {
+                pitch: 4.0,
+                yaw: 5.0,
+                roll: 6.0,
+            }),
+            spawn_velocity: v(-1000.0, 0.0, 3200.0),
+            ..channel_open(3, 42, 8)
+        });
+        sink.on_actor_open(&channel_open(4, 43, 0));
+        sink.on_actor_close(3, NetworkGuid(42), false);
+        let spawn = |row: &ActorRecord| {
+            [
+                [row.spawn_x, row.spawn_y, row.spawn_z],
+                [row.spawn_pitch, row.spawn_yaw, row.spawn_roll],
+                [row.spawn_vx, row.spawn_vy, row.spawn_vz],
+            ]
+        };
+        let rows: Vec<_> = sink.records.actors.iter().map(spawn).collect();
+        assert_eq!(
+            rows[0],
+            [
+                [Some(1.5), Some(-2.0), Some(3.0)],
+                [Some(4.0), Some(5.0), Some(6.0)],
+                [Some(-1000.0), Some(0.0), Some(3200.0)],
+            ]
+        );
+        assert_eq!(rows[1..], [[[None; 3]; 3]; 2]);
+    }
+
     /// A static actor's close row, like its open row, gets no class_path from
     /// its own GUID path (the level's instance name, not a class).
     #[test]
     fn a_static_actors_close_row_does_not_fabricate_a_class_path_from_its_own_guid() {
-        let mut cache = NetGuidCache::new();
+        let mut rig = Rig::default();
         // The actor's own GUID path -- an instance name, e.g. what a level
         // placement looks like on the wire -- must not read back as a class.
-        cache.set_net_guid_path(42, "WindowShieldA1".to_owned(), None);
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        rig.cache.set_net_guid_path(42, "WindowShieldA1", None);
+        let mut sink = rig.sink();
 
         // No archetype: `NetworkGuid(0)` is invalid, so `on_actor_open` never
         // registers a channel archetype for it.
@@ -2019,10 +1807,8 @@ mod tests {
 
     #[test]
     fn destroyed_channel_archetypes_are_retired_but_dormant_ones_survive() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        let mut sink = rig.sink();
 
         sink.on_actor_open(&channel_open(3, 42, 8));
         sink.on_actor_open(&channel_open(4, 43, 9));
@@ -2040,71 +1826,53 @@ mod tests {
         );
     }
 
-    /// Player identity survives Swiftplay's `Swiftplay_EoRCredits_PlayerState_C`
-    /// through `canonical_group` (`GROUP_ALIASES`).
+    /// `Subject` and `SpawnedCharacter` are captured on the bomb PlayerState and
+    /// on Swiftplay's (through `canonical_group`). A 0 is a disconnect, never a
+    /// body; a reconnect's pawn is appended and a repeat moves to the end, so
+    /// the last is the current body; `PossessedCharacter` (a camera, drone or
+    /// ability pawn) never enters the history.
     #[test]
-    fn player_identity_is_captured_on_a_swiftplay_player_state() {
+    fn player_identity_keeps_the_spawned_body() {
         const SWIFT: &str = "/Game/GameModes/_Development/Swiftplay_EndOfRoundCredits/Swiftplay_EoRCredits_PlayerState.Swiftplay_EoRCredits_PlayerState_C";
-        for path in [BOMB_PLAYER_STATE, SWIFT] {
-            let mut cache = NetGuidCache::new();
-            let mut channel_state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        const SPAWNED: &str = "SpawnedCharacter";
+        const POSSESSED: &str = "PossessedCharacter";
+        for (path, writes, want) in [
+            (BOMB_PLAYER_STATE, vec![(SPAWNED, 576)], vec![576]),
+            (SWIFT, vec![(SPAWNED, 576)], vec![576]),
+            (
+                BOMB_PLAYER_STATE,
+                vec![(SPAWNED, 1368), (SPAWNED, 0)],
+                vec![1368],
+            ),
+            (
+                BOMB_PLAYER_STATE,
+                vec![(SPAWNED, 1510), (SPAWNED, 0), (SPAWNED, 45530)],
+                vec![1510, 45530],
+            ),
+            (
+                BOMB_PLAYER_STATE,
+                vec![(SPAWNED, 7), (SPAWNED, 8), (SPAWNED, 7), (SPAWNED, 7)],
+                vec![8, 7],
+            ),
+            (BOMB_PLAYER_STATE, vec![(SPAWNED, 0)], vec![]),
+            (BOMB_PLAYER_STATE, vec![(POSSESSED, 412)], vec![]),
+            (
+                BOMB_PLAYER_STATE,
+                vec![(SPAWNED, 20), (POSSESSED, 20), (POSSESSED, 412)],
+                vec![20],
+            ),
+        ] {
+            let mut rig = Rig::default();
+            let mut sink = rig.sink();
             sink.current_group_path = Arc::from(path);
             sink.current_actor_guid = 42;
-
             sink.record_player_identity(Some("Subject"), Some("uuid-here"), None);
-            sink.record_player_identity(Some("SpawnedCharacter"), None, Some(576));
-
-            let players = sink.channel_state.players.clone();
-            let entry = players
-                .get(&42)
-                .unwrap_or_else(|| panic!("nothing for {path}"));
+            for &(name, guid) in &writes {
+                sink.record_player_identity(Some(name), None, Some(guid));
+            }
+            let entry = &sink.channel_state.players[&42];
             assert_eq!(entry.subject.as_deref(), Some("uuid-here"), "{path}");
-            assert_eq!(entry.character_net_guid, Some(576), "{path}");
-        }
-    }
-
-    /// A disconnect does not erase the character link. `SpawnedCharacter`
-    /// arrives about 60 ms in and again as 0 when the player leaves; keeping the
-    /// 0 made `manifest.players.character_net_guid` 0 for 9 spawned players
-    /// across 5 of 69 demo replays, which left spike custody `unknown`, two
-    /// planters unattributed, and the worst replay only 73.2% of its movement
-    /// rows attributed to a player.
-    #[test]
-    fn a_disconnect_does_not_erase_the_character_link() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        sink.current_group_path = Arc::from(BOMB_PLAYER_STATE);
-        sink.current_actor_guid = 42;
-
-        sink.record_player_identity(Some("SpawnedCharacter"), None, Some(1368));
-        sink.record_player_identity(Some("SpawnedCharacter"), None, Some(0));
-
-        let players = sink.channel_state.players.clone();
-        assert_eq!(players.get(&42).unwrap().character_net_guid, Some(1368));
-    }
-
-    #[test]
-    fn possession_never_makes_an_ability_pawn_a_player_body() {
-        // Regression case: body hits still count during possession,
-        // and releasing a device must not leave it registered as a player.
-        for device in [412, 798, 1170, 1534, 1884] {
-            let mut cache = NetGuidCache::new();
-            let mut state = ChannelState::new();
-            let mut records = RecordBuffers::default();
-            let mut sink = ExportSink::new(&mut cache, &mut state, &mut records);
-            sink.current_group_path = Arc::from(BOMB_PLAYER_STATE);
-            sink.current_actor_guid = 42;
-            sink.record_player_identity(Some("PossessedCharacter"), None, Some(device));
-            assert_eq!(sink.channel_state.players[&42].character_net_guid, None);
-            sink.record_player_identity(Some("SpawnedCharacter"), None, Some(20));
-            sink.record_player_identity(Some("PossessedCharacter"), None, Some(device));
-            assert_eq!(sink.channel_state.players[&42].character_net_guid, Some(20));
-            sink.record_player_identity(Some("PossessedCharacter"), None, Some(20));
-            assert_eq!(sink.channel_state.players[&42].character_net_guid, Some(20));
+            assert_eq!(entry.character_net_guids, want, "{path} {writes:?}");
         }
     }
 
@@ -2112,11 +1880,9 @@ mod tests {
     /// blocks stay 100 in the aggregate while the line list stops at 32.
     #[test]
     fn failures_past_the_line_cap_are_all_aggregated() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        channel_state.enable_failure_aggregate(false);
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        rig.state.enable_failure_aggregate(false);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from("/Script/ShooterGame.AresAbilitySystemComponent"));
         for i in 0..100 {
             sink.on_stream_failure(abandoned_tail(i % 2));
@@ -2152,11 +1918,9 @@ mod tests {
     /// inflated by payloads that are on disk as preservation rows.
     #[test]
     fn preserved_unresolved_failures_are_separated_from_real_loss() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        channel_state.enable_failure_aggregate(true);
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        rig.state.enable_failure_aggregate(true);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from("AbilitiesAndBuffsComponent"));
 
         // The framing layer's exact sequence for an unresolved block:
@@ -2198,11 +1962,9 @@ mod tests {
     /// the caller's totals.
     #[test]
     fn taking_the_aggregate_drains_it() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        channel_state.enable_failure_aggregate(false);
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
+        let mut rig = Rig::default();
+        rig.state.enable_failure_aggregate(false);
+        let mut sink = rig.sink();
         sink.set_current_group_path(Arc::from("SomeGroup"));
         sink.on_stream_failure(abandoned_tail(8));
 
@@ -2214,38 +1976,19 @@ mod tests {
         );
     }
 
-    /// ...but a character that never spawned still reports nothing, rather
-    /// than a 0 that reads like a NetGUID.
-    #[test]
-    fn a_character_that_never_spawned_stays_none() {
-        let mut cache = NetGuidCache::new();
-        let mut channel_state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut channel_state, &mut records);
-        sink.current_group_path = Arc::from(BOMB_PLAYER_STATE);
-        sink.current_actor_guid = 7;
-
-        sink.record_player_identity(Some("SpawnedCharacter"), None, Some(0));
-
-        let players = sink.channel_state.players.clone();
-        assert_eq!(players.get(&7).unwrap().character_net_guid, None);
-    }
-
     #[cfg(feature = "export")]
     #[test]
     fn checkpoint_block_spans_include_every_emitted_child_and_empty_block() {
-        let mut cache = NetGuidCache::new();
-        cache
+        let mut rig = Rig::default();
+        rig.cache
             .add_export_group(vrf_schema::NetFieldExportGroup::new(
                 "ActorGroup".to_owned(),
                 1,
                 4,
             ))
             .unwrap();
-        cache.set_net_guid_path(9, "ActorGroup".to_owned(), None);
-        let mut state = ChannelState::new();
-        let mut records = RecordBuffers::default();
-        let mut sink = ExportSink::new(&mut cache, &mut state, &mut records);
+        rig.cache.set_net_guid_path(9, "ActorGroup", None);
+        let mut sink = rig.sink();
         sink.enable_checkpoint_block_context(
             vrf_export::CheckpointIdentity {
                 checkpoint_index: 2,
@@ -2256,11 +1999,7 @@ mod tests {
         );
         sink.time_ms = 12;
         sink.packet_id = 3;
-        let header = ContentBlockHeader {
-            has_rep_layout: true,
-            is_actor: true,
-            ..Default::default()
-        };
+        let header = actor_block(true);
         sink.on_content_block(4, NetworkGuid(9), &header);
         sink.push_field(FieldValues {
             field_name: Some(Arc::from("raw-parent")),

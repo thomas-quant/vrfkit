@@ -11,7 +11,8 @@ format — into Parquet. It is reverse-engineered against a format that changes
 every game build, so almost every claim in this repo is a *measurement*, not a
 specification, and the measurements are dated.
 
-Ten Rust crates under `crates/`, Python tooling under `tools/`. The Rust side
+Ten Rust crates under `crates/` (plus the test-only `dev/vrf-testkit` and the
+`tools/extract_component_classes` member), Python tooling under `tools/`. The Rust side
 decodes; the Python side generates the type overlay, checks the output, and
 derives analytical views.
 
@@ -23,7 +24,7 @@ derives analytical views.
 | How do I run it, and what does each tool do? | `docs/USAGE.md` |
 | How do I build, test, and what must pass? | `CONTRIBUTING.md` |
 | Why is the code shaped this way? | the doc comment next to it |
-| What was tried and rejected? | `docs/archive/` |
+| What was tried and rejected? | `docs/PERFORMANCE_NOTES.md`, the doc comment, `git log` |
 
 `README.md` is the front page and repeats the highlights. When it disagrees
 with `docs/`, `docs/` is newer.
@@ -84,29 +85,33 @@ Consequences for how you work:
 ## Traps that have cost real time
 
 - **Type changes to `crates/vrf-decode/src/table.rs` go through
-  `tools/apply_type_corrections.py`**, with their evidence, then `cargo fmt`.
+  `tools/apply_type_corrections.py`**, with their evidence.
   CI runs it with `--check` and fails if a measured correction is missing.
-- **Some entries in that table are unreachable.** The four `LifeChangeEvents`
-  member entries never appear as a top-level parameter. "Fixing" one compiles,
-  passes tests, and changes no rows. The real typing happens in
-  `crates/vrfkit/src/sink/rpc.rs`.
+- **Some entries in that table are unreachable by name.** The four
+  `LifeChangeEvents` member entries never appear as a top-level parameter, so
+  "fixing" one changes no row through its name. They still donate 6 checksums
+  (e.g. 4098809706 Float, 1435614478 ObjectNetGuid) to `checksum_table.rs`: a
+  retype changes what `extract_checksum_types.py` learns, and deleting them
+  removes the donors. The real typing happens in `crates/vrfkit/src/sink/rpc.rs`.
 - **One name entry is dead by design.** `EquippablePickupProjectile_C`'s
   `MyEquippable` no longer matches: FName instance numbers are part of the name,
   so the wire says `MyEquippable_0`. It still resolves through the
   `compatible_checksum` fallback, so no row depends on the entry.
 - **`actors.event` has three values, not two** — `open` / `close` / `dormant`.
   Dormancy is not destruction; only `close` is a despawn.
-- **MSRV 1.86 is not your local toolchain.** `let` chains have already broken a
-  build this way. Run the sweep through `cargo +1.86.0`.
-- **`pip install -r requirements.txt`.** `pyarrow` and `numpy` are real
-  dependencies of `tools/`; without them twelve test modules fail to import and
-  the suite silently runs a subset.
+- **MSRV 1.86 is not your local toolchain**: run the sweep through `cargo +1.86.0`.
+- **`pip install -r requirements.txt`** first: without it most tools test
+  modules fail to import.
 
 ## Measuring
 
 When you need a number, measure it and write down *how*, including the filters.
 A figure whose method is not recorded cannot be reproduced, and this repo has
 already shipped a comment quoting a denominator that matched no table on disk.
+
+A code comment keeps the constraint and its key number, one line each. The
+method goes in the commit message, a test that reproduces it, or `docs/`; no
+dates, commit hashes or "used to" history in comments.
 
 Corpus guards read their inputs from environment variables — see
 `CONTRIBUTING.md`. Nothing in the tree points at one person's disk, and nothing

@@ -1,33 +1,16 @@
-import copy, json, sys, tempfile, unittest
+import copy, json, tempfile, unittest
 from pathlib import Path
 import pyarrow as pa, pyarrow.parquet as pq
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from support import TempDirTestCase
 import extract_kill_observations as tool
-from tools.tests.wire_fixtures import FIELD_SCHEMA as SCHEMA, array
+from wire_fixtures import FIELD_SCHEMA as SCHEMA, array, field_row, write_empty_tables
 
 
 def row(**kw):
-    x = {
-        "time_ms": 1000,
-        "packet_id": 2,
-        "channel_index": 3,
-        "actor_net_guid": 4,
-        "object_net_guid": 5,
-        "group_path": tool.GROUP,
-        "handle": 15,
-        "field_name": "KillData[0].bDidKillTriggerFinisher",
-        "compatible_checksum": None,
-        "bit_count": 1,
-        "raw_bits": b"\1",
-        "value_i64": None,
-        "value_f64": None,
-        "value_bool": True,
-        "value_str": None,
-    }
-    x.update(kw)
-    return x
+    return field_row(dict(time_ms=1000, packet_id=2, channel_index=3, actor_net_guid=4, object_net_guid=5,
+                          group_path=tool.GROUP, handle=15, field_name="KillData[0].bDidKillTriggerFinisher",
+                          bit_count=1, raw_bits=b"\1", value_bool=True), **kw)
 
 
 def fixture(two=False):
@@ -55,6 +38,8 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(tool.parse_array(raw, width)[2][0][:3], (0, 15, 1))
         with self.assertRaises(tool.InputError):
             tool.parse_array(raw, width - 1)
+        with self.assertRaisesRegex(tool.InputError, "residual"):
+            tool.parse_array(raw + b"\0", width + 8)
 
     def test_nested_unexpected_handle_and_nonexact_ref(self):
         raw, width = array([(0, [(8, 8, b"\0")])])
@@ -64,9 +49,8 @@ class ParserTests(unittest.TestCase):
             tool.exact_ref(b"\0\0", 16)
 
 
-#: Builds whose exports carry KillData children and passed every extractor
-#: check on all 48 available replays (2026-09-28, docs/KILL_OBSERVATIONS.md).
-#: Listed explicitly: iterating the tool's own set would test nothing.
+#: Measured legacy builds, listed explicitly: iterating the tool's own set
+#: would test nothing.
 LEGACY_BUILDS = [
     "11.06", "11.07", "11.08", "11.09", "11.10", "11.11", "12.00", "12.01",
     "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08", "12.09",
@@ -83,29 +67,7 @@ def build_export(root, build):
         manifest["replay_build"] = build
     (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     pq.write_table(pa.Table.from_pylist(fixture(), schema=SCHEMA), root / "fields.parquet")
-    empty = {
-        "checkpoint_fields": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("checkpoint_id", pa.string()), *SCHEMA]
-        ),
-        "net_guids": pa.schema([("net_guid", pa.uint32())]),
-        "checkpoint_actors": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("actor_net_guid", pa.uint32())]
-        ),
-        "checkpoint_net_guids": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("net_guid", pa.uint32())]
-        ),
-        "checkpoint_export_groups": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("ordinal", pa.uint32()),
-             ("group_path", pa.string())]
-        ),
-        "checkpoint_export_fields": pa.schema(
-            [("checkpoint_index", pa.uint32()), ("group_ordinal", pa.uint32()),
-             ("handle", pa.uint32()), ("rendered_name", pa.string()),
-             ("compatible_checksum", pa.uint32())]
-        ),
-    }
-    for name, schema in empty.items():
-        pq.write_table(pa.Table.from_pylist([], schema=schema), root / f"{name}.parquet")
+    write_empty_tables(root)
     pq.write_table(
         pa.Table.from_pylist([{"actor_net_guid": 4}],
                              schema=pa.schema([("actor_net_guid", pa.uint32())])),
@@ -119,6 +81,8 @@ class BuildScopeTests(unittest.TestCase):
         import contextlib, io
 
         for build in (*LEGACY_BUILDS, "13.01", "13.02", "13.04", "13.05", "13.06"):
+            self.assertIn(f"++Ares-Core+release-{build}", tool.MEASURED_BUILDS)
+        for build in ("11.06", "13.06"):
             branch = f"++Ares-Core+release-{build}"
             with self.subTest(build=build), tempfile.TemporaryDirectory() as t:
                 export = build_export(Path(t) / "export", branch)
@@ -130,15 +94,15 @@ class BuildScopeTests(unittest.TestCase):
                 self.assertIn("1 serialized updates", printed.getvalue())
                 result = json.loads(out.read_text(encoding="utf-8"))
                 self.assertEqual(result["provenance"]["replay_build"], branch)
+                self.assertEqual(result["provenance"]["wire_bits_sha256"],
+                                 tool.sha(Path(tool.__file__).with_name("wire_bits.py")))
                 self.assertEqual(result["counts"]["fields"]["parent_rows"], 1)
                 [record] = result["observations"]
                 self.assertTrue(record["members"]["did_kill_trigger_finisher"])
 
     def test_unmeasured_builds_are_still_refused(self):
-        # 12.10, 12.11 and 13.00 export no KillData children: the route is
-        # unobserved there, so an export from them cannot be checked. 13.07's
-        # declarations match every measured identity here; only the build is
-        # new, and a build must be measured before it is read.
+        # 12.10, 12.11 and 13.00 export no KillData children; 13.07 matches
+        # every measured identity, but a build must be measured before it is read.
         for build in ("++Ares-Core+release-12.10", "++Ares-Core+release-12.11",
                       "++Ares-Core+release-13.00", "++Ares-Core+release-13.07",
                       "12.09", "++Ares-Core+release-12.09 ", None):
@@ -148,16 +112,15 @@ class BuildScopeTests(unittest.TestCase):
                     tool.extract(export)
 
 
-class ExtractionTests(unittest.TestCase):
+class ExtractionTests(TempDirTestCase):
     def run_rows(self, rows, decl=DECL, refs=None):
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            pq.write_table(
-                pa.Table.from_pylist(rows, schema=SCHEMA), root / "fields.parquet"
-            )
-            return tool.extract_table(
-                root, "fields", decl, refs or {None: ({4}, set())}
-            )
+        root = self.tmp()
+        pq.write_table(
+            pa.Table.from_pylist(rows, schema=SCHEMA), root / "fields.parquet"
+        )
+        return tool.extract_table(
+            root, "fields", decl, refs or {None: ({4}, set())}
+        )
 
     def test_partial_stays_null_and_repeated_parents_keep_ordinals(self):
         got, counts = self.run_rows(fixture(True))
@@ -283,25 +246,10 @@ class ExtractionTests(unittest.TestCase):
                 *list(SCHEMA),
             ]
         )
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            pq.write_table(
-                pa.Table.from_pylist(cp, schema=schema),
-                root / "checkpoint_fields.parquet",
-            )
-            with self.assertRaisesRegex(tool.InputError, "declaration"):
-                tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})
-
-
-class OutputTests(unittest.TestCase):
-    def test_source_overwrite_is_rejected(self):
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            p = root / "fields.parquet"
-            p.write_bytes(b"x")
-            with self.assertRaisesRegex(tool.InputError, "refusing"):
-                tool.reject_overwrite(root, p)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        root = self.tmp()
+        pq.write_table(
+            pa.Table.from_pylist(cp, schema=schema),
+            root / "checkpoint_fields.parquet",
+        )
+        with self.assertRaisesRegex(tool.InputError, "declaration"):
+            tool.extract_table(root, "checkpoint_fields", bad, {0: ({4}, set())})

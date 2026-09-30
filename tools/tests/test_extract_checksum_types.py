@@ -14,8 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import extract_checksum_types as gen  # noqa: E402
+from support import TOOLS, TempDirTestCase
+import extract_checksum_types as gen
 
 #: The one multi-field braced type, in the one-line spelling `render` writes.
 BYTE_WHOLE = ("FieldType::RepMovement { rotation: RotatorQuantization::ByteComponents, "
@@ -117,7 +117,7 @@ class RetypeTests(unittest.TestCase):
             self.assertEqual(len(gen.retype_problems(verdict, {checksum})), 1, checksum)
 
     def test_retype_is_refused_in_check_mode(self):
-        export = Path(__file__).resolve().parents[1] / "fixtures" / "checksum_export"
+        export = TOOLS / "fixtures" / "checksum_export"
         result = subprocess.run(
             [sys.executable, str(Path(gen.__file__)), "--export", str(export),
              "--check", "--retype", "24357661"],
@@ -184,11 +184,9 @@ class ParseTests(unittest.TestCase):
             self.assertIsInstance(checksum, int)
             self.assertTrue(ftype.startswith("FieldType::"), ftype)
 
-    def test_the_overlay_table_is_read_in_one_spelling_for_both_layouts(self):
-        """cargo fmt breaks a braced type over lines with a trailing comma;
-        read verbatim, a braced donor would disagree with its own one-line
-        committed spelling. A key holding an escape is refused: the shared
-        parser does not unescape."""
+    def test_the_overlay_table_is_read_in_the_spelling_render_writes(self):
+        """A braced type broken over lines with a trailing comma reads as the
+        one-line spelling `render` writes, and an escaped key is unescaped."""
         table = (
             "pub static OVERLAY_TABLE: [OverlayEntry; 2] = [\n"
             "    OverlayEntry {\n"
@@ -208,13 +206,14 @@ class ParseTests(unittest.TestCase):
             ("/Game/B.B_C", "Origin"): "FieldType::VectorNetQuantize { scale: 100 }",
         })
         escaped = table.replace('"/Game/B.B_C"', '"/Game/B\\"B_C"')
+        self.assertIn(("/Game/B\"B_C", "Origin"),
+                      read_with("TABLE_RS", escaped, gen.load_overlay_table))
         with self.assertRaises(SystemExit):
-            read_with("TABLE_RS", escaped, gen.load_overlay_table)
+            read_with("TABLE_RS", table.replace("; 2]", "; 3]"), gen.load_overlay_table)
 
     def test_every_committed_row_is_read_or_reading_fails(self):
-        """A row cargo fmt broke over lines must still be read, or --check
-        would skip it and the next write drop it; every read must reach the
-        declared slice length."""
+        """A row broken over lines is still read, or --check would skip it and
+        the next write drop it; a read short of the declared length fails."""
         head = gen.render({}).split("pub static")[0]
         rows = (
             "    (5, FieldType::Float),\n"
@@ -245,44 +244,44 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("crate::types", gen.render({1: "FieldType::Int32"}))
 
 
-class LearnTests(unittest.TestCase):
+class LearnTests(TempDirTestCase):
     def test_only_raw_and_skip_teach_nothing(self):
         """Raw and Skip carry no decode, so they are not donors; a type whose
         name merely contains one of them still is."""
-        with tempfile.TemporaryDirectory() as temp:
-            manifest = Path(temp) / "manifest.json"
-            manifest.write_text(json.dumps({"net_field_export_groups": [
-                {"path": "/g", "fields": [
-                    {"name": name, "compatible_checksum": checksum}
-                    for checksum, name in enumerate(("raw", "skip", "raw_like"), 1)
-                ]},
-            ]}), encoding="utf-8")
-            resolved, conflicts = gen.learn([manifest], {
-                ("/g", "raw"): "FieldType::Raw",
-                ("/g", "skip"): "FieldType::Skip",
-                ("/g", "raw_like"): "FieldType::RawBits",
-            })
+        temp = self.tmp()
+        manifest = temp / "manifest.json"
+        manifest.write_text(json.dumps({"net_field_export_groups": [
+            {"path": "/g", "fields": [
+                {"name": name, "compatible_checksum": checksum}
+                for checksum, name in enumerate(("raw", "skip", "raw_like"), 1)
+            ]},
+        ]}), encoding="utf-8")
+        resolved, conflicts = gen.learn([manifest], {
+            ("/g", "raw"): "FieldType::Raw",
+            ("/g", "skip"): "FieldType::Skip",
+            ("/g", "raw_like"): "FieldType::RawBits",
+        })
         self.assertEqual((resolved, conflicts), ({3: "FieldType::RawBits"}, {}))
 
 
-class CliGuardTests(unittest.TestCase):
+class CliGuardTests(TempDirTestCase):
     def test_missing_manifest_is_a_failure_not_a_successful_skip(self):
-        with tempfile.TemporaryDirectory() as temp:
-            export = Path(temp) / "missing-export"
-            result = subprocess.run(
-                [sys.executable, str(Path(gen.__file__)), "--export", str(export),
-                 "--check"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-            )
+        temp = self.tmp()
+        export = temp / "missing-export"
+        result = subprocess.run(
+            [sys.executable, str(Path(gen.__file__)), "--export", str(export),
+             "--check"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("SKIP:", result.stdout + result.stderr)
 
     def test_committed_ci_fixture_exercises_the_generator_guard(self):
-        export = Path(__file__).resolve().parents[1] / "fixtures" / "checksum_export"
+        export = TOOLS / "fixtures" / "checksum_export"
         result = subprocess.run(
             [sys.executable, str(Path(gen.__file__)), "--export", str(export),
              "--check"],
@@ -306,7 +305,3 @@ class CliGuardTests(unittest.TestCase):
             len(overlap), 0,
             "fixture and committed table share no checksums -- the CI gate "
             "is comparing nothing")
-
-
-if __name__ == "__main__":
-    unittest.main()

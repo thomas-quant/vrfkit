@@ -16,3 +16,6 @@ checkpoint = []
 [dependencies]
 vrf-bitio = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+vrf-testkit = { workspace = true }

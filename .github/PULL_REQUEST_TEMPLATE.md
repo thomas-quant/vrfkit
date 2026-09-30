@@ -6,18 +6,7 @@
 
 ## Verification
 
-- [ ] `cargo +1.86.0 fmt --check`
-- [ ] `cargo +1.86.0 clippy --workspace --all-targets --all-features --locked -- -D warnings`
-- [ ] `cargo +1.86.0 test --workspace --locked`
-- [ ] Core-only/singleton feature matrix and strict rustdoc from `CONTRIBUTING.md`
-- [ ] Rust `write_interop_files` fixture verified by `crates/vrf-export/tests/python_interop.py` using its exact private directory
-- [ ] `python -W error tools/check_ascii.py --check`
-- [ ] `python -W error tools/apply_type_corrections.py --check`
-- [ ] `python -W error tools/extract_checksum_types.py --export tools/fixtures/checksum_export --check`
-- [ ] `python -W error tools/generate_scoped_types.py --check`
-- [ ] `python -W error tools/check_baseline_schemas.py`
-- [ ] `python -W error tools/check_docs.py` (not `--fast`: that skips the count check)
-- [ ] `python -W error -m unittest discover -s tools/tests -p "test_*.py"`
+- [ ] The pre-PR sweep in `CONTRIBUTING.md`, every command exit 0 (not `check_docs.py --fast`: the full run checks the test counts)
 
 ## Replay validation (parser changes)
 
@@ -40,5 +29,5 @@ See CONTRIBUTING.md, "Replay evidence for parser changes". -->
 - [ ] Output is **byte-identical by committed SHA-256** on valid replays (or the measured baseline change is explained line by line).
 - [ ] No `unsafe` added.
 - [ ] No non-ASCII in Rust code or comments.
-- [ ] No generated file (`checksum_table.rs`, `scoped_types.rs`, `sbox.rs`, `golden_vectors.rs`, `native_vectors.rs`) hand-edited. `scoped_types.rs` comes from `tools/generate_scoped_types.py`; `native_vectors.rs` from `tools/capture_native_transforms.py`.
+- [ ] No generated file (`checksum_table.rs`, `scoped_types.rs`, `native_vectors.rs`) hand-edited. `scoped_types.rs` comes from `tools/generate_scoped_types.py`; `native_vectors.rs` from `tools/capture_native_transforms.py`.
 - [ ] No new hardcoded display names in a Rust crate.

@@ -10,7 +10,6 @@ published as `money_decreases_in_team_switch_window`, never as purchases.
 
 from __future__ import annotations
 
-import argparse
 import bisect
 import json
 import re
@@ -22,13 +21,19 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 if __package__:
-    from .atomic_io import atomic_write_text
+    from .atomic_io import run_json_cli
+    from .wire_bits import load_net_guids
 else:  # direct script execution
-    from atomic_io import atomic_write_text
+    from atomic_io import run_json_cli
+    from wire_bits import load_net_guids
 
 
 MAGAZINE_PATH = "MagazineAmmo"
 SHOT_EFFECT_ID = "ReplayPlayContinuousEffectAtLocation.EffectID"
+#: Gun-scoped RPC whose actor is the magazine's outer (the weapon).
+WEAPON_RPC = "MulticastPlayContinuousEffectFromClient.EffectID"
+#: Each ammo decrease by how many WEAPON_RPC rows of its weapon lie within 300 ms.
+WEAPON_RPC_TALLY = ("no_weapon", "none", "unique", "multiple")
 ROUND_MONEY_RE = re.compile(r"RoundInfos\[(\d+)\]\.(StartOfRoundMoney|EndOfRoundMoney)$")
 TEAM_ECONOMY_RE = re.compile(
     r"TeamEconomy\[(\d+)\]\.(LoadoutValue|AverageLoadoutValue)$"
@@ -84,17 +89,10 @@ def _team_switch_windows(switches: list[int], round_starts: list[int]) -> list[t
     """`[switchTeams, first roundStarted after it)` per switch; end None = end of stream.
 
     A side switch resets credits (800 at half time, 5000 in overtime) with an
-    ordinary `Money` write, a decrease for anyone holding more, and no buy
-    phase is open before the round starts. On the 1,018-export corpus (parser
-    259ed10, 2026-09-28; docs/FOLLOWUP.md) 5,616 decreases fall inside, all
-    7-10 ms after the switch: 5,551 to 800, 50 to 5000, 12 to 0 and 3 to 6200
-    (each 0 and 6200 after a second or later overtime switch).
-
-    Keyed on the decrease's own time, not its collapsed interval: a player
-    already on 800 gets no reset sample, so the first buy's interval spans the
-    switch, and an interval rule took 105 real buys. With no later
-    `roundStarted` (11 overtime replays end seconds after the switch) the
-    window runs to the end of the stream; the reset still comes 8 ms after.
+    ordinary `Money` write while no buy phase is open: 5,616 corpus decreases,
+    all 7-10 ms after the switch. Keyed on the decrease's own time, not its
+    collapsed interval: a player already on 800 gets no reset sample, and an
+    interval rule took 105 real buys.
     """
     windows = []
     for switch in switches:
@@ -130,16 +128,6 @@ def _value_at(timeline, time_ms: int, packet_id: int):
     return values[index] if index >= 0 else None
 
 
-def _reject_input_overwrite(export_dir: Path, output_path: Path) -> None:
-    """Refuse to overwrite any source Parquet or manifest with JSON output."""
-    source = export_dir.resolve()
-    output = output_path.resolve()
-    inputs = {path.resolve() for path in source.glob("*.parquet")}
-    inputs.add((source / "manifest.json").resolve())
-    if output in inputs:
-        raise ValueError(f"output path is an input export file: {output}")
-
-
 def _read_columns(path: Path, columns: list[str], *, observation_fields=False) -> dict[str, list]:
     table = pq.read_table(path, columns=columns)
     if observation_fields:
@@ -148,7 +136,7 @@ def _read_columns(path: Path, columns: list[str], *, observation_fields=False) -
         scalar_names = pa.array(sorted(PURCHASE_FIELDS | {
             "AuthResourceAmount", "CurrentEquippable", "NewCurrentEquippable",
             "CurrentState", "Money", "DefuseProgress", "LoadoutValue",
-            "AverageLoadoutValue", "Owner", SHOT_EFFECT_ID,
+            "AverageLoadoutValue", "Owner", SHOT_EFFECT_ID, WEAPON_RPC,
         }))
         indexed = pc.match_substring_regex(
             names, "^(?:" + ROUND_MONEY_RE.pattern + "|" + TEAM_ECONOMY_RE.pattern + ")"
@@ -158,9 +146,10 @@ def _read_columns(path: Path, columns: list[str], *, observation_fields=False) -
     return {name: table.column(name).to_pylist() for name in columns}
 
 
-def _near(sorted_times: list[int], time_ms: int, window_ms: int) -> bool:
-    position = bisect.bisect_left(sorted_times, time_ms - window_ms)
-    return position < len(sorted_times) and sorted_times[position] <= time_ms + window_ms
+def _near(sorted_times: list[int], time_ms: int, window_ms: int) -> int:
+    """How many of `sorted_times` lie within +/-window_ms of time_ms."""
+    return (bisect.bisect_right(sorted_times, time_ms + window_ms)
+            - bisect.bisect_left(sorted_times, time_ms - window_ms))
 
 
 def _stable_rows(rows: list[dict]) -> list[dict]:
@@ -181,21 +170,9 @@ def build(export_dir: Path) -> dict:
     if missing:
         raise ValueError(f"missing required export tables: {', '.join(missing)}")
 
-    net = _read_columns(export_dir / "net_guids.parquet",
-                        ["net_guid", "path", "outer_net_guid"])
-    # A NetGUID with conflicting metadata is not a join key: taking the last
-    # row would make a reload/ammo relation depend on Parquet order.
-    path_values = defaultdict(set)
-    outer_values = defaultdict(set)
-    for guid, path, outer in zip(net["net_guid"], net["path"], net["outer_net_guid"]):
-        if path:
-            path_values[guid].add(path)
-        if outer is not None:
-            outer_values[guid].add(outer)
-    path_of = {guid: next(iter(values)) for guid, values in path_values.items()
-               if len(values) == 1}
-    outer_of = {guid: next(iter(values)) for guid, values in outer_values.items()
-                if len(values) == 1}
+    net = load_net_guids(export_dir, "path", "outer_net_guid")
+    path_of = {guid: path for guid, (path, _) in net.items() if path}
+    outer_of = {guid: outer for guid, (_, outer) in net.items() if outer is not None}
 
     events = _read_columns(export_dir / "events.parquet", ["group", "time1"])
     round_starts = sorted(time for group, time in zip(events["group"], events["time1"])
@@ -225,6 +202,7 @@ def build(export_dir: Path) -> dict:
     owner_info_controllers = defaultdict(list)
     player_controllers = defaultdict(list)
     shot_times = []
+    weapon_rpc_times = defaultdict(list)
 
     for row in range(len(fields["time_ms"])):
         time_ms = fields["time_ms"][row]
@@ -257,12 +235,11 @@ def build(export_dir: Path) -> dict:
         elif integer is not None and (match := ROUND_MONEY_RE.fullmatch(name or "")):
             slot, value_kind = match.groups()
             balances[(actor, int(slot), value_kind)].append((time_ms, packet_id, row, integer))
-        elif group.endswith("OwnerExclusivePlayerInfo") and name == "Owner" and integer:
-            # The descriptor identifies Owner as the owning controller.
+        elif group.endswith("OwnerExclusivePlayerInfo") and name == "Owner" and integer is not None:
+            # The owning controller; 0 (cleared) is kept so it ends the join.
             owner_info_controllers[actor].append((time_ms, packet_id, row, integer))
-        elif group.endswith("BombPlayerState_C") and name == "Owner" and integer:
-            # BombPlayerState.Owner gives the inverse controller -> player
-            # state link needed by OwnerExclusivePlayerInfo.
+        elif group.endswith("BombPlayerState_C") and name == "Owner" and integer is not None:
+            # The inverse controller -> player state link.
             player_controllers[actor].append((time_ms, packet_id, row, integer))
         elif group.endswith("BaseTeamState") and name in ("LoadoutValue", "AverageLoadoutValue"):
             if integer is not None:
@@ -279,8 +256,13 @@ def build(export_dir: Path) -> dict:
         elif (group.endswith("ReplayEffectComponent_ClassNetCache")
               and name == SHOT_EFFECT_ID):
             shot_times.append(time_ms)
+        elif (name == WEAPON_RPC and group.startswith("/Game/Equippables/Guns/")
+              and group.endswith("_ClassNetCache")):
+            weapon_rpc_times[actor].append(time_ms)
 
     shot_times.sort()
+    for times in weapon_rpc_times.values():
+        times.sort()
     owner_info_controller_timelines = {
         info: _timeline(samples) for info, samples in owner_info_controllers.items()
     }
@@ -299,6 +281,7 @@ def build(export_dir: Path) -> dict:
         team_values[(team_guid, source, slot)][(time_ms, packet_id)][value_kind] = value
     ammo_changes = []
     ambiguous_ammo_packets = 0
+    weapon_rpc_tally = dict.fromkeys(WEAPON_RPC_TALLY, 0)
     for component, samples in magazine.items():
         weapon = outer_of.get(component)
         changes, ambiguous = _changes(samples)
@@ -306,6 +289,10 @@ def build(export_dir: Path) -> dict:
         for time_ms, before, after, delta in changes:
             if not delta:
                 continue
+            rpcs = None
+            if delta < 0:
+                rpcs = _near(weapon_rpc_times.get(weapon, []), time_ms, 300) if weapon else None
+                weapon_rpc_tally[WEAPON_RPC_TALLY[1 + min(rpcs, 2)] if weapon else "no_weapon"] += 1
             ammo_changes.append({
                 "time_ms": time_ms,
                 "magazine_component_guid": component,
@@ -314,11 +301,12 @@ def build(export_dir: Path) -> dict:
                 "after": after,
                 "delta": delta,
                 "kind": "decrease" if delta < 0 else "increase",
-                "round_start_within_150ms": _near(round_starts, time_ms, 150),
+                "round_start_within_150ms": bool(_near(round_starts, time_ms, 150)),
                 # Global timing only: EffectID has no demonstrated weapon join.
                 "global_effect_id_within_300ms": (
-                    _near(shot_times, time_ms, 300) if delta < 0 else None
+                    bool(_near(shot_times, time_ms, 300)) if delta < 0 else None
                 ),
+                "weapon_rpc_within_300ms": rpcs,
             })
 
     # Raw counter observations, joined to reload state intervals only through
@@ -483,7 +471,7 @@ def build(export_dir: Path) -> dict:
                 )
                 players = [
                     player for player, timeline in player_controller_timelines.items()
-                    if controller is not None and _value_at(timeline, time_ms, packet_id) == controller
+                    if controller not in (None, 0) and _value_at(timeline, time_ms, packet_id) == controller
                 ]
                 player = players[0] if len(players) == 1 else None
                 join_source = (
@@ -610,7 +598,9 @@ def build(export_dir: Path) -> dict:
         "evidence_rules": {
         "scalar_dedup": "consecutive equal values collapse by time_ms, packet_id",
             "same_packet_conflict": "conflicting values become unknown boundaries, never value-sorted transitions",
-            "ammo_shot_join": "decrease carries only a global EffectID observation within +/-300ms",
+            "ammo_shot_join": ("a decrease carries a global EffectID observation and a count "
+                               "of its weapon's gun-scoped RPCs within +/-300ms; neither is a "
+                               "shot count"),
             "defuse_completion": "events.spikeDefused is authoritative; progress is never completion",
             "purchase": "PurchasedItemComponent rows are snapshots; Money decreases are separate events",
             "money_team_switch": ("a Money decrease at or after switchTeams and before the "
@@ -649,6 +639,7 @@ def build(export_dir: Path) -> dict:
                 "source": "OwnerExclusivePlayerInfo.Owner@time -> BombPlayerState.Owner@time",
             },
         },
+        "ammo_decrease_weapon_rpc_within_300ms": weapon_rpc_tally,
         "ambiguous_same_packet_counts": {
             "ammo": ambiguous_ammo_packets,
             "inventory": ambiguous_inventory_packets,
@@ -669,26 +660,24 @@ def build(export_dir: Path) -> dict:
     return observations
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--export", type=Path, required=True)
-    parser.add_argument("--out", type=Path, required=True)
-    args = parser.parse_args()
-    _reject_input_overwrite(args.export, args.out)
-    result = build(args.export)
-    atomic_write_text(args.out, json.dumps(result, indent=2) + "\n")
-    print(f"wrote {args.out}")
+def summary(result, out):
+    yield f"wrote {out}"
     for name in ("ammo_changes", "equip_intervals", "reload_intervals",
                  "defuse_progress_transitions", "defuse_completions",
                  "round_balances", "team_loadouts", "money_decreases",
                  "money_decreases_in_team_switch_window", "transaction_snapshots"):
-        print(f"  {name}: {len(result[name])}")
+        yield f"  {name}: {len(result[name])}"
+    yield (f"  ammo decreases by weapon RPCs within 300 ms: "
+           f"{json.dumps(result['ammo_decrease_weapon_rpc_within_300ms'])}")
     windows = result["team_switch_windows"]
-    print(f"  team switch windows: {windows['switches']} "
-          f"({windows['closed_by_end_of_stream']} open to the end of the stream)")
+    yield (f"  team switch windows: {windows['switches']} "
+           f"({windows['closed_by_end_of_stream']} open to the end of the stream)")
     for gap in result["quality_gaps"]:
-        print(f"  quality gap: {gap}")
-    return 0
+        yield f"  quality gap: {gap}"
+
+
+def main(argv=None) -> int:
+    return run_json_cli(__doc__, build, summary, argv, sources=[Path(__file__)], indent=2)
 
 
 if __name__ == "__main__":

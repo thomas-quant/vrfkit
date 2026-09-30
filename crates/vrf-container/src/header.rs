@@ -81,13 +81,11 @@ pub struct ReplayHeader {
     pub platform: String,
     pub build_config: u8,
     pub build_target_type: u8,
-    /// Header payload bytes past `BuildTargetType`, reported uninterpreted
-    /// because nothing here knows their layout. Expected 0; non-zero means the
-    /// header grew. Written to the manifest as `header_trailing_bytes`.
+    /// Payload bytes past `BuildTargetType`, reported uninterpreted: non-zero
+    /// means the header grew. The manifest's `header_trailing_bytes`.
     pub trailing_bytes: usize,
 }
 
-/// Parse the header chunk payload.
 pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, ContainerError> {
     let mut reader = BitReader::new(payload);
 
@@ -144,13 +142,10 @@ pub(crate) fn parse_replay_header(payload: &[u8]) -> Result<ReplayHeader, Contai
         branch,
     };
 
-    // All 36 sampled replays from 11.06 through 12.05 put UE4Version (522)
-    // immediately after Branch. The length-prefixed extension first appears
-    // in the 12.06 samples. Do not retry a malformed modern header as legacy:
-    // doing so would silently interpret its length as a package version.
-    // A legacy build missing from this list fails loudly instead: forced down
-    // the modern path, 11.06, 11.11 and 12.05 samples raise BitIo EOF or
-    // CountOverflow on the level names (checked 2026-09-29).
+    // 11.06-12.05 put UE4Version (522) right after Branch; the length-prefixed
+    // extension starts at 12.06. A malformed modern header is not retried as
+    // legacy, which would read its length as a package version; a legacy build
+    // missing here fails on the modern path (BitIo EOF or CountOverflow).
     let legacy_header = matches!(
         replay_version.branch.as_str(),
         "++Ares-Core+release-11.06"

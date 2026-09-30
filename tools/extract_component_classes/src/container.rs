@@ -106,9 +106,7 @@ impl Container {
                 let start = out.len();
                 out.resize(start + size, 0);
                 // A fresh extractor per block (it keeps decoder state across
-                // calls), and `read` over a slice so what the codec left unread
-                // shows: both for the reasons on `inflate` in
-                // crates/vrf-container/src/oodle.rs.
+                // calls), and `read` over a slice so unread input shows.
                 let mut unread: &[u8] = &raw;
                 let n = oozextract::Extractor::new()
                     .read(&mut unread, &mut out[start..])
@@ -142,48 +140,24 @@ impl Container {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::toc::tests::{TocSpec, build_toc};
-    use crate::toc::{ChunkId, CompressedBlock, OffsetLength};
+    use crate::toc::tests::{TocSpec, build_toc, one_chunk_toc};
     use std::io::Cursor as IoCursor;
 
-    /// A container of stored (uncompressed) blocks: 8-byte blocks, chunk 0 at
-    /// stream offset 4 spanning three blocks, so a read crosses two block
-    /// boundaries and starts mid-block.
+    fn container(spec: &TocSpec) -> Container {
+        let toc = parse_toc(&build_toc(spec)).unwrap();
+        Container {
+            name: "t".to_owned(),
+            ucas_path: PathBuf::new(),
+            toc,
+        }
+    }
+
+    /// Stored (uncompressed) 8-byte blocks, chunk 0 at stream offset 4 spanning
+    /// three of them, so a read starts mid-block and crosses two boundaries.
     fn stored() -> (Container, Vec<u8>) {
-        let ucas: Vec<u8> = (0u8..32).collect();
-        let spec = TocSpec {
-            flags: crate::toc::FLAG_INDEXED,
-            block_size: 8,
-            methods: vec![],
-            chunks: vec![(
-                ChunkId {
-                    id: 1,
-                    chunk_type: 1,
-                },
-                OffsetLength {
-                    offset: 4,
-                    length: 18,
-                },
-            )],
-            blocks: (0..4)
-                .map(|i| CompressedBlock {
-                    offset: i * 8,
-                    compressed_size: 8,
-                    uncompressed_size: 8,
-                    method: 0,
-                })
-                .collect(),
-            ..TocSpec::default()
-        };
-        let toc = parse_toc(&build_toc(&spec)).unwrap();
-        (
-            Container {
-                name: "t".to_owned(),
-                ucas_path: PathBuf::new(),
-                toc,
-            },
-            ucas,
-        )
+        let blocks = [(0, 8, 8, 0), (8, 8, 8, 0), (16, 8, 8, 0), (24, 8, 8, 0)];
+        let spec = one_chunk_toc(1, (4, 18), 8, vec![], &blocks);
+        (container(&spec), (0u8..32).collect())
     }
 
     #[test]
@@ -214,43 +188,14 @@ mod tests {
     }
 
     /// One Oodle block: an eight-byte uncompressed Kraken block (header
-    /// `0x4C 0x06`, decoded on vrf-container's `archive_with_unread_input`),
-    /// then `unread` bytes inside the compressed size the codec never reaches.
+    /// `0x4C 0x06`), then `unread` bytes inside the compressed size the codec
+    /// never reaches.
     fn oodle(unread: usize) -> (Container, Vec<u8>) {
         let mut ucas = vec![0x4C, 0x06];
         ucas.extend(0u8..8);
         ucas.extend(std::iter::repeat_n(0xAB, unread));
-        let spec = TocSpec {
-            flags: crate::toc::FLAG_INDEXED,
-            block_size: 8,
-            methods: vec!["Oodle"],
-            chunks: vec![(
-                ChunkId {
-                    id: 1,
-                    chunk_type: 1,
-                },
-                OffsetLength {
-                    offset: 0,
-                    length: 8,
-                },
-            )],
-            blocks: vec![CompressedBlock {
-                offset: 0,
-                compressed_size: ucas.len() as u32,
-                uncompressed_size: 8,
-                method: 1,
-            }],
-            ..TocSpec::default()
-        };
-        let toc = parse_toc(&build_toc(&spec)).unwrap();
-        (
-            Container {
-                name: "t".to_owned(),
-                ucas_path: PathBuf::new(),
-                toc,
-            },
-            ucas,
-        )
+        let spec = one_chunk_toc(1, (0, 8), 8, vec!["Oodle"], &[(0, ucas.len() as u32, 8, 1)]);
+        (container(&spec), ucas)
     }
 
     #[test]

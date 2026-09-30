@@ -7,13 +7,11 @@ import os
 from pathlib import Path
 import struct
 import subprocess
-import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from support import TempDirTestCase
 import package_release as release
 
 
@@ -58,15 +56,13 @@ class ReleaseIdentityTests(unittest.TestCase):
                 release.require_windows_x64(image)
 
 
-class ReleasePackageTests(unittest.TestCase):
+class ReleasePackageTests(TempDirTestCase):
     TAG = "v1.2.3-rc.1"
     COMMIT = "a" * 40
     HELP = "\n".join("vrfkit " + command for command in ("inspect", "validate", "diag", "export"))
 
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = self.tmp()
         self.exe = self.root / "source.exe"
         self.exe.write_bytes(pe_image())
         for name in ("LICENSE", "NOTICE.md"):
@@ -194,7 +190,3 @@ class ReleasePackageTests(unittest.TestCase):
             release.main(["verify", "--tag", self.TAG, "--commit", self.COMMIT,
                           "--directory", str(self.output)])
         self.assertEqual(raised.exception.code, 1)
-
-
-if __name__ == "__main__":
-    unittest.main()

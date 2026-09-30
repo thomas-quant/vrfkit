@@ -6,20 +6,24 @@ No Windows APIs or game services are provided. Input hashes and function RVAs
 come from fixtures/native_transform_readers.json, not from transform Rust code.
 
 Usage:
-    python tools/capture_native_transforms.py --binaries ROOT --check
+    python tools/capture_native_transforms.py --binaries ARCHIVE --recovered-binaries RECOVERED --check
 
-ROOT contains <build>/ShooterGame/Binaries/Win64/VALORANT-Win64-Shipping.exe.
-Without --check, write the Rust fixture after every build succeeds.
+Both roots hold <build>/ShooterGame/Binaries/Win64/VALORANT-Win64-Shipping.exe;
+RECOVERED is recover_native_binaries.py's output, read for the seven builds the
+catalog marks `recovered` (11.06-12.00). Without --check, write the Rust
+fixture after every build succeeds.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import random
 import struct
 from pathlib import Path
+
+from atomic_io import atomic_write_text
+from recover_native_binaries import BINARY_PATH, checked_input
 
 REPO = Path(__file__).resolve().parent.parent
 CATALOG = REPO / "tools/fixtures/native_transform_readers.json"
@@ -51,9 +55,7 @@ def capture(exe: Path, entry: dict):
         UC_X86_REG_RBP, UC_X86_REG_RIP,
     )
 
-    data = exe.read_bytes()
-    if hashlib.sha256(data).hexdigest() != entry["exe_sha256"]:
-        raise ValueError(f"executable SHA-256 mismatch: {exe}")
+    data = checked_input(exe, entry["exe_sha256"])
     pe = pefile.PE(data=data, fast_load=True)
     if pe.FILE_HEADER.Machine != 0x8664:
         raise ValueError("expected x86-64 PE")
@@ -100,6 +102,9 @@ def main():
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+    protected = [e["build"] for e in catalog if e.get("recovered")]
+    if protected and args.recovered_binaries is None:
+        parser.error(f"builds {', '.join(protected)} need --recovered-binaries")
     lines = [
         "// Expected output captured from original x86-64 reader functions.",
         "// Regenerate with tools/capture_native_transforms.py; see docs/LEGACY_BUILD_SUPPORT.md.",
@@ -108,10 +113,8 @@ def main():
     ]
     for entry in catalog:
         build = entry["build"]
-        root = (args.recovered_binaries if entry.get("recovered")
-                and args.recovered_binaries is not None else args.binaries)
-        exe = root / build / "ShooterGame/Binaries/Win64/VALORANT-Win64-Shipping.exe"
-        rows = capture(exe, entry)
+        root = args.recovered_binaries if entry.get("recovered") else args.binaries
+        rows = capture(root / build / BINARY_PATH, entry)
         lines.extend([
             f'    // {build}: executable SHA-256 {entry["exe_sha256"]}',
             f'    // Reader RVA {entry["function_rva"]}.',
@@ -127,7 +130,7 @@ def main():
             raise SystemExit("native transform fixture differs from original machine code")
         print("PASS: committed fixture matches original machine code")
     else:
-        OUTPUT.write_text(text, encoding="utf-8")
+        atomic_write_text(OUTPUT, text)
 
 
 if __name__ == "__main__":

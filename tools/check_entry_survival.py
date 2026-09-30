@@ -1,169 +1,66 @@
 #!/usr/bin/env python3
-"""Report, per game build, whether each name-keyed overlay entry is still reached.
+"""Report, per game build, whether each name-keyed overlay entry is still declared.
 
-Why this exists
----------------
 Almost every typed value vrfkit emits is keyed on something the replay
-declares: `table.rs` on (group path, field name), `scoped_types.rs` on (field
-name, group path, compatible checksum), `checksum_table.rs` on the checksum
-alone, and a few hand-written maps on exact group paths. A patch that moves,
-renames or stops replicating something breaks none of them loudly: the key
-stops matching, the rows arrive untyped and `Decode errors: 0` holds. Cypher's
-tripwire assets moved from `.../Gumshoe/S0/Ability_E/` to `.../Ability_4/`
-and `Deployed` went untyped with every counter at zero. On the 1,018-replay
-declaration corpus (2026-09-28) that move happened between 13.00 and 13.01:
-the new groups are declared from 13.01 on (70 of 215 replays), the old ones
-last in 13.00 and earlier.
+declares. A patch that moves, renames or stops replicating it breaks nothing
+loudly: the key stops matching, the rows arrive untyped and `Decode errors: 0`
+holds (Cypher's tripwire moved from `.../Gumshoe/S0/Ability_E/` to
+`.../Ability_4/` between 13.00 and 13.01). Only declarations are read: the
+manifest's `net_field_export_groups` and, when present, the checkpoint
+`checkpoint_export_groups` / `checkpoint_export_fields` tables joined on
+(`checkpoint_index`, `group_ordinal`). Nothing is decoded; no game install is
+read.
 
-Only declarations are read -- the main stream's `net_field_export_groups` in
-`manifest.json` and, when the export has them, every checkpoint's
-`checkpoint_export_groups.parquet` / `checkpoint_export_fields.parquet`,
-joined on (`checkpoint_index`, `group_ordinal`) as docs/USAGE.md specifies. A
-replay declares whatever either stream declares. No replay is decoded and no
-game install is read.
-
-Entries
--------
-Parsed from the Rust sources on every run, each count checked against the
-array length the source declares (a mismatch is a failure, never a smaller
-check):
+Entries, parsed from the Rust sources on every run (a count that disagrees
+with the array length its source declares fails):
 
   table     `OVERLAY_TABLE` (table.rs): (group, field name) -> type
   handle    `OVERLAY_HANDLE_TABLE` (table.rs): (group, handle) -> field name
   scoped    `SCOPED_TYPES` (scoped_types.rs): (name, group, checksum) -> type
   checksum  `CHECKSUM_TYPES` (checksum_table.rs): checksum -> type
-  route     the measured structured-array routes: the (group, parent,
-            checksum) arms of `measured_array_route` (sink/blobs.rs) and the
-            `NetworkedProjectilePath` gate in sink/rpc.rs, together checked
-            against `MeasuredArrayRoute::ALL` (sink/measured_routes.rs)
+  route     the measured array routes: the arms of `measured_array_route`
+            (sink/blobs.rs) and the `NetworkedProjectilePath` gate
+            (sink/rpc.rs), checked against `MeasuredArrayRoute::ALL`
   remap     the class groups `KNOWN_SUBOBJECT_CLASS_PATHS` (sink/paths.rs)
-            routes components to -- the path, or path + `_ClassNetCache` for a
-            ClassNetCache pair -- read through `check_component_remaps`
+            routes components to, read through `check_component_remaps`
   alias     the source groups of `GROUP_ALIASES` (overlay.rs)
 
-Not covered, because nothing here parses them: the handle-keyed member tables
-of the array routes (`verified_*_leaf*` in sink/blobs.rs), the
-`MulticastRespondToValidMapClick` targeting gate and the life-change schemas
-in sink/rpc.rs, the `struct_blob_kind` field names, and the effect-blob
-parameter names (`FloatValues` / `VectorValues` / `ObjectValues`) in
-vrf-decode/src/effect.rs. A rename there is still silent to this tool.
+Not covered: the handle-keyed member tables of the array routes, the
+`MulticastRespondToValidMapClick` gate and the life-change schemas in
+sink/rpc.rs, the `struct_blob_kind` names, and the effect-blob parameter names
+(vrf-decode/src/effect.rs).
 
-When an entry counts as declared
---------------------------------
-`table` entries are matched in `resolve_entry`'s order (overlay.rs, mirrored
-by overlay_mirror; see `Overlay`), so `Role` / `RemoteRole`, which every
-current replay declares as `215` / `216`, are reached only where a handle
-entry maps them. A `handle` entry counts per `Overlay.handle_state`; a real
-name the table does not know is the refusal overlay.rs counts, tallied here as
-a handle conflict per build. `scoped`, `route` and `checksum` entries count
-where their exact key is declared, `remap` and `alias` entries where their
-group is.
+`table` entries match in `resolve_entry`'s order (overlay_mirror), so `Role` /
+`RemoteRole`, declared as `215` / `216`, count only through a handle entry; a
+real name at a mapped handle the table does not know is a conflict, as in
+overlay.rs. Per (entry, build) an entry is declared, field-missing (its group
+is; for a checksum, a group carrying it anywhere in the input) or not observed.
 
-The mirror was checked against the Rust export of one 13.01 replay
-(`03f82073`, integration build 9f92756, 2026-09-28): of its 2,067 top-level
-property identities (group, name, checksum, handle), vrfkit typed exactly the
-ones the mirror resolves to a type other than `Raw` / `Skip`, each in the value
-column that type fills; of its 902 RPC-parameter identities 837 agree and the
-other 65 are `FloatValues` / `VectorValues` / `ObjectValues`, `Raw` in the
-table and typed by the effect decoder -- the not-covered item above.
+Each build is compared with its REFERENCE WINDOW: the builds before it, newest
+first, until they hold `REFERENCE_REPLAYS` replays (13.00 alone is one replay
+without the old tripwire groups). An entry declared there and not in the build
+is field-missing (its group still is), moved (the group is gone and a
+SUCCESSOR appears: a new group of the same kind whose class name is the same,
+differs in one `_` token of at most `SHORT_TOKEN` characters, or declares one
+of the old group's (name, checksum) pairs that at most `RARE_PAIR_GROUPS`
+reference groups declare), or vanished. A move is `covered` when the
+successor's field resolves to the entry's own type, `lost` otherwise. `drift`
+(a table or handle entry declared under a checksum its single-checksum
+reference never carried) and `conflicts` are reported, never failed.
 
-States and findings
--------------------
-Per (entry, build), over the build's replays:
+An absence is EVIDENCE when p <= `ALPHA` -- the chance that the build's `m`
+replays all miss the `k` of `c` reference replays declaring it, C(c+m-k, m) /
+C(c+m, m) -- and the build has `MIN_CONTEXT` such replays; otherwise it is
+weak and never fails. On the 1,018-replay corpus (24 builds) the largest
+evidenced p was 1.9e-4 and the smallest weak one 0.0165.
 
-  declared        at least one replay declares the entry
-  field-missing   none does, but the entry's group is declared (for a
-                  checksum: some group that carries it anywhere in the input)
-  not observed    not even the group is declared -- the class was not used
-
-Each build is compared with its REFERENCE WINDOW: the builds just before it,
-newest first, until they hold at least `REFERENCE_REPLAYS` replays. Comparing
-with the previous build alone cannot work on this corpus: 13.00 is one replay
-and does not declare the old tripwire groups at all, so the one move the
-corpus holds would never be a transition from "declared". With the window,
-13.01's reference is 12.01-13.00 (30 replays) and every later build's is the
-single build before it. An entry declared in its reference and not in the
-build is one of:
-
-  field-missing   the group is still declared, the field is not
-  moved           the group is gone and a SUCCESSOR appears: a group of the
-                  same kind (property, `_ClassNetCache`, same `:Function`),
-                  declared in this build and in no build of the reference,
-                  whose class name is the same, or differs in exactly one
-                  `_`-separated token of at most `SHORT_TOKEN` characters on
-                  both sides (`Gumshoe_E_TripWire` -> `Gumshoe_4_TripWire`),
-                  or which declares one of the old group's rare (name,
-                  checksum) pairs -- rare meaning declared by at most
-                  `RARE_PAIR_GROUPS` groups across the reference. A generic
-                  pair (`Owner` is on 614 groups of the corpus) never
-                  nominates a successor.
-  vanished        the group is gone and no successor was found
-
-A moved entry is `covered` when the successor's field resolves, through the
-same order, to the entry's own type (`Owner` via the engine object references,
-say) -- nothing turned raw -- and `lost` otherwise.
-
-Two more columns are reported and never fail. `drift`: a `table` or `handle`
-entry still declared, but under a checksum its reference never carried -- a
-changed type behind an unchanged name, which the name lookup would keep
-typing the old way. It is read only where the reference carried the name under
-one checksum, and not for a checksum `checksum_table.rs` already types the
-entry's way. `conflicts`: replays in which a mapped handle carried a different
-real name, the refusal above.
-
-Evidence and thresholds
------------------------
-Absence is judged with the exact hypergeometric probability that it is
-sampling: with `k` of `c` reference replays declaring the entry and none of
-the build's `m`, p = C(c+m-k, m) / C(c+m, m) -- the chance that a random `m`
-of the `c+m` replays miss all `k`. For field-missing the replays counted are
-those declaring the group; for moved and vanished, all replays and the
-group's presence. A finding carries EVIDENCE when p <= `ALPHA` and the build
-has at least `MIN_CONTEXT` such replays; without it the finding is printed as
-weak and never fails.
-
-Measured on the 1,018-replay corpus (24 builds, 2026-09-28):
-
-  * 16 legacy builds hold 3 replays and 12.10, 12.11 and 13.00 one each,
-    below `MIN_CONTEXT`, so nothing a legacy build lacks can fail, whatever
-    the rate. That is the whole argument for "sampling alone cannot fail".
-    (The three single replays are the 23-70 s public fixtures, which is why
-    they declare about a sixth of the table and fill the weak list.)
-  * The 20 evidenced findings: `TeamEconomy` on BombGameState, 215 of 215
-    in 13.01 -> 0 of 205 in 13.02, p = 1.1e-125; the five Gumshoe groups at
-    13.01, in 4 or 5 of 30 reference replays -> 0 of 215, p = 1.9e-4 and
-    2.0e-5.
-  * The absences that stay weak in a build with enough replays: at the top,
-    the `AggroBot` agent's groups, 43 of 401 in 13.05 -> 0 of 38 in 13.06,
-    p = 0.0165, and for field-missing an `AresAttributeSet` `CurrentValue`
-    checksum, 37 of 401 -> 0 of 38, p = 0.030. An agent nobody picked in 38
-    matches is sampling, and it reads as such.
-
-`ALPHA` = 1e-3 sits a factor of 5 above the largest evidenced p and 16 below
-the smallest weak one.
-
-What fails
-----------
-Exit 1 for an evidenced field-missing finding and for an evidenced move that
-is `lost`, unless it is listed in `tools/fixtures/entry_survival_expected.json`
-with a reason and the evidence for it; also for a listed item that matches no
-such finding (`STALE`), a checkpoint field row that joins no group, a
-main-stream field declaration without a name or checksum, and a Rust table
-that does not parse completely. A covered move, a vanished group and every
-weak finding are printed and never fail. Every kind of entry is judged,
-`Raw` and `Skip` included: `TeamEconomy` is `Raw` in the table, and its loss
-at 13.02 silenced the struct-blob decoder keyed on that name.
-
-Exit 2 when there is nothing to judge: no export, an export whose manifest
-has no declarations, a build string with no version to order it by, or fewer
-than two builds.
-
-Running it on a new build
--------------------------
-Export the new build's replays with `--checkpoints` into the same root as the
-earlier builds' exports and run with `--root`: a build is judged only against
-the builds before it, so the previous build must be there too, and until the
-new build has `MIN_CONTEXT` replays every finding in it prints as weak.
+Exit 1 on an evidenced field-missing entry or lost move not listed with its
+reason in `tools/fixtures/entry_survival_expected.json`, on a listed item that
+matches nothing (STALE), a checkpoint field joining no one group, a main-stream
+field without a name or checksum, and a Rust table that does not parse. Exit 2
+when there is nothing to judge: no export, no declarations, a build with no
+version, or fewer than two builds. A new build is judged against the builds
+before it, so export it into the same --root as they are.
 
 Usage:
     python tools/check_entry_survival.py --root <exports-root> [--root ...]
@@ -185,11 +82,11 @@ from pathlib import Path
 if __package__:
     from . import overlay_mirror as mirror
     from .check_component_remaps import remap_entries, table_source, unparsed_entries
-    from .export_scan import is_generated_sibling
+    from .export_scan import child_exports
 else:  # direct script execution
     import overlay_mirror as mirror
     from check_component_remaps import remap_entries, table_source, unparsed_entries
-    from export_scan import is_generated_sibling
+    from export_scan import child_exports
 
 REPO = Path(__file__).resolve().parents[1]
 TABLE_RS = REPO / "crates" / "vrf-decode" / "src" / "table.rs"
@@ -201,8 +98,8 @@ RPC_RS = REPO / "crates" / "vrfkit" / "src" / "sink" / "rpc.rs"
 ROUTES_RS = REPO / "crates" / "vrfkit" / "src" / "sink" / "measured_routes.rs"
 EXPECTED_JSON = REPO / "tools" / "fixtures" / "entry_survival_expected.json"
 
-#: Largest sampling probability a finding may have and still count as
-#: evidence. See the module docstring for the corpus numbers either side.
+#: Largest sampling probability that is still evidence (the module docstring
+#: gives the corpus numbers either side).
 ALPHA = 1e-3
 #: Fewest replays (declaring the group, or at all for a move) a build needs
 #: before an absence in it can fail. Every legacy build holds at most three.
@@ -301,8 +198,8 @@ def parse_routes(blobs: str, rpc: str, routes: str) -> list[Entry]:
     arms = re.findall(
         r"\(\s*" + STR + r",\s*" + STR + r",\s*Some\(([\d_]+)\),?\s*\)\s*=>\s*\{?\s*"
         r"MeasuredArrayRoute::(\w+)", body, re.S)
-    mirror.check_count("measured_array_route", body.count("MeasuredArrayRoute::"),
-                       body.count("MeasuredArrayRoute::"), len(arms))
+    literal = body.count("MeasuredArrayRoute::")
+    mirror.check_count("measured_array_route", literal, literal, len(arms))
     found = {v: Entry("route", unescape(g), unescape(n), int(c.replace("_", "")))
              for g, n, c, v in arms}
 
@@ -394,7 +291,6 @@ def load_catalog(sources: Sources) -> Catalog:
 class Resolution:
     step: str               # table | alias | scoped | engine | checksum
     entry: Entry | None     # the table / scoped / checksum entry that typed it
-    via_handle: Entry | None
     ftype: str
 
 
@@ -426,12 +322,9 @@ class Overlay:
         if step is None:
             return None
         if step == "engine reference":
-            return Resolution("engine", None, None, OBJECT_NET_GUID)
-        aliased = step.startswith("alias ")
-        via = None
-        if step.endswith("handle"):
-            via = self.handles[(self.aliases[group] if aliased else group, handle)]
-        return Resolution("alias" if aliased else STEP_KINDS[step], hit, via, hit.ftype)
+            return Resolution("engine", None, OBJECT_NET_GUID)
+        return Resolution("alias" if step.startswith("alias ") else STEP_KINDS[step], hit,
+                          hit.ftype)
 
     def handle_state(self, group, name, handle) -> tuple[Entry | None, str]:
         """`(handle entry, state)` for a declaration at an explicit handle.
@@ -472,6 +365,7 @@ class LoadStats:
     checkpoint_fields: int = 0
     orphan_checkpoint_fields: int = 0
     path_index_mismatches: int = 0
+    repeated_checkpoint_groups: int = 0
     skipped: list = field(default_factory=list)
 
 
@@ -491,13 +385,9 @@ def discover(roots: list[Path], exports: list[Path], stats: LoadStats) -> list[P
     for root in roots:
         if not root.is_dir():
             raise InputError(f"--root {root} is not a directory")
-        for child in sorted(root.iterdir()):
-            if not child.is_dir():
-                continue
-            if is_generated_sibling(child.name):
-                stats.skipped.append(child)
-            elif (child / "manifest.json").is_file():
-                found.append(child)
+        children, skipped = child_exports(root, "manifest.json")
+        found += children
+        stats.skipped += skipped
     for export in exports:
         if not (export / "manifest.json").is_file():
             raise InputError(f"--export {export} holds no manifest.json")
@@ -541,31 +431,32 @@ def load_export(directory: Path, stats: LoadStats) -> Replay:
     if group_file.is_file() != field_file.is_file():
         raise InputError(f"{directory}: only one of the two checkpoint declaration tables")
     if group_file.is_file():
+        import pyarrow as pa
+        import pyarrow.compute as pc
         import pyarrow.parquet as pq
 
         stats.exports_with_checkpoints += 1
+        keys = ["checkpoint_index", "group_ordinal"]
         gt = pq.read_table(group_file, columns=[
-            "checkpoint_index", "ordinal", "path_name_index", "group_path"])
-        by_ordinal = {}
-        for index, ordinal, path_index, path in zip(
-                *(gt.column(c).to_pylist() for c in gt.column_names)):
-            path = _intern(path)
-            by_ordinal[(index, ordinal)] = (path_index, path)
-            groups.add(path)
+            "checkpoint_index", "ordinal", "path_name_index", "group_path"]).rename_columns(
+            keys + ["group_path_index", "group_path"])
+        groups.update(map(_intern, pc.unique(gt["group_path"]).to_pylist()))
         stats.checkpoint_groups += gt.num_rows
-        ft = pq.read_table(field_file, columns=[
-            "checkpoint_index", "group_ordinal", "path_name_index", "handle",
-            "compatible_checksum", "rendered_name"])
-        for index, ordinal, path_index, handle, checksum, name in zip(
-                *(ft.column(c).to_pylist() for c in ft.column_names)):
-            joined = by_ordinal.get((index, ordinal))
-            if joined is None:
-                stats.orphan_checkpoint_fields += 1
-                continue
-            if joined[0] != path_index:
-                stats.path_index_mismatches += 1
-                continue
-            fields.add((joined[1], _intern(name), checksum, handle))
+        stats.repeated_checkpoint_groups += gt.num_rows - gt.group_by(keys).aggregate([]).num_rows
+        ft = pq.read_table(field_file, columns=keys + [
+            "path_name_index", "handle", "compatible_checksum", "rendered_name"])
+        joined = ft.join(gt.append_column("declared", pa.repeat(True, gt.num_rows)), keys)
+        declared = pc.is_valid(joined["declared"])
+        mine, theirs = joined["path_name_index"], joined["group_path_index"]
+        same = pc.or_(pc.fill_null(pc.equal(mine, theirs), False),
+                      pc.and_(pc.is_null(mine), pc.is_null(theirs)))
+        stats.orphan_checkpoint_fields += joined.num_rows - pc.count(joined["declared"]).as_py()
+        stats.path_index_mismatches += joined.filter(pc.and_(declared, pc.invert(same))).num_rows
+        unique = joined.filter(pc.and_(declared, same)).group_by(
+            ["group_path", "rendered_name", "compatible_checksum", "handle"]).aggregate([])
+        fields.update(zip(map(_intern, unique["group_path"].to_pylist()),
+                          map(_intern, unique["rendered_name"].to_pylist()),
+                          unique["compatible_checksum"].to_pylist(), unique["handle"].to_pylist()))
         stats.checkpoint_fields += ft.num_rows
     stats.exports += 1
     return Replay(str(directory), build, frozenset(groups), frozenset(fields))
@@ -1194,7 +1085,8 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
           f"{stats.exports_with_checkpoints} export(s) with checkpoint tables, "
           f"{stats.checkpoint_groups} group row(s), {stats.checkpoint_fields} field row(s); "
           f"{stats.orphan_checkpoint_fields} field row(s) joining no group, "
-          f"{stats.path_index_mismatches} path-index mismatch(es)")
+          f"{stats.path_index_mismatches} path-index mismatch(es), "
+          f"{stats.repeated_checkpoint_groups} repeated group key(s)")
     print(f"skipped generated directories: {len(stats.skipped)}")
     for s in stats.skipped:
         print(f"  {s}")
@@ -1230,9 +1122,10 @@ def run(replays: list[Replay], catalog: Catalog, expected: list[dict], stats: Lo
         problems.append(f"{len(stale)} item(s) of {expected_name} match no failing "
                         f"finding (STALE): " + "; ".join(
                             f"{i['entry']} {i['build']} {i['finding']}" for i in stale))
-    if stats.orphan_checkpoint_fields or stats.path_index_mismatches:
-        problems.append("checkpoint field declarations that join no group -- the input is "
-                        "inconsistent, so what it declares is not known")
+    if (stats.orphan_checkpoint_fields or stats.path_index_mismatches
+            or stats.repeated_checkpoint_groups):
+        problems.append("checkpoint field declarations that join no group, or no one group -- "
+                        "the input is inconsistent, so what it declares is not known")
     if stats.fields_without_identity:
         problems.append("main-stream field declarations without a name or checksum -- the "
                         "input is inconsistent, so what it declares is not known")

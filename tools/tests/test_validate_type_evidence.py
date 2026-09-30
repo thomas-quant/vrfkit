@@ -1,44 +1,50 @@
 import base64
+import contextlib
+import io
+import json
 import struct
-import sys
-import tempfile
-import unittest
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from validate_type_evidence import (  # noqa: E402
-    decode_exact, exported_matches, exported_value, spec_rows, validate,
-    values_match)
+from support import TOOLS, TempDirTestCase
+from wire_fixtures import pack_bits
+from validate_type_evidence import (
+    check_specifications, decode_exact, exported_matches, exported_value,
+    load_specifications, main, spec_rows, validate, values_match)
 
 
-def pack_bits(*fields: tuple[int, int]) -> tuple[bytes, int]:
-    """(value, width) pairs, least significant bit first, as Unreal writes them."""
-    value = position = 0
-    for field, width in fields:
-        value |= (field & ((1 << width) - 1)) << position
-        position += width
-    return value.to_bytes((position + 7) // 8, "little"), position
+def fstring_fields(text: str):
+    data = text.encode("utf-8") + b"\0"
+    return [(len(data), 32)] + [(byte, 8) for byte in data]
 
 
-def write_fields(path: Path, rows: list[tuple[str, str, bytes, int]]) -> None:
-    """A fields.parquet with dictionary-encoded group/field columns, as vrfkit
-    writes them. `rows` are (group, field, raw_bits, bit_count)."""
+VALUE_TYPES = {"value_str": pa.string(), "value_i64": pa.int64(),
+               "value_f64": pa.float64(), "value_bool": pa.bool_()}
+
+
+def row(group, field, raw, bits, **columns):
+    return {"group_path": group, "field_name": field, "raw_bits": raw, "bit_count": bits, **columns}
+
+
+def write_rows(directory: Path, rows: list[dict], *, manifest: bool = True) -> Path:
+    """A finished export: group/field dictionary-encoded as vrfkit writes them,
+    handle 1 and checksum 7 unless a row says otherwise, value columns null."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if manifest:
+        (directory / "manifest.json").write_text('{"replay_build": "13.02"}', encoding="utf-8")
     pq.write_table(pa.table({
-        "group_path": pa.array([r[0] for r in rows]).dictionary_encode(),
-        "field_name": pa.array([r[1] for r in rows]).dictionary_encode(),
-        "handle": [1] * len(rows),
-        "compatible_checksum": pa.array([7] * len(rows), pa.uint32()),
-        "bit_count": [r[3] for r in rows],
-        "raw_bits": [r[2] for r in rows],
-        "value_str": pa.array([None] * len(rows), pa.string()),
-        "value_i64": pa.array([None] * len(rows), pa.int64()),
-        "value_f64": pa.array([None] * len(rows), pa.float64()),
-        "value_bool": pa.array([None] * len(rows), pa.bool_()),
-    }), path)
+        "group_path": pa.array([r["group_path"] for r in rows]).dictionary_encode(),
+        "field_name": pa.array([r["field_name"] for r in rows]).dictionary_encode(),
+        "handle": pa.array([r.get("handle", 1) for r in rows], pa.uint32()),
+        "compatible_checksum": pa.array([r.get("compatible_checksum", 7) for r in rows], pa.uint32()),
+        "bit_count": pa.array([r["bit_count"] for r in rows], pa.uint32()),
+        "raw_bits": pa.array([r["raw_bits"] for r in rows], pa.binary()),
+        **{name: pa.array([r.get(name) for r in rows], kind) for name, kind in VALUE_TYPES.items()},
+    }), directory / "fields.parquet")
+    return directory
 
 
 #: A payload `Int32` cannot decode: three bytes declared as 32 bits.
@@ -46,18 +52,16 @@ MALFORMED = (b"\x01\x02\x03", 32)
 VALID = (struct.pack("<i", 5), 32)
 
 
-class SpecificationScopeTests(unittest.TestCase):
+class SpecificationScopeTests(TempDirTestCase):
     """Only (group, field[, checksum]) pairs the specification names are
     evidence. `validate` narrows rows by group AND field name before handing
     them to Python, then resolves the exact pair; these pin both halves."""
 
     def test_an_unspecified_field_of_a_specified_group_is_ignored(self):
-        with tempfile.TemporaryDirectory() as directory:
-            write_manifest(Path(directory))
-            write_fields(Path(directory) / "fields.parquet", [
-                ("g", "f", *VALID), ("g", "other", *MALFORMED)])
-            report = validate(Path(directory),
-                              [{"group": "g", "field": "f", "type": "Int32"}])
+        directory = self.tmp()
+        write_rows(directory, [row("g", "f", *VALID), row("g", "other", *MALFORMED)])
+        report = validate(directory,
+                          [{"group": "g", "field": "f", "type": "Int32"}])
         self.assertEqual(report["failure_count"], 0)
         self.assertEqual(list(report["fields"]), ["g::f"])
         self.assertEqual(report["fields"]["g::f"]["rows"], 1)
@@ -65,23 +69,18 @@ class SpecificationScopeTests(unittest.TestCase):
     def test_a_group_paired_with_another_entrys_field_is_ignored(self):
         """Rows can pass a group-set x field-set prefilter without being a
         specified pair; the exact lookup after it must still drop them."""
-        with tempfile.TemporaryDirectory() as directory:
-            write_manifest(Path(directory))
-            write_fields(Path(directory) / "fields.parquet", [
-                ("a", "x", *VALID), ("b", "y", *VALID),
-                ("a", "y", *MALFORMED), ("b", "x", *MALFORMED)])
-            report = validate(Path(directory), [
-                {"group": "a", "field": "x", "type": "Int32"},
-                {"group": "b", "field": "y", "type": "Int32"}])
+        directory = self.tmp()
+        write_rows(directory, [
+            row("a", "x", *VALID), row("b", "y", *VALID),
+            row("a", "y", *MALFORMED), row("b", "x", *MALFORMED)])
+        report = validate(directory, [
+            {"group": "a", "field": "x", "type": "Int32"},
+            {"group": "b", "field": "y", "type": "Int32"}])
         self.assertEqual(report["failure_count"], 0)
         self.assertEqual(sorted(report["fields"]), ["a::x", "b::y"])
         self.assertEqual(report["missing"], [])
 
     def test_the_prefilter_keeps_only_specified_groups_and_fields_in_order(self):
-        """What reaches `to_pylist`: rows of a specified group whose field is
-        also specified, in file order. Group alone let every other field of
-        a specified group through -- 173,510 rows materialised to use 22,989
-        on one 13.06 export with the public-fixture specification."""
         table = pa.table({
             "group_path": pa.array(["g", "g", "h", "g", "h"]).dictionary_encode(),
             "field_name": pa.array(["f", "other", "f", "f", "other"]).dictionary_encode(),
@@ -91,14 +90,9 @@ class SpecificationScopeTests(unittest.TestCase):
         self.assertEqual(kept["handle"].to_pylist(), [1, 4])
 
 
-def fstring_fields(text: str):
-    data = text.encode("utf-8") + b"\0"
-    return [(len(data), 32)] + [(byte, 8) for byte in data]
-
-
 #: Two real `ReplicatedMovement` rows and the JSON the Rust exporter wrote for
-#: them (audit exports at 259ed10). The Short one is the case a string compare
-#: cannot survive: f32 yaw 283.88671875 is printed as `283.88672`.
+#: them. The Short one is the case a string compare cannot survive: f32 yaw
+#: 283.88671875 is printed as `283.88672`.
 DIVEBOMB_BYTE = (
     "e0ec4e985d5421c37b4d07e4de1b04", 118,
     '{"linear_velocity":{"x":2062,"y":-530,"z":525},"angular_velocity":null,'
@@ -115,7 +109,11 @@ SEEKER_NADE_SHORT = (
 )
 
 
-class BitLevelTypeTests(unittest.TestCase):
+def rep_movement_matches(text, decoded, type_name="RepMovementByte"):
+    return values_match(type_name, decoded, exported_value({"value_str": text}, type_name))
+
+
+class BitLevelTypeTests(TempDirTestCase):
     def test_enum_byte_takes_its_width_from_the_payload(self):
         self.assertEqual(decode_exact(b"\x05", 3, "EnumByte"), 5)
         self.assertEqual(decode_exact(b"\xff", 8, "EnumByte"), 255)
@@ -127,9 +125,11 @@ class BitLevelTypeTests(unittest.TestCase):
     def test_bit_level_padding_must_be_zero(self):
         with self.assertRaisesRegex(ValueError, "padding"):
             decode_exact(b"\x0d", 3, "EnumByte")
+        with self.assertRaisesRegex(ValueError, "padding"):
+            decode_exact(b"\x03", 1, "Bool")
 
     def test_fname_reads_the_two_corpus_payloads(self):
-        """The only two OriginalBuyerTeam payloads in 1,018 replays."""
+        """Real OriginalBuyerTeam payloads."""
         self.assertEqual(
             decode_exact(bytes.fromhex("08000000a4cac8000000000000"), 97, "FName"), "Red")
         self.assertEqual(
@@ -158,10 +158,7 @@ class BitLevelTypeTests(unittest.TestCase):
             (SEEKER_NADE_SHORT, "RepMovementShort"),
         ):
             decoded = decode_exact(bytes.fromhex(hex_bits), bits, type_name)
-            self.assertEqual(
-                values_match(type_name, decoded,
-                             exported_value({"value_str": text}, type_name)),
-                (True, "/100"), type_name)
+            self.assertEqual(rep_movement_matches(text, decoded, type_name), (True, "/100"), type_name)
 
     def test_the_location_scale_is_reported_not_assumed(self):
         """The same bits exported in world units still match, at "/1"; a
@@ -175,10 +172,7 @@ class BitLevelTypeTests(unittest.TestCase):
             ('{"x":2525,"y":-44.04,"z":6.8}', (False, None)),
         ):
             world = text.replace('{"x":25.25,"y":-44.04,"z":6.8}', location)
-            self.assertEqual(
-                values_match("RepMovementByte", decoded,
-                             exported_value({"value_str": world}, "RepMovementByte")),
-                expected, location)
+            self.assertEqual(rep_movement_matches(world, decoded), expected, location)
 
     def test_the_wrong_rotator_width_is_caught(self):
         """A Byte row read as Short runs off the end. The reverse can consume
@@ -188,10 +182,7 @@ class BitLevelTypeTests(unittest.TestCase):
             decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementShort")
         hex_bits, bits, text = SEEKER_NADE_SHORT
         as_byte = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
-        self.assertEqual(
-            values_match("RepMovementByte", as_byte,
-                         exported_value({"value_str": text}, "RepMovementByte")),
-            (False, None))
+        self.assertEqual(rep_movement_matches(text, as_byte), (False, None))
 
     def test_rep_movement_optional_members_are_read_in_wire_order(self):
         # flags: physics, server frame and server handle set; every vector and
@@ -218,155 +209,155 @@ class BitLevelTypeTests(unittest.TestCase):
     def test_an_unparseable_export_is_a_mismatch_not_a_crash(self):
         hex_bits, bits, _text = DIVEBOMB_BYTE
         decoded = decode_exact(bytes.fromhex(hex_bits), bits, "RepMovementByte")
-        self.assertEqual(
-            values_match("RepMovementByte", decoded,
-                         exported_value({"value_str": "{not json"}, "RepMovementByte")),
-            (False, None))
+        self.assertEqual(rep_movement_matches("{not json", decoded), (False, None))
 
     def test_compare_typed_checks_every_bit_level_type(self):
         rows = [
-            ("g", "e", 3, bytes.fromhex("05"), 5, None),
-            ("g", "n", 97, bytes.fromhex("08000000a4cac8000000000000"), None, "Red"),
-            ("g", "m", DIVEBOMB_BYTE[1], bytes.fromhex(DIVEBOMB_BYTE[0]), None,
-             DIVEBOMB_BYTE[2]),
+            row("g", "e", bytes.fromhex("05"), 3, value_i64=5),
+            row("g", "n", bytes.fromhex("08000000a4cac8000000000000"), 97, value_str="Red"),
+            row("g", "m", bytes.fromhex(DIVEBOMB_BYTE[0]), DIVEBOMB_BYTE[1], value_str=DIVEBOMB_BYTE[2]),
         ]
         specs = [{"group": "g", "field": "e", "type": "EnumByte"},
                  {"group": "g", "field": "n", "type": "FName"},
                  {"group": "g", "field": "m", "type": "RepMovementByte"}]
 
         def run(rows):
-            with tempfile.TemporaryDirectory() as directory:
-                write_manifest(Path(directory))
-                pq.write_table(pa.table({
-                    "group_path": [r[0] for r in rows], "field_name": [r[1] for r in rows],
-                    "handle": [1] * len(rows), "compatible_checksum": [2] * len(rows),
-                    "bit_count": [r[2] for r in rows], "raw_bits": [r[3] for r in rows],
-                    "value_i64": pa.array([r[4] for r in rows], pa.int64()),
-                    "value_str": pa.array([r[5] for r in rows], pa.string()),
-                    "value_f64": pa.array([None] * len(rows), pa.float64()),
-                    "value_bool": pa.array([None] * len(rows), pa.bool_()),
-                }), Path(directory) / "fields.parquet")
-                return validate(Path(directory), specs, compare_typed=True)
+            directory = self.tmp()
+            return validate(write_rows(directory, rows), specs, compare_typed=True)
 
         clean = run(rows)
         self.assertEqual((clean["failure_count"], clean["typed_mismatch_count"]), (0, 0))
         self.assertEqual(clean["missing"], [])
         self.assertEqual(clean["fields"]["g::m"]["location_scales"], {"/100": 1})
-        wrong = [
-            ("g", "e", 3, bytes.fromhex("05"), 4, None),
-            ("g", "n", 97, bytes.fromhex("08000000a4cac8000000000000"), None, "Blue"),
-            ("g", "m", DIVEBOMB_BYTE[1], bytes.fromhex(DIVEBOMB_BYTE[0]), None,
-             DIVEBOMB_BYTE[2].replace("347.34375", "348.75")),
-        ]
+        wrong = [{**rows[0], "value_i64": 4}, {**rows[1], "value_str": "Blue"},
+                 {**rows[2], "value_str": DIVEBOMB_BYTE[2].replace("347.34375", "348.75")}]
         self.assertEqual(run(wrong)["typed_mismatch_count"], 3)
 
 
-def write_manifest(directory: Path) -> None:
-    """Every published export has one; discovery refuses a table without it."""
-    (directory / "manifest.json").write_text('{"replay_build": "13.02"}', encoding="utf-8")
-
-
 def write_int_export(directory: Path, *, manifest: bool = True) -> None:
-    directory.mkdir(parents=True)
-    pq.write_table(pa.table({
-        "group_path": ["g"], "field_name": ["f"], "handle": [1],
-        "compatible_checksum": [2], "bit_count": [32],
-        "raw_bits": [struct.pack("<i", 17)], "value_str": [None],
-        "value_i64": [17], "value_f64": [None], "value_bool": [None],
-    }), directory / "fields.parquet")
-    if manifest:
-        write_manifest(directory)
+    write_rows(directory, [row("g", "f", struct.pack("<i", 17), 32, value_i64=17)], manifest=manifest)
 
 
-class ExportDiscoveryTests(unittest.TestCase):
+class ExportDiscoveryTests(TempDirTestCase):
     SPEC = [{"group": "g", "field": "f", "type": "Int32"}]
 
     def test_a_stranded_prior_output_is_not_counted_a_second_time(self):
-        """The silent case: `vrfkit export` leaves the prior `--out` as a
-        complete `.X.vrfkit-previous-*` export when it cannot delete it or dies
-        between its two renames. At 259ed10 the rglob here read it as a second
-        export: rows 2, not 1, with no error -- a plausible number."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_int_export(root / "a")
-            write_int_export(root / ".a.vrfkit-previous-4242-7")
-            expected = [str((root / ".a.vrfkit-previous-4242-7").resolve())]
-            report = validate(root, self.SPEC, compare_typed=True)
+        """`vrfkit export` leaves the prior `--out` as a complete
+        `.X.vrfkit-previous-*` export when it cannot delete it or dies between
+        its two renames; read as a second export it doubles the rows."""
+        root = self.tmp()
+        write_int_export(root / "a")
+        write_int_export(root / ".a.vrfkit-previous-4242-7")
+        expected = [str((root / ".a.vrfkit-previous-4242-7").resolve())]
+        report = validate(root, self.SPEC, compare_typed=True)
         self.assertEqual(report["fields"]["g::f"]["rows"], 1)
         self.assertEqual(report["typed_mismatch_count"], 0)
         self.assertEqual(report["skipped_generated_dirs"], expected)
 
     def test_a_killed_exports_staging_directory_is_not_read(self):
-        """What `Stop-Process -Force` 1.5 s into an export left: no footer."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_int_export(root / "pub2")
-            staging = root / ".pub2.vrfkit-staging-55396-0"
-            staging.mkdir()
-            (staging / "fields.parquet").write_bytes(b"PAR1 no footer")
-            report = validate(root, self.SPEC)
+        root = self.tmp()
+        write_int_export(root / "pub2")
+        staging = root / ".pub2.vrfkit-staging-55396-0"
+        staging.mkdir()
+        (staging / "fields.parquet").write_bytes(b"PAR1 no footer")
+        report = validate(root, self.SPEC)
         self.assertEqual(report["fields"]["g::f"]["rows"], 1)
         self.assertEqual(len(report["skipped_generated_dirs"]), 1)
 
     def test_a_leftover_nested_below_the_root_is_skipped_too(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_int_export(root / "build" / "a")
-            write_int_export(root / "build" / ".a.vrfkit-previous-4242-7" / "nested")
-            report = validate(root, self.SPEC)
+        root = self.tmp()
+        write_int_export(root / "build" / "a")
+        write_int_export(root / "build" / ".a.vrfkit-previous-4242-7" / "nested")
+        report = validate(root, self.SPEC)
         self.assertEqual(report["fields"]["g::f"]["rows"], 1)
 
     def test_a_discovered_table_without_a_manifest_is_refused(self):
         """manifest.json is written last; without it the tables may be partial."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_int_export(root / "complete")
-            write_int_export(root / "partial", manifest=False)
-            with self.assertRaisesRegex(ValueError, "manifest.json"):
-                validate(root, self.SPEC)
+        root = self.tmp()
+        write_int_export(root / "complete")
+        write_int_export(root / "partial", manifest=False)
+        with self.assertRaisesRegex(ValueError, "manifest.json"):
+            validate(root, self.SPEC)
+
+    def test_an_export_id_naming_no_tables_is_refused(self):
+        root = self.tmp()
+        write_int_export(root / "done")
+        with self.assertRaisesRegex(ValueError, "typo"):
+            validate(root, self.SPEC, export_ids=["done", "typo"])
 
     def test_only_leftovers_below_the_root_is_an_error_that_counts_them(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_int_export(root / ".a.vrfkit-previous-4242-7")
-            with self.assertRaisesRegex(ValueError, r"no field parquet files.*1 "):
-                validate(root, self.SPEC)
+        root = self.tmp()
+        write_int_export(root / ".a.vrfkit-previous-4242-7")
+        with self.assertRaisesRegex(ValueError, r"no field parquet files.*1 "):
+            validate(root, self.SPEC)
 
     def test_a_path_named_explicitly_is_never_filtered(self):
         """Only discovery filters; pointing the tool at a leftover is deliberate."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            leftover = root / ".a.vrfkit-previous-4242-7"
-            write_int_export(leftover)
-            for report in (
-                validate(leftover, self.SPEC),
-                validate(leftover / "fields.parquet", self.SPEC),
-                validate(root, self.SPEC, export_ids=[leftover.name]),
-            ):
-                self.assertEqual(report["fields"]["g::f"]["rows"], 1)
-                self.assertEqual(report["skipped_generated_dirs"], [])
+        root = self.tmp()
+        leftover = root / ".a.vrfkit-previous-4242-7"
+        write_int_export(leftover)
+        for report in (
+            validate(leftover, self.SPEC),
+            validate(leftover / "fields.parquet", self.SPEC),
+            validate(root, self.SPEC, export_ids=[leftover.name]),
+        ):
+            self.assertEqual(report["fields"]["g::f"]["rows"], 1)
+            self.assertEqual(report["skipped_generated_dirs"], [])
 
 
-class DecodeExactTests(unittest.TestCase):
+class SpecificationFileTests(TempDirTestCase):
+    def test_every_committed_specification_is_well_formed(self):
+        for name in ("type_evidence.json", "type_evidence_aliases.json", "type_evidence_rejected.json",
+                     "public_fixture_type_evidence.json", "scoped_type_evidence.json"):
+            with self.subTest(name):
+                self.assertTrue(check_specifications(load_specifications(TOOLS / "fixtures" / name)))
+
+    def test_the_scoped_fixture_is_read_in_the_exported_spelling(self):
+        specs = load_specifications(TOOLS / "fixtures" / "scoped_type_evidence.json")
+        self.assertIn({"group": "/Script/ShooterGame.DamageableComponent_ClassNetCache",
+                       "field": "MulticastNotifyHeal.EventInstigator",
+                       "checksum": 3087885251, "type": "ObjectNetGuid"}, specs)
+        self.assertEqual([s for s in specs if ":" in s["group"]], [])
+
+    def test_allow_missing_lists_an_absent_identity_but_fails_when_none_is_observed(self):
+        root = self.tmp()
+        write_int_export(root / "a")
+        spec, absent = root / "spec.json", root / "absent.json"
+        spec.write_text(json.dumps([{"group": "g", "field": "f", "type": "Int32"},
+                                    {"group": "g", "field": "absent", "type": "Int32"}]), encoding="utf-8")
+        absent.write_text(json.dumps([{"group": "other", "field": "x", "type": "Int32"}]), encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            codes = (main([str(root), str(spec)]), main([str(root), str(spec), "--allow-missing"]),
+                     main([str(root), str(absent), "--allow-missing"]))
+        self.assertEqual(codes, (1, 0, 1))
+        self.assertEqual(output.getvalue().count('"g::absent"'), 2)
+        self.assertEqual(errors.getvalue(), "no specified identity was observed\n")
+
+    def test_empty_specification_and_missing_root_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "empty"):
+            validate(Path("."), [])
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            validate(Path("definitely-not-a-real-evidence-root"), [
+                {"group": "g", "field": "f", "type": "Bool"}
+            ])
+
+
+class DecodeExactTests(TempDirTestCase):
     def test_checksum_scope_separates_same_name_and_catches_wrong_values(self):
-        with tempfile.TemporaryDirectory() as directory:
-            write_manifest(Path(directory))
-            path = Path(directory) / "fields.parquet"
-            pq.write_table(pa.table({
-                "group_path": ["g", "g"], "field_name": ["B", "B"], "handle": [39, 208],
-                "compatible_checksum": [379198054, 943211507], "bit_count": [8, 32],
-                "raw_bits": [b"\xff", b"\0\0\0\0"], "value_str": [None, None],
-                "value_i64": [254, None], "value_f64": [None, None], "value_bool": [None, None],
-            }), path)
-            spec = {"group": "g", "field": "B", "type": "Byte", "checksum": 379198054}
-            report = validate(Path(directory), [spec], compare_typed=True)
-            self.assertEqual(report["failure_count"], 0)
-            self.assertEqual(report["typed_mismatch_count"], 1)
-            self.assertEqual(report["fields"]["g::B::checksum=379198054"]["rows"], 1)
-            with self.assertRaisesRegex(ValueError, "overlapping"):
-                validate(Path(directory), [spec, {"group": "g", "field": "B", "type": "Byte"}])
-            unscoped = validate(Path(directory), [{"group": "g", "field": "B", "type": "Byte"}])
-            self.assertEqual(unscoped["failure_count"], 1)
+        directory = self.tmp()
+        write_rows(directory, [
+            row("g", "B", b"\xff", 8, handle=39, compatible_checksum=379198054, value_i64=254),
+            row("g", "B", b"\0\0\0\0", 32, handle=208, compatible_checksum=943211507)])
+        spec = {"group": "g", "field": "B", "type": "Byte", "checksum": 379198054}
+        report = validate(directory, [spec], compare_typed=True)
+        self.assertEqual(report["failure_count"], 0)
+        self.assertEqual(report["typed_mismatch_count"], 1)
+        self.assertEqual(report["fields"]["g::B::checksum=379198054"]["rows"], 1)
+        with self.assertRaisesRegex(ValueError, "overlapping"):
+            validate(directory, [spec, {"group": "g", "field": "B", "type": "Byte"}])
+        unscoped = validate(directory, [{"group": "g", "field": "B", "type": "Byte"}])
+        self.assertEqual(unscoped["failure_count"], 1)
 
     def test_primitive_widths_and_values(self):
         self.assertIs(decode_exact(b"\x01", 1, "Bool"), True)
@@ -382,26 +373,22 @@ class DecodeExactTests(unittest.TestCase):
         self.assertEqual(decode_exact(raw, 32, "UInt32"), 0xE28C69D7)
         with self.assertRaisesRegex(ValueError, "32 bits"):
             decode_exact(raw[:3], 24, "UInt32")
-        with tempfile.TemporaryDirectory() as directory:
-            write_manifest(Path(directory))
-            pq.write_table(pa.table({
-                "group_path": ["g", "g"], "field_name": ["D", "D"], "handle": [210, 210],
-                "compatible_checksum": [1032080829, 1032080829], "bit_count": [32, 32],
-                "raw_bits": [raw, raw], "value_str": [None, None],
-                "value_i64": [0xE28C69D7, 0xE28C69D7 - 2**32],
-                "value_f64": [None, None], "value_bool": [None, None],
-            }), Path(directory) / "fields.parquet")
-            spec = {"group": "g", "field": "D", "type": "UInt32", "checksum": 1032080829}
-            report = validate(Path(directory), [spec], compare_typed=True)
-            self.assertEqual(report["failure_count"], 0)
-            self.assertEqual(report["typed_mismatch_count"], 1)
-            self.assertEqual(report["typed_mismatch_examples"][0]["exported"], 0xE28C69D7 - 2**32)
-            self.assertEqual(report["fields"]["g::D::checksum=1032080829"]["min"], 0xE28C69D7)
+        directory = self.tmp()
+        write_rows(directory, [
+            row("g", "D", raw, 32, handle=210, compatible_checksum=1032080829, value_i64=value)
+            for value in (0xE28C69D7, 0xE28C69D7 - 2**32)])
+        spec = {"group": "g", "field": "D", "type": "UInt32", "checksum": 1032080829}
+        report = validate(directory, [spec], compare_typed=True)
+        self.assertEqual(report["failure_count"], 0)
+        self.assertEqual(report["typed_mismatch_count"], 1)
+        self.assertEqual(report["typed_mismatch_examples"][0]["exported"], 0xE28C69D7 - 2**32)
+        self.assertEqual(report["typed_mismatch_examples"][0]["decoded"], 0xE28C69D7)
+        self.assertEqual(report["fields"]["g::D::checksum=1032080829"]["min"], 0xE28C69D7)
 
     def test_fstring_requires_full_consumption_and_terminator(self):
         raw = struct.pack("<i", 4) + b"abc\0"
         self.assertEqual(decode_exact(raw, 64, "FString"), "abc")
-        with self.assertRaisesRegex(ValueError, "length"):
+        with self.assertRaisesRegex(ValueError, "residual"):
             decode_exact(raw + b"x", 72, "FString")
         with self.assertRaisesRegex(ValueError, "terminator"):
             decode_exact(struct.pack("<i", 4) + b"abcd", 64, "FString")
@@ -471,16 +458,11 @@ class DecodeExactTests(unittest.TestCase):
         self.assertEqual(number["format"]["maximum_fractional_digits"], 2)
         # History 11, one bit off byte alignment after the history byte: a
         # string-table entry, here the table path and key "Kills".
-        raw, bits = pack_bits((0, 32), (11, 8), (0, 1), *self._fstring("/T/S.S"), (0, 32),
-                              *self._fstring("Kills"))
+        raw, bits = pack_bits((0, 32), (11, 8), (0, 1), *fstring_fields("/T/S.S"), (0, 32),
+                              *fstring_fields("Kills"))
         self.assertEqual(decode_exact(raw, bits, "FTextTree"),
                          {"flags": 0, "history": 11, "kind": "string_table",
                           "table": {"name": "/T/S.S", "number": 0}, "key": "Kills"})
-
-    @staticmethod
-    def _fstring(text):
-        data = text.encode() + b"\0"
-        return [(len(data), 32)] + [(byte, 8) for byte in data]
 
     def test_ftext_tree_refuses_unseen_forms_and_residue(self):
         raw = bytearray(bytes.fromhex(self.TIMER_NUMBER[0]))
@@ -513,38 +495,13 @@ class DecodeExactTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "32 bits"):
             decode_exact(struct.pack("<d", 1.0), 64, "Float")
 
-    def test_empty_specification_and_missing_root_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "empty"):
-            validate(Path("."), [])
-        with self.assertRaisesRegex(ValueError, "does not exist"):
-            validate(Path("definitely-not-a-real-evidence-root"), [
-                {"group": "g", "field": "f", "type": "Bool"}
-            ])
 
-    def test_compare_typed_checks_the_exported_value(self):
-        with tempfile.TemporaryDirectory() as directory:
-            write_manifest(Path(directory))
-            path = Path(directory) / "fields.parquet"
-            pq.write_table(pa.table({
-                "group_path": ["g"], "field_name": ["f"], "handle": [1],
-                "compatible_checksum": [2], "bit_count": [32],
-                "raw_bits": [struct.pack("<i", 17)], "value_str": [None],
-                "value_i64": [18], "value_f64": [None], "value_bool": [None],
-            }), path)
-            report = validate(Path(directory), [
-                {"group": "g", "field": "f", "type": "Int32"}
-            ], compare_typed=True)
-            self.assertEqual(report["failure_count"], 0)
-            self.assertEqual(report["typed_mismatch_count"], 1)
-            self.assertEqual(report["typed_mismatch_examples"][0]["decoded"], 17)
-
-
-class ShapedTypeTests(unittest.TestCase):
+class ShapedTypeTests(TempDirTestCase):
     """The non-primitive decoders scoped entries may use.
 
     The base64 vectors are payloads an independent parser's tests recorded
-    from replay 42e03082, which is not in the local corpus: an independent
-    statement of what those exact bits decode to, and of their exact widths.
+    from a replay outside the local corpus: an independent statement of what
+    those exact bits decode to, and of their exact widths.
     """
 
     def test_recorded_raze_payloads_consume_their_exact_widths(self):
@@ -639,35 +596,23 @@ class ShapedTypeTests(unittest.TestCase):
                     '"rotation":{"pitch":0,"yaw":90,"roll":0},'
                     '"simulated_physics_sleep":false,"rep_physics":false,'
                     '"server_frame":null,"server_physics_handle":null}')
-        self.assertTrue(exported_matches("RepMovementByte", exported, decoded))
-        self.assertFalse(exported_matches(
-            "RepMovementByte", exported.replace('"yaw":90', '"yaw":91'), decoded))
-        self.assertFalse(exported_matches(
-            "RepMovementByte", exported.replace('"rep_physics":false', '"rep_physics":true'), decoded))
-        self.assertFalse(exported_matches("RepMovementByte", "not json", decoded))
+        self.assertEqual(rep_movement_matches(exported, decoded), (True, "/100"))
+        for wrong in (exported.replace('"yaw":90', '"yaw":91'),
+                      exported.replace('"rep_physics":false', '"rep_physics":true'), "not json"):
+            self.assertEqual(rep_movement_matches(wrong, decoded), (False, None))
 
     def test_validate_reports_vector_component_ranges(self):
-        with tempfile.TemporaryDirectory() as directory:
-            write_manifest(Path(directory))
-            path = Path(directory) / "fields.parquet"
-            first, bits = pack_bits((8 | 64, 7), (100, 8), (100, 8), (100, 8))
-            second, _ = pack_bits((8 | 64, 7), (-50, 8), (100, 8), (120, 8))
-            pq.write_table(pa.table({
-                "group_path": ["g", "g"], "field_name": ["RelativeScale3D"] * 2,
-                "handle": [6, 6], "compatible_checksum": [1992268157] * 2,
-                "bit_count": [bits, bits], "raw_bits": [first, second],
-                "value_str": ["(1,1,1)", "(-0.5,1,1.2)"], "value_i64": [None, None],
-                "value_f64": [None, None], "value_bool": [None, None],
-            }), path)
-            report = validate(Path(directory), [{"group": "g", "field": "RelativeScale3D",
-                                                 "type": "VectorNetQuantize100",
-                                                 "checksum": 1992268157}], compare_typed=True)
-            self.assertEqual(report["failure_count"], 0)
-            self.assertEqual(report["typed_mismatch_count"], 0)
-            field = report["fields"]["g::RelativeScale3D::checksum=1992268157"]
-            self.assertEqual(field["min"], (-0.5, 1.0, 1.0))
-            self.assertEqual(field["max"], (1.0, 1.0, 1.2))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        directory = self.tmp()
+        first, bits = pack_bits((8 | 64, 7), (100, 8), (100, 8), (100, 8))
+        second, _ = pack_bits((8 | 64, 7), (-50, 8), (100, 8), (120, 8))
+        write_rows(directory, [
+            row("g", "RelativeScale3D", raw, bits, handle=6, compatible_checksum=1992268157, value_str=text)
+            for raw, text in ((first, "(1,1,1)"), (second, "(-0.5,1,1.2)"))])
+        report = validate(directory, [{"group": "g", "field": "RelativeScale3D",
+                                             "type": "VectorNetQuantize100",
+                                             "checksum": 1992268157}], compare_typed=True)
+        self.assertEqual(report["failure_count"], 0)
+        self.assertEqual(report["typed_mismatch_count"], 0)
+        field = report["fields"]["g::RelativeScale3D::checksum=1992268157"]
+        self.assertEqual(field["min"], (-0.5, 1.0, 1.0))
+        self.assertEqual(field["max"], (1.0, 1.0, 1.2))

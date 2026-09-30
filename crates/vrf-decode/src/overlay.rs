@@ -1,17 +1,15 @@
 //! Overlay table: `(group_path, field_name)` -> [`FieldType`], plus decoding.
-//! The entries live in `table.rs` as a sorted slice; this module adds the hash
-//! index ([`index`], answering the ~2M probes a replay makes) and
-//! the resolution order ([`apply_overlay_with_handle`]). `table_is_sorted`
-//! still asserts the order: the reference binary search the index is tested
-//! against needs it.
+//! The entries live in `table.rs` as a sorted slice (`table_is_sorted` keeps
+//! the reference binary search valid); this module adds the hash index
+//! ([`index`], for the ~2M probes a replay makes) and the resolution order
+//! ([`apply_overlay_with_handle`]).
 
 mod index;
 mod stats;
 
 use std::sync::OnceLock;
 
-use crate::decode::{DecodeError, DecodedValue, FieldType, decode_field};
-use crate::ftext::FTextTreeError;
+use crate::decode::{DecodedValue, FieldType, decode_field};
 use index::{OverlayIndex, handle_hash, handle_hash_from_group, name_hash, name_hash_from_group};
 
 pub use index::{GroupHashState, group_hash_state};
@@ -50,11 +48,7 @@ impl OverlayTable {
     /// Create a table from a static slice.
     #[must_use]
     pub const fn new(entries: &'static [OverlayEntry]) -> Self {
-        Self {
-            entries,
-            handle_entries: &[],
-            index: OnceLock::new(),
-        }
+        Self::with_handles(entries, &[])
     }
 
     /// Create a table with explicit-handle fallback metadata.
@@ -83,14 +77,14 @@ impl OverlayTable {
     }
 
     /// [`Self::lookup`] with the key hash already computed, which the
-    /// `b`-prefix fallback reuses instead of hashing the group path again.
+    /// `b`-prefix fallback reuses. The name is compared before the path: names
+    /// are short and almost always differ, paths share long prefixes.
     #[inline]
     fn lookup_hashed(&self, hash: u64, group_path: &str, field_name: &str) -> Option<FieldType> {
-        let entries = self.entries;
-        let position = self
-            .index()
-            .find_name(entries, hash, group_path, field_name)?;
-        Some(entries[position].field_type)
+        let e = self.entries;
+        let hit = |i: usize| e[i].field_name == field_name && e[i].group_path == group_path;
+        let i = self.index().by_name.find(hash, hit)?;
+        Some(e[i].field_type)
     }
 
     /// Look up the `b`-prefixed spelling of `field_name` without building the
@@ -105,7 +99,7 @@ impl OverlayTable {
         self.lookup_b_prefixed_hashed(name_hash(group_path, field_name), group_path, field_name)
     }
 
-    /// The `b`-prefixed lookup with the key hash already computed.
+    /// The `b`-prefixed lookup under the hash of the UNprefixed key.
     #[inline]
     fn lookup_b_prefixed_hashed(
         &self,
@@ -113,11 +107,12 @@ impl OverlayTable {
         group_path: &str,
         field_name: &str,
     ) -> Option<FieldType> {
-        let entries = self.entries;
-        let position = self
-            .index()
-            .find_b_prefixed_name(entries, hash, group_path, field_name)?;
-        Some(entries[position].field_type)
+        let e = self.entries;
+        let hit = |i: usize| {
+            e[i].field_name.strip_prefix('b') == Some(field_name) && e[i].group_path == group_path
+        };
+        let i = self.index().by_stripped_name.find(hash, hit)?;
+        Some(e[i].field_type)
     }
 
     /// Look up the descriptor field name for an explicit property handle.
@@ -135,11 +130,10 @@ impl OverlayTable {
         group_path: &str,
         handle: u32,
     ) -> Option<&'static str> {
-        let handle_entries = self.handle_entries;
-        let position = self
-            .index()
-            .find_handle(handle_entries, hash, group_path, handle)?;
-        Some(handle_entries[position].field_name)
+        let e = self.handle_entries;
+        let hit = |i: usize| e[i].handle == handle && e[i].group_path == group_path;
+        let i = self.index().by_handle.find(hash, hit)?;
+        Some(e[i].field_name)
     }
 
     /// Number of entries.
@@ -223,24 +217,24 @@ impl OverlayResult {
     };
 
     fn from_decoded(value: DecodedValue) -> Self {
-        match value {
-            DecodedValue::I64(v) => Self {
-                value_i64: Some(v),
-                ..Self::NONE
-            },
-            DecodedValue::F64(v) => Self {
-                value_f64: Some(v),
-                ..Self::NONE
-            },
-            DecodedValue::Bool(v) => Self {
-                value_bool: Some(v),
-                ..Self::NONE
-            },
-            DecodedValue::Str(v) => Self {
-                value_str: Some(v),
-                ..Self::NONE
-            },
+        let (value_i64, value_f64, value_bool, value_str) = value.into_columns();
+        Self {
+            value_i64,
+            value_f64,
+            value_bool,
+            value_str,
         }
+    }
+
+    /// The `(value_i64, value_f64, value_bool, value_str)` columns.
+    #[must_use]
+    pub fn into_columns(self) -> (Option<i64>, Option<f64>, Option<bool>, Option<String>) {
+        (
+            self.value_i64,
+            self.value_f64,
+            self.value_bool,
+            self.value_str,
+        )
     }
 }
 
@@ -304,10 +298,8 @@ pub fn apply_overlay_with_handle(
     )
 }
 
-/// [`apply_overlay_with_handle`] with the field's `compatible_checksum`. Both
-/// export paths pass one at no cost: the schema walk that finds the name finds
-/// the checksum on the same `NetFieldExport` (`tools/bench_export.py` measured
-/// no slowdown).
+/// [`apply_overlay_with_handle`] with the field's `compatible_checksum`, which
+/// the schema walk that finds the name finds on the same `NetFieldExport`.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_overlay_with_checksum(
     table: &OverlayTable,
@@ -358,8 +350,7 @@ pub fn resolve_field_type_with_checksum(
     handle: Option<u32>,
     checksum: Option<u32>,
 ) -> Option<FieldType> {
-    // This entry point answers "what type is this field", with no stats to
-    // report into; the refusal still applies, it is simply not tallied here.
+    // No stats here: the refusal still applies, it is just not tallied.
     let mut refused = false;
     resolve_entry(
         table,
@@ -374,16 +365,10 @@ pub fn resolve_field_type_with_checksum(
 }
 
 /// Game-mode sibling classes carrying the SAME property set under another class
-/// name, mapped to the class the table is keyed on. Swiftplay replays (5 of the
-/// 215-replay corpus) declare `Swiftplay_EoRCredits_{GameState,PlayerState}_C`
-/// where Bomb declares `Bomb{GameState,PlayerState}_C`, with identical field
-/// names (`RoundResults`, `BombState`, `PlayerInfo`, `CompetitiveTier`, ...).
-///
-/// An alias, not 28 duplicated entries: those would drift as the table
-/// changes, and `ADDITIONS` in `apply_type_corrections.py` is for silent
-/// descriptors. It is
-/// sound while same-name properties have equal widths on both classes, which
-/// `check_decode_errors_corpus.py` tests on the five Swiftplay replays. The
+/// name (Swiftplay's `Swiftplay_EoRCredits_*_C` for `Bomb*_C`), mapped to the
+/// class the table is keyed on: an alias, not duplicated entries that would
+/// drift. Sound while same-name properties have equal widths on both classes,
+/// which `check_decode_errors_corpus.py` tests on the Swiftplay replays.
 /// `_ClassNetCache` and `<Class>:<Function>` forms are not aliased: the table
 /// has no Bomb entries for them.
 const GROUP_ALIASES: &[(&str, &str)] = &[
@@ -418,11 +403,10 @@ pub fn canonical_group(group_path: &str) -> &str {
 }
 
 /// `AActor` / `USceneComponent` object references Unreal replicates on every
-/// actor, always as a NetGUID. The descriptors declare them only for the
-/// classes they cover: on 02d4d478 they are typed on 129 group/field pairs
-/// (4,601 rows) and untyped on 203 more (6,048 rows). The engine fixes the
-/// type, so this is a fallback by name, not table rows (the 203 pairs are one
-/// match's lineup), and it runs late, so a declared type wins.
+/// actor, always as a NetGUID; the descriptors declare them only for the
+/// classes they cover (untyped on 203 group/field pairs of 02d4d478, one
+/// match's lineup). The engine fixes the type, so this is a fallback by name,
+/// not table rows, and it runs late, so a declared type wins.
 const ENGINE_OBJECT_REFS: [&str; 4] = ["Owner", "Instigator", "AttachParent", "Controller"];
 
 /// The type a `compatible_checksum` was learned to carry, or `None`. Unreal
@@ -521,8 +505,7 @@ fn resolve_in_group<'a>(
     // new property with the old one's type is the silent shape of a patch (the
     // width often fits, so no counter moves). A bare decimal (`"248"`, an
     // unresolved FName index) declares nothing and stays exempt, as
-    // `overlay_falls_back_to_an_explicit_property_handle_when_the_wire_name_differs`
-    // pins.
+    // `a_bare_fname_index_still_reaches_the_handle_fallback` pins.
     if let Some(name) = field_name {
         if name != descriptor_name && !is_unresolved_fname_index(name) {
             *refused = true;
@@ -613,42 +596,7 @@ fn apply_overlay_inner(
         }
         Err(e) => {
             stats.decoded_err += 1;
-            let kind = match &e {
-                // EOF only for a real EOF (an invalid string, a runaway
-                // IntPacked or a length past the payload is Malformed).
-                DecodeError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
-                // The only `Residual`: bits left over is what the label means.
-                DecodeError::NotFullyConsumed { .. } => DecodeErrorKind::Residual,
-                DecodeError::RawOrSkip => DecodeErrorKind::ZeroBits, // unreachable here
-                // The rest are refusals: the bits read fine but say something
-                // the decoder will not return. A mistyped FText, this repo's
-                // costliest bug shape, lands here and must not read as leftover
-                // bits; the byte-array cap is a table constant, not a layout.
-                DecodeError::UnsignedOverflow { .. } => DecodeErrorKind::Rejected,
-                DecodeError::UnsupportedTextHistory { .. } => DecodeErrorKind::Rejected,
-                DecodeError::NonFiniteComponent { .. } => DecodeErrorKind::Rejected,
-                DecodeError::InvalidQuantizationScale { .. }
-                | DecodeError::InvalidFNameNumber { .. } => DecodeErrorKind::Rejected,
-                DecodeError::ByteArrayLengthCapExceeded { .. } => DecodeErrorKind::Rejected,
-                // The tree reader's reasons sorted the same way; framing the
-                // payload breaks is Malformed.
-                DecodeError::FTextTree(tree) => match tree {
-                    FTextTreeError::BitIo(bit) => DecodeErrorKind::from_bit_error(bit),
-                    FTextTreeError::TrailingBits { .. } => DecodeErrorKind::Residual,
-                    FTextTreeError::UnsupportedHistory { .. }
-                    | FTextTreeError::UnsupportedNameForm
-                    | FTextTreeError::UnsupportedArgumentTag { .. }
-                    | FTextTreeError::NegativeNameSuffix { .. }
-                    | FTextTreeError::NonFiniteNumber => DecodeErrorKind::Rejected,
-                    FTextTreeError::InvalidArgumentCount { .. }
-                    | FTextTreeError::InvalidEmptyForm
-                    | FTextTreeError::InvalidBool { .. }
-                    | FTextTreeError::StringTooLong { .. }
-                    | FTextTreeError::MissingStringTerminator
-                    | FTextTreeError::DepthLimit { .. }
-                    | FTextTreeError::NodeLimit { .. } => DecodeErrorKind::Malformed,
-                },
-            };
+            let kind = DecodeErrorKind::from_decode_error(&e);
             stats
                 .error_report
                 .record(group_path, diagnostic_name, field_type, bit_count, kind);

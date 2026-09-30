@@ -17,8 +17,8 @@ SUBCOMMANDS:
     inspect   Print replay info, header, branch, and chunk summary
               --redact-identifiers  Suppress the replay's friendly name
     validate  Run the RepLayout grammar oracle on every ReplayData content
-              block. Exits 0 when all of them framed, 1 when any did not,
-              and 2 when the file carried no content blocks to check.
+              block. Exits 0 on a pass, 1 on any counted failure, and 2
+              when the file carried no content blocks to check.
               --diagnostics  Print full context for every malformed/skipped event
     diag      Walk ReplayData and every Checkpoint chunk and aggregate every
               stream failure (kind, cause, group, function count, handle)
@@ -52,21 +52,11 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
 
     match args[1].as_str() {
         "inspect" => {
-            let (file, [redact_identifiers], []) = parse(
-                args,
-                ["--redact-identifiers"],
-                [],
-                "unknown inspect option or surplus argument: ",
-            )?;
+            let (file, [redact_identifiers], []) = parse(args, ["--redact-identifiers"], [])?;
             inspect::run(file, redact_identifiers).map(|()| 0)
         }
         "validate" => {
-            let (file, [diagnostics], []) = parse(
-                args,
-                ["--diagnostics"],
-                [],
-                "unknown validate option or surplus argument: ",
-            )?;
+            let (file, [diagnostics], []) = parse(args, ["--diagnostics"], [])?;
             oracle::run(file, diagnostics).map(oracle::Verdict::exit_code)
         }
         "diag" => {
@@ -74,7 +64,6 @@ pub fn run(args: &[String]) -> Result<u8, CliError> {
                 args,
                 ["--include-payloads"],
                 [("--json", "--json requires a file path")],
-                "unknown diag option or surplus argument: ",
             )?;
             crate::diagnose::run(file, json, include_payloads).map(|()| 0)
         }
@@ -95,12 +84,11 @@ type Parsed<'a, const F: usize, const V: usize> = (&'a str, [bool; F], [Option<&
 /// Split `<subcommand> <file.vrf> [options]`. Each of `flags` may appear
 /// once. Each of `valued` may appear once and takes the next argument as its
 /// value, whatever it looks like; the pair's second element is the message
-/// when there is none. Anything else is refused as `{unknown}{argument}`.
+/// when there is none. Anything else is refused.
 fn parse<'a, const F: usize, const V: usize>(
     args: &'a [String],
     flags: [&str; F],
     valued: [(&str, &str); V],
-    unknown: &str,
 ) -> Result<Parsed<'a, F, V>, CliError> {
     let file = args
         .get(2)
@@ -123,7 +111,10 @@ fn parse<'a, const F: usize, const V: usize>(
                 .ok_or_else(|| CliError::Usage(valued[i].1.to_string()))?;
             values[i] = Some(value.as_str());
         } else {
-            return Err(CliError::Usage(format!("{unknown}{arg}")));
+            return Err(CliError::Usage(format!(
+                "unknown {} option or surplus argument: {arg}",
+                args[1]
+            )));
         }
     }
     Ok((file, set, values))
@@ -135,7 +126,6 @@ fn export(args: &[String]) -> Result<(), CliError> {
         args,
         ["--checkpoints"],
         [("--out", "--out requires a directory path")],
-        "unknown option: ",
     )?;
     let out_dir =
         out_dir.ok_or_else(|| CliError::Usage("export requires --out <dir>".to_string()))?;
@@ -155,101 +145,34 @@ fn export(_args: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
 
-    fn owned(args: &[&str]) -> Vec<String> {
-        args.iter().map(|arg| (*arg).to_owned()).collect()
-    }
-
-    /// `export` refuses an `--out` holding anything it does not write
-    /// (`driver::publish`), so the help states the rule rather than leaving
-    /// the refusal as the first a user hears of it. Whitespace-normalized, so
-    /// rewrapping the text does not fail this.
+    /// Refusals are usage errors raised before the file is opened; an
+    /// accepted command line gets as far as opening the missing file.
     #[test]
-    fn help_states_what_export_out_may_hold() {
-        let help = USAGE.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            help.contains(
-                "into --out, which must be new, empty or hold only export output: \
-                 anything else in it is refused, never deleted"
-            ),
-            "{USAGE}"
-        );
-    }
-
-    #[test]
-    fn inspect_rejects_surplus_arguments_before_opening_the_file() {
-        let err = run(&owned(&["vrfkit", "inspect", "missing.vrf", "extra"]))
-            .expect_err("inspect must not ignore a surplus positional argument");
-        assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn inspect_accepts_identifier_redaction_before_opening_the_file() {
-        let err = run(&owned(&[
-            "vrfkit",
-            "inspect",
-            "missing.vrf",
-            "--redact-identifiers",
-        ]))
-        .expect_err("the missing input should still be opened after parsing");
-        assert!(matches!(err, CliError::Io(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn inspect_rejects_duplicate_identifier_redaction() {
-        let err = run(&owned(&[
-            "vrfkit",
-            "inspect",
-            "missing.vrf",
-            "--redact-identifiers",
-            "--redact-identifiers",
-        ]))
-        .expect_err("duplicate privacy options must not be ignored");
-        assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn validate_rejects_unknown_options_before_opening_the_file() {
-        let err = run(&owned(&["vrfkit", "validate", "missing.vrf", "--unknown"]))
-            .expect_err("validate must not ignore an unknown option");
-        assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn validate_rejects_surplus_positional_arguments() {
-        let err = run(&owned(&["vrfkit", "validate", "missing.vrf", "other.vrf"]))
-            .expect_err("validate must not ignore another input path");
-        assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
-    }
-
-    #[cfg(feature = "export")]
-    #[test]
-    fn export_rejects_duplicate_out_before_opening_the_file() {
-        let err = run(&owned(&[
-            "vrfkit",
-            "export",
-            "missing.vrf",
-            "--out",
-            "first",
-            "--out",
-            "second",
-        ]))
-        .expect_err("export must reject a duplicate --out");
-        assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
-    }
-
-    #[cfg(feature = "export")]
-    #[test]
-    fn export_rejects_duplicate_checkpoints_before_opening_the_file() {
-        let err = run(&owned(&[
-            "vrfkit",
-            "export",
-            "missing.vrf",
-            "--out",
-            "out",
-            "--checkpoints",
-            "--checkpoints",
-        ]))
-        .expect_err("export must reject a duplicate --checkpoints");
-        assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
+    fn unknown_surplus_and_duplicate_arguments_are_refused_before_the_file() {
+        const REDACT: &str = "--redact-identifiers";
+        const CP: &str = "--checkpoints";
+        let mut cases: Vec<(&[&str], bool)> = vec![
+            (&["inspect", "m.vrf", "extra"], true),
+            (&["inspect", "m.vrf", REDACT], false),
+            (&["inspect", "m.vrf", REDACT, REDACT], true),
+            (&["validate", "m.vrf", "--unknown"], true),
+            (&["validate", "m.vrf", "other.vrf"], true),
+        ];
+        if cfg!(feature = "export") {
+            cases.push((&["export", "m.vrf", "--out", "a", "--out", "b"], true));
+            cases.push((&["export", "m.vrf", "--out", "o", CP, CP], true));
+        }
+        for (args, refused) in cases {
+            let argv: Vec<String> = ["vrfkit"]
+                .iter()
+                .chain(args)
+                .map(|a| a.to_string())
+                .collect();
+            match run(&argv) {
+                Err(CliError::Usage(_)) if refused => {}
+                Err(CliError::Io(_)) if !refused => {}
+                other => panic!("{args:?}: {other:?}"),
+            }
+        }
     }
 }

@@ -4,11 +4,9 @@
 //! names; the signature block if signed; the directory index; a 33-byte meta
 //! record per chunk.
 //!
-//! Only TOC version 5 is accepted: every 13.06 container is version 5 and is
-//! consumed exactly to its last byte by this layout. Any other version is an
-//! error naming it, not a best effort: version 8 changes the meta size and
-//! versions below 5 lack the overflow list, either of which would misplace the
-//! directory index without failing.
+//! Only TOC version 5 (every 13.06 container, read to its last byte) is
+//! accepted: version 8 changes the meta size and versions below 5 lack the
+//! overflow list, either of which would misplace the directory index silently.
 
 use crate::reader::{Cursor, Result, fail};
 
@@ -318,6 +316,34 @@ pub(crate) mod tests {
         out.extend_from_slice(&spec.directory_index);
         out.extend(std::iter::repeat_n(0xCCu8, spec.chunks.len() * META_SIZE));
         out
+    }
+
+    /// An indexed, unsigned TOC with one chunk (id 1) at `(offset, length)`
+    /// over `blocks` of `(offset, compressed size, uncompressed size, method)`.
+    pub fn one_chunk_toc(
+        chunk_type: u8,
+        (offset, length): (u64, u64),
+        block_size: u32,
+        methods: Vec<&'static str>,
+        blocks: &[(u64, u32, u32, u8)],
+    ) -> TocSpec {
+        let block = |&(offset, compressed_size, uncompressed_size, method)| CompressedBlock {
+            offset,
+            compressed_size,
+            uncompressed_size,
+            method,
+        };
+        TocSpec {
+            flags: FLAG_INDEXED,
+            block_size,
+            methods,
+            chunks: vec![(
+                ChunkId { id: 1, chunk_type },
+                OffsetLength { offset, length },
+            )],
+            blocks: blocks.iter().map(block).collect(),
+            ..TocSpec::default()
+        }
     }
 
     fn two_chunk_spec() -> TocSpec {

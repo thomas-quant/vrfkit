@@ -4,21 +4,20 @@ Every fixture is built bit by bit from the grammar in the tool's docstring, so
 a test names the wire property it pins and fails when the decoder stops
 enforcing it. No replay bytes or player data are used.
 """
-from contextlib import redirect_stderr, redirect_stdout
-import io
 import json
 from pathlib import Path
 import struct
 import tempfile
 import unittest
 from unittest.mock import patch
-import zlib
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from tools import extract_ground_volumes as gv
-from tools.tests.wire_fixtures import BitWriter
+from support import TempDirTestCase, run_cli
+import extract_ground_volumes as gv
+from check_checksum_types import chain_checksum
+from wire_fixtures import BitWriter
 
 CNC_IDENTITY = ("FragmentInfo", 2225407835)
 #: 13.02-shaped declaration: handle -> (name, compatible_checksum).
@@ -60,22 +59,10 @@ CELL = {"253": 7, "bIsActive": True, "Status": 1,
         "Ceiling": 346.0000305175781, "Floor": 99.99999237060547}
 
 
-def compatible_checksum(name, cpp_type, parent=0, static_index=0):
-    """Unreal's RepLayout compatible checksum, computed here from names; the
-    tool holds only the numbers the replays declare. CRC-32 over the
-    UTF-32LE lower-cased name, then the lower-cased C++ type, then the
-    little-endian 32-bit static array index, seeded with the parent's."""
-    crc = zlib.crc32(name.lower().encode("utf-32-le"), parent)
-    crc = zlib.crc32(cpp_type.lower().encode("utf-32-le"), crc)
-    return zlib.crc32(struct.pack("<I", static_index), crc)
-
-
-#: The item struct and its parents, as named in the 13.06 game executable's
-#: reflection data: FragmentInfo:FGroundVolumeFragmentArray -> Items:TArray ->
-#: Items:FGroundVolumeFragment. None of these levels (nor GridPos) is declared
-#: in any export of the corpus; only the members below are.
-ITEM_PARENT = compatible_checksum("Items", "FGroundVolumeFragment", compatible_checksum(
-    "Items", "TArray", compatible_checksum("FragmentInfo", "FGroundVolumeFragmentArray")))
+#: The item struct's parent chain as the 13.06 executable names it; no export
+#: declares these levels (nor GridPos), only the members below.
+ITEM_CHAIN = [("FragmentInfo", "FGroundVolumeFragmentArray"), ("Items", "TArray"),
+              ("Items", "FGroundVolumeFragment")]
 #: Declared identity -> its path below FGroundVolumeFragment, one (name, C++
 #: type) step per struct or array level; an array element repeats the name.
 REPRODUCED = {
@@ -326,10 +313,7 @@ class ChecksumTests(unittest.TestCase):
 
     @staticmethod
     def path_checksum(steps):
-        crc = ITEM_PARENT
-        for name, cpp_type in steps:
-            crc = compatible_checksum(name, cpp_type, crc)
-        return crc
+        return chain_checksum(ITEM_CHAIN + list(steps))
 
     def test_declared_checksums_reproduce_from_the_struct_chain(self):
         # Every identity the tool decodes, except the width-only ones.
@@ -379,8 +363,8 @@ class NameTests(unittest.TestCase):
         # Same identity in another build: a checksum does not carry the
         # enumerators, and this one does not even reproduce.
         self.assertEqual(gv.status_label(B1305, STATUS, 1), (None, "status_unnamed_declaration"))
-        # Same build, another checksum under the name. Decoding cannot reach
-        # this today (MEMBERS admits one Status identity), hence a direct call.
+        # Same build, another checksum under the name (a direct call: MEMBERS
+        # admits one Status identity).
         self.assertEqual(gv.status_label(B1306, ("Status", STATUS[1] ^ 1), 1),
                          (None, "status_unnamed_declaration"))
         # Count, the enum's count sentinel, and the rest of the 3-bit range.
@@ -425,7 +409,7 @@ def make_export(root, window_rows, build="13.02", slots=(2,), cp_fields=(), acto
     source.mkdir()
     (source / "manifest.json").write_text(json.dumps({
         "replay_build": f"++Ares-Core+release-{build}",
-        "net_field_export_groups": manifest_groups() if groups is None else groups}))
+        "net_field_export_groups": manifest_groups() if groups is None else groups}), encoding="utf-8")
     base = {"time_ms": 500, "packet_id": 9, "channel_index": 3, "actor_net_guid": 100,
             "object_net_guid": 104, "handle": 0xFFFFFFFF, "field_name": gv.UNRESOLVED_CNC,
             "compatible_checksum": None, "group_path": "PatchVolume"}
@@ -460,46 +444,46 @@ def window_row(stream_items=None, **extra):
     return dict({"raw_bits": raw, "bit_count": count}, **extra)
 
 
-class SchemaTests(unittest.TestCase):
+class SchemaTests(TempDirTestCase):
     def test_main_and_checkpoint_declarations_are_merged(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            groups = manifest_groups(decl={h: i for h, i in DECL.items() if h != 43})
-            source = make_export(Path(tmp), [], groups=groups, cp_fields=[
-                {"checkpoint_index": 0, "path_name_index": 8, "handle": 43,
-                 "compatible_checksum": 3454040167, "rendered_name": "Floor"}])
-            # The checkpoint row names handle 43 only if it joins the class
-            # group; give the class group its own checkpoint declaration.
-            groups_table = pq.read_table(source / "checkpoint_export_groups.parquet").to_pylist()
-            groups_table.append({"checkpoint_index": 0, "path_name_index": 7,
-                                 "group_path": gv.CLASS_GROUP, "declared_slots": 46})
-            pq.write_table(table(groups_table, {"checkpoint_index": pa.uint32(), "path_name_index": pa.uint32(),
-                                                "group_path": pa.string(), "declared_slots": pa.uint32()}),
-                           source / "checkpoint_export_groups.parquet")
-            fields = pq.read_table(source / "checkpoint_export_fields.parquet").to_pylist()
-            fields[0]["path_name_index"] = 7
-            pq.write_table(table(fields, {"checkpoint_index": pa.uint32(), "path_name_index": pa.uint32(),
-                                          "handle": pa.uint32(), "compatible_checksum": pa.uint32(),
-                                          "rendered_name": pa.string()}),
-                           source / "checkpoint_export_fields.parquet")
-            manifest = json.loads((source / "manifest.json").read_text())
-            loaded = gv.load_schema(source, manifest)
-            self.assertIsNone(loaded.error)
-            self.assertEqual(loaded.members[43], ("Floor", 3454040167))
-            self.assertEqual((loaded.cnc, loaded.cnc_slots), ({0: CNC_IDENTITY}, 2))
+        tmp = self.tmp()
+        groups = manifest_groups(decl={h: i for h, i in DECL.items() if h != 43})
+        source = make_export(tmp, [], groups=groups, cp_fields=[
+            {"checkpoint_index": 0, "path_name_index": 8, "handle": 43,
+             "compatible_checksum": 3454040167, "rendered_name": "Floor"}])
+        # The checkpoint row names handle 43 only if it joins the class
+        # group; give the class group its own checkpoint declaration.
+        groups_table = pq.read_table(source / "checkpoint_export_groups.parquet").to_pylist()
+        groups_table.append({"checkpoint_index": 0, "path_name_index": 7,
+                             "group_path": gv.CLASS_GROUP, "declared_slots": 46})
+        pq.write_table(table(groups_table, {"checkpoint_index": pa.uint32(), "path_name_index": pa.uint32(),
+                                            "group_path": pa.string(), "declared_slots": pa.uint32()}),
+                       source / "checkpoint_export_groups.parquet")
+        fields = pq.read_table(source / "checkpoint_export_fields.parquet").to_pylist()
+        fields[0]["path_name_index"] = 7
+        pq.write_table(table(fields, {"checkpoint_index": pa.uint32(), "path_name_index": pa.uint32(),
+                                      "handle": pa.uint32(), "compatible_checksum": pa.uint32(),
+                                      "rendered_name": pa.string()}),
+                       source / "checkpoint_export_fields.parquet")
+        manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+        loaded = gv.load_schema(source, manifest)
+        self.assertIsNone(loaded.error)
+        self.assertEqual(loaded.members[43], ("Floor", 3454040167))
+        self.assertEqual((loaded.cnc, loaded.cnc_slots), ({0: CNC_IDENTITY}, 2))
 
     def test_declaration_conflict_is_detected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            source = make_export(Path(tmp), [], cp_fields=[
-                {"checkpoint_index": 0, "path_name_index": 8, "handle": 0,
-                 "compatible_checksum": 99, "rendered_name": "SomethingElse"}])
-            manifest = json.loads((source / "manifest.json").read_text())
-            self.assertEqual(gv.load_schema(source, manifest).error, "declaration_conflict")
+        tmp = self.tmp()
+        source = make_export(tmp, [], cp_fields=[
+            {"checkpoint_index": 0, "path_name_index": 8, "handle": 0,
+             "compatible_checksum": 99, "rendered_name": "SomethingElse"}])
+        manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(gv.load_schema(source, manifest).error, "declaration_conflict")
 
     def test_cnc_slot_count_must_be_declared_and_agree(self):
         for slots, error in (((), "cnc_slots_undeclared"), ((2, 3), "cnc_slots_conflict"), ((2, 2), None)):
             with self.subTest(slots=slots), tempfile.TemporaryDirectory() as tmp:
                 source = make_export(Path(tmp), [], slots=slots)
-                manifest = json.loads((source / "manifest.json").read_text())
+                manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
                 self.assertEqual(gv.load_schema(source, manifest).error, error)
 
 
@@ -539,44 +523,43 @@ class RouteTests(unittest.TestCase):
                 self.assertIsNotNone(record["raw_bits_hex"])
 
 
-class CliTests(unittest.TestCase):
+class CliTests(TempDirTestCase):
     def test_items_windows_and_receipt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = make_export(root, [window_row()])
-            out = root / "result"
-            receipt = gv.extract(source, out)
-            counts = receipt["counts"]
-            self.assertEqual((counts["rows"], counts["windows_exact"], counts["rejected"],
-                              counts["changed_items"], counts["hulls"], counts["items_complete"]),
-                             (1, 1, 0, 1, 1, 1))
-            self.assertEqual((counts["rows_unresolved_cnc_payload"], counts["rows_rep_layout_tail"],
-                              counts["rows_bare_patch_volume"], counts["rows_declared_class"]), (1, 0, 1, 0))
-            self.assertEqual(receipt["input_sha256_before"], receipt["input_sha256_after"])
-            self.assertEqual(receipt["items_sha256"], gv.sha(out / "items.ndjson"))
-            self.assertEqual(receipt["declarations"]["cnc_declared_slots"], 2)
-            item = json.loads((out / "items.ndjson").read_text())
-            self.assertEqual(item["physical_row_ordinal"], 1)
-            self.assertEqual(item["fields"], CELL)
-            self.assertEqual(item["owner_class_path"], "/Game/X/Patch_Test.Patch_Test_C")
-            self.assertEqual((item["object_path"], item["object_outer_net_guid"]), ("PatchVolume", 100))
-            self.assertEqual((counts["object_outer_is_actor"], counts["object_outer_not_actor"],
-                              counts["object_guid_unresolved"]), (1, 0, 0))
-            self.assertEqual(item["hull"], {"points_xy": [p[:2] for p in POINTS],
-                                            "floor": CELL["Floor"], "ceiling": CELL["Ceiling"]})
-            window_record = json.loads((out / "windows.ndjson").read_text())
-            self.assertEqual(window_record["status"], "decoded_exact")
-            with self.assertRaisesRegex(ValueError, "already exists"):
-                gv.extract(source, out)
-            with self.assertRaisesRegex(ValueError, "outside"):
-                gv.extract(source, source / "forbidden")
+        root = self.tmp()
+        source = make_export(root, [window_row()])
+        out = root / "result"
+        receipt = gv.extract(source, out)
+        counts = receipt["counts"]
+        self.assertEqual((counts["rows"], counts["windows_exact"], counts["rejected"],
+                          counts["changed_items"], counts["hulls"], counts["items_complete"]),
+                         (1, 1, 0, 1, 1, 1))
+        self.assertEqual((counts["rows_unresolved_cnc_payload"], counts["rows_rep_layout_tail"],
+                          counts["rows_bare_patch_volume"], counts["rows_declared_class"]), (1, 0, 1, 0))
+        self.assertEqual(receipt["input_sha256_before"], receipt["input_sha256_after"])
+        self.assertEqual(receipt["items_sha256"], gv.sha(out / "items.ndjson"))
+        self.assertEqual(receipt["wire_bits_sha256"], gv.sha(Path(gv.__file__).with_name("wire_bits.py")))
+        self.assertEqual(receipt["declarations"]["cnc_declared_slots"], 2)
+        item = json.loads((out / "items.ndjson").read_text(encoding="utf-8"))
+        self.assertEqual(item["physical_row_ordinal"], 1)
+        self.assertEqual(item["fields"], CELL)
+        self.assertEqual(item["owner_class_path"], "/Game/X/Patch_Test.Patch_Test_C")
+        self.assertEqual((item["object_path"], item["object_outer_net_guid"]), ("PatchVolume", 100))
+        self.assertEqual((counts["object_outer_is_actor"], counts["object_outer_not_actor"],
+                          counts["object_guid_unresolved"]), (1, 0, 0))
+        self.assertEqual(item["hull"], {"points_xy": [p[:2] for p in POINTS],
+                                        "floor": CELL["Floor"], "ceiling": CELL["Ceiling"]})
+        window_record = json.loads((out / "windows.ndjson").read_text(encoding="utf-8"))
+        self.assertEqual(window_record["status"], "decoded_exact")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            gv.extract(source, out)
+        with self.assertRaisesRegex(ValueError, "outside"):
+            gv.extract(source, source / "forbidden")
 
     def test_the_receipt_is_written_with_lf_line_endings(self):
         """LF on every platform, like the two ndjson files (not CRLF on Windows)."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            gv.extract(make_export(root, [window_row()]), root / "result")
-            data = (root / "result" / "receipt.json").read_bytes()
+        root = self.tmp()
+        gv.extract(make_export(root, [window_row()]), root / "result")
+        data = (root / "result" / "receipt.json").read_bytes()
         self.assertIn(b"\n", data)
         self.assertNotIn(b"\r\n", data)
 
@@ -590,7 +573,7 @@ class CliTests(unittest.TestCase):
                 root = Path(tmp)
                 source = make_export(root, [window_row([(1, item_bits(values, drop=drop))])], build=build)
                 receipt = gv.extract(source, root / "result")
-                item = json.loads((root / "result" / "items.ndjson").read_text())
+                item = json.loads((root / "result" / "items.ndjson").read_text(encoding="utf-8"))
                 self.assertEqual(item["status_name"], name)
                 self.assertEqual(item["fields"].get("Status"), None if drop else values.get("Status", CELL["Status"]))
                 self.assertEqual({k: receipt["counts"][k] for k in STATUS_COUNTERS},
@@ -600,24 +583,22 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(receipt["schema_version"], 2)
 
     def test_every_counter_is_written_even_when_zero(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            receipt = gv.extract(make_export(root, []), root / "result")
-            self.assertEqual(set(receipt["counts"]), set(gv.COUNTERS))
-            self.assertTrue(all(value == 0 for value in receipt["counts"].values()))
+        root = self.tmp()
+        receipt = gv.extract(make_export(root, []), root / "result")
+        self.assertEqual(set(receipt["counts"]), set(gv.COUNTERS))
+        self.assertTrue(all(value == 0 for value in receipt["counts"].values()))
 
     def test_partial_item_and_owner_status_are_counted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            actors = [{"actor_net_guid": 100, "event": "open", "class_path": "/A.A_C"},
-                      {"actor_net_guid": 100, "event": "open", "class_path": "/B.B_C"}]
-            source = make_export(root, [window_row([(1, item_bits(drop=("Floor",)))])], actors=actors)
-            counts = gv.extract(source, root / "result")["counts"]
-            self.assertEqual((counts["items_partial"], counts["items_complete"]), (1, 0))
-            self.assertEqual((counts["owner_class_ambiguous"], counts["owner_class_resolved"]), (1, 0))
-            item = json.loads((root / "result" / "items.ndjson").read_text())
-            self.assertEqual((item["complete"], item["owner_class_path"], item["hull"]["floor"]),
-                             (False, None, None))
+        root = self.tmp()
+        actors = [{"actor_net_guid": 100, "event": "open", "class_path": "/A.A_C"},
+                  {"actor_net_guid": 100, "event": "open", "class_path": "/B.B_C"}]
+        source = make_export(root, [window_row([(1, item_bits(drop=("Floor",)))])], actors=actors)
+        counts = gv.extract(source, root / "result")["counts"]
+        self.assertEqual((counts["items_partial"], counts["items_complete"]), (1, 0))
+        self.assertEqual((counts["owner_class_ambiguous"], counts["owner_class_resolved"]), (1, 0))
+        item = json.loads((root / "result" / "items.ndjson").read_text(encoding="utf-8"))
+        self.assertEqual((item["complete"], item["owner_class_path"], item["hull"]["floor"]),
+                         (False, None, None))
 
     def test_object_outer_is_checked_against_the_actor(self):
         cases = (([{"net_guid": 104, "path": "PatchVolume", "outer_net_guid": 7}], (0, 1, 0), ("PatchVolume", 7)),
@@ -628,44 +609,37 @@ class CliTests(unittest.TestCase):
                 counts = gv.extract(make_export(root, [window_row()], net_guids=guids), root / "result")["counts"]
                 self.assertEqual((counts["object_outer_is_actor"], counts["object_outer_not_actor"],
                                   counts["object_guid_unresolved"]), expected)
-                item = json.loads((root / "result" / "items.ndjson").read_text())
+                item = json.loads((root / "result" / "items.ndjson").read_text(encoding="utf-8"))
                 self.assertEqual((item["object_path"], item["object_outer_net_guid"]), identity)
 
     def test_rejections_are_retained_and_exit_nonzero(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            raw, count = window([(1, item_bits())], body_suffix=1)
-            source = make_export(root, [{"raw_bits": raw, "bit_count": count}])
-            out = root / "result"
-            argv = ["extract", "--export-dir", str(source), "--out-dir", str(out)]
-            with patch.object(gv.sys, "argv", argv), redirect_stdout(io.StringIO()) as printed,                     redirect_stderr(io.StringIO()) as errors:
-                self.assertEqual(gv.main(), 1)
-            self.assertEqual(json.loads(printed.getvalue())["rejected"], 1)
-            self.assertEqual(json.loads(errors.getvalue()), {"unconsumed_entry": 1})
-            receipt = json.loads((out / "receipt.json").read_text())
-            self.assertEqual((receipt["counts"]["rejected"], receipt["rejection_reasons"]),
-                             (1, {"unconsumed_entry": 1}))
-            record = json.loads((out / "windows.ndjson").read_text())
-            self.assertEqual((record["status"], record["raw_bits_hex"]), ("unconsumed_entry", raw.hex()))
-            self.assertEqual((out / "items.ndjson").read_text(), "")
+        root = self.tmp()
+        raw, count = window([(1, item_bits())], body_suffix=1)
+        source = make_export(root, [{"raw_bits": raw, "bit_count": count}])
+        out = root / "result"
+        code, printed, errors = run_cli(gv.main, "--export-dir", source, "--out-dir", out, prog="extract")
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(printed)["rejected"], 1)
+        self.assertEqual(json.loads(errors), {"unconsumed_entry": 1})
+        receipt = json.loads((out / "receipt.json").read_text(encoding="utf-8"))
+        self.assertEqual((receipt["counts"]["rejected"], receipt["rejection_reasons"]),
+                         (1, {"unconsumed_entry": 1}))
+        record = json.loads((out / "windows.ndjson").read_text(encoding="utf-8"))
+        self.assertEqual((record["status"], record["raw_bits_hex"]), ("unconsumed_entry", raw.hex()))
+        self.assertEqual((out / "items.ndjson").read_text(encoding="utf-8"), "")
 
     def test_changed_input_does_not_publish(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = make_export(root, [window_row()])
-            out = root / "result"
-            original = gv.selected_rows
+        root = self.tmp()
+        source = make_export(root, [window_row()])
+        out = root / "result"
+        original = gv.selected_rows
 
-            def alter(path, checkpoint):
-                yield from original(path, checkpoint)
-                if checkpoint:
-                    with (source / "manifest.json").open("a") as handle:
-                        handle.write(" ")
-            with patch.object(gv, "selected_rows", alter), self.assertRaisesRegex(ValueError, "changed during read"):
-                gv.extract(source, out)
-            self.assertFalse(out.exists())
-            self.assertEqual(list(root.glob(".ground-volumes-*")), [])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        def alter(path, checkpoint):
+            yield from original(path, checkpoint)
+            if checkpoint:
+                with (source / "manifest.json").open("a", encoding="utf-8") as handle:
+                    handle.write(" ")
+        with patch.object(gv, "selected_rows", alter), self.assertRaisesRegex(ValueError, "changed during read"):
+            gv.extract(source, out)
+        self.assertFalse(out.exists())
+        self.assertEqual(list(root.glob(".ground-volumes-*")), [])

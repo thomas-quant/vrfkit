@@ -29,6 +29,8 @@ required-features = ["event", "oodle"]
 [dependencies]
 vrf-bitio = { workspace = true }
 thiserror = { workspace = true }
-# Clean-room Kraken/Mermaid/Selkie/Leviathan decoder, MIT licensed. Deliberately
-# not `oozle`: its GPL-3.0-or-later licence would force this crate's to change.
-oozextract = { version = "0.5.4", optional = true }
+# MIT-licensed; not `oozle`, whose GPL-3.0-or-later would relicense this crate.
+oozextract = { workspace = true, optional = true }
+
+[dev-dependencies]
+vrf-testkit = { workspace = true }

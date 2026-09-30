@@ -19,27 +19,18 @@
 //! bits short of the declared size. This is evidence about blocks that reached
 //! framing, not a whole-file losslessness proof. [`verdict_from_stats`] lists
 //! what fails the verdict; an unresolved ClassNetCache block whose whole
-//! decoded payload was kept is reported apart and is not loss. Diagnostic
-//! events carry packet, bunch, channel, actor, header and bit-position context
-//! (`validate --diagnostics`).
-//!
-//! The one-block-per-replay residue, and why its first explanation (a
-//! PlayerController omitting spawn velocity) was false: see
-//! docs/archive/PROJECT_STATUS.md 17-A.
+//! decoded payload was kept is reported apart and is not loss.
 
 use std::fs;
 use std::time::Instant;
 
-use vrf_container::{
-    ChunkIterator, ChunkType, decompress_replay_data_with_trailing, parse_preamble,
-};
-use vrf_frame::{FrameSkips, walk_demo_frames};
+use vrf_container::parse_preamble;
 use vrf_net::stats::{DiagnosticEvent, NetStats, SkipReason};
-use vrf_schema::NetGuidCache;
 
-use crate::error::{CliError, replication_reader};
+use crate::error::CliError;
+use crate::pass::{Chunk, Pass, Replay, for_each_chunk};
 use crate::report;
-use crate::sink::{ChannelState, ExportSink, RecordBuffers};
+use crate::sink::ExportStats;
 
 /// What a validation run concluded, and the exit code it earns.
 ///
@@ -50,17 +41,13 @@ use crate::sink::{ChannelState, ExportSink, RecordBuffers};
 pub enum Verdict {
     /// Content blocks were found and every one of them framed.
     Passed,
-    /// At least one framing, payload, reassembly, or unread-ReplayData failure
-    /// was observed (bytes past an archive or left by its codec). See
-    /// [`Verdict::decide`].
+    /// At least one failure [`verdict_from_stats`] counts.
     ValidationFailed,
     /// No RepLayout or ClassNetCache blocks at all -- nothing was validated.
     NoContentBlocks,
 }
 
 impl Verdict {
-    /// Decide the verdict from the two counters that carry it.
-    ///
     /// Absence of evidence outranks: a file with no content blocks validated
     /// nothing, whatever its other counters say.
     #[must_use]
@@ -74,7 +61,6 @@ impl Verdict {
         }
     }
 
-    /// The process exit code for this verdict.
     #[must_use]
     pub fn exit_code(self) -> u8 {
         match self {
@@ -87,30 +73,14 @@ impl Verdict {
 
 /// Decide from the hard-failure counters inside the scored validation scope.
 ///
-/// `partial_errors` is not a term: those rejections are discarded before a
-/// complete bunch reaches framing, so they are outside the scored population.
-/// Bytes an accumulator still holds at EOF were present and abandoned, so
-/// `unfinished_partials` is loss. The depth sum (framing, malformed,
-/// transform, field stream, RPC) is `NetStats::lost_content_blocks`'s alone;
-/// restating it here would let this verdict and `quality.content_blocks_lost`
-/// drift apart.
-///
-/// `bunches_on_unopened_channel` is loss of the `bunch_header_failures` class:
-/// a whole bunch dropped before framing because its channel had no open actor.
-/// It became a term only after measuring 0 on 45 replays (2026-09-28, `diag`
-/// main and checkpoint passes plus `validate`): two from each of the local
-/// archive's 21 build directories (13.01's two include the pinned 02d4d478)
-/// and the three public fixtures -- 24 builds, 23,818,049 main and 185,244
-/// checkpoint bunches. Its two companions are not terms:
-/// `unopened_channel_bits` moves only with that count, and a failed reopen is
-/// already a `bunch_header_failures` in four of its five arms. The fifth, a
-/// package-map export bunch whose exports read cleanly, never reads the open
-/// it carries and fails no header stage, but its displaced actor is still
-/// retired, so a later payload bunch on that channel is dropped and counted
-/// here. A rejected fragment stays unscored even when it carried a channel's
-/// open: with no live actor on the channel, the bunches dropped after it are
-/// the loss; with one, it retires nothing and later bunches frame under that
-/// actor (docs/FOLLOWUP.md).
+/// Not terms: `partial_errors` (rejected before a complete bunch reaches
+/// framing, so unscored), `unopened_channel_bits` (moves only with
+/// `bunches_on_unopened_channel`) and a failed reopen (it fails the bunch
+/// header, or retires its actor so the bunches after it count as unopened).
+/// `unfinished_partials` is loss: bytes present at EOF and abandoned. The
+/// depth sum is `NetStats::lost_content_blocks`'s alone, so this verdict and
+/// `quality.content_blocks_lost` cannot drift. `bunches_on_unopened_channel`
+/// is 0 on 45 replays of 24 builds, main and checkpoint passes.
 fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verdict {
     let total_with_content = stats.rep_layout_blocks + stats.class_net_cache_blocks;
     let failures = stats.malformed_packets
@@ -125,71 +95,40 @@ fn verdict_from_stats(stats: &NetStats, replay_data_trailing_bytes: u64) -> Verd
 }
 
 /// Run the validate oracle; `diagnostics` prints every retained event in full.
-/// A file that cannot be read is an error, not a verdict; one that was read
-/// reports through [`Verdict`].
+/// A file that cannot be read is an error, not a verdict.
 pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     let start = Instant::now();
 
     eprintln!("reading {path}...");
     let data = fs::read(path)?;
     let preamble = parse_preamble(&data)?;
-    let branch = &preamble.header.replay_version.branch;
-    let flags = preamble.header.flags;
-    let compressed = preamble.info.compressed;
-    let encrypted = preamble.info.encrypted;
+    let replay = Replay::new(&preamble);
+    let branch = replay.branch;
 
     eprintln!("branch: {branch}");
     eprintln!("validating RepLayout grammar on framed ReplayData content blocks...");
 
-    let mut cache = NetGuidCache::new();
-    let mut repl_reader = replication_reader(branch)?;
-
-    let mut total_packets: u32 = 0;
-    // Packets are counted inside the frame callback, so a frame that ends
-    // before its packet loop moves nothing but this.
-    let mut frames_walked: u32 = 0;
-    // Length-prefixed, so nothing else moves if a build starts sending them.
-    let mut frame_skips = FrameSkips::default();
-    // Frames whose NaN or infinite time was read as 0 ms.
-    let mut non_finite_frame_times: u64 = 0;
+    let mut pass = Pass::new(&replay)?;
+    // Counted as every pass does, never printed.
+    let mut sink = ExportStats::default();
     // Counted, not merely skipped: see `checkpoint_scope_note`.
     let mut checkpoint_chunks: u64 = 0;
     let mut replay_data_trailing_bytes = 0u64;
-    let mut chunk_iter = ChunkIterator::new(&data, preamble.remaining_offset);
-    let mut channel_state = ChannelState::new();
-    // Never drained, and `ExportSink::new` clears them, so they stay bounded by
-    // the largest packet.
-    let mut buffers = RecordBuffers::default();
-
-    while let Some(chunk) = chunk_iter.next_chunk()? {
-        if chunk.chunk_type == ChunkType::Checkpoint {
-            checkpoint_chunks += 1;
-            continue;
+    let unknown_chunks = for_each_chunk(&data, &replay, |chunk| {
+        match chunk {
+            Chunk::Checkpoint(_) => checkpoint_chunks += 1,
+            Chunk::ReplayData(frames, unread) => {
+                replay_data_trailing_bytes += unread as u64;
+                // Never drained: each packet's sink clears them.
+                pass.walk(&frames, &mut sink, |_| Ok(()))?;
+            }
+            Chunk::Event(_) => {}
         }
-        if chunk.chunk_type != ChunkType::ReplayData {
-            continue;
-        }
+        Ok(())
+    })?;
 
-        let payload = &data[chunk.data_offset..chunk.data_offset + chunk.size_in_bytes as usize];
-        let (decompressed, trailing) =
-            decompress_replay_data_with_trailing(payload, compressed, encrypted)?;
-        replay_data_trailing_bytes += trailing as u64;
-
-        let walk = walk_demo_frames(&decompressed, flags, &mut cache, |pkt, packet_cache| {
-            let mut sink = ExportSink::new(packet_cache, &mut channel_state, &mut buffers);
-            sink.enable_measured_array_routes(branch);
-            sink.time_ms = pkt.time_ms;
-            sink.packet_id = total_packets;
-            repl_reader.process_packet(pkt.data, total_packets as i32, &mut sink);
-            total_packets += 1;
-        })?;
-        frames_walked += walk.frames;
-        frame_skips.absorb(walk.skipped);
-        non_finite_frame_times += u64::from(walk.non_finite_times);
-    }
-
-    repl_reader.finish();
-    let stats = repl_reader.stats();
+    pass.finish();
+    let stats = pass.reader.stats();
     let elapsed = start.elapsed();
 
     let total_content = stats.content_blocks;
@@ -219,7 +158,16 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         "    Unopened channel:   {} bunches / {} bits",
         stats.bunches_on_unopened_channel, stats.unopened_channel_bits
     );
+    // Printed, not (yet) verdict terms: such a bunch's content is never read.
+    println!(
+        "    Package map exports: {} ({} with RepLayout export)",
+        stats.package_map_exports, stats.rep_layout_export_bunches
+    );
     println!("    Malformed framing:  {malformed}");
+    println!(
+        "    Content framing fails: {}",
+        stats.content_block_framing_failures
+    );
     println!("    Transform failed:   {}", stats.transform_failures);
     println!("    Field stream failed:{}", stats.field_stream_failures);
     println!("    RPC payload lost:   {rpc_payloads_lost}");
@@ -242,12 +190,16 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         "  ReplayData unread:    {} bytes",
         replay_data_trailing_bytes
     );
-    println!("  ReplayData frames:    {frames_walked}");
+    println!("  ReplayData frames:    {}", pass.frames);
+    println!("  Unknown chunks:       {unknown_chunks}");
     println!(
         "  Frame skips:          {}",
-        report::frame_skips(&frame_skips)
+        report::frame_skips(&pass.frame_skips)
     );
-    println!("  Frame times:          {non_finite_frame_times} non-finite");
+    println!(
+        "  Frame times:          {} non-finite",
+        pass.non_finite_frame_times
+    );
     println!("  Packets:              {}", stats.packets);
     println!("  Bunches:              {}", stats.bunches);
     println!("  Actor opens:          {}", stats.actor_opens);
@@ -267,13 +219,10 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
         println!("  No content blocks found - cannot validate.");
     } else {
         println!("{}", pass_rate_line(total_with_content, failed));
-        if stats.skipped_bits > 0 {
-            println!("  (skipped_bits counter: {} bits)", stats.skipped_bits);
-        }
     }
 
     // The counters above say how many payload-stage failures; these say which.
-    let stream_failures = channel_state.stream_failures();
+    let stream_failures = pass.channels.stream_failures();
     if !stream_failures.is_empty() {
         println!();
         println!("=== Stream failures ({} shown) ===", stream_failures.len());
@@ -284,9 +233,8 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
 
     if !stats.diagnostics.is_empty() {
         println!();
-        // The list is capped (uncapped it reaches ~100 MB on a replay whose
-        // transform is wrong), so past the cap `len()` alone under-reports --
-        // docs/archive/PROJECT_STATUS.md 5-A's bug, in the display layer.
+        // Capped (uncapped, ~100 MB on a wrong transform), so past the cap
+        // `len()` alone under-reports.
         if stats.diagnostics_dropped == 0 {
             println!(
                 "=== Diagnostic Events ({} total) ===",
@@ -322,13 +270,9 @@ pub fn run(path: &str, diagnostics: bool) -> Result<Verdict, CliError> {
     Ok(verdict)
 }
 
-/// The `NOT COVERED` line for the Checkpoint chunks this oracle skips.
-///
-/// The skip stays, stated rather than implied. A checkpoint is an independent
-/// archive (its own GUID cache, export map and DemoFrame re-opening every live
-/// actor) and walking it is `export --checkpoints`'s job; folding it in here
-/// would move every counter `validate`'s pinned baselines hold and add three
-/// hard-failure paths to a command that reports rather than aborts.
+/// The `NOT COVERED` line for the Checkpoint chunks this oracle skips, stated
+/// rather than implied: walking them would move every counter `validate`'s
+/// pinned baselines hold, and `export --checkpoints` decodes them.
 fn checkpoint_scope_note(checkpoint_chunks: u64) -> Option<String> {
     (checkpoint_chunks > 0).then(|| {
         format!(
@@ -351,12 +295,10 @@ fn partial_reassembly_scope_note(partial_errors: u64) -> Option<String> {
 }
 
 /// The `ORACLE PASS RATE` line for `failed` of `total_with_content` blocks.
-///
-/// `failed` (`lost_content_blocks()`) can exceed the classified total: a block
-/// whose header or `content_bits` could not be read is lost before it is
-/// classified. So `passed` saturates at 0 (a release build would wrap it) and
-/// the rate saturates with it, still as `1 - failed / total` rather than
-/// `passed / total`, whose last bit can differ.
+/// `failed` can exceed the classified total (a block whose header could not be
+/// read is lost unclassified), so `passed` and the rate saturate at 0; the
+/// rate stays `1 - failed / total`, whose last bit can differ from
+/// `passed / total`.
 fn pass_rate_line(total_with_content: u64, failed: u64) -> String {
     let passed = total_with_content.saturating_sub(failed);
     let pass_rate = 1.0 - (failed.min(total_with_content) as f64 / total_with_content as f64);
@@ -377,44 +319,30 @@ fn verdict_line(verdict: Verdict) -> &'static str {
     }
 }
 
-/// Print a breakdown of where skipped bits come from.
+/// Print a breakdown of where skipped bits come from, zeros included, so a
+/// category that stops being recorded stays visible.
 fn print_skip_breakdown(events: &[DiagnosticEvent]) {
-    let mut overrun_count = 0u32;
-    let mut overrun_bits = 0u64;
-    let mut header_err_count = 0u32;
-    let mut header_err_bits = 0u64;
-    let mut bits_read_err_count = 0u32;
-    let mut bits_read_err_bits = 0u64;
-    let mut parse_fail_count = 0u32;
-    let mut parse_fail_bits = 0u64;
-
+    let mut tally = [(0u32, 0u64); 4];
     for ev in events {
-        match &ev.reason {
-            SkipReason::ContentBitsOverrun { .. } => {
-                overrun_count += 1;
-                overrun_bits += ev.bits_skipped;
-            }
-            SkipReason::HeaderReadError => {
-                header_err_count += 1;
-                header_err_bits += ev.bits_skipped;
-            }
-            SkipReason::ContentBitsReadError => {
-                bits_read_err_count += 1;
-                bits_read_err_bits += ev.bits_skipped;
-            }
-            SkipReason::ParseFailure => {
-                parse_fail_count += 1;
-                parse_fail_bits += ev.bits_skipped;
-            }
-        }
+        let reason = match ev.reason {
+            SkipReason::ContentBitsOverrun { .. } => 0,
+            SkipReason::HeaderReadError => 1,
+            SkipReason::ContentBitsReadError => 2,
+            SkipReason::ParseFailure => 3,
+        };
+        tally[reason].0 += 1;
+        tally[reason].1 += ev.bits_skipped;
     }
-
     println!("  Skip breakdown:");
-    // Zeros included, so a category that stops being recorded stays visible.
-    println!("    ContentBitsOverrun:   {overrun_count} events, {overrun_bits} bits");
-    println!("    HeaderReadError:      {header_err_count} events, {header_err_bits} bits");
-    println!("    ContentBitsReadError: {bits_read_err_count} events, {bits_read_err_bits} bits");
-    println!("    ParseFailure:         {parse_fail_count} events, {parse_fail_bits} bits");
+    let labels = [
+        "ContentBitsOverrun:",
+        "HeaderReadError:",
+        "ContentBitsReadError:",
+        "ParseFailure:",
+    ];
+    for (label, (count, bits)) in labels.into_iter().zip(tally) {
+        println!("    {label:<22}{count} events, {bits} bits");
+    }
 }
 
 /// Print full details for one diagnostic event.
@@ -432,7 +360,7 @@ fn print_diagnostic_event(index: usize, ev: &DiagnosticEvent) {
     }
     println!("  | archetype_net_guid:  {}", ev.archetype_net_guid);
     if let Some(ref path) = ev.class_path {
-        println!("  | class_path:          {path}");
+        println!("  | archetype_path:      {path}");
     }
     println!("  | bunch_flags:");
     let f = &ev.bunch_flags;
@@ -511,8 +439,8 @@ mod tests {
         );
     }
 
-    /// It printed "-50.000000% (0 / 2 blocks passed)", which the corpus
-    /// sweeps' `([\d.]+)%` cannot read: they reported no rate at all.
+    /// A negative rate would not match the corpus sweeps' `([\d.]+)%`, so they
+    /// would report no rate at all.
     #[test]
     fn the_pass_rate_saturates_like_the_passed_count() {
         assert_eq!(
@@ -536,96 +464,47 @@ mod tests {
         assert_eq!(Verdict::decide(0, 0), Verdict::NoContentBlocks);
     }
 
+    /// Each hard-failure term alone fails a replay that otherwise passes; an
+    /// unresolved RPC whose whole payload was kept and a reassembly rejection
+    /// (reported as unscored) do not.
     #[test]
     fn every_unfinished_or_payload_failure_prevents_a_pass() {
-        let clean = NetStats {
+        let failures: [fn(&mut NetStats); 10] = [
+            |s| s.malformed_packets = 1,
+            |s| s.bunch_header_failures = 1,
+            |s| s.transform_failures = 1,
+            |s| s.field_stream_failures = 1,
+            |s| (s.class_net_cache_blocks, s.rpc_stream_failures) = (1, 1),
+            |s| s.unfinished_partials = 1,
+            |s| s.partial_resource_limit_failures = 1,
+            |s| s.channel_state_limit_failures = 1,
+            |s| s.content_block_framing_failures = 1,
+            |s| (s.bunches_on_unopened_channel, s.unopened_channel_bits) = (1, 10),
+        ];
+        let passes: [fn(&mut NetStats); 3] = [
+            |_| {},
+            |s| (s.rpc_stream_failures, s.unresolved_rpc_payloads_preserved) = (1, 1),
+            |s| s.partial_errors = 1,
+        ];
+        let clean = || NetStats {
             rep_layout_blocks: 1,
             ..NetStats::default()
         };
-        assert_eq!(verdict_from_stats(&clean, 0), Verdict::Passed);
-
-        for failed in [
-            NetStats {
-                rep_layout_blocks: 1,
-                malformed_packets: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                bunch_header_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                transform_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                field_stream_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                class_net_cache_blocks: 1,
-                rpc_stream_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                unfinished_partials: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                partial_resource_limit_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                channel_state_limit_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                content_block_framing_failures: 1,
-                ..NetStats::default()
-            },
-            NetStats {
-                rep_layout_blocks: 1,
-                bunches_on_unopened_channel: 1,
-                unopened_channel_bits: 10,
-                ..NetStats::default()
-            },
-        ] {
-            assert_eq!(verdict_from_stats(&failed, 0), Verdict::ValidationFailed);
+        let verdict = |set: fn(&mut NetStats)| {
+            let mut stats = clean();
+            set(&mut stats);
+            verdict_from_stats(&stats, 0)
+        };
+        for (i, set) in failures.into_iter().enumerate() {
+            assert_eq!(verdict(set), Verdict::ValidationFailed, "failure {i}");
+        }
+        for (i, set) in passes.into_iter().enumerate() {
+            assert_eq!(verdict(set), Verdict::Passed, "pass {i}");
         }
         assert_eq!(
-            verdict_from_stats(&clean, 1),
+            verdict_from_stats(&clean(), 1),
             Verdict::ValidationFailed,
             "unconsumed decompressed ReplayData bytes must fail validation"
-        );
-
-        let unresolved_but_preserved = NetStats {
-            class_net_cache_blocks: 1,
-            rpc_stream_failures: 1,
-            unresolved_rpc_payloads_preserved: 1,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            verdict_from_stats(&unresolved_but_preserved, 0),
-            Verdict::Passed,
-            "an unresolved RPC whose whole decoded payload was preserved is not data loss"
-        );
-
-        let reassembly_rejection = NetStats {
-            rep_layout_blocks: 1,
-            partial_errors: 1,
-            ..NetStats::default()
-        };
-        assert_eq!(
-            verdict_from_stats(&reassembly_rejection, 0),
-            Verdict::Passed,
-            "partial reassembly rejections are reported as unscored, not silently treated as validated blocks"
         );
     }
 

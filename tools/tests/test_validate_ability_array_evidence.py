@@ -1,27 +1,24 @@
 """Fail-closed checks for the independent ability-array wire validator."""
 
 from collections import Counter
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
-from tools import validate_ability_array_evidence as evidence
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-
-def packed(value):
-    result = bytearray()
-    while True:
-        more = value >> 7
-        result.append(((value & 127) << 1) | bool(more))
-        if not more:
-            return bytes(result)
-        value = more
+import support  # puts tools/ on sys.path
+import validate_ability_array_evidence as evidence
+from wire_fixtures import array
 
 
 def path_point(fields=((1, 32), (2, 192), (3, 192))):
-    raw = bytearray(packed(1) + packed(1))
-    for handle, width in fields:
-        raw += packed(handle + 1) + packed(width) + bytes(width // 8)
-    raw += packed(0) + packed(0)
-    return {"field_name": "MulticastSetPath.NetworkedProjectilePath", "raw_bits": bytes(raw), "bit_count": len(raw) * 8}
+    raw, count = array([(0, [(handle, width, bytes(width // 8)) for handle, width in fields])])
+    return {"field_name": "MulticastSetPath.NetworkedProjectilePath", "raw_bits": raw, "bit_count": count}
 
 
 class AbilityArrayEvidenceTests(unittest.TestCase):
@@ -94,9 +91,9 @@ class AbilityArrayEvidenceTests(unittest.TestCase):
     def test_an_int_packed_fifth_byte_past_32_bits_is_refused(self):
         """Only four bits of the fifth byte fit in a u32, the limit vrf-bitio
         and validate_type_evidence enforce."""
-        self.assertEqual(evidence.Bits(b"\xff\xff\xff\xff\x1e", 40).packed(), 0xFFFFFFFF)
+        self.assertEqual(evidence.Bits(b"\xff\xff\xff\xff\x1e", 40).int_packed(), 0xFFFFFFFF)
         with self.assertRaisesRegex(ValueError, "IntPacked"):
-            evidence.Bits(b"\xff\xff\xff\xff\x20", 40).packed()
+            evidence.Bits(b"\xff\xff\xff\xff\x20", 40).int_packed()
 
     def test_typed_comparison_fails_if_children_disappear_or_go_null(self):
         key = next(key for key in evidence.ROUTES if "NetworkedProjectilePath" in key[1])
@@ -124,5 +121,67 @@ class AbilityArrayEvidenceTests(unittest.TestCase):
             evidence.compare_children(row, expected, emitted)
 
 
-if __name__ == "__main__":
-    unittest.main()
+PATH_KEY = next(key for key in evidence.ROUTES if "NetworkedProjectilePath" in key[1])
+CONTEXT = {"time_ms": 1, "packet_id": 2, "channel_index": 3, "actor_net_guid": 4, "object_net_guid": 5}
+
+
+def export_rows(parent):
+    """A path parent preceded by its emitted children, as vrfkit writes them."""
+    _, _, expected = evidence.inspect(parent, evidence.ROUTES[PATH_KEY])
+    rows = []
+    for name, (_handle, width, raw, column, value) in expected.items():
+        child = {"field_name": name, "handle": 0, "compatible_checksum": None,
+                 "bit_count": width, "raw_bits": raw}
+        child[column] = "(0,0,0)" if isinstance(value, tuple) else value
+        rows.append(child)
+    return rows + [{**parent, "handle": 1, "compatible_checksum": PATH_KEY[2]}]
+
+
+def run_main(rows, declared=True, flags=("--compare-typed", "--require-routes")):
+    """main() over one synthetic export: `(exit code, stdout)`."""
+    with tempfile.TemporaryDirectory() as directory:
+        export = Path(directory)
+        groups = [{"path": evidence.PATH_GROUP, "fields": [
+            {"handle": 0, "name": "NetworkedProjectilePath", "compatible_checksum": PATH_KEY[2]}]}]
+        (export / "manifest.json").write_text(
+            json.dumps({"net_field_export_groups": groups if declared else []}), encoding="utf-8")
+        types = {"compatible_checksum": pa.uint32(), "bit_count": pa.uint32(), "raw_bits": pa.binary(),
+                 "handle": pa.uint32(), "field_name": pa.string(), "value_i64": pa.int64(),
+                 "value_f64": pa.float64(), "value_bool": pa.bool_(), "value_str": pa.string()}
+        pq.write_table(pa.table({
+            "group_path": [PATH_KEY[0]] * len(rows),
+            **{name: [value] * len(rows) for name, value in CONTEXT.items()},
+            **{name: pa.array([row.get(name) for row in rows], kind) for name, kind in types.items()},
+        }), export / "fields.parquet")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = evidence.main([str(export), *flags])
+    return code, output.getvalue()
+
+
+class MainTests(unittest.TestCase):
+    def test_children_pair_with_the_parent_after_them(self):
+        rows = export_rows(path_point())
+        code, out = run_main(rows)
+        self.assertIn("rows={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 1} "
+                      "elements={'MulticastSetPath.NetworkedProjectilePath': 1} "
+                      "typed_children={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 3}", out)
+        self.assertIn("missing observed route", out)  # --require-routes: no ActiveBlinds row
+        self.assertEqual(code, 1)
+        self.assertEqual(run_main(rows, flags=["--compare-typed"])[0], 0)
+        self.assertNotIn("orphan", out)
+        self.assertNotIn("declaration", out)
+
+    def test_an_orphan_child_and_a_missing_declaration_fail(self):
+        rows = export_rows(path_point())
+        code, out = run_main(rows + rows[:1], declared=False)
+        self.assertEqual(code, 1)
+        self.assertIn("orphan children: {'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 1}", out)
+        self.assertIn(f"declaration mismatch: '{evidence.PATH_GROUP}'", out)
+
+    def test_children_in_the_wrong_order_are_not_counted(self):
+        rows = export_rows(path_point())
+        code, out = run_main([rows[1], rows[0], *rows[2:]])
+        self.assertEqual(code, 1)
+        self.assertIn("child path", out)
+        self.assertIn("typed_children={'ActiveBlinds': 0, 'MulticastSetPath.NetworkedProjectilePath': 0}", out)

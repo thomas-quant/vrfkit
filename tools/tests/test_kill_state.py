@@ -1,16 +1,10 @@
 import copy
-import importlib.util
 import math
-import pathlib
 import struct
 import unittest
 
-
-MODULE_PATH = pathlib.Path(__file__).parents[1] / "kill_state.py"
-SPEC = importlib.util.spec_from_file_location("kill_state", MODULE_PATH)
-kill_state = importlib.util.module_from_spec(SPEC)
-assert SPEC.loader is not None
-SPEC.loader.exec_module(kill_state)
+import support  # puts tools/ on sys.path
+import kill_state
 
 
 def raw(handle, value, bits=8):
@@ -240,7 +234,3 @@ class KillStateTests(unittest.TestCase):
             with self.subTest(complete=item["members_complete"]):
                 with self.assertRaisesRegex(kill_state.KillStateError, "victim_ref_resolution"):
                     kill_state.project_kill_state(document(item))
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """Pin a corpus's oracle numbers and fail when they drift.
 
-validate_corpus.py prints what a corpus currently does; a regression guard
-has to answer "did my change move it". This stores per-file and total figures
-in a JSON baseline and exits non-zero on any difference.
-
-The replays live outside the repo (a relative corpus path resolves against
-VRFKIT_CORPUS_DIR), so a missing corpus is reported and SKIPPED rather than
-failed, unless --require-input or VRFKIT_REQUIRE_CORPUS is set: a guard that
-fails on someone else's machine gets disabled, and a disabled guard protects
-nothing.
+validate_corpus.py prints what a corpus does; this pins its per-file and total
+figures in a JSON baseline and exits 1 on any difference. A relative corpus
+path resolves against VRFKIT_CORPUS_DIR; a missing corpus is SKIPPED unless
+--require-input or VRFKIT_REQUIRE_CORPUS is set.
 
 Usage:
     python tools/check_corpus_baseline.py --baseline tools/baselines/build_1302.json
@@ -19,19 +14,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from validate_corpus import _run_one, parse_oracle_output  # noqa: E402
 from corpus_scan import find_replays  # noqa: E402
-
-if __package__:
-    from .atomic_io import atomic_write_text
-else:  # direct script execution
-    from atomic_io import atomic_write_text
+import summary_counters as sc  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_EXE = REPO / "target" / "release" / "vrfkit.exe"
@@ -58,9 +47,7 @@ def measure(exe: Path, root: Path) -> dict:
         for key in totals:
             match = got.get(key)
             if match is None:
-                # None, not 0: a counter the oracle stopped printing is a
-                # change worth failing on, which a total would hide.
-                entry[key] = None
+                entry[key] = None  # never 0: a total would hide it
                 continue
             value = int(match.group(1))
             entry[key] = value
@@ -71,12 +58,8 @@ def measure(exe: Path, root: Path) -> dict:
 
 
 def unpinnable(current: dict) -> list[str]:
-    """Why this run must not become a baseline, if it must not.
-
-    A replay the oracle could not validate (recorded as `{"error": ...}` and
-    left out of the totals) or a counter it did not print (None) would pin a
-    number never measured, which a later run failing the same way MATCHES.
-    """
+    """Why this run must not become a baseline: a replay the oracle could not
+    validate, or a counter it did not print."""
     reasons = []
     if not current["per_file"]:
         return ["no replay produced any numbers"]
@@ -125,82 +108,30 @@ def main() -> int:
                     help="fail instead of skipping when the corpus is absent/empty")
     args = ap.parse_args()
 
-    if not args.exe.exists():
-        print(f"build the release binary first: {args.exe}", file=sys.stderr)
+    if sc.no_exe(args.exe):
         return 2
-
-    stored = json.loads(args.baseline.read_text(encoding="utf-8")) \
-        if args.baseline.exists() else {}
-    # A new baseline pins --corpus as given, never the path resolved below:
-    # a path would put one machine's directory into a committed file.
-    if args.update and not stored.get("corpus") and args.corpus is not None \
-            and args.corpus.anchor:
-        print(f"FAILED: --update would write the path {args.corpus} into "
-              f"{args.baseline.name}; a baseline names its corpus relative to "
-              f"VRFKIT_CORPUS_DIR. Set VRFKIT_CORPUS_DIR to {args.corpus.parent} and "
-              f"pass --corpus {args.corpus.name}.", file=sys.stderr)
+    stored = sc.load_baseline(args.baseline)
+    refusal = args.update and sc.machine_path(args.corpus, stored.get("corpus"), "corpus",
+                                              args.baseline)
+    if refusal:
+        print(refusal, file=sys.stderr)
         return 2
-    # Decided on the text, not the Path: Path("") is Path("."), which exists,
-    # so a baseline naming no corpus walked and pinned the working directory.
-    named = args.corpus or os.path.expandvars(stored.get("corpus", ""))
-    corpus = Path(named) if named else None
-    # A relative path in the baseline resolves against VRFKIT_CORPUS_DIR so the
-    # repo ships no absolute path; absolute paths and --corpus are used as-is.
-    if corpus is not None and corpus.name and not corpus.is_absolute():
-        corpus_dir = os.environ.get("VRFKIT_CORPUS_DIR", "")
-        if corpus_dir:
-            corpus = Path(corpus_dir) / corpus
+    corpus = sc.baseline_input(args.corpus, stored.get("corpus", ""))
     if corpus is None or not corpus.exists():
-        missing = ("no corpus named (pass --corpus or store one in the baseline)"
-                   if corpus is None else f"corpus not present ({corpus})")
-        if args.require_input or os.environ.get("VRFKIT_REQUIRE_CORPUS"):
-            print(f"REQUIRED INPUT MISSING: {missing}", file=sys.stderr)
-            return 2
-        print(f"SKIP: {missing}")
-        print("      these replays are machine-local; nothing to guard here.")
-        return 0
-
+        return sc.missing_input("no corpus named (pass --corpus or store one in the baseline)"
+                                if corpus is None else f"corpus not present ({corpus})",
+                                args.require_input)
     current = measure(args.exe, corpus)
     if not current["per_file"]:
-        if args.require_input or os.environ.get("VRFKIT_REQUIRE_CORPUS"):
-            print(f"REQUIRED INPUT MISSING: no .vrf under {corpus}", file=sys.stderr)
-            return 2
-        print(f"SKIP: no .vrf under {corpus}")
-        return 0
+        return sc.missing_input(f"no .vrf under {corpus}", args.require_input)
 
-    if args.update:
-        refusals = unpinnable(current)
-        if refusals:
-            print(f"FAILED: refusing to pin a broken run -- {len(refusals)} "
-                  f"figure(s) were never measured", file=sys.stderr)
-            for line in refusals[:15]:
-                print(f"  {line}", file=sys.stderr)
-            print("  Fix the run first; a baseline of zeros is matched by the "
-                  "same failure next time.", file=sys.stderr)
-            return 1
-        payload = {"corpus": stored.get("corpus") or str(args.corpus), **current}
-        atomic_write_text(args.baseline, json.dumps(payload, indent=1) + "\n")
-        n = len(current["per_file"])
-        print(f"wrote {args.baseline} ({n} replays, "
-              f"branches {current['branches']})")
-        return 0
-
-    if not stored:
-        print(f"no baseline at {args.baseline} -- run with --update",
-              file=sys.stderr)
-        return 2
-
-    problems = diff(stored, current)
-    n = len(current["per_file"])
-    if problems:
-        print(f"DRIFT: {len(problems)} difference(s) across {n} replays")
-        for line in problems:
-            print(f"  {line}")
-        return 1
-
-    print(f"OK: {n} replays match the baseline "
-          f"(branches {current['branches']}, "
-          f"malformed {current['totals']['malformed']})")
+    pinned = {"corpus": stored.get("corpus") or str(args.corpus), **current}
+    verdict = sc.pin_or_diff(args.baseline, stored, pinned, args.update,
+                             unpinnable(current), diff)
+    if verdict is not None:
+        return verdict
+    print(f"OK: {len(current['per_file'])} replays match the baseline "
+          f"(branches {current['branches']}, malformed {current['totals']['malformed']})")
     return 0
 
 

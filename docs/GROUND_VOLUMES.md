@@ -1,11 +1,8 @@
 # Ground-area volumes: GroundVolumeComponent cells
 
-Measured 2026-09-28 on the 1,018 exports of the common audit corpus (parser
-`259ed10`, checkpoints on; builds 11.06 to 13.06). This closes the question
-[the PatchVolume investigation](GAS_AND_PATCHVOLUME_INVESTIGATION.md) left
-open -- an independent item schema for the numerically consumed PatchVolume
-windows -- and decodes those windows with it. Nothing here changes Parquet
-output; the decoder is a separate tool.
+The item schema of the `PatchVolume` windows, and a separate tool that decodes
+them; Parquet output is unchanged. Figures are from the 1,018 exports of the
+common audit (builds 11.06 to 13.06, checkpoints on).
 
 ```bash
 python tools/extract_ground_volumes.py --export-dir <export-directory> --out-dir <new-output-directory>
@@ -15,8 +12,8 @@ The output directory holds `items.ndjson` (one record per decoded cell
 update), `windows.ndjson` (every selected source window with its raw bits and
 a status) and `receipt.json` (counts including zeros, rejection reasons, the
 replay's resolved declarations and the [member names](#names) they resolve
-to, input hashes before/after, the tool's own hash). The exit status is
-nonzero if any window is rejected.
+to, input hashes before/after, and the hashes of the tool and of
+`wire_bits.py`). The exit status is nonzero if any window is rejected.
 
 ## What was established
 
@@ -52,8 +49,7 @@ On the whole corpus:
 | Component object's outer is the owning actor (`net_guids.parquet`) | 346,186 |
 | `TJunctions` members kept raw (all 16 zero bits) | 7,232 |
 
-Neither route has a checkpoint row. The 1,018 receipts carry one extractor
-hash and unchanged input hashes.
+Neither route has a checkpoint row.
 
 ## The two routes
 
@@ -83,14 +79,8 @@ its name:
 
 `tools/extract_component_classes` reached the same class from the game's
 IoStore containers ([DATA.md](DATA.md#reading-component-classes-out-of-the-game),
-"Not added, and why").
-
-Route completeness: the same strict decoder, with each replay's declaration,
-was run on every other preserved ClassNetCache window or tail in both field
-tables of all 1,018 exports -- 5,552,491 main and 1,666 checkpoint windows of
-every other group. 312,179 of them are in the 63 exports that declare no
-ClassNetCache slot count for the component, where no window can be tried; the
-other 5,241,978 were tried and none decodes.
+"Not added, and why"). The same strict decoder, run on every other preserved
+ClassNetCache window of all 1,018 exports (5,241,978 tried), decodes none.
 
 Owners, by the class of the actor that owns the object:
 
@@ -217,14 +207,11 @@ nothing: the struct levels in between are needed.
   differently and does not reproduce this way. The levels above the members
   -- `FragmentInfo`, `Items`, `GridPos` -- are declared in none of the 1,018
   exports, so their own checksums never appear.
-- Provenance: the struct and member names are from the 13.06 game
-  executable's reflection data, read statically on 2026-09-28; no game file
-  or extract of one is in this repository. The declared values are from a
-  fresh 13.06 export (integration binary `9f92756`, checkpoints on), whose
-  main-stream and checkpoint declarations agree. Every identity has the same
-  checksum in every build (above), so the result is not specific to 13.06.
-  `tools/tests/test_extract_ground_volumes.py` recomputes each value from
-  the names alone.
+- The struct and member names are from the 13.06 game executable's
+  reflection data; no game file or extract of one is in this repository.
+  Every identity has the same checksum in every build, so the result is not
+  specific to 13.06, and `tools/tests/test_extract_ground_volumes.py`
+  recomputes each value from the names alone.
 
 `TJunctions` stays raw: its checksum says `TArray`, and 16 zero bits are
 exactly an empty array's packed count and terminator, but no element was ever
@@ -237,8 +224,7 @@ Item `fields` keep the declared names, `253` included. The receipt's
 declares exactly these (name, checksum) pairs: `253` -> `ID`, `X` ->
 `GridPos.X`, `Y` -> `GridPos.Y`. It is keyed by the pair, never by the name,
 so a build whose checksum differed would not be relabelled. `ID` is not the
-FastArray item ID: the two are equal on 15 of the 280 items of the smoke run
-below.
+FastArray item ID: the two are equal on only 15 of 280 sampled items.
 
 `Status` names come from one build. In the 13.06 executable the member's
 enum is `EGroundVolumeFragmentStatus`: `AllInside` 0, `PartiallyOutside` 1,
@@ -252,145 +238,32 @@ sentinel, not a state: a 4, like a 5-7, is left unnamed. The receipt counts
 `status_named`, `status_unnamed_declaration` and `status_unnamed_value`,
 zeros included. These are names, not measured behaviour.
 
-Smoke run, 2026-09-28, on four exports -- two 13.06, one 13.05 with a
-declared-class window, one 12.06: windows and items identical to the
-previous version apart from the added fields, 0 rejected; `status_named` 118
-(every 13.06 item), `status_unnamed_declaration` 405 (every 13.05 and 12.06
-item), `status_unnamed_value` 0; `resolved_names` holds all three names in
-the 13.x exports and only `X`/`Y` in 12.06, which declares no `253`.
-
 ## Validation independent of the decoder
 
-**A second reader agrees on every value.** A separately written reader shares
-no code with the tool: it selects rows per Parquet row group by dictionary
-code, expands each window to a bit string, converts IEEE-754 bit patterns
-with integer arithmetic, and recognizes arrays from the declaration. On all
-1,018 exports it agrees with the tool on the physical ordinal and status of
-all 36,661 windows, every entry's offset, width, header words and deleted and
-changed counts, the identity of all 346,186 items, and all 4,129,661
-item-level member values including the 4,867,849 array elements inside them,
-with 0 mismatches. Planting any one of ten perturbations into a copy of the
-tool's output -- one ulp on a float, a grid coordinate, a reversed polygon, an
-item ID, a bool written as an integer, a dropped item, a segment index, an
-entry offset, a window status, a hull view -- is reported as a mismatch.
-
-**Members that are serialized separately agree with each other.** Counts are
-items per route, bare / declared.
-
-| Relation | Bare | Declared |
-|---|---:|---:|
-| `Floor` equals the lowest polygon Z rounded to f32, builds 12.06-13.06 | 323,040 / 323,040 | 5,192 / 5,192 |
-| The same, builds 11.06-12.05 | 17,872 / 17,954 | -- |
-| `Ceiling` equals the largest per-point ceiling (non-empty arrays) | 323,040 / 323,040 | 5,192 / 5,192 |
-| `TravelDistance` equals the mean per-point travel distance (1e-6 relative; largest deviation 1.35e-6) | 323,040 / 323,040 | 5,192 / 5,192 |
-| One per-point ceiling and travel distance per polygon point | 323,040 / 323,040 | 5,192 / 5,192 |
-| Every `ExteriorSegments` pair indexes the polygon | 232,637 / 232,637 | 2,934 / 2,934 |
-| `Ceiling` above `Floor` | 340,975 / 340,994 | 5,192 / 5,192 |
-
-The 82 older-build floors that differ are all in 11.06-12.05, before the
-per-point arrays carried data; there the relation is not exact. Of the 19
-cells without a ceiling above the floor, 18 have the two equal and one, in
-12.04, has the ceiling lower.
-
-**The polygons sit on a grid at the owner's spawn.** Per object, the cell size
-is the most common side of its square four-point polygons, the origin is the
-most common corner offset of those squares, and the frame is the best of the
-eight axis-aligned orientations. Each item's polygon must then lie inside the
-cell its own `X`/`Y` name, within 0.01 units.
-
-| Grid check | Bare | Declared |
-|---|---:|---:|
-| Items inside their own cell | 340,780 / 340,842 | 4,924 / 5,192 |
-| Objects fully explained | 9,438 / 9,453 | 15 / 62 |
-| Objects without a square cell (not measured) | 13 (152 items) | 0 |
-| Cell size | 160 on 9,437 objects, 158 on 16 | 200 on 62 |
-| Frame against the owner's spawn yaw (objects whose owner has one) | world-aligned on 9,303 / 9,304, whatever the yaw | the yaw rounded to a multiple of 90 degrees on 62 / 62 |
-| Grid origin to owner spawn XY, median / p99 / max | 0.041 / 1.03 / 160.0 | 0.036 / 0.07 / 1.02 |
-
-The spawn position in `actors.parquet` carries one decimal, so a median of
-0.04 puts the grid origin at the spawn; the yaw is a separate column the fit
-never reads, and it predicts the declared-class frame every time. 149 bare
-objects have an owner without a spawn yaw. The declared-class misses are
-cells with `Status` 1-3 whose points reach at most 0.124 cells beyond the
-named cell. Of the 15 bare objects not fully explained, 13 have points at most
-0.5 cells outside the named cell, and two are fits the estimate gets wrong: a
-158 size taken from a clipped square, and a mirrored frame explaining 5 of 17
-items.
-
-**The rest of the geometry.**
-
-- Per cell, the polygon point farthest from the owner's spawn XY: bare
-  median 440, max 615 units; declared median 849, max 1,737.
-- `Floor` minus the owner's spawn Z: bare median -1.0 (p01 -306, p99 97);
-  declared median -115.
-- Inside the XY extent of every other actor's spawn position plus 1,000
-  units: 340,928 / 340,994 bare, 5,192 / 5,192 declared. The 66 exceptions
-  belong to three owners; two of them (64 items) spawned outside that extent
-  themselves.
-- Polygon orientation: 340,982 counter-clockwise, 11 clockwise, 1 zero area
-  (bare); all 5,192 counter-clockwise (declared). 77 bare polygons have an
-  area below 1 square unit.
-- Not every polygon named `ConvexHullPoints` is convex: 522 bare and 166
-  declared polygons turn both ways. 519 of the 522 and all 166 have
-  `Status` 1-3.
-- A per-point travel distance, in cells, is at least the straight-line
-  distance from the grid origin within 0.001 for 1,491,343 of 1,494,461 bare
-  points and 20,813 of 21,327 declared points (median ratio 1.07). Its exact
-  meaning, including where the declared class measures from, is not
-  established.
-
-**Time and identity.**
-
-- No cell update precedes its owner actor's first `open` or follows its last
-  `close`: 0 and 0 of 346,186. 1,894 updates belong to owners with no `close`
-  in the replay.
-- 120 updates re-send an item ID already seen on the same object. All 120
-  change `Status` (2 to 3 in 119, 1 to 3 in one) and nothing else: `253`,
-  `X`, `Y` and `TravelDistance` never change for an item ID.
-- Per object, the largest `TravelDistance` among newly appearing items never
-  decreases from window to window on 8,810 of 9,466 bare objects and on all
-  62 declared ones: new cells mostly appear in order of increasing
-  `TravelDistance`, but not strictly.
-
-## Tests and mutations
+- **A second reader agrees on every value.** A separately written reader
+  sharing no code with the tool agrees on all 1,018 exports: the physical
+  ordinal and status of all 36,661 windows, every entry header, all 346,186
+  item identities and 4,129,661 member values, including the 4,867,849 array
+  elements, with 0 mismatches.
+- **Separately serialized members agree.** On 12.06--13.06 `Floor` is the
+  lowest polygon Z rounded to f32 on every cell (on 11.06--12.05, before the
+  per-point arrays carried data, 17,872 of 17,954); `Ceiling` is the largest
+  per-point ceiling and `TravelDistance` the mean per-point travel distance
+  (within 1.35e-6) on every cell with points; every `ExteriorSegments` pair
+  indexes its polygon.
+- **The polygons sit on a grid at the owner's spawn.** Fitting a cell size
+  (160 units bare, 200 declared), origin and axis-aligned frame per object,
+  340,780 of 340,842 bare and 4,924 of 5,192 declared items lie inside the cell
+  their own `X`/`Y` name; the grid origin is a median 0.04 units from the
+  owner's spawn XY, and the declared-class frame is the owner's spawn yaw
+  rounded to 90 degrees on 62 of 62 objects.
+- **Time and identity.** No cell update precedes its owner's first `open` or
+  follows its last `close`. The 120 updates that re-send an item ID change
+  only `Status`; `253`, `X`, `Y` and `TravelDistance` never change for an ID.
 
 `tools/tests/test_extract_ground_volumes.py` builds every fixture bit by bit
-from the grammar above; no replay bytes are used. Its checksum tests compute
-CRC-32 from member names alone, apart from the tool, which holds only the
-declared numbers. Each of 42 mutations applied to a scratch copy of the tool
-made at least one test fail, and in each case the test named for the broken
-property:
-
-| Mutation | Test that fails |
-|---|---|
-| Member handle read as `encoded`, not `encoded - 1` | `test_member_handle_is_encoded_minus_one` |
-| Support bit not checked | `test_support_bit_must_be_set` |
-| Unconsumed entry bits accepted | `test_unconsumed_entry_bits_reject` |
-| Scalar width not checked | `test_scalar_width_must_match_type` |
-| f32 read as an integer; vector read as two doubles | `test_floats_are_ieee754_and_vectors_three_doubles` |
-| Array index order / bounds / completeness not checked | `test_array_elements_must_be_whole_and_in_order` |
-| Unconsumed array bits accepted | `test_array_payload_must_close_exactly` |
-| Element missing a member accepted | `test_element_missing_a_member_rejects` |
-| Member placement or duplicates not checked | `test_member_placement_and_declaration` |
-| Route identity not checked | `test_route_identity_is_checked` |
-| Unmeasured build accepted | `test_unmeasured_builds_and_checkpoint_rows_stay_raw` |
-| Declaration conflict ignored | `test_declaration_conflict_is_detected` |
-| Slot count not required | `test_cnc_slot_count_must_be_declared_and_agree` |
-| ClassNetCache handle hardcoded to one bit | `test_cnc_handle_width_follows_declared_slots` |
-| ClassNetCache field identity not checked | `test_cnc_field_must_be_declared_fragment_info` |
-| Non-finite floats accepted | `test_nonfinite_float_rejects` |
-| 32-bit values read unsigned | `test_integers_are_signed_32_bit` |
-| Untyped member width not checked | `test_untyped_member_kept_raw_and_counted` |
-| Counters not written when zero | `test_every_counter_is_written_even_when_zero` |
-| Input change during a run not detected | `test_changed_input_does_not_publish` |
-| Object outer not compared with the actor; unresolved object not counted | `test_object_outer_is_checked_against_the_actor` |
-| A `MEMBERS` checksum mistyped | `test_declared_checksums_reproduce_from_the_struct_chain` |
-| An identity added to `MEMBERS` without being reproduced or listed as width-only | `test_every_member_is_reproduced_or_width_only` |
-| `X` read unsigned, `bIsActive` read as a 1-bit integer, `TJunctions` decoded as an array | `test_members_are_read_as_the_type_their_checksum_encodes` |
-| A resolved name that is not its checksum's path, or its key's checksum mistyped | `test_resolved_names_are_the_paths_their_checksums_encode` |
-| Resolved names matched by the declared name alone | `test_resolved_names_follow_the_declared_checksum` |
-| `Status` named whatever its identity (reachable only by a direct call: decoding admits one `Status` identity), or in every build; `Count` named as a state | `test_status_names_only_for_the_declaration_they_were_read_from` |
-| An unnamed value tallied as named; a status counter not incremented; the build not passed to the item; `status_name` or `resolved_names` not written | `test_status_name_is_written_and_counted_per_declaration` |
+from the grammar above (no replay bytes), and each test is named for the
+property it breaks when the tool is mutated.
 
 ## What is not established
 
@@ -417,8 +290,3 @@ rows; and a custom-delta reader for `FragmentInfo` -- the FastArray body in
 `crates/vrf-decode/src/fastarray.rs` with no per-item checksum, then the
 member grammar above -- emitting item members as rows typed by declared
 (name, checksum). Neither is attempted here.
-
-Private evidence -- the declaration survey, the per-export outputs, the second
-reader's comparison, the validation and route-completeness runs and the
-mutation log -- is retained outside the repository. This document quotes only
-aggregate counts: no replay bytes, paths or player data.

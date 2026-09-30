@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
-import tempfile
 import unittest
 from collections import Counter
 from contextlib import redirect_stderr, redirect_stdout
@@ -14,8 +12,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import analyze_raw_properties as raw_inventory  # noqa: E402
+from support import TempDirTestCase
+import analyze_raw_properties as raw_inventory
 
 
 SCHEMA = pa.schema(
@@ -66,7 +64,7 @@ def row(
     }
 
 
-class AnalyzeExportTests(unittest.TestCase):
+class AnalyzeExportTests(TempDirTestCase):
     def _write_export(self, root: Path, rows: list[dict]) -> None:
         (root / "manifest.json").write_text(
             json.dumps({"replay_build": "++Ares-Core+release-13.04"}),
@@ -88,11 +86,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=5, group="/private/Rpc_ClassNetCache", handle=4, name=None,
                 bits=8, raw=b"\xff"),
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            build = raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        build = raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         self.assertEqual(build, "13.04")
         self.assertEqual(inventory.field_rows[build], 5)
@@ -116,11 +113,10 @@ class AnalyzeExportTests(unittest.TestCase):
         rows = [
             row(packet=1, group="/private/group", handle=1, name=None, bits=0, raw=None)
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         self.assertEqual(inventory.integrity_failures, 1)
         self.assertEqual(inventory.unnamed_raw_rows["13.04"], 0)
@@ -130,11 +126,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=1, group="/private/group", handle=1, name=None,
                 bits=9, raw=b"\x01")
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         self.assertEqual(inventory.integrity_failures, 1)
         self.assertEqual(inventory.unnamed_wrong_length_rows["13.04"], 1)
@@ -145,11 +140,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=991, group=private_group, handle=987654, name=None,
                 bits=24, raw=b"\x01\x02\x03")
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         report = raw_inventory.render_report(
             inventory,
@@ -195,17 +189,17 @@ class AnalyzeExportTests(unittest.TestCase):
             ]),
         ]
         inventory = raw_inventory.Inventory()
-        with tempfile.TemporaryDirectory() as td:
-            for ordinal, (build, rows) in enumerate(exports, 1):
-                root = Path(td) / str(ordinal)
-                root.mkdir()
-                (root / "manifest.json").write_text(
-                    json.dumps({"replay_build": f"++Ares-Core+release-{build}"}),
-                    encoding="utf-8",
-                )
-                pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMA),
-                               root / "fields.parquet")
-                raw_inventory.analyze_export(root, inventory, replay_ordinal=ordinal)
+        td = self.tmp()
+        for ordinal, (build, rows) in enumerate(exports, 1):
+            root = td / str(ordinal)
+            root.mkdir()
+            (root / "manifest.json").write_text(
+                json.dumps({"replay_build": f"++Ares-Core+release-{build}"}),
+                encoding="utf-8",
+            )
+            pq.write_table(pa.Table.from_pylist(rows, schema=SCHEMA),
+                           root / "fields.parquet")
+            raw_inventory.analyze_export(root, inventory, replay_ordinal=ordinal)
 
         report = raw_inventory.render_report(
             inventory,
@@ -311,11 +305,10 @@ class AnalyzeExportTests(unittest.TestCase):
             row(packet=991, group=private_group, handle=987654, name=None,
                 bits=24, raw=b"\x01\x02\x03")
         ]
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self._write_export(root, rows)
-            inventory = raw_inventory.Inventory()
-            raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
+        root = self.tmp()
+        self._write_export(root, rows)
+        inventory = raw_inventory.Inventory()
+        raw_inventory.analyze_export(root, inventory, replay_ordinal=1)
 
         document = raw_inventory.summary_document(
             inventory,
@@ -373,13 +366,15 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn("/private/replay-name", error.getvalue())
 
     def test_build_help_states_the_default_builds(self):
-        """--help names exactly the builds a default run samples."""
+        """--help names the builds a default run samples."""
         printed = io.StringIO()
         with redirect_stdout(printed), self.assertRaises(SystemExit):
             raw_inventory.parse_args(["--help"])
         text = " ".join(printed.getvalue().split())
-        self.assertIn(f"(default: {', '.join(raw_inventory.DEFAULT_BUILDS)})", text)
+        self.assertIn(f"(default: the newest {raw_inventory.DEFAULT_BUILD_COUNT} builds found)", text)
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_the_default_builds_are_the_newest_by_number(self):
+        """Compared as text, 9.10 would outrank 13.06 and 13.2 would outrank 13.10."""
+        labels = ["13.06", "9.10", "12.10", "13.05", "11.06", "13.06", "10.01"]
+        self.assertEqual(raw_inventory.newest_builds(labels), ("12.10", "13.05", "13.06"))
+        self.assertEqual(raw_inventory.newest_builds(["13.10", "13.2", "13.06"], 2), ("13.06", "13.10"))

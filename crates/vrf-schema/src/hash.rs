@@ -10,8 +10,7 @@ pub type FxHashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx
 /// A `HashSet` using [`FxHasher`].
 pub type FxHashSet<T> = std::collections::HashSet<T, BuildHasherDefault<FxHasher>>;
 
-/// Copied verbatim from `rustc_hash` (2^64 / pi, rounded), so the mixing is
-/// the one rustc exercises rather than something invented here.
+/// `rustc_hash`'s constant (2^64 / pi, rounded): the mixing rustc exercises.
 const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 
 /// A fast, non-cryptographic hasher for locally-sourced keys.
@@ -23,8 +22,7 @@ pub struct FxHasher {
 impl FxHasher {
     #[inline]
     fn add(&mut self, word: u64) {
-        // Rotating before the XOR is what stops the high bits of successive
-        // words from cancelling; the multiply then diffuses low bits upward.
+        // The rotate keeps successive words' high bits from cancelling.
         self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(SEED);
     }
 }
@@ -77,8 +75,7 @@ impl Hasher for FxHasher {
 
     #[inline]
     fn finish(&self) -> u64 {
-        // Not a half swap: rotating by 20 brings the multiply's well-mixed high
-        // bits down to the low bits hashbrown takes the bucket index from.
+        // Brings the multiply's well-mixed high bits down to hashbrown's bucket bits.
         self.hash.rotate_left(20)
     }
 }
@@ -96,8 +93,7 @@ mod tests {
 
     #[test]
     fn distinct_small_integers_do_not_collide() {
-        // NetGUID keys are small and dense; a mix that collapsed them would
-        // turn every probe into a bucket walk.
+        // NetGUID keys are small and dense.
         let mut seen = std::collections::HashSet::new();
         for guid in 0u32..10_000 {
             assert!(seen.insert(hash_of(&guid)), "collision at {guid}");
@@ -106,8 +102,7 @@ mod tests {
 
     #[test]
     fn distinct_paths_do_not_collide_across_the_reference_shapes() {
-        // Real group paths share long prefixes; a hash that only looked at the
-        // first word would collide en masse on these.
+        // Real group paths share long prefixes.
         let paths = [
             "/Script/ShooterGame.AresAttributeSet",
             "/Script/ShooterGame.AresAbilitySystemComponent",
@@ -124,21 +119,16 @@ mod tests {
 
     #[test]
     fn byte_slice_length_changes_the_hash() {
-        // A trailing-chunk bug that ignored the tail would make these equal.
         assert_ne!(hash_of(&"Ares"), hash_of(&"Ares "));
         assert_ne!(hash_of(&"AresAttribute"), hash_of(&"AresAttributeS"));
     }
 
+    /// The crate's only FxHasher-backed test map spanning many probe groups, so
+    /// the only test a hash that depends on anything but the key fails.
     #[test]
     fn works_as_a_hashmap_hasher() {
-        let mut map: FxHashMap<u32, &str> = FxHashMap::default();
-        for i in 0..1000u32 {
-            map.insert(i, "x");
-        }
-        assert_eq!(map.len(), 1000);
-        for i in 0..1000u32 {
-            assert_eq!(map.get(&i), Some(&"x"));
-        }
+        let map: FxHashMap<u32, u32> = (0..1000).map(|i| (i, i)).collect();
+        assert!((0..1000).all(|i| map.get(&i) == Some(&i)));
         assert_eq!(map.get(&1000), None);
     }
 }

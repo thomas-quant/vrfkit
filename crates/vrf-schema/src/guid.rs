@@ -1,24 +1,23 @@
 //! NetGUID value types: the identifier itself, its export flags, and the
 //! per-GUID record the cache hands back.
 
-/// A 32-bit network GUID referencing a replicated object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A network GUID as transmitted on the wire: `0` is no object, `1` the
+/// default object (its export flags are always read), odd values static
+/// (level-placed) actors and even non-zero values dynamic (spawned) ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct NetworkGuid(pub u32);
 
 impl NetworkGuid {
-    /// The zero GUID is invalid (never assigned by the engine).
     #[must_use]
     pub const fn is_valid(self) -> bool {
         self.0 != 0
     }
 
-    /// GUID 1 is the default object, which always carries export flags.
     #[must_use]
     pub const fn is_default(self) -> bool {
         self.0 == 1
     }
 
-    /// Dynamic objects have an even GUID (bit 0 clear).
     #[must_use]
     pub const fn is_dynamic(self) -> bool {
         self.is_valid() && (self.0 & 1) == 0
@@ -32,7 +31,6 @@ pub struct ExportFlags(pub u8);
 impl ExportFlags {
     pub const NONE: Self = Self(0);
     pub const HAS_PATH: Self = Self(1 << 0);
-    #[allow(dead_code)]
     pub const NO_LOAD: Self = Self(1 << 1);
     pub const HAS_NETWORK_CHECKSUM: Self = Self(1 << 2);
 

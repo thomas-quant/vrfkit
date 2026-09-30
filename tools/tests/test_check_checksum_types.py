@@ -11,17 +11,14 @@ if four things hold, each breakable without anything else noticing:
     other mismatch still fails, and an item that applies to the input and
     covers nothing is STALE and fails.
 """
-import contextlib
-import io
 import json
 import random
-import sys
-import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import check_checksum_types as cct  # noqa: E402
+from support import TempDirTestCase, run_cli
+import check_checksum_types as cct
 
 
 # A second implementation of the formula, written from UE 5.3 FCrc rather than
@@ -64,23 +61,26 @@ def ue_checksum(name, cpp_type, static_index=0, parent=0):
     return ue_mem_crc32_u32(static_index, crc)
 
 
-# Declared checksums from real replays (the 1,018-replay declaration corpus,
-# 11.06-13.06, collected 2026-09-28), with the parent chain that reproduces
-# them; the chains' provenance is in PARENT_CHAINS.
+# Declared checksums from real replays (11.06-13.06), with the parent chain
+# that reproduces them. Chains the overlay needs are in PARENT_CHAINS with
+# their source; the formula-only ones have theirs beside the constant.
 # (wire name, name hashed, C++ type, chain links, declared checksum)
 
 TRANSFORM = (("Transform", "FTransform"),)
 SPAWN_TRANSFORM = (("SpawnTransform", "FTransform"),)
 HANDLE = (("Handle", "FForceModuleHandle"),)
 CORRECT = (("AuthServerCorrectRepVariables", "FInventoryServerCorrectRepVariables"),)
+# 13.06 reflection: FBlindManagerState.ActiveBlinds (TArray<FActiveBlind>), FActiveBlind.BlindEffectID
 BLIND = (("AuthBlindManagerState", "FBlindManagerState"), ("ActiveBlinds", "TArray"),
          ("ActiveBlinds", "FActiveBlind"))
 BLIND_EFFECT = BLIND + (("BlindEffectID", "FEffectID"),)
+# 13.06 reflection: UGroundVolumeComponent.FragmentInfo.Items, FGroundVolumeFragment.GridPos
 FRAGMENT = (("FragmentInfo", "FGroundVolumeFragmentArray"), ("Items", "TArray"),
             ("Items", "FGroundVolumeFragment"))
 GRID = FRAGMENT + (("GridPos", "FIntPoint"),)
 ATTACH = (("AttachmentReplication", "FRepAttachment"),)
 EFFECT_ID = (("EffectID", "FEffectID"),)
+ACTIVE_EFFECT = (("ServerActiveEffects", "TArray"), ("ServerActiveEffects", "FActiveEffectInfo"))
 
 REPLAY_VECTORS = (
     # effect RPCs and TransformTransitionContext: `249` is FTransform.Rotation
@@ -94,6 +94,13 @@ REPLAY_VECTORS = (
     ("StopMovementTime", "StopMovementTime", "float", (), 244888268),
     ("EffectManagerComponent", "EffectManagerComponent", "UEffectManagerComponent*", (), 1051633025),
     ("EffectID", "EffectID", "int64", EFFECT_ID, 2340855891),
+    ("EffectID", "EffectID", "int64", (("CurrentEffectID", "FEffectID"),), 2251343646),
+    ("NetTimestamp", "NetTimestamp", "float", (("TimeStamp", "FNetworkedMovementTimestamp"),), 259706372),
+    ("StartTimeStamp", "StartTimeStamp", "float", ACTIVE_EFFECT, 3801979459),
+    ("EffectID", "EffectID", "int64", ACTIVE_EFFECT + EFFECT_ID, 1129645208),
+    # 13.06 reflection: FActiveEffectInfo.Transform
+    ("Translation", "Translation", "FVector", ACTIVE_EFFECT + TRANSFORM, 2319708401),
+    ("LongestActiveBlindDuration", "LongestActiveBlindDuration", "float", BLIND[:1], 3668710569),
     ("BlindId", "BlindId", "uint32", BLIND, 2836858544),
     ("InitialDuration", "InitialDuration", "float", BLIND, 1370668337),
     ("SourceID", "SourceID", "FName", BLIND_EFFECT, 4130766059),
@@ -115,7 +122,7 @@ REPLAY_VECTORS = (
     ("248", "Location", "FVector", (), 598402184),
     # a bitfield bool (`uint8 bIsActive:1`) hashes as its storage type
     ("bIsActive", "bIsActive", "uint8", (), 2967469237),
-    # Blueprint fields matched by the 13.06 pak reader (bp-properties track)
+    # a top-level Blueprint field
     ("BoundToGamePhase", "BoundToGamePhase", "bool", (), 520326154),
 )
 
@@ -193,29 +200,7 @@ class FormulaTests(unittest.TestCase):
         prefixes = {links[:i] for links in pinned for i in range(1, len(links) + 1)}
         for chain in cct.PARENT_CHAINS:
             with self.subTest(chain=chain.links):
-                self.assertTrue(chain.links in prefixes or self._reproduces_member(chain),
-                                "no replay vector exercises this chain")
-
-    @staticmethod
-    def _reproduces_member(chain):
-        # Chains whose members vrfkit types but no vector above names: pinned
-        # by a member checksum from the same corpus.
-        extra = {
-            (("TimeStamp", "FNetworkedMovementTimestamp"),): ("NetTimestamp", "float", 259706372),
-            (("CurrentEffectID", "FEffectID"),): ("EffectID", "int64", 2251343646),
-            (("ServerActiveEffects", "TArray"), ("ServerActiveEffects", "FActiveEffectInfo")):
-                ("StartTimeStamp", "float", 3801979459),
-            (("ServerActiveEffects", "TArray"), ("ServerActiveEffects", "FActiveEffectInfo"),
-             ("EffectID", "FEffectID")): ("EffectID", "int64", 1129645208),
-            (("ServerActiveEffects", "TArray"), ("ServerActiveEffects", "FActiveEffectInfo"),
-             ("Transform", "FTransform")): ("Translation", "FVector", 2319708401),
-            (("AuthBlindManagerState", "FBlindManagerState"),):
-                ("LongestActiveBlindDuration", "float", 3668710569),
-        }.get(chain.links)
-        if extra is None:
-            return False
-        name, cpp, declared = extra
-        return cct.compatible_checksum(name, cpp, 0, cct.chain_checksum(chain.links)) == declared
+                self.assertIn(chain.links, prefixes, "no replay vector exercises this chain")
 
 
 class ParseTests(unittest.TestCase):
@@ -389,7 +374,7 @@ class ClassifyTests(unittest.TestCase):
 
 
 def identity(group, name, handle, checksum, build="13.06"):
-    return cct.Identity(group, name, handle, checksum, {build}, 1)
+    return cct.Identity(group, name, handle, checksum, {build})
 
 
 class ReportTests(unittest.TestCase):
@@ -620,10 +605,7 @@ def write_export(root: Path, name: str, groups, build="++Ares-Core+release-13.06
 
 
 def run_main(*argv):
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cct.main(list(argv))
-    return code, out.getvalue(), err.getvalue()
+    return run_cli(cct.main, *argv)
 
 
 # Identities typed by the committed tables in ways no pending change touches:
@@ -634,13 +616,23 @@ CORRECTION_INDEX = 3198546915
 OWNER = cct.compatible_checksum("Owner", "AActor*")
 
 
-class MainTests(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
+def write_checkpoint(d: Path, groups=((0, INVENTORY),), **fields):
+    """Checkpoint 0's declaration tables: `groups` are (ordinal, path), and
+    `fields` the field table's other columns."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    pq.write_table(pa.table({"checkpoint_index": pa.array([0] * len(groups), pa.uint32()),
+                             "ordinal": pa.array([o for o, _ in groups], pa.uint32()),
+                             "group_path": [path for _, path in groups]}),
+                   d / "checkpoint_export_groups.parquet")
+    rows = len(fields["handle"])
+    pq.write_table(pa.table({"checkpoint_index": pa.array([0] * rows, pa.uint32()), **fields}),
+                   d / "checkpoint_export_fields.parquet")
 
-    def tearDown(self):
-        self._tmp.cleanup()
+
+class MainTests(TempDirTestCase):
+    def setUp(self):
+        self.root = self.tmp()
 
     def test_a_clean_export_exits_0_and_prints_its_zeros(self):
         d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX),
@@ -648,7 +640,6 @@ class MainTests(unittest.TestCase):
         code, out, _ = run_main("--export", str(d))
         self.assertEqual(code, 0, out)
         self.assertIn("      2  match", out)
-        self.assertIn("      0  mismatch", out)
         self.assertIn("      0  untestable", out)
         self.assertIn("      0  static-array element (index > 0)", out)
         self.assertIn(f"      0  {cct.ENUM_CAPABLE}", out)
@@ -656,6 +647,22 @@ class MainTests(unittest.TestCase):
         # print their zero mismatch line
         self.assertEqual(out.count("      0  mismatch"), 2, out)
         self.assertIn("mismatches: 0 identities, 0 checksum_table.rs carriers", out)
+        # the expected list, none of whose checksums this export declares
+        self.assertIn("      0 / 0     unexpected", out)
+        self.assertIn("      0 / 0     expected", out)
+        n = len(committed_items())
+        self.assertIn(f"expected mismatches (tools/fixtures/checksum_types_expected.json): {n} item(s)",
+                      out)
+        self.assertIn("      0  matched", out)
+        self.assertIn("      0  STALE", out)
+        self.assertIn(f"{n:>7}  not applicable", out)
+        empty = self.root / "empty.json"
+        empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
+        code, out, _ = run_main("--export", str(d), "--expected", str(empty))
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 item(s)", out)
+        for state in cct.EXPECTED_STATES:
+            self.assertIn(f"      0  {state}:", out)
 
     def test_an_unclassified_field_type_variant_stops_the_run(self):
         """A `FieldType` variant `CPP_TYPES` does not map would otherwise be
@@ -664,25 +671,11 @@ class MainTests(unittest.TestCase):
         d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
         trimmed = {k: v for k, v in cct.CPP_TYPES.items() if k != "FTextTree"}
         self.assertNotEqual(len(trimmed), len(cct.CPP_TYPES), "the fixture must remove a variant")
-        original = cct.CPP_TYPES
-        cct.CPP_TYPES = trimmed
-        try:
+        with mock.patch.object(cct, "CPP_TYPES", trimmed):
             code, out, err = run_main("--export", str(d))
-        finally:
-            cct.CPP_TYPES = original
         self.assertEqual(code, 2, out + err)
         self.assertIn("FieldType variant(s) ['FTextTree'] are not classified in CPP_TYPES", err)
         self.assertNotIn("OK:", out)
-
-    def test_a_type_the_checksum_contradicts_exits_1(self):
-        seed = cct.chain_checksum(CORRECT)
-        wrong = cct.compatible_checksum("CorrectionIndex", "uint32", 0, seed)
-        d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", wrong)]})
-        code, out, err = run_main("--export", str(d))
-        self.assertEqual(code, 1)
-        self.assertIn("MISMATCH /Script/ShooterGame.AresInventory | CorrectionIndex", out)
-        self.assertIn("reproduces uint32 under AuthServerCorrectRepVariables", out)
-        self.assertIn("FAILED", err)
 
     def test_nothing_typed_is_a_failure_not_a_pass(self):
         d = write_export(self.root, "e", {"/Game/Nothing.Nothing_C": [(1, "NoSuchField", 5)]})
@@ -741,21 +734,13 @@ class MainTests(unittest.TestCase):
         differs from the control in one column, on a row that joins its
         group (an orphan never reaches the check)."""
         import pyarrow as pa
-        import pyarrow.parquet as pq
-        groups = pa.table({"checkpoint_index": pa.array([0], pa.uint32()),
-                           "ordinal": pa.array([0], pa.uint32()),
-                           "group_path": [INVENTORY]})
 
         def export(name, handle=pa.array([30], pa.uint32()),
                    checksum=pa.array([CORRECTION_INDEX], pa.uint32()),
                    rendered_name=pa.array(["CorrectionIndex"])):
             d = write_export(self.root, name, {})
-            pq.write_table(groups, d / "checkpoint_export_groups.parquet")
-            pq.write_table(pa.table({"checkpoint_index": pa.array([0], pa.uint32()),
-                                     "group_ordinal": pa.array([0], pa.uint32()),
-                                     "handle": handle, "compatible_checksum": checksum,
-                                     "rendered_name": rendered_name}),
-                           d / "checkpoint_export_fields.parquet")
+            write_checkpoint(d, group_ordinal=pa.array([0], pa.uint32()), handle=handle,
+                             compatible_checksum=checksum, rendered_name=rendered_name)
             return d
 
         code, out, err = run_main("--export", str(export("control")))
@@ -780,23 +765,16 @@ class MainTests(unittest.TestCase):
 
     def test_checkpoint_declarations_are_read_and_a_duplicate_group_key_refused(self):
         import pyarrow as pa
-        import pyarrow.parquet as pq
         d = write_export(self.root, "e", {})
-        groups = pa.table({"checkpoint_index": pa.array([0], pa.uint32()),
-                           "ordinal": pa.array([0], pa.uint32()),
-                           "group_path": [INVENTORY]})
-        fields = pa.table({"checkpoint_index": pa.array([0, 0], pa.uint32()),
-                           "group_ordinal": pa.array([0, 1], pa.uint32()),
-                           "handle": pa.array([30, 31], pa.uint32()),
-                           "compatible_checksum": pa.array([CORRECTION_INDEX, 1076231069], pa.uint32()),
-                           "rendered_name": ["CorrectionIndex", "LastSeenClientCorrectionIndex"]})
-        pq.write_table(groups, d / "checkpoint_export_groups.parquet")
-        pq.write_table(fields, d / "checkpoint_export_fields.parquet")
+        fields = {"group_ordinal": pa.array([0, 1], pa.uint32()), "handle": pa.array([30, 31], pa.uint32()),
+                  "compatible_checksum": pa.array([CORRECTION_INDEX, 1076231069], pa.uint32()),
+                  "rendered_name": ["CorrectionIndex", "LastSeenClientCorrectionIndex"]}
+        write_checkpoint(d, **fields)
         code, out, _ = run_main("--export", str(d))
         self.assertEqual(code, 0, out)
         self.assertIn("2 checkpoint declarations (1 exports carry them, 1 without a group)", out)
         self.assertIn("      1  match", out)
-        pq.write_table(pa.concat_tables([groups, groups]), d / "checkpoint_export_groups.parquet")
+        write_checkpoint(d, ((0, INVENTORY), (0, INVENTORY)), **fields)
         self.assertEqual(run_main("--export", str(d))[0], 2)
 
     def test_json_lists_every_classified_identity(self):
@@ -913,14 +891,14 @@ class ExpectedShapeTests(unittest.TestCase):
         self.assertEqual(cct.declared_checksums(ids), {5})
 
 
-class ExpectedListLoadTests(unittest.TestCase):
+class ExpectedListLoadTests(TempDirTestCase):
     PARENTS = {label for label, _ in cct.Seeds().named}
 
     def load(self, items):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.json"
-            path.write_text(json.dumps({"expected": items}), encoding="utf-8")
-            return cct.load_expected(path, self.PARENTS)
+        tmp = self.tmp()
+        path = tmp / "expected.json"
+        path.write_text(json.dumps({"expected": items}), encoding="utf-8")
+        return cct.load_expected(path, self.PARENTS)
 
     def test_an_item_loads_with_its_type_canonical(self):
         (item,) = self.load([listed(vrfkit_type="FieldType::VectorDouble")])
@@ -952,15 +930,15 @@ class ExpectedListLoadTests(unittest.TestCase):
             self.load([listed(), listed(reason="the same shape again")])
 
     def test_a_file_that_is_not_a_list_is_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "expected.json"
-            for text in ("not json", json.dumps({"items": []}), json.dumps([listed()])):
-                with self.subTest(text=text[:20]):
-                    path.write_text(text, encoding="utf-8")
-                    with self.assertRaises(cct.ExpectedListError):
-                        cct.load_expected(path, self.PARENTS)
-            with self.assertRaises(cct.ExpectedListError):
-                cct.load_expected(Path(tmp) / "absent.json", self.PARENTS)
+        tmp = self.tmp()
+        path = tmp / "expected.json"
+        for text in ("not json", json.dumps({"items": []}), json.dumps([listed()])):
+            with self.subTest(text=text[:20]):
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(cct.ExpectedListError):
+                    cct.load_expected(path, self.PARENTS)
+        with self.assertRaises(cct.ExpectedListError):
+            cct.load_expected(tmp / "absent.json", self.PARENTS)
 
     def test_every_committed_item_is_a_real_mismatch(self):
         """Each committed item's arithmetic, recomputed with the tool and with
@@ -991,15 +969,11 @@ class ExpectedListLoadTests(unittest.TestCase):
                 self.assertTrue(item.reason.isascii() and item.evidence.isascii())
 
 
-class ExpectedMainTests(unittest.TestCase):
+class ExpectedMainTests(TempDirTestCase):
     """End to end, through `main` and the committed tables."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
+        self.root = self.tmp()
 
     def write_list(self, *items) -> Path:
         path = self.root / "expected.json"
@@ -1054,6 +1028,7 @@ class ExpectedMainTests(unittest.TestCase):
         code, out, err = run_main("--export", str(d))
         self.assertEqual(code, 1)
         self.assertIn("MISMATCH /Script/ShooterGame.AresInventory | CorrectionIndex", out)
+        self.assertIn("reproduces uint32 under AuthServerCorrectRepVariables", out)
         self.assertIn(f"EXPECTED {EFFECT_RPC} | 249 | {ROTATION}", out)
         self.assertIn("FAILED", err)
 
@@ -1086,24 +1061,6 @@ class ExpectedMainTests(unittest.TestCase):
         empty = self.write_list()
         self.assertEqual(run_main("--export", str(d), "--expected", str(empty))[0], 0)
 
-    def test_an_input_without_the_checksums_prints_every_zero(self):
-        d = write_export(self.root, "e", {INVENTORY: [(30, "CorrectionIndex", CORRECTION_INDEX)]})
-        code, out, _ = run_main("--export", str(d))
-        self.assertEqual(code, 0, out)
-        self.assertIn("      0 / 0     unexpected", out)
-        self.assertIn("      0 / 0     expected", out)
-        n = len(committed_items())
-        self.assertIn(f"expected mismatches (tools/fixtures/checksum_types_expected.json): {n} item(s)",
-                      out)
-        self.assertIn("      0  matched", out)
-        self.assertIn("      0  STALE", out)
-        self.assertIn(f"{n:>7}  not applicable", out)
-        code, out, _ = run_main("--export", str(d), "--expected", str(self.write_list()))
-        self.assertEqual(code, 0, out)
-        self.assertIn("0 item(s)", out)
-        for state in cct.EXPECTED_STATES:
-            self.assertIn(f"      0  {state}:", out)
-
     def test_an_unreadable_list_exits_2(self):
         d = self.rotations()
         no_reason = listed()
@@ -1113,7 +1070,3 @@ class ExpectedMainTests(unittest.TestCase):
                 code, _, err = run_main("--export", str(d), "--expected", str(path))
                 self.assertEqual(code, 2)
                 self.assertIn("FAILED: expected list", err)
-
-
-if __name__ == "__main__":
-    unittest.main()

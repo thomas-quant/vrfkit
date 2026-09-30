@@ -3,17 +3,11 @@
 //! A run writes into `.{out}.vrfkit-staging-{pid}-{nonce}` beside the
 //! destination and publishes by renaming it over `--out`, moving any prior
 //! output aside to `.{out}.vrfkit-previous-{pid}-{nonce}` in between. `Drop`
-//! removes the staging directory of a run that fails in-process; a killed
-//! process runs no destructor. Measured at 259ed10: `Stop-Process -Force`
-//! 1.5 s into an export left `.pub2.vrfkit-staging-55396-0` holding a
-//! footerless 1,561,999-byte `fields.parquet` and no manifest. Power loss is
-//! the same case, and so -- reasoned, not measured -- is a Windows console
-//! Ctrl+C (no handler is installed; the default ends the process through
-//! `ExitProcess`). A kill between `publish`'s two renames strands the prior
-//! output, a complete export, in its `previous` sibling. Also at 259ed10, a
-//! re-export while another process had the destination as its working
-//! directory failed with only `I/O error: ... (os error 32)`: no path, and no
-//! sign that a fully decoded export was discarded.
+//! removes the staging directory of a run that fails in-process. A killed
+//! process (`Stop-Process -Force`, power loss, a console Ctrl+C: no handler is
+//! installed) runs no destructor and leaves staging behind with footerless
+//! tables; a kill between `publish`'s two renames strands the prior output, a
+//! complete export, in its `previous` sibling.
 //!
 //! The next export to the same destination names each such sibling and
 //! deletes nothing ([`report_leftovers`]). `tools/export_scan.py` recognises
@@ -28,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{CHECKPOINT_TABLES, MAIN_TABLES, MANIFEST};
+use crate::diagnose::usable_parent;
 
 static NEXT_OUTPUT_PATH: AtomicU64 = AtomicU64::new(0);
 
@@ -125,7 +120,7 @@ impl OutputTransaction {
     /// rename then fails, it is moved straight back. Only once the new
     /// directory is in place is the backup removed. Every error names the step,
     /// its paths and what became of the run's output, and keeps the OS error's
-    /// kind (the bare `os error 32` in the module doc said none of that).
+    /// kind.
     pub(super) fn publish(self) -> io::Result<()> {
         self.publish_reporting_to(&mut io::stderr())
     }
@@ -422,12 +417,6 @@ fn name_list(names: &[OsString]) -> String {
     list
 }
 
-fn usable_parent(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
 fn generated_name(destination_name: &OsStr, kind: &str, nonce: u64) -> OsString {
     let mut name = OsString::from(".");
     name.push(destination_name);
@@ -663,9 +652,10 @@ mod tests {
         );
     }
 
-    /// The first rename fails the way the measured os error 32 did: another
-    /// handle holds the destination without `FILE_SHARE_DELETE`. Windows-only,
-    /// like that refusal; every Rust CI job runs on Windows.
+    /// The first rename fails with os error 32: another handle (a process
+    /// whose working directory it is) holds the destination without
+    /// `FILE_SHARE_DELETE`. Windows-only, like that refusal; every Rust CI job
+    /// runs on Windows.
     #[cfg(windows)]
     #[test]
     fn a_destination_held_open_elsewhere_fails_naming_it_and_keeps_the_prior_output() {
@@ -710,7 +700,7 @@ mod tests {
         );
     }
 
-    /// The killed export's leftover measured in the module doc, name and all.
+    /// A killed export's leftover: a footerless table and no manifest.
     #[test]
     fn a_staging_directory_left_by_a_killed_export_is_reported_and_kept() {
         let root = TestDir::new();
@@ -874,24 +864,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_empty_destination_is_accepted() {
-        let root = TestDir::new();
-        let empty = root.path().join("empty");
-        fs::create_dir(&empty).unwrap();
-        for destination in [root.path().join("missing"), empty] {
-            let (transaction, warnings) = begin_capturing(&destination);
-            assert_eq!(warnings, "");
-            fs::write(transaction.path().join(MANIFEST), b"new complete").unwrap();
-            transaction.publish().unwrap();
-            assert_eq!(
-                fs::read(destination.join(MANIFEST)).unwrap(),
-                b"new complete"
-            );
-        }
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
-    }
-
-    #[test]
     fn a_directory_named_like_a_table_is_a_foreign_entry() {
         let root = TestDir::new();
         let destination = root.path().join("export");
@@ -913,6 +885,10 @@ mod tests {
         assert_eq!(
             fs::read(impostor.join("part-0.parquet")).unwrap(),
             b"someone else's dataset"
+        );
+        assert_eq!(
+            fs::read(destination.join(MANIFEST)).unwrap(),
+            b"old complete"
         );
     }
 
@@ -1008,51 +984,5 @@ mod tests {
         assert_eq!(name_list(&names[..2]), "f0, f1");
         assert_eq!(entry_count(1), "1 entry");
         assert_eq!(entry_count(10), "10 entries");
-    }
-
-    /// The loss `tests/export_destination.rs` reproduces through the binary:
-    /// refused before anything is decoded, and left exactly as it was.
-    #[test]
-    fn a_destination_holding_foreign_entries_is_refused_and_left_intact() {
-        let root = TestDir::new();
-        let destination = root.path().join("export");
-        fs::create_dir_all(destination.join("sub")).unwrap();
-        let kept: [(PathBuf, &[u8]); 4] = [
-            (destination.join("match.vrf"), b"the replay itself"),
-            (destination.join("precious.txt"), b"a file of the user's"),
-            (destination.join("sub").join("notes.txt"), b"nested"),
-            (destination.join("manifest.json"), b"old complete"),
-        ];
-        for (path, bytes) in &kept {
-            fs::write(path, bytes).unwrap();
-        }
-
-        let outcome = OutputTransaction::begin_reporting_to(&destination, &mut Vec::new())
-            .and_then(|transaction| {
-                fs::write(transaction.path().join("manifest.json"), b"new complete")?;
-                transaction.publish()
-            });
-
-        for (path, bytes) in &kept {
-            assert_eq!(
-                fs::read(path).ok().as_deref(),
-                Some(*bytes),
-                "{} must survive an export to {}",
-                path.display(),
-                destination.display()
-            );
-        }
-        let error = outcome.expect_err("a destination holding foreign entries must be refused");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        let message = error.to_string();
-        assert!(
-            message.contains("3 entries an export does not write (match.vrf, precious.txt, sub)"),
-            "the refusal must count and name every foreign entry, and only those: {message}"
-        );
-        assert!(
-            message.contains("choose a new or empty directory"),
-            "the refusal must say how to proceed: {message}"
-        );
-        assert!(staging_entries(root.path()).is_empty());
     }
 }

@@ -1,74 +1,43 @@
 //! DemoFrame iteration: decompressed replay-data chunk -> `(time_ms, packet)` sequence.
 //!
 //! A stage between the container (decompressed chunks) and the replication
-//! reader (packets), with its own error modes: a valid container can hold an
-//! invalid frame stream.
+//! reader (packets): a valid container can hold an invalid frame stream.
 //!
 //! # DemoFrame wire layout
 //!
-//! Each decompressed ReplayData chunk is a *sequence* of DemoFrames.
-//! A single DemoFrame has this structure (all reads are **byte-aligned**, using
-//! Unreal's `FBinaryArchive` -- i.e. `IntPacked` is still the 7-bit-per-byte
-//! encoding, `FString` is i32 length + bytes + null, etc.):
+//! A ReplayData chunk is a sequence of DemoFrames, read byte-aligned
+//! (`FBinaryArchive`: `IntPacked` is still 7 bits per byte, `FString` an i32
+//! length, the bytes and a null):
 //!
 //! ```text
-//! +--------------------------------------------------------------------------+
-//! | currentLevelIndex   : i32                                  (ignored)     |
-//! | timeSeconds         : f32                                  (frame time)  |
-//! +--------------------------------------------------------------------------+
-//! | -- ExportData --                                                         |
-//! |   numLayoutCmdExports: IntPacked -> ReadNetFieldExports                  |
-//! |   numExportGuids:      IntPacked -> ReadExportGuids                      |
-//! +--------------------------------------------------------------------------+
-//! | -- StreamingLevelFixes --                                                |
-//! |   [if HasStreamingFixes flag]:                                           |
-//! |     numLevels : IntPacked                                                |
-//! |     for each: FString (level name)                                       |
-//! |     externalOffset : u64                                                 |
-//! |   [else]:                                                                |
-//! |     numLevels : IntPacked                                                |
-//! |     for each: FString + FString + FTransform (10 floats = 40 bytes)      |
-//! +--------------------------------------------------------------------------+
-//! | -- ExternalData --                                                       |
-//! |   loop:                                                                  |
-//! |     numBits : IntPacked   (0 -> break)                                   |
-//! |     netGuid : IntPacked   (ignored)                                      |
-//! |     skip ceil(numBits/8) bytes                                           |
-//! +--------------------------------------------------------------------------+
-//! | -- GameSpecificFrameData --                                              |
-//! |   [if GameSpecificFrameData flag]:                                       |
-//! |     skipExternalOffset : u64                                             |
-//! |     skip that many bytes                                                 |
-//! +--------------------------------------------------------------------------+
-//! | -- Packet loop --                                                        |
-//! |   loop:                                                                  |
-//! |     [if HasStreamingFixes]:  seenLevelIndex : IntPacked (ignored)        |
-//! |     packetSize : i32                                                     |
-//! |     [if packetSize == 0 -> frame ends]                                   |
-//! |     [if packetSize <  0 -> error]                                        |
-//! |     packet data: packetSize bytes -> emitted to caller                   |
-//! +--------------------------------------------------------------------------+
+//! currentLevelIndex   : i32 (ignored)
+//! timeSeconds         : f32 (the frame time)
+//! ExportData          : numLayoutCmdExports : IntPacked -> ReadNetFieldExports
+//!                       numExportGuids      : IntPacked -> ReadExportGuids
+//! StreamingLevelFixes : numLevels : IntPacked, then per level
+//!                       HasStreamingFixes: FString; then externalOffset : u64
+//!                       otherwise: FString, FString, FTransform (40 bytes)
+//! ExternalData        : until numBits is 0: numBits : IntPacked,
+//!                       netGuid : IntPacked, ceil(numBits / 8) bytes
+//! GameSpecificFrameData (flag set): skipExternalOffset : u64, that many bytes
+//! packets             : until packetSize is 0:
+//!                       seenLevelIndex : IntPacked (HasStreamingFixes; ignored)
+//!                       packetSize : i32 (negative -> error), packetSize bytes
 //! ```
 //!
 //! # Flag semantics
-//!
-//! The header `flags` field (from `vrf_container::ReplayHeader::flags`) controls
-//! two optional steps:
 //!
 //! | Bit | Name | Effect |
 //! |-----|------|--------|
 //! | 1 (0x02) | `HasStreamingFixes` | Enables the streaming-level-fixes path and per-packet `seenLevelIndex` |
 //! | 3 (0x08) | `GameSpecificFrameData` | Enables the game-specific skip section |
 //!
-//! The reference replay sets only `HasStreamingFixes` (header flags `0x0002`),
-//! so its game-specific section is absent on every one of its 226,190 frames.
-//! So does every header of the 45-replay, 24-build sample measured on
-//! 2026-09-28 (docs/PERFORMANCE_NOTES.md#measured-shape-on-real-replays), which
-//! also carried no ExternalData. [`FrameSkips`] is what moves if a build
-//! changes either.
+//! Every measured replay sets only `HasStreamingFixes` and sends no ExternalData
+//! (docs/PERFORMANCE_NOTES.md#measured-shape-on-real-replays); [`FrameSkips`]
+//! moves if that changes.
 //!
-//! No Cargo features: every section must be consumed, in order, for the frame
-//! cursor to stay aligned.
+//! No Cargo features: every section must be consumed, in order, to keep the
+//! frame cursor aligned.
 
 #![forbid(unsafe_code)]
 
@@ -80,9 +49,7 @@ pub use error::FrameError;
 use vrf_bitio::BitReader;
 use vrf_schema::NetGuidCache;
 
-use sections::{
-    read_export_data, read_external_data, read_game_specific_frame_data, read_streaming_level_fixes,
-};
+use sections::{read_external_data, read_game_specific_frame_data, read_streaming_level_fixes};
 
 /// Replay header flags that control DemoFrame parsing.
 pub const FLAG_HAS_STREAMING_FIXES: u32 = 1 << 1;
@@ -91,11 +58,10 @@ pub const FLAG_GAME_SPECIFIC_FRAME_DATA: u32 = 1 << 3;
 /// Unreal's `MaxPacketSizeInBits`, in bytes.
 const MAX_PACKET_SIZE_BYTES: i32 = 16384 / 8;
 
-/// A packet from the DemoFrame stream. See [`walk_demo_frames`] for how
-/// `time_ms` is derived from the frame's `timeSeconds`.
+/// A packet from the DemoFrame stream.
 #[derive(Debug, Clone)]
 pub struct DemoPacket<'a> {
-    /// Time of the enclosing DemoFrame, in milliseconds.
+    /// The enclosing DemoFrame's `timeSeconds` in ms; see [`walk_demo_frames`].
     pub time_ms: u32,
     /// Sequential packet index (0-based across the entire chunk).
     pub packet_index: u32,
@@ -103,12 +69,10 @@ pub struct DemoPacket<'a> {
     pub data: &'a [u8],
 }
 
-/// Section bytes a DemoFrame walk stepped over without decoding them.
-///
-/// ExternalData and GameSpecificFrameData are skipped by their declared
-/// lengths, so nothing else moves when a build starts
-/// sending them. Zero is a measurement, not a default. `#[non_exhaustive]` so a
-/// further tally is not a breaking change.
+/// Section bytes a DemoFrame walk stepped over undecoded, by their declared
+/// lengths, so nothing else moves when a build starts sending them: zero is a
+/// measurement, not a default. `#[non_exhaustive]` so a further tally is not
+/// a breaking change.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FrameSkips {
@@ -148,9 +112,8 @@ pub struct FrameWalk {
     pub non_finite_times: u32,
 }
 
-/// [`walk_demo_frames`] returning only `(packets, frames)`, kept for callers
-/// of the published function; it drops [`FrameSkips`] and the non-finite
-/// time count.
+/// [`walk_demo_frames`] returning only `(packets, frames)`, for callers of the
+/// published function.
 pub fn iter_demo_frames(
     data: &[u8],
     flags: u32,
@@ -187,19 +150,9 @@ pub fn walk_demo_frames(
         frame_count += 1;
         let _current_level_index = reader.read_i32()?;
         let time_seconds = reader.read_f32()?;
-        // The rule, which the consumer bundle format fixes
-        // (docs/archive/PROJECT_STATUS.md 7-B): a finite time is
-        // `seconds * 1000` in f64, rounded half away from zero
-        // (`f64::round`); a non-finite one is 0.
-        // Truncating put every frame with a fractional ms >= 0.5 one ms early.
-        // `is_finite` is explicit because `as u32` saturates +inf to u32::MAX
-        // where the rule gives 0, and any bit pattern can arrive here.
-        // A finite value outside u32 ms is refused, not saturated: -1.0 s
-        // would land on 0 ms, the replay's first frame, a plausible wrong time
-        // nothing reports. A non-finite time still becomes 0 ms, but is
-        // counted (`FrameWalk::non_finite_times`), so that
-        // same wrong time is reported. The range check reads the rounded
-        // value, so -0.0004 s stays 0 ms.
+        // The consumer bundle's rule: `seconds * 1000` in f64, rounded half away
+        // from zero. Outside u32 ms after rounding is refused, not saturated
+        // (-1.0 s would read as the first frame); non-finite is 0 ms, counted.
         let time_ms = if time_seconds.is_finite() {
             let ms = (f64::from(time_seconds) * 1000.0).round();
             if ms < 0.0 || ms > f64::from(u32::MAX) {
@@ -213,8 +166,9 @@ pub fn walk_demo_frames(
             0
         };
 
-        read_export_data(&mut reader, cache)?;
-
+        // ExportData into `cache`; its per-frame counts reach no counter.
+        let _ = vrf_schema::read_net_field_exports(&mut reader, cache)?;
+        let _ = vrf_schema::read_export_guids(&mut reader, cache)?;
         read_streaming_level_fixes(&mut reader, has_streaming_fixes)?;
 
         let (blobs, bytes) = read_external_data(&mut reader)?;
@@ -253,9 +207,8 @@ pub fn walk_demo_frames(
                 });
             }
 
-            // `reader` starts at bit 0 of `data` and every frame read, vrf-schema's
-            // ExportData included, is whole bytes, so `position() / 8` is the
-            // packet's exact byte offset in `data`.
+            // Every frame read, ExportData included, is whole bytes.
+            debug_assert_eq!(reader.position() % 8, 0);
             let byte_offset = (reader.position() / 8) as usize;
             let packet_data = &data[byte_offset..byte_offset + packet_size_usize];
             reader.skip_bits(bit_count)?;
@@ -283,20 +236,7 @@ pub fn walk_demo_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn push_int_packed(data: &mut Vec<u8>, mut value: u32) {
-        loop {
-            let mut byte = ((value & 0x7f) << 1) as u8;
-            value >>= 7;
-            if value != 0 {
-                byte |= 1;
-            }
-            data.push(byte);
-            if value == 0 {
-                return;
-            }
-        }
-    }
+    use vrf_testkit::add_int_packed;
 
     /// One DemoFrame: `exports` is the whole ExportData section, then no
     /// streaming levels, the ExternalData blobs `(numBits, netGuid, payload)`,
@@ -319,8 +259,8 @@ mod tests {
             data.extend_from_slice(&0u64.to_le_bytes()); // externalOffset
         }
         for &(num_bits, net_guid, payload) in external {
-            push_int_packed(&mut data, num_bits);
-            push_int_packed(&mut data, net_guid);
+            add_int_packed(&mut data, num_bits);
+            add_int_packed(&mut data, net_guid);
             data.extend_from_slice(payload);
         }
         data.push(0); // ExternalData terminator
@@ -343,16 +283,16 @@ mod tests {
     /// `field_count` slots, no field and no export GUIDs.
     fn group_export(field_count: u32) -> Vec<u8> {
         let mut data = Vec::new();
-        push_int_packed(&mut data, 1); // one layout export
-        push_int_packed(&mut data, 7); // path-name index
-        push_int_packed(&mut data, 1); // path is exported
+        add_int_packed(&mut data, 1); // one layout export
+        add_int_packed(&mut data, 7); // path-name index
+        add_int_packed(&mut data, 1); // path is exported
         let path = b"/Script/G.Thing";
         data.extend_from_slice(&((path.len() + 1) as i32).to_le_bytes());
         data.extend_from_slice(path);
         data.push(0);
-        push_int_packed(&mut data, field_count);
+        add_int_packed(&mut data, field_count);
         data.push(0); // no field exported
-        push_int_packed(&mut data, 0); // no export GUIDs
+        add_int_packed(&mut data, 0); // no export GUIDs
         data
     }
 
@@ -467,8 +407,8 @@ mod tests {
         Ok(time_ms.expect("the frame carries one packet"))
     }
 
-    /// Non-finite times are read as 0 ms and counted per frame; a finite
-    /// time, -0.0 s and a refused one are not.
+    /// Non-finite times are read as 0 ms and counted per frame; 1.5 s and
+    /// -0.0 s between them are not.
     #[test]
     fn non_finite_frame_times_are_counted_not_refused() {
         let flags = FLAG_HAS_STREAMING_FIXES | FLAG_GAME_SPECIFIC_FRAME_DATA;
@@ -484,10 +424,6 @@ mod tests {
         assert_eq!(walk.non_finite_times, 3);
         assert_eq!((walk.frames, walk.packets), (5, 5));
         assert_eq!(times, [0, 1_500, 0, 0, 0]);
-
-        let finite = build_frame(flags, 2.0, &[0, 0], &[], &[], &[&[0x00]]);
-        let walk = walk_demo_frames(&finite, flags, &mut NetGuidCache::new(), |_, _| {}).unwrap();
-        assert_eq!(walk.non_finite_times, 0);
     }
 
     /// The named cases of the conversion in [`walk_demo_frames`].

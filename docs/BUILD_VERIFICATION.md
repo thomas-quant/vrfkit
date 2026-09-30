@@ -1,14 +1,8 @@
-# Common build verification, 2026-09-28
+# Common build verification
 
 All **1,018 unique available replays**, spanning **24 supported builds**, were
-checked with parser commit `259ed10c7e0c9d87c852f80fab7535d38d2e187f`.
-The report's `date_utc` reads 2026-09-27T17:54Z, which is 02:54 on 2026-09-28
-local time (UTC+9).
-Discovery found 1,074 paths under two roots, the version-organized archive and
-the preserved fixtures. SHA-256 deduplication removed 56 duplicate copies.
-The archive contributes 1,014 unique files, one per path. The preserved
-fixtures add the three 12.10/12.11/13.00 replays and one additional 13.02
-replay; their other 56 files are copies of archive files.
+checked with parser commit `259ed10c7e0c9d87c852f80fab7535d38d2e187f`. The two
+supplied roots held 1,074 paths; SHA-256 deduplication removed 56 copies.
 
 All 1,018 pass ReplayData validation and checkpoint-enabled export. The oracle
 passes **657,565,897/657,565,897** scored main blocks;
@@ -19,9 +13,7 @@ checkpoint decoding work. No run is counted as passing because it was skipped.
 
 The all-counter acceptance rule gives **1,018/1,018 clean**. The audit command
 exits **0**; its failure and `build_errors` lists are empty, and the executable
-was unchanged at completion. The per-replay acceptance rule and failure
-counters are those of the 2026-09-25 audits; the runner has since added only
-the build-level `build_errors` check described under [Method](#method).
+was unchanged at completion.
 
 The [machine-readable report](../tools/fixtures/build_verification.json)
 contains build aggregates, input hashes and the complete finding list.
@@ -61,25 +53,6 @@ The separately reported RPC suffix counters are
 **24,926,105 main / 0 checkpoint bits**.
 These nonzero populations remain outside a claim of complete semantic decoding.
 
-## Changes since 2026-09-25
-
-The previous report checked 986 replays with parser `91dc679`
-([Git history](https://github.com/yakisoba0728/vrfkit/blob/259ed10c7e0c9d87c852f80fab7535d38d2e187f/tools/fixtures/build_verification.json)).
-32 new 13.06 replays, copied from the game's Demos directory on 2026-09-28,
-raise 13.06 from 6 to 38; every earlier input hash is present again under the
-same build. Two roots were supplied instead of three (the Demos root added no
-unique file): 1,074 discovered paths instead of 1,048, 56 duplicates instead of
-62. Between `91dc679` and `259ed10` every Rust change is inside a
-`#[cfg(test)]` module, and the executables differ only in link metadata (Rich
-header, PE and debug-directory timestamps, PDB signature). The runner digest
-changed because `verify_build_corpus.py` now writes `build_errors`; the
-evidence specification did not. The 986 carried-over replays reproduce every
-per-build entry of the earlier report exactly (all 84 counters, evidence rows,
-table rows and bytes, input hashes), so every change in the totals comes from
-the 32 new replays: +22,177,585 scored main blocks, +792,841 checkpoint blocks,
-+469,847 compared values, and one more observed evidence identity on 13.06,
-`/Game/Characters/Gumshoe/Gumshoe_PC.Gumshoe_PC_C::ReplayLastTransformUpdateTimeStamp`.
-
 ## Method
 
 `tools/verify_build_corpus.py` recursively discovers each supplied corpus root,
@@ -106,7 +79,7 @@ deduplicates by SHA-256, and applies the following checks to every unique file:
 **Clean/checked** means the number of replays meeting all four conditions,
 divided by every unique replay checked. A successful export alone is not a
 strict clean result. Registered build support and a completely clean field
-audit are separate measurements; nonzero findings remain visible below.
+audit are separate measurements.
 
 Unknown whole RPCs preserved as raw payloads are counted separately from RPC
 loss. Skipped bits, RPC suffix bits, refused handle conflicts and untyped
@@ -120,74 +93,6 @@ positive checkpoint block and decoded-value counts, not just an evidence
 label. The recorded report carries an empty `build_errors` list, and all 24
 builds meet these conditions.
 
-## Resolved findings
-
-These findings and their fixes date from 2026-09-25. The before/after
-comparison below covers the 986 replays audited that day; the 2026-09-28
-audit finds all 986 clean again.
-
-The first 2026-09-25 audit at parser `bf8ab9c` found 116 array-counter
-occurrences across 81 replays. The [original report](https://github.com/yakisoba0728/vrfkit/blob/448f2b64990647e7294f3fbe0c14d2cdf20c4ba0/tools/fixtures/build_verification.json)
-remains recorded in Git history. Every occurrence came from
-`/Script/ShooterGame.BlindManagerComponent.ActiveBlinds`.
-
-| Build | Previously affected replays | Main array errors before -> after | Main leaf errors before -> after | Checkpoint leaf errors before -> after |
-|---|---:|---:|---:|---:|
-| 13.01 | 22/215 | 14 -> 0 | 0 -> 0 | 17 -> 0 |
-| 13.02 | 17/205 | 15 -> 0 | 1 -> 0 | 9 -> 0 |
-| 13.04 | 10/108 | 5 -> 0 | 0 -> 0 | 11 -> 0 |
-| 13.05 | 32/401 | 23 -> 0 | 2 -> 0 | 19 -> 0 |
-
-Two independently reproducible mistakes accounted for the entire population:
-
-- **57 empty deltas:** the three-byte windows `02 00 00` (56 occurrences)
-  and `04 00 00` (one occurrence) declare array capacity one or two, no
-  changed elements, and one extra zero IntPacked trailer. The ActiveBlinds
-  route wrongly demanded immediate end-of-window after the index terminator.
-  It now consumes exactly this zero trailer on empty deltas. Populated
-  arrays, nonzero/truncated/multiple trailers and other array routes retain
-  their strict framing checks. No child values are invented for unchanged
-  elements; the complete original parent remains exported.
-- **59 null references:** CausingActor is an IntPacked object reference.
-  Its valid one-byte `00` means no actor, but the measured-width guard only
-  allowed 16 or 24 bits. The added 8-bit case still passes the ordinary exact
-  ObjectNetGuid decoder and the field name/checksum/type checks. It emits
-  the explicit integer zero, rather than leaving an absent value. The old
-  early refusal also hid the other valid members of that array update.
-
-All 116 captured windows were independently decoded from their raw bits.
-The 59 reference cases contain 56 full nine-member checkpoint snapshots and
-three six-member main-stream deltas. The Python evidence reader now accepts
-sparse ActiveBlinds updates; projectile path points still require all members.
-
-The [before/after evidence](../tools/fixtures/blind_array_regression.json)
-compares all 986 identical replay hashes of that corpus. It proves:
-
-- **522 new typed children:** 18 main and 504 checkpoint, all independently
-  matched in path, context, raw window and typed value; all 59 affected parents
-  recover their children exactly once per observed occurrence.
-- Every pre-existing field row, typed value and raw payload is unchanged,
-  including the original parent windows and their bit counts.
-- Non-field tables are byte-identical except the affected checkpoint-block
-  tables. Only their field-row starts/counts change, by exactly the inserted
-  child rows; all other block metadata remains unchanged.
-- Main/checkpoint framing, transform, field-stream, RPC-loss, overlay, struct,
-  movement, array and array-leaf failure counters are zero.
-
-Regression tests drive the real `on_field` sink path. The empty-delta and
-null-reference tests failed before the fix and pass afterward. Malformed
-trailers, truncated/overlong references and changed declarations still fail
-with preserved raw data. The independent Python tests also failed before
-the evidence reader was corrected. The initial full-file reproductions
-changed from nonzero array counters to zero using the release executable.
-
-Commands for the focused regression tests:
-
-```powershell
-cargo +1.86.0 test -p vrfkit active_blinds_ --locked
-python -W error -m unittest tools.tests.test_validate_ability_array_evidence
-```
-
 ## Reproduce
 
 Build the parser from the revision recorded in the report. Use fresh output
@@ -200,36 +105,19 @@ cargo +1.86.0 build --release -p vrfkit --locked
 python tools/verify_build_corpus.py --exe target/release/vrfkit.exe --corpus '<archive-root>' --corpus '<preserved-fixture-root>' --work-dir '<new-private-work-dir>' --output '<new-report.json>' --jobs 4
 ```
 
-The recorded run supplied these two roots and used `--jobs 12`. The worker
-count affects run time and memory use; aggregation does not depend on the
-order in which replays finish. A root that holds only copies of files in
-other roots adds paths and duplicates but no replay.
-
-The report pins the parser commit, Rust source digest, executable digest,
-runner digest, evidence specification and input content hashes. Inputs are
-hashed again after processing, and the executable is checked at completion.
-Private logs, per-replay reports, manifests and exports remain in the work
-directory. The published report contains no source paths or player identities.
-The command writes findings even when its strict acceptance gate exits nonzero.
-
-The source, runner and evidence digests hash working-tree bytes, so they
-depend on the checkout's line endings. The recorded source digest is that of
-the auditing checkout, whose 158 hashed files equal `259ed10` after CRLF
-normalization; a fresh `core.autocrlf=true` checkout of the same commit gives
-a different digest. Compare sources with Git rather than by digest alone.
+The recorded run used these two roots and `--jobs 12`; the worker count does
+not affect aggregation. The report pins the parser commit, Rust source digest,
+executable digest, runner digest, evidence specification and input content
+hashes; inputs are hashed again after processing. It contains no source paths
+or player identities, and is written even when the strict gate exits nonzero.
+The source, runner and evidence digests hash working-tree bytes, so they depend
+on line endings: compare sources with Git, not by digest alone.
 
 ## Arithmetic evidence
 
 The shared replay audit supplements the transform tests. The sixteen builds
 11.06--12.09 have 79 independently captured native-machine-code cases each;
 the eight other builds have eleven golden cases each. These remain
-different sources of arithmetic evidence. They are not used as substitutes
-for any of the common replay checks.
-
-## Earlier measurements
-
-[Build recovery](LEGACY_BUILD_SUPPORT.md) records the 48 samples used while
-adding 11.06--12.09. The physical-field and gameplay-observation
-measurements in [CURRENT_STATUS.md](CURRENT_STATUS.md) and related phase reports
-retain their own dates and denominators. This audit does not recompute those
-historical semantic inventories.
+different sources of arithmetic evidence, not substitutes for the replay
+checks; [LEGACY_BUILD_SUPPORT.md](LEGACY_BUILD_SUPPORT.md) records the 48
+samples used while adding 11.06--12.09.

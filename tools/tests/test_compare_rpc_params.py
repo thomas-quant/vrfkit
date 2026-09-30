@@ -1,16 +1,15 @@
 """Guards for the RPC parameter comparison.
 
-Both sides empty must not read as a match: two empty Counters compare equal.
-The one expected difference (a 02d4d478 damage record only vrfkit emits; see
-docs/FOLLOWUP.md) is driven through the real loaders over written files, and
-must not widen (another record, other values, another packet, another replay,
-no manifest) or outlive what it describes (STALE fails the run).
+Both sides empty must not exit 0 (the shared `verdict` is tested in
+test_compare_combat_report.py). The one expected difference (a 02d4d478
+damage record only vrfkit emits; see docs/FOLLOWUP.md) is driven through the
+real loaders over written files, and must not widen (another record, other
+values, another packet, another replay, no manifest) or outlive what it
+describes (STALE fails the run).
 """
 import collections
 import io
 import json
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,16 +18,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import compare_rpc_params as guard  # noqa: E402
+from support import TempDirTestCase, run_cli
+import compare_rpc_params as guard
 
 
 ONE_RPC = {"MulticastEndRound": [("NewRoundNumber", "int")]}
-KEY = ("MulticastEndRound", "NewRoundNumber")
-
-
-def side(values=None):
-    return {KEY: collections.Counter(values or {})}
 
 
 def records(values=None):
@@ -43,35 +37,7 @@ def records(values=None):
 
 def run(**kwargs):
     """`main`'s exit code and what it printed."""
-    with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
-        code = guard.main(**kwargs)
-    return code, out.getvalue()
-
-
-class CompareTests(unittest.TestCase):
-    def test_identical_multisets_match(self):
-        _rows, ok, checked = guard.compare(side({1: 2}), side({1: 2}), ONE_RPC)
-        self.assertTrue(ok)
-        self.assertEqual(checked, 1)
-
-    def test_a_differing_count_does_not_match(self):
-        _rows, ok, _ = guard.compare(side({1: 2}), side({1: 1}), ONE_RPC)
-        self.assertFalse(ok)
-
-    def test_a_parameter_present_on_one_side_only_does_not_match(self):
-        _rows, ok, _ = guard.compare(side({1: 2}), side(), ONE_RPC)
-        self.assertFalse(ok)
-
-    def test_both_sides_empty_is_not_something_that_was_compared(self):
-        """The hole: nothing to compare read as agreement."""
-        _rows, _ok, checked = guard.compare(side(), side(), ONE_RPC)
-        self.assertEqual(checked, 0)
-
-    def test_both_sides_empty_is_reported_as_such_not_as_a_match(self):
-        """The `both empty` arm is reached before `cs_vals == rust_vals`."""
-        rows, _ok, _checked = guard.compare(side(), side(), ONE_RPC)
-        self.assertIn("both empty", " ".join(rows))
-        self.assertNotIn("MATCH", " ".join(rows))
+    return run_cli(lambda _: guard.main(**kwargs))[:2]
 
 
 class ExitCodeTests(unittest.TestCase):
@@ -107,11 +73,13 @@ class InputTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn(str(missing), err.getvalue())
 
-    def test_the_parquet_path_is_not_read_from_argv_at_import(self):
-        """`Path(sys.argv[1])` at module level would take a test runner's first
-        argument as the parquet."""
-        self.assertFalse(hasattr(guard, "PARQUET_PATH"))
+    def test_the_default_reference_is_not_the_valplay_bundle(self):
         self.assertNotIn("valplay", guard.DEFAULT_REFERENCE.lower())
+
+    def test_regional_damage_ordinals_follow_the_enum(self):
+        """EAresRegionalDamage: RegionCount = 3, Invalid_Radial = 4."""
+        self.assertEqual(guard.norm("regional_damage__region_count", "enum_byte"), 3)
+        self.assertEqual(guard.norm("regional_damage__invalid__radial", "enum_byte"), 4)
 
 
 # Files shaped like the real inputs.
@@ -202,11 +170,9 @@ def write_ours(path, rows):
     return path
 
 
-class FileTest(unittest.TestCase):
+class FileTest(TempDirTestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.dir = Path(tmp.name)
+        self.dir = self.tmp()
 
     def compare_files(self, reference_rows, our_rows, sha=LISTED.replay_sha256):
         reference = write_reference(self.dir, reference_rows, sha)
@@ -324,7 +290,3 @@ class RecordTests(FileTest):
                          guard.load_rust_records(ours))
         self.assertEqual(guard.load_cs_records(reference)[0][0],
                          (1000, 576, 576, 10, "MulticastNotifyKilledEnemy"))
-
-
-if __name__ == "__main__":
-    unittest.main()

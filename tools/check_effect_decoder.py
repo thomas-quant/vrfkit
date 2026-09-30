@@ -1,28 +1,18 @@
-#!/usr/bin/env python3
-"""Self-check the live shot-effect decoder against pinned wire examples.
+"""Pinned wire examples for the live Python shot-effect decoder, which
+tools/tests/test_check_effect_decoder.py runs through `check`.
 
 The first nine cases are the wire vectors the Rust decoder's tests pin in
 ``crates/vrf-decode/src/effect/tests.rs``: six non-empty hex blobs and the three
-one-byte empty arrays.  vrfkit runs that Rust decoder; this script deliberately
-calls the Python decoder that produces the valplay bundle, so the same vectors
-are checked on both sides.
-
-The two ``reference_*`` cases come from the reference bundle's
-``events.ndjson`` for replay 02d4d478:
-
-* packet 39959, ``FloatValues``: adds ``FiringState.BurstShotNumber``;
-* packet 15347, ``ObjectValues``: adds a singleton ``FXC.EffectContext``.
-
-Run with:
-    python tools/check_effect_decoder.py --check
-
-For a deliberate-corruption demonstration (which must fail):
-    python tools/check_effect_decoder.py --check --corrupt rust_float_sheriff_basic
+one-byte empty arrays. Here they run through the Python decoder that produces
+the valplay bundle, so the same vectors are checked on both sides. The two
+``reference_*`` cases come from the reference bundle's ``events.ndjson`` for
+replay 02d4d478: packet 39959 ``FloatValues`` adds
+``FiringState.BurstShotNumber``; packet 15347 ``ObjectValues`` adds a
+singleton ``FXC.EffectContext``.
 """
 
 from __future__ import annotations
 
-import argparse
 import math
 import struct
 import sys
@@ -221,11 +211,11 @@ def _preview(elements: tuple[tuple[int | None, object | None], ...]) -> str:
 
 
 def check(corrupt_name: str | None = None) -> list[str]:
-    """Return one failure per Python-decoder disagreement."""
+    """One failure per Python-decoder disagreement, with case `corrupt_name`
+    corrupted by one flipped byte."""
     failures = []
-    names = {case.name for case in CASES}
-    if corrupt_name is not None and corrupt_name not in names:
-        return [f"unknown case for --corrupt: {corrupt_name}"]
+    if corrupt_name is not None and corrupt_name not in {case.name for case in CASES}:
+        return [f"unknown case to corrupt: {corrupt_name}"]
     for original in CASES:
         case = _corrupt(original) if original.name == corrupt_name else original
         actual = tuple(bundle._decode_effect_elements(case.data, case.bit_count, case.spec))
@@ -246,20 +236,5 @@ def check(corrupt_name: str | None = None) -> list[str]:
     return failures
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="verify pinned cases")
-    parser.add_argument("--corrupt", metavar="CASE", help="flip one byte in CASE")
-    args = parser.parse_args()
-    failures = check(args.corrupt)
-    if failures:
-        print(f"FAILED: {len(failures)} effect decoder check(s)", file=sys.stderr)
-        for failure in failures:
-            print(f"  {failure}", file=sys.stderr)
-        return 1
-    print(f"OK: {len(CASES)} live effect decoder cases")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit("no CLI: run python -m unittest tools/tests/test_check_effect_decoder.py")

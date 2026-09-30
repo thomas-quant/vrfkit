@@ -1,6 +1,6 @@
 //! The streaming writer every table shares: buffer rows, convert a batch to
 //! Arrow when the buffer fills, finalise on `finish`. What differs per table
-//! (schema, dictionary columns, rows to `RecordBatch`) is the [`Table`] trait.
+//! is the [`Table`] trait.
 //!
 //! Two independent thresholds: [`MAX_BUFFERED_ROWS`] records are held before
 //! conversion, which bounds memory; the row-group size is where `ArrowWriter`
@@ -21,37 +21,22 @@ use parquet::schema::types::ColumnPath;
 
 use crate::error::ExportError;
 
-/// The mini-batch a Parquet column writer works in, after which it checks
-/// whether a data page is full. Pinned, not left to the library default, since
-/// [`MAX_BUFFERED_ROWS`] must stay a multiple of it for the bytes to hold.
+/// The mini-batch after which a Parquet column writer checks whether a data
+/// page is full; pinned, since [`MAX_BUFFERED_ROWS`] must be a multiple of it.
 pub const PARQUET_WRITE_BATCH_SIZE: usize = 1_024;
 
-/// Rows held as records before being converted to an Arrow batch. **Not** the
-/// row-group size: `ArrowWriter` cuts a row group at `max_row_group_row_count`
-/// across batches, so 16 batches of 8,192 cut where one of 131,072 did.
-///
-/// It must be a multiple of [`PARQUET_WRITE_BATCH_SIZE`], which the assertion
-/// below enforces: `write_batch` checks page limits after each mini-batch, and
-/// a batch ending inside one adds a check point that can move a page boundary.
-/// Measured on all 11 Parquet outputs of the reference replay:
-///
-/// | rows per batch | result |
-/// |---|---|
-/// | 131,072 (one per row group), 8,192, 3,072 (divides neither group size) | byte-identical |
-/// | 3,000 | **bytes moved** in `fields`, `movement` and `checkpoint_fields` |
-///
-/// Against one batch per row group, five `export` runs of the reference replay
-/// went from 172.0 to 105.9 MB peak working set and 1.456 to 1.281 s median
-/// wall time: a whole row group is no longer held as records (~20 MB of
-/// `FieldRecord`), doubled while its arrays are built. Much smaller batches pay
-/// a fixed cost of building fourteen Arrow arrays and lose the dictionary
-/// builders' capacity hints.
+/// Rows held as records before conversion to one Arrow batch; not the
+/// row-group size, which `ArrowWriter` cuts across batches. A multiple of
+/// [`PARQUET_WRITE_BATCH_SIZE`], or a batch ending inside a mini-batch moves a
+/// page boundary (3,000 rows moved bytes; 8,192 and 3,072 did not). Smaller
+/// than a row group, so a whole group (~20 MB of `FieldRecord`) is never held
+/// as records while its arrays are built.
 pub const MAX_BUFFERED_ROWS: usize = 8_192;
 
 const _: () = assert!(
     MAX_BUFFERED_ROWS % PARQUET_WRITE_BATCH_SIZE == 0,
     "MAX_BUFFERED_ROWS must be a multiple of PARQUET_WRITE_BATCH_SIZE or the \
-     Parquet output moves; see the table above this constant"
+     Parquet output moves"
 );
 
 /// Everything the generic writer needs to know about one table, implemented
@@ -64,39 +49,22 @@ pub trait Table {
     /// against how large a column chunk ZSTD gets to work on.
     const DEFAULT_ROW_GROUP_SIZE: usize;
 
-    /// The only columns written with a Parquet dictionary; every other column
-    /// is PLAIN (then ZSTD, like everything). **Every string column is
-    /// listed**, as the docs promise (the few that measured larger are named in
-    /// docs/PERFORMANCE_NOTES.md); **any other column only where a dictionary
-    /// measured smaller** than PLAIN over a 45-replay sample, each table's
-    /// comment giving its dictionary/plain ratios.
-    ///
-    /// parquet-rs dictionary-encodes every non-boolean column by default, so
-    /// [`TableWriter`] turns that off first; applied over the default, this
-    /// list switched on only what was already on (method and totals:
-    /// docs/PERFORMANCE_NOTES.md, "Dictionary encoding is chosen per column").
-    /// parquet-rs also ignores a name matching no column and never gives a
-    /// BOOLEAN column a dictionary; the roundtrip tests reject both and check
-    /// every written file's dictionary pages against this list.
+    /// The only columns written with a Parquet dictionary, the rest PLAIN:
+    /// every string column, as the docs promise, and any other only where a
+    /// dictionary measured smaller over a 45-replay sample. Most tables give
+    /// their listed/unlisted dictionary/plain byte ratio ranges (below 1 when
+    /// the dictionary is smaller); the declaration tables and partials say why
+    /// they have none: docs/PERFORMANCE_NOTES.md#dictionary-encoding-is-chosen-per-column.
+    /// parquet-rs ignores a name matching no column and never gives BOOLEAN a
+    /// dictionary; the roundtrip tests reject both and check every file's pages.
     const DICTIONARY_COLUMNS: &'static [&'static str];
 
-    /// Optional retained-row byte budget; zero leaves row-count batching alone.
-    ///
-    /// Non-zero bounds [`Self::retained_bytes`] over every row not yet in a
-    /// closed row group, buffered or already held encoded by the `ArrowWriter`.
-    /// The row that would pass the budget starts a new group (a lone oversized
-    /// row gets its own). Only the budget closes a group early: closing one per
-    /// 8,192-row batch left `checkpoint_guid_entries.parquet` 928,714 bytes in
-    /// ten groups against 396,821 in one (reference replay, `export
-    /// --checkpoints`). The sum resets only when a group closes; reset per
-    /// batch, an open group could hold 16 batches of just under the budget.
-    ///
-    /// Encoder state (dictionaries, page buffers) is not counted and is bounded
-    /// by the row limit, as for every table. Against the per-batch close, on
-    /// the largest corpus replay (13.04 `fce40cc5`, 113.6 MB), `export
-    /// --checkpoints`, five alternating runs: peak commit 226.6 -> 240.5 MB
-    /// median, peak working set 219.6 -> 230.9 MB; the main-only export, with
-    /// no budgeted rows, measured the same (peak working set 187.3 vs 186.9 MB).
+    /// Optional byte budget (zero: none) over [`Self::retained_bytes`] of every
+    /// row not yet in a closed row group, buffered or held encoded by the
+    /// `ArrowWriter`. The row that would pass it starts a new group (a lone
+    /// oversized row gets its own). Only the budget closes a group early:
+    /// closing one per batch splits `checkpoint_guid_entries` into ten groups
+    /// at 2.3x the bytes. Encoder state is not counted; the row limit bounds it.
     const MAX_BUFFERED_BYTES: usize = 0;
 
     /// Bytes retained outside the row struct itself for budgeted tables.
@@ -104,9 +72,8 @@ pub trait Table {
         0
     }
 
-    /// The Arrow schema. Must match [`Self::build_batch`]'s column order:
-    /// `RecordBatch::try_new` checks only types, so two swapped same-typed
-    /// columns would pass and silently corrupt the export.
+    /// The Arrow schema, in [`Self::build_batch`]'s column order:
+    /// `RecordBatch::try_new` checks only types, not names.
     fn schema() -> Arc<Schema>;
 
     /// Rows to reserve up front. Small tables (actors, net_guids, events)
@@ -162,10 +129,9 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
         Self::with_row_group_size(sink, T::DEFAULT_ROW_GROUP_SIZE)
     }
 
-    /// Create a writer with a custom row-group size. Smaller groups cost
-    /// compression; memory changes only below [`MAX_BUFFERED_ROWS`], where one
-    /// batch is one row group, so that constant's alignment rule does not
-    /// apply: no batch ends inside a group.
+    /// A writer with a custom row-group size. Smaller groups cost compression;
+    /// below [`MAX_BUFFERED_ROWS`] one batch is one row group, so no batch ends
+    /// inside a group and that constant's alignment rule does not apply.
     pub fn with_row_group_size(sink: W, row_group_size: usize) -> Result<Self, ExportError> {
         if row_group_size == 0 {
             return Err(ExportError::Usage(
@@ -224,9 +190,8 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
         self.buffer.len()
     }
 
-    /// Close the open row group before `record` if adding it would take the
-    /// pending bytes past the budget, so the row that tips it starts a new
-    /// group. "Open" includes rows the `ArrowWriter` already holds: straight
+    /// Close the open row group before `record` if adding it would pass the
+    /// budget. "Open" includes rows the `ArrowWriter` already holds: straight
     /// after a batch flush the buffer is empty but the row group is not.
     fn flush_for_byte_budget(&mut self, record: &T::Row) -> Result<(), ExportError> {
         let incoming = T::retained_bytes(record);
@@ -282,15 +247,13 @@ impl<T: Table, W: Write + Send> TableWriter<T, W> {
 
     fn flush_buffer(&mut self) -> Result<(), ExportError> {
         let batch = T::build_batch(&self.buffer)?;
-        // Cleared, not taken: one allocation for the whole run, and the rows
-        // are gone before the encoder runs, so rows and arrays never coexist.
+        // Cleared (one allocation for the run) before `write`, so the rows are
+        // freed before the encoder runs.
         self.buffer.clear();
         self.writer.write(&batch)?;
-        // A group the ArrowWriter closed at its row limit is on the sink now.
-        // The budgeted tables' 131,072 is 16 batches and a budget cut empties
-        // both sides, so that limit falls between batches and this sees every
-        // such close. A custom size that splits a batch keeps counting the
-        // flushed head: an over-count, which can only close a later group early.
+        // A group closed at its row limit is on the sink; 131,072 is 16 whole
+        // batches, so every such close lands here. A custom size that splits a
+        // batch over-counts the flushed head, which can only close a group early.
         if self.writer.in_progress_rows() == 0 {
             self.pending_bytes = 0;
         }
@@ -376,7 +339,6 @@ mod tests {
     #[test]
     fn row_count_flushes_leave_a_budgeted_row_group_open() {
         // ~0.5 MB against 8 MiB: nothing closes a group before the row limit.
-        // A close per batch is what fragmented the budgeted tables.
         const ROWS: usize = 4 * MAX_BUFFERED_ROWS + 5;
         const _: () = assert!(ROWS * 16 < BUDGET / 10, "must stay far below the budget");
         assert_eq!(

@@ -163,31 +163,28 @@ pub(crate) mod tests {
         out
     }
 
+    /// A script object chunk for `paths`, each named by the text after its
+    /// last `.` or `:` and outered to the text before it.
+    pub fn script_from_paths(paths: &[&str]) -> Vec<u8> {
+        let (mut names, mut objects) = (Vec::new(), Vec::new());
+        for (i, path) in paths.iter().enumerate() {
+            let (outer, leaf) = match path.rsplit_once(['.', ':']) {
+                Some((outer, leaf)) => (Some(outer), leaf),
+                None => (None, *path),
+            };
+            names.push(leaf);
+            objects.push((i as u32, 0, *path, outer));
+        }
+        build_script_objects(&names, &objects)
+    }
+
     fn sample() -> Vec<u8> {
-        build_script_objects(
-            &["/Script/ShooterGame", "AresInventory", "Inner", "Deeper"],
-            &[
-                (0, 0, "/Script/ShooterGame", None),
-                (
-                    1,
-                    0,
-                    "/Script/ShooterGame.AresInventory",
-                    Some("/Script/ShooterGame"),
-                ),
-                (
-                    2,
-                    0,
-                    "/Script/ShooterGame.AresInventory:Inner",
-                    Some("/Script/ShooterGame.AresInventory"),
-                ),
-                (
-                    3,
-                    0,
-                    "/Script/ShooterGame.AresInventory:Inner.Deeper",
-                    Some("/Script/ShooterGame.AresInventory:Inner"),
-                ),
-            ],
-        )
+        script_from_paths(&[
+            "/Script/ShooterGame",
+            "/Script/ShooterGame.AresInventory",
+            "/Script/ShooterGame.AresInventory:Inner",
+            "/Script/ShooterGame.AresInventory:Inner.Deeper",
+        ])
     }
 
     /// Depth 3 is where the rule shows: below the first subobject UE joins
@@ -246,10 +243,7 @@ pub(crate) mod tests {
         bytes.push(0);
         assert!(parse_script_objects(&bytes).is_err());
 
-        let dup = build_script_objects(
-            &["/Script/A"],
-            &[(0, 0, "/Script/A", None), (0, 0, "/Script/A", None)],
-        );
+        let dup = script_from_paths(&["/Script/A", "/Script/A"]);
         assert!(parse_script_objects(&dup).unwrap_err().0.contains("twice"));
     }
 }

@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """Reproduce metrics.json for every replay that has a reference bundle.
 
-Every figure in docs/archive/PROJECT_STATUS.md section 6 rests on a single
-replay (02d4d478). This runs the whole pipeline -- vrfkit export, the valplay
-adapter, compute_metrics.py -- against each replay that has BOTH a source
-.vrf and a reference metrics.json, then diffs section by section.
-
-The question it answers is not "does our parser work" (validate_corpus.py
-already answers that at the bit level) but "does the section-level agreement
-measured on 02d4d478 generalise". A section that is EXACT on one replay and
-differs on ten is not EXACT; it is lucky.
-
-Nothing under valplay/ is written to. Our outputs go to out/xval/<id>/ and
-out/xval_bundle/<id>/.
+Runs check_metrics_baseline.py's pipeline (vrfkit export, the valplay adapter,
+compute_metrics.py) on each replay with BOTH a source .vrf and a reference
+metrics.json under VRFKIT_VALPLAY_DIR, then diffs them section by section: a
+section EXACT on one replay and different on ten is not EXACT, it is lucky.
+Nothing under valplay/ is written; outputs go to out/xval/<id>/ and
+out/xval_bundle/<id>/, and the sections exact on every replay to
+out/xval_summary.json, which `--expect-exact` reads back to fail a run where
+one of them no longer is.
 
 Usage:
     python tools/validate_metrics_corpus.py [--limit N] [--only <id>]
-                                            [--jobs N]
+                                            [--jobs N] [--expect-exact FILE]
 """
 
 from __future__ import annotations
@@ -25,32 +21,28 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 if __package__:
+    from . import check_metrics_baseline as cmb
     from .atomic_io import atomic_write_text, remove_tree, require_descendant
 else:  # direct script execution
+    import check_metrics_baseline as cmb
     from atomic_io import atomic_write_text, remove_tree, require_descendant
 
 REPO = Path(__file__).resolve().parent.parent
 VALPLAY = Path(os.environ.get("VRFKIT_VALPLAY_DIR", ""))
 EXPORTS = VALPLAY / "pipeline" / "exports"
 VRF_DIR = VALPLAY / "data" / "raw" / "vrf"
-COMPUTE = VALPLAY / "pipeline" / "metrics" / "compute_metrics.py"
 VRFKIT = REPO / "target" / "release" / "vrfkit.exe"
-ADAPTER = REPO / "tools" / "to_valplay_bundle.py"
 
 # Present in metrics.json but not a metric: provenance that necessarily differs
 # because the two bundles live at different paths.
 NON_METRIC_KEYS = {"source"}
 REPLAY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-EXPORT_TIMEOUT_SECONDS = 1800
-ADAPTER_TIMEOUT_SECONDS = 600
-METRICS_TIMEOUT_SECONDS = 600
 
 
 def discover():
@@ -71,30 +63,10 @@ def discover():
     return out
 
 
-def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", **kw)
-
-
-def run_stage(cmd: list[str], *, timeout: float):
-    """Run one pipeline stage and turn process failures into readable errors."""
-    try:
-        return run(cmd, timeout=timeout), None
-    except subprocess.TimeoutExpired:
-        return None, f"timeout after {timeout:g} seconds"
-    except OSError as exc:
-        return None, f"could not start process: {exc}"
-
-
 def fresh_dir(path: Path, root: Path | None = None) -> Path:
-    """Delete `path` and recreate it empty.
-
-    These directories persist between runs and `compute_metrics.py` runs
-    without `-o`, so a previous run's `metrics.json` would be read whenever
-    compute_metrics exits 0 without writing -- and compared against its own
-    reference, a stale file looks EXACT. A bundle built over an export that
-    stopped writing a table would mix two runs the same way.
-    """
+    """Delete `path` and recreate it empty: these directories persist between
+    runs, and a stale metrics.json read after a compute_metrics that wrote
+    nothing would compare EXACT against its own reference."""
     root = root or path.parent
     remove_tree(path, root)  # refuses a path outside `root` before deleting
     path.mkdir(parents=True, exist_ok=True)
@@ -139,38 +111,9 @@ def process(replay_id: str) -> dict:
     except (OSError, ValueError) as exc:
         return {"id": replay_id, "stage": "input", "error": str(exc)}
 
-    r, error = run_stage(
-        [str(VRFKIT), "export", str(source), "--out", str(export_dir)],
-        timeout=EXPORT_TIMEOUT_SECONDS,
-    )
-    if r is None:
-        return {"id": replay_id, "stage": "export", "error": error}
-    if r.returncode != 0:
-        return {"id": replay_id, "stage": "export", "error": r.stderr[-400:]}
-
-    r, error = run_stage(
-        [sys.executable, str(ADAPTER), str(export_dir), "-o", str(bundle_root)],
-        timeout=ADAPTER_TIMEOUT_SECONDS,
-    )
-    if r is None:
-        return {"id": replay_id, "stage": "adapter", "error": error}
-    if r.returncode != 0:
-        return {"id": replay_id, "stage": "adapter", "error": r.stderr[-400:]}
-
-    r, error = run_stage(
-        [sys.executable, str(COMPUTE), str(bundle_root)],
-        timeout=METRICS_TIMEOUT_SECONDS,
-    )
-    if r is None:
-        return {"id": replay_id, "stage": "metrics", "error": error}
-    if r.returncode != 0:
-        return {"id": replay_id, "stage": "metrics", "error": r.stderr[-400:]}
-
-    ours_path = bundle_root / "metrics.json"
-    if not ours_path.exists():
-        return {"id": replay_id, "stage": "metrics", "error": "no metrics.json written"}
-
-    ours = json.loads(ours_path.read_text(encoding="utf-8"))
+    ours, stage, error = cmb.run_pipeline(VRFKIT, source, export_dir, bundle_root)
+    if ours is None:
+        return {"id": replay_id, "stage": stage, "error": error}
     sections = sorted((set(ours) | set(ref)) - NON_METRIC_KEYS)
     status = {s: ("EXACT" if ours.get(s) == ref.get(s) else "differs") for s in sections}
     return {
@@ -187,10 +130,21 @@ def main() -> int:
     ap.add_argument("--only", action="append", default=None)
     ap.add_argument("--jobs", type=int, default=3,
                     help="parallel replays; each uses ~2 GB, so keep it small")
+    ap.add_argument("--expect-exact", type=Path, default=None,
+                    help="a JSON with an always_exact list (a pinned xval_summary.json): "
+                         "fail when one of its sections is not EXACT on every replay")
     args = ap.parse_args()
 
-    if not VRFKIT.exists():
-        print(f"build the release binary first: {VRFKIT}", file=sys.stderr)
+    expected = []
+    if args.expect_exact:
+        try:
+            expected = json.loads(args.expect_exact.read_text(encoding="utf-8"))["always_exact"]
+            if not isinstance(expected, list):
+                raise TypeError("always_exact is not a list")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"--expect-exact {args.expect_exact}: {exc!r}", file=sys.stderr)
+            return 2
+    if cmb.sc.no_exe(VRFKIT):
         return 2
 
     ids = args.only or discover()
@@ -252,14 +206,19 @@ def main() -> int:
         {"replays": order, "always_exact": always}, indent=1))
     print(f"\nwrote {summary}")
 
+    lost = sorted(set(expected) - set(always))
+    if args.expect_exact:
+        print(f"expected exact on every replay: {len(expected)}, not exact now: {len(lost)}")
     dead = failures(results)
     if dead:
         print(f"\nFAILED: {len(dead)} of {len(ids)} replay(s) did not complete "
               f"the pipeline", file=sys.stderr)
         for line in dead[:15]:
             print(f"    {line}", file=sys.stderr)
-        return 1
-    return 0
+    if lost:
+        print(f"\nFAILED: expected EXACT on every replay, and not: {', '.join(lost)}",
+              file=sys.stderr)
+    return 1 if dead or lost else 0
 
 
 if __name__ == "__main__":
