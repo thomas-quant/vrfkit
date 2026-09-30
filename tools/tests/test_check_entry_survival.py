@@ -507,7 +507,7 @@ class LoadTests(TempDirTestCase):
                         "repeated_checkpoint_groups"):
             with self.subTest(counter=counter):
                 err = io.StringIO()
-                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                with contextlib.redirect_stderr(err):
                     code = guard.run(reps, cat, [], guard.LoadStats(**{counter: 1}))
                 self.assertEqual(code, 1)
                 self.assertIn("join no group", err.getvalue())
@@ -532,11 +532,9 @@ class LoadTests(TempDirTestCase):
         empty = tmp / "empty.json"
         empty.write_text(json.dumps({"expected": []}), encoding="utf-8")
         report = tmp / "report.json"
-        with contextlib.redirect_stdout(io.StringIO()) as out, \
-                contextlib.redirect_stderr(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
             listed = guard.main(["--root", str(root), "--json", str(report)])
-        with contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
             unlisted = guard.main(["--root", str(root), "--expected", str(empty)])
         data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(listed, 0, out.getvalue())
@@ -568,8 +566,7 @@ class LoadTests(TempDirTestCase):
         write_committed_findings(root)
         path = tmp / "other_expected.json"
         path.write_text(json.dumps({"expected": [stale]}), encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
             code = guard.main(["--root", str(root), "--expected", str(path)])
         self.assertEqual(code, 1)
         failed = [line for line in err.getvalue().splitlines() if line.startswith("FAILED:")]

@@ -116,8 +116,7 @@ class RpcNameTests(TempDirTestCase):
                        vk / "fields.parquet")
         output = io.StringIO()
         with mock.patch.object(sys, "argv", ["compare_with_csharp.py", str(cs), str(vk)]), \
-                contextlib.redirect_stdout(output), \
-                contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stdout(output):
             guard.main()
         report = output.getvalue()
         return report.split("## 4. RPC name comparison", 1)[1].split("## 5.", 1)[0]

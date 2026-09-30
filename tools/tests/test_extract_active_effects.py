@@ -181,8 +181,7 @@ class TracksTests(TempDirTestCase):
         inputs = {path: path.read_bytes() for path in self.export.iterdir()}
         for out, tracks in (("effects.parquet", self.export / "fields.parquet"),
                             (self.export / "actors.parquet", "tracks.parquet"), ("same", "same")):
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                code = effects.main(["--export", str(self.export), "--out", str(self.root / out),
-                                     "--tracks", str(self.root / tracks)])
+            code = effects.main(["--export", str(self.export), "--out", str(self.root / out),
+                                 "--tracks", str(self.root / tracks)])
             self.assertEqual(code, 1)
         self.assertEqual({path: path.read_bytes() for path in self.export.iterdir()}, inputs)

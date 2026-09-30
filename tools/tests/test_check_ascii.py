@@ -65,7 +65,7 @@ class CheckAsciiTests(TempDirTestCase):
         shutil.copyfile(SCRIPT, copied_script)
         (repository / "notes.md").write_bytes(b"no Rust here\n")
         subprocess.run(["git", "init", "--quiet"], cwd=repository, check=True)
-        subprocess.run(["git", "add", "--", "notes.md"],
+        subprocess.run(["git", "-c", "core.autocrlf=false", "add", "--", "notes.md"],
                        cwd=repository, check=True)
 
         result = subprocess.run(
@@ -87,22 +87,9 @@ class CheckAsciiTests(TempDirTestCase):
         shutil.copyfile(SCRIPT, copied_script)
         (nested_directory / "local.rs").write_bytes(b"// ASCII\n")
         (repository / "planted.rs").write_bytes(b"// planted: \xc3\xa9\n")
-        subprocess.run(
-            ["git", "init", "--quiet"], cwd=repository, check=True
-        )
-        subprocess.run(
-            [
-                "git",
-                "-c",
-                "core.autocrlf=false",
-                "add",
-                "--",
-                "nested/local.rs",
-                "planted.rs",
-            ],
-            cwd=repository,
-            check=True,
-        )
+        subprocess.run(["git", "init", "--quiet"], cwd=repository, check=True)
+        subprocess.run(["git", "-c", "core.autocrlf=false", "add", "--", "nested/local.rs", "planted.rs"],
+                       cwd=repository, check=True)
 
         result = subprocess.run(
             [sys.executable, str(copied_script), "--check"],

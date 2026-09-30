@@ -1,7 +1,5 @@
 """Release assets must fail verification when their bytes or identity change."""
-from contextlib import redirect_stderr
 import hashlib
-from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -186,7 +184,7 @@ class ReleasePackageTests(TempDirTestCase):
                 release.verify_package(self.output, self.TAG, self.COMMIT, smoke=True)
 
     def test_cli_verification_failure_exits_nonzero(self):
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+        with self.assertRaises(SystemExit) as raised:
             release.main(["verify", "--tag", self.TAG, "--commit", self.COMMIT,
                           "--directory", str(self.output)])
         self.assertEqual(raised.exception.code, 1)

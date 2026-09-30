@@ -514,8 +514,7 @@ class CheckCountTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(sys, "argv", ["check_docs.py", *argv]), \
                 patch.object(guard, "measure_tests", return_value=(1, 1, [])), \
-                contextlib.redirect_stdout(output), \
-                contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stdout(output):
             guard.main()
         found = re.search(r"(\d+) checks$", output.getvalue(), re.M)
         self.assertIsNotNone(found, output.getvalue())

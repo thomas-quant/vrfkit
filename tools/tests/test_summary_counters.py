@@ -4,8 +4,6 @@ Every line must be one summary.rs prints, each key must name the argument at
 its position (read off summary.rs, not the spec), each pattern must match
 exactly one printed line, and a line that is not printed must read as missing.
 """
-import contextlib
-import io
 import re
 import tempfile
 import unittest
@@ -131,8 +129,7 @@ class PinOrDiffTests(unittest.TestCase):
     def test_a_refused_update_writes_nothing_and_drift_fails(self):
         def diff(want, got):
             return [] if want == got else ["moved"]
-        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "baseline.json"
             self.assertEqual(sc.pin_or_diff(path, {}, {"n": 1}, True, ["unmeasured"], diff), 1)
             self.assertFalse(path.exists())
